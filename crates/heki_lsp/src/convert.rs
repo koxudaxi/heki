@@ -295,6 +295,7 @@ mod tests {
             fold_key: None,
             open_records: Vec::new(),
             contracts: Vec::new(),
+            allowed_examples: Vec::new(),
         };
         let uri = Url::parse("file:///a.py").unwrap();
         let target = EditTarget {

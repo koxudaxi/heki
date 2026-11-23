@@ -1,8 +1,8 @@
 //! Contract extensions end to end through the real binary: `MUT204` call ownership (receiver
 //! classes, overrides, bound-method aliases, `getattr`, constructions, private delegation, the
-//! allowed-context rule), the `EFF201` `reads-targets` / `calls` / `allow-writes` boundaries,
-//! `forbidden-*` scopes of the owner contracts, per-site Ratchet counts, configuration errors, and
-//! `heki rule MUT204`.
+//! allowed-context rule), the `EFF201` `reads-targets` / `calls` / `allow-writes` boundaries and
+//! a class's own initialization in them, `forbidden-*` scopes of the owner contracts, per-site
+//! Ratchet counts, configuration errors, and `heki rule MUT204`.
 
 mod common;
 
@@ -281,12 +281,19 @@ fn mut204_calls_constructions_and_delegation() {
         "{diags:#?}"
     );
     assert_eq!(sites(&diags), [1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1]);
-    // The contract's `message` is the help of each report, not part of its message.
+    // The contract's `message` starts the help of each report, not part of its message, and
+    // the allowed callers making the same call follow it.
+    let note = "use a GenerationStore operation instead";
+    let store = "`pkg.store.GenerationStore.replace_data_type_ref`";
     for d in &diags {
-        assert_eq!(
-            d["help"], "use a GenerationStore operation instead",
-            "{d:#}"
-        );
+        let help = match d["target"].as_str().unwrap() {
+            "DataType.replace_reference" => format!("{note}; allowed callers of `{t}`: {store}"),
+            "pkg.util.reset_cache" => {
+                format!("{note}; allowed callers of `pkg.util.reset_cache`: {store}")
+            }
+            _ => note.to_owned(),
+        };
+        assert_eq!(d["help"], help, "{d:#}");
     }
     assert_eq!(
         diags[0]["message"],
@@ -756,6 +763,134 @@ def r_uses_parser_private(m: Model) -> dict[str, int]:
 
     return _p_private(m)
 "#;
+
+const INITIALIZATION_CONFIG: &str = r#"[project]
+name = "t"
+
+[[tool.heki.effect-boundaries]]
+name = "passes"
+scopes = ["pkg.passes.*"]
+forbid = ["reads-targets"]
+read-targets = ["Node.tag"]
+write-universe = ["Node.*"]
+"#;
+
+/// An initializer hands its `self` to helpers: a private function, a private method, a public
+/// function, through `super().__init__()`; `Pair` also hands another node to one.
+const INITIALIZATION_MODEL: &str = r#"from __future__ import annotations
+
+
+class Node:
+    def __init__(self, members: list[Node]) -> None:
+        self.members = members
+        self.tag = ""
+        _link(self)
+        self._init_fields()
+
+    def _init_fields(self) -> None:
+        _mark(self)
+
+    def relink(self) -> None:
+        _link(self)
+
+
+class Pair(Node):
+    def __init__(self, first: Node, second: Node) -> None:
+        super().__init__([first, second])
+        link(self)
+        _mark(second)
+
+
+def _link(node: Node) -> None:
+    if len(node.members) > 1:
+        node.optional = True
+
+
+def _mark(node: Node) -> None:
+    node.marked = bool(node.tag)
+
+
+def link(node: Node) -> None:
+    node.linked = True
+
+
+def _relink(node: Node) -> None:
+    _link(node)
+
+
+def build_union(members: list[Node]) -> Node:
+    return Node(members)
+"#;
+
+const INITIALIZATION_PASSES: &str = r#"from pkg.model import Node, Pair, _relink, build_union
+
+
+def renders_a_hint(node: Node) -> int:
+    return len(build_union([node, node]).members)
+
+
+def constructs_directly(node: Node) -> int:
+    return len(Node([node, node]).members)
+
+
+def pairs(first: Node, second: Node) -> Pair:
+    return Pair(first, second)
+
+
+def links_another(node: Node) -> Node:
+    made = Node([])
+    _relink(node)
+    return made
+
+
+def relinks(node: Node) -> None:
+    node.relink()
+
+
+def writes_an_existing_node(node: Node) -> None:
+    node.optional = True
+"#;
+
+/// What an initializer's helpers do to its `self` is the class's own initialization, as what the
+/// initializer does to it: constructing a node (`Node(...)`, `build_union`, `Pair(...)` through
+/// `super().__init__()`) writes and reads no existing node. The same helpers on another object
+/// stay reported: `Pair` marking `second`, `_link` reached again through `_relink` (after the
+/// path through `Node.__init__` reached it first), and a method calling it after `__init__`
+/// returned.
+#[test]
+fn eff201_initialization_through_the_helpers_it_passes_self_to() {
+    let p = Project::new("ext_eff201_initialization");
+    p.write("pyproject.toml", INITIALIZATION_CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/model.py", INITIALIZATION_MODEL)
+        .write("pkg/passes.py", INITIALIZATION_PASSES);
+    let diags = diagnostics(&p, &["--select", "EFF201"]);
+    let pas = "pkg/passes.py";
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(pas, 13, "pairs", "passes:Node.marked"),
+            d(pas, 13, "pairs", "passes:reads:Node.tag"),
+            d(pas, 18, "links_another", "passes:Node.optional"),
+            d(pas, 23, "relinks", "passes:Node.optional"),
+            d(pas, 27, "writes_an_existing_node", "passes:Node.optional"),
+        ]
+    );
+    assert_eq!(
+        related(by_qualname(&diags, "links_another")),
+        [
+            "`links_another` calls `pkg.model._relink`",
+            "`_relink` calls `pkg.model._link`",
+        ]
+    );
+    assert_eq!(
+        related(by_qualname(&diags, "pairs")),
+        [
+            "`pairs` calls `pkg.model.Pair.__init__`",
+            "`Pair.__init__` calls `pkg.model._mark`"
+        ]
+    );
+}
 
 #[test]
 fn forbidden_scopes_restrict_owner_contracts() {

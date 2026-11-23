@@ -44,6 +44,15 @@ nested class (its `__init__` in particular) are kept apart from the methods of t
 `__qualname__`: a class defined in a function is `factory.<locals>.Worker`, so its methods never
 share a summary with a module-level `Worker`.
 
+Names follow Python's private name mangling (`heki_semantic::mangling`). Inside a class, at any
+depth of nested functions, an attribute name that starts with two underscores and does not end
+with two is recorded as the member it is (`self.__run` is `AttrLoad { attr: "_Parser__run" }` in
+class `Parser`), and so is every name of a class body (`def __run` binds `_Parser__run`). A
+function's own variables keep their spelling: they are no members. A definition keeps its
+written name in its qualname (`Parser.__run`), so the declarations find a method reached by its
+member name through that spelling (`ModuleDecls::definition_path`), and the contract patterns match a definition under both spellings
+(`def_spellings`), an attribute target `C.__x` the member `_C__x` of the classes it names.
+
 ```text
 IrFunction {
     id, name, qualname,
@@ -397,8 +406,19 @@ the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores
   stores into a name a function storing it reads, or into a name such a function reads through
   the stores of the names it reads; one walk over the functions finds them
   (`ProjectDecls::elsewhere`).
+- **Changes in place.** A change the module's code makes to the object a global or an
+  attribute holds, through a load of it (an item store `HANDLERS[kind] = run`, a method that may
+  add items such as `append`, `update`, or `setdefault`; `heki_ir::FnIndex::changed_vars`,
+  through copies and phis), is a store of the object's class with its items unknown (of an
+  annotated global's declaration): a name holding `{"noop": noop}` keeps `dict` and no item
+  type the code may replace. Another module's change marks the name (`StoredElsewhere::changed`), whose type
+  then keeps no items where it is read. What a call the object is handed to does is not
+  followed (the assumption on objects of unknown origin).
 - **Annotations.** An annotation types every store of the name it declares (Priority 2): an
-  annotated global holds its declaration or a narrower value, an annotated attribute its
+  annotated global holds its declaration, refined by what the value says beyond it
+  (`ProjectDecls::refine`: a narrower value, or for an instance of the declared container class
+  the item slots where the value is narrower or the declaration says nothing, such as the
+  functions of `HANDLERS: dict[str, Callable[..., None]] = {...}`), an annotated attribute its
   declaration.
 
 Stores of two or three classes give a union, on which a call dispatches as on any union (one of
@@ -531,6 +551,42 @@ reads each module once, however many paths of star imports reach it; a star impo
 module being decided binds nothing more. A change another module makes to the `__all__` of the
 module would have to run before the star import, and is not followed.
 
+A class-body name bound once, outside a field, to a module-level name (a function, class, or
+alias of its module, a name an import binds, or an attribute of one) or to `staticmethod` of one
+(`factory = Scope`, `REQUIRE: ClassVar[...] = staticmethod(require)`) is that object
+(`ClassDecl::named_attrs`, `ProjectDecls::class_alias`), when no code of the module stores the
+attribute on the class or on an instance, no other module rebinds it, and no hook runs on the
+read. Read through the class object (`Holder.REQUIRE`, also inherited) it is the object itself;
+read on an instance, a function outside `staticmethod` is a bound method, which binds the
+instance first, and anything else is the object. A call through `cls` or an instance runs the
+object of every class the receiver may be (the class and its project subclasses, at most
+`DISPATCH_CLASS_LIMIT`); a class among them finding the name as anything else leaves the call
+unresolved. A call of a class bound so constructs it (`self.factory(...)`).
+
+A value bound to one of several named objects (a branch `f = a if c else b`, the values of a
+table) is one of them (`Ty::OneOf`, at most `MAX_NAMED`, eight): a call runs every one, which must
+bind a receiver alike. A module global bound once, by the module body outside a loop, to a dict
+display with string-literal keys and no `**` entry, some value of which is a function, a class,
+or a partial object, and that no code changes in place or rebinds, is a table
+(`ModuleDecls::tables`, at most 256 entries): reading it with a key a string constant gives
+(`HANDLERS["create"]`, `HANDLERS[KEY]`, in its module, imported, or through the module) gives
+that entry's value, a later entry of the key replacing an earlier one; any other key, and
+iterating its values, give one of its values.
+
+A function every `return` of which gives what one import binds, an import in the function (`from
+pkg import ops`, then `return ops`, which breaks an import cycle) or one of its module, with no
+decorator but those keeping calls as defined and a `functools` cache, returns that object
+(`FunctionDecl::returned_import`) when it is a project module or the function has no return
+annotation of a class of its own (none, `-> ModuleType`). A value of
+`types.ModuleType` says nothing of the names the module binds: a call of one is unresolved, as on
+`Any`.
+
+A module-level `TypeVar` bound once with a `bound=` (a name, an attribute of one, or the string of
+an annotation) or constraints is that bound, or the union of the constraints, wherever an
+annotation names it, in its module or imported (`ModuleDecls::type_vars`,
+`ProjectDecls::declared_ty`): `for c in run.contexts` of `contexts: list[C]` with `C =
+TypeVar("C", bound=View)` gives a `View`. An unbounded one gives no class.
+
 A method that no project class of the receiver's MRO defines comes from the first base outside
 the project, when heki takes it to define the method (a base it knows nothing of coming first, an
 unknown base included, leaves the call unresolved): a special method (`__init__`, `__copy__`,
@@ -612,7 +668,11 @@ EffectSummary(f) = {
     typed_field_write_sites:  Set<TypedFieldWriteSite>,    // own and IndirectHelper writes to (class, attr) with
                                                            // kind, chain, and the parameters the written object
                                                            // may be, plus the sites private callees hand over (a
-                                                           // public callee reports its own) (MUT201, EFF201)
+                                                           // public callee reports its own) (MUT201, EFF201);
+                                                           // an item write keyed by a parameter (`EntryKey`)
+                                                           // is copied to every caller with the key the call
+                                                           // passes (`passed`: a constant, the caller's
+                                                           // parameter, or a key heki cannot tell)
     typed_field_writes:       Set<(Class, Attr)>,          // every typed write reached through any callee
     typed_params:             Bitset,                      // parameters the function types itself (its sites
                                                            // cover their changes)
@@ -1655,7 +1715,14 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      kind, or a subclass the annotation admits that replaces the method. Filling a memo of the shared object or initializing one of its attributes
      lazily (`SelfAttrWrite::fills_memo`, `lazy_init`, on any object a parameter or a tagged value
      holds; through a call, a change of the object a memo-named attribute holds) is no change:
-     what the object computes stays the same. A change below a shallow copy
+     what the object computes stays the same. A memo fill is a store under a test finding its key
+     missing (`not in`, the `else` of `in`, a `None` or falsy `.get(k)`, through
+     `guards::unset_branches`; the key compared by `cache_flow::same_key`), `setdefault`, or a
+     change of a memo-named container (also a parameter's default container); a lazy
+     initialization is a store (`guards::stored_attr`: also `setattr`, `__setattr__`) in a block
+     only a branch finding the attribute unset leads to (`guards::attr_tests`: `None` and
+     truthiness tests of `obj.attr`, `getattr(obj, "attr", ...)`, `hasattr(obj, "attr")`, and the
+     `except AttributeError:` clause of a `try` whose body reads it). A change below a shallow copy
      of a parameter (`copy.copy(p).tags.append(x)`) is a change of the parameter.
   4. **Return flow**: a backward walk from the returns a run can reach (`ownership::Live`: not
      a `return` after a `while True:` loop that no `break` leaves) marks each call whose result
@@ -1694,7 +1761,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   callers, with the same initializer and allowed-context rules as `MUT201`. Reads through
   parameters without a project-class type are not seen.
 
-### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF111`, `EFF112`, `EFF113`, `EFF114`, `EFF115`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF111`, `EFF112`, `EFF113`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
 0. **Must-facts and the exact tier** (`EffectSummary::must_exec`, computed only when `EFF101`,
    `EFF111`, `EFF103`, or `EFF113` runs: `OptInFacts::must_effects`):
    - Per call instruction, the path facts (`heki_ir::Paths`, with the reader of
@@ -1982,7 +2049,27 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      that is no async generator, worded as certain when every one is an `async def` no decorator
      replaces, and as possible otherwise. Only catalog APIs count: a project function taking a
      callable resolves to the project and is never one, whatever it does with the coroutine.
-13. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
+13. **`EFF116`** (opt-in): a call of a project generator function whose generator nothing
+   iterates, so its body does not run.
+   - The rule (`eff_rules::never_iterated`) reads each function's IR: a call (not awaited)
+     whose result has no name and whose every reader is a truth test (a branch's condition,
+     `not`, or a call of the builtin `bool` the resolver confirms) is a candidate, one with no
+     reader at all a statement. Only a function with a candidate is typed (`TypeCtx::infer`);
+     the call is resolved there (`resolve_call`, `resolve_method`) and judged complete as
+     `CallSite::complete` is (`TypeCtx::inst_targets_complete`). The callees' declarations are
+     read at check time (`FunctionDecl::is_generator`: a generator function no decorator
+     replaces), so a change of one between a generator and a plain function in another module
+     re-checks the caller's file.
+   - The hand-off form reads `EFF115`'s records (`OptInTables::unawaited_handoffs`, computed
+     when either rule runs) and skips the APIs that hand the result back
+     (`UnawaitedHandoff::hands_back`); each record also says whether its callees are every
+     implementation calling the handed value can run (`UnawaitedHandoff::complete`).
+   - Every callee must be a generator function: a call that may run a plain or decorated
+     implementation is no report. A report says so when a callee's name is bound to more than one
+     definition (`MustExec::bound_twice` of its summary). Its tier is exact when no name is bound
+     twice and the call is complete; the rule is heuristic until it is certified, which caps the
+     tier.
+14. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function (and each module body a scope names as `<module>`,
    `DottedPattern::names_module_bodies`) finds the shortest chain to each forbidden effect,
    without entering `allowed-callees`, other scope functions, or bodies that do not run at the
@@ -2032,9 +2119,9 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    declaration reads (`DeclKeys::modules`, `DeclKeys::package_paths`; a change of a package's
    path changes the key of each package above it), so a module created, deleted, or changing a
    path re-summarizes the function.
-   A module body's accesses include those of the class bodies it runs, as its reference sites
-   do, when a scope names a module body (`Contracts::checks_module_bodies`) or reference sites
-   are kept. Without such a boundary the map stays empty. The language server compares a
+   A module body's accesses include those of the class bodies it runs, as a function's do, when
+   a scope names a module body (`Contracts::checks_module_bodies`). Without such a boundary the
+   map stays empty. The language server compares a
    file's accesses before and after an edit, without positions, and re-checks the files above
    a function whose accesses changed, as it does for its Layer 2 call sites.
 
@@ -2319,11 +2406,12 @@ and `obj.__dict__.pop(<name>)` act on it, and, for Werkzeug, the slot an instanc
 through the module's imports (`ModuleDecls::decorator_symbol`), is listed; only such a getter makes
 a cached property an exact claim's (R3), and any other `cached_property` is one by its name.
 
-A fourth table, `[[calls_unawaited]]` (`heki_kb::UnawaitedCall`, `EFF115`), names the callable
-argument a call calls as a plain function without awaiting what it returns (by position, the
-receiver not counted, or by keyword), and whether it tests the result for truth:
-`threading.Thread`'s `target`, `atexit.register`, `signal.signal`, `filter`. Every
-`offloads_blocking_arg` API counts as one too. Each listed call also has an entry; the table
+A fourth table, `[[calls_unawaited]]` (`heki_kb::UnawaitedCall`, `EFF115`, `EFF116`), names the
+callable argument a call calls as a plain function without awaiting what it returns (by position,
+the receiver not counted, or by keyword), whether it tests the result for truth, and whether it
+hands the result back to its caller (`hands_back`: an executor's `submit` and `map`,
+`weakref.finalize`): `threading.Thread`'s `target`, `atexit.register`, `signal.signal`, `filter`.
+Every `offloads_blocking_arg` API counts as one too, and hands the result back. Each listed call also has an entry; the table
 stands beside the entries so that the entries without such an argument, nearly all, keep no word
 for it.
 

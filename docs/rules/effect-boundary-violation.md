@@ -37,15 +37,18 @@ count for a read.
     subclasses), or to one entry of the container an attribute holds (`Class.attr["key"]`), in
     every form `MUT201` follows, through the receivers whose class `MUT201` sees (the items of
     annotated containers included); a class's own initialization is no write (constructing a
-    fresh object runs its `__init__`), and neither is a write that constructs the object it
-    writes (`fresh-objects = "allow"`, the default; a write the reached function makes to an
+    fresh object runs its `__init__`): what an initializer writes on its own `self`, itself or
+    through the helpers it passes `self` to (`_link(self)`, `self._init_fields()`,
+    `super().__init__()`), while the same helper writing another object, or called after
+    `__init__` returned, writes an existing one; neither is a write that constructs the object
+    it writes (`fresh-objects = "allow"`, the default; a write the reached function makes to an
     object it allocated), as for `MUT201`;
   - `reads-targets`: reads of the `Class.attr` entries of `read-targets` (and their
     subclasses), in every form `MUT203` follows (`obj.attr`, `getattr(obj, "attr")`,
-    `obj.__dict__["attr"]` or `vars(obj)["attr"]`, a property getter that reads it); an
-    initializer reading its own instance is no read. An entry also names an attribute of a module
-    outside the project by its full dotted name (`sys.platform`), read as `sys.platform` or
-    through `from sys import platform`;
+    `obj.__dict__["attr"]` or `vars(obj)["attr"]`, a property getter that reads it); a class's
+    own initialization reading its instance, itself or through such a helper, is no read. An
+    entry also names an attribute of a module outside the project by its full dotted name
+    (`sys.platform`), read as `sys.platform` or through `from sys import platform`;
   - `calls`: calls of the `call-targets` entries, matched as the targets of `MUT204`: a function,
     a method (with its overrides in subclasses, through bound-method aliases and `getattr` with a
     constant name), or a class (constructing it); a call is one only when every function it may
@@ -80,6 +83,14 @@ count for a read.
   write of a `write-universe` entry that no `allow-writes` entry names is reported, in every form
   `writes-targets` follows. `allow-writes` also exempts writes from `write-targets` in the same
   boundary. Without `allow-writes`, the boundary allows no write of the universe.
+- An entry target (`Class.attr["key"]`, in `write-targets`, `write-universe`, or `allow-writes`)
+  also matches the writes a store operation makes with the key a call passes it: `set_extra(field,
+  "init", v)`, where `set_extra` writes `field.extras[key]`, writes `Field.extras["init"]`,
+  through any number of functions passing the key on, also as a `Final` constant. An item write
+  whose key heki cannot tell (a key the function computes, a parameter of the scope function, or
+  an argument that is neither) is reported where the boundary names an entry of the attribute and
+  allows no write of the whole container (`allow-writes = ["Field.extras"]`): "writes an entry of
+  `Field.extras` under a key heki cannot tell".
 
 Each scope function is searched breadth first over the project call graph, so the reported
 chain is a shortest one. The search does not enter:
@@ -115,6 +126,16 @@ definition. The report counts every distinct site of that kind the scope functio
 a Ratchet baseline sees a second blocking call, write, or parameter change below a recorded
 report.
 
+With `unresolved = "report"`, the boundary also reports what it cannot judge in the reach: a call
+heki resolves to no function (`HANDLERS[kind](...)` on a table something changes, a parameter
+called), a function it does not model (`eval`, a body too large) or whose body only a stub
+declares, and a write of an attribute `write-targets` or `write-universe` names on an object of
+unknown class or under a name computed at run time (`thing.required = True` of an unannotated
+`thing`, `setattr(thing, name, v)`). Each kind is reported once per scope function, at the call
+in the scope function starting the shortest chain to the first one, with the chain; calls and
+writes inside `allowed-callees` are not followed. Without it, the boundary is silent where heki
+cannot see, so no report does not mean the scope stays inside the boundary.
+
 `allow-writes` is only as precise as heki's view of which object each write changes. A write
 heki cannot tell apart from a write of the pass's input is reported: state that a property
 getter writes while rendering, or a store operation whose writes depend on its arguments. A
@@ -144,7 +165,9 @@ Its premises:
   part of the claim. With `"calls-and-bases"`, so is a class statement passing a class target
   as a base, typed where the statement runs; whether the subclass is constructed is not part of
   the claim. With `"reads"`, so is any other use of the target's value, as for `MUT204`; what the
-  use does with it is not part of the claim.
+  use does with it is not part of the claim. For an item write, the entry is the one the key
+  names: a constant in the function, or the constant a call on the chain passes for the key.
+  Established. A write under a key heki cannot tell may change another entry. Open.
 
 ## Why is this bad?
 Some parts of a code base promise to be pure: rendering a model must not mutate it, domain code
@@ -210,6 +233,9 @@ No automatic fix.
   - `allow-writes`: `Class.attr` writes the boundary allows (needs `write-universe`).
   - `fresh-objects`: `"allow"` (default) or `"report"`: whether writes that construct the object
     they write count, as for `[[tool.heki.write-owners]]`.
+  - `unresolved`: `"ignore"` (default) or `"report"`: whether what the boundary cannot judge in
+    the reach is reported (diagnostic targets `checks:unresolved-calls`,
+    `checks:unresolved-writes:required`).
   - `references`: `"ignore"` (default), `"calls"`, `"calls-and-bases"`, or `"reads"`: whether a
     reference handing a `call-targets` entry on, with `"calls-and-bases"` a class statement
     naming one among its bases, and with `"reads"` any other use of its value, counts for

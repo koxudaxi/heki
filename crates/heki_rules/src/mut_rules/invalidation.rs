@@ -9,13 +9,14 @@
 //! announced either), and a function every caller path of which announces the change after
 //! calling it (invalidation in bulk by a caller) is not reported.
 
-use super::{MergedReports, is_private};
+use super::allowed_examples::announced;
+use super::{MergedReports, is_private, place_functions};
 use crate::contracts::ConfigContracts;
 use crate::{CheckContext, RuleConfigError, SitesByCaller};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
-    ContractClass, CoveredAfter, FuncKey, Reach, UnmetWrite, body_runs_at, builds_written_object,
-    is_initializer, reach_across,
+    Construction, ContractClass, CoveredAfter, FuncKey, Reach, UnmetWrite, body_runs_at,
+    builds_written_object, is_initializer, reach_across,
 };
 use rustc_hash::FxHashSet;
 use std::collections::VecDeque;
@@ -68,13 +69,8 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
                 let target = contract
                     .target(&classes, &u.attr)
                     .map_or_else(|| format!("{}.{}", u.class_qualname, u.attr), str::to_owned);
-                // One report per call or write, contract, and target; it stands for every
-                // original write behind it (two writes of one helper are two sites). The
-                // diagnostic target names the contract: two contracts announcing one write are
-                // two reports, and two baseline entries.
-                let report_target = format!("{}:{target}", rule.name);
-                let named =
-                    super::matched_name(&target, || format!("{}.{}", u.class_qualname, u.attr));
+                let (report_target, named) =
+                    reported_names(&rule.name, &target, &u.class_qualname, &u.attr);
                 let writer = u
                     .via_chain
                     .last()
@@ -111,10 +107,57 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
             }
         }
     }
-    for m in merged {
-        m.emit(cx, "MUT109", out);
+    for (c, m) in merged.into_iter().enumerate() {
+        let rule = &cx.config.invalidation[c];
+        let contract = &names.invalidations[c];
+        let bit = u8::try_from(c).expect("at most `MAX_INVALIDATIONS` contracts");
+        m.emit(cx, ("MUT109", "announcing writers"), out, |examples| {
+            let mut add = |key, path, (class, attr): (&str, &str)| {
+                let classes = ContractClass::lineage(&names, cx.decls, class);
+                let Some(target) = contract.target(&classes, attr) else {
+                    return;
+                };
+                let (report_target, named) = reported_names(&rule.name, target, class, attr);
+                let quoted = format!("`{named}`");
+                let name = super::Named {
+                    target: &report_target,
+                    named: &quoted,
+                    rank: 0,
+                    contract: c,
+                };
+                examples.add((&report_target, name), key, path);
+            };
+            for (key, path, s) in place_functions(cx, |_| true) {
+                // An exempt writer's writes need no announcement of their own.
+                if contract.names_exempt_writer(&key.fqn(), &key.qualname) {
+                    let own = s
+                        .typed_field_write_sites
+                        .iter()
+                        .filter(|w| w.via_chain.is_empty() && w.construction != Construction::Yes);
+                    for w in own {
+                        add(key, path, (&w.class_qualname, &w.attr));
+                    }
+                }
+                let writes = cx.index.files[path].flows.get(key).into_iter();
+                for w in writes.flat_map(|f| &f.writes) {
+                    if w.contracts & (1 << c) != 0 && announced(s, bit, w.span) {
+                        add(key, path, (&w.class_qualname, &w.attr));
+                    }
+                }
+            }
+        });
     }
     Ok(())
+}
+
+/// What a report of a write of `attr` on an object of `class` that the configured `target` of
+/// the contract `contract` names says: the report's target and the member it quotes. The
+/// report's target names the contract, so two contracts announcing one write are two reports,
+/// and two baseline entries; it stands for every original write behind it (two writes of one
+/// helper are two sites).
+fn reported_names(contract: &str, target: &str, class: &str, attr: &str) -> (String, String) {
+    let named = super::matched_name(target, || format!("{class}.{attr}"));
+    (format!("{contract}:{target}"), named)
 }
 
 /// Whether every caller path of `func` announces the unmet write `u` after calling it: each

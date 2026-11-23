@@ -362,7 +362,13 @@ fn changes_text(out: &mut String, r: &InspectReport) {
     match &c.class_attrs {
         Some(writes) => {
             for w in writes.iter().filter(|w| !w.fresh) {
-                lines.push((format!("{}.{}", w.class, w.attr), w.kind.to_owned()));
+                let place = format!("{}.{}", w.class, w.attr);
+                if w.keys.is_empty() {
+                    lines.push((place.clone(), w.kind.to_owned()));
+                }
+                for k in &w.keys {
+                    lines.push((format!("{place}[{k}]"), w.kind.to_owned()));
+                }
             }
         }
         None => lines.push((

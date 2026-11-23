@@ -232,8 +232,8 @@ the installed release changed, and the changelog on GitHub lists every release.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   says how many.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
-  `EFF110`, `EFF112`, `EFF114`, `EFF115`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`,
-  `MUT112`, `MUT113`, `MUT115`): they need their exact code or name. In `ignore`, a prefix covers every
+  `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `MUT101`, `MUT103`, `MUT106`, `MUT107`,
+  `MUT108`, `MUT111`, `MUT112`, `MUT113`, `MUT115`): they need their exact code or name. In `ignore`, a prefix covers every
   rule it matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
@@ -285,6 +285,15 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   contract: it names the target configured first among them, and lists the others (`(also
   `A.items`)`).
 - A `Class.attr` target covers the subclasses of the class too.
+- A private name of a class (`__cache`, `__run`: two leading underscores and not two trailing)
+  is the member Python's name mangling makes of it (`_Parser__cache` in class `Parser`), and a
+  name may spell it either way: `pkg.Parser.__run` and `pkg.Parser._Parser__run` (or
+  `pkg.Parser._Parser__*`) name the same method. An access is matched as Python runs it: inside
+  `Parser`, `self.__run` reaches `_Parser__run`; outside, a receiver typed `Parser`, a
+  subclass's `self`, or `type[Parser]` reaches it as `_Parser__run`. A subclass's own private
+  name (`self.__run` in `JsonParser`, the member `_JsonParser__run`) is another member, and
+  overrides nothing of its base. With `unresolved = "report"`, the last name of such a target
+  counts in both spellings (`__run`, and `_Parser__run` for a class the target names).
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, a name with more than one colon or an empty module or qualified name, call
   targets whose globs are too many to match together (tens of thousands of complex ones), an
@@ -295,7 +304,11 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
   method named like a target, accessed on an object of unknown class (an unannotated parameter,
   a loop variable, an untyped call result, `Any`, a protocol whose implementations heki cannot
-  list). A baseline counts them apart from the violations the typed rules prove.
+  list). A baseline counts them apart from the violations the typed rules prove. An owner
+  contract with it also judges a function some code hands on as a value (a display, a class
+  attribute, an argument, a return: `HANDLERS = [helper]`, `REQUIRE = staticmethod(helper)`)
+  in that function, as if it had no callers: such a function has callers heki does not see, so
+  its allowed callers do not allow what it does.
 - An attribute named through a string (`setattr`, `getattr`, `__dict__`, `vars`) is followed
   when the string is a constant: see [Dynamic names](scope.md#dynamic-names).
 
@@ -332,9 +345,12 @@ unresolved = "report"
 
 A container entry (`Class.attr["key"]`):
 
-- matches the writes of that constant key (a literal or a string constant), not a write of the
-  whole container or with a computed key;
-- is reported once, under the entry, when its container is a target too.
+- matches the writes of that constant key (a literal or a string constant), also by a store
+  operation a call passes the key to (`set_extra(field, "init", v)` writing `field.extras[key]`,
+  reported at the call), not a write of the whole container or with a computed key;
+- is reported once, under the entry, when its container is a target too;
+- in an effect boundary, makes a write of the container under a key heki cannot tell a report of
+  its own ("under a key heki cannot tell"), unless the boundary allows the whole container.
 
 A write into the entries of a target's container (`model.meta["kw"][name] = v`) is a write of
 the target. So is a write through a local alias of the container (`kw = model.meta["kw"]`), also
@@ -596,6 +612,7 @@ import-probes = "report"
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes (as in `write-owners`) counts as a write of the boundary. |
 | `references` | `"ignore"` | `"ignore"`, `"calls"`, `"calls-and-bases"`, or `"reads"`, as for `call-owners`: whether a reference handing a `call-targets` entry on (and a class statement naming one among its bases, and any other use of its value) counts for `calls`. |
 | `import-probes` | `"allow"` | `"allow"` or `"report"`: whether `reads-environment` also forbids an import probe, an `import` inside a `try` with an `except` clause naming `ImportError` or `ModuleNotFoundError`. `"report"` without `reads-environment` is a configuration error. |
+| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the boundary also reports, under `EFF201`, what it cannot judge in its scopes' reach: a call heki resolves to no function, a function it does not model (`eval`, a body too large) or whose body only a stub declares, and a write of an attribute `write-targets` or `write-universe` names on an object of unknown class or under a name computed at run time. Each kind is one report per scope function, at the first one with its chain. |
 | `message` | none | The help of every report of the boundary. |
 
 | `forbid` token | Forbids |
@@ -767,8 +784,9 @@ holds for `invalidation` too:
 - **`attribution = "lexical"` judges the code where it is written.** The two rules above do not
   apply: an access is judged in the function whose code holds it, whoever calls that function.
   A lambda, comprehension, or generator expression is part of the function it is written in, a
-  class body's code part of the function running the class statement, and a nested `def` a
-  function of its own; the parameters of the function a lambda, comprehension, or generator
+  class body's code (a class attribute's value, a decorator, a default argument) part of the
+  function running the class statement (`<module>` for a class at module level), and a nested
+  `def` a function of its own; the parameters of the function a lambda, comprehension, or generator
   expression reads are the function's, wherever it runs. For `write-owners`, a call handing a
   typed object to a helper that changes it without knowing its class is the caller's write.
   With `unresolved = "report"`, the callers binding a parameter only tell its object's class,
@@ -807,10 +825,14 @@ holds for `invalidation` too:
   list), and a protocol-typed value handed to a helper that changes it without typing its
   parameter stay reported. By the call graph, a private method of an implementation that a call
   through the protocol runs still hands its writes of its own `self` to the caller.
-- **One report stands for every site behind it.** A report at a call stands for every access
-  behind the call, and an effect boundary's report for every site its scope function reaches.
-  JSON output gives their number as `sites`, and a
-  [Ratchet baseline](adoption.md#ratchet-baselines) counts each of them.
+- **The help names the allowed code that does it today.** After the contract's `message`, the
+  help of a report names up to three public functions and methods whose own body does what the
+  report shows from a place the contract allows (an `allowed-*` pattern names them, or the
+  `forbidden-*` patterns leave them out; for `invalidation`, the writes announced on every path
+  and the `exempt-writers`), by fully qualified name:
+  ``add entries through `Store`; allowed writers of `Registry.entries`: `pkg.store.Store.add` ``.
+  Private functions (`_name`), special methods (`__init__`), and the exempt methods are not named.
+  JSON output gives them with their files as `allowed_examples` (`fqn`, `path`).
 
 ## Ecosystem knowledge: `[[tool.heki.ecosystem]]`
 

@@ -152,6 +152,15 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         tracking: None,
     },
     ExperimentalFeature {
+        id: "rule.EFF116",
+        kind: ExperimentalKind::Rule,
+        target: "EFF116",
+        since: "0.2.6",
+        reason: "The development corpus has few reports of it, and its premises are not yet \
+            certified.",
+        tracking: None,
+    },
+    ExperimentalFeature {
         id: "cli-option.profile",
         kind: ExperimentalKind::CliOption,
         target: "heki check --profile",

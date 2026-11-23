@@ -704,6 +704,15 @@ impl<'a> TypeCtx<'a> {
     }
 }
 
+/// The builtin sequences a slice of which is a new sequence of their class.
+const SLICED_SEQUENCES: &[&str] = &[
+    "builtins.list",
+    "builtins.tuple",
+    "builtins.str",
+    "builtins.bytes",
+    "builtins.bytearray",
+];
+
 /// A transfer cannot run yet: an operand it needs is unset.
 struct Pending;
 
@@ -1772,12 +1781,21 @@ impl<'e, 'a> Engine<'e, 'a> {
     }
 
     fn subscript(&self, span: Span, obj: VarId, index: VarId, is_slice: bool) -> Step {
-        let Some(o) = self.need(obj)?.and_then(Ty::obj) else {
+        let container = self.need(obj)?;
+        if !is_slice && let Some(item) = self.table_item(obj, index) {
+            return Ok(item);
+        }
+        let Some(o) = container.and_then(Ty::obj) else {
             return Ok(None);
         };
         let item = match (&o.args, is_slice) {
             (Args::None, false) => return Ok(self.dunder(o, "__getitem__")),
-            (Args::None, true) => return Ok(None),
+            // A slice of a builtin sequence is one of its class, whatever its items.
+            (Args::None, true) => {
+                return Ok(SLICED_SEQUENCES
+                    .contains(&o.class.as_str())
+                    .then(|| Ty::inst(o.class.as_str())));
+            }
             (Args::Map(_, v), _) => (**v).clone(),
             // A slice keeps the container type (a tuple's length is lost).
             (Args::Items(_), true) => return Ok(Some(Ty::Inst(o.clone()))),
@@ -1791,6 +1809,21 @@ impl<'e, 'a> Engine<'e, 'a> {
             (Args::Tuple(es), false) => self.position(span, obj, index, es),
         };
         item_ty(item)
+    }
+
+    /// What `obj[index]` gives when `obj` reads a module's table of functions and `index` is
+    /// one of its keys (`HANDLERS["create"]`, [`TypeCtx::table_value`]).
+    fn table_item(&self, obj: VarId, index: VarId) -> Option<Option<Ty>> {
+        let inst = self.shape.inst(self.shape.copy_root(obj))?;
+        let module_of = |v: VarId| match self.fact(v) {
+            Fact::Known(Ty::Ref(m)) => Some(m),
+            _ => None,
+        };
+        let read = self.cx.global_read(inst, &module_of)?;
+        let key = self
+            .cx
+            .str_constant_in(self.shape, index, &FxHashMap::default())?;
+        self.cx.table_value(read, &key)
     }
 
     /// The item at constant position `index` of a tuple, or any of its items. An unpacking
@@ -1950,7 +1983,8 @@ impl<'e, 'a> Engine<'e, 'a> {
             | Ty::SelfType
             | Ty::Partial(_)
             | Ty::Coroutine(_)
-            | Ty::Union(_) => None,
+            | Ty::Union(_)
+            | Ty::OneOf(_) => None,
         }
     }
 
@@ -1981,6 +2015,11 @@ impl<'e, 'a> Engine<'e, 'a> {
         let Some((class, skip_self, self_ty)) = self.static_receiver(recv) else {
             return Ok(None);
         };
+        if let Ty::Inst(_) = recv
+            && let Some(value) = cx.instance_alias(class, attr)
+        {
+            return Ok(value);
+        }
         let t = match cx.store_read_member(class, attr, skip_self) {
             Some(Read::Pending) => return Err(Pending),
             Some(Read::Of(t)) => Some(t),
@@ -2015,6 +2054,11 @@ impl<'e, 'a> Engine<'e, 'a> {
         }
         let cx = self.cx;
         let (class, skip_self, self_ty) = self.static_receiver(recv)?;
+        // A class body binding `method` to a name (`factory = Scope`): the call calls what it
+        // names, a bound method returning what the function does.
+        if !skip_self && let Some((named, _)) = cx.project.class_alias(class, method) {
+            return self.called(&cx.named(named), call);
+        }
         if let Some(key) = cx.project.mro_definition(class, method, skip_self) {
             let decl = cx.project.function_decl(&key)?;
             // Calling what a property returns is calling its value, not the getter; a class
@@ -2025,6 +2069,9 @@ impl<'e, 'a> Engine<'e, 'a> {
                     .then(|| self.member(recv, method).ok().flatten())
                     .flatten();
                 return value.and_then(|v| self.called(&v, call));
+            }
+            if decl.returned_import.is_some() {
+                return decl.declared_return(cx.project).map(|t| decl.call_type(t));
             }
             return decl
                 .return_type
@@ -2055,6 +2102,10 @@ impl<'e, 'a> Engine<'e, 'a> {
             }
             // What the partial object binds shifts the arguments: they are not followed.
             Ty::Partial(inner) => self.called(inner, Passed::default()),
+            Ty::OneOf(fqns) => join_all(
+                fqns.iter()
+                    .map(|fqn| self.cx.call_result(fqn, |i, k| self.passed(call, i, k))),
+            ),
             other => self.member_call(other, "__call__", call),
         }
     }

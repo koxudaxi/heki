@@ -812,6 +812,66 @@ fn facts_the_configuration_does_not_compute_are_null() {
     assert_eq!(report(&p, "rename")["returns"]["new_object"], "no");
 }
 
+const INITIALIZATION: &str = r#"from __future__ import annotations
+
+
+class Node:
+    def __init__(self, members: list[Node]) -> None:
+        self.members = members
+        _link(self)
+
+    def relink(self) -> None:
+        _link(self)
+
+
+def _link(node: Node) -> None:
+    node.optional = len(node.members) > 1
+
+
+def link_all(nodes: list[Node]) -> None:
+    for n in nodes:
+        _link(n)
+
+
+def constructs(members: list[Node]) -> Node:
+    return Node(members)
+
+
+def relinks(node: Node) -> None:
+    node.relink()
+"#;
+
+/// A class's own initialization writes the object it constructs, through the helpers it passes
+/// `self` to too (as `EFF201` judges it): constructing a node changes no existing object, while
+/// the same helper called by a method after `__init__` returned, or on other nodes, does.
+#[test]
+fn an_initializer_and_its_helpers_write_the_object_it_constructs() {
+    let p = Project::new("inspect_initialization");
+    p.write("m.py", INITIALIZATION);
+    let r = |symbol: &str| report_with(&p, &[symbol, "--extend-select", "MUT112"]);
+    let attrs = |v: &Value| -> Vec<(String, bool)> {
+        (v["changes"]["class_attrs"].as_array().unwrap().iter())
+            .map(|w| (w["attr"].as_str().unwrap().to_owned(), w["fresh"] == true))
+            .collect()
+    };
+    let constructs = r("constructs");
+    assert_eq!(
+        attrs(&constructs),
+        [("members".to_owned(), true), ("optional".to_owned(), true)]
+    );
+    assert_eq!(constructs["purity"]["verdict"], "pure");
+    let init = r("Node.__init__");
+    assert_eq!(strings(&init["purity"]["because"]), ["changes_self"]);
+    for writer in ["relinks", "Node.relink", "link_all"] {
+        let w = r(writer);
+        assert_eq!(attrs(&w), [("optional".to_owned(), false)], "{writer}");
+        assert!(strings(&w["purity"]["because"]).contains(&"writes_objects".to_owned()));
+    }
+    let (code, out, err) = p.heki(&["inspect", "constructs", "--extend-select", "MUT112"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("changes   none"), "{out}");
+}
+
 #[test]
 fn return_origins() {
     let p = facts_project("inspect_returns");
@@ -967,7 +1027,8 @@ fn calls_on_values_whose_type_says_nothing_are_unresolved() {
     assert_eq!(report(&p, "known")["purity"]["verdict"], "pure");
 }
 
-/// A dispatch through a table heki does not resolve, in functions that also write.
+/// A dispatch through a table heki does not resolve (another function adds to it), in functions
+/// that also write.
 const DISPATCH: &str = r#"from typing import Callable
 
 
@@ -981,6 +1042,10 @@ def _flag(field: Field) -> None:
 
 
 TABLE: dict[str, Callable[[Field], None]] = {"flag": _flag}
+
+
+def register(name: str, run: Callable[[Field], None]) -> None:
+    TABLE[name] = run
 
 
 def only_dispatches(field: Field) -> None:
@@ -1034,7 +1099,7 @@ fn unresolved_calls_in_reach_are_named_whatever_the_verdict() {
     assert_eq!(calls["unknown_at"]["fqn"], "m.only_dispatches");
     assert_eq!(
         hops(&calls["unknown_at"]["chain"]),
-        [(27, "m.only_dispatches".to_owned())]
+        [(31, "m.only_dispatches".to_owned())]
     );
     // Every one reached, nearest first; `unknown_at` is the first.
     let both = &report(&p, "through_both")["purity"];
@@ -1044,8 +1109,8 @@ fn unresolved_calls_in_reach_are_named_whatever_the_verdict() {
     assert_eq!(
         hops(&both["unknown_reach"]["entries"][1]["chain"]),
         [
-            (35, "m.calls_one_that_dispatches".to_owned()),
-            (27, "m.only_dispatches".to_owned())
+            (39, "m.calls_one_that_dispatches".to_owned()),
+            (31, "m.only_dispatches".to_owned())
         ]
     );
     assert_eq!(both["unknown_reach"]["truncated"], false);
@@ -1057,7 +1122,7 @@ fn unresolved_calls_in_reach_are_named_whatever_the_verdict() {
     assert_eq!(code, 0, "{err}");
     assert!(
         out.contains(
-            "  impure: changes_params\n  cannot follow\n    vague            m.py:36 m.vague\n    only_dispatches  m.py:35 m.calls_one_that_dispatches -> m.py:27 m.only_dispatches\n"
+            "  impure: changes_params\n  cannot follow\n    vague            m.py:40 m.vague\n    only_dispatches  m.py:39 m.calls_one_that_dispatches -> m.py:31 m.only_dispatches\n"
         ),
         "{out}"
     );
