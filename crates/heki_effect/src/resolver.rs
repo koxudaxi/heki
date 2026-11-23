@@ -29,11 +29,12 @@ use heki_kb::{
 };
 use heki_semantic::{ModuleImport, ScopeKind, SemanticModel, StarImport, mangling};
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::BuildHasher;
 use std::ops::Bound;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -927,6 +928,11 @@ pub struct ModuleDecls {
     pub classes: BTreeMap<String, Box<ClassDecl>>,
     /// Function qualname -> declaration (module body excluded).
     pub functions: BTreeMap<String, Box<FunctionDecl>>,
+    /// Whether a class or function here is a member written with a private name (`def __run`
+    /// in class `Parser`, held as `_Parser__run`): only then may a path name a definition by
+    /// another spelling ([`Self::definition_path`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub private_members: bool,
     /// Module global `name -> type` of the instance it holds (`client = httpx.Client()`): the
     /// join of every store of the module (`stores::record`).
     pub global_types: BTreeMap<String, Ty>,
@@ -1128,6 +1134,10 @@ impl ModuleDecls {
     /// class member reached by the mangled name its class holds it under (`Parser._Parser__run`)
     /// is the definition written with the private name (`def __run`, qualname `Parser.__run`).
     fn definition_path<'p>(&self, path: &'p str) -> Cow<'p, str> {
+        // Every lookup of a definition comes here, and few modules define a private member.
+        if !self.private_members {
+            return Cow::Borrowed(path);
+        }
         let defines = |q: &str| self.functions.contains_key(q) || self.classes.contains_key(q);
         if defines(path) {
             return Cow::Borrowed(path);
@@ -1907,8 +1917,44 @@ struct Kept<T> {
     reads: Option<Arc<DeclKeys>>,
 }
 
-/// The answers [`ProjectDecls`] keeps of one question, by its key.
-type KeptAnswers<K, T> = RwLock<FxHashMap<K, Kept<T>>>;
+/// The answers [`ProjectDecls`] keeps of one question, by its key. Every analysis thread asks,
+/// some questions for each name it looks up ([`ProjectDecls::star_binding`]): behind one lock,
+/// the threads would wait on each other, so each shard of the keys has its own.
+#[derive(Debug)]
+struct KeptAnswers<K, T> {
+    shards: Box<[KeptShard<K, T>]>,
+}
+
+/// One shard of a [`KeptAnswers`].
+type KeptShard<K, T> = RwLock<FxHashMap<K, Kept<T>>>;
+
+/// The shards of each [`KeptAnswers`], a few per analysis thread.
+const KEPT_SHARDS: usize = 64;
+
+impl<K, T> Default for KeptAnswers<K, T> {
+    fn default() -> Self {
+        Self {
+            shards: (0..KEPT_SHARDS).map(|_| RwLock::default()).collect(),
+        }
+    }
+}
+
+impl<K: Eq + std::hash::Hash, T> KeptAnswers<K, T> {
+    /// The shard keeping the answer for `key`.
+    fn shard(&self, key: &K) -> &KeptShard<K, T> {
+        let hash = FxBuildHasher.hash_one(key);
+        &self.shards[(hash >> 32) as usize % KEPT_SHARDS]
+    }
+
+    fn clear(&mut self) {
+        for shard in &mut self.shards {
+            shard
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clear();
+        }
+    }
+}
 
 /// Declarations of every project module plus derived indexes.
 #[derive(Debug, Default)]
@@ -1943,6 +1989,9 @@ pub struct ProjectDecls {
     grown_elsewhere: FxHashSet<String>,
     /// Those another project module rebinds or deletes (`ModuleDecls::rebound_globals`).
     rebound_elsewhere: FxHashSet<String>,
+    /// The dotted prefixes of the names in `rebound_elsewhere` (`pkg.mod.C` of
+    /// `pkg.mod.C.run.__code__`): another module rebinds no attribute of a class not among them.
+    rebound_owners: FxHashSet<String>,
     /// What project modules store into the globals of other modules and into the instances of
     /// their classes, joined (`ModuleDecls::stores_elsewhere`), and the modules whose own types
     /// then hold no longer.
@@ -2240,22 +2289,10 @@ impl ProjectDecls {
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
-        self.class_constants
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
-        self.attr_joins
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
-        self.capacities
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
-        self.star_bindings
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
+        self.class_constants.clear();
+        self.attr_joins.clear();
+        self.capacities.clear();
+        self.star_bindings.clear();
         self.catalog_attributes.clear();
         // Maintenance, not a lookup of an analysis.
         let recording = std::mem::replace(self.recorder.on.get_mut(), false);
@@ -2312,6 +2349,9 @@ impl ProjectDecls {
         self.protocols = self.protocol_implementations();
         self.grown_elsewhere = self.globals_changed_elsewhere(|m| &m.grown_globals);
         self.rebound_elsewhere = self.globals_changed_elsewhere(|m| &m.rebound_globals);
+        self.rebound_owners = (self.rebound_elsewhere.iter())
+            .flat_map(|fqn| fqn.match_indices('.').map(|(dot, _)| fqn[..dot].to_owned()))
+            .collect();
         self.setstate_called = self.modules.values().any(|m| m.calls_setstate);
         self.elsewhere = self.stores_elsewhere();
         self.changed_paths = self.package_path_changes();
@@ -2416,8 +2456,9 @@ impl ProjectDecls {
     /// project gives a project class of `mro` other bases (`__bases__`), or its instances
     /// another class (`__class__`).
     pub(crate) fn lookup_rebound(&self, mro: &[String], name: &str) -> bool {
-        // Only an analysis whose reads are recorded asks for keys no module stores yet.
-        let elsewhere = !self.rebound_elsewhere.is_empty() || self.recording();
+        // Only an analysis whose reads are recorded asks for keys no module stores yet. Every
+        // call whose targets are checked asks for each class it may run on, along its MRO.
+        let recording = self.recording();
         let mut found = false;
         for c in mro {
             let Some((m, qualname, decl)) = self
@@ -2426,6 +2467,7 @@ impl ProjectDecls {
             else {
                 continue;
             };
+            let elsewhere = recording || self.rebound_owners.contains(c);
             let stored = |attr: &str| {
                 decl.rebound_attrs.contains(attr)
                     || (elsewhere && self.rebound_elsewhere_canonical(&format!("{c}.{attr}")))
@@ -3128,7 +3170,8 @@ impl ProjectDecls {
     ) -> T {
         let recording = self.recorder.on.load(Ordering::Relaxed);
         // An answer kept without its reads is computed again while recording, to record them.
-        let known = cache
+        let shard = cache.shard(&key);
+        let known = shard
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&key)
@@ -3155,7 +3198,7 @@ impl ProjectDecls {
             value: value.clone(),
             reads,
         };
-        cache
+        shard
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(key, known);
@@ -3195,6 +3238,7 @@ impl ProjectDecls {
     ) -> Option<(CapacityOf, Option<Arc<DeclKeys>>)> {
         let recording = self.recorder.on.load(Ordering::Relaxed);
         self.capacities
+            .shard(name)
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .get(name)
@@ -3209,6 +3253,7 @@ impl ProjectDecls {
         reads: Option<Arc<DeclKeys>>,
     ) {
         self.capacities
+            .shard(&name)
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(name, Kept { value, reads });
@@ -4293,7 +4338,10 @@ impl ProjectDecls {
     fn own_method(&self, class: &str, name: &str) -> Option<FuncKey> {
         let (m, rest) = self.split_module(class)?;
         let member = format!("{rest}.{name}");
-        let qualname = m.definition_path(&member).into_owned();
+        let qualname = match m.definition_path(&member) {
+            Cow::Owned(written) => written,
+            Cow::Borrowed(_) => member,
+        };
         m.functions.contains_key(&qualname).then(|| FuncKey {
             module: m.module_name.clone(),
             qualname,
@@ -4774,6 +4822,13 @@ impl ProjectDecls {
         }
     }
 
+    /// Whether some class body binds `attr` to a module-level name (`ClassDecl::named_attrs`):
+    /// otherwise no class reads it as an alias ([`Self::class_aliases`]).
+    pub(crate) fn binds_alias(&self, attr: &str) -> bool {
+        self.read(|k| note(&mut k.alias_names, attr));
+        self.alias_names.contains(attr)
+    }
+
     /// What reading `attr` on the class `class` or on one of its instances finds, when the first
     /// class along the MRO defining it binds it in its body to a module-level name
     /// (`ClassDecl::named_attrs`: `factory = Scope`, `REQUIRE: ClassVar[...] =
@@ -4783,8 +4838,7 @@ impl ProjectDecls {
     /// module may rebind it, or a hook run on the read (`__getattribute__`, a metaclass heki
     /// does not know); a field the class body annotates is the instance's own.
     pub(crate) fn class_aliases(&self, class: &str, attr: &str) -> Option<ClassAlias<'_>> {
-        self.read(|k| note(&mut k.alias_names, attr));
-        if !self.alias_names.contains(attr) {
+        if !self.binds_alias(attr) {
             return None;
         }
         let class = self.canonical(class);
@@ -5409,6 +5463,9 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     let rebound = rebound_imports(input, &stores, &decls);
     decls.rebound_imports = (!rebound.is_empty()).then(|| Box::new(rebound));
     decls.rebound_definitions = rebound_definitions(input, &stores, &decls);
+    decls.private_members = (decls.classes.keys())
+        .chain(decls.functions.keys())
+        .any(|qualname| mangling::member_path(qualname).is_some());
     // Qualnames whose every definition is a property getter (a setter, a deleter, or any other
     // function with the same qualname shares its summary).
     let mut getters_only: FxHashMap<&str, bool> = FxHashMap::default();
@@ -8020,6 +8077,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     type_checking_imports: BTreeMap::new(),
     classes: BTreeMap::new(),
     functions: BTreeMap::new(),
+    private_members: false,
     global_types: BTreeMap::new(),
     tables: BTreeMap::new(),
     declared_items: BTreeMap::new(),
@@ -8580,9 +8638,21 @@ impl<'a> TypeCtx<'a> {
             Recv::Inst(class) => (class, true, true),
             Recv::Ref(_) | Recv::Super(_) => return None,
         };
+        // Every method call asks, and the receiver's class may have thousands of subclasses:
+        // they are listed only for a name some class body binds.
+        if !self.project.binds_alias(method) {
+            return None;
+        }
         let mut classes = vec![self.project.canonical(class)];
         if family {
             classes.extend(self.project.subclasses_of(class));
+        }
+        // As for the implementations of a method (`instance_targets_complete`). Past the limit,
+        // the first class binding the name to a name decides, not what each one binds.
+        if classes.len() > DISPATCH_CLASS_LIMIT {
+            return (classes.iter())
+                .any(|c| self.project.class_aliases(c, method).is_some())
+                .then_some(Callee::TooMany);
         }
         let found: Vec<Option<ClassAlias<'_>>> = classes
             .iter()
@@ -8590,10 +8660,6 @@ impl<'a> TypeCtx<'a> {
             .collect();
         if found.iter().all(Option::is_none) {
             return None;
-        }
-        // As for the implementations of a method (`instance_targets_complete`).
-        if classes.len() > DISPATCH_CLASS_LIMIT {
-            return Some(Callee::TooMany);
         }
         let mut out: Option<Callee> = found
             .iter()
