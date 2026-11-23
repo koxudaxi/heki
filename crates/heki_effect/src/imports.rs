@@ -154,14 +154,14 @@ fn class_bodies<'m>(ir: &'m ModuleIr, f: &'m IrFunction) -> Vec<ClassBody<'m>> {
         next,
         |(id, guarded)| {
             if id != f.id.0 {
-                match index.get(&id) {
-                    Some(&at) => out[at].guarded |= guarded,
-                    None => {
-                        index.insert(id, out.len());
-                        let body = ir.function(FunctionId(id));
-                        out.push(ClassBody { body, guarded });
-                    }
-                }
+                let at = *index.entry(id).or_insert_with(|| {
+                    out.push(ClassBody {
+                        body: ir.function(FunctionId(id)),
+                        guarded: false,
+                    });
+                    out.len() - 1
+                });
+                out[at].guarded |= guarded;
             }
             Visit::<()>::Expand
         },
