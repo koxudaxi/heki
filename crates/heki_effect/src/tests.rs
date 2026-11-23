@@ -2131,8 +2131,12 @@ def library_only(names: list[str]) -> int:
     parts = []
     parts.append("x")
     parts.append(",".join(names))
-    parts.append(f"{names}".strip())
+    parts.append(f"{len(names)}".strip())
     return len(parts) + len("abc")
+
+
+def shown(names: list[str]) -> str:
+    return f"{names}"
 
 
 def handed_unknown(value) -> int:
@@ -2172,7 +2176,11 @@ def ordered(names: list[str] | tuple[str, ...]) -> list[str]:
     return sorted(names)
 
 
-def checks(value: object, cls: type[Holder]) -> bool:
+def checks(value: Holder, cls: type[Holder]) -> bool:
+    return isinstance(value, cls)
+
+
+def checks_any(value: object, cls: type[Holder]) -> bool:
     return isinstance(value, cls)
 
 
@@ -2278,8 +2286,10 @@ fn removals_of_kept_values_by_name_and_by_unknown_code() {
     assert_eq!(removes("clear"), KeptRemoval::Any);
     assert_eq!(removes("calls_drop"), named("size"));
     assert_eq!(removes("unknown"), KeptRemoval::Any);
-    // `list.append` and `len` of a builtin list or string run no code of the project.
+    // `list.append` and `len` of a builtin list or string run no code of the project; a list's
+    // string shows its items' `repr()`, of classes heki does not know.
     assert_eq!(removes("library_only"), KeptRemoval::Nothing);
+    assert_eq!(removes("shown"), KeptRemoval::Any);
     // `len` of a value of a class heki does not know runs its `__len__`.
     assert_eq!(removes("handed_unknown"), KeptRemoval::Any);
     // `isinstance` looks up `__class__` on its first argument, and runs the metaclass's
@@ -2294,8 +2304,10 @@ fn removals_of_kept_values_by_name_and_by_unknown_code() {
     // classes heki does not know.
     assert_eq!(removes("copied"), KeptRemoval::Nothing);
     assert_eq!(removes("ordered"), KeptRemoval::Any);
-    // A class object's `__instancecheck__` is its metaclass's.
+    // A class object's `__instancecheck__` is its metaclass's; a value annotated `object` may
+    // be of any class, whose `__class__` lookup may run its code.
     assert_eq!(removes("checks"), KeptRemoval::Nothing);
+    assert_eq!(removes("checks_any"), KeptRemoval::Any);
     // `filter(None, ...)` calls nothing; `map` calls a project class while it is iterated.
     assert_eq!(removes("present"), KeptRemoval::Nothing);
     assert_eq!(removes("built_rows"), KeptRemoval::Any);

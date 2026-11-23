@@ -173,6 +173,8 @@ before reports reaching one waiting call are folded together.
 | `DATA101` | 0.2.0 | 6 / 0 | 0 / 0 |
 | `MUT110` | 0.2.0 | 5 / 0 | 2 / 0 |
 | `MUT114` | 0.2.0 | 5 / 0 | 5 / 0 |
+| `MUT101` | 0.2.4 (experimental) | 26 / 0 | 1 / 0 |
+| `MUT111` | 0.2.4 (experimental) | 60 / 0 | 2 / 0 |
 | `MUT119` | 0.2.5 | 23 / 0 | 2 / 0 |
 
 <!-- End of the generated certifications. -->

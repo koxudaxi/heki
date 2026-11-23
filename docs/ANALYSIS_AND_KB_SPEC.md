@@ -385,6 +385,20 @@ variable of the name, which the scopes created outside the comprehension read. A
 nested scope may rebind (`nonlocal`, an assignment expression in a comprehension scope before
 3.12, any scope nested in a function too large to model) is of unknown type.
 
+A cell that the function binding it binds only as one of its parameters, and that no nested
+scope rebinds, is that parameter in every scope reading it (`FunctionDecl::captured_params`, one
+list per qualname, which scopes sharing a qualname share): every scope nested in the function
+gets one more parameter per such cell, past the parameters of every scope with its qualname, so
+a scope that does not read it can still hand it to one that does (a generator expression calling
+a nested function), and the masks of its facts (`may_params`, `obj_params`) name it. A call binds
+it (`BoundCallee::params` past the scope's own) to the caller's own parameter when the caller
+binds the cell, to the caller's position of it when the caller is nested in that function too,
+and to nothing otherwise: a closure called away from the function. So the mapping of
+masks across calls takes `self` in a comprehension, generator expression, lambda, or nested
+function back to the method running it (a class's own initialization, `own-receiver`, the walk
+up the callers), and the owner contracts' lexical attribution maps the positions of a lambda,
+comprehension, or generator expression to the function holding it directly.
+
 Module names come from the paths below a source root (`pkg/mod.py` → `pkg.mod`,
 `pkg/__init__.py` → `pkg`), the deepest one holding the file, else the project root. The `src`
 setting lists the source roots; without it they are detected as ty detects them: `src/`, the
@@ -717,7 +731,10 @@ successors, returns, exception targets) with the points that invalidate or read 
 property of its own instance (`del self.<name>`, a constant-key removal from `self.__dict__`,
 `self.__dict__.clear()`, `self.<name>`, and calls on `self`, whose callees' summaries say what
 they do). They are local facts, never propagated, and they let `MUT101` decide staleness from the
-index alone, for a method of any indexed file.
+index alone, for a method of any indexed file. `FileSummary.kept_removals` (only with
+`OptInFacts::kept_values`) holds the names under which the file's functions remove a value an
+object keeps in its `__dict__`: a project-wide fact the language server compares per file
+(`Workspace::note_kept_removals`), as it does the sentinel comparisons of `MUT118`.
 
 `OptInTables::blind_spots` (`heki_effect::BlindCall`, in `FileSummary::opt_in_tables`, the one
 box per file that holds the opt-in tables of its functions; only with `OptInFacts::blind_spots`,
@@ -1014,20 +1031,59 @@ which module imports which.
    keys, also where two definitions or two targets are joined.
 8. **What may remove a kept value** (computed only with `OptInFacts::kept_values`). A method's
    `CacheFlow` also holds the points that may remove or replace a value kept in some object's
-   `__dict__`: `MayRemove(name)` (`del obj.<name>`, an item of a `__dict__` stored or removed
-   under that key), `MayRemoveAny` (a `__dict__` cleared, replaced, or handed to a call; an
-   `await`, the implicit awaits of `async for` and `async with`, or a `yield`, while other code
-   runs; a call heki cannot resolve, of a library outside
-   the catalog, or of one that may run project code by its `[[invokes]]` entry, section 4.2; a
+   `__dict__`. Each is decided positively: a point is harmless only where heki establishes it.
+   `MayRemove(name)` stands for a store or a deletion of `obj.<name>`, or of an item of a
+   `__dict__` under that key, through any reference (`self`, a parameter, a closure cell, a
+   global, a container's item, `*args`), when `<name>` is a property getter's name
+   (`ProjectDecls::names_property`, recorded as a `DeclKeys::property_names` key) and `obj` is
+   not established as an object that keeps no value under it
+   (`heki_effect::invokes::may_keep_under`: a value built in the function, or an instance of
+   classes none of which binds a property getter of the name, `ProjectDecls::binds_property`).
+   `MayRemoveAny` stands for a store or a deletion of a `__dict__` or a `__class__`; a `__dict__`
+   cleared or handed to a call; an `await`, the implicit awaits of `async for` and `async with`,
+   or a `yield`, while other code runs; a call heki cannot resolve, of a library outside the
+   catalog, or of one that may run project code by its `[[invokes]]` entry, section 4.2; a
    project call whose targets are not every implementation it can run; the iteration of a value
-   that is no builtin container, no project generator's result, and no `lazy` call's; a
-   library call handed a container whose items heki does not know, such as a display changed
-   after it is built or what a builtin call or a generator expression returns), and
-   `Calls(span)` at the project calls no `SelfCall` stands for (other receivers, the property
-   getters a read of `self.<name>` runs) and at each step of iterating what a project generator
-   called at `span` returns, whose callees' summaries say what they remove.
+   that is no builtin container, no project generator's result, and no `lazy` call's (a
+   generator expression runs its body); a library call handed a container whose items heki does
+   not know; a special method an instruction runs on an operand's class
+   (`heki_ir::IrFunction::special_methods`: an operator and its reflection, with what a builtin
+   operator reads of the other operand, a comparison, `in`, `%` formatting, a conversion or
+   format, a subscript and its key, an unpacking, a call's `*` and `**` arguments, a key a set or
+   dict display hashes, a generator expression's outer iterable, entering and leaving a `with`,
+   and a branch's truth test, not a loop's test of its next item) that heki does not establish
+   as no code of the project (`heki_effect::invokes::special_methods_run_project_code`: on every
+   class the operand may be under R2, the method found first along the MRO,
+   `ProjectDecls::special_method_owner`, is `object`'s, a builtin type's, whose hash,
+   comparison, and `repr()` run the items' own and whose dict or set lookups compare stored keys
+   under an equal hash, or a library class's called as a library call handed every operand,
+   R3; a value of an abstract class, a protocol, `object`, or no class heki knows establishes
+   none); an attribute access that may run code of the project besides a getter heki resolves
+   (`heki_effect::invokes::attribute_access_runs_project_code`: on a project class, a read that
+   finds no plain attribute or method, a write that may run a property setter, `__setattr__`,
+   `__delattr__`, another descriptor, or code of a base heki does not know,
+   `ProjectDecls::attr_write_runs_no_code`; on a library object, the access as a call of that
+   attribute under R3; on a value of unknown class, anything); a class statement; an import of
+   a project module; a `raise` of a value that may be a class of the project (an instance, a
+   value built in the function, and what calling a class gives are none). `Calls(span)` stands
+   at the project calls no `SelfCall` stands for (other receivers, the property getters a read
+   of `self.<name>` runs) and at each step of iterating what a project generator called at
+   `span` returns, whose callees' summaries say what they remove. What the function
+   establishes of a value's class is one least fixpoint over its instructions and phis
+   (`Extractor::established_values`, `Built`): a constant, a string, a `bool` of `not`, `is`, or
+   `in`, and a tuple of such values are builtin values whose items are established; a list,
+   set, or dict display and a new container a builtin returns are of an exact builtin class
+   with items heki does not establish; an operator, a comparison, a conversion, or `str()`
+   gives a builtin value only when every operand is one or its inferred class runs `object`'s
+   or a builtin type's own methods for it (`invokes::interpreter_own`), and a comparison of two
+   sequences by order only when their items are established too; anything else is not
+   established.
    `KeptFacts::removes_kept` (`EffectSummary::kept`) joins the same points of a function (a
-   `yield` excepted: its consumer is its caller) with what every callee removes. Each write of
+   `yield` excepted: its consumer is its caller) with what every callee removes, and
+   `FileSummary::kept_removals` the names under which the file's functions themselves remove a
+   value (also where the deletion may run other code): the lazy-setup filter asks whether any
+   function of the project does, and the language server checks again the files of the lazy
+   setup getters of a name whose removals change. Each write of
    the flow also records, under the same opt-in (`SelfAttrWrite::kept`), its literal key
    (`KeptWrite::key`) and, for an in-place change, the builtin list, dict, or set the attribute
    holds by its type and the method that changes it (`KeptWrite::change`).
@@ -1379,7 +1435,10 @@ message = "write model state through GenerationStore instead"
      - **container mutation through an alias**: `xs = obj.a; xs.append(...)` / `xs[i] = ...` /
        `xs.clear()` / `xs.sort()` / `xs |= ...` (through alias tracking and
        `mutated_param_paths`, **handing `obj.a` to `helper(obj.a)` that calls `.append()` is
-       caught across calls**). An alias is one in the scopes nested in its function too: a
+       caught across calls**). An augmented assignment that changes a built-in container in
+       place (`types::changes_in_place`: `+=` on a list, `|=` on a dict, `-=` on a set) gives
+       the container itself, so the name it rebinds stays the alias and keeps its type
+       (`xs |= {}; xs["k"] = v`); on any other value (`n += 1`) it binds a new object. An alias is one in the scopes nested in its function too: a
        read of its closure cell joins the aliases of every value the function binds to it, as
        a phi joins its inputs (the function is summarized before the scopes nested in it), and
        a cell a nested scope rebinds (`nonlocal`) is no alias. `getattr(obj, "a"[, default])`
@@ -1931,7 +1990,7 @@ Every candidate also needs `A1HazardFree` (no frame introspection in the functio
 | **OPT103** | `size-dependent` | `Unique(acc)`, `ExclusiveAccessAtWrite(acc)`, `ExactType(acc / rhs)`, `NoIntermediateReads`, `ExceptionStateSafe` | `LoopCarried(acc)`, `NotConstSmall` (local `str +=` excluded); for `obj.attr +=`, every assignment of the attribute (the class's methods for `self`) stores a `str` / `bytes` / `tuple` literal of the right operand's kind | A.8 (slower for small loops), `self.s +=`, `__radd__` on the right, `self.values = []` then `self.values += (i,)` |
 | **OPT110** | `size-dependent` | `ValueLoopInvariant(lst, loop)`, `ExactType(lst, list \| tuple)`, hash-consistent builtin elements (`HashConsistentProbe`), `ZeroTripExceptionSafe`; the edit needs a `for` statement (not a comprehension clause) and a name no other hoist of the function binds | `NotConstSmall(lst)`, not a `ConstSmall` / retry loop | S9a, S9b, S22, S27 |
 | **OPT111** | `size-dependent` | `Unique(seen)`, `ExclusiveAccessAtWrite`, `ExactType(seen, list)`, hash-consistent builtin elements, only the appends the set mirrors (`OnlyPairedAppends`) | `NotConstSmall` | `seen.remove`, unhashable elements |
-| **OPT120** / **OPT121** | `size-dependent` | `Unique(q)` (no escape, not returned), `ExactType(q, list)`, only operations `deque` supports equally (`DequeEquivalentOps`: no `list(*a)` / `list(**kw)`, no iterator live at a change or consumed by it, iterators used only for their elements, `q = q[1:]` exactly) | `NotConstSmall`, **no index `q[i]` other than the ends (`0`, `-1`)** | S12, `sort()`, $O(n)$ middle indexes, `q.extend(reversed(q))`, `type(iter(q))` |
+| **OPT120** / **OPT121** | `size-dependent` | `Unique(q)` (no escape, not returned), `ExactType(q, list)`, only operations `deque` supports equally (`DequeEquivalentOps`: no `list(*a)` / `list(**kw)`, no iterator live at a change or consumed by it, iterators used only for their elements, `q = q[1:]` exactly, no other object bound to a variable it reaches) | `NotConstSmall`, **no index `q[i]` other than the ends (`0`, `-1`)** | S12, `sort()`, $O(n)$ middle indexes, `q.extend(reversed(q))`, `type(iter(q))` |
 | **OPT130** | `size-dependent` | Every argument `ValueLoopInvariant`, `SideEffectFree` (no method arguments), `ZeroTripExceptionSafe` (no `*` arguments), the built container used by the membership test only (`ValueLoopInvariant(call)`) | `NotConstSmall` (100 times slower when the loop runs zero times: A.8), not a `ConstSmall` / retry loop, not `tuple(t)` of a tuple | S22, S28, A.8 |
 
 Open premises (`CheckExtras::open_premises`, as for `EFF111` / `EFF113` in section 2.4): a

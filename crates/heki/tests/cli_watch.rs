@@ -5,7 +5,7 @@ mod common;
 
 use common::Project;
 use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
@@ -32,7 +32,7 @@ fn watch_rechecks_changed_files_and_affected_callers() {
             "pkg/api.py",
             "from pkg.util import helper\n\n\nasync def handler():\n    helper()\n",
         );
-    let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
+    let mut child = common::heki_command()
         .args([
             "check",
             "--heuristic",
@@ -90,7 +90,7 @@ fn watch_exits_with_the_last_reports_status() {
         "a.py",
         "def f(items):\n    x = []\n    for i in items:\n        x = x + [i]\n    return x\n",
     );
-    let out = Command::new(env!("CARGO_BIN_EXE_heki"))
+    let out = common::heki_command()
         .args([
             "check",
             "--heuristic",
@@ -112,7 +112,7 @@ fn watch_exits_with_the_last_reports_status() {
     assert_eq!(diags[0]["rule_code"], "OPT101");
     assert_eq!(diags[0]["severity"], "warning");
     let watch_status = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_heki"))
+        common::heki_command()
             .args(["check", "--heuristic", "--watch"])
             .args(args)
             .current_dir(&p.dir)
@@ -128,7 +128,7 @@ fn watch_exits_with_the_last_reports_status() {
     assert_eq!(watch_status(&["--fail-on", "error"]), Some(0));
     // Invalid configuration is reported before watching starts.
     p.write("heki.toml", "[lint]\nselect = [\"NOPE1\"]\n");
-    let out = Command::new(env!("CARGO_BIN_EXE_heki"))
+    let out = common::heki_command()
         .args(["check", "--heuristic", "--watch"])
         .current_dir(&p.dir)
         .env("HEKI_WATCH_MAX_RUNS", "0")
@@ -144,7 +144,7 @@ fn spawn_watch(
     args: &[&str],
     max_runs: &str,
 ) -> (std::process::Child, Receiver<String>) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
+    let mut child = common::heki_command()
         .args(["check", "--heuristic", "--fail-on", "warning", "--watch"])
         .args(args)
         .current_dir(&p.dir)
@@ -343,7 +343,7 @@ fn watch_fails_like_check_on_invalid_rule_options() {
             "heki.toml",
             "[[write-owners]]\nname = \"store\"\ntargets = [\"fields\"]\n",
         );
-    let out = Command::new(env!("CARGO_BIN_EXE_heki"))
+    let out = common::heki_command()
         .args(["check", "--heuristic", "--watch"])
         .current_dir(&p.dir)
         .env("HEKI_WATCH_MAX_RUNS", "0")
@@ -364,7 +364,7 @@ fn watch_validates_severities_and_loads_the_summary_snapshot() {
     p.write("pkg/__init__.py", "")
         .write("pkg/api.py", "def add(items):\n    return items\n");
     assert!(
-        Command::new(env!("CARGO_BIN_EXE_heki"))
+        common::heki_command()
             .args(["snapshot", "--write"])
             .current_dir(&p.dir)
             .status()
@@ -390,7 +390,7 @@ fn watch_validates_severities_and_loads_the_summary_snapshot() {
     );
     // An unknown `lint.severity` key is a configuration error before watching starts.
     p.write("heki.toml", "[lint.severity]\nNOPE1 = \"warning\"\n");
-    let out = Command::new(env!("CARGO_BIN_EXE_heki"))
+    let out = common::heki_command()
         .args(["check", "--heuristic", "--watch"])
         .current_dir(&p.dir)
         .env("HEKI_WATCH_MAX_RUNS", "0")
@@ -420,7 +420,7 @@ fn watch_reports_what_check_reports() {
         );
     let (code, check, _) = p.check(&["--output-format", "json"]);
     assert_eq!(code, 1);
-    let watch = Command::new(env!("CARGO_BIN_EXE_heki"))
+    let watch = common::heki_command()
         .args(["check", "--heuristic", "--watch", "--output-format", "json"])
         .current_dir(&p.dir)
         .env("HEKI_WATCH_MAX_RUNS", "0")
@@ -439,7 +439,7 @@ fn watch_colors_its_reports_like_check() {
         "import time\n\n\nasync def handler():\n    time.sleep(1)\n",
     );
     let stdout = |watch: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_heki"))
+        let out = common::heki_command()
             .args(["check", "--heuristic", "--color", "always"])
             .args(watch)
             .current_dir(&p.dir)
@@ -721,7 +721,7 @@ fn watch_marks_the_functions_a_profile_shows_hot_like_check() {
         check.contains("profile: `A.run` is on the stack in 95.0% of samples"),
         "{check}"
     );
-    let watch = Command::new(env!("CARGO_BIN_EXE_heki"))
+    let watch = common::heki_command()
         .args(["check", "--heuristic", "--watch"])
         .args(args)
         .current_dir(&p.dir)

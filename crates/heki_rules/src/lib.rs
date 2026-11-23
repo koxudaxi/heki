@@ -33,7 +33,7 @@ pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
 pub use heki_diagnostics::Certainty;
 pub use mut_rules::{
     CHAIN_RULES, ChainFacts, SentinelTestKey, StaleWriteKey, chain_facts, deep_copy_files,
-    family_readers, sentinel_tests_in, stale_writes_by_file,
+    family_readers, kept_removals_in, lazy_setup_files, sentinel_tests_in, stale_writes_by_file,
 };
 pub use selection::{EffectiveSelectors, RuleSelection, SelectionError, Selectors, heuristic_hint};
 pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};
@@ -197,7 +197,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT101",
         slug: "cached-property-stale-mutation",
         family: RuleFamily::Mut,
-        certainty: Certainty::Heuristic,
+        certainty: Certainty::Exact,
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
@@ -281,7 +281,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT111",
         slug: "cached-property-stale-read",
         family: RuleFamily::Mut,
-        certainty: Certainty::Heuristic,
+        certainty: Certainty::Exact,
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
@@ -932,6 +932,20 @@ pub(crate) struct CheckContext<'a> {
     /// Why must-facts do not hold, shared by the rules that record open premises (built only
     /// when the run records them).
     pub must_explainer: Option<heki_effect::MustExplainer<'a>>,
+}
+
+/// Whether [`check_project`] runs the rule `code` on the file at the project-relative `rel_path`:
+/// `selection` enables it there, and `MUT103` also needs the summary snapshot it compares with
+/// (`snapshot`).
+pub fn runs_on(selection: &RuleSelection, snapshot: bool, code: &str, rel_path: &str) -> bool {
+    selection.is_enabled_for(code, rel_path) && (code != "MUT103" || snapshot)
+}
+
+/// Whether `--fix` applies the fix of `d` without options, and the language server offers it as
+/// the preferred quick fix: a `safe` + `unconditional` rule's, or a suppression report's.
+pub fn fixes_unconditionally(d: &Diagnostic) -> bool {
+    project::is_suppression_report(&d.rule_code)
+        || find_rule(&d.rule_code).is_some_and(|m| m.auto_fix_default)
 }
 
 /// Run every enabled rule over an analyzed project.

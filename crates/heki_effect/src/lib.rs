@@ -74,9 +74,9 @@ pub use readonly::{
 };
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
-    Callee, ClassDecl, DeclKeys, DeclPasses, DeepCopy, FunctionDecl, HeldSentinel, ModuleDecls,
-    ModuleLayout, NamedAttr, ProjectDecls, ReadOnlyAttr, ReadOnlyKind, StrConstant, StrValue,
-    TypeCtx, Val, aliases_of, detect_source_roots, func_qualname, module_name_for_path,
+    Callee, CapturedParams, ClassDecl, DeclKeys, DeclPasses, DeepCopy, FunctionDecl, HeldSentinel,
+    ModuleDecls, ModuleLayout, NamedAttr, ProjectDecls, ReadOnlyAttr, ReadOnlyKind, StrConstant,
+    StrValue, TypeCtx, Val, aliases_of, detect_source_roots, func_qualname, module_name_for_path,
     resolve_relative_module, self_aliases,
 };
 pub use summary::{BLOCKING_EFFECTS, offloaded_callable};
@@ -2167,6 +2167,12 @@ pub struct OptInTables {
     /// order ([`OptInFacts::unawaited_handoffs`]).
     #[serde(default, skip_serializing_if = "FxHashMap::is_empty")]
     pub unawaited_handoffs: FxHashMap<FuncKey, Vec<UnawaitedHandoff>>,
+    /// The names under which the file's functions themselves remove or replace the value an
+    /// object keeps in its `__dict__` (`del obj.<name>`, a removal of the constant key
+    /// `<name>` from a `__dict__`; [`OptInFacts::kept_values`]). Read through
+    /// [`FileSummary::kept_removals`].
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub kept_removals: BTreeSet<String>,
 }
 
 /// A project function handed to a library call that calls it as a plain function and never
@@ -2205,6 +2211,14 @@ impl FileSummary {
     /// The opt-in tables of the file, made when it first has one of their facts.
     pub(crate) fn opt_in_tables_mut(&mut self) -> &mut OptInTables {
         self.opt_in_tables.get_or_insert_with(Box::default)
+    }
+
+    /// [`OptInTables::kept_removals`] (none while the facts are not computed).
+    pub fn kept_removals(&self) -> impl Iterator<Item = &str> {
+        self.opt_in_tables
+            .iter()
+            .flat_map(|t| &t.kept_removals)
+            .map(String::as_str)
     }
 
     /// The summary of a project file heki could not read or parse: a module that defines

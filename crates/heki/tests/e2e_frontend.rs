@@ -22,7 +22,7 @@ const TOUR_FUTURE: &str = "tests/corpus/frontend_tour_future.py";
 
 /// `heki <args>` in `dir`: `(exit code, stdout, stderr)`.
 fn heki_in(dir: &Path, args: &[&str]) -> (i32, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_heki"))
+    let out = common::heki_command()
         .args(args)
         .current_dir(dir)
         .output()

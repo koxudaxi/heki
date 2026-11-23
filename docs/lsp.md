@@ -74,6 +74,9 @@ heki's diagnostics and fixes while you edit, with the results `heki check` repor
   result would not parse is never offered, as `heki check --fix` refuses it.
 - A quick fix that appends `# heki: ignore[CODE]` to the line of any diagnostic, unless a comment
   cannot go there (the line ends inside a string or with a `\` continuation).
+- With [`report-unused-suppressions`](configuration.md#unused-suppressions), a quick fix that
+  removes the codes of a suppression comment that suppressed nothing, or the whole comment when
+  none is left.
 
 Code actions edit the version of the document their diagnostics were computed on:
 
