@@ -326,7 +326,7 @@ fn declared_source_encodings_are_read_and_fixes_keep_them() {
     let (code, _, stderr) = p.check(&[]);
     assert_eq!(code, 2);
     assert!(
-        stderr.contains("legacy.py: source declares encoding `cp1252`"),
+        stderr.contains("legacy.py: cannot read the file: source declares encoding `cp1252`"),
         "{stderr}"
     );
     std::fs::write(p.dir.join("legacy.py"), b"x = '\xe9'\n").unwrap();

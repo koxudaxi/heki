@@ -17,19 +17,103 @@
 use crate::{CORE_RULES, Certainty, RuleMeta, find_rule};
 use globset::{Glob, GlobMatcher};
 use heki_diagnostics::Diagnostic;
-use heki_env::LintConfig;
+use heki_env::{Docs, Explain, LintConfig, Problem, Setting};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum SelectionError {
-    #[error("unknown rule selector `{0}`")]
-    UnknownRule(String),
-    #[error("invalid per-file-ignores glob `{pattern}`: {cause}")]
+    /// A selector that names no rule, in the list `origin` (`--select`, `lint.ignore`,
+    /// `lint.per-file-ignores`, `lint.severity`).
+    #[error("unknown rule selector `{selector}` in `{origin}`")]
+    UnknownRule {
+        selector: String,
+        origin: &'static str,
+    },
+    #[error("invalid glob `{pattern}` in `lint.per-file-ignores`: {cause}")]
     Glob {
         pattern: String,
         cause: globset::Error,
     },
+}
+
+impl Explain for SelectionError {
+    fn explain(&self) -> Problem {
+        let problem = Problem::new(self.to_string()).docs(Docs::Lint);
+        match self {
+            Self::UnknownRule { selector, origin } => {
+                let setting = match *origin {
+                    "lint.severity" => Some(Setting {
+                        table: "lint.severity".to_owned(),
+                        key: Some(selector.clone()),
+                        ..Setting::default()
+                    }),
+                    "lint.per-file-ignores" => Some(Setting {
+                        table: "lint.per-file-ignores".to_owned(),
+                        value: Some(selector.clone()),
+                        ..Setting::default()
+                    }),
+                    lint if lint.starts_with("lint.") => {
+                        Some(Setting::of_context(lint, Some(selector)))
+                    }
+                    _ => None,
+                };
+                let problem = unknown_rule(problem, selector, true);
+                match setting {
+                    Some(setting) => problem.setting(setting),
+                    None => problem,
+                }
+            }
+            Self::Glob { pattern, .. } => problem
+                .help("a key of `per-file-ignores` is a glob of project-relative paths, as `\"tests/**\"`")
+                .setting(Setting {
+                    table: "lint.per-file-ignores".to_owned(),
+                    key: Some(pattern.clone()),
+                    ..Setting::default()
+                }),
+        }
+    }
+}
+
+/// `problem` about `selector`, a word that names no rule, with the rules it might have meant;
+/// `prefixes`: whether a prefix (`EFF`, `ALL`) would do. A selector with digits is a misspelled
+/// code, so only codes are offered for it.
+pub fn unknown_rule(problem: Problem, selector: &str, prefixes: bool) -> Problem {
+    let code_like = selector.chars().any(|c| c.is_ascii_digit());
+    let families: BTreeSet<&str> = CORE_RULES
+        .iter()
+        .map(|r| r.code.trim_end_matches(|c: char| c.is_ascii_digit()))
+        .chain(["ALL"])
+        .filter(|_| prefixes && !code_like)
+        .collect();
+    let names = CORE_RULES
+        .iter()
+        .flat_map(|r| [r.code, r.slug])
+        .chain(families.iter().copied());
+    let mut candidates: Vec<String> = Vec::new();
+    for name in heki_env::problem::nearest(selector.trim(), names) {
+        let code = find_rule(name).map_or(name, |r| r.code);
+        if !candidates.iter().any(|c| c == code) {
+            candidates.push(code.to_owned());
+        }
+    }
+    let mut problem = problem;
+    if let Some(first) = candidates.first() {
+        let named = find_rule(first).map_or_else(
+            || format!("`{first}`"),
+            |r| format!("`{}` ({})", r.code, r.slug),
+        );
+        problem = problem.help(format!("did you mean {named}?"));
+    }
+    let what = if prefixes {
+        "a selector is a rule code (`EFF101`), a rule name (`async-blocking-call`), or a code prefix (`EFF`, `ALL`)"
+    } else {
+        "a rule is named by its code (`EFF101`) or its name (`async-blocking-call`)"
+    };
+    problem.candidates = candidates;
+    problem
+        .help(what)
+        .help("`heki rule --all` lists every rule, with its code and name")
 }
 
 /// The selection options of the command line, over the configuration (`--select`,
@@ -69,10 +153,10 @@ pub struct EffectiveSelectors {
 
 impl EffectiveSelectors {
     pub fn of(lint: &LintConfig, cli: &Selectors) -> Self {
-        let (select, extend) = selecting(lint, cli);
+        let (select, [config, cli_extend]) = selecting(lint, cli);
         Self {
-            select: select.map(<[String]>::to_vec),
-            extend_select: extend.concat(),
+            select: select.map(|(s, _)| s.to_vec()),
+            extend_select: [config.0, cli_extend.0].concat(),
             ignore: [lint.ignore.as_slice(), &cli.ignore].concat(),
         }
     }
@@ -102,21 +186,34 @@ fn resolve(
         .filter(|r| all || r.code.len() > s.len() && r.code[..s.len()].eq_ignore_ascii_case(s))
         .collect();
     if s.is_empty() || matching.is_empty() {
-        return Err(SelectionError::UnknownRule(selector.to_owned()));
+        return Err(SelectionError::UnknownRule {
+            selector: selector.to_owned(),
+            origin: "",
+        });
     }
     Ok(matching.into_iter().filter(|r| admits(r)).collect())
 }
 
+/// The rules the selectors of the list `origin` name.
 fn codes(
-    selectors: &[String],
+    (selectors, origin): SelectorList<'_>,
     admits: &dyn Fn(&RuleMeta) -> bool,
 ) -> Result<BTreeSet<&'static str>, SelectionError> {
     let mut out = BTreeSet::new();
     for s in selectors {
-        out.extend(resolve(s, admits)?.into_iter().map(|r| r.code));
+        let rules = resolve(s, admits).map_err(|e| match e {
+            SelectionError::UnknownRule { selector, .. } => {
+                SelectionError::UnknownRule { selector, origin }
+            }
+            other => other,
+        })?;
+        out.extend(rules.into_iter().map(|r| r.code));
     }
     Ok(out)
 }
+
+/// A list of selectors and where it is written (`--select`, `lint.select`).
+type SelectorList<'s> = (&'s [String], &'static str);
 
 /// Every rule a prefix of `ignore` or `per-file-ignores` matches.
 fn any_rule(_: &RuleMeta) -> bool {
@@ -128,13 +225,19 @@ fn any_rule(_: &RuleMeta) -> bool {
 fn selecting<'s>(
     lint: &'s LintConfig,
     cli: &'s Selectors,
-) -> (Option<&'s [String]>, [&'s [String]; 2]) {
+) -> (Option<SelectorList<'s>>, [SelectorList<'s>; 2]) {
     let select = if cli.select.is_empty() {
-        lint.select.as_deref()
+        lint.select.as_deref().map(|s| (s, "lint.select"))
     } else {
-        Some(cli.select.as_slice())
+        Some((cli.select.as_slice(), "--select"))
     };
-    (select, [&lint.extend_select, &cli.extend_select])
+    (
+        select,
+        [
+            (&lint.extend_select, "lint.extend-select"),
+            (&cli.extend_select, "--extend-select"),
+        ],
+    )
 }
 
 /// The enabled rules before `ignore`, with `heuristic` as the value of `lint.heuristic`.
@@ -165,19 +268,20 @@ fn named_rules(lint: &LintConfig, cli: &Selectors) -> BTreeSet<&'static str> {
     select
         .into_iter()
         .chain(extend)
-        .flatten()
+        .flat_map(|(list, _)| list)
         .filter_map(|s| named(s).map(|r| r.code))
         .collect()
 }
 
 impl RuleSelection {
-    /// Resolve the effective rule set from `[tool.heki.lint]` and the command line.
+    /// Resolve the effective rule set from `[tool.heki.lint]` and the command line. Every
+    /// selector, and every rule `lint.severity` names, must name a rule.
     pub fn resolve(lint: &LintConfig, cli: &Selectors) -> Result<Self, SelectionError> {
         let heuristic = cli.heuristic.or(lint.heuristic).unwrap_or(false);
         let mut enabled = enabled_before_ignore(lint, cli, heuristic)?;
-        let ignored = codes(&lint.ignore, &any_rule)?
+        let ignored = codes((&lint.ignore, "lint.ignore"), &any_rule)?
             .into_iter()
-            .chain(codes(&cli.ignore, &any_rule)?)
+            .chain(codes((&cli.ignore, "--ignore"), &any_rule)?)
             .collect::<BTreeSet<_>>();
         enabled.retain(|code| !ignored.contains(code));
         let heuristic_off = if heuristic {
@@ -205,7 +309,13 @@ impl RuleSelection {
                     cause,
                 })?
                 .compile_matcher();
-            per_file.push((glob, codes(rules, &any_rule)?));
+            per_file.push((glob, codes((rules, "lint.per-file-ignores"), &any_rule)?));
+        }
+        if let Some(key) = lint.severity.keys().find(|k| find_rule(k).is_none()) {
+            return Err(SelectionError::UnknownRule {
+                selector: key.clone(),
+                origin: "lint.severity",
+            });
         }
         Ok(Self {
             enabled,
@@ -488,7 +598,9 @@ mod tests {
             ..Selectors::default()
         };
         let err = RuleSelection::resolve(&LintConfig::default(), &unknown);
-        assert!(matches!(err, Err(SelectionError::UnknownRule(r)) if r == "NOPE1"));
+        assert!(
+            matches!(err, Err(SelectionError::UnknownRule { selector, origin: "--select" }) if selector == "NOPE1")
+        );
         let empty = Selectors {
             ignore: vec![String::new()],
             ..Selectors::default()

@@ -312,7 +312,6 @@ fn render_full(
     source_line: &dyn Fn(&Path, u32) -> Option<String>,
 ) -> String {
     let mut out = String::new();
-    let bar = paint(styles.gutter, '|');
     let equals = paint(styles.gutter, '=');
     for d in diags {
         let path = path_text(&d.path);
@@ -329,21 +328,7 @@ fn render_full(
             d.message
         );
         if let Some(text) = source_line(&d.path, d.line) {
-            let gutter = d.line.to_string().len();
-            let _ = writeln!(out, "{:gutter$} {bar}", "");
-            let _ = writeln!(
-                out,
-                "{} {}",
-                paint(styles.gutter, format_args!("{} |", d.line)),
-                text.trim_end()
-            );
-            let _ = writeln!(
-                out,
-                "{:gutter$} {bar} {}{}",
-                "",
-                caret_padding(&text, d.column),
-                paint(severity, '^')
-            );
+            write_excerpt(&mut out, styles, severity, &text, d.line, d.column);
         }
         for r in &d.related {
             let _ = writeln!(
@@ -360,6 +345,89 @@ fn render_full(
         out.push('\n');
     }
     out
+}
+
+/// The source line `text` (line `line`) with a caret under byte column `column`, painted in
+/// `caret`.
+fn write_excerpt(
+    out: &mut String,
+    styles: &Stylesheet,
+    caret: anstyle::Style,
+    text: &str,
+    line: u32,
+    column: u32,
+) {
+    let bar = paint(styles.gutter, '|');
+    let gutter = line.to_string().len();
+    let _ = writeln!(out, "{:gutter$} {bar}", "");
+    let _ = writeln!(
+        out,
+        "{} {}",
+        paint(styles.gutter, format_args!("{line} |")),
+        text.trim_end()
+    );
+    let _ = writeln!(
+        out,
+        "{:gutter$} {bar} {}{}",
+        "",
+        caret_padding(text, column),
+        paint(caret, '^')
+    );
+}
+
+/// A failure of a command ([`heki_env::Problem`]) in the layout of a report: `error:`, where
+/// the cause is, the message, the source line under it, then what to do (`= help:`) and the
+/// page of the documentation (`= docs:`).
+pub fn render_problem(
+    problem: &heki_env::Problem,
+    styles: &Stylesheet,
+    source_line: &dyn Fn(&Path, u32) -> Option<String>,
+) -> String {
+    let mut out = String::new();
+    let equals = paint(styles.gutter, '=');
+    let _ = write!(out, "{}: ", paint(styles.error, "error"));
+    let excerpt = problem.location.as_ref().and_then(|at| {
+        let path = path_text(&at.path);
+        match at.position {
+            Some((line, column)) => {
+                let _ = write!(out, "{} ", styles.location(&path, line, column));
+                source_line(&at.path, line).map(|text| (text, line, column))
+            }
+            None => {
+                let _ = write!(
+                    out,
+                    "{}{} ",
+                    paint(styles.path, path),
+                    paint(styles.separator, ':')
+                );
+                None
+            }
+        }
+    });
+    let _ = writeln!(out, "{}", problem.message);
+    if let Some((text, line, column)) = excerpt {
+        write_excerpt(&mut out, styles, styles.error, &text, line, column);
+    }
+    for help in &problem.help {
+        let _ = writeln!(out, "  {equals} {}: {help}", paint(styles.help, "help"));
+    }
+    if let Some(docs) = problem.docs {
+        let _ = writeln!(
+            out,
+            "  {equals} {}: {}",
+            paint(styles.help, "docs"),
+            docs.url()
+        );
+    }
+    out
+}
+
+/// Line `line` (1-based) of the file at `path`, read from the disk.
+pub fn file_line(path: &Path, line: u32) -> Option<String> {
+    let text = heki_ast::read_source(path).ok()?;
+    heki_ast::LineIndex::from_source(&text)
+        .line_text(&text, line)
+        .map(str::to_owned)
 }
 
 /// The text of `line` before 1-based byte column `column` (cut back to a character boundary).
@@ -679,6 +747,51 @@ pub enum BaselineError {
         "baseline {path} lists {}::{} {} `{}` more than once; keep one entry", key.path, key.qualname, key.rule_code, key.target
     )]
     Duplicate { path: PathBuf, key: BaselineKey },
+}
+
+impl heki_env::Explain for BaselineError {
+    fn explain(&self) -> heki_env::Problem {
+        let rewrite = "`heki check --update-baseline` writes it again from the current reports";
+        let (path, message, help) = match self {
+            Self::Read { path, cause } => (
+                path,
+                format!("cannot read the baseline: {cause}"),
+                "name an existing file with `--baseline` or `baseline`, or record one with `--update-baseline`",
+            ),
+            Self::Write { path, cause } => (
+                path,
+                format!("cannot write the baseline: {cause}"),
+                "make the file and its directory writable",
+            ),
+            Self::Toml { path, cause } => (
+                path,
+                format!(
+                    "invalid baseline: {}",
+                    cause.message().trim().replace('\n', "; ")
+                ),
+                rewrite,
+            ),
+            Self::Version { path, version } => (
+                path,
+                format!(
+                    "the baseline has version {version}; this heki reads versions 1 and {BASELINE_VERSION}"
+                ),
+                rewrite,
+            ),
+            Self::Duplicate { path, key } => (
+                path,
+                format!(
+                    "the baseline lists {}::{} {} `{}` more than once",
+                    key.path, key.qualname, key.rule_code, key.target
+                ),
+                "keep one of the entries",
+            ),
+        };
+        heki_env::Problem::new(message)
+            .at_file(path)
+            .help(help)
+            .docs(heki_env::Docs::Baselines)
+    }
 }
 
 /// On-disk shape: `version`, then `[[entries]]` sorted by key (minimal git diffs).
