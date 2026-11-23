@@ -10,7 +10,7 @@ that implements or changes anything here follows the invariants and procedures b
    the gate a new rule has to pass.
 3. `docs/ANALYSIS_AND_KB_SPEC.md`: the IR, `EffectSummary`, the Soundness lane's abstract domain
    and proof obligations, the knowledge bases, and the Stage 0-A measurements.
-4. `docs/DESIGN_HISTORY_AND_ADR.md`: ADR-001 to ADR-020, what was decided and why the
+4. `docs/DESIGN_HISTORY_AND_ADR.md`: ADR-001 to ADR-022, what was decided and why the
    alternatives were rejected.
 
 When a document and the implementation disagree, update the document in the same change.
@@ -32,13 +32,15 @@ When a document and the implementation disagree, update the document in the same
    - The default `heki check --fix` applies only fixes that are `safe` and `unconditional`
      (`OPT101`, and `OPT102`: `{**d, ...}` with the accumulator leading, `d = d | other` on
      exact operands, and `s = s | t` on exact sets whose iteration order nothing observes).
-   - Custom decorators, custom contract APIs, Lean 4, native extensions, a general import-cycle
-     checker (tach's domain), and framework-specific heuristic rules are non-goals: do not add
-     them.
+   - Custom decorators, custom contract APIs, Lean 4, native extensions, and framework-specific
+     heuristic rules are non-goals: do not add them. Framework knowledge enters as catalog data.
 5. **Incremental LSP (ADR-017)**:
    - `heki_effect::ProjectIndex` never keeps IR: it keeps the light `FileSummary`, the reverse
      call graph, and Early Cutoff. Facts a rule needs across functions go into `EffectSummary` /
      `FileSummary` and take part in the Early Cutoff comparison.
+   - Import facts (ADR-022) go into `FileSummary`; which module an import loads is decided only
+     in `heki_effect::imports` and `ProjectDecls`, never in a rule. Contracts read from other
+     tools' files become ordinary heki contracts in `heki_env::import_contracts`.
 6. **One interface with Ruff and `t-linter` (ADR-017)**:
    - Configuration lives under `[tool.heki]` in kebab-case; suppression comments are
      `# heki: ignore[...]` (primary) and `# noqa:` (compatible); exit codes are `0 / 1 / 2`.
@@ -89,14 +91,22 @@ uvx --python 3.12 --from "pytest==8.4.2" --with "pyyaml==6.0.3" --with "jsonsche
 ```
 
 ## 4. Adding or changing rules
-- A new rule passes the gate in `docs/scope.md`: what a single-file syntax check, a type checker,
-  or an import-graph checker can decide belongs to Ruff, ty, or tach; heki takes only what needs
-  control flow, the call graph, or alias facts. It is also measured on a corpus and reviewed by
-  hand before it is enabled by default (ADR-010). A new rule is heuristic: it runs by default
-  only once it is exact, its reports built from established premises only and its certification
-  passed (ADR-018, release gate 3). Its page says what a report states: the premises of its
-  claim, and which of them a heuristic report may not have established. A false claim of an
-  exact rule is fixed in the fact of the premise behind it, never by an exclusion in the rule.
+- heki's scope (`docs/scope.md`, "What heki covers"; ADR-022): the core is what a program does
+  across functions and modules (effects, changes, aliasing, purity, async and resource behavior),
+  which one file or one type cannot decide. Walls are contracts the user writes or heki proposes
+  on who may write, read, call, reach an effect, and import what. Single-file patterns and style
+  (Ruff, isort) and type correctness (type checkers) are out of scope. An idea from another
+  language is taken when it fits the core or the walls and passes the evidence gate: counts on a
+  corpus, real harm, and no false exact claim. Framework knowledge enters as catalog data.
+- A new rule passes the gate in `docs/scope.md`: what a single-file syntax check or a type
+  checker can decide belongs to Ruff or ty; heki takes only what needs control flow, the call
+  graph, alias facts, or the project's import facts (ADR-022). It is also measured on a corpus
+  and reviewed by hand before it is enabled by default (ADR-010). A new rule is heuristic: it
+  runs by default only once it is exact, its reports built from established premises only and
+  its certification passed (ADR-018, release gate 3). Its page says what a report states: the
+  premises of its claim, and which of them a heuristic report may not have established. A false
+  claim of an exact rule is fixed in the fact of the premise behind it, never by an exclusion in
+  the rule.
 - Every new rule and every filter change comes with true-positive and true-negative regression
   tests: end-to-end tests through the real binary in `crates/heki/tests/`, plus
   `tests/semantic/fixtures.py` or `tests/difftest/` where they apply.

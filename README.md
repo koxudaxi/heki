@@ -223,9 +223,10 @@ through helpers, effects behind a call, stale shared state, and quadratic patter
 
 ## 🔍 How heki differs
 
-Ruff models syntax, type checkers model declared types, and tach and import-linter model imports.
-heki models effects and aliases, what code does, so use it next to them: the second example
-passes `mypy --strict` and pyright's strict mode, yet sends one query per order. See the
+Ruff models syntax, and type checkers model declared types. heki models effects and aliases,
+what code does, so use it next to them: the second example passes `mypy --strict` and pyright's
+strict mode, yet sends one query per order. Import rules that know when each import runs, and
+read the contracts of tach and import-linter, are planned. See the
 [comparison](https://heki.koxudaxi.dev/#how-heki-differs).
 
 ## 🔧 Rewrites proven under CPython's semantics
