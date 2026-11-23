@@ -3992,10 +3992,10 @@ the call graph, or the class hierarchy goes through them:
   node a node reaches, the members of a cycle sharing one. `reach` walks with a visited set.
   `fixpoint` joins the facts of nodes that read each other, and visits a node again only when a
   fact it reads grows, up to a visit limit.
-- A `Budget` per owner (a rule run on one function, the summary of one function) counts the
-  steps of all the owner's walks, and the weight of every fact they join, which bounds both the
-  work of joining and the memory of the facts kept: 64 per IR unit, at least 4,096. Past it every
-  walk of the owner answers open.
+- A `Budget` per owner (a rule run on one function, the summary of one function, the store
+  types of one module) counts the steps of all the owner's walks, and the weight of every fact
+  they join, which bounds both the work of joining and the memory of the facts kept: 64 per IR
+  unit, at least 4,096. Past it every walk of the owner answers open.
 - `FnShape` holds the tables of one function that walks read instead of scanning it:
   definitions, readers, copy roots, predecessors, reverse postorder, dominators, and loops.
 - `SharedMemo` keeps answers over the project declarations across functions, and replays what

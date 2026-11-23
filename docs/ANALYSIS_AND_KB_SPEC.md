@@ -383,11 +383,15 @@ the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores
   (`self.active = self.client`, `self.items = self.items[1:]`) binds a value whose type depends on
   the one being decided. The types are a least fixpoint (`heki_ir::walk::fixpoint`): each read
   starts with no value, then gives what the stores bound so far give, as the final declarations
-  will (the family join); a function is inferred again only when a name it reads grew, at most
-  four times. A read the final declarations answer from another module (an attribute of a class
-  with a family member in another module, a class of another module along the MRO) gives what the
-  declarations of pass 1 give. Past the visit limit, the first round's types hold, with those reads
-  untyped. Where the types differ from the first round's joined with them, the latter are kept
+  will (the family join); a function is visited again only when a name it reads grew, at most
+  four times, and inferred again only when a read it made gives something else: a visit first
+  asks the reads of the function's last inference (the first round's on the first visit), and
+  when each gives what it gave, the function stores what it stored then. The fixpoint has a
+  budget of 64 steps per IR unit of its functions: a visit takes one, one per read it asks
+  again, and the size of what the function stores. A read the final declarations answer from
+  another module (an attribute of a class with a family member in another module, a class of
+  another module along the MRO) gives what the declarations of pass 1 give. Past the visit limit
+  or the budget, the first round's types hold, with those reads untyped. Where the types differ from the first round's joined with them, the latter are kept
   (`ModuleDecls::store_fallbacks`), with what each function of the fixpoint stores and reads, once
   per function (`StoreFallbacks::dependencies`). A name's fallback holds once another module
   stores into a name a function storing it reads, or into a name such a function reads through
