@@ -477,9 +477,10 @@ pub enum ConfigError {
 impl Explain for ConfigError {
     fn explain(&self) -> Problem {
         let problem = Problem::new(self.to_string());
-        let at = |problem: Problem, path: &Path, position: &Option<(u32, u32)>| match position {
-            Some((line, column)) => problem.at(path, *line, *column),
-            None => problem,
+        let at = |problem: Problem, path: &Path, position: &Option<(u32, u32)>| {
+            position.map_or(problem.clone(), |(line, column)| {
+                problem.at(path, line, column)
+            })
         };
         match self {
             Self::Io { .. } => problem

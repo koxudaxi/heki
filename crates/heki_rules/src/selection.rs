@@ -91,7 +91,17 @@ pub fn unknown_rule(problem: Problem, selector: &str, prefixes: bool) -> Problem
         .flat_map(|r| [r.code, r.slug])
         .chain(families.iter().copied());
     let mut candidates: Vec<String> = Vec::new();
-    for name in heki_env::problem::nearest(selector.trim(), names) {
+    let word = selector.trim().to_lowercase();
+    // `nearest` is as loose as `clap`; a rule name is offered only for a small typo (`NOPE1` is
+    // not a misspelled `OPT101`): one edit for a prefix, two for a code or a slug.
+    let close = |name: &&str| {
+        let allowed = if name.len() > 3 { 2 } else { 1 };
+        strsim::damerau_levenshtein(&word, &name.to_lowercase()) <= allowed
+    };
+    for name in heki_env::problem::nearest(&word, names)
+        .into_iter()
+        .filter(close)
+    {
         let code = find_rule(name).map_or(name, |r| r.code);
         if !candidates.iter().any(|c| c == code) {
             candidates.push(code.to_owned());
@@ -175,6 +185,7 @@ fn named(selector: &str) -> Option<&'static RuleMeta> {
 fn resolve(
     selector: &str,
     admits: &dyn Fn(&RuleMeta) -> bool,
+    origin: &'static str,
 ) -> Result<Vec<&'static RuleMeta>, SelectionError> {
     let s = selector.trim();
     if let Some(r) = named(s) {
@@ -188,7 +199,7 @@ fn resolve(
     if s.is_empty() || matching.is_empty() {
         return Err(SelectionError::UnknownRule {
             selector: selector.to_owned(),
-            origin: "",
+            origin,
         });
     }
     Ok(matching.into_iter().filter(|r| admits(r)).collect())
@@ -201,12 +212,7 @@ fn codes(
 ) -> Result<BTreeSet<&'static str>, SelectionError> {
     let mut out = BTreeSet::new();
     for s in selectors {
-        let rules = resolve(s, admits).map_err(|e| match e {
-            SelectionError::UnknownRule { selector, .. } => {
-                SelectionError::UnknownRule { selector, origin }
-            }
-            other => other,
-        })?;
+        let rules = resolve(s, admits, origin)?;
         out.extend(rules.into_iter().map(|r| r.code));
     }
     Ok(out)

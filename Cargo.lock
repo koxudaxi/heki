@@ -678,6 +678,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "strsim",
  "thiserror",
  "toml",
 ]

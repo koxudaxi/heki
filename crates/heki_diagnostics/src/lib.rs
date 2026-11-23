@@ -752,7 +752,8 @@ pub enum BaselineError {
 
 impl heki_env::Explain for BaselineError {
     fn explain(&self) -> heki_env::Problem {
-        let rewrite = "`heki check --update-baseline` writes it again from the current reports";
+        // `--update-baseline` reads an existing baseline first, so it fails on these two as well.
+        let rewrite = "repair the file, or delete or rename it and record it again with `heki check --update-baseline`";
         let (path, message, help) = match self {
             Self::Read { path, cause } => (
                 path,

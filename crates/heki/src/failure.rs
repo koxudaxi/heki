@@ -96,9 +96,7 @@ pub(crate) fn explain(err: &anyhow::Error) -> Problem {
 fn explained(cause: &(dyn std::error::Error + 'static)) -> Option<Problem> {
     macro_rules! first_of {
         ($($error:ty),* $(,)?) => {
-            $(if let Some(e) = cause.downcast_ref::<$error>() {
-                return Some(e.explain());
-            })*
+            None$(.or_else(|| cause.downcast_ref::<$error>().map(Explain::explain)))*
         };
     }
     first_of!(
@@ -114,8 +112,7 @@ fn explained(cause: &(dyn std::error::Error + 'static)) -> Option<Problem> {
         heki_profile::ProfileError,
         heki_kb::KbError,
         heki_lsp::EngineError,
-    );
-    None
+    )
 }
 
 /// `problem` with its path relative to the working directory, as reports write paths.
