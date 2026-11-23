@@ -605,7 +605,13 @@ EffectSummary(f) = {
     typed_field_write_sites:  Set<TypedFieldWriteSite>,    // own and IndirectHelper writes to (class, attr) with
                                                            // kind, chain, and the parameters the written object
                                                            // may be, plus the sites private callees hand over (a
-                                                           // public callee reports its own) (MUT201, EFF201)
+                                                           // public callee reports its own) (MUT201, EFF201);
+                                                           // an item write keyed by a parameter (`EntryKey`)
+                                                           // is copied to every caller with the key the call
+                                                           // passes (`passed`: a constant, the caller's
+                                                           // parameter, or a key heki cannot tell) for MUT201
+                                                           // and `heki inspect`; EFF201 resolves the key along
+                                                           // the calls its search follows, route by route
     typed_field_writes:       Set<(Class, Attr)>,          // every typed write reached through any callee
     typed_params:             Bitset,                      // parameters the function types itself (its sites
                                                            // cover their changes)

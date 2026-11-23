@@ -944,7 +944,9 @@ impl MemberPattern {
 
 /// The targets of one contract `site` writes (by index): the item targets naming the entry it
 /// changes when there are any, else the attribute targets, so a write of one entry is reported
-/// once, under its most specific target.
+/// once, under its most specific target. A copy of a callee's write with the key a call passes
+/// ([`TypedFieldWriteSite::passed`]) hits item targets only: the callee's own site is the write
+/// of the attribute.
 pub(crate) fn write_hits<'t>(
     targets: &'t [ContractTarget],
     site: &TypedFieldWriteSite,
@@ -952,7 +954,7 @@ pub(crate) fn write_hits<'t>(
     let hits: Vec<(usize, &ContractTarget)> = targets
         .iter()
         .enumerate()
-        .filter(|(_, t)| t.matches_write(site))
+        .filter(|(_, t)| t.matches_write(site) && (t.key.is_some() || !site.passed))
         .collect();
     if hits.iter().any(|(_, t)| t.key.is_some()) {
         hits.into_iter().filter(|(_, t)| t.key.is_some()).collect()

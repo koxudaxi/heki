@@ -363,6 +363,33 @@ pub struct TypedFieldWriteSite {
     /// through protocols ([`Contracts::write_protocols`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub through_protocol: bool,
+    /// Where the key of an item write comes from when `key` holds no constant (computed only
+    /// when an ownership contract is declared).
+    #[serde(default)]
+    pub key_from: EntryKey,
+    /// A copy, in a caller, of a callee's item write keyed by one of the callee's parameters,
+    /// with the key the call passes in `key` or `key_from` (`set_extra(field, "init", v)` writing
+    /// `field.extras[key]`): it stands for the entry targets (`Class.attr["key"]`) the write may
+    /// hit, which the callee's own site leaves to its callers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub passed: bool,
+}
+
+/// Where the key of an item write comes from when [`TypedFieldWriteSite::key`] holds no
+/// constant.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryKey {
+    /// `key` is the write's constant key, or the write changes no single entry.
+    #[default]
+    Written,
+    /// Parameter `p` of the summary owner: each call decides the entry it writes.
+    Param(u8),
+    /// A key heki cannot tell: one the function computes, or an argument that is neither a
+    /// constant nor a parameter of the caller.
+    Unknown,
 }
 
 /// How a function's new object was made: a shallow copy shares the containers of the original
@@ -1182,6 +1209,11 @@ pub struct ArgBinding {
     /// The loops around the call (bit `d - 1`: the one at depth `d`) across whose iterations
     /// the argument stays one object: those that do not construct it.
     pub stays_in_loops: u64,
+    /// The string constant the argument is (a literal or a `Final` constant), for the item
+    /// writes a callee keys by the parameter ([`EntryKey::Param`]); kept only when an ownership
+    /// contract is declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<Box<str>>,
 }
 
 impl EffectSummary {
@@ -1786,6 +1818,19 @@ impl BoundCallee {
     /// mapping of `obj_params` across this call).
     pub fn caller_params_of(&self, mask: u64) -> u64 {
         callgraph::bound_params(mask, self)
+    }
+
+    /// The key the call passes for parameter `p` of the callee: a string constant, the
+    /// caller's own parameter, or a value heki cannot tell.
+    pub fn passed_key(&self, p: u8) -> (Option<String>, EntryKey) {
+        let arg = self.params.get(usize::from(p));
+        if let Some(text) = arg.and_then(|a| a.binding.as_ref()?.text.as_deref()) {
+            return (Some(text.to_owned()), EntryKey::Written);
+        }
+        match arg.and_then(|a| a.param.as_ref()) {
+            Some((q, None)) => (None, EntryKey::Param(*q)),
+            _ => (None, EntryKey::Unknown),
+        }
     }
 }
 
