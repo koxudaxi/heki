@@ -267,6 +267,64 @@ fn a_copy_hook_of_a_subclass_makes_the_report_heuristic() {
     assert_eq!(stdout.trim(), "[]");
 }
 
+/// What other objects are handed: a deep copy whose `memo` the caller passes keeps the copy there,
+/// and a deletion hands its key to the container's `__delitem__`. A property read that a subclass
+/// answers from a class attribute runs no getter heki resolves, directly or through a function
+/// returning it.
+const HANDED: &str = r#"import copy
+
+
+class Registry:
+    def __init__(self):
+        self.removed = []
+
+    def __delitem__(self, key):
+        self.removed.append(key)
+
+
+class Base:
+    @property
+    def data(self):
+        return []
+
+
+class Child(Base):
+    data = []
+
+
+def copied(xs: list, memo: dict):
+    return copy.deepcopy(xs, memo)
+
+
+def removed(registry: Registry, xs):
+    keys = list(xs)
+    del registry[keys]
+    return keys
+
+
+def relay(x: Base):
+    return x.data
+
+
+def run(xs: list, memo: dict, registry: Registry, x: Base):
+    copy.deepcopy(xs, memo).append(1)
+    copy.deepcopy(xs, memo=memo).append(1)
+    copy.deepcopy(xs).append(1)
+    copied(xs, memo).append(1)
+    removed(registry, xs).append(1)
+    relay(x).append(1)
+    x.data.append(1)
+"#;
+
+#[test]
+fn objects_handed_to_other_code_and_reads_heki_does_not_resolve() {
+    let p = Project::new("mut119_handed");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/handed.py", HANDED);
+    let diags = diagnostics(&p);
+    assert_eq!(reported(&diags), at("handed.py", &[39, 42, 43]));
+}
+
 #[test]
 fn changes_other_code_sees_and_results_the_code_reads() {
     let p = Project::new("mut119_kept");

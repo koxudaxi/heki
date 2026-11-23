@@ -617,6 +617,13 @@ const LOST_MAKE_SET: &str = "def make():\n    return set()\n";
 const LOST_MIDDLE: &str = "from pkg.lost_make import make\n\n\ndef options():\n    return make()\n";
 const LOST_ITEM: &str =
     "from pkg.lost_middle import options\n\n\ndef enable():\n    options()[\"debug\"] = True\n";
+// An append to what a function returns that returns what a function in another module returns,
+// which calls it back (one SCC, whose members a full build gives no fact from each other): the
+// callee builds a set, then a list (the caller's facts stay the same), then stops calling back.
+const LOST_LOOP_COLLECT: &str = "from pkg.lost_loop_rebuild import rebuilt\n\n\ndef collect(refresh):\n    if refresh:\n        rebuilt()\n    return set()\n";
+const LOST_LOOP_COLLECT_NEW: &str = "from pkg.lost_loop_rebuild import rebuilt\n\n\ndef collect(refresh):\n    if refresh:\n        rebuilt()\n    return []\n";
+const LOST_LOOP_COLLECT_ALONE: &str = "def collect(refresh):\n    return []\n";
+const LOST_LOOP_REBUILD: &str = "from pkg.lost_loop_collect import collect\n\n\ndef rebuilt():\n    return collect(False)\n\n\ndef enable():\n    rebuilt().append(1)\n";
 
 // Values new on one path and borrowed on another (`MUT112`): a caller two modules above a
 // function that copies its argument (through a wrapper in a third module), and a class whose
@@ -1009,6 +1016,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/lost_make.py", LOST_MAKE),
         ("pkg/lost_middle.py", LOST_MIDDLE),
         ("pkg/lost_item.py", LOST_ITEM),
+        ("pkg/lost_loop_collect.py", LOST_LOOP_COLLECT),
+        ("pkg/lost_loop_rebuild.py", LOST_LOOP_REBUILD),
         ("pkg/fresh_ops.py", FRESH_OPS),
         ("pkg/fresh_build.py", FRESH_BUILD),
         ("pkg/strict_ops.py", STRICT_OPS),
@@ -3235,7 +3244,9 @@ fn steps_mut118() -> Vec<Step> {
 /// `MUT119`: an item store through a property of a class in another module, by the final fact
 /// of its getter: the getter returns a copy of its field, then the field itself, then a copy it
 /// also keeps on the instance. Then an item store on what a function returns, two modules above
-/// the function building it, when only the kind it builds changes.
+/// the function building it, when only the kind it builds changes. Then an append to what a
+/// function returns whose callee in another module calls it back: the server recomputes the
+/// caller with the edited callee as one SCC, as a full build does.
 fn steps_mut119() -> Vec<Step> {
     vec![
         Step::new(
@@ -3276,6 +3287,16 @@ fn steps_mut119() -> Vec<Step> {
             vec![save("pkg/lost_make.py", LOST_MAKE)],
         )
         .present(&[("pkg/lost_item.py", "MUT119")]),
+        Step::new(
+            "a function calling its caller back builds a list instead of a set",
+            vec![save("pkg/lost_loop_collect.py", LOST_LOOP_COLLECT_NEW)],
+        )
+        .absent(&[("pkg/lost_loop_rebuild.py", "MUT119")]),
+        Step::new(
+            "and stops calling back",
+            vec![save("pkg/lost_loop_collect.py", LOST_LOOP_COLLECT_ALONE)],
+        )
+        .present(&[("pkg/lost_loop_rebuild.py", "MUT119")]),
     ]
 }
 

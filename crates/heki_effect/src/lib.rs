@@ -2897,7 +2897,10 @@ impl ProjectIndex {
                 changed,
             };
         }
-        region = affected.iter().chain(&relocated).cloned().collect();
+        // Whole SCCs, as a full build computes them: an edited function sharing one with a caller
+        // is recomputed with it, not taken as a finished callee (`Resolver::in_scc`).
+        let callers: FxHashSet<FuncKey> = affected.iter().chain(&relocated).cloned().collect();
+        region = callgraph::scc_closure(self, &callers);
         let before: FxHashMap<FuncKey, FinalFacts> = affected
             .iter()
             .filter_map(|k| Some((k.clone(), self.final_facts(k)?)))

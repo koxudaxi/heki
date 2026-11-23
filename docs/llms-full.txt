@@ -5418,15 +5418,17 @@ The object is the value of the expression the change is applied to, and it is ne
 - built as the builtin itself: a display, a comprehension, a call of `list`, `dict`, `set`,
   `bytearray`, `collections.deque`, or `sorted`;
 - a copy the ecosystem catalog describes (`x.copy()` of a builtin container, `copy.copy(x)`,
-  `os.environ.copy()`) of a value whose builtin container type heki knows, or a slice of a list
-  or `bytearray`;
+  `os.environ.copy()`) of a value whose builtin container type heki knows, called with nothing
+  but the value it copies (`copy.deepcopy(x, memo)` keeps the copy in `memo`), or a slice of a
+  list or `bytearray`;
 - what a call of a project function, or a read of a property, returns, when every return of each
   function the call can run is such an object and the function keeps it nowhere: not stored,
   captured, yielded, raised, handed to a call that may keep it (a builtin that only inspects its
   argument, such as `len`, keeps nothing), handed to a method whose result may hold it (a view
-  such as `d.values()` or an iterator holds it, unless only a loop or a test reads it), or read
-  through an attribute (a bound method holds its object). A function returning the result of
-  another such function qualifies too.
+  such as `d.values()` or an iterator holds it, unless only a loop or a test reads it), used as
+  a key (`del registry[items]` hands it to the registry's `__delitem__`), or read through an
+  attribute (a bound method holds its object). A function returning the result of another such
+  function qualifies too.
 
 The change is a changing method of the object's own type (`append`, `extend`, `insert`, `sort`,
 `reverse`, `update`, `pop`, `clear`, `setdefault`, `add`, `discard`, `remove`, ...), an item
@@ -5461,7 +5463,8 @@ Its premises:
 - **New object**: the object is built as the builtin itself where it is changed, copied there by
   a copy the catalog describes from a value of a builtin container type no project subclass
   copies otherwise (R2), or returned by project functions whose every return is such an object
-  that they keep nowhere, and the call or property read resolves to every function it can run.
+  that they keep nowhere, and the call or property read, and each one whose result those
+  functions return, resolves to every function it can run.
   Open for a copy whose class only comes from the copied value's type (R2) when a project
   subclass may replace the copy or the change, for the result of a function returning such a
   copy, and when the call may run functions heki does not resolve.
@@ -5522,6 +5525,10 @@ def child_env(home):
 - A new object bound to a name and never read again is out of scope.
 - Library functions returning new containers (`str.split`, `json.loads`) are not followed unless
   the catalog describes them as copies.
+- A function that compares the new object (`items == other`, `items in seen`) or tests it with
+  `isinstance` is taken to keep nothing: a project `__eq__`, `__contains__`, or metaclass
+  `__instancecheck__` that stored the operand it is handed would keep it. These hooks answer a
+  test, and code that stores their operand is not known.
 
 
 ---
