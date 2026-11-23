@@ -40,6 +40,32 @@ Mutations through attributes, subscripts, container methods, in-place operators,
 that mutate their argument are followed for the heuristic reports, with the same copies and
 memo fills as `MUT202` (`readonly-return-mutation`).
 
+A function that keeps its results in a memo it writes itself is a cached function for the
+heuristic reports, without configuration: what it returns on some path is read from, or stored
+into, a container held by its `self`, by a module global, or by a parameter as its default
+(`def parse(text, _memo={})`), under a key derived from its other parameters (`key`,
+`id(raw)`, `(a, b)`, `name.lower()`), where the function fills that container under the key
+with a result computed from its parameters: under a test finding the key missing (`if key not in
+self._cache:`, the `else` of `if key in ...:`, a `None` or falsy `.get(key)`), through
+`setdefault`, or in a container named as a cache or memo.
+
+```python
+class Graph:
+    def schema(self, raw):
+        if (found := self._schemas.get(id(raw))) is None:
+            found = self._schemas[id(raw)] = Schema(raw)
+        return found
+
+
+def describe(graph, raw):
+    graph.schema(raw).description = "changed"  # MUT114: every reader of `raw` sees it
+```
+
+A container the function only reads (a cache object's accessor, a registry), and one it fills
+per key with a new object built from none of its parameters (`self._states[name] = State()`) or
+with an argument as it is, hold state the callers share on purpose: their values are not
+followed.
+
 ## What a report states
 
 An exact report states that the function changes in place, at the reported line, the list,
@@ -61,8 +87,10 @@ Its premises:
   `__ior__` may change nothing). Established.
 
 A heuristic report states that the function changes an object that a cached function returned,
-or an object below it. Open: the value may be the cached one on some paths only, and the object
-may be a class instance whose change heki cannot tell from a memo fill.
+or an object below it. Open: the value may be the cached one on some paths only, the object
+may be a class instance whose change heki cannot tell from a memo fill, and a function keeping
+its results in a memo it writes itself may hand a caller a new object (heki does not establish
+that every call with the same arguments gets the object kept).
 
 ## Why is this bad?
 A cached return value is shared by every caller with the same arguments. Changing it in place
