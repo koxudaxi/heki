@@ -32,12 +32,13 @@ Each step of the chain is established, not assumed:
   decorator other than `staticmethod`, `classmethod`, `property`, `abstractmethod`, or
   `override` may not run the body, and is not followed; a function defined twice is not
   followed, and neither is a function, class, or method whose name the project binds to another
-  object (assumption R1): another store or a `del` of the name in its module (also on a branch,
-  after `global`, or by `globals()` or `exec`), in its class body, or on its class object; a
-  store or `del` from another module, also through `setattr` with a string literal, and any
-  name of a module that `setattr` stores into under a name heki cannot read; a store of the
-  function's `__code__`; and, for a method, a store of the name on a class the lookup passes, of
-  `__bases__` on a class along the MRO, or of `self.__class__` in a method;
+  object (assumption R1; a name its module body or class body binds last to one named object on
+  every path is that object): another store or a `del` of the name in its module (also on a
+  branch, after `global`, or by `globals()` or `exec`), in its class body, or on its class
+  object; a store or `del` from another module, also through `setattr` with a string literal,
+  and any name of a module that `setattr` stores into under a name heki cannot read; a store of
+  the function's `__code__`; and, for a method, a store of the name on a class the lookup
+  passes, of `__bases__` on a class along the MRO, or of `self.__class__` in a method;
 - the waiting call is in the ecosystem catalog, waits on every call (a database call that may be
   answered by a session's identity map, a cache, an open connection, or that sends only pending
   changes does not), and no argument that may come from the caller can make it return at once

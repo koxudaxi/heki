@@ -295,7 +295,9 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   subclass's `self`, or `type[Parser]` reaches it as `_Parser__run`. A subclass's own private
   name (`self.__run` in `JsonParser`, the member `_JsonParser__run`) is another member, and
   overrides nothing of its base. With `unresolved = "report"`, the last name of such a target
-  counts in both spellings (`__run`, and `_Parser__run` for a class the target names).
+  counts in both spellings (`__run`, and `_Parser__run` for a class the target names); a
+  target without a class (`__run`) names the member of any class (`other.__run()` in class
+  `Driver` calls `_Driver__run`).
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, a name with more than one colon or an empty module or qualified name, call
   targets whose globs are too many to match together (tens of thousands of complex ones), an
@@ -461,7 +463,7 @@ The call side of `write-owners`.
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `name` | `""` | The contract's name in reports. |
-| `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass. A target may end in an argument list (`DataType(is_dict=True)`, below). |
+| `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass, also through a `functools.partial` object holding it and through a library method building an instance of its receiver's class (a pydantic model's `model_construct`, `model_validate` of a dict, `model_copy`). A target may end in an argument list (`DataType(is_dict=True)`, below). |
 | `subclasses` | `true` | `false`: a class target means constructing exactly the class, not a subclass (an exception class whose subclasses anyone may raise). `Class.method` targets keep covering overrides. |
 | `allowed-callers` | `[]` | Functions allowed to call the targets. |
 | `forbidden-callers` | `[]` | When set, only calls by these functions are reported. |
@@ -508,17 +510,27 @@ The call side of `write-owners`.
   Python binds it: never a positional-only parameter (with `def f(kind=False, /, **kwargs)`,
   `f(kind=True)` leaves `kind` false), and a keyword naming no parameter passes its value under its
   name into `**kwargs`; the receiver of a method call is its first position. A `**` operand that is
-  a dict display with string constant keys (literals, or string constants as above), which nothing
-  changes (a name holding it is only unpacked with `**`, bound to another name, tested, or
-  returned), passes its entries as keywords: `DataType(**{"is_dict": True})`,
-  `flags = {"is_dict": True}; DataType(**flags)`. A call that raises `TypeError` instead of running
-  the function passes nothing: two keywords of one name (written and in such a display, or in two
-  displays), a keyword binding a parameter a position or the receiver binds too, a keyword naming no
-  parameter of a function without `**kwargs`, a position (the receiver included) past the parameters
-  of a function without `*args`, or a parameter without a default left unbound where no `*`
-  unpacking or `**` unpacking of another mapping may bind it. Any other argument (a variable, a
-  call, `*` unpacking, `**` unpacking of another mapping) is not established, and the call is not
-  reported. A reference passes no arguments, so it never matches. A target with an argument list
+  a mapping the function builds, which nothing changes (a name holding it is only unpacked with
+  `**`, merged into another mapping, bound to another name, tested, or returned), passes its
+  entries as keywords: a dict display with string constant keys (literals, or string constants as
+  above), `DataType(**{"is_dict": True})`, `flags = {"is_dict": True}; DataType(**flags)`; a merge
+  of mappings (`{**a, **b}`, `dict(a, is_dict=True)`, `a | b` of two mappings the function builds),
+  which passes the last entry of each key, a mapping heki does not build (a parameter) replacing
+  every key before it; and a mapping built on several paths (`flags = a if c else b`), which passes
+  a key where every path passes the same constant for it. Calling a `functools.partial` object the
+  function makes (through copies) calls what it holds, with the positions it holds first and its
+  keywords, which a keyword the call writes replaces: after `make = partial(DataType,
+  is_dict=True)`, `make()` constructs `DataType(is_dict=True)`, reported at `make()`, where the
+  class is constructed (a call unpacking a mapping with `**` over keywords the object holds is not
+  followed). A pydantic model's `model_construct` passes its keywords to the fields,
+  `model_validate` the entries of the dict it is passed, and `model_copy` those of `update`. A
+  call that raises `TypeError` instead of running the function passes nothing: two keywords of one
+  name (written and in such a display, or in two displays), a keyword binding a parameter a
+  position or the receiver binds too, a keyword naming no parameter of a function without
+  `**kwargs`, a position (the receiver included) past the parameters of a function without
+  `*args`, or a parameter without a default left unbound where no `*` unpacking or `**` unpacking
+  of another mapping may bind it. Any other argument (a variable, a call, `*` unpacking, `**`
+  unpacking of another mapping) is not established, and the call is not reported. A reference passes no arguments, so it never matches. A target with an argument list
   names no symbol outside the project; `unresolved = "report"` matches its last name before the
   list, whatever the arguments of a call on an object of unknown class.
 - With `references = "calls-and-bases"`, a class statement passing a class target as a base is

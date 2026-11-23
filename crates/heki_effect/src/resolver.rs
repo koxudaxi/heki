@@ -992,7 +992,9 @@ pub struct ModuleDecls {
     /// the module global (also in a function after `global f`, and any name when `globals()`
     /// or `exec` may bind it) or of the class-body name, a deletion of either, or a store of a
     /// function's `__code__` ([`rebound_definitions`]). A call through such a name may run
-    /// that object instead ([`ProjectDecls::call_rebound`]).
+    /// that object instead ([`ProjectDecls::call_rebound`]). A module global the module body
+    /// binds again to named objects only is none: the name holds them ([`Self::aliases`],
+    /// [`Self::alias_paths`]).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub rebound_definitions: BTreeSet<String>,
     /// What the module's code stores into the globals of other project modules and into the
@@ -6728,8 +6730,9 @@ impl Named<'_> {
 /// [`ModuleDecls::rebound_definitions`]. A `def` or `class` statement binds its name to the
 /// object it makes (`MakeClosure` of a function of that name), at module level by a store
 /// (`stores` counts every store of a module global), in a class body by the value itself; any
-/// other store of the name is another object, and so is a class-body name bound as a named
-/// copy (`m = other`, `m = staticmethod(m)`).
+/// other store of the name is another object, unless the module body binds the name to named
+/// objects only, and so is a class-body name bound as a named copy (`m = other`,
+/// `m = staticmethod(m)`).
 fn rebound_definitions(
     input: &ModuleInput<'_>,
     stores: &GlobalStores<'_>,
@@ -6774,6 +6777,10 @@ fn rebound_definitions(
         out.extend(code_replaced(input, f, decls));
     }
     let dynamic = input.ir.constants.dynamic;
+    // A name the module body binds again to named objects only holds them
+    // (`ModuleDecls::aliases`, `ModuleDecls::alias_paths`): a call through the name runs them,
+    // and a value naming the definition is the object its statement made.
+    let resolved = |q: &str| decls.aliases.contains_key(q) || decls.alias_paths.contains_key(q);
     out.extend(
         decls
             .functions
@@ -6781,7 +6788,9 @@ fn rebound_definitions(
             .chain(decls.classes.keys())
             .filter(|q| !q.contains('.'))
             .filter(|q| {
-                dynamic || !stores.exactly(q, by_statement.get(q.as_str()).copied().unwrap_or(0))
+                dynamic
+                    || !(resolved(q)
+                        || stores.exactly(q, by_statement.get(q.as_str()).copied().unwrap_or(0)))
             })
             .cloned(),
     );
@@ -7098,10 +7107,11 @@ fn class_properties(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
             }
             continue;
         }
-        // A method defined directly in its class (`C.m`, not `C.m.<locals>.f`).
+        // A method defined directly in its class (`C.m`, not `C.m.<locals>.f`), by the name the
+        // class holds it under (`_C__key` of `def __key`), as the IR spells the attribute.
         let method = f.owner_class_qualname.as_deref().and_then(|owner| {
             let name = f.qualname.strip_prefix(owner)?.strip_prefix('.')?;
-            (!name.contains('.')).then_some((owner, name))
+            (!name.contains('.')).then(|| (owner, mangling::member_name(&f.qualname)))
         });
         let Some((owner, name)) = method else {
             continue;
@@ -7114,7 +7124,7 @@ fn class_properties(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
                     .is_some_and(|(_, a)| matches!(a, "setter" | "deleter" | "getter"))
         });
         if is_property {
-            found.push((owner.to_owned(), name.to_owned()));
+            found.push((owner.to_owned(), name.into_owned()));
         }
     }
     for (class, name) in found {

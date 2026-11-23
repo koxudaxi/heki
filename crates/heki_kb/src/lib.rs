@@ -442,6 +442,26 @@ pub struct EcosystemEntry {
     /// `EFF112`: the call writes an argument, or serializes it into text, in the order of its
     /// elements (`json.dumps`, `pathlib.Path.write_text`, `print`).
     pub writes_in_order: Option<OrderedOutput>,
+    /// The call builds a new instance of its receiver's class (the class a class method is
+    /// called on, the class of the instance an instance method is called on) without running
+    /// the class's `__init__`, its fields set from these values: a call contract sees it as
+    /// constructing the class (`pydantic.BaseModel.model_construct`, `model_validate`,
+    /// `model_copy`).
+    pub builds_receiver: Option<FieldValues>,
+}
+
+/// Where a call building an instance of its receiver's class takes the values of the fields
+/// from (`EcosystemEntry::builds_receiver`): the keywords it is passed (`keywords`), or the
+/// entries of the mapping at position `arg` (the receiver not counted) or passed by the keyword
+/// `param`. With `only_from_dict`, the call builds an instance only when that argument is a
+/// dict: given another value, it may return the value itself (`model_validate` of an instance).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FieldValues {
+    pub keywords: bool,
+    pub arg: Option<u8>,
+    pub param: Option<String>,
+    pub only_from_dict: bool,
 }
 
 /// `EFF115` (`[[calls_unawaited]]`): the callable argument the call of `symbol` calls as a plain
@@ -1808,6 +1828,39 @@ mod tests {
                     ..entry(&[])
                 },
             ),
+            (
+                s(&["pydantic.BaseModel.model_copy"]),
+                EcosystemEntry {
+                    copy_sanitizer: Some(CopyDepth::Shallow),
+                    builds_receiver: Some(FieldValues {
+                        param: Some("update".into()),
+                        ..FieldValues::default()
+                    }),
+                    ..entry(&[])
+                },
+            ),
+            (
+                s(&["pydantic.BaseModel.model_construct"]),
+                EcosystemEntry {
+                    builds_receiver: Some(FieldValues {
+                        keywords: true,
+                        ..FieldValues::default()
+                    }),
+                    ..entry(&[])
+                },
+            ),
+            (
+                s(&["pydantic.BaseModel.model_validate"]),
+                EcosystemEntry {
+                    builds_receiver: Some(FieldValues {
+                        arg: Some(0),
+                        param: Some("obj".into()),
+                        only_from_dict: true,
+                        ..FieldValues::default()
+                    }),
+                    ..entry(&[])
+                },
+            ),
         ]
     }
 
@@ -2105,7 +2158,6 @@ mod tests {
                     "copy.copy",
                     "copy.replace",
                     "dataclasses.replace",
-                    "pydantic.BaseModel.model_copy",
                     "builtins.dict.copy",
                     "builtins.list.copy",
                     "builtins.set.copy",

@@ -175,7 +175,7 @@ fn a_receiver_typed_by_a_protocol_leaves_the_targets_incomplete() {
 
 #[test]
 fn a_name_the_project_binds_again_leaves_the_targets_incomplete() {
-    let open = "import time\n\n\ndef load() -> None:\n    time.sleep(1)\n\n\nload = print\n\n\nasync def handle():\n    load()\n";
+    let open = "import time\n\n\ndef load() -> None:\n    time.sleep(1)\n\n\ndef quiet() -> None:\n    global load\n    load = print\n\n\nasync def handle():\n    load()\n";
     let report = heuristic(
         "op_rebound",
         EFF101,
@@ -186,9 +186,9 @@ fn a_name_the_project_binds_again_leaves_the_targets_incomplete() {
     );
     assert_eq!(
         closer_line_detail(&report, 0),
-        ("none".to_owned(), Some(12), None)
+        ("none".to_owned(), Some(14), None)
     );
-    let closed = open.replace("load = print\n", "");
+    let closed = open.replace("    load = print\n", "");
     exact("op_rebound_closed", EFF101, &closed, "EFF101");
 }
 
