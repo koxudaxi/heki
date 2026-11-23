@@ -1963,7 +1963,7 @@ fn rule_and_explain_commands() {
     let (code, all, _) = heki(&["rule", "--all"]);
     assert_eq!(code, 0);
     let lines: Vec<&str> = all.lines().collect();
-    assert_eq!(lines.len(), 46, "{all}");
+    assert_eq!(lines.len(), 47, "{all}");
     assert!(lines[0].starts_with("MUT101   cached-property-stale-mutation "));
     // Each rule's certainty and when it runs with no configuration.
     for (code, state) in [
