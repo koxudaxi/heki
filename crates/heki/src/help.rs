@@ -196,6 +196,19 @@ pub(crate) const RECOMMEND: LongHelp = LongHelp {
     ],
 };
 
+pub(crate) const VERSION: LongHelp = LongHelp {
+    reference: Some(Docs::CliVersion),
+    exit_codes: &[(0, "the version is printed")],
+    examples: &[
+        ("heki version", "the version of this heki"),
+        (
+            "heki version --changelog",
+            "the version, then the changelog section of this release: the rules, keys, and options it adds or changes",
+        ),
+    ],
+    machine_output: &[],
+};
+
 pub(crate) const SKILL_INSTALL: LongHelp = LongHelp {
     reference: Some(Docs::CliSkillInstall),
     exit_codes: &[

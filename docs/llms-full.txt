@@ -1208,6 +1208,7 @@ the same file is `services.api.app` and the import is not resolved. Put a `pypro
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `target-version` | the oldest version `project.requires-python` admits, else `py312` | Python version of the code: `py311` … `py315` (or `3.11` … `3.15`). `--target-version` overrides it. See [below](https://heki.koxudaxi.dev/configuration/#the-default-target-version) for the inference and [Scope](https://heki.koxudaxi.dev/scope/#the-target-python-version) for what the version changes. |
+| `required-version` | none | A [PEP 440](https://peps.python.org/pep-0440/) version specifier made of operators and plain releases (`">=0.2.6"`; no pre-, post-, or dev-release suffix) the running heki must satisfy; an older or newer one stops with an error. See [Requiring a heki version](https://heki.koxudaxi.dev/configuration/#requiring-a-heki-version). |
 | `exclude` | the Ruff defaults (`.git`, `.venv`, `build`, `dist`, `node_modules`, …) | Replaces the excluded paths: globs, matched against the project-relative path and each of its components, and covering everything below a matched directory. |
 | `extend-exclude` | `[]` | Adds excluded paths. |
 | `src` | the detected source roots | Source roots, relative to the project root: the module names of the files below each are relative to it (`src = ["lib"]` names `lib/pkg/net.py` `pkg.net`). See [Module names follow the source roots](https://heki.koxudaxi.dev/configuration/#module-names-follow-the-source-roots). |
@@ -1227,6 +1228,29 @@ supported version that every clause admits:
 | `>=3.16` (only newer versions) | `py315` |
 | `<4` (no lower bound, admits 3.12) | `py312` |
 | missing, or not a version specifier | `py312` |
+
+### Requiring a heki version
+
+`required-version` makes a heki that does not satisfy the specifier refuse to run, as Ruff's
+`required-version` does. heki checks it before any other key, so a configuration that uses keys
+a newer release adds fails with this message on an older heki:
+
+```toml
+[tool.heki]
+required-version = ">=0.2.6"
+```
+
+```text
+error: pyproject.toml:2:20: this is heki 0.2.4, but the configuration requires `>=0.2.6`
+```
+
+An older heki cannot know which release adds a key it has never heard of. Without
+`required-version` (and any heki before the release that added it rejects the key as unknown, like any
+other), an unknown key is an error that says only what the table accepts. When the key is not close to a
+key of its table (a close one is a typo, and the error offers it), the error also says that the
+key may belong to a newer heki, names the running version, and points to `required-version` and
+the changelog. It cannot say which release adds the key. `heki version --changelog` prints what
+the installed release changed, and the changelog on GitHub lists every release.
 
 ### Which files are checked
 
@@ -2750,6 +2774,7 @@ Commands:
   inspect      Experimental: what heki knows about one function (its effects, what it changes, keeps, and returns, whether it is pure, its callers, reports, and contracts)
   recommend    Experimental: advice on the configuration of a project, with counts from its analysis, and the keys to add (it writes no file)
   skill        Experimental: install heki's Agent Skill where a coding agent reads skills
+  version      Print the version of this heki, and with `--changelog` what this release changed
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -3298,6 +3323,40 @@ Examples:
       into ~/.agents/skills/heki, for every project
   heki skill install --agent claude-code --overwrite
       replace an installed skill with this heki's
+```
+
+## `heki version`
+
+```text
+Print the version of this heki, and with `--changelog` what this release changed
+
+Usage: heki version [OPTIONS]
+
+Options:
+      --changelog
+          Also print this release's section of the changelog, the one the binary was built with, without a network
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Documentation:
+  This command     https://heki.koxudaxi.dev/cli-reference/#heki-version
+  Documentation    https://heki.koxudaxi.dev/
+  Getting started  https://heki.koxudaxi.dev/getting-started/
+  Configuration    https://heki.koxudaxi.dev/configuration/
+  Rules            https://heki.koxudaxi.dev/rules/
+  Coding agents    https://heki.koxudaxi.dev/coding-agents/
+  llms.txt         https://heki.koxudaxi.dev/llms.txt
+  Agent Skill      https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental
+
+Exit codes:
+  0  the version is printed
+
+Examples:
+  heki version
+      the version of this heki
+  heki version --changelog
+      the version, then the changelog section of this release: the rules, keys, and options it adds or changes
 ```
 
 
