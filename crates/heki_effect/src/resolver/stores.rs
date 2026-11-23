@@ -514,14 +514,7 @@ impl<'p> Unfixed<'p> {
             .iter()
             .filter(|star| !star.in_type_checking)
             .map(|star| {
-                let exports = super::resolve_relative_module(
-                    &input.module_name,
-                    input.is_package,
-                    star.level,
-                    star.module.as_deref(),
-                    input.root_is_package,
-                )
-                .and_then(|module| {
+                let exports = super::star_import_module(input, star).and_then(|module| {
                     let all = format!("{module}.__all__");
                     let fixed = !project.grown_elsewhere(&all);
                     project
