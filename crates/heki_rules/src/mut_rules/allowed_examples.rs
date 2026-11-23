@@ -79,7 +79,7 @@ impl<'a, K: Ord + Clone> AllowedExamples<'a, K> {
 
     /// The functions found for the report under `key` naming `target` and `named`: the first
     /// [`NAMED`] by fully qualified name.
-    pub(super) fn of(&self, key: &K, target: &str, named: &str) -> Vec<Found<'a>> {
+    pub(super) fn found_for(&self, key: &K, target: &str, named: &str) -> Vec<Found<'a>> {
         self.wanted
             .get(key)
             .and_then(|targets| targets.get(target))
