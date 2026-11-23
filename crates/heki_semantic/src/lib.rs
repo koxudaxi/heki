@@ -9,6 +9,8 @@ use heki_env::RuntimeProfile;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
+pub mod mangling;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ScopeId(pub u32);
 
@@ -97,7 +99,8 @@ pub struct ClassInfo {
     /// Class keywords with the source text of their value (`metaclass=Meta`, `frozen=False`);
     /// `**kwargs` is left out.
     pub keywords: Vec<(String, String)>,
-    /// The functions defined directly in the class body.
+    /// The functions defined directly in the class body, by the names the class holds them
+    /// under (`_Parser__run` for `def __run`).
     pub methods: Vec<String>,
     pub span: Span,
 }
@@ -226,16 +229,10 @@ impl ScopeBuilder {
     }
 
     fn mangle(&self, name: &str) -> String {
-        if name.starts_with("__")
-            && !name.ends_with("__")
-            && let Some(cls) = &self.enclosing_class_name
-        {
-            let stripped = cls.trim_start_matches('_');
-            if !stripped.is_empty() {
-                return format!("_{stripped}{name}");
-            }
+        match &self.enclosing_class_name {
+            Some(class) => mangling::mangle(class, name).into_owned(),
+            None => name.to_owned(),
         }
-        name.to_string()
     }
 
     fn add_binding(
@@ -926,9 +923,8 @@ impl<'a> Analyzer<'a> {
         );
         self.note_guard_binding(func.name.as_str(), GuardBinding::Other);
         if let Some(cid) = self.cur_class_body() {
-            self.classes[cid.0 as usize]
-                .methods
-                .push(func.name.to_string());
+            let member = self.cur_scope_mut().mangle(func.name.as_str());
+            self.classes[cid.0 as usize].methods.push(member);
         }
     }
 
