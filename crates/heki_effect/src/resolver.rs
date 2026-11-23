@@ -1673,6 +1673,21 @@ fn dotted_prefixes(name: &str) -> impl Iterator<Item = &str> {
         .chain(std::iter::once(name))
 }
 
+/// Where a special method of an instance comes from ([`ProjectDecls::special_method_owner`]),
+/// from the least to the most code it may run.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum MethodOwner {
+    /// `object`'s, which runs nothing else.
+    Object,
+    /// The interpreter's own of a builtin type, which may run the same of the items it holds
+    /// (a container's comparison, hash, or `repr()`, an exception's string of its arguments).
+    Builtin,
+    /// May be the one this class outside the project defines.
+    Library(String),
+    /// May be code of the project.
+    Project,
+}
+
 /// What a dotted fqn names inside the project.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Symbol<'a> {
@@ -2735,6 +2750,33 @@ impl ProjectDecls {
             })
     }
 
+    /// Whether storing or deleting `attr` on a value of the project class `class` runs no code
+    /// on every class it may be under R2: as [`Self::attr_store_on_instance`], except that a
+    /// class body may bind the name to a function it defines that no decorator replaces (a
+    /// method, which an instance's own attribute shadows) or that is a getter without a setter
+    /// or deleter (`FunctionDecl::is_property`: a `property` raises, a cached property's value
+    /// is the instance's own attribute).
+    pub(crate) fn attr_write_runs_no_code(
+        &self,
+        class: &str,
+        attr: &str,
+        catalog_stores: impl Fn(&str) -> bool,
+    ) -> bool {
+        let plain_function = |c: &str| {
+            self.own_method(c, attr)
+                .and_then(|k| self.function_decl(&k))
+                .is_some_and(|f| f.called_as_defined || f.is_property)
+        };
+        self.binds_none_of(class, &["__setattr__", "__delattr__"], &catalog_stores)
+            && self.value_classes(class).iter().all(|c| {
+                self.read(|k| note(&mut k.class_facts, c));
+                self.class(c).is_some_and(|d| {
+                    !d.properties.contains(attr)
+                        && (!d.code_attrs.contains(attr) || plain_function(c))
+                })
+            })
+    }
+
     /// Whether reading `attr` on a value of the class `class` finds the value an instance
     /// stores there, as [`Self::plain_attr`] decides for project classes, with the classes
     /// outside the project along the MROs of every class the value may be (R2) plain bases or
@@ -3133,6 +3175,64 @@ impl ProjectDecls {
     pub fn method_not_overridden(&self, class: &str, method: &str, by_name: bool) -> bool {
         let read = self.attr_read(class, method);
         read.binders.is_empty() && !read.custom_metaclass && !(by_name && read.getattribute)
+    }
+
+    /// Where the special method `name` that Python looks up on the class of an instance of
+    /// `class` comes from, over every class the instance may be under R2 ([`Self::value_classes`]),
+    /// the one that may run the most. A class of the project defines it when it binds the name
+    /// or has a metaclass heki does not know (which may add it); past them, a builtin type has
+    /// the interpreter's own, `object` or a plain base `object`'s (a `NamedTuple` a tuple's),
+    /// and any other class outside the project may define it, as heki does not read it. Every
+    /// base outside the project of a class the instance may be counts, wherever its MRO puts it.
+    pub(crate) fn special_method_owner(&self, class: &str, name: &str) -> MethodOwner {
+        let outside = |c: &str| {
+            if matches!(c, "object" | "builtins.object")
+                || PLAIN_BASES.contains(&c) && !c.ends_with(".NamedTuple")
+            {
+                MethodOwner::Object
+            } else if c.starts_with("builtins.") || PLAIN_BASES.contains(&c) {
+                MethodOwner::Builtin
+            } else {
+                MethodOwner::Library(c.to_owned())
+            }
+        };
+        let class = self.canonical(class);
+        let mut owner = if self.is_project_class(&class) {
+            MethodOwner::Object
+        } else {
+            outside(&class)
+        };
+        for c in self.value_classes(&class) {
+            self.read(|k| note(&mut k.class_facts, &c));
+            let Some(d) = self.class(&c) else { continue };
+            if d.custom_metaclass || d.members.contains(name) {
+                return MethodOwner::Project;
+            }
+            for base in d.bases.iter().map(|b| self.canonical(b)) {
+                if !self.is_project_class(&base) {
+                    owner = owner.max(outside(&base));
+                }
+            }
+        }
+        owner
+    }
+
+    /// Whether a property getter of the project (`@property`, a cached property) is named
+    /// `attr`: a cached property keeps its value in the instance `__dict__` under its getter's
+    /// name, so no other name holds a value a getter of the project computed.
+    pub fn names_property(&self, attr: &str) -> bool {
+        self.read(|k| note(&mut k.property_names, attr));
+        self.property_names.contains(attr)
+    }
+
+    /// Whether a class a value of the class `class` may be (R2, [`Self::value_classes`]) binds
+    /// `attr` to a property getter, so that an instance may keep a value under it.
+    pub(crate) fn binds_property(&self, class: &str, attr: &str) -> bool {
+        self.value_classes(class).iter().any(|c| {
+            self.own_method(c, attr)
+                .and_then(|k| self.function_decl(&k))
+                .is_some_and(FunctionDecl::reads_as_property)
+        })
     }
 
     /// Every project class that (transitively) inherits from `class`, sorted.
@@ -3725,6 +3825,16 @@ impl ProjectDecls {
             },
         );
         missing == Answer::Known(None)
+    }
+
+    /// Whether a project class along the MRO of `class` defines `__slots__`: an instance may then
+    /// have no `__dict__`.
+    pub fn defines_slots(&self, class: &str) -> bool {
+        self.mro(&self.canonical(class)).into_iter().any(|c| {
+            self.read(|k| note(&mut k.class_facts, &c));
+            self.class(&c)
+                .is_some_and(|d| d.members.contains("__slots__"))
+        })
     }
 
     /// Whether an instance of exactly `class` calling `method` runs one of `callee`: the
