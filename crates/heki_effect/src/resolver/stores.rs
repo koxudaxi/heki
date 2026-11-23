@@ -10,7 +10,7 @@
 
 use super::{
     AttrStore, ClassDecl, ModuleDecls, ProjectDecls, StoreDependency, StoreFallbacks, StoreTarget,
-    StoredElsewhere, StoresElsewhere, TypeCtx, aliases_of, is_summarized_function,
+    StoredElsewhere, StoresElsewhere, Table, TypeCtx, aliases_of, is_summarized_function,
     kept_in_declarations, note, self_aliases,
 };
 use crate::ModuleInput;
@@ -753,7 +753,7 @@ fn tables(
     body: &StoringFn<'_>,
     types: &Inferred,
     unfixed: &Unfixed<'_>,
-) -> BTreeMap<String, Box<[(Box<str>, Option<Ty>)]>> {
+) -> BTreeMap<String, Table> {
     let mut out = BTreeMap::new();
     let stores = heki_ir::GlobalStores::of(std::slice::from_ref(body.f));
     let changed: FxHashSet<&str> = fns

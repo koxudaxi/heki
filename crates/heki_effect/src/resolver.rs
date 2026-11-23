@@ -887,7 +887,7 @@ pub struct ModuleDecls {
     /// (`None`: unknown), in order (`stores::record`). `HANDLERS["create"]` is that value
     /// ([`ProjectDecls::table`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub tables: BTreeMap<String, Box<[(Box<str>, Option<Ty>)]>>,
+    pub tables: BTreeMap<String, Table>,
     /// Module-level names bound once to another object by name (`_set = object.__setattr__`,
     /// `run = helpers.run`), or so after imports of the name that binding always replaces, by
     /// the fqn of that object ([`module_aliases`]): as a value or in
@@ -988,6 +988,10 @@ pub struct ModuleDecls {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unread: bool,
 }
+
+/// The entries of a table ([`ModuleDecls::tables`]): each string key with the type of its value
+/// (`None`: unknown), in order.
+pub type Table = Box<[(Box<str>, Option<Ty>)]>;
 
 /// How a module changes the `__path__` of a package, the directories Python finds the modules
 /// under the package in, which start as the package's own directory
