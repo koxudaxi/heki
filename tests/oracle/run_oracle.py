@@ -224,7 +224,7 @@ def main():
     )
     parser.add_argument(
         "--table-rules",
-        nargs="*",
+        nargs="+",
         help="generate from the premise table only for these rules (a rule's certification run)",
     )
     parser.add_argument("--run-timeout", type=float, default=2.0, help="seconds per program run")
@@ -244,7 +244,10 @@ def main():
             parser.error(f"the premise table has no rows for {', '.join(missing)}")
         args.table = {code: names for code, names in args.table.items() if code in args.table_rules}
     if args.mode != "grammar":
-        premise_generator.check_table(args.table)
+        covered = premise_generator.check_table(args.table)
+        unsupported = sorted(set(args.table_rules or ()) - set(covered))
+        if unsupported:
+            parser.error(f"the premise generator has no builder for {', '.join(unsupported)}")
     args.open_premises = args.mode != "grammar" and driver.supports_open_premises(args.heki)
     os.makedirs(args.out, exist_ok=True)
     started = time.monotonic()
