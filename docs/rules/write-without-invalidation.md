@@ -52,7 +52,8 @@ It does not report:
 
 The help starts with the contract's `message` and then names up to three announcing writers of
 the target the report names: public functions and methods that write it themselves and announce
-the change on every path, and `exempt-writers` that write it themselves, by fully qualified name
+every write of it, their own and their helpers', on every path, and `exempt-writers` that write it
+themselves, by fully qualified name
 (``announcing writers of `DataModel.fields`: `pkg.passes.narrow` ``). Private functions (`_name`)
 and special methods do not count. JSON output gives them with their files as `allowed_examples`
 (`fqn`, `path`).
