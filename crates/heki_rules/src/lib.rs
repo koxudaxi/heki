@@ -15,6 +15,7 @@ mod contracts;
 mod data_rules;
 mod eff_rules;
 pub mod experimental;
+pub mod import_view;
 pub mod inspect;
 mod mut_rules;
 mod opt_rules;
@@ -26,8 +27,8 @@ pub mod selection;
 pub mod snapshot;
 
 pub use contracts::{
-    MAX_INVALIDATIONS, declares_ownership, inspect_facts, opt_in_facts, recommend_facts,
-    summary_contracts, typed_writes,
+    MAX_INVALIDATIONS, declares_ownership, import_facts, inspect_facts, opt_in_facts,
+    recommend_facts, summary_contracts, typed_writes,
 };
 pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
 pub use heki_diagnostics::Certainty;

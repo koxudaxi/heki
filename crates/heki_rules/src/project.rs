@@ -679,6 +679,8 @@ pub enum Facts {
     Inspect,
     /// Also what `heki recommend` reads ([`crate::recommend_facts`]).
     Recommend,
+    /// Also the import facts ([`crate::import_facts`]): `heki inspect --imports`.
+    Imports,
 }
 
 /// What an index is built with: the contracts its summaries depend on, whether typed writes
@@ -701,6 +703,7 @@ impl IndexFacts {
             Facts::Check => crate::opt_in_facts(selection),
             Facts::Inspect => crate::inspect_facts(selection),
             Facts::Recommend => crate::recommend_facts(selection),
+            Facts::Imports => crate::import_facts(selection),
         };
         Ok(Self {
             contracts: crate::summary_contracts(config, kb)?,

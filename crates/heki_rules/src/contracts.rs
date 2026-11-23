@@ -522,6 +522,7 @@ pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
         call_cycles: selection.is_enabled("EFF114"),
         shared_state: false,
         blind_spots: false,
+        imports: false,
     }
 }
 
@@ -532,6 +533,15 @@ pub fn inspect_facts(selection: &RuleSelection) -> OptInFacts {
     OptInFacts {
         return_origins: true,
         shared_state: true,
+        ..opt_in_facts(selection)
+    }
+}
+
+/// [`opt_in_facts`] with the import facts `heki inspect --imports` shows
+/// ([`heki_effect::FileSummary::imports`]).
+pub fn import_facts(selection: &RuleSelection) -> OptInFacts {
+    OptInFacts {
+        imports: true,
         ..opt_in_facts(selection)
     }
 }

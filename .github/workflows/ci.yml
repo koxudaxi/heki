@@ -381,6 +381,8 @@ jobs:
       - run: cargo build -p heki
       - name: heki_semantic vs CPython symtable
         run: python tests/symtable_verify/verify_symtable.py --heki target/debug/heki tests/symtable_verify/fixtures/ tests/corpus/
+      - name: Import facts vs CPython
+        run: python tests/import_verify/verify_imports.py --heki target/debug/heki tests/import_verify/fixtures/
       - name: Layer 1 knowledge base sentinels
         run: python tests/sentinel/verify_soundness_kb.py
       - name: Adversarial counterexamples

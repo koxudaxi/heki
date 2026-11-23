@@ -169,6 +169,8 @@ Options:
           List the callers transitively, and the reports above the function
       --depth <DEPTH>
           How many caller levels `--callers` lists [default: 3]
+      --imports
+          Show the imports of the project modules SYMBOL names (a module name or a glob over module names): each import with when it runs and what it loads, and what loading the module loads while it loads
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
       --extend-select <EXTEND_SELECT>

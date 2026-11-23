@@ -12,6 +12,7 @@ use crate::decorators::keeps_returned_value;
 use crate::environment::{self, AccessKind, ExternalAccess};
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
 use crate::held;
+use crate::imports::{ImportSite, module_imports};
 use crate::infer::CellKey;
 use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
 use crate::invokes;
@@ -138,6 +139,7 @@ fn extract_module(
         .map(func_qualname)
         .collect();
     let mut cell_aliases = CellAliases::default();
+    let mut imported_by_name: Vec<ImportSite> = Vec::new();
     for f in &input.ir.functions {
         if f.is_class_body || (is_overload(f) && implemented.contains(func_qualname(f))) {
             continue;
@@ -157,6 +159,7 @@ fn extract_module(
             kept_points,
             types,
             mut blind,
+            imports: by_name,
         } = Extractor::new(
             &shape,
             &key,
@@ -168,6 +171,7 @@ fn extract_module(
         )
         .run();
         cell_aliases.extend(cells);
+        imported_by_name.extend(by_name);
         // A `class` statement in a function runs its body there: the body's effects and calls
         // are the function's (its methods run only when they are called).
         if !f.is_module_body {
@@ -186,6 +190,7 @@ fn extract_module(
                 absorb_class_body(&mut summary, facts.summary);
                 external.extend(facts.external);
                 blind.extend(facts.blind);
+                imported_by_name.extend(facts.imports);
                 sites.extend(
                     facts
                         .sites
@@ -195,12 +200,14 @@ fn extract_module(
                 references.extend(facts.references);
             }
         } else if opt_in.blind_spots
+            || opt_in.imports
             || contracts.is_some_and(|c| c.references() || c.checks_module_bodies())
         {
             // The module body runs the bodies of its classes: what they hand on (a dataclass
             // field's `default_factory`) is handed on by the module, what they take from
             // outside the project (`sys.platform`) the module takes, and the calls heki is
-            // blind to there are the module's. Their other facts are not the module's.
+            // blind to and the modules imported by name there are the module's. Their other
+            // facts are not the module's.
             for body in class_bodies_run_by(input.ir, f) {
                 let body = FnShape::new(body);
                 let facts = Extractor::new(
@@ -216,6 +223,7 @@ fn extract_module(
                 references.extend(facts.references);
                 external.extend(facts.external);
                 blind.extend(facts.blind);
+                imported_by_name.extend(facts.imports);
             }
         }
         if let Some(mut flow) = flow {
@@ -282,6 +290,9 @@ fn extract_module(
                 file.local_functions.insert(key, Arc::new(summary));
             }
         }
+    }
+    if opt_in.imports {
+        file.imports = module_imports(input, imported_by_name).map(Box::new);
     }
     release_spare_capacity(&mut file);
     file
@@ -668,6 +679,8 @@ struct Extracted {
     types: FxHashMap<VarId, Val>,
     /// [`FileSummary::blind_spots`].
     blind: Vec<BlindCall>,
+    /// The calls importing a module by name ([`FileSummary::imports`]).
+    imports: Vec<ImportSite>,
 }
 
 /// The points of a function that read one `self` attribute ([`Extractor::self_read_points`]).
@@ -848,6 +861,8 @@ struct Extractor<'a> {
     /// The calls heki is blind to (`FileSummary::blind_spots`), with
     /// [`OptInFacts::blind_spots`].
     blind: Vec<BlindCall>,
+    /// The calls importing a module by name, with [`OptInFacts::imports`].
+    imports: Vec<ImportSite>,
 }
 
 /// A key of a container as [`Extractor::key_present`] compares keys: the same variable through
@@ -1202,6 +1217,7 @@ impl<'a> Extractor<'a> {
             established: OnceCell::new(),
             followed_callables: OnceCell::new(),
             blind: Vec::new(),
+            imports: Vec::new(),
         };
         ex.ownership = contracts.is_some_and(|c| c.ownership());
         ex.track = ex.ownership && ex.may_construct();
@@ -2682,6 +2698,7 @@ impl<'a> Extractor<'a> {
             kept_points: self.kept_points,
             types: self.types,
             blind: self.blind,
+            imports: self.imports,
         }
     }
 
@@ -6326,6 +6343,9 @@ impl<'a> Extractor<'a> {
         self.call_escapes(callee, call);
         match callee {
             Callee::External(symbol) => {
+                if self.opt_in.imports {
+                    self.import_by_name(bb, symbol, call);
+                }
                 if let Some(c) = self.contracts {
                     if c.external_call(symbol) {
                         let imports = self.cx.catalog(symbol).and_then(|e| e.environment_access())

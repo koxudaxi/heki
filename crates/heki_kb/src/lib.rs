@@ -377,6 +377,38 @@ pub struct EcosystemEntry {
     /// `EFF112`: the call writes an argument, or serializes it into text, in the order of its
     /// elements (`json.dumps`, `pathlib.Path.write_text`, `print`).
     pub writes_in_order: Option<OrderedOutput>,
+    /// Calling the function imports the module its arguments name, with its parent packages
+    /// (`importlib.import_module`, `__import__`): an import site of the caller
+    /// (`heki_effect::imports`). `importlib.util.find_spec` only finds one.
+    pub loads_module: Option<LoadsModule>,
+}
+
+/// Where a call that imports a module by name takes the name from
+/// (`EcosystemEntry::loads_module`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LoadsModule {
+    /// The module's name.
+    pub name: ArgSlot,
+    /// The package a name starting with a dot is anchored at, one package up for each further
+    /// dot (`importlib.import_module(name, package)`).
+    pub package: Option<ArgSlot>,
+    /// How many packages up from the caller's a relative name starts (`__import__`'s `level`):
+    /// the name is absolute only where this is not passed or is `0`.
+    pub level: Option<ArgSlot>,
+}
+
+/// The modules a distribution installs whose names are not its own (`[[provides]]`): `PyYAML`
+/// installs `yaml`, `Pillow` installs `PIL`. A dependency's modules are otherwise the ones whose
+/// top-level name, normalized as PEP 503 normalizes distribution names, equals its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Provides {
+    /// The name on PyPI.
+    pub distribution: String,
+    /// The top-level modules and packages it installs (`google.protobuf` for a namespace
+    /// package's portion).
+    pub modules: Vec<String>,
 }
 
 /// What a call writes in the order of its elements (`EcosystemEntry::writes_in_order`): a
@@ -809,6 +841,8 @@ struct EcosystemKbFile {
     #[serde(default)]
     distributions: Vec<Distribution>,
     #[serde(default)]
+    provides: Vec<Provides>,
+    #[serde(default)]
     entries: Vec<EcosystemEntry>,
     #[serde(default)]
     attributes: Vec<AttributeType>,
@@ -845,6 +879,8 @@ pub struct EffectiveEcosystemKb {
     /// The releases each distribution's rows were checked against ([`Distribution`]); the
     /// analysis never reads them.
     pub distributions: Vec<Distribution>,
+    /// The modules distributions install under other names than their own ([`Provides`]).
+    pub provides: Vec<Provides>,
     pub digest: String,
 }
 
@@ -872,6 +908,7 @@ impl EffectiveEcosystemKb {
             cached_properties: BTreeMap::new(),
             attributes: BTreeMap::new(),
             distributions: Vec::new(),
+            provides: Vec::new(),
             digest,
         }
     }
@@ -886,9 +923,11 @@ impl EffectiveEcosystemKb {
         let mut cached_properties = BTreeMap::new();
         let mut attributes = BTreeMap::new();
         let mut distributions = Vec::new();
+        let mut provides = Vec::new();
         for &(file, text) in ECOSYSTEM_KB_FILES {
             let parsed = parse_ecosystem_file(file, text)?;
             distributions.extend(parsed.distributions);
+            provides.extend(parsed.provides);
             raw.extend(parsed.entries.into_iter().map(|e| (e.symbol.clone(), e)));
             attributes.extend(parsed.attributes.into_iter().map(|a| (a.symbol, a.class)));
             opaque_packages.extend(parsed.opaque_packages);
@@ -921,13 +960,16 @@ impl EffectiveEcosystemKb {
         let listed = serde_json::to_string(&invokes).unwrap_or_default();
         let caches = serde_json::to_string(&cached_properties).unwrap_or_default();
         let read = serde_json::to_string(&attributes).unwrap_or_default();
-        kb.digest = blake3::hash(format!("{}|{listed}|{caches}|{read}", kb.digest).as_bytes())
-            .to_hex()
-            .to_string();
+        let provided = serde_json::to_string(&provides).unwrap_or_default();
+        kb.digest =
+            blake3::hash(format!("{}|{listed}|{caches}|{read}|{provided}", kb.digest).as_bytes())
+                .to_hex()
+                .to_string();
         kb.invokes = invokes;
         kb.cached_properties = cached_properties;
         kb.attributes = attributes;
         kb.distributions = distributions;
+        kb.provides = provides;
         kb.user_symbols = overrides
             .iter()
             .filter(|p| p.attribute_type.is_none())
@@ -969,6 +1011,21 @@ impl EffectiveEcosystemKb {
     /// keeping the value in the instance `__dict__` ([`CachedPropertyDecorator`]).
     pub fn cached_property(&self, symbol: &str) -> Option<&CachedPropertyDecorator> {
         self.cached_properties.get(symbol)
+    }
+
+    /// The distributions the catalog lists as installing the module `module` under another
+    /// name ([`Provides`]): those listing it or a package holding it.
+    pub fn distributions_providing(&self, module: &str) -> impl Iterator<Item = &str> {
+        self.provides
+            .iter()
+            .filter(move |p| {
+                p.modules.iter().any(|m| {
+                    module
+                        .strip_prefix(m.as_str())
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+                })
+            })
+            .map(|p| p.distribution.as_str())
     }
 
     /// Whether a row of the catalog types an attribute named `attr`, on any class.
@@ -1774,10 +1831,39 @@ mod tests {
                 tagged(EnvironmentAccess::Read),
             ),
             (
-                s(&["importlib.util.find_spec", "importlib.import_module"]),
+                s(&["importlib.util.find_spec"]),
                 tagged(EnvironmentAccess::Import),
             ),
+            (
+                s(&["importlib.import_module"]),
+                EcosystemEntry {
+                    loads_module: Some(LoadsModule {
+                        name: slot(0, "name"),
+                        package: Some(slot(1, "package")),
+                        level: None,
+                    }),
+                    ..tagged(EnvironmentAccess::Import)
+                },
+            ),
+            (
+                s(&["builtins.__import__"]),
+                EcosystemEntry {
+                    loads_module: Some(LoadsModule {
+                        name: slot(0, "name"),
+                        package: None,
+                        level: Some(slot(4, "level")),
+                    }),
+                    ..entry(&[])
+                },
+            ),
         ]
+    }
+
+    fn slot(arg: u8, param: &str) -> ArgSlot {
+        ArgSlot {
+            arg: Some(arg),
+            param: Some(param.to_owned()),
+        }
     }
 
     fn standard_library() -> Vec<(Vec<String>, EcosystemEntry)> {
@@ -4400,6 +4486,46 @@ mod tests {
             assert!(
                 matches!(&result, Err(KbError::InvalidEffect(name)) if name == bad),
                 "{bad}: {result:?}"
+            );
+        }
+    }
+
+    /// The calls that import a module by name, and the distributions installing modules under
+    /// other names, as the built-in catalog lists them.
+    #[test]
+    fn module_loads_and_providing_distributions() {
+        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        let loads = |symbol: &str| kb.lookup(symbol).and_then(|e| e.loads_module.clone());
+        assert_eq!(
+            loads("importlib.import_module"),
+            Some(LoadsModule {
+                name: slot(0, "name"),
+                package: Some(slot(1, "package")),
+                level: None,
+            })
+        );
+        assert_eq!(
+            loads("builtins.__import__"),
+            Some(LoadsModule {
+                name: slot(0, "name"),
+                package: None,
+                level: Some(slot(4, "level")),
+            })
+        );
+        assert_eq!(loads("importlib.util.find_spec"), None);
+        for (module, distributions) in [
+            ("yaml", vec!["PyYAML"]),
+            ("yaml.loader", vec!["PyYAML"]),
+            ("yamlish", vec![]),
+            ("cv2", vec!["opencv-python", "opencv-python-headless"]),
+            ("google.protobuf.message", vec!["protobuf"]),
+            ("google", vec![]),
+            ("requests", vec![]),
+        ] {
+            assert_eq!(
+                kb.distributions_providing(module).collect::<Vec<_>>(),
+                distributions,
+                "{module}"
             );
         }
     }

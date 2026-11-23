@@ -372,11 +372,20 @@ pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
     if let Some(question) = &args.generate_prompt {
         return crate::prompt::run(args, question);
     }
-    let Some(path) = &args.walk_steps else {
-        return run_check(args);
+    recording_steps(args.walk_steps.as_deref(), || run_check(args))
+}
+
+/// `run()`, with the steps of every walk written to `path` when one is given
+/// (`--walk-steps`).
+pub(crate) fn recording_steps(
+    path: Option<&Path>,
+    run: impl FnOnce() -> Result<ExitCode>,
+) -> Result<ExitCode> {
+    let Some(path) = path else {
+        return run();
     };
     heki_ir::walk::record_steps();
-    let code = run_check(args)?;
+    let code = run()?;
     let steps = serde_json::to_string_pretty(&heki_ir::walk::recorded_steps())?;
     std::fs::write(path, steps + "\n")
         .with_context(|| format!("cannot write `{}`", path.display()))?;

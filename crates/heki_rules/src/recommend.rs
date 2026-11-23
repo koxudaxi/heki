@@ -275,7 +275,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
             let qualnames = f.ir.functions.iter().map(|g| g.qualname.as_str());
             std::iter::once("")
                 .chain(qualnames)
-                .any(|q| crate::eff_rules::is_test_code(q, &f.rel))
+                .any(|q| heki_effect::code_kind::is_test_code(q, &f.rel))
         })
         .map(|f| f.path.as_path())
         .collect();

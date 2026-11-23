@@ -23,6 +23,7 @@ pub mod cache_flow;
 mod callgraph;
 pub use callgraph::{HopGap, MustExplainer, MustGap, SiteMust};
 pub mod capacity;
+pub mod code_kind;
 mod paths;
 pub use paths::with_paths;
 mod construction;
@@ -32,6 +33,7 @@ pub(crate) mod decorators;
 mod environment;
 pub mod guards;
 pub mod held;
+pub mod imports;
 mod infer;
 mod invalidation;
 mod invokes;
@@ -2152,6 +2154,10 @@ pub struct FileSummary {
     /// finds one). Read through [`Self::kept_removals`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kept_removals: Option<Box<BTreeSet<String>>>,
+    /// The file's import sites ([`imports::ModuleImports`]; local, IR-free; `None` unless
+    /// [`OptInFacts::imports`], and for a typing stub, whose imports never run).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imports: Option<Box<imports::ModuleImports>>,
 }
 
 impl FileSummary {
@@ -2203,6 +2209,10 @@ pub struct IncrementalUpdate {
     /// The functions of the file (and of call cycles through it) whose facts changed or that
     /// disappeared, and the callers whose facts changed with them, sorted.
     pub changed: Vec<FuncKey>,
+    /// The file's import facts changed, wherever its sites are written
+    /// ([`imports::ModuleImports::same_facts`]), or it appeared or disappeared with some: the
+    /// import graph changed.
+    pub imports_changed: bool,
 }
 
 /// A file of the project that heki could not read or parse, by the module it would define.
@@ -2337,7 +2347,8 @@ pub enum TypedWrites {
 /// `CallSite::under_lock`), `EFF112`'s set-order flows (`EffectSummary::set_order`), `EFF114`'s
 /// call cycles (`EffectSummary::call_cycle`), and the shared state functions change
 /// (`EffectSummary::shared_state`), which only `heki inspect` reads, and the calls heki is
-/// blind to (`FileSummary::blind_spots`), which only `heki recommend` reads.
+/// blind to (`FileSummary::blind_spots`), which only `heki recommend` reads, and the import
+/// facts (`FileSummary::imports`), which `heki inspect --imports` reads.
 /// `CallSite::returned`, which `MUT202` reads too, is always computed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OptInFacts {
@@ -2356,6 +2367,8 @@ pub struct OptInFacts {
     pub blind_spots: bool,
     pub set_order: bool,
     pub call_cycles: bool,
+    /// [`FileSummary::imports`].
+    pub imports: bool,
 }
 
 impl OptInFacts {
@@ -2372,6 +2385,7 @@ impl OptInFacts {
         blind_spots: false,
         set_order: true,
         call_cycles: true,
+        imports: true,
     };
 
     /// Whether the call sites carry [`CallSite::complete`] and [`CallSite::on_every_return`].
@@ -2705,6 +2719,11 @@ impl ProjectIndex {
     pub fn update_file(&mut self, mut new_file: FileSummary) -> IncrementalUpdate {
         let path = new_file.path.clone();
         let old_file = self.files.remove(&path);
+        let old_imports = old_file.as_ref().and_then(|f| f.imports.as_deref());
+        let imports_changed = match (old_imports, new_file.imports.as_deref()) {
+            (Some(old), Some(new)) => !old.same_facts(new),
+            (old, new) => old.is_some() != new.is_some(),
+        };
         let mut previous: FxHashMap<FuncKey, Arc<EffectSummary>> = FxHashMap::default();
         let mut owned_before: FxHashSet<FuncKey> = FxHashSet::default();
         if let Some(old) = &old_file {
@@ -2835,6 +2854,7 @@ impl ProjectIndex {
                 summary_changed,
                 affected_callers: Vec::new(),
                 changed,
+                imports_changed,
             };
         }
         region = affected.iter().chain(&relocated).cloned().collect();
@@ -2865,6 +2885,7 @@ impl ProjectIndex {
             summary_changed,
             affected_callers: affected,
             changed,
+            imports_changed,
         }
     }
 

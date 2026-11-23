@@ -59,28 +59,7 @@ fn relaxed(s: &EffectSummary, key: &FuncKey, unit: &ModuleUnit<'_>, relax_tests:
     if has_decorator(s, "asynccontextmanager") && name.contains("lifespan") {
         return true;
     }
-    relax_tests && is_test_code(&key.qualname, &unit.rel_path)
-}
-
-/// Test code as pytest discovers it by default: a `test_*` function (a method of a test class
-/// included) and the functions nested in one, and every function of a `test_*.py` or
-/// `*_test.py` file or of a file under a `test/` or `tests/` directory.
-pub(crate) fn is_test_code(qualname: &str, rel_path: &str) -> bool {
-    let mut components = rel_path.split('/').peekable();
-    let mut in_tests = false;
-    let mut file = "";
-    while let Some(c) = components.next() {
-        if components.peek().is_some() {
-            in_tests |= c == "tests" || c == "test";
-        } else {
-            file = c;
-        }
-    }
-    let stem = file.strip_suffix(".py").unwrap_or(file);
-    in_tests
-        || stem.starts_with("test_")
-        || stem.ends_with("_test")
-        || qualname.split('.').any(|part| part.starts_with("test_"))
+    relax_tests && heki_effect::code_kind::is_test_code(&key.qualname, &unit.rel_path)
 }
 
 /// The code of a boundary report: `EFF105` for the file system, `EFF101` when whenever the call

@@ -77,6 +77,12 @@ pub struct ModuleImport {
     /// which are evaluated before it binds its name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rebound_at: Option<u32>,
+    /// From Python 3.15 on, the module's `__lazy_modules__` may make this import lazy, and heki
+    /// cannot tell: the list is not one literal bound once and never changed, or it may name
+    /// the module of a relative import, or the import is in the `else` or `finally` clause of a
+    /// `try` statement, where CPython decides by the shape of the code around it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lazy_open: bool,
     pub span: Span,
 }
 
@@ -188,6 +194,9 @@ struct ScopeBuilder {
     class_comp_reads: FxHashSet<String>,
     /// Names bound by an inlined class-body comprehension itself (which ARE visible in it).
     class_comp_bindings: FxHashSet<String>,
+    /// How many times the scope binds `__lazy_modules__` ([`Analyzer::mark_lazy_modules`]),
+    /// up to 2.
+    lazy_modules_bindings: u8,
 }
 
 impl ScopeBuilder {
@@ -222,6 +231,7 @@ impl ScopeBuilder {
             in_comp_reads: FxHashSet::default(),
             class_comp_reads: FxHashSet::default(),
             class_comp_bindings: FxHashSet::default(),
+            lazy_modules_bindings: 0,
         }
     }
 
@@ -246,6 +256,9 @@ impl ScopeBuilder {
         is_lazy_import: bool,
     ) {
         let name = self.mangle(raw_name);
+        if name == LAZY_MODULES {
+            self.lazy_modules_bindings = self.lazy_modules_bindings.saturating_add(1).min(2);
+        }
         if self.bound_names.insert(name.clone()) {
             self.bindings.push(Binding {
                 name,
@@ -361,7 +374,33 @@ struct Analyzer<'a> {
     star_imports: Vec<StarImport>,
     /// Target names of every PEP 709 inlined comprehension, by region index.
     comp_regions: Vec<FxHashSet<String>>,
+    /// The parts of the `try` statements around the statement being visited.
+    try_parts: Vec<TryPart>,
+    /// Per import (same index as `imports`), whether a listing in `__lazy_modules__` makes it
+    /// lazy ([`Analyzer::mark_lazy_modules`]).
+    lazy_listing: Vec<LazyListing>,
     source: &'a str,
+}
+
+/// A part of a `try` statement, for the imports `__lazy_modules__` makes lazy.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TryPart {
+    /// The body or an `except` clause: CPython imports there at once.
+    BodyOrHandler,
+    /// The `else` or `finally` clause: CPython makes some of them lazy and not others.
+    ElseOrFinally,
+}
+
+/// What a listing in the module's `__lazy_modules__` does to one import (PEP 810).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LazyListing {
+    /// Nothing: a lazy import already, an import in a function or class body, or one in the
+    /// body or an `except` clause of a `try` statement.
+    Never,
+    /// It makes the import lazy.
+    Applies,
+    /// It may (`TryPart::ElseOrFinally`).
+    Open,
 }
 
 impl<'a> Analyzer<'a> {
@@ -391,6 +430,8 @@ impl<'a> Analyzer<'a> {
             has_star_import: false,
             star_imports: Vec::new(),
             comp_regions: Vec::new(),
+            try_parts: Vec::new(),
+            lazy_listing: Vec::new(),
             source,
         }
     }
@@ -533,6 +574,76 @@ impl<'a> Analyzer<'a> {
             imp.rebound_at = rebinds
                 .get(imp.bound_name.as_str())
                 .and_then(|starts| starts.iter().copied().find(|&s| s > imp.span.end));
+        }
+    }
+
+    /// What a listing in `__lazy_modules__` does to an import statement at the current point
+    /// (lazy already when `is_lazy`). CPython checks the list only for imports in the module
+    /// body, outside the body and the `except` clauses of a `try` statement (checked on
+    /// CPython 3.15).
+    fn lazy_listing_here(&self, is_lazy: bool) -> LazyListing {
+        if is_lazy || self.cur_scope_id() != ScopeId(0) {
+            return LazyListing::Never;
+        }
+        match self.try_parts.as_slice() {
+            [] => LazyListing::Applies,
+            parts if parts.iter().all(|p| *p == TryPart::BodyOrHandler) => LazyListing::Never,
+            _ => LazyListing::Open,
+        }
+    }
+
+    /// PEP 810 (3.15+): the module body's `__lazy_modules__` makes the imports of the modules
+    /// it lists lazy, when they run after it is bound. heki reads it only when the module body
+    /// binds it once, at its top level, to a list, tuple, or set of string literals, and
+    /// nothing else in the module reads, binds, or deletes it (`__lazy_modules__.append(...)`
+    /// changes it). An import is listed by its full module name (`import a.b` by `a.b`, `from
+    /// a.b import c` by `a.b`); the name of a relative import is the package's, which this
+    /// model does not know. Whatever heki cannot read leaves the import's laziness open.
+    fn mark_lazy_modules(&mut self, suite: &[Stmt]) {
+        const NAME: &str = LAZY_MODULES;
+        if !self.profile.pep810_lazy_imports {
+            return;
+        }
+        let bindings = self.scopes[0].lazy_modules_bindings;
+        let mentioned = (self.scopes.iter())
+            .any(|sc| sc.raw_read_set.contains(NAME) || sc.global_decls.contains(NAME));
+        if bindings == 0 && !mentioned {
+            return;
+        }
+        let assigned = suite.iter().find_map(|stmt| match stmt {
+            Stmt::Assign(a)
+                if matches!(a.targets.as_slice(), [Expr::Name(n)] if n.id.as_str() == NAME) =>
+            {
+                Some((stmt.range().end().to_u32(), string_literals(&a.value)))
+            }
+            _ => None,
+        });
+        // The listed names and where the list starts to apply; `None`: a list heki cannot read.
+        let list = match assigned {
+            Some((after, Some(names))) if bindings == 1 && !mentioned => Some((after, names)),
+            _ => None,
+        };
+        for (imp, listing) in self.imports.iter_mut().zip(&self.lazy_listing) {
+            if *listing == LazyListing::Never {
+                continue;
+            }
+            let Some((after, names)) = &list else {
+                imp.lazy_open = true;
+                continue;
+            };
+            if imp.span.start < *after {
+                continue;
+            }
+            let module = if imp.is_from {
+                imp.module.as_deref().unwrap_or_default()
+            } else {
+                imp.imported_name.as_str()
+            };
+            let listed = imp.level > 0 || names.iter().any(|n| n == module);
+            match listing {
+                LazyListing::Applies if imp.level == 0 => imp.is_lazy |= listed,
+                _ => imp.lazy_open |= listed,
+            }
         }
     }
 
@@ -772,6 +883,7 @@ impl<'a> Analyzer<'a> {
                 }
             }
             Stmt::Try(t) => {
+                self.try_parts.push(TryPart::BodyOrHandler);
                 self.visit_suite(&t.body);
                 for h in &t.handlers {
                     let ast::ExceptHandler::ExceptHandler(eh) = h;
@@ -788,8 +900,11 @@ impl<'a> Analyzer<'a> {
                     }
                     self.visit_suite(&eh.body);
                 }
+                self.try_parts.pop();
+                self.try_parts.push(TryPart::ElseOrFinally);
                 self.visit_suite(&t.orelse);
                 self.visit_suite(&t.finalbody);
+                self.try_parts.pop();
             }
             Stmt::Assert(a) => {
                 self.visit_expr(&a.test);
@@ -823,8 +938,10 @@ impl<'a> Analyzer<'a> {
                         is_lazy: imp.is_lazy,
                         in_type_checking: self.in_type_checking,
                         rebound_at: None,
+                        lazy_open: false,
                         span: Span::from(alias.range),
                     });
+                    self.lazy_listing.push(self.lazy_listing_here(imp.is_lazy));
                 }
             }
             Stmt::ImportFrom(imp) => {
@@ -869,8 +986,10 @@ impl<'a> Analyzer<'a> {
                         is_lazy: imp.is_lazy,
                         in_type_checking: self.in_type_checking,
                         rebound_at: None,
+                        lazy_open: false,
                         span: Span::from(alias.range),
                     });
+                    self.lazy_listing.push(self.lazy_listing_here(imp.is_lazy));
                 }
             }
             Stmt::Global(g) => {
@@ -1666,7 +1785,27 @@ pub fn analyze_module(
     let mut analyzer = Analyzer::new(source, profile, module.suite());
     analyzer.visit_suite(module.suite());
     analyzer.mark_overridden_imports(module.suite());
+    analyzer.mark_lazy_modules(module.suite());
     analyzer.resolve_all()
+}
+
+/// The module global listing the modules whose imports are lazy (PEP 810).
+const LAZY_MODULES: &str = "__lazy_modules__";
+
+/// The strings of a list, tuple, or set display of string literals only.
+fn string_literals(value: &Expr) -> Option<Vec<String>> {
+    let elts = match value {
+        Expr::List(l) => &l.elts,
+        Expr::Tuple(t) => &t.elts,
+        Expr::Set(s) => &s.elts,
+        _ => return None,
+    };
+    elts.iter()
+        .map(|e| match e {
+            Expr::StringLiteral(s) => Some(s.value.to_str().to_owned()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The names a module-body statement always binds when it runs (not those of its nested
@@ -1759,5 +1898,94 @@ class Child(Base):
                 .iter()
                 .any(|s| s.kind == ScopeKind::Comprehension)
         );
+    }
+
+    /// Each import's `(is_lazy, lazy_open)` under `__lazy_modules__`, by its bound name, on
+    /// CPython 3.15 (as `tests/import_verify/` checks on the interpreter) and on 3.14, where
+    /// the list does nothing.
+    #[test]
+    fn lazy_modules_lists_make_later_module_body_imports_lazy() {
+        let listed = "__lazy_modules__ = [\"a.b\", \"c\", \"d\", \"e\", \"f\", \"g\"]\n";
+        for (src, expected) in [
+            (
+                format!("import c\n{listed}import a.b as ab\nimport a\nfrom c import x\n"),
+                vec![
+                    ("c", false, false),
+                    ("ab", true, false),
+                    ("a", false, false),
+                    ("x", true, false),
+                ],
+            ),
+            (
+                format!("{listed}if 1:\n    import d\nwith o:\n    import e as e\n"),
+                vec![("d", true, false), ("e", true, false)],
+            ),
+            (
+                format!(
+                    "{listed}try:\n    import c\nexcept ImportError:\n    import d\nelse:\n    import e\nfinally:\n    import f\n    import h\n"
+                ),
+                vec![
+                    ("c", false, false),
+                    ("d", false, false),
+                    ("e", false, true),
+                    ("f", false, true),
+                    ("h", false, false),
+                ],
+            ),
+            (
+                format!(
+                    "{listed}def f():\n    import c\nclass K:\n    import d\nfrom . import g\nfrom .z import y\n"
+                ),
+                vec![
+                    ("c", false, false),
+                    ("d", false, false),
+                    ("g", false, true),
+                    ("y", false, true),
+                ],
+            ),
+            (
+                format!("{listed}__lazy_modules__.append(\"h\")\nimport c\nimport h\n"),
+                vec![("c", false, true), ("h", false, true)],
+            ),
+            (
+                format!("{listed}{listed}import c\n"),
+                vec![("c", false, true)],
+            ),
+            (
+                "def f():\n    global __lazy_modules__\n    __lazy_modules__ = []\nimport c\n"
+                    .to_owned(),
+                vec![("c", false, true)],
+            ),
+            (
+                "__lazy_modules__ = [name]\nimport c\nlazy import d\n".to_owned(),
+                vec![("c", false, true), ("d", true, false)],
+            ),
+            (
+                "__lazy_modules__ = (\"c\",)\nimport c\n".to_owned(),
+                vec![("c", true, false)],
+            ),
+            (
+                "__lazy_modules__ = {\"c\"}\nimport c\n".to_owned(),
+                vec![("c", true, false)],
+            ),
+            (
+                "__lazy_modules__ = make()\nimport c\n".to_owned(),
+                vec![("c", false, true)],
+            ),
+            ("import c\n".to_owned(), vec![("c", false, false)]),
+        ] {
+            let parsed = parse_module(&src).unwrap();
+            let model = analyze_module(&parsed, &src, RuntimeProfile::from(PythonVersion::PY315));
+            let got: Vec<(&str, bool, bool)> = (model.imports.iter())
+                .map(|i| (i.bound_name.as_str(), i.is_lazy, i.lazy_open))
+                .collect();
+            assert_eq!(got, expected, "{src}");
+            let older = analyze_module(&parsed, &src, RuntimeProfile::from(PythonVersion::PY314));
+            assert!(
+                (older.imports.iter()).all(|i| !i.lazy_open
+                    && i.is_lazy == (i.bound_name == "d" && src.contains("lazy import d"))),
+                "{src}"
+            );
+        }
     }
 }

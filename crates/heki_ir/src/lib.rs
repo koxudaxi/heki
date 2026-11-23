@@ -1013,6 +1013,11 @@ pub struct ModuleIr {
     /// may be rebound by it (`heki_soundness` builtin-shadowing protection, Assumption A1(b)).
     #[serde(default)]
     pub has_star_import: bool,
+    /// The `from m import *` statements of the module body, with the block of each: they bind
+    /// names, so they are no instructions. A statement in a `finally` body is listed once per
+    /// way out of its `try`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub star_imports: Vec<(BlockId, Span)>,
     /// Module-level names the code fixes (integer constants and small displays), for the
     /// size facts of [`FnIndex`] and the declarations other modules read.
     #[serde(default)]
