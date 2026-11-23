@@ -255,8 +255,8 @@ def hands_back(text: str, items: list[str]) -> None:
 "#;
 
 /// A method whose call may run a plain implementation, which is no report, one whose every
-/// implementation is a generator function, and a name bound to two definitions, which the report
-/// words as such.
+/// implementation is a generator function (or an async generator function), and a name bound to
+/// two definitions, which the report words as such.
 const POSSIBLE: &str = r#"import sys
 
 
@@ -312,6 +312,20 @@ def run(source: Source, stream: Stream, pager: Pager) -> None:
     stream.rows()  # EFF116
     chunks()  # EFF116
     pager.pages()  # EFF116
+
+
+class Feed:
+    async def items(self):
+        yield 1
+
+
+class LiveFeed(Feed):
+    async def items(self):
+        yield 2
+
+
+async def run_feed(feed: Feed) -> None:
+    feed.items()  # EFF116
 "#;
 
 const SOURCES: &[(&str, &str)] = &[
@@ -442,6 +456,12 @@ fn a_report_names_the_function_and_what_reads_its_generator() {
         ),
         "{}",
         message_at(&diags, "pkg/possible.py", 55)
+    );
+    assert_eq!(
+        message_at(&diags, "pkg/possible.py", 69),
+        "the call of `Feed.items` is a statement, and `Feed.items` and the other implementations \
+         the call may run are async generator functions: calling it only creates an async \
+         generator, so the body does not run"
     );
     let first = report_at(&diags, "pkg/statements.py", 17);
     assert_eq!(first["qualname"], "Code.instruction");

@@ -2058,9 +2058,8 @@ impl<'a> Reach<'a> {
         i: usize,
         func: &FuncKey,
     ) {
-        let Some(path) = cx.index.file_of(func) else {
-            return;
-        };
+        // The node runs its body: the function has a summary, kept with its file.
+        let path = cx.index.file_of(func).expect("summarized");
         let summary = cx.index.summary(func);
         let blind = cx.index.files[path].blind_calls_of(func);
         let mut unresolved = false;

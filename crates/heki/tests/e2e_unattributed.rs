@@ -72,7 +72,10 @@ const MODEL: &str = r#"class Field:
         self.required = False
 "#;
 
-const HELPERS: &str = r#"def call(run, field):
+const HELPERS: &str = r#"import os
+
+
+def call(run, field):
     run(field)
 
 
@@ -86,6 +89,19 @@ def write(thing):
 
 def evaluated(text):
     return eval(text)
+
+
+class Maker:
+    def __init__(self, field):
+        self.field = field
+
+
+def make(field):
+    return field
+
+
+if os.environ.get("PLAIN"):
+    make = Maker
 "#;
 
 const STUBBED: &str = r#"from pkg.model import Field
@@ -93,8 +109,13 @@ const STUBBED: &str = r#"from pkg.model import Field
 def go(field: Field) -> None: ...
 "#;
 
-/// The shapes a boundary cannot judge, and the ones it can.
-const SHAPES: &str = r#"from pkg import helpers, stubbed
+/// The shapes a boundary cannot judge, and the ones it can: a call of a name bound to a
+/// function on one path and to a class on another is unresolved; a call of a library function
+/// the catalog has no entry for is not.
+const SHAPES: &str = r#"import vendor
+
+from pkg import helpers, stubbed
+from pkg.helpers import make
 from pkg.model import Field
 
 
@@ -136,6 +157,14 @@ def through_stub(field: Field) -> None:
 
 def writes_field(field: Field) -> None:
     field.required = True  # EFF201
+
+
+def through_either(field: Field) -> None:
+    make(field)  # EFF201
+
+
+def through_library(field: Field) -> None:
+    vendor.process(field)
 "#;
 
 fn boundary_project(name: &str) -> Project {
@@ -182,7 +211,28 @@ fn a_boundary_reporting_what_it_cannot_judge_reports_each_shape_with_its_chain()
         message(at("stubbed.go")),
         "`through_stub` reaches a body only a stub declares (via `pkg.stubbed.go`), so effect boundary `checks` cannot tell what it does there"
     );
+    assert_eq!(
+        message(at("make(field)")),
+        "`through_either` reaches a call heki cannot resolve (`make`), so effect boundary `checks` cannot tell what it does there"
+    );
     assert_eq!(reported(&p, "pkg/lenient.py", &["EFF201"]).len(), 1);
+}
+
+#[test]
+fn an_unknown_unresolved_value_is_a_configuration_error() {
+    let p = boundary_project("unattributed_unknown_value");
+    p.write(
+        "pyproject.toml",
+        &BOUNDARIES.replace("unresolved = \"report\"", "unresolved = \"maybe\""),
+    );
+    let (code, stdout, stderr) = p.check(&[]);
+    assert_eq!(code, 2, "{stdout}{stderr}");
+    assert!(
+        stderr.contains(
+            "unknown `unresolved` value `maybe` in effect-boundaries `checks` (expected `ignore` or `report`)"
+        ),
+        "{stderr}"
+    );
 }
 
 const CONSTRUCTION: &str = r#"[project]
@@ -227,7 +277,9 @@ class Copier:
         setattr(source, name, 0)
 "#;
 
-/// Constructing objects of the target classes, and writes that stay unknown.
+/// Constructing objects of the target classes, writes naming an attribute at run time on an
+/// object the function constructs (`fresh-objects = "allow"`, the default), and writes that stay
+/// unknown.
 const BUILDS: &str = r#"from pkg.records import Assigned, Copier, Filled, Record, assign, fill
 
 
@@ -257,6 +309,12 @@ def refills(record: Filled, name: str) -> None:
 
 def reassigns(thing) -> None:
     assign(thing)  # EFF201
+
+
+def names_on_a_new_record(name: str) -> Record:
+    record = Record(name)
+    setattr(record, name, 1)
+    return record
 "#;
 
 #[test]

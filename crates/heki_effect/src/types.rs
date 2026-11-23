@@ -555,7 +555,18 @@ mod tests {
         assert_eq!(both.depth(), 1);
         assert_eq!(f.depth(), 1);
         assert_eq!(Ty::Partial(Box::new(f.clone())).depth(), 2);
-        assert_eq!(list(Elem::Of(f)).depth(), 2);
+        assert_eq!(list(Elem::Of(f.clone())).depth(), 2);
+        // A value is one of the named objects it names: one, those of a choice, none for an
+        // instance. One name is that object; two to eight are a choice; none or more, nothing.
+        let names = |n: usize| (0..n).map(|i| format!("m.f{i}"));
+        let choice = Ty::one_of(names(2).rev()).unwrap();
+        assert_eq!(choice, Ty::OneOf(names(2).collect()));
+        assert_eq!(f.named(), ["m.f"]);
+        assert_eq!(choice.named(), ["m.f0", "m.f1"]);
+        assert!(Ty::inst("m.A").named().is_empty());
+        assert_eq!(Ty::one_of(["m.f".to_owned(), "m.f".to_owned()]), Some(f));
+        assert_eq!(Ty::one_of(names(0)), None);
+        assert_eq!(Ty::one_of(names(MAX_NAMED + 1)), None);
     }
 
     #[test]

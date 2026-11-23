@@ -3147,10 +3147,11 @@ fn stores_through_families_and_re_exports_keep_what_they_bind() {
 }
 
 /// More spellings of stores and deletions, recognized by the value of the callee: `setattr`
-/// through `builtins`, a local alias, an import in the function, a closure cell, or names bound
-/// on both branches; deletions and namespace reads store nothing; a namespace handed on,
-/// merged, updated from keywords or another dict, or written under another method stores any
-/// attribute; stores through a union of classes, the module itself, and in place.
+/// through `builtins`, a local alias, an import in the function (also the function's only sign
+/// of a store), a closure cell, or names bound on both branches; deletions and namespace reads
+/// store nothing; a namespace handed on, merged, updated from keywords or another dict, or
+/// written under another method stores any attribute; stores through a union of classes, the
+/// module itself, and in place.
 const FORMS: &str = r#"import builtins
 import collections
 from typing import Protocol
@@ -3221,6 +3222,19 @@ class Spelled:
         self.client.get("https://example.com")  # EFF101
         for c in self.items:
             c.get("https://example.com")  # EFF101
+
+
+class ImportedSetattr:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def swap(self, client: httpx.AsyncClient) -> None:
+        from builtins import setattr as put
+
+        put(self, "client", client)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
 
 
 def fill(namespace) -> None:

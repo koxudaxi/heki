@@ -3477,14 +3477,13 @@ impl ProjectDecls {
     /// on instances through other receivers, and those stored on the class object outside the
     /// class body. Empty for a name that is no project class.
     pub fn declared_names(&self, class: &str) -> Vec<&str> {
-        let mut out = Vec::new();
-        if let Some(c) = self.class(class) {
-            out.extend(c.members.iter().map(String::as_str));
-            out.extend(c.attr_types.keys().map(String::as_str));
-            out.extend(c.attr_stores.iter().map(|(name, _)| &**name));
-            out.extend(c.rebound_attrs.iter().map(String::as_str));
-        }
-        out
+        let names = self.class(class).into_iter().flat_map(|c| {
+            (c.members.iter().map(String::as_str))
+                .chain(c.attr_types.keys().map(String::as_str))
+                .chain(c.attr_stores.iter().map(|(name, _)| &**name))
+                .chain(c.rebound_attrs.iter().map(String::as_str))
+        });
+        names.collect()
     }
 
     /// Whether the canonical project class `class` is a `TypedDict`.
@@ -6435,12 +6434,10 @@ fn unknown_globals(stores: &GlobalStores<'_>, decls: &ModuleDecls) -> BTreeSet<S
 /// unbounded, and so does a variable a star import, `exec`, or `globals()` may rebind.
 fn type_vars(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<String, Ty> {
     let mut out = BTreeMap::new();
-    let Some(body) = input.ir.functions.iter().find(|f| f.is_module_body) else {
-        return out;
-    };
     if input.ir.constants.dynamic || input.ir.has_star_import {
         return out;
     }
+    let body = input.ir.function(input.ir.module_fn);
     let stores = GlobalStores::of(&input.ir.functions);
     let shape = FnShape::new(body);
     let text = |var: VarId| annotation_text(&shape, var);
@@ -6499,31 +6496,25 @@ fn type_vars(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<String, T
 
 /// The annotation text the module-body variable `var` holds or names: a string literal, a name
 /// the body binds or reads (an import, a class, a global), or an attribute of one
-/// (`views.ContextView`), at most [`MAX_ALIAS_SEGMENTS`] segments.
+/// (`views.ContextView`), at most [`MAX_ALIAS_SEGMENTS`] segments. Every load and every
+/// assignment of a name binds a variable the IR names after it.
 fn annotation_text(shape: &FnShape<'_>, var: VarId) -> Option<String> {
     let mut attrs: Vec<&str> = Vec::new();
     let mut cur = var;
-    let named = |base: &str, attrs: &[&str]| {
-        let mut text = base.to_owned();
-        for attr in attrs.iter().rev() {
-            text.push('.');
-            text.push_str(attr);
-        }
-        text
-    };
-    for _ in 0..MAX_ALIAS_CHASE + MAX_ALIAS_SEGMENTS {
+    loop {
         if let Some(name) = shape.f.var_name(cur).filter(|n| !n.starts_with('.')) {
-            return Some(named(name, &attrs));
+            let mut text = name.to_owned();
+            for attr in attrs.iter().rev() {
+                text.push('.');
+                text.push_str(attr);
+            }
+            return Some(text);
         }
         match &shape.inst(cur)?.kind {
             InstKind::Const {
                 literal: heki_ir::ConstLiteral::Str(s),
                 ..
             } if attrs.is_empty() => return Some(s.to_string()),
-            InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
-                return Some(named(name, &attrs));
-            }
-            InstKind::Copy { src, .. } => cur = *src,
             InstKind::AttrLoad { obj, attr, .. } if attrs.len() < MAX_ALIAS_SEGMENTS => {
                 attrs.push(attr);
                 cur = *obj;
@@ -6531,7 +6522,6 @@ fn annotation_text(shape: &FnShape<'_>, var: VarId) -> Option<String> {
             _ => return None,
         }
     }
-    None
 }
 
 /// [`ModuleDecls::rebound_imports`]: the import's own store is one of the module's stores of
@@ -7956,25 +7946,35 @@ fn union_targets(
 fn named_targets(fqns: &[String], each: impl Fn(&str) -> Callee) -> Callee {
     let mut out: Option<Callee> = None;
     for fqn in fqns {
-        out = Some(match (out, each(fqn)) {
-            (None, callee) => callee,
-            (Some(Callee::Project(mut keys, binds)), Callee::Project(more, b)) if binds == b => {
-                for k in more {
-                    if !keys.contains(&k) {
-                        keys.push(k);
-                    }
-                }
-                if keys.len() > CHA_CANDIDATE_LIMIT {
-                    return Callee::TooMany;
-                }
-                Callee::Project(keys, binds)
-            }
-            (Some(Callee::External(a)), Callee::External(b)) if a == b => Callee::External(a),
-            (Some(Callee::TooMany), _) | (_, Callee::TooMany) => return Callee::TooMany,
-            _ => return Callee::Unresolved,
-        });
+        match join_either(out, each(fqn)) {
+            Ok(joined) => out = Some(joined),
+            Err(targets) => return targets,
+        }
     }
     out.unwrap_or(Callee::Unresolved)
+}
+
+/// The targets of a call that may run what `out` resolves (the objects before, if any) or what
+/// `callee` does: the project functions of both, when they bind the receiver alike, or the one
+/// external function both are. `Err` holds the targets that end the join: too many past
+/// [`CHA_CANDIDATE_LIMIT`] functions, and unresolved for anything else.
+fn join_either(out: Option<Callee>, callee: Callee) -> Result<Callee, Callee> {
+    match (out, callee) {
+        (None, callee) => Ok(callee),
+        (Some(Callee::Project(mut keys, binds)), Callee::Project(more, b)) if binds == b => {
+            for k in more {
+                if !keys.contains(&k) {
+                    keys.push(k);
+                }
+            }
+            if keys.len() > CHA_CANDIDATE_LIMIT {
+                return Err(Callee::TooMany);
+            }
+            Ok(Callee::Project(keys, binds))
+        }
+        (Some(Callee::External(a)), Callee::External(b)) if a == b => Ok(Callee::External(a)),
+        _ => Err(Callee::Unresolved),
+    }
 }
 
 impl Ty {
@@ -8677,22 +8677,10 @@ impl<'a> TypeCtx<'a> {
                 Symbol::External if on_instance && !is_static => Callee::Unresolved,
                 _ => self.call_targets(Some(Recv::Ref(&named))),
             };
-            out = Some(match (out, callee) {
-                (None, callee) => callee,
-                (Some(Callee::Project(mut keys, b)), Callee::Project(more, b2)) if b == b2 => {
-                    for k in more {
-                        if !keys.contains(&k) {
-                            keys.push(k);
-                        }
-                    }
-                    if keys.len() > CHA_CANDIDATE_LIMIT {
-                        return Some(Callee::TooMany);
-                    }
-                    Callee::Project(keys, b)
-                }
-                (Some(Callee::External(a)), Callee::External(b)) if a == b => Callee::External(a),
-                _ => return Some(Callee::Unresolved),
-            });
+            match join_either(out, callee) {
+                Ok(joined) => out = Some(joined),
+                Err(targets) => return Some(targets),
+            }
         }
         out
     }

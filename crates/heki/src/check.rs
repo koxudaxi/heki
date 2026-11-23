@@ -643,12 +643,8 @@ fn report_unmatched_entries(args: &CheckArgs, analyzed: &Analyzed) -> Result<boo
     // Without the key, only a run over the whole project judges: an entry naming code in a file
     // the paths leave out would look unmatched.
     if configured.is_none() {
-        let (left_out, _) = paths_leave_out(
-            &analyzed.project,
-            &args.paths,
-            1,
-            recommend::MAX_CENSUS_ENTRIES,
-        )?;
+        let limit = recommend::MAX_CENSUS_ENTRIES;
+        let (left_out, _) = paths_leave_out(&analyzed.project, &args.paths, 1, limit)?;
         if !left_out.is_empty() {
             return Ok(false);
         }
