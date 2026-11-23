@@ -124,5 +124,15 @@ def fetch_all(urls: list[str]) -> list[str]:
         return [session.get(url).text for url in urls]
 ```
 
+A reused client keeps state from one request to the next. A `requests.Session` persists the
+cookies that responses set across all requests made from it, and sends the `auth` and `headers`
+set on it with each of them
+([Session Objects](https://requests.readthedocs.io/en/latest/user/advanced/#session-objects)).
+An `httpx.Client` also persists cookies across requests, and applies the headers and auth passed
+to its constructor to every request
+([Clients](https://www.python-httpx.org/advanced/clients/#why-use-a-client)). When the loop
+makes requests for unrelated parties (other sites, other users), clear that state between them
+(`client.cookies.clear()` in both libraries), or keep one client per party.
+
 ## Fix safety
 No automatic fix.

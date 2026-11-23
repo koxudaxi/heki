@@ -3,58 +3,37 @@
 heki gives coding agents (Claude Code, Codex, Cursor, and similar) the checks it gives people:
 every diagnostic says what was proven, where the evidence is, and what blocks a fix. `heki
 inspect` says what one function does, so an agent does not read its callees to find out. The
-[Agent Skill](#agent-skill-experimental) teaches an agent the workflow of this page.
+[Agent Skill](#agent-skill-experimental) teaches an agent the routine of this page after an edit.
 
 ## Analyze the project, not one file
 
 heki follows calls across files. `heki check app/api.py` analyzes that file alone and misses what
-its callees do: run heki on the project (the default `.`) and filter the JSON by path.
+its callees do: run heki on the project (the default `.`).
 
-## Before an edit: `heki inspect` (experimental)
+A diagnostic sits where the problem shows, which is often not the file that was edited. In the
+[first example](index.md#a-blocking-call-two-helpers-below-an-async-def) of the overview, adding
+`requests.get` to `app/users.py` makes `EFF101` report at `app/api.py`, in the `async def` that
+reaches it through two helpers. To find the diagnostics an edit caused, keep those whose `path`
+or any `related[].path` is an edited file: a filter on `path` alone drops the ones in callers'
+files. Or compare with the run before the edit: record the findings once in a baseline outside
+the project, and each check with it reports only the new ones.
 
 ```console
-$ heki inspect app.users.load_user --output-format json
-$ heki inspect app/users.py:42
-$ heki inspect app/users.py::load_user --callers --depth 3
+$ heki check --baseline /tmp/heki-before.toml --update-baseline   # before the first edit
+$ heki check --baseline /tmp/heki-before.toml --output-format json   # after each edit
 ```
-
-| Field | Content |
-| ----- | ------- |
-| `effects` | the network, database, file, subprocess, sleep, and lock waits it reaches, and the clients and queries it creates, each with the shortest call chain |
-| `changes` | the parameters, `self` attributes, other objects' attributes, module globals, and closure cells it changes, directly or through calls, with the call chain to the change |
-| `retains` | the parameters it stores where they outlive the call |
-| `returns` | whether its result is a new object, a parameter, or state that outlives the call |
-| `purity` | `pure`, `impure` with the reasons, or `unknown` with the first function whose calls heki cannot resolve, and what the verdict assumes |
-| `callers` | who calls it, whether in a loop; with `--callers`, transitively |
-| `reports` | what `heki check` reports in it; with `--callers`, also above it |
-| `contracts` | the contracts that name it |
-
-- A name is a dotted name (`pkg.mod.Class.method`, or a suffix such as `Class.method`, or a
-  glob), `path.py:line`, or `path.py::name`. An ambiguous or unknown name exits with 2: the error
-  says what to do (in JSON, `error.help`; a misspelled name gets the functions whose names look
-  like it) and lists the functions to choose from (`error.candidates`, `error.suggestions`,
-  `error.methods`, or `error.functions`).
-- `pure` means heki found no effect and no change of an input or of shared state, and resolved
-  every call below. Libraries the [catalog](configuration.md#ecosystem-knowledge-toolhekiecosystem)
-  does not list count as having no effects.
-- A field the configuration does not compute is `null`, with the setting that computes it.
-- Exit code 0 when the function was inspected, 2 otherwise or when a file could not be analyzed
-  (the report is still printed, with `complete: false`).
-
-Inspect the edited function again after the edit and compare `effects`, `changes`, `retains`, and
-`returns` with the run before it: a new entry is new behavior. Fact keys carry no line numbers, so
-a diff of the two JSON objects shows only what changed.
 
 ## After an edit: `heki check`
 
 A typical instruction for the agent:
 
-> After changing Python files, run `heki check --output-format json` on the project. For each
-> diagnostic, read its `help` and `heki rule <rule_code>`, follow `related` to the root cause,
-> and fix it there. A diagnostic whose `certainty` is `heuristic` can be wrong about the code:
-> confirm what its message says before changing anything. Apply `heki check --fix` for the safe
-> rewrites. Never silence a diagnostic with `# heki: ignore` unless the rule's documentation
-> describes the case as intended. When unsure, run `heki check --generate-prompt "<question>"`.
+> After changing Python files, run `heki check --output-format json` on the project. Act on the
+> diagnostics whose `path` or a `related[].path` is a file you changed. For each, read its `help`
+> and `heki rule <rule_code>`, follow `related` to the root cause, and fix it there. A
+> diagnostic whose `certainty` is `heuristic` can be wrong about the code: confirm what its
+> message says before changing anything. Apply `heki check --fix` for the safe rewrites. Never
+> silence a diagnostic with `# heki: ignore` unless the rule's documentation describes the case
+> as intended. When unsure, run `heki check --generate-prompt "<question>"`.
 
 ```console
 $ heki check --output-format json
@@ -109,6 +88,45 @@ instead, which makes a good prompt for the fix. `heki rule --all --output-format
 every rule's metadata and documentation, the premises of its exact claim, and its published
 precision: its certification and its latest measurement ([Rule Precision](precision.md)).
 
+## What a function does: `heki inspect` (experimental)
+
+When a diagnostic or a question is about one function, `heki inspect` says what it reaches,
+changes, keeps, and returns, with the call chains, without reading its callees. Run it when a
+function's effects are in question, not before every edit.
+
+```console
+$ heki inspect app.users.load_user --output-format json
+$ heki inspect app/users.py:42
+$ heki inspect app/users.py::load_user --callers --depth 3
+```
+
+| Field | Content |
+| ----- | ------- |
+| `effects` | the network, database, file, subprocess, sleep, and lock waits it reaches, and the clients and queries it creates, each with the shortest call chain |
+| `changes` | the parameters, `self` attributes, other objects' attributes, module globals, and closure cells it changes, directly or through calls, with the call chain to the change |
+| `retains` | the parameters it stores where they outlive the call |
+| `returns` | whether its result is a new object, a parameter, or state that outlives the call |
+| `purity` | `pure`, `impure` with the reasons, or `unknown` with the first function whose calls heki cannot resolve, and what the verdict assumes |
+| `callers` | who calls it, whether in a loop; with `--callers`, transitively |
+| `reports` | what `heki check` reports in it; with `--callers`, also above it |
+| `contracts` | the contracts that name it |
+
+- A name is a dotted name (`pkg.mod.Class.method`, or a suffix such as `Class.method`, or a
+  glob), `path.py:line`, or `path.py::name`. An ambiguous or unknown name exits with 2: the error
+  says what to do (in JSON, `error.help`; a misspelled name gets the functions whose names look
+  like it) and lists the functions to choose from (`error.candidates`, `error.suggestions`,
+  `error.methods`, or `error.functions`).
+- `pure` means heki found no effect and no change of an input or of shared state, and resolved
+  every call below. Libraries the [catalog](configuration.md#ecosystem-knowledge-toolhekiecosystem)
+  does not list count as having no effects.
+- A field the configuration does not compute is `null`, with the setting that computes it.
+- Exit code 0 when the function was inspected, 2 otherwise or when a file could not be analyzed
+  (the report is still printed, with `complete: false`).
+
+To see what an edit changed in a function, inspect it before and after the edit and compare
+`effects`, `changes`, `retains`, and `returns`: a new entry is new behavior. Fact keys carry no line
+numbers, so a diff of the two JSON objects shows only what changed.
+
 ## Ask a model: `heki check --generate-prompt` (experimental)
 
 When a diagnostic is unclear, or the fix or the contract to write is, print a prompt for a model
@@ -147,11 +165,13 @@ $ heki check --output-format-json-schema generate-prompt
 
 The repository publishes an [Agent Skill](https://agentskills.io/specification) at
 [`skills/heki/`](https://github.com/koxudaxi/heki/tree/main/skills/heki) for skills-compatible
-coding agents. It teaches the workflow of this page: `heki inspect` before editing a function,
-`heki check --output-format json` after the edit, `related` and `heki rule <CODE>` to find the
-root cause, `heuristic` reports confirmed before acting on them, only the fixes heki proves
-safe, and `heki check --generate-prompt` when unsure. Its `SKILL.md` links this page, and its
-`references/` hold the output fields and what to do when a command does not behave as expected.
+coding agents. It is the routine of this page after an edit, short enough to read each time it
+runs: `heki check --output-format json` on the project, the diagnostics the edit caused,
+`related` and `heki rule <CODE>` to find the root cause, `heuristic` reports confirmed before
+acting on them, and only the fixes heki proves safe. `heki inspect` and
+`heki check --generate-prompt` are for when a function or a diagnostic is in question. Its
+`SKILL.md` links this page, and its `references/` hold the output fields and what to do when a
+command does not behave as expected.
 
 The skill is experimental: its wording, when agents load it, and the install commands can change
 as the agents evolve.

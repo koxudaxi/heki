@@ -506,7 +506,8 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                             repeats.every()
                         ),
                         Some(format!(
-                            "create one client or session before the {} and reuse it",
+                            "create one client or session before the {} and reuse it (a reused \
+                             client keeps state such as cookies from call to call)",
                             repeats.ahead_of()
                         )),
                         chain,

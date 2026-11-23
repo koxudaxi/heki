@@ -12,10 +12,17 @@ uv run heki --version
 The package and the command are both named `heki`. It is a single executable and needs no Python
 interpreter to run.
 
+## What the exit code says
+
+`0`: nothing fails the run. `1`: a diagnostic fails it (an `error`, or a `warning` with
+`--fail-on warning`); the output lists it. `2`: a configuration, I/O, or syntax error (below).
+
 ## A diagnostic disappears when one file is checked
 
 `heki check path/to/file.py` analyzes that file alone and misses what its callees in other files
-do. Check the project (`heki check`, the default `.`) and filter the JSON by `path`.
+do. Check the project (`heki check`, the default `.`). A diagnostic sits where the problem shows,
+which is often a caller's file: keep the ones whose `path` or a `related[].path` is a file you
+edited, not only those whose `path` is.
 
 ## `heki inspect` exits with 2
 
@@ -56,6 +63,11 @@ rules. `--heuristic` runs the others too; their reports can be wrong about the c
 
 With a Ratchet baseline (`--baseline` or `baseline` in the configuration), `heki check` reports
 only the findings the baseline does not allow. Do not update the baseline to make a run pass.
+
+## `--fix` leaves a reported rewrite
+
+`--fix` applies the rewrites heki proves safe and always faster. `--include-size-dependent` also
+applies the proven ones that pay off only for large inputs: ask the user before using it.
 
 ## `MUT103` warns that the snapshot does not exist
 

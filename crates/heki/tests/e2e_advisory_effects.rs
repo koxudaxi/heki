@@ -898,7 +898,8 @@ fn each_effect_has_its_own_help() {
         })
         .collect();
     let offload = "offload it with `asyncio.to_thread`, or";
-    let client = "create one client or session before the loop and reuse it";
+    let client = "create one client or session before the loop and reuse it (a reused client \
+                  keeps state such as cookies from call to call)";
     let query = "batch the queries, or load the data once before the loop";
     assert_eq!(
         reports,

@@ -73,7 +73,7 @@ docs_pages! {
     CliInspect => "cli-reference/#heki-inspect",
     CliRecommend => "cli-reference/#heki-recommend",
     CliSkillInstall => "cli-reference/#heki-skill-install",
-    Inspect => "coding-agents/#before-an-edit-heki-inspect-experimental",
+    Inspect => "coding-agents/#what-a-function-does-heki-inspect-experimental",
 }
 
 impl Docs {

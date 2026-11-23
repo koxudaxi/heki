@@ -1,7 +1,7 @@
 //! The Agent Skill in `skills/heki/` against the binary and the documentation: its frontmatter
-//! follows the Agent Skills format, every command and option it and the Coding Agents page name
-//! exists, its tables of output fields are the page's, and the skill, the page, and the Claude
-//! Code marketplace point at each other.
+//! follows the Agent Skills format, its body stays within a byte budget, every command and option
+//! it and the Coding Agents page name exists, its tables of output fields are the page's, and the
+//! skill, the page, and the Claude Code marketplace point at each other.
 
 mod common;
 
@@ -67,16 +67,10 @@ fn the_skill_follows_the_agent_skills_format() {
         (1..=1024).contains(&description.chars().count()),
         "{description}"
     );
-    for words in [
-        "heki inspect",
-        "heki check --output-format json",
-        "related",
-        "heki rule <CODE>",
-        "heuristic",
-        "heki check --generate-prompt",
-    ] {
-        assert!(description.contains(words), "{words}: {description}");
-    }
+    assert!(
+        description.contains("heki check --output-format json"),
+        "{description}"
+    );
     // Every top-level key is one the format defines.
     for line in lines.iter().filter(|l| !l.starts_with(' ')) {
         let key = line.split(':').next().unwrap();
@@ -93,7 +87,9 @@ fn the_skill_follows_the_agent_skills_format() {
             "{line}"
         );
     }
-    assert!(body.lines().count() < 500, "a SKILL.md body stays short");
+    // An agent reads the body each time the skill runs: it holds the routine after an edit, and
+    // the rest is in `references/`.
+    assert!(body.len() <= 2_300, "{} bytes", body.len());
 }
 
 /// The commands of `text`: each inline code span, and each line of a fenced block.
@@ -201,7 +197,7 @@ fn the_skill_lists_the_output_fields_the_page_lists() {
         table_after(&output, "## `heki check --output-format json`"),
         check
     );
-    let inspect = table_after(&page, "## Before an edit: `heki inspect`");
+    let inspect = table_after(&page, "## What a function does: `heki inspect`");
     assert!(inspect.len() > 8, "{inspect:?}");
     assert_eq!(
         table_after(&output, "## `heki inspect --output-format json`"),
