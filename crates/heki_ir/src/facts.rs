@@ -1388,9 +1388,10 @@ impl<'a> FnIndex<'a> {
     }
 
     /// The variables whose object this function itself may add items to or replace items of,
-    /// directly or through an alias (copies and phis): an item store (`xs[k] = v`), a method call
-    /// that may add items (`append`, `update`, `setdefault`), or an in-place operator
-    /// (`xs += ys`). What code the object is handed to or returned to does is not followed.
+    /// directly or through an alias (copies and phis): an item store (`xs[k] = v`) or a method
+    /// call that may add items (`append`, `update`, `setdefault`). An in-place operator
+    /// (`xs += ys`) binds its result again, where the store says what it binds. What code the
+    /// object is handed to or returned to does is not followed.
     pub fn changed_vars(&self) -> FxHashSet<VarId> {
         let mut ops = Vec::new();
         for inst in self.f.blocks.iter().flat_map(|b| &b.insts) {
@@ -1401,11 +1402,6 @@ impl<'a> FnIndex<'a> {
                 {
                     ops.push(*recv);
                 }
-                InstKind::BinOp {
-                    lhs,
-                    in_place: true,
-                    ..
-                } => ops.push(*lhs),
                 _ => {}
             }
         }
