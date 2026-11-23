@@ -7021,13 +7021,14 @@ impl<'a> Extractor<'a> {
             p.args.splice(0..0, held.iter().copied());
             // An outer partial's `**` unpacking may override any keyword this one holds.
             let overridden = p.kwargs.iter().any(|(k, _)| k.is_none());
-            p.kwargs.splice(
-                0..0,
-                kwargs
-                    .iter()
-                    .filter(|(k, _)| !overridden || k.is_none())
-                    .cloned(),
-            );
+            // A keyword an outer partial writes again replaces this one's.
+            let replaced: Vec<_> = kwargs
+                .iter()
+                .filter(|(k, _)| !overridden || k.is_none())
+                .filter(|(k, _)| k.is_none() || !p.kwargs.iter().any(|(o, _)| o == k))
+                .cloned()
+                .collect();
+            p.kwargs.splice(0..0, replaced);
             p.open |= open;
             cur = inner;
         }
