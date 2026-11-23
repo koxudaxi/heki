@@ -1107,6 +1107,44 @@ const DEQUE: &[Expect] = &[
             ("OPT121", V::Fix(&["deque([])", "q.appendleft(-i)"])),
         ],
     ),
+    // A type checker gives a variable one type from its bindings: one the deque reaches must
+    // hold nothing else.
+    (
+        "alias_bound_elsewhere",
+        &[(
+            "OPT121",
+            V::Blocked("DequeEquivalentOps(q): `s` is also bound to another object at line"),
+        )],
+    ),
+    (
+        "queue_bound_again",
+        &[(
+            "OPT120",
+            V::Blocked("DequeEquivalentOps(q): `q` is also bound to another object at line"),
+        )],
+    ),
+    (
+        "alias_in_parameter",
+        &[(
+            "OPT121",
+            V::Blocked("DequeEquivalentOps(q): `last` is a parameter (line"),
+        )],
+    ),
+    (
+        "alias_bound_to_argument",
+        &[(
+            "OPT121",
+            V::Blocked("DequeEquivalentOps(q): `s` is also bound to another object at line 320:"),
+        )],
+    ),
+    (
+        "alias_of_queue_only",
+        &[("OPT121", V::Fix(&["deque([])", "q.appendleft(x)"]))],
+    ),
+    (
+        "alias_maybe_unbound",
+        &[("OPT121", V::Fix(&["deque([])", "q.appendleft(x)"]))],
+    ),
     ("dict_pop", &[]),
     ("dict_del", &[]),
     ("bounded", &[]),

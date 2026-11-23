@@ -1612,6 +1612,33 @@ fn the_text_form_shows_every_kind_of_fact() {
 }
 
 #[test]
+fn a_nested_function_names_the_enclosing_parameters_it_keeps() {
+    let p = Project::new("inspect_captured_params");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.write-owners]]\nname = \"owned\"\ntargets = [\"Model.name\"]\nallowed-writers = [\"nobody\"]\n",
+    );
+    p.write(
+        "m.py",
+        "REGISTRY = []\n\n\ndef outer(items, other):\n    def inner():\n        REGISTRY.append(other)\n\n    return inner\n\n\ndef outer_with_parameter(items, other):\n    def inner(extra):\n        REGISTRY.append(other)\n\n    inner(1)\n\n\ndef outer_with_varargs(items, other):\n    def inner(*args, **kwargs):\n        REGISTRY.append(other)\n\n    inner()\n\n\ndef outer_with_lambdas(xs, other):\n    wide = lambda a, b: a\n    narrow = lambda: REGISTRY.append(other)\n    return wide, narrow\n",
+    );
+    for symbol in [
+        "outer.<locals>.inner",
+        "outer_with_parameter.<locals>.inner",
+        "outer_with_parameter",
+        "outer_with_varargs.<locals>.inner",
+        "outer_with_varargs",
+        "outer_with_lambdas.<locals>.<lambda>",
+    ] {
+        assert_eq!(
+            report(&p, symbol)["retains"]["kept"],
+            serde_json::json!(["other"]),
+            "{symbol}"
+        );
+    }
+}
+
+#[test]
 fn class_attribute_writes_name_how_they_write() {
     let p = Project::new("inspect_write_kinds");
     p.write(

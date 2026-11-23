@@ -13,12 +13,13 @@ use heki_effect::{
 pub use heki_rules::Selectors;
 use heki_rules::project::{
     Facts, FileError, IndexFacts, ParsedFile, Project, ProjectEnv, ProjectError, ProjectOptions,
-    discovers, exclude_set, parse_source, retain_unsuppressed, unread_module,
+    RulesRun, discovers, exclude_set, parse_source, retain_unsuppressed, unread_module,
 };
 use heki_rules::{
     CHAIN_RULES, ChainFacts, CheckExtras, RuleSelection, SNAPSHOT_FILE, SelectionError,
     SentinelTestKey, SnapshotError, StaleWriteKey, SummarySnapshot, chain_facts, check_project,
-    deep_copy_files, family_readers, find_rule, sentinel_tests_in, stale_writes_by_file,
+    deep_copy_files, family_readers, find_rule, kept_removals_in, lazy_setup_files,
+    sentinel_tests_in, stale_writes_by_file,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
@@ -246,9 +247,19 @@ pub struct Workspace {
     /// latest analysis; kept while `MUT118` is selected: the files with deep copies need a new
     /// check when they change.
     sentinel_tests: FxHashMap<PathBuf, BTreeSet<SentinelTestKey>>,
+    /// The names under which the functions of each file remove a value an object keeps by
+    /// name, as of the file's latest analysis; kept while `MUT101` or `MUT111` is selected: the
+    /// files of the cached properties of those names need a new check when they change (their
+    /// lazy setup steps read whether any function removes them).
+    kept_removals: FxHashMap<PathBuf, BTreeSet<String>>,
     /// What the configured contracts read across functions (`Workspace::affected_by`).
     reach: ContractReach,
     stats: EngineStats,
+}
+
+/// Whether `selection` runs a rule reading the kept-value facts (`MUT101`, `MUT111`).
+fn kept_values(selection: &RuleSelection) -> bool {
+    selection.is_enabled("MUT101") || selection.is_enabled("MUT111")
 }
 
 /// What the latest check of each file read of the declarations ([`DeclKeys`]). A check reads
@@ -525,6 +536,16 @@ impl Workspace {
         } else {
             FxHashMap::default()
         };
+        let kept_removals = if kept_values(&selection) {
+            index
+                .files
+                .keys()
+                .map(|path| (path.clone(), kept_removals_in(&index, path)))
+                .filter(|(_, names)| !names.is_empty())
+                .collect()
+        } else {
+            FxHashMap::default()
+        };
         let stats = EngineStats {
             indexed_files: index.files.len(),
             ..EngineStats::default()
@@ -547,6 +568,7 @@ impl Workspace {
                 patching_builtins,
                 stale_writes,
                 sentinel_tests,
+                kept_removals,
                 reach,
                 stats,
             },
@@ -630,7 +652,12 @@ impl Workspace {
                 &extras,
             )
             .expect("a check fails only on invalid rule options, which fail `Workspace::load`");
-            retain_unsuppressed(&mut diags, [parsed]);
+            let run = RulesRun {
+                selection: &self.selection,
+                snapshot: self.snapshot.is_some(),
+                lint: &self.env.cfg.lint,
+            };
+            retain_unsuppressed(&mut diags, [parsed], &run);
             diags
         });
         // A withheld report counts: an edit to its call chain can make it exact.
@@ -866,6 +893,30 @@ impl Workspace {
             return Vec::new();
         }
         deep_copy_files(&self.index)
+    }
+
+    /// Record the names under which the functions of `path` remove a kept value by name; when
+    /// they changed, the lazy setup steps of the cached properties of those names may change
+    /// tier: returns their files.
+    fn note_kept_removals(&mut self, path: &Path) -> Vec<PathBuf> {
+        if !kept_values(&self.selection) {
+            return Vec::new();
+        }
+        let now = kept_removals_in(&self.index, path);
+        let before = if now.is_empty() {
+            self.kept_removals.remove(path)
+        } else {
+            self.kept_removals.insert(path.to_path_buf(), now.clone())
+        }
+        .unwrap_or_default();
+        let changed: BTreeSet<&str> = before
+            .symmetric_difference(&now)
+            .map(String::as_str)
+            .collect();
+        if changed.is_empty() {
+            return Vec::new();
+        }
+        lazy_setup_files(&self.index, &changed)
     }
 
     /// Re-summarize one parsed file; returns the update, what changed in the declarations, and
@@ -1116,6 +1167,7 @@ impl Workspace {
         affected.extend(self.note_builtins(&parsed.path, parsed.patches_builtins()));
         affected.extend(self.note_stale_writes(&parsed.path));
         affected.extend(self.note_sentinel_tests(&parsed.path));
+        affected.extend(self.note_kept_removals(&parsed.path));
         // Call chains of other files show this file's call sites, and `MUT113` reports the
         // container changes of its methods: when they move, those diagnostics move with them
         // (the summaries copying call sites were re-propagated).
@@ -1225,6 +1277,7 @@ impl Workspace {
         affected.extend(self.note_builtins(path, false));
         affected.extend(self.note_stale_writes(path));
         affected.extend(self.note_sentinel_tests(path));
+        affected.extend(self.note_kept_removals(path));
         let mut v: Vec<PathBuf> = affected.into_iter().collect();
         v.sort();
         v

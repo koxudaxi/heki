@@ -282,6 +282,74 @@ def front_insert_twice(n):
 
 
 # ==============================================================================
+# Variables the queue reaches: a type checker gives each one type
+# ==============================================================================
+def alias_bound_elsewhere(items, stop):
+    """`s = q` stores the queue in `s`, which `s = [...]` types as a list."""
+    s = [a for a in items]
+    q = []
+    for x in reversed(s):
+        if x == stop:
+            s = q
+            break
+        q.insert(0, x)
+    return list(s)
+
+
+def queue_bound_again(items):
+    """The second `q = [...]` stays a list."""
+    q = list(items)
+    out = []
+    while q:
+        out.append(q.pop(0))
+    q = [len(out)]
+    return out, q
+
+
+def alias_in_parameter(n, last=None):
+    """`last = q` stores the queue in a parameter."""
+    q = []
+    for i in range(n):
+        q.insert(0, i)
+    last = q
+    return list(last)
+
+
+def alias_bound_to_argument(n, first):
+    """`s = first` binds `s` to the caller's object too."""
+    s = first
+    q = []
+    for i in range(n):
+        q.insert(0, i)
+    if n > 1:
+        s = q
+    return list(s)
+
+
+def alias_of_queue_only(items, stop):
+    """`s` is bound to the queue alone: the deque is the one object it holds."""
+    q = []
+    for x in reversed(items):
+        if x == stop:
+            s = q
+            break
+        q.insert(0, x)
+    else:
+        s = q
+    return list(s)
+
+
+def alias_maybe_unbound(items, stop):
+    """`s` holds the queue or nothing (`UnboundLocalError` when `stop` is not an item)."""
+    q = []
+    for x in items:
+        if x == stop:
+            s = q
+        q.insert(0, x)
+    return list(s)
+
+
+# ==============================================================================
 # Not candidates
 # ==============================================================================
 def dict_pop(n):
@@ -435,6 +503,12 @@ def main() -> int:
             run(stringified_queue, items),
             run(printed_queue, items, io.StringIO()),
             run(front_insert_twice, n),
+            run(alias_bound_elsewhere, items, n // 2),
+            run(queue_bound_again, items),
+            run(alias_in_parameter, n),
+            run(alias_bound_to_argument, n, items),
+            run(alias_of_queue_only, items, n // 2),
+            run(alias_maybe_unbound, items, n // 2),
             run(dict_pop, n),
             run(dict_del, n),
             run(bounded, n),
