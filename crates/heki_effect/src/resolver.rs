@@ -872,8 +872,9 @@ pub struct ModuleDecls {
     /// have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store_fallbacks: Option<Box<StoreFallbacks>>,
-    /// The module calls `__setstate__` on an object outside a `__setstate__` handing its own
-    /// state on: the state may be anything ([`ProjectDecls::restores_hold`]).
+    /// The module calls `__setstate__` on an object, or reads the method or names it, outside a
+    /// `__setstate__` handing its own state on: the state may be anything
+    /// ([`ProjectDecls::restores_hold`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub calls_setstate: bool,
     /// The names a star import of the module binds when the module fixes them: its `__all__`,
@@ -3672,15 +3673,47 @@ impl ProjectDecls {
     }
 
     /// The classes whose code may store into an instance of the project class `class`:
-    /// `class`, its project subclasses, and the project classes along their MROs, sorted.
+    /// `class`, its project subclasses, and the project classes along their MROs, sorted. One
+    /// walk visits each class at most twice, as an instance's class and as a base, however many
+    /// subclasses share its bases.
     pub(crate) fn instance_family(&self, class: &str) -> Vec<String> {
-        let mut instances = self.subclasses_of(class);
-        instances.push(class.to_owned());
-        let family: BTreeSet<String> = instances.iter().flat_map(|c| self.mro(c)).collect();
-        family
+        let budget = Budget::unmetered("heki_effect::resolver::ProjectDecls::instance_family");
+        let mut names = vec![self.canonical(class)];
+        let mut ids: FxHashMap<String, usize> = FxHashMap::default();
+        ids.insert(names[0].clone(), 0);
+        let mut found: FxHashSet<usize> = FxHashSet::default();
+        // A node is a class and whether an instance may be of it (`class` and its subclasses,
+        // whose own subclasses may be too) or it is only a base of one.
+        let next = |(id, instance): (usize, bool), out: &mut Vec<(usize, bool)>| {
+            let class = names[id].as_str();
+            let mut next: Vec<(String, bool)> = Vec::new();
+            if instance {
+                let subclasses = self.direct_subclasses(class).iter();
+                next.extend(subclasses.map(|c| (c.clone(), true)));
+            }
+            if let Some(decl) = self.class(class) {
+                next.extend(decl.bases.iter().map(|b| (self.canonical(b), false)));
+            }
+            for (c, instance) in next {
+                let id = *ids.entry(c).or_insert_with_key(|c| {
+                    names.push(c.clone());
+                    names.len() - 1
+                });
+                out.push((id, instance));
+            }
+        };
+        // Unmetered: the walk ends, visiting every class of the family.
+        let _ = reach(&budget, [(0, true)], next, |(id, _)| {
+            found.insert(id);
+            Visit::<()>::Expand
+        });
+        let mut family: Vec<String> = found
             .into_iter()
+            .map(|id| names[id].clone())
             .filter(|c| self.is_project_class(c))
-            .collect()
+            .collect();
+        family.sort_unstable();
+        family
     }
 
     /// The declared value of the property `attr` when the definition of `attr` that an instance

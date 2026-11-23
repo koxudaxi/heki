@@ -230,8 +230,9 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     integers, booleans, floats, displays, strings, and tuples of strings. A string constant, or
     a tuple of them, is one entry: its text (`strs` / `str_tuples`, one `Arc<str>` per string
     the module writes, which aliases and items share), whose length gives its display. It is
-    the one view of a module name bound once (a star import rebinds every name bound before
-    it, also one with an underscore, which the imported module's `__all__` may list): the
+    the one view of a module name bound once (a star import that runs, not one under
+    `if TYPE_CHECKING:`, rebinds every name not bound after it for good, also one with an
+    underscore, which the imported module's `__all__` may list; `LastBindings`): the
     effect lane's declarations read their number, boolean, and string constants from it, and `GlobalStores` is the one count of the stores
     and deletions of each module global that it, `ModuleBindings`, and the declarations read.
   - The Soundness lane reads these facts within one module only (`FnIndex`). The Advisory rules
@@ -330,7 +331,7 @@ the targets of write and read boundaries.
 |---|---|---|---|
 | 1 | Local constructors and direct imports (relative imports, source roots, re-exports) | Exact | `requests.get(u)`, `client = httpx.Client(); client.get(u)` |
 | 2 | PEP 484 annotations (parameters, locals, return types, attributes), container item types, and return annotations along the MRO; `isinstance` narrowing and unions of up to three classes | Typed | `def f(repo: UserRepo, db: Session): db.execute(...)`, `for m in models: m.save()` with `models: list[Model]` |
-| 3 | `self.attr = Cls(...)` in `__init__` and similar, and module globals, each as every store of it agrees | Typed | `self.http = httpx.Client()`, then `self.http.get(...)` in another method |
+| 3 | `self.attr = Cls(...)` in `__init__` or `__post_init__`, and module globals the module body binds, each the join of what every store of it binds | Typed | `self.http = httpx.Client()`, then `self.http.get(...)` in another method |
 | 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` dispatches to its structural implementations (a call site keeps the protocol's own declaration of the method, `CallSite::declared`, which the read and call contracts judge it by) | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
 
 A module global the module body binds to a value of known type, and an instance attribute
@@ -355,16 +356,20 @@ the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores
   binds what the operator gives on the attribute's own value: nothing new when the name holds a
   list, set, dict, deque, `bytearray`, `str`, or `bytes`, and an unknown value otherwise.
 - **Stores heki cannot name.** `setattr(obj, name, v)`, `obj.__dict__.update(other)`,
-  `obj.__dict__ = state`, `obj.__class__ = C`, and a namespace handed on store any attribute
+  `obj.__dict__ = state`, `obj.__class__ = C` (also through `setattr` or
+  `object.__setattr__(obj, "__dict__", state)`), and a namespace handed on store any attribute
   (`ClassDecl::stores_any_attr`), except in `__setstate__` from its state parameter
   (`ClassDecl::restores_state`): those restore what an instance held, while no project code calls
-  `__setstate__` itself (outside a `__setstate__` handing its state on) and the family has no
+  `__setstate__` itself, reads the method, or names it (`getattr(obj, "__setstate__")`) outside a
+  `__setstate__` handing its state on, and the family has no
   `__reduce__` / `__reduce_ex__` and no `__getstate__` building the state from anything but the
   instance's own attributes (`FunctionDecl::state_of_self`).
 - **Globals the module may rebind.** In a module whose globals `globals()` or `exec` may change,
-  every store of a global binds a value of unknown type. A module-body store before a star import
-  does too, unless the star-imported module is a project module whose `__all__` fixes the names it
-  exports and does not list the name (`ModuleDecls::exports`).
+  every store of a global binds a value of unknown type. A module-body store does too when a star
+  import that runs (not one under `if TYPE_CHECKING:`) may bind the name after it: the store comes
+  before the import, or on only some of the paths after it (a branch, an `except` clause, a loop;
+  `heki_ir::LastBindings`). A star import of a project module whose `__all__` fixes the names it
+  exports binds only those (`ModuleDecls::exports`).
 - **Other modules.** What other project modules store into a module's globals and into the
   instances of its classes (`ModuleDecls::stores_elsewhere`) is joined where the type is read. A
   store's receiver is typed as the storing module's decided types type it: one an attribute or a

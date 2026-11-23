@@ -1,6 +1,7 @@
 //! The types of module globals and instance attributes (Priority 3), from every store the
-//! project's code makes to each: a type read from one store holds only if every other store binds
-//! a value of the same type ([`ModuleDecls::global_types`], [`ClassDecl::attr_stores`],
+//! project's code makes to each: a name the module body (a global) or `__init__` /
+//! `__post_init__` through `self` (an attribute) binds to a value of known type has the join of
+//! what every store of it binds ([`ModuleDecls::global_types`], [`ClassDecl::attr_stores`],
 //! [`ProjectDecls::member_type`]).
 //!
 //! A module decides the types of its own globals and of its classes' attributes ([`record`]).
@@ -19,7 +20,7 @@ use crate::types::Ty;
 use heki_ir::walk::{
     Answer, Budget, Def, Facts, FnShape, Join, Sparse, Use, Visit, fixpoint, reach,
 };
-use heki_ir::{BlockId, BuiltinKind, Inst, InstKind, IrFunction, Terminator, VarId};
+use heki_ir::{BlockId, BuiltinKind, Inst, InstKind, IrFunction, LastBindings, Terminator, VarId};
 use heki_kb::EffectiveEcosystemKb;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
@@ -212,13 +213,18 @@ impl Joins {
                 out.push(Key::Name(target.clone()));
             }
         }
-        for class in other.any.iter().chain(&other.restoring) {
-            if !self.any.contains(class) && !self.restoring.contains(class) {
+        // A class gaining either changes what reading its attributes gives: `any` leaves them
+        // unknown, `restoring` holds only while the restores do.
+        for class in &other.any {
+            if self.any.insert(class.clone()) {
                 out.push(Key::Class(class.clone()));
             }
         }
-        self.any.extend(other.any.iter().cloned());
-        self.restoring.extend(other.restoring.iter().cloned());
+        for class in &other.restoring {
+            if self.restoring.insert(class.clone()) {
+                out.push(Key::Class(class.clone()));
+            }
+        }
         if other.any_global && !self.any_global {
             self.any_global = true;
             out.push(Key::Globals);
@@ -375,13 +381,14 @@ impl Decided {
                     .insert(attr.clone(), store);
             }
         }
-        out.any_attr = fallback
-            .any
+        // A class these types only restore stores any attribute in the fallback when the
+        // fallback has it among `any`.
+        let any = fallback.any.iter().filter(|c| !self.any.contains(*c));
+        let restoring = fallback
+            .restoring
             .iter()
-            .chain(&fallback.restoring)
-            .filter(|c| !self.any.contains(*c) && !self.restoring.contains(*c))
-            .cloned()
-            .collect();
+            .filter(|c| !self.any.contains(*c) && !self.restoring.contains(*c));
+        out.any_attr = any.chain(restoring).cloned().collect();
         let differs = !(out.globals.is_empty() && out.attrs.is_empty() && out.any_attr.is_empty());
         differs.then_some(out)
     }
@@ -392,18 +399,22 @@ struct Unfixed<'p> {
     /// `globals()` or `exec` may bind any global at any time
     /// ([`heki_ir::ModuleConstants::dynamic`]).
     dynamic: bool,
-    /// The end of each star import, and the names its module exports when they are known
-    /// ([`ModuleDecls::exports`]): a name the module body stores before it may hold anything
-    /// after.
+    /// The end of each star import that runs (not one under `if TYPE_CHECKING:`), and the
+    /// names its module exports when they are known ([`ModuleDecls::exports`]): a name the
+    /// module body stores may hold anything after it, unless a store binds the name after it
+    /// for good ([`LastBindings::overrides`]).
     star_imports: Vec<(u32, Option<&'p [String]>)>,
+    /// Where the module body binds a name for good (`None`: the body stores nothing).
+    last: Option<LastBindings>,
 }
 
 impl<'p> Unfixed<'p> {
-    fn of(input: &ModuleInput<'_>, project: &'p ProjectDecls) -> Self {
-        let star_imports = input
+    fn of(input: &ModuleInput<'_>, project: &'p ProjectDecls, fns: &[StoringFn<'_>]) -> Self {
+        let star_imports: Vec<(u32, Option<&[String]>)> = input
             .semantic
             .star_imports
             .iter()
+            .filter(|star| !star.in_type_checking)
             .map(|star| {
                 let exports = super::resolve_relative_module(
                     &input.module_name,
@@ -424,18 +435,29 @@ impl<'p> Unfixed<'p> {
                 (star.span.end, exports)
             })
             .collect();
+        let last = fns
+            .iter()
+            .find(|s| s.f.is_module_body)
+            .filter(|_| !star_imports.is_empty())
+            .map(|body| LastBindings::of(&body.shape));
         Self {
             dynamic: input.ir.constants.dynamic,
             star_imports,
+            last,
         }
     }
 
-    /// Whether the global `name` that `store` of `f` stores may then be bound to anything.
-    fn rebinds(&self, f: &IrFunction, store: &Inst, name: &str) -> bool {
-        let star_rebinds = |(end, exports): &(u32, Option<&[String]>)| {
-            store.span.start < *end && exports.is_none_or(|e| e.iter().any(|n| n == name))
+    /// Whether the global `name` that `store` in `block` of `s` stores may then be bound to
+    /// anything.
+    fn rebinds(&self, s: &StoringFn<'_>, block: BlockId, store: &Inst, name: &str) -> bool {
+        let overridden = |end: u32| {
+            self.last
+                .is_some_and(|last| last.overrides(&s.shape, block, store, end))
         };
-        self.dynamic || (f.is_module_body && self.star_imports.iter().any(star_rebinds))
+        let star_rebinds = |(end, exports): &(u32, Option<&[String]>)| {
+            exports.is_none_or(|e| e.iter().any(|n| n == name)) && !overridden(*end)
+        };
+        self.dynamic || (s.f.is_module_body && self.star_imports.iter().any(star_rebinds))
     }
 }
 
@@ -545,7 +567,7 @@ pub(super) fn record(
     if fns.is_empty() {
         return;
     }
-    let unfixed = Unfixed::of(input, project);
+    let unfixed = Unfixed::of(input, project, &fns);
     let (decided, fallbacks, foreign) = {
         let decls: &ModuleDecls = decls;
         let first_reads = FirstReads::default();
@@ -645,6 +667,7 @@ fn decide(
         establishable,
         joins: RefCell::new(fixed),
         families: RefCell::default(),
+        distinct_families: RefCell::default(),
         consulted: RefCell::default(),
         pending: RefCell::default(),
     };
@@ -785,7 +808,9 @@ struct Deciding<'d> {
     joins: RefCell<Joins>,
     /// The canonical classes of the family of a class ([`ProjectDecls::instance_family`]),
     /// `None` when a member is a class of another module.
-    families: RefCell<FxHashMap<String, Option<Vec<String>>>>,
+    families: RefCell<FxHashMap<String, Option<Rc<[String]>>>>,
+    /// One copy of each family: the classes of a chain of subclasses share theirs.
+    distinct_families: RefCell<FxHashSet<Rc<[String]>>>,
     /// What the function being inferred read of the names being decided.
     consulted: RefCell<Vec<Key>>,
     /// The names a read took for ones no store binds yet.
@@ -802,7 +827,7 @@ impl Deciding<'_> {
             .then_some(qualname)
     }
 
-    fn family(&self, class: &str) -> Option<Vec<String>> {
+    fn family(&self, class: &str) -> Option<Rc<[String]>> {
         if let Some(known) = self.families.borrow().get(class) {
             return known.clone();
         }
@@ -810,7 +835,15 @@ impl Deciding<'_> {
         let own = family
             .iter()
             .all(|c| self.own_qualname(c).is_some())
-            .then_some(family);
+            .then(|| {
+                let family: Rc<[String]> = family.into();
+                let mut distinct = self.distinct_families.borrow_mut();
+                if let Some(known) = distinct.get(&family) {
+                    return Rc::clone(known);
+                }
+                distinct.insert(Rc::clone(&family));
+                family
+            });
         self.families
             .borrow_mut()
             .insert(class.to_owned(), own.clone());
@@ -1115,8 +1148,8 @@ pub(crate) enum AttrOp<'f> {
     /// A store of `value` in the attribute `name` of `obj`: `obj.attr = v`,
     /// `setattr(obj, name, v)`, `object.__setattr__(obj, name, v)`, `obj.__setattr__(name, v)`
     /// (`super().__setattr__(name, v)`), also through an alias of the builtin. Replacing the
-    /// namespace or the class (`obj.__dict__ = state`, `obj.__class__ = C`) stores every
-    /// attribute (`AttrName::Unknown`).
+    /// namespace or the class (`obj.__dict__ = state`, `obj.__class__ = C`, or either through
+    /// `setattr`) stores every attribute (`AttrName::Unknown`).
     Store {
         obj: VarId,
         name: AttrName<'f>,
@@ -1141,23 +1174,17 @@ pub(crate) fn attr_op<'f, 'v>(
     name: impl Fn(VarId) -> Option<String>,
 ) -> Option<AttrOp<'f>> {
     let named = |v: VarId| name(v).map_or(AttrName::Unknown, |n| AttrName::Named(Cow::Owned(n)));
+    let stored = |v: VarId| replacing_all(named(v));
     let builtin = |v: VarId| match val(v) {
         Some(crate::resolver::Val::Ref(s)) => Some(s.as_str()),
         _ => None,
     };
     match kind {
-        InstKind::AttrStore { obj, attr, value } => {
-            let name = if attr == "__dict__" || attr == "__class__" {
-                AttrName::Unknown
-            } else {
-                AttrName::Named(Cow::Borrowed(attr.as_str()))
-            };
-            Some(AttrOp::Store {
-                obj: *obj,
-                name,
-                value: *value,
-            })
-        }
+        InstKind::AttrStore { obj, attr, value } => Some(AttrOp::Store {
+            obj: *obj,
+            name: replacing_all(AttrName::Named(Cow::Borrowed(attr.as_str()))),
+            value: *value,
+        }),
         InstKind::AttrDelete { obj, attr } => Some(AttrOp::Delete {
             obj: *obj,
             name: AttrName::Named(Cow::Borrowed(attr.as_str())),
@@ -1172,7 +1199,7 @@ pub(crate) fn attr_op<'f, 'v>(
             ("builtins.setattr" | "builtins.object.__setattr__", [obj, n, value]) => {
                 Some(AttrOp::Store {
                     obj: *obj,
-                    name: named(*n),
+                    name: stored(*n),
                     value: *value,
                 })
             }
@@ -1194,12 +1221,12 @@ pub(crate) fn attr_op<'f, 'v>(
         } if kwargs.is_empty() => match (method.as_str(), args.as_slice()) {
             ("__setattr__", [n, value]) => Some(AttrOp::Store {
                 obj: *recv,
-                name: named(*n),
+                name: stored(*n),
                 value: *value,
             }),
             ("__setattr__", [obj, n, value]) => Some(AttrOp::Store {
                 obj: *obj,
-                name: named(*n),
+                name: stored(*n),
                 value: *value,
             }),
             ("__delattr__", [n]) => Some(AttrOp::Delete {
@@ -1213,6 +1240,15 @@ pub(crate) fn attr_op<'f, 'v>(
             _ => None,
         },
         _ => namespace_op_load(kind, &val),
+    }
+}
+
+/// The name a store binds: one replacing the namespace or the class (`__dict__`, `__class__`)
+/// stores every attribute, whichever spelling stores it.
+fn replacing_all(name: AttrName<'_>) -> AttrName<'_> {
+    match name {
+        AttrName::Named(n) if n == "__dict__" || n == "__class__" => AttrName::Unknown,
+        name => name,
     }
 }
 
@@ -1356,7 +1392,8 @@ impl<'c, 'f> Classifier<'c, 'f> {
         let f = self.s.f;
         let mut out = Sink { own, foreign };
         let mut namespaces: Vec<(VarId, VarId)> = Vec::new();
-        for inst in insts(f) {
+        let blocks = f.blocks.iter();
+        for (block, inst) in blocks.flat_map(|b| b.insts.iter().map(move |inst| (b.id, inst))) {
             if let InstKind::StoreGlobal { name, value } = &inst.kind {
                 let target = StoreTarget::Global(name.clone());
                 let loads_it = |k: &InstKind| matches!(k, InstKind::LoadGlobal { name: n, .. } | InstKind::LoadName { name: n, .. } if n == name);
@@ -1364,7 +1401,7 @@ impl<'c, 'f> Classifier<'c, 'f> {
                     out.own.in_place.insert(target);
                     continue;
                 }
-                let rebinds = self.unfixed.rebinds(f, inst, name);
+                let rebinds = self.unfixed.rebinds(self.s, block, inst, name);
                 let value = self.global_value(name, *value, rebinds);
                 let value = value.as_ref().map(Option::as_ref);
                 out.own.store(target, f.is_module_body, value);
@@ -1782,16 +1819,28 @@ pub(super) fn exported_names(input: &ModuleInput<'_>) -> Option<Box<[String]>> {
         .collect()
 }
 
-/// Whether the module calls `__setstate__` itself, outside a `__setstate__` handing its own
-/// state on (`super().__setstate__(state)`): [`ModuleDecls::calls_setstate`].
+/// Whether the module may call `__setstate__` itself, outside a `__setstate__` handing its own
+/// state on (`super().__setstate__(state)`): [`ModuleDecls::calls_setstate`]. A call, a read of
+/// the method (`restore = obj.__setstate__`), and its name as a string
+/// (`getattr(obj, "__setstate__")`) all count: the method read may be called with anything.
 pub(super) fn calls_setstate(input: &ModuleInput<'_>) -> bool {
+    let names_it = |kind: &InstKind| match kind {
+        InstKind::MethodCall { method: name, .. } | InstKind::AttrLoad { attr: name, .. } => {
+            name == "__setstate__"
+        }
+        InstKind::Const {
+            literal: heki_ir::ConstLiteral::Str(s),
+            ..
+        } => s == "__setstate__",
+        _ => false,
+    };
     input
         .ir
         .functions
         .iter()
         .filter(|f| f.name != "__setstate__")
         .flat_map(insts)
-        .any(|inst| matches!(&inst.kind, InstKind::MethodCall { method, .. } if method == "__setstate__"))
+        .any(|inst| names_it(&inst.kind))
 }
 
 /// [`super::FunctionDecl::state_of_self`] of the module's `__getstate__` methods.

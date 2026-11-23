@@ -2,11 +2,12 @@
 //! narrowing through phis, the passes of the type inference and of the classes of merged values,
 //! the closure cells child scopes read, the iterables child scopes receive from the functions
 //! creating them, the fixpoint joining the stores of attributes, the names its functions store
-//! and read, and the stores through namespaces and `setattr`, the size of the Soundness lane's
-//! proof state, the values `EFF107` follows from a task factory, the walk to the callable a
-//! builtin calls once per item, contracts with many call targets and argument lists, the walk to
-//! the uses handing a reference to a call target on, the locks `EFF109` follows, the values class
-//! statements pass as bases, and the bindings the deque rewrite's candidates check.
+//! and read, the stores through namespaces and `setattr`, the classes whose code may store into
+//! an instance, the size of the Soundness lane's proof state, the values `EFF107` follows from a
+//! task factory, the walk to the callable a builtin calls once per item, contracts with many call
+//! targets and argument lists, the walk to the uses handing a reference to a call target on, the
+//! locks `EFF109` follows, the values class statements pass as bases, and the bindings the deque
+//! rewrite's candidates check.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -603,6 +604,42 @@ fn a_chain_of_stores_across_methods_keeps_one_dependency_per_method() {
     };
     let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();
     assert_eq!(blocking(check_linear(2000, shape)), 1);
+}
+
+/// A class whose `__init__` stores an attribute, with a chain of two thousand subclasses, and a
+/// thousand functions reading the attribute on an instance of it: the classes whose code may
+/// store into the instance (the subclasses and the bases of each) are walked once, each class
+/// at most twice, not along the bases of each subclass in turn.
+#[test]
+fn the_classes_storing_into_a_deep_subclass_chain_are_walked_once() {
+    let shape = |k: usize| {
+        let (depth, functions) = (250 * k, 125 * k);
+        let mut lines = vec![
+            "import httpx".to_owned(),
+            String::new(),
+            String::new(),
+            "class C0:".to_owned(),
+            "    def __init__(self) -> None:".to_owned(),
+            "        self.client = httpx.Client()".to_owned(),
+        ];
+        for i in 1..depth {
+            lines.push(String::new());
+            lines.push(String::new());
+            lines.push(format!("class C{i}(C{}):", i - 1));
+            lines.push("    pass".to_owned());
+        }
+        for i in 0..functions {
+            lines.push(String::new());
+            lines.push(String::new());
+            lines.push(format!("async def use{i}(node: C0) -> None:"));
+            lines.push("    node.client.get(\"https://example.com\")".to_owned());
+        }
+        let p = Project::new(&format!("bounds_store_family_{k}"));
+        p.write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();
+    assert_eq!(blocking(check_linear(SCALE, shape)), 1);
 }
 
 /// A function binding `names` variables in turn `bindings` times in all, each binding followed

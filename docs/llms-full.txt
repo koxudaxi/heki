@@ -457,8 +457,8 @@ heki looks for the callee in this order:
 
 1. local constructors and imports;
 2. annotations;
-3. attributes `__init__` assigns and module globals, when every store of each agrees on the
-   type;
+3. attributes `__init__` or `__post_init__` assigns and globals the module body assigns: the
+   join of what every store of each binds;
 4. the class hierarchy, up to eight overriding methods.
 
 It also follows container item types (`list[Model]`), return annotations along the MRO,
@@ -550,7 +550,8 @@ Missed findings close as heki learns more:
   module-level string bound once in its module, or a class constant declared `ClassVar` or
   `Final` and bound once (`Model.KEY`, `self.KEY`, `cls.KEY`).
 - **Not followed** for a module-level name without `Final` that another module rebinds or deletes,
-  one bound in a loop or before a star import that may rebind it, a class constant stored on its
+  one bound in a loop, or before a star import that may rebind it or on only some of the paths
+  after it (`if flag: from m import *` / `else: KEY = "x"`), a class constant stored on its
   class or an instance outside the class body (`Model.KEY = "x"`; from another module, only one
   without `Final`), a class constant a subclass defines again, is given its own value
   (`Child.KEY = "x"`), or inherits first from another base it lists before the class
@@ -588,12 +589,19 @@ Missed findings close as heki learns more:
   in `self.base.client = ...`), the module (also imported in a function, or through `setattr` or
   `vars`). A store through a receiver without a known type (`def configure(obj): obj.client =
   ...`, a parameter whose default is the module) is not joined, nor is one through a `Protocol`
-  value, so the type the other stores agree on may be wrong for values it stores. The same holds
+  value, so the join of the other stores may be wrong for values it stores. The same holds
   for a receiver read from an attribute or a global of another module (`def swap(app: App):
   app.state.client = ...`, where `App`'s module types `state`), and a receiver kept in an
   attribute or a global of the storing module has the type that module's stores give it: when
   yet another module stores an instance of another class there (`owner.base = Other()`), a store
   through it is not joined into that class.
+- The items of a container an attribute or a global holds are those of the values its stores
+  bind (`self.clients = [httpx.Client()]`): what another function adds to the container
+  (`self.clients.append(client)`, `self.clients += [client]`) is not joined, so a loop over it
+  takes every item to be of the classes the stores give.
+- `__setstate__` restoring an instance's namespace from its state keeps the attributes' types when
+  the class's `__getstate__` builds the state from the instance's own attributes. One putting an
+  attribute's value under another attribute's name (`return {"client": self.other}`) is not seen.
 
 ### Names the catalog does not list
 

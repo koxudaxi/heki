@@ -269,6 +269,7 @@ const KEY_CLASS_REBIND: &str =
 const KEY_SUBCLASS_REBIND: &str = "from pkg.key_class import Keys\n\n\nclass QuietKeys(Keys):\n    pass\n\n\nQuietKeys.KEY = \"other\"\n";
 const RESTORING: &str = "import httpx\n\n\nclass Restoring:\n    def __init__(self):\n        self.client = httpx.Client()\n\n    def __setstate__(self, state):\n        self.__dict__.update(state)\n\n    async def handle(self):\n        self.client.get(\"https://example.com\")\n";
 const SETSTATE_CALL: &str = "import httpx\n\nfrom pkg.restoring import Restoring\n\n\ndef load(target: Restoring):\n    target.__setstate__({\"client\": httpx.AsyncClient()})\n";
+const SETSTATE_READ: &str = "import httpx\n\nfrom pkg.restoring import Restoring\n\n\ndef load(target: Restoring):\n    restore = getattr(target, \"__setstate__\")\n    restore({\"client\": httpx.AsyncClient()})\n";
 // Another module reads the class constant on an instance, as the class's own method does.
 const KEY_CLASS_READER: &str = "from pkg.key_class import Keys\nfrom pkg.model import Registry\n\n\ndef mark_with(keys: Keys, r: Registry):\n    r.__dict__[keys.KEY] = []\n";
 // A `Final` class constant of a class a decorator of another module builds; a third module
@@ -2698,6 +2699,22 @@ fn steps_aliases_and_getters() -> Vec<Step> {
         Step::new(
             "the module calling it is deleted",
             vec![Action::Delete("pkg/setstate_call.py")],
+        )
+        .present(&[("pkg/restoring.py", "EFF101")]),
+        Step::new(
+            "another module reads the method by its name, to call it later",
+            vec![Action::Create(
+                "pkg/setstate_read.py",
+                SETSTATE_READ.to_owned(),
+            )],
+        )
+        .absent(&[("pkg/restoring.py", "EFF101")]),
+        Step::new(
+            "it names another method",
+            vec![save(
+                "pkg/setstate_read.py",
+                &SETSTATE_READ.replace("__setstate__", "__getstate__"),
+            )],
         )
         .present(&[("pkg/restoring.py", "EFF101")]),
     ]

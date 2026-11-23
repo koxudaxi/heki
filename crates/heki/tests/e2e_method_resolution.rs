@@ -1359,14 +1359,20 @@ async def handler() -> None:
 "#;
 
 /// A star import may rebind the names the module body stores before it, not those it stores
-/// after.
-const STAR_GLOBALS: &str = r#"import httpx
+/// after it on every path; one under `if TYPE_CHECKING:` never runs.
+const STAR_GLOBALS: &str = r#"from typing import TYPE_CHECKING
+
+import httpx
 
 before = httpx.Client()
 
 from pkg.factory import *  # noqa: E402, F403
 
 after = httpx.Client()
+checked = httpx.Client()
+
+if TYPE_CHECKING:
+    from pkg.factory import *  # noqa: F403
 
 
 async def read_before() -> None:
@@ -1375,6 +1381,67 @@ async def read_before() -> None:
 
 async def read_after() -> None:
     after.get("https://example.com")  # EFF101
+
+
+async def read_checked() -> None:
+    checked.get("https://example.com")  # EFF101
+"#;
+
+/// A star import on one branch leaves the names the other branch stores to what it binds; so is
+/// a string constant bound there no constant, and `setattr` through it stores an attribute heki
+/// cannot name. A store after both branches binds the name for good.
+const STAR_BRANCHES: &str = r#"import os
+
+import httpx
+
+if os.environ.get("PLUGIN"):
+    from pkg.factory import *  # noqa: F403
+else:
+    branched = httpx.Client()
+    KEY = "other"
+
+LISTED = "other"
+
+
+async def read_branched() -> None:
+    branched.get("https://example.com")
+
+
+class Keyed:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        self.other = None
+
+    def configure(self) -> None:
+        setattr(self, KEY, httpx.AsyncClient())
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Listed:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        self.other = None
+
+    def configure(self) -> None:
+        setattr(self, LISTED, httpx.AsyncClient())
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+"#;
+
+/// A fallback an `except` clause binds when the star import fails.
+const STAR_FALLBACK: &str = r#"import httpx
+
+try:
+    from pkg.factory import *  # noqa: F403
+except ImportError:
+    fallback = httpx.Client()
+
+
+async def read_fallback() -> None:
+    fallback.get("https://example.com")
 "#;
 
 #[test]
@@ -1387,6 +1454,8 @@ fn a_global_has_the_type_every_store_of_it_binds() {
             ("pkg/factory.py", FACTORY),
             ("pkg/dynamic_globals.py", DYNAMIC_GLOBALS),
             ("pkg/star_globals.py", STAR_GLOBALS),
+            ("pkg/star_branches.py", STAR_BRANCHES),
+            ("pkg/star_fallback.py", STAR_FALLBACK),
         ],
         &["EFF101"],
     );
@@ -1746,7 +1815,8 @@ fn another_module_stores_into_a_global_through_any_receiver_of_its_module() {
 }
 
 /// Stores into an instance the inference can type: `self.__dict__ = state` stores any
-/// attribute; `super().__setattr__`, an alias of `object.__setattr__`, a `Final` name, and a
+/// attribute, and so does replacing the namespace or the class through `object.__setattr__` or
+/// `setattr`; `super().__setattr__`, an alias of `object.__setattr__`, a `Final` name, and a
 /// keyword of the namespace's `update` are named stores; deletions store nothing; a class
 /// method's new instance and an annotated parameter are instances of the class.
 const RECEIVERS: &str = r#"from typing import Final
@@ -1763,6 +1833,28 @@ class DictAssign:
 
     def load(self, state) -> None:
         self.__dict__ = state
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class FrozenDict:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def load(self, state) -> None:
+        object.__setattr__(self, "__dict__", state)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class ClassSwap:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def become(self, cls) -> None:
+        setattr(self, "__class__", cls)
 
     async def handle(self) -> None:
         self.client.get("https://example.com")
@@ -2212,17 +2304,84 @@ def load(target: Restored) -> None:
     target.__setstate__({"client": httpx.AsyncClient()})
 "#;
 
+/// The method read and called later, under its name as a string.
+const READS_SETSTATE: &str = r#"import httpx
+
+from pkg.restored import Restored
+
+
+def load(target: Restored) -> None:
+    restore = getattr(target, "__setstate__")
+    restore({"client": httpx.AsyncClient()})
+"#;
+
+/// A class whose `__setstate__` restores its namespace, and whose other method then stores an
+/// attribute heki cannot name: a read of its attributes made before that method is visited is
+/// read again, so a global copying one is not left with the restored type.
+const RESTORED_THEN_UNNAMED: &str = r#"import httpx
+
+copied = httpx.Client()
+kept = httpx.Client()
+
+
+class Unnamed:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+
+    def remember(self) -> None:
+        global copied
+        copied = self.client
+
+    def configure(self, name, value) -> None:
+        self.client.close()
+        setattr(self, name, value)
+
+
+class Restored:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+
+    def remember(self) -> None:
+        global kept
+        kept = self.client
+
+
+async def handle() -> None:
+    copied.get("https://example.com")
+
+
+async def handle_kept() -> None:
+    kept.get("https://example.com")  # EFF101
+"#;
+
 #[test]
 fn setstate_restores_what_an_instance_held() {
     check_marks("restored", &[("pkg/restored.py", RESTORED)], &["EFF101"]);
-    // A direct call may hand `__setstate__` anything.
+    // A direct call may hand `__setstate__` anything, and so may the method read and called
+    // later.
     let unmarked = RESTORED.replace("  # EFF101", "");
+    for (name, caller) in [
+        ("restored_called", CALLS_SETSTATE),
+        ("restored_read", READS_SETSTATE),
+    ] {
+        check_marks(
+            name,
+            &[
+                ("pkg/restored.py", unmarked.as_str()),
+                ("pkg/calls_setstate.py", caller),
+            ],
+            &["EFF101"],
+        );
+    }
     check_marks(
-        "restored_called",
-        &[
-            ("pkg/restored.py", unmarked.as_str()),
-            ("pkg/calls_setstate.py", CALLS_SETSTATE),
-        ],
+        "restored_then_unnamed",
+        &[("pkg/restored_then_unnamed.py", RESTORED_THEN_UNNAMED)],
         &["EFF101"],
     );
 }

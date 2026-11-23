@@ -132,6 +132,9 @@ pub struct StarImport {
     pub module: Option<String>,
     pub level: u32,
     pub span: Span,
+    /// Under `if TYPE_CHECKING:`: the import never runs, and binds nothing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_type_checking: bool,
 }
 
 /// Per-module semantic analysis result (JSON-serializable for `symtable` differential verification).
@@ -834,6 +837,7 @@ impl<'a> Analyzer<'a> {
                             module: module.clone(),
                             level: imp.level,
                             span: Span::from(imp.range),
+                            in_type_checking: self.in_type_checking,
                         });
                         continue;
                     }

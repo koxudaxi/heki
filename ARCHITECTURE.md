@@ -295,9 +295,11 @@ resolution (`heki_semantic`); then an SSA-CFG IR is built for every function.
 #### Light type resolution for the call graph
 No type errors are reported; types are resolved only to find call targets, the classes of read
 and written attributes, and the targets of write boundaries. Priority: (1) local constructors and
-direct imports, (2) PEP 484 annotations, (3) the types of attributes `__init__` binds and of
-module globals, as every store of each agrees, (4) the class hierarchy (CHA, at most 8
-candidates). A call that cannot be resolved is not
+direct imports, (2) PEP 484 annotations, (3) the types of instance attributes and module globals:
+an attribute `__init__` or `__post_init__` binds through `self`, or a global the module body
+binds, to a value of known type has the join of what every store of it binds (a union when the
+stores bind different classes), (4) the class hierarchy (CHA, at most 8 candidates). A call that
+cannot be resolved is not
 followed (the function is marked `unknown_calls`), and an external function that the Layer 2
 catalog does not list contributes no effect.
 
