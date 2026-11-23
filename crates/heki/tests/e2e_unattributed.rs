@@ -185,6 +185,92 @@ fn a_boundary_reporting_what_it_cannot_judge_reports_each_shape_with_its_chain()
     assert_eq!(reported(&p, "pkg/lenient.py", &["EFF201"]).len(), 1);
 }
 
+const CONSTRUCTION: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["EFF201"]
+
+[[tool.heki.effect-boundaries]]
+name = "builds"
+scopes = ["pkg.builds.*"]
+write-universe = ["Record.value", "Filled.value", "Assigned.value"]
+allow-writes = []
+unresolved = "report"
+"#;
+
+const RECORDS: &str = r#"class Record:
+    def __init__(self, name: str) -> None:
+        setattr(self, name, 0)
+
+
+def fill(obj, name: str) -> None:
+    setattr(obj, name, 0)
+
+
+def assign(obj) -> None:
+    obj.value = 0
+
+
+class Filled:
+    def __init__(self, name: str) -> None:
+        fill(self, name)
+
+
+class Assigned:
+    def __init__(self) -> None:
+        assign(self)
+
+
+class Copier:
+    def __init__(self, source: Record, name: str) -> None:
+        setattr(source, name, 0)
+"#;
+
+/// Constructing objects of the target classes, and writes that stay unknown.
+const BUILDS: &str = r#"from pkg.records import Assigned, Copier, Filled, Record, assign, fill
+
+
+def builds(name: str) -> Record:
+    return Record(name)
+
+
+def builds_filled(name: str) -> Filled:
+    return Filled(name)
+
+
+def builds_assigned() -> Assigned:
+    return Assigned()
+
+
+def copies(record: Record, name: str) -> Copier:
+    return Copier(record, name)  # EFF201
+
+
+def renames(record: Record, name: str) -> None:
+    setattr(record, name, 1)  # EFF201
+
+
+def refills(record: Filled, name: str) -> None:
+    fill(record, name)  # EFF201
+
+
+def reassigns(thing) -> None:
+    assign(thing)  # EFF201
+"#;
+
+#[test]
+fn a_class_initializing_its_own_instance_is_no_write_the_boundary_cannot_judge() {
+    let p = Project::new("unattributed_construction");
+    p.write("pyproject.toml", CONSTRUCTION);
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/records.py", RECORDS);
+    p.write("pkg/builds.py", BUILDS);
+    let found = reported(&p, "pkg/builds.py", &["EFF201"]);
+    let lines: Vec<(u64, String)> = found.iter().map(|(l, r, _)| (*l, r.clone())).collect();
+    assert_eq!(lines, marked(BUILDS, &["EFF201"]), "{found:#?}");
+}
+
 const OWNERS: &str = r#"[project]
 name = "t"
 

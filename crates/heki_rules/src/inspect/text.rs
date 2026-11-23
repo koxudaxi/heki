@@ -363,7 +363,7 @@ fn changes_text(out: &mut String, r: &InspectReport) {
         Some(writes) => {
             for w in writes.iter().filter(|w| !w.fresh) {
                 let place = format!("{}.{}", w.class, w.attr);
-                if w.keys.is_empty() {
+                if !w.entries_only {
                     lines.push((place.clone(), w.kind.to_owned()));
                 }
                 for k in &w.keys {
