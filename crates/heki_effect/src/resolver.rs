@@ -5926,14 +5926,11 @@ fn rebound_definitions(
                 {
                     *by_statement.entry(name).or_default() += 1;
                 }
-                InstKind::Copy { dst, .. } if f.is_class_body => {
-                    if let Some(name) = f.var_name(*dst) {
-                        let member = format!("{}.{name}", f.qualname);
-                        if defines(&member) {
-                            out.insert(member);
-                        }
-                    }
-                }
+                InstKind::Copy { dst, .. } if f.is_class_body => out.extend(
+                    f.var_name(*dst)
+                        .map(|name| format!("{}.{name}", f.qualname))
+                        .filter(|member| defines(member)),
+                ),
                 InstKind::Delete { name, .. } if f.is_class_body => {
                     let member = format!("{}.{name}", f.qualname);
                     if defines(&member) {
