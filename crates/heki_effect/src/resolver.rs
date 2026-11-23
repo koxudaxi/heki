@@ -7705,6 +7705,12 @@ impl<'a> TypeCtx<'a> {
         if let Some(callee) = recv.and_then(|r| self.alias_call_targets(r, method)) {
             return callee;
         }
+        self.defined_method_targets(recv, method)
+    }
+
+    /// [`Self::method_call_targets`] by the methods the classes define, past the class bodies
+    /// binding `method` to a name.
+    fn defined_method_targets(&self, recv: Option<Recv<'_>>, method: &str) -> Callee {
         match recv {
             Some(Recv::Ref(fqn)) => {
                 if self.project.is_project_class(fqn) {
@@ -7737,9 +7743,10 @@ impl<'a> TypeCtx<'a> {
     /// name ([`ProjectDecls::class_alias`]), on every class the receiver may be: a class object
     /// is exactly its class, an instance or `cls` also a project subclass. Calling the named
     /// object calls it as it is, except a function read on an instance outside `staticmethod`,
-    /// a bound method, which binds the instance first. `None` when no such class binds it so;
-    /// unresolved when one finds anything else, or the classes' targets bind differently; too
-    /// many past [`DISPATCH_CLASS_LIMIT`] classes.
+    /// a bound method, which binds the instance first. A class finding a method of the name, or
+    /// none, runs what the methods give ([`Self::defined_method_targets`]). `None` when no class
+    /// binds the name to a name; unresolved when the targets bind differently; too many past
+    /// [`DISPATCH_CLASS_LIMIT`] classes.
     fn alias_call_targets(&self, recv: Recv<'_>, method: &str) -> Option<Callee> {
         let (class, on_instance, family) = match recv {
             Recv::Ref(class) if self.project.is_project_class(class) => (class, false, false),
@@ -7762,11 +7769,11 @@ impl<'a> TypeCtx<'a> {
         if classes.len() > DISPATCH_CLASS_LIMIT {
             return Some(Callee::TooMany);
         }
-        let mut out: Option<Callee> = None;
-        for alias in found {
-            let Some((named, is_static)) = alias else {
-                return Some(Callee::Unresolved);
-            };
+        let mut out: Option<Callee> = found
+            .iter()
+            .any(Option::is_none)
+            .then(|| self.defined_method_targets(Some(recv), method));
+        for (named, is_static) in found.into_iter().flatten() {
             let named = self.project.object_named(named);
             let callee = match self.called_symbol(&named) {
                 Symbol::Function(key, _) if on_instance && !is_static => {
