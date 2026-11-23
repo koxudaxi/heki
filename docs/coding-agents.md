@@ -90,6 +90,67 @@ instead, which makes a good prompt for the fix. `heki rule --all --output-format
 every rule's metadata and documentation, the premises of its exact claim, and its published
 precision: its certification and its latest measurement ([Rule Precision](precision.md)).
 
+## Architecture rules with agents
+
+Do not describe the architecture in the project's `AGENTS.md` or `CLAUDE.md`. Declare it as
+[contracts](configuration.md#contracts) and let `heki check` enforce it. Three lines are enough:
+
+> After editing Python, run `heki check`.
+> A report that names a contract means the code crossed a wall the maintainers declared: change the
+> code as the report's help says.
+> Do not edit the contracts or the baseline, and do not add a suppression, unless the maintainer
+> asks.
+
+The `message` of a contract is what the agent reads as the fix, so write it as an instruction:
+
+```toml
+# heki.toml
+[[write-owners]]
+name = "generation-store"
+targets = ["pkg.model.DataModel.fields"]
+allowed-writers = ["Store.*"]
+message = "use GenerationStore.set_fields() instead"
+```
+
+Put the contracts and the baseline path in `heki.toml`, and give that file an owner (`CODEOWNERS`,
+or the host's rule for protected files). A change to a wall is then a reviewed change, and an agent
+cannot move a wall to make a report go away.
+
+### A Stop hook for Claude Code
+
+A [Stop hook](https://code.claude.com/docs/en/hooks) runs when Claude Code is about to end its turn.
+The script below runs `heki check` and, when it exits with 1 (findings), sends the text to the agent
+and keeps it working. Exit code 2 of the hook means "block, and read stderr". heki's own failure (exit
+code 2, or no `heki` on the path) lets the turn end, so a configuration error does not loop. The hook
+input has `stop_hook_active`, which is `true` while Claude Code is already continuing because of a
+stop hook; the script stops blocking then.
+
+```sh
+#!/bin/sh
+input=$(cat)
+case $input in
+  *'"stop_hook_active":true'* | *'"stop_hook_active": true'*) exit 0 ;;
+esac
+report=$(heki check 2>&1)
+status=$?
+[ "$status" -eq 1 ] || exit 0
+printf '%s\n' "$report" >&2
+exit 2
+```
+
+Register it in `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [{ "hooks": [{ "type": "command", "command": ".claude/hooks/heki-stop.sh" }] }]
+  }
+}
+```
+
+Run on a project with findings that are already known, it would block every turn: use
+`heki check --baseline heki-baseline.toml` in the script so that only new findings count.
+
 ## What a function does: `heki inspect` (experimental)
 
 When a diagnostic or a question is about one function, `heki inspect` says what it reaches,

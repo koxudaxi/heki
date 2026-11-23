@@ -900,23 +900,25 @@ impl ContractTarget {
 
 /// The member a contract target names after its last dot (`fields` of `pkg.Model.fields`),
 /// matched against an attribute name as its class holds it: as written in the class, and for a
-/// private name (`__cache`) mangled with a class the target names (`_Model__cache`).
+/// private name (`__cache`) mangled with a class the target names (`_Model__cache`), or with
+/// any class when the target names none (`__cache`).
 #[derive(Debug, Clone)]
 pub(crate) struct MemberPattern {
     pattern: DottedPattern,
-    /// The names of the classes the target names, without their leading underscores.
-    holders: FxHashSet<String>,
+    /// The names of the classes the target names, without their leading underscores; `None`
+    /// when it names no class.
+    holders: Option<FxHashSet<String>>,
 }
 
 impl MemberPattern {
-    /// `text` held by the classes of `all` that `holder` names (none without a holder).
+    /// `text` held by the classes of `all` that `holder` names, or by any class without one.
     pub(crate) fn new(
         text: &str,
         holder: Option<&DottedPattern>,
         all: &[ContractClass],
         context: &'static str,
     ) -> Result<Self, RuleConfigError> {
-        let holders = holder.map_or_else(FxHashSet::default, |holder| {
+        let holders = holder.map(|holder| {
             all.iter()
                 .filter(|c| holder.matches_class(c))
                 .map(|c| {
@@ -935,7 +937,8 @@ impl MemberPattern {
     pub(crate) fn matches(&self, attr: &str) -> bool {
         self.pattern.matches(attr)
             || mangling::unmangled(attr).any(|(class, written)| {
-                self.holders.contains(class) && self.pattern.matches(written)
+                self.holders.as_ref().is_none_or(|h| h.contains(class))
+                    && self.pattern.matches(written)
             })
     }
 }
@@ -3323,12 +3326,16 @@ impl<'a> Mut202Fn<'a> {
         })
     }
 
-    /// The one project function the call instruction `inst` runs.
+    /// The one project function the call instruction `inst` runs: its one target, whose name
+    /// the project binds to no other object (R1, [`ProjectDecls::call_rebound`]).
     fn single_callee(&self, inst: &'a Inst) -> Option<&'a FuncKey> {
         let shape = self.shape();
         let call = site_call(&|v| shape.inst(v), self.sites, inst, false)?;
         let callees = call.site?.project_callees();
         let bc = callees.first().filter(|_| callees.len() == 1)?;
+        if self.cx.decls.call_rebound(&bc.callee.fqn()) {
+            return None;
+        }
         self.cx.index.summary(&bc.callee).map(|_| &bc.callee)
     }
 

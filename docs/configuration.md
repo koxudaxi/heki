@@ -154,6 +154,7 @@ the same file is `services.api.app` and the import is not resolved. Put a `pypro
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `target-version` | the oldest version `project.requires-python` admits, else `py312` | Python version of the code: `py311` … `py315` (or `3.11` … `3.15`). `--target-version` overrides it. See [below](#the-default-target-version) for the inference and [Scope](scope.md#the-target-python-version) for what the version changes. |
+| `required-version` | none | A [PEP 440](https://peps.python.org/pep-0440/) version specifier made of operators and plain releases (`">=0.2.6"`; no pre-, post-, or dev-release suffix) the running heki must satisfy; an older or newer one stops with an error. See [Requiring a heki version](#requiring-a-heki-version). |
 | `exclude` | the Ruff defaults (`.git`, `.venv`, `build`, `dist`, `node_modules`, …) | Replaces the excluded paths: globs, matched against the project-relative path and each of its components, and covering everything below a matched directory. |
 | `extend-exclude` | `[]` | Adds excluded paths. |
 | `src` | the detected source roots | Source roots, relative to the project root: the module names of the files below each are relative to it (`src = ["lib"]` names `lib/pkg/net.py` `pkg.net`). See [Module names follow the source roots](#module-names-follow-the-source-roots). |
@@ -173,6 +174,29 @@ supported version that every clause admits:
 | `>=3.16` (only newer versions) | `py315` |
 | `<4` (no lower bound, admits 3.12) | `py312` |
 | missing, or not a version specifier | `py312` |
+
+### Requiring a heki version
+
+`required-version` makes a heki that does not satisfy the specifier refuse to run, as Ruff's
+`required-version` does. heki checks it before any other key, so a configuration that uses keys
+a newer release adds fails with this message on an older heki:
+
+```toml
+[tool.heki]
+required-version = ">=0.2.6"
+```
+
+```text
+error: pyproject.toml:2:20: this is heki 0.2.4, but the configuration requires `>=0.2.6`
+```
+
+An older heki cannot know which release adds a key it has never heard of. Without
+`required-version` (and any heki before the release that added it rejects the key as unknown, like any
+other), an unknown key is an error that says only what the table accepts. When the key is not close to a
+key of its table (a close one is a typo, and the error offers it), the error also says that the
+key may belong to a newer heki, names the running version, and points to `required-version` and
+the changelog. It cannot say which release adds the key. `heki version --changelog` prints what
+the installed release changed, and the changelog on GitHub lists every release.
 
 ### Which files are checked
 
@@ -269,7 +293,9 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   subclass's `self`, or `type[Parser]` reaches it as `_Parser__run`. A subclass's own private
   name (`self.__run` in `JsonParser`, the member `_JsonParser__run`) is another member, and
   overrides nothing of its base. With `unresolved = "report"`, the last name of such a target
-  counts in both spellings (`__run`, and `_Parser__run` for a class the target names).
+  counts in both spellings (`__run`, and `_Parser__run` for a class the target names); a
+  target without a class (`__run`) names the member of any class (`other.__run()` in class
+  `Driver` calls `_Driver__run`).
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, a name with more than one colon or an empty module or qualified name, call
   targets whose globs are too many to match together (tens of thousands of complex ones), an
@@ -425,7 +451,7 @@ The call side of `write-owners`.
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `name` | `""` | The contract's name in reports. |
-| `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass. A target may end in an argument list (`DataType(is_dict=True)`, below). |
+| `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass, also through a `functools.partial` object holding it and through a library method building an instance of its receiver's class (a pydantic model's `model_construct`, `model_validate` of a dict, `model_copy`). A target may end in an argument list (`DataType(is_dict=True)`, below). |
 | `subclasses` | `true` | `false`: a class target means constructing exactly the class, not a subclass (an exception class whose subclasses anyone may raise). `Class.method` targets keep covering overrides. |
 | `allowed-callers` | `[]` | Functions allowed to call the targets. |
 | `forbidden-callers` | `[]` | When set, only calls by these functions are reported. |
@@ -472,17 +498,27 @@ The call side of `write-owners`.
   Python binds it: never a positional-only parameter (with `def f(kind=False, /, **kwargs)`,
   `f(kind=True)` leaves `kind` false), and a keyword naming no parameter passes its value under its
   name into `**kwargs`; the receiver of a method call is its first position. A `**` operand that is
-  a dict display with string constant keys (literals, or string constants as above), which nothing
-  changes (a name holding it is only unpacked with `**`, bound to another name, tested, or
-  returned), passes its entries as keywords: `DataType(**{"is_dict": True})`,
-  `flags = {"is_dict": True}; DataType(**flags)`. A call that raises `TypeError` instead of running
-  the function passes nothing: two keywords of one name (written and in such a display, or in two
-  displays), a keyword binding a parameter a position or the receiver binds too, a keyword naming no
-  parameter of a function without `**kwargs`, a position (the receiver included) past the parameters
-  of a function without `*args`, or a parameter without a default left unbound where no `*`
-  unpacking or `**` unpacking of another mapping may bind it. Any other argument (a variable, a
-  call, `*` unpacking, `**` unpacking of another mapping) is not established, and the call is not
-  reported. A reference passes no arguments, so it never matches. A target with an argument list
+  a mapping the function builds, which nothing changes (a name holding it is only unpacked with
+  `**`, merged into another mapping, bound to another name, tested, or returned), passes its
+  entries as keywords: a dict display with string constant keys (literals, or string constants as
+  above), `DataType(**{"is_dict": True})`, `flags = {"is_dict": True}; DataType(**flags)`; a merge
+  of mappings (`{**a, **b}`, `dict(a, is_dict=True)`, `a | b` of two mappings the function builds),
+  which passes the last entry of each key, a mapping heki does not build (a parameter) replacing
+  every key before it; and a mapping built on several paths (`flags = a if c else b`), which passes
+  a key where every path passes the same constant for it. Calling a `functools.partial` object the
+  function makes (through copies) calls what it holds, with the positions it holds first and its
+  keywords, which a keyword the call writes replaces: after `make = partial(DataType,
+  is_dict=True)`, `make()` constructs `DataType(is_dict=True)`, reported at `make()`, where the
+  class is constructed (a call unpacking a mapping with `**` over keywords the object holds is not
+  followed). A pydantic model's `model_construct` passes its keywords to the fields,
+  `model_validate` the entries of the dict it is passed, and `model_copy` those of `update`. A
+  call that raises `TypeError` instead of running the function passes nothing: two keywords of one
+  name (written and in such a display, or in two displays), a keyword binding a parameter a
+  position or the receiver binds too, a keyword naming no parameter of a function without
+  `**kwargs`, a position (the receiver included) past the parameters of a function without
+  `*args`, or a parameter without a default left unbound where no `*` unpacking or `**` unpacking
+  of another mapping may bind it. Any other argument (a variable, a call, `*` unpacking, `**`
+  unpacking of another mapping) is not established, and the call is not reported. A reference passes no arguments, so it never matches. A target with an argument list
   names no symbol outside the project; `unresolved = "report"` matches its last name before the
   list, whatever the arguments of a call on an object of unknown class.
 - With `references = "calls-and-bases"`, a class statement passing a class target as a base is

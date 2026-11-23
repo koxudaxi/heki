@@ -634,6 +634,40 @@ def copies_only(flag: bool) -> None:
     );
 }
 
+/// A written keyword binds its parameter whatever way the `**` mapping beside it is built: a
+/// helper changing the argument it passes changes the shared value, beside a display and beside
+/// a mapping built on two paths.
+#[test]
+fn a_keyword_beside_a_mapping_of_several_ways_binds_its_parameter() {
+    let p = project("shared_keyword_beside_mapping", DEEP_SHARED);
+    p.write(
+        "app.py",
+        r#"CACHE = [[1], [2]]
+
+
+def shared() -> list[list[int]]:
+    return CACHE
+
+
+def fill(rows, kind=False):
+    rows.append([int(kind)])
+
+
+def one_way() -> None:
+    fill(rows=shared(), **{"kind": True})
+
+
+def two_ways(flag: bool) -> None:
+    flags = {"kind": True} if flag else {"kind": False}
+    fill(rows=shared(), **flags)
+"#,
+    );
+    assert_eq!(
+        reports(&p, "MUT202"),
+        vec![at("app.py", 13, "one_way"), at("app.py", 18, "two_ways")]
+    );
+}
+
 #[test]
 fn container_constructors_and_unpacking_displays_copy_only_the_top_level() {
     let p = project("shared_constructors", "");
