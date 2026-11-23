@@ -2221,23 +2221,6 @@ impl FileSummary {
             .map(String::as_str)
     }
 
-    /// The final `MUT119` fact of the file's `func`.
-    fn fresh_return(&self, func: &FuncKey) -> Option<&fresh::FreshReturn> {
-        self.opt_in_tables
-            .as_ref()?
-            .fresh_returns
-            .resolved
-            .get(func)
-    }
-
-    /// What callers read of the file's `func` after propagation.
-    fn final_facts(&self, func: &FuncKey) -> Option<FinalFacts> {
-        Some(FinalFacts {
-            summary: Arc::clone(self.functions.get(func)?),
-            fresh_return: self.fresh_return(func).cloned(),
-        })
-    }
-
     /// The final facts as the local ones, where propagation starts.
     fn reset_final_facts(&mut self) {
         self.functions = self.local_functions.clone();
@@ -2280,6 +2263,17 @@ struct FinalFacts {
 }
 
 impl FinalFacts {
+    /// What callers read of `file`'s `func` after propagation.
+    fn of(file: &FileSummary, func: &FuncKey) -> Option<Self> {
+        let tables = file.opt_in_tables.as_ref();
+        Some(Self {
+            summary: Arc::clone(file.functions.get(func)?),
+            fresh_return: tables
+                .and_then(|t| t.fresh_returns.resolved.get(func))
+                .cloned(),
+        })
+    }
+
     /// Location-insensitive equality ([`EffectSummary::same_facts`]).
     fn same_facts(&self, other: &Self) -> bool {
         self.summary.same_facts(&other.summary) && self.fresh_return == other.fresh_return
@@ -2699,15 +2693,16 @@ impl ProjectIndex {
 
     /// The final `MUT119` fact of `func` ([`fresh::FreshReturns::resolved`]), if it has one.
     pub fn fresh_return(&self, func: &FuncKey) -> Option<&fresh::FreshReturn> {
-        self.files
-            .get(self.func_files.get(func)?)?
-            .fresh_return(func)
+        let file = self.files.get(self.func_files.get(func)?)?;
+        file.opt_in_tables
+            .as_ref()?
+            .fresh_returns
+            .resolved
+            .get(func)
     }
 
     fn final_facts(&self, func: &FuncKey) -> Option<FinalFacts> {
-        self.files
-            .get(self.func_files.get(func)?)?
-            .final_facts(func)
+        FinalFacts::of(self.files.get(self.func_files.get(func)?)?, func)
     }
 
     fn shared_summary(&self, func: &FuncKey) -> Option<&Arc<EffectSummary>> {
@@ -2824,7 +2819,7 @@ impl ProjectIndex {
             for k in old.functions.keys() {
                 if self.func_files.get(k) == Some(&path) {
                     owned_before.insert(k.clone());
-                    previous.extend(old.final_facts(k).map(|facts| (k.clone(), facts)));
+                    previous.extend(FinalFacts::of(old, k).map(|facts| (k.clone(), facts)));
                 }
             }
             self.remove_file_links(old);

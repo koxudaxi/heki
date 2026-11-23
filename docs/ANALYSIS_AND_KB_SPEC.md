@@ -1168,10 +1168,10 @@ which module imports which.
    comparison, a conversion, an iteration, a call of a builtin that only inspects it); a store, a
    capture, a yield, a raise, an attribute load (a bound method), or any other call ends the fact.
    Both walks share one budget per function. `built` says every source is the builtin itself.
-3. **Propagation** (`Resolver::fresh_return`): a local fact naming project functions holds when
-   each has a final fact of the same kind outside the SCC being computed (a recursive function
-   has none), and is `built` only when they all are. Two definitions of one function keep the
-   fact only when both have it with one kind. Early Cutoff compares the final facts with the
+3. **Propagation** (`Resolver::resolve_fresh_return`): a local fact naming project functions holds
+   when each has a final fact of the same kind outside the SCC being computed (a recursive
+   function has none), and is `built` only when they all are. Two definitions of one function keep
+   the fact only when both have it with one kind. Early Cutoff compares the final facts with the
    summaries (`FinalFacts`), so a change of one re-propagates the callers as a summary change
    does.
 4. **The rule** (`heki_rules::mut_rules::lost_changes`): a changing method of a container kind,

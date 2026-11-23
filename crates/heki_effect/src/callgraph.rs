@@ -209,7 +209,7 @@ pub(crate) fn propagate_with_budget(
                 index,
                 in_scc: &in_scc,
             }
-            .fresh_return(&nodes[i]);
+            .resolve_fresh_return(&nodes[i]);
             let fresh_changed = index.fresh_return(&nodes[i]) != fresh.as_ref();
             if fresh_changed {
                 store_fresh_return(index, &nodes[i], fresh);
@@ -979,7 +979,7 @@ impl Resolver<'_> {
     /// The final fact of `func` ([`crate::fresh::FreshReturns::resolved`]): its local fact when
     /// each project function it names returns a new container of the same kind on every return
     /// (by its final fact, outside the SCC being computed).
-    fn fresh_return(&self, func: &FuncKey) -> Option<FreshReturn> {
+    fn resolve_fresh_return(&self, func: &FuncKey) -> Option<FreshReturn> {
         let file = &self.index.files[&self.index.func_files[func]];
         let local = file.opt_in_tables.as_ref()?.fresh_returns.local.get(func)?;
         let mut fact = FreshReturn {
