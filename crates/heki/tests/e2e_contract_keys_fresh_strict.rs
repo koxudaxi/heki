@@ -3386,6 +3386,136 @@ fn unlisted_dict_keys_count_the_keys_every_write_owners_contract_names() {
     );
 }
 
+const UNKNOWN_CLASS_MODEL: &str = r#"from __future__ import annotations
+
+
+class Field:
+    def __init__(self) -> None:
+        self.kind = "str"
+        _init_cache(self)
+
+
+class Sub(Field):
+    pass
+
+
+class Other:
+    pass
+
+
+def _init_cache(obj) -> None:
+    obj.__dict__["_init_cache"] = None
+"#;
+
+const UNKNOWN_CLASS_PASSES: &str = r#"from __future__ import annotations
+
+from pkg.model import Field, Other
+
+
+def typed_new_key(field: Field) -> None:
+    field.__dict__["_name_cache"] = 1
+
+
+def untyped_new_key(field) -> None:
+    field.__dict__["_name_cache"] = 1
+
+
+def loop_new_key(fields: list) -> None:
+    for field in fields:
+        field.__dict__.setdefault("_seen_cache", True)
+
+
+def untyped_listed_key(field) -> None:
+    field.__dict__["_type_cache"] = 1
+
+
+def untyped_key_named_elsewhere(field) -> None:
+    field.__dict__["_named_elsewhere"] = 1
+
+
+def untyped_new_attribute(field) -> None:
+    field._new_attribute = 1
+
+
+def _fill(obj) -> None:
+    obj.__dict__.pop("_filled", None)
+
+
+def fill_field(field: Field) -> None:
+    _fill(field)
+
+
+def other_only(obj) -> None:
+    obj.__dict__["_other_key"] = 1
+
+
+def call_other(other: Other) -> None:
+    other_only(other)
+"#;
+
+/// A project whose contract `caches` guards `Field._type_cache` with `keys` added, next to a
+/// contract naming `Field._named_elsewhere`.
+fn unknown_class_project(name: &str, keys: &str) -> Project {
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT205\"]\n\n{}{}",
+            write_owner("caches", "pkg.model.Field._type_cache", "pkg.store:*", keys),
+            write_owner("other", "pkg.model.Field._named_elsewhere", "pkg.store:*", ""),
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", UNKNOWN_CLASS_MODEL)
+    .write("pkg/passes.py", UNKNOWN_CLASS_PASSES)
+    .write(
+        "pkg/store.py",
+        "def save(field) -> None:\n    field.__dict__[\"_stored\"] = 1\n",
+    );
+    p
+}
+
+/// With `unlisted-dict-keys = "report"` and `unresolved = "report"`, a constant `__dict__` key
+/// no target names, written on an object of unknown class (a parameter no annotation types, a
+/// loop variable), is a `MUT205` report: it may be a new key of a target's class. So is one in a
+/// helper a caller hands an instance of a target's class, which `MUT201` does not see as a
+/// `__dict__` write at the caller. A key another contract names, a plain attribute store, a
+/// helper only called with an object of another class, the class's own initialization through
+/// a helper, and the allowed writers are not; without either key the write stays silent.
+#[test]
+fn unlisted_dict_keys_on_objects_of_unknown_class_are_unresolved_writes() {
+    let u = "pkg/passes.py";
+    let typed = d(u, 7, "MUT201", "typed_new_key", "Field._name_cache");
+    let listed = d(u, 20, "MUT205", "untyped_listed_key", "_type_cache");
+    let both = "unlisted-dict-keys = \"report\"\nunresolved = \"report\"\n";
+    let p = unknown_class_project("unlisted_keys_unknown_class", both);
+    let diags = diagnostics(&p, &[]);
+    assert_eq!(
+        found(&diags),
+        vec![
+            typed.clone(),
+            d(u, 11, "MUT205", "untyped_new_key", "_name_cache"),
+            d(u, 16, "MUT205", "loop_new_key", "_seen_cache"),
+            listed.clone(),
+            d(u, 32, "MUT205", "_fill", "_filled"),
+        ]
+    );
+    assert_eq!(
+        message_at(&diags, u, 11),
+        "`untyped_new_key` writes `_name_cache` (as a `__dict__` item), a `__dict__` key no target names, on an object of unknown class outside the write owners of `caches`: heki cannot tell whether it writes `pkg.model.Field._name_cache`"
+    );
+    let p = unknown_class_project(
+        "unlisted_keys_unknown_class_typed_only",
+        "unlisted-dict-keys = \"report\"\n",
+    );
+    assert_eq!(found(&diagnostics(&p, &[])), vec![typed]);
+    let p = unknown_class_project(
+        "unlisted_keys_unknown_class_listed_only",
+        "unresolved = \"report\"\n",
+    );
+    assert_eq!(found(&diagnostics(&p, &[])), vec![listed]);
+}
+
 /// A star import binds the names its module exports, which heki does not read, so it may bind
 /// the name of any builtin: `len(globals())` may hand the dict to another `len` (the one
 /// `pkg.writer` defines), which may bind a name declared `Final`. That holds for a star import

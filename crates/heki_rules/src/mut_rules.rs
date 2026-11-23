@@ -2723,7 +2723,8 @@ pub(crate) fn mut201(
         });
     }
 
-    unresolved::mut205(cx, &rules, out);
+    let named_keys = NamedDictKeys::new(&rules);
+    unresolved::mut205(cx, &rules, &named_keys, out);
     if !writes {
         return Ok(());
     }
@@ -2744,7 +2745,6 @@ pub(crate) fn mut201(
         .map(|r| r.targets.iter().map(|_| InsideAllowed::default()).collect())
         .collect();
     let names_protocols = rules.iter().any(|r| r.allowance.names_protocols());
-    let named_keys = NamedDictKeys::new(&rules);
     for path in paths {
         let file = &cx.index.files[path];
         let Some(unit) = cx.unit(path) else {
