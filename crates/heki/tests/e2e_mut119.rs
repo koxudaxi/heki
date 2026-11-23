@@ -172,6 +172,9 @@ fn every_container_kind_and_every_way_a_new_one_is_made() {
     assert!(message(15).starts_with("`appendleft` changes a new `deque`,"));
     assert!(message(21).starts_with("the item deletion changes a new `dict`,"));
     assert!(message(26).ends_with("and the assignment stores the `None` that `extend` returns"));
+    // A project subclass that keeps the copy hooks leaves the copy of a `list` exact.
+    let quiet = diags.iter().find(|d| d["line"] == 48).unwrap();
+    assert_eq!(quiet["certainty"], "exact");
 }
 
 /// Changes some other code sees, or results the code reads: a method of a project class named
@@ -263,8 +266,11 @@ fn a_copy_hook_of_a_subclass_makes_the_report_heuristic() {
     let diags = diagnostics(&p);
     assert_eq!(reported(&diags), at("hooked.py", &[10]));
     assert_eq!(diags[0]["certainty"], "heuristic");
-    let (_, stdout, _) = p.check(&["--output-format", "json"]);
+    // A plain run leaves the heuristic report out; `--heuristic` shows it.
+    let (_, stdout, _) = p.heki(&["check", "--output-format", "json"]);
     assert_eq!(stdout.trim(), "[]");
+    let (_, stdout, _) = p.check(&["--output-format", "json"]);
+    assert!(stdout.contains("\"certainty\": \"heuristic\""), "{stdout}");
 }
 
 #[test]
