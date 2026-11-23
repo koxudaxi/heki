@@ -745,6 +745,9 @@ def mut119(sc, strip):
     if way in ("path", "shadowed"):
         sc.define([f"SHARED_{ns} = {held}"])
     lines = []
+    if way in ("path", "shadowed"):
+        # The entry replenishes the module state a previous input may have emptied.
+        lines += [f"global SHARED_{ns}", f"SHARED_{ns} = {held}"]
     origin = sc.pick(["built", "built", "project"] + (["copy"] if copies else []))
     if way in ("stored", "field", "path"):
         origin = "project"
@@ -764,7 +767,8 @@ def mut119(sc, strip):
     elif origin == "copy":
         obj = sc.pick(copies)
     elif origin == "project":
-        lines, obj = _mut119_made(sc, sc.pick(built), way)
+        made_lines, obj = _mut119_made(sc, sc.pick(built), way)
+        lines += made_lines
     else:
         obj = sc.pick(built)
     text, form, returns_value = sc.pick(changes)
@@ -788,8 +792,13 @@ def mut119(sc, strip):
         elif result == "stored":
             lines.append("out = {}")
             change, tail = f"out[key] = {change}", "return out"
-    place = sc.pick(["plain", "plain", "if", "for", "try"])
+    # A loop would run a destructive change twice on a receiver the entry retains.
+    retained = way in ("field", "path", "shadowed", "copy-self", "override")
+    place = sc.pick(["plain", "plain", "if", "try"] if retained else ["plain", "plain", "if", "for", "try"])
     if place == "if":
+        if way in ("walrus", "read"):
+            # The change binds the name the tail reads; `flag` may be false.
+            lines.append("items = []" if way == "walrus" else "top = 0")
         lines += block("if flag:", [change])
     elif place == "for":
         lines += block("for _ in range(2):", [change])

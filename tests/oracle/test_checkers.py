@@ -567,7 +567,7 @@ class Mut119(unittest.TestCase):
         return result["checked"], [(f["kind"], f["premise"].split(":")[0]) for f in result["refutations"]]
 
     def test_an_object_nothing_holds_confirms(self):
-        facts = {"method": self.sort, **self.held(0), "results": {"env": "NoneType", "out[k]": None}}
+        facts = {"method": self.sort, **self.held(0), "results": {"env": [True, "NoneType"], "out[k]": None}}
         self.assertEqual(self.check(self.method, lost(facts)), (1, []))
 
     def test_an_object_still_held_refutes_new_object(self):
@@ -588,7 +588,11 @@ class Mut119(unittest.TestCase):
         self.assertEqual(self.check(self.store, lost(facts)), (1, [("not-changed-in-place", "Changed in place")]))
 
     def test_a_target_holding_another_value_refutes_changed_in_place(self):
-        facts = {"method": ["pop", True, None], **self.held(0), "results": {"top": "int"}}
+        facts = {"method": ["pop", True, None], **self.held(0), "results": {"top": [False, "int"]}}
+        self.assertEqual(self.check(self.method, lost(facts)), (1, [("result-not-none", "Changed in place")]))
+
+    def test_a_value_of_a_class_named_nonetype_is_not_none(self):
+        facts = {"method": ["pop", True, None], **self.held(0), "results": {"top": [False, "NoneType"]}}
         self.assertEqual(self.check(self.method, lost(facts)), (1, [("result-not-none", "Changed in place")]))
 
     def test_an_object_the_line_did_not_see_counts_when_a_builtin_made_it(self):
@@ -926,6 +930,46 @@ class Helpers(unittest.TestCase):
         self.assertEqual(monitor.static_eval("a.k", {"a": Plain()}), 1)
         self.assertIs(monitor.static_eval("a.k", {"a": WithProperty()}), monitor.UNKNOWN)
         self.assertEqual(monitor.static_eval('a["k"]', {"a": {"k": 2}}), 2)
+
+    def test_a_key_of_a_program_class_runs_no_hash_or_eq(self):
+        class Key(str):
+            def __hash__(self):
+                raise AssertionError("ran")
+
+        class Stored:
+            def __eq__(self, other):
+                raise AssertionError("ran")
+
+            __hash__ = object.__hash__
+
+        self.assertIs(monitor.static_eval("a[k]", {"a": {"x": 1}, "k": Key("x")}), monitor.UNKNOWN)
+        self.assertIs(monitor.static_eval("a[k]", {"a": {Stored(): 1, "x": 2}, "k": "x"}), monitor.UNKNOWN)
+        self.assertEqual(monitor.static_eval("a[k]", {"a": {"x": 1}, "k": "x"}), 1)
+
+    def test_a_target_whose_key_the_statement_rebinds_is_not_read_back(self):
+        import ast
+
+        import plan
+
+        source = _source('def f(out, k, xs):\n    out[k] = k = list(xs).sort()\n    out[k] = xs.sort()\n')
+        statements = [n for n in ast.walk(source.tree) if isinstance(n, ast.Assign)]
+        for statement, loaded in zip(statements, (None, "out[k]")):
+            rebound = frozenset(
+                n.id for n in ast.walk(statement) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+            )
+            self.assertEqual(plan._loaded_target(source, statement.targets[0], rebound), loaded)
+
+    def test_a_store_in_an_inline_handler_is_not_alone_on_its_line(self):
+        import ast
+
+        import plan
+
+        source = _source(
+            "def f():\n    try:\n        g()\n    except ValueError: [1][0] = 2\n"
+            "    try:\n        g()\n    except ValueError:\n        [1][0] = 2\n"
+        )
+        stores = [n for n in ast.walk(source.tree) if isinstance(n, ast.Assign)]
+        self.assertEqual([plan._alone_on_its_line(source, n) for n in stores], [False, True])
 
     def test_snapshots_see_in_place_changes(self):
         items = [1, {2}]

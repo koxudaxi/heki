@@ -660,12 +660,12 @@ def check_mut119(claim, runs, sources=None):
                 )
                 continue
             for expr, held in facts["results"].items():
-                if held is not None and held != "NoneType":
+                if held is not None and not held[0]:
                     result.refute(
                         "result-not-none",
-                        f"Changed in place: `{expr}` holds a `{held}`, not the `None` the change returns",
+                        f"Changed in place: `{expr}` holds a `{held[1]}`, not the `None` the change returns",
                         run,
-                        {"target": expr, "type": held},
+                        {"target": expr, "type": held[1]},
                     )
     return result
 

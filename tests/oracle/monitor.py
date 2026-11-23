@@ -928,7 +928,7 @@ class Recorder:
             loaded = {}
             for expr in watch.results:
                 value = static_eval(expr, local)
-                loaded[expr] = None if value is UNKNOWN else type(value).__name__
+                loaded[expr] = None if value is UNKNOWN else [value is None, type(value).__name__]
             facts["results"] = loaded
 
     def _on_instruction(self, code, offset):
@@ -1240,7 +1240,9 @@ _PLAIN = (int, str, bytes, float, bool, type(None))
 
 
 def _is_plain_key(value):
-    if isinstance(value, _PLAIN):
+    """Whether hashing and comparing `value` runs no program code: an exact builtin type (a
+    subclass may define `__hash__`, `__eq__`, or `__index__`), tuples of them included."""
+    if type(value) in _PLAIN:
         return True
     if type(value) is tuple:
         return all(_is_plain_key(v) for v in value)
@@ -1301,6 +1303,9 @@ def _static_eval(node, local):
         base = _static_eval(node.value, local)
         key = _static_eval(node.slice, local)
         if type(base) in (dict, list, tuple) and key is not UNKNOWN and _is_plain_key(key):
+            if type(base) is dict and not all(_is_plain_key(k) for k in base):
+                # A stored key of the program's class may run its `__eq__` on a hash collision.
+                return UNKNOWN
             try:
                 return base[key]
             except (KeyError, IndexError, TypeError):
