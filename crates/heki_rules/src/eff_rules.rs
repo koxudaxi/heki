@@ -6,7 +6,7 @@ use crate::mut_rules::{
     CallTargets, ContractTarget, FunctionMatcher, FunctionMatchers, References, SiteId, Subclasses,
     allows_fresh, call_verb, contract_places, counts_references, group_texts, helper_changes_field,
     initializes_itself, parse_call_targets, parse_read_targets, parse_targets, patterns,
-    project_classes, reports_import_probes, site_callee, write_hits,
+    project_classes, reports_import_probes, site_callee, split_item, write_hits,
 };
 use crate::opt_rules::{Creators, Sizes};
 use crate::premises::{self, OpenCause};
@@ -20,8 +20,9 @@ use heki_effect::guards::{loop_bit, per_item_bit};
 use heki_effect::with_paths;
 use heki_effect::{
     AccessKind, BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget,
-    Construction, EffectSummary, ExternalAccess, Facts, FuncKey, HopGap, MustGap, PerItem, Runner,
-    SiteEffect, SiteMust, TypeCtx, WriteKind, anchors_call_site, boundary_reports_in,
+    Construction, EffectSummary, EntryKey, ExternalAccess, Facts, FuncKey, HopGap, MustGap,
+    PerItem, Runner, SiteEffect, SiteMust, TypeCtx, TypedFieldWriteSite, WriteKind,
+    anchors_call_site, boundary_reports_in,
 };
 use heki_env::EffectBoundaryRule;
 pub(crate) use heki_ir::ItemOrigins;
@@ -1145,6 +1146,56 @@ impl Boundary<'_> {
         (!(own_body && self.in_scope(callee))).then_some(d)
     }
 
+    /// Whether the search follows the calls `chain` makes from the own call sites `own` of a
+    /// function down to the function that writes: the first at a site the search enters, and
+    /// none below it allowed (`allowed-callees`) or of the scopes.
+    fn follows_chain(
+        &self,
+        cx: &CheckContext<'_>,
+        own: &[(&Path, &CallSite)],
+        chain: &[Arc<CallHop>],
+    ) -> bool {
+        let [first, rest @ ..] = chain else {
+            return false;
+        };
+        let followed = own.iter().any(|(_, site)| {
+            site.span == first.span
+                && site.project_callees().iter().any(|bc| {
+                    bc.callee.fqn() == first.callee
+                        && self.follows(cx, site, &bc.callee, Facts::Body).is_some()
+                })
+        });
+        let writer = chain
+            .last()
+            .and_then(|h| cx.index.function_named(&h.callee));
+        let below = rest.iter().map(|h| Some(h.caller.clone())).chain([writer]);
+        followed
+            && below.into_iter().all(|k| {
+                k.is_some_and(|k| !names_function(&self.allowed_callees, &k) && !self.in_scope(&k))
+            })
+    }
+
+    /// The container `Class.attr` of the entry targets (`Class.attr["key"]`) the boundary judges
+    /// the item write `w` by, when it names some for the written attribute and allows no write of
+    /// the whole container: `writes-targets` entries, or `write-universe` ones. `own_init` leaves
+    /// out a class's own initialization.
+    fn names_entries_of(
+        &self,
+        w: &TypedFieldWriteSite,
+        own_init: &dyn Fn(&ContractTarget) -> bool,
+    ) -> Option<String> {
+        let allowed = self
+            .allow_writes
+            .iter()
+            .any(|a| a.key.is_none() && a.matches(&w.class_qualname, &w.attr));
+        let targets = self.write_targets.iter().filter(|_| self.writes_targets);
+        let entry = targets
+            .chain(&self.write_universe)
+            .find(|t| t.key.is_some() && t.matches(&w.class_qualname, &w.attr) && !own_init(t))?;
+        let (container, _) = split_item(&entry.text)?;
+        (!allowed).then(|| container.to_owned())
+    }
+
     /// Whether the boundary checks writes: `writes-targets`, or a `write-universe`.
     fn checks_writes(&self) -> bool {
         self.writes_targets || !self.write_universe.is_empty()
@@ -1392,6 +1443,9 @@ fn undeclared_text(entry: &str, attr: &str) -> String {
 enum WriteBucket {
     Target(usize),
     Undeclared(String),
+    /// An item write of the container `Class.attr` under a key heki cannot tell, where the
+    /// boundary names entries of it.
+    UnresolvedKey(String),
 }
 
 /// The part of the call graph one scope function reaches. A node is a function's facts of one
@@ -1574,8 +1628,13 @@ impl<'a> Reach<'a> {
             .into_iter()
             .flat_map(|s| &s.typed_field_write_sites);
         for w in writes {
+            // A copy passed a parameter of this function as the key is decided by the calls
+            // above it, unless the search starts here.
+            if w.passed && matches!(w.key_from, EntryKey::Param(_)) && i != 0 {
+                continue;
+            }
             let extra = match (w.via_chain.as_slice(), w.kind) {
-                ([], _) => None,
+                ([], _) => Vec::new(),
                 // A helper of the scopes counts too: it cannot see the type of the field it
                 // is handed, so the function handing it over reports the write. The helper's
                 // summary also holds what its callees change, so the write counts only when the
@@ -1592,7 +1651,11 @@ impl<'a> Reach<'a> {
                             })
                     }) =>
                 {
-                    Some(CallHop::clone(hop))
+                    vec![CallHop::clone(hop)]
+                }
+                // A callee's item write with the key a call here passes.
+                (chain, _) if w.passed && b.follows_chain(cx, own, chain) => {
+                    heki_effect::owned_chain(chain)
                 }
                 _ => continue,
             };
@@ -1624,11 +1687,23 @@ impl<'a> Reach<'a> {
                 };
                 buckets.push(WriteBucket::Undeclared(text));
             }
+            // An item write whose key heki cannot tell may write an entry the boundary names.
+            let key_open = match w.key_from {
+                EntryKey::Written => false,
+                EntryKey::Param(_) => i == 0,
+                EntryKey::Unknown => true,
+            };
+            if buckets.is_empty()
+                && key_open
+                && let Some(container) = b.names_entries_of(w, &own_init)
+            {
+                buckets.push(WriteBucket::UnresolvedKey(container));
+            }
             for bucket in buckets {
                 let nodes = &self.nodes;
                 note(&mut self.writes, bucket, (func.fqn(), w.span), || {
                     let mut chain = chain_to(nodes, i);
-                    chain.extend(extra.clone());
+                    chain.extend(extra.iter().cloned());
                     (chain, w.span, w.kind.describe())
                 });
             }
@@ -1896,6 +1971,13 @@ impl<'a> Reach<'a> {
                         key.qualname, found.kind, b.label
                     );
                     emit(found, attr.clone(), message);
+                }
+                WriteBucket::UnresolvedKey(container) => {
+                    let message = format!(
+                        "`{}` writes an entry of `{container}` under a key heki cannot tell ({}{via}), where {} names some of its entries",
+                        key.qualname, found.kind, b.label
+                    );
+                    emit(found, format!("{container}[?]"), message);
                 }
             }
         }

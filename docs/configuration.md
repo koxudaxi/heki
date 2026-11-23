@@ -308,9 +308,12 @@ unresolved = "report"
 
 A container entry (`Class.attr["key"]`):
 
-- matches the writes of that constant key (a literal or a string constant), not a write of the
-  whole container or with a computed key;
-- is reported once, under the entry, when its container is a target too.
+- matches the writes of that constant key (a literal or a string constant), also by a store
+  operation a call passes the key to (`set_extra(field, "init", v)` writing `field.extras[key]`,
+  reported at the call), not a write of the whole container or with a computed key;
+- is reported once, under the entry, when its container is a target too;
+- in an effect boundary, makes a write of the container under a key heki cannot tell a report of
+  its own ("under a key heki cannot tell"), unless the boundary allows the whole container.
 
 A write into the entries of a target's container (`model.meta["kw"][name] = v`) is a write of
 the target. So is a write through a local alias of the container (`kw = model.meta["kw"]`), also

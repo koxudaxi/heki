@@ -1065,6 +1065,7 @@ impl LocalGuards {
                 .iter()
                 .filter(|lp| !d.fresh || !self.fresh_in_loop(cx, var, lp).open_means(true))
                 .fold(0, |m, lp| m | loop_bit(lp)),
+            text: None,
         }
     }
 

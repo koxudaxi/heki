@@ -13,8 +13,9 @@ use crate::{DottedPattern, ModuleUnit, has_glob_syntax};
 use heki_ast::{LineIndex, Span};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
-    AttrKeyPath, CallHop, CallsByCaller, CellChange, EffectSummary, FuncKey, GuardTest,
-    ProjectDecls, ProjectIndex, SharedState, SiteRole, Slot, func_qualname, is_stub,
+    AttrKeyPath, CallHop, CallsByCaller, CellChange, EffectSummary, EntryKey, FuncKey, GuardTest,
+    ProjectDecls, ProjectIndex, SharedState, SiteRole, Slot, TypedFieldWriteSite, func_qualname,
+    is_stub,
 };
 use heki_ir::IrFunction;
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
@@ -413,6 +414,11 @@ pub struct ClassAttrWrite {
     pub attr: String,
     pub kind: &'static str,
     pub fresh: bool,
+    /// The entries of the attribute's container the function's own and passed item writes
+    /// change: `"init"` for a constant key, the parameter's name for a key its callers pass
+    /// (`key`), `?` for a key heki cannot tell.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -956,14 +962,27 @@ fn changes(
         .iter()
         .map(|a| self_attr(b, key, local, a))
         .collect();
+    let entry = |site: &TypedFieldWriteSite| match (&site.key, site.key_from) {
+        (Some(k), _) => Some(format!("{k:?}")),
+        (None, EntryKey::Param(p)) => Some(param_name(p, params)),
+        (None, EntryKey::Unknown) => Some("?".to_owned()),
+        (None, EntryKey::Written) => None,
+    };
     let class_attrs = index.propagates_typed_writes().then(|| {
         s.typed_field_writes
             .iter()
-            .map(|w| ClassAttrWrite {
-                class: w.class_qualname.clone(),
-                attr: w.attr.clone(),
-                kind: w.kind.as_str(),
-                fresh: w.fresh,
+            .map(|w| {
+                let sites = s.typed_field_write_sites.iter().filter(|t| {
+                    t.class_qualname == w.class_qualname && t.attr == w.attr && t.kind == w.kind
+                });
+                let keys: BTreeSet<String> = sites.filter_map(entry).collect();
+                ClassAttrWrite {
+                    class: w.class_qualname.clone(),
+                    attr: w.attr.clone(),
+                    kind: w.kind.as_str(),
+                    fresh: w.fresh,
+                    keys: keys.into_iter().collect(),
+                }
             })
             .collect()
     });

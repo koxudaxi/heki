@@ -116,6 +116,11 @@ forbid = ["writes-targets"]
 write-targets = ["Rack.items"]
 allowed-callees = ["pkg.rack_ops.empty"]
 
+[[tool.heki.effect-boundaries]]
+name = "extras-pass"
+scopes = ["pkg.extras_pass"]
+write-universe = ['Extras.values["init"]']
+
 [[tool.heki.write-owners]]
 name = "rack"
 targets = ["Rack.items"]
@@ -233,6 +238,9 @@ const ASYNC_USER: &str = "from pkg.async_client import AsyncClient\n\n\nasync de
 // Constant keys, objects under construction, and the strict mode: a `__dict__` key names the
 // guarded attribute through a `Final` constant of another module; a private helper fills a new
 // object its caller hands it; a helper writes a target on a parameter its caller types.
+// A store operation in another module writes the entry its caller passes (`set_value(e, "init", v)`).
+const EXTRAS: &str = "class Extras:\n    def __init__(self) -> None:\n        self.values: dict[str, object] = {}\n\n\ndef set_value(e: Extras, key: str, value: object) -> None:\n    e.values[key] = value\n";
+const EXTRAS_PASS: &str = "from pkg.extras import Extras, set_value\n\n\ndef prepare(e: Extras) -> None:\n    set_value(e, \"init\", 1)\n";
 const KEY_CONSTS: &str = "from typing import Final\n\nKEY: Final = \"entries\"\n";
 const KEY_WRITER: &str = "from pkg.key_consts import KEY\nfrom pkg.model import Registry\n\n\ndef mark(r: Registry):\n    r.__dict__[KEY] = []\n";
 // A class constant names the guarded attribute for the class's own methods.
@@ -1013,6 +1021,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/stamp.py", STAMP),
         ("pkg/stamp_middle.py", STAMP_MIDDLE),
         ("pkg/stamped.py", STAMPED),
+        ("pkg/extras.py", EXTRAS),
+        ("pkg/extras_pass.py", EXTRAS_PASS),
         ("pkg/conn_mixin.py", CONN_MIXIN),
         ("pkg/conn_client.py", CONN_CLIENT),
         ("pkg/conn_pooled.py", CONN_POOLED),
@@ -2449,7 +2459,18 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
         "    r.entries.append(1)\n",
         "    KEPT.append(r)\n    r.entries.append(1)\n",
     );
+    let fixed_key = EXTRAS.replace("e.values[key]", "e.values[\"other\"]");
     vec![
+        Step::new(
+            "a store operation in another module stops writing the entry its caller passes",
+            vec![Action::Save("pkg/extras.py", fixed_key)],
+        )
+        .absent(&[("pkg/extras_pass.py", "EFF201")]),
+        Step::new(
+            "the store operation writes the entry its caller passes again",
+            vec![save("pkg/extras.py", EXTRAS)],
+        )
+        .present(&[("pkg/extras_pass.py", "EFF201")]),
         Step::new(
             "the `Final` key constant of another module names another attribute",
             vec![Action::Save(
