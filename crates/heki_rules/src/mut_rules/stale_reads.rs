@@ -14,6 +14,7 @@ use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::{FuncKey, ProjectDecls, ProjectIndex, TypedFieldReadSite};
+use heki_semantic::mangling;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -31,8 +32,8 @@ struct CachedRead<'a> {
 
 /// What an instance of a project class runs.
 struct Lineage {
-    /// By name, the definitions along the class's MRO (its own first, then its project
-    /// ancestors').
+    /// By the name the class holds each under (`_C__cache` of `def __cache`), the definitions
+    /// along the class's MRO (its own first, then its project ancestors').
     defs: FxHashMap<String, Vec<FuncKey>>,
 }
 
@@ -41,8 +42,8 @@ impl Lineage {
         let mut defs: FxHashMap<String, Vec<FuncKey>> = FxHashMap::default();
         let mro = std::iter::once(class.to_owned()).chain(decls.ancestors_of(class));
         for key in mro.flat_map(|c| decls.methods_of(&c)) {
-            let name = key.qualname.rsplit('.').next().unwrap_or(&key.qualname);
-            defs.entry(name.to_owned()).or_default().push(key);
+            let name = mangling::member_name(&key.qualname).into_owned();
+            defs.entry(name).or_default().push(key);
         }
         Self { defs }
     }
