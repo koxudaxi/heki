@@ -3593,6 +3593,22 @@ CI runs them on CPython 3.11 to 3.15 (`ir_counterexamples.py` on 3.15 only).
 | `soundness_e2e_counterexamples.py` | that the rewrites earlier versions of heki made of these shapes change behavior; the end-to-end tests check that heki now blocks or disproves each |
 | `ir_counterexamples.py` | that the rewrites heki made before the IR modeled a shape (a binding, an alias, a path) change behavior; needs CPython 3.15 |
 
+The Layer 2 rows of the distributions the catalog lists (`[[distributions]]`) are checked against
+releases of each distribution:
+
+```console
+$ uv run --no-project --python 3.12 --with "packaging==25.0" python tests/sentinel/verify_ecosystem_kb.py [--only DIST] [--version DIST==VERSION]
+```
+
+For the oldest and the newest release the `verified` range admits, and the first and the last of
+each major release, it installs the release in a throwaway environment (with its dependencies as
+they were a day after its upload) and checks that each `[[attributes]]` row's attribute, read on
+an instance, is of exactly the row's class, that each `async_safe` method is a coroutine function
+and each blocking one is not, and that each `return_type = "Self"` method returns an instance of
+the receiver's class, also on a subclass; the clients and builders run with the network refused.
+It needs `uv` and PyPI, so it runs in its own workflow (`sentinel.yml`): when the catalog or the
+script changes, and weekly, so that a new release that breaks a row fails there first.
+
 ### Run-time oracle
 
 ```console

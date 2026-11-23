@@ -786,7 +786,9 @@ pub struct AttributeType {
 
 /// A distribution whose catalog rows were checked against its releases
 /// (`[[distributions]]`): every entry and attribute row under `packages` holds in each release
-/// `verified` admits. The analysis never reads the project's versions.
+/// `verified` admits, which `tests/sentinel/verify_ecosystem_kb.py` checks on the oldest, the
+/// newest, and the first and last of each major release. The analysis never reads the project's
+/// versions.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Distribution {

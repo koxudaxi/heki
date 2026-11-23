@@ -1,0 +1,42 @@
+name: Catalog sentinel
+
+# The Layer 2 rows of each `[[distributions]]` entry of `kb/ecosystem/*.toml`, checked against
+# releases of the distribution (tests/sentinel/verify_ecosystem_kb.py): when the catalog or the
+# script changes, and weekly, so that a new release that breaks a row fails here before a user
+# meets it. The releases come from PyPI, so the job needs the network and is not part of CI.
+
+on:
+  pull_request:
+    paths:
+      - "kb/ecosystem/**"
+      - "tests/sentinel/verify_ecosystem_kb.py"
+      - ".github/workflows/sentinel.yml"
+  push:
+    branches: [main]
+    paths:
+      - "kb/ecosystem/**"
+      - "tests/sentinel/verify_ecosystem_kb.py"
+      - ".github/workflows/sentinel.yml"
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sentinel-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ecosystem:
+    name: Layer 2 catalog against releases
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false
+      - run: uv run --no-project --python 3.12 --with "packaging==25.0" python tests/sentinel/verify_ecosystem_kb.py

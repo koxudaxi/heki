@@ -2120,7 +2120,8 @@ no method a class takes from its base (`external_defines`). The synchronous and 
 clients of a library have rows of their own at every step, and a row whose meaning changes
 across the verified releases under one name is left out. `[[distributions]]`
 (`heki_kb::Distribution`) names, per distribution (its PyPI name), the import packages its rows
-cover and the PEP 440 range of releases they were checked against (`verified`). The analysis never
+cover and the PEP 440 range of releases they were checked against (`verified`), which
+`tests/sentinel/verify_ecosystem_kb.py` installs and checks the rows on. The analysis never
 reads a project's versions: its output does not depend on the installed environment. The rows
 type the resources of the LLM SDKs: openai's clients (`OpenAI`, `AzureOpenAI`, and their async
 twins) to `chat.completions`, `responses`, and `embeddings`, anthropic's to `messages`, and
