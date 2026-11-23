@@ -1,20 +1,20 @@
 //! The allowed functions the help of a contract report names (`Diagnostic::allowed_examples`):
 //! public project functions and methods whose own body does what the report shows, from a place
-//! the contract allows, each with its file. A `write-owners`, `read-owners`, or `call-owners` contract allows the functions its
-//! `allowed-*` patterns name, and every function outside its `forbidden-*` patterns; an
-//! `invalidation` contract allows the writes of its exempt writers and the writes announced on
-//! every path. The functions come from the index, as every other fact of a report, so the
-//! language server's check of one file names the same ones as `heki check`. They carry no line:
-//! a line of another file moves with every edit above it, which leaves the facts the help names
-//! the same.
+//! the contract allows, each with its file. A `write-owners`, `read-owners`, or `call-owners`
+//! contract allows the functions its `allowed-*` patterns name, and every function outside its
+//! `forbidden-*` patterns; an `invalidation` contract allows the writes of its exempt writers and
+//! of the functions that announce every write of the target on every path. The functions come
+//! from the index, as every other fact of a report, so the language server's check of one file
+//! names the same ones as `heki check`. They carry no line: a line of another file moves with
+//! every edit above it, which leaves the facts the help names the same.
 
 use super::call_owners::split_arguments;
 use super::{Allowance, AllowanceKeys, Named, patterns, split_item};
 use crate::{CheckContext, DottedPattern, last_name};
-use heki_ast::Span;
 use heki_diagnostics::AllowedExample;
-use heki_effect::{EffectSummary, FileSummary, FuncKey, ProjectIndex, SiteRole, UnmetWrite};
+use heki_effect::{EffectSummary, FileSummary, FuncKey, ProjectIndex, SiteRole};
 use heki_env::HekiConfig;
+use heki_semantic::mangling::unmangled;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
@@ -152,15 +152,6 @@ pub(super) fn place_functions<'a>(
         .collect()
 }
 
-/// Whether the `invalidation` write `origin` of `func` (summary `s`) to the target of contract
-/// `contract` is announced on every normal path: its own write, and no path leaves it
-/// unannounced.
-pub(super) fn announced(s: &EffectSummary, contract: u8, origin: Span) -> bool {
-    !s.unmet_invalidation.iter().any(|u: &UnmetWrite| {
-        u.contract == contract && u.via_chain.is_empty() && u.origin == origin
-    })
-}
-
 /// The functions one kind of owner contract accepts as places to access its targets from
 /// ([`Allowance::names_place`]), and the last names of its targets: the attribute, or the
 /// function, method, or class called.
@@ -191,8 +182,11 @@ impl OwnedNames {
         self.allowances.iter().any(|a| a.names_place(func))
     }
 
+    /// Whether `name` may be the name of a target: as written, or a private member mangled
+    /// with any class (`_Ledger__rows` of `Ledger.__rows`).
     fn names(&self, name: &str) -> bool {
-        self.names.iter().any(|p| p.matches(name))
+        let mut written = std::iter::once(name).chain(unmangled(name).map(|(_, written)| written));
+        written.any(|n| self.names.iter().any(|p| p.matches(n)))
     }
 }
 
@@ -266,10 +260,10 @@ fn last_of(fqn: &str) -> &str {
 }
 
 /// What the help of contract reports can name of the public functions of `path`, folded into
-/// one number (0 for none): the own writes, reads, and calls of a target's name by the functions
-/// `owners` accepts, and the `invalidation` target writes of every function with whether each is
-/// announced. The language server checks the files with reports of [`EXAMPLE_RULES`] again when
-/// it changes.
+/// one number (0 for none): the own writes, reads, and calls of a target's name and the
+/// constructions by the functions `owners` accepts, and the `invalidation` target writes of every
+/// function with the writes it leaves unannounced. The language server checks the files with
+/// reports of [`EXAMPLE_RULES`] again when it changes.
 pub fn example_digest(owners: &ExampleOwners, index: &ProjectIndex, path: &Path) -> u64 {
     (index.files.get(path)).map_or(0, |file| digest_of(owners, index, file))
 }
@@ -315,9 +309,9 @@ fn digest_of(owners: &ExampleOwners, index: &ProjectIndex, file: &FileSummary) -
         for site in file.call_sites.iter().filter(|c| calls && &c.caller == key) {
             let callees = site.project_callees().iter().map(|bc| &bc.callee);
             let callees: Vec<&FuncKey> = callees.chain(site.declared()).collect();
-            let names = callees.iter().map(|k| last_of(&k.qualname));
-            let mut names = names.chain(site.constructs.as_deref().map(last_of));
-            if names.any(|n| owners.callers.names(n)) {
+            let mut names = callees.iter().map(|k| last_of(&k.qualname));
+            // A subclass of a target class is constructed under a name of its own.
+            if site.constructs.is_some() || names.any(|n| owners.callers.names(n)) {
                 let call = site.role == SiteRole::Call;
                 facts.insert(fingerprint((
                     key,
@@ -330,16 +324,25 @@ fn digest_of(owners: &ExampleOwners, index: &ProjectIndex, file: &FileSummary) -
             }
         }
         let flows = file.flows.get(key).filter(|_| owners.invalidation);
-        for w in flows.into_iter().flat_map(|f| &f.writes) {
-            let contracts = (0..64u8).filter(|c| w.contracts & (1 << c) != 0);
-            let announced: Vec<bool> = contracts.map(|c| announced(s, c, w.span)).collect();
+        let writes: Vec<_> = flows.into_iter().flat_map(|f| &f.writes).collect();
+        for w in &writes {
             facts.insert(fingerprint((
                 key,
                 "flow",
                 w.contracts,
                 &w.class_qualname,
                 &w.attr,
-                announced,
+            )));
+        }
+        // A write it leaves unannounced, its own or a helper's, keeps a function from announcing
+        // its target.
+        for u in s.unmet_invalidation.iter().filter(|_| !writes.is_empty()) {
+            facts.insert(fingerprint((
+                key,
+                "unmet",
+                u.contract,
+                &u.class_qualname,
+                &u.attr,
             )));
         }
     }
