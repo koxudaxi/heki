@@ -28,7 +28,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "EFF115", "MUT115", "MUT118", "MUT119"]
+extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "EFF115", "EFF116", "MUT115", "MUT118", "MUT119"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -850,6 +850,15 @@ const REC_WALK_BACK: &str = "from pkg import rec_handler\n\n\ndef descend(node):
 const CORO_JOBS: &str = "def flush(n):\n    return n\n";
 const CORO_JOBS_ASYNC: &str = "async def flush(n):\n    return n\n";
 const CORO_USE: &str = "import threading\n\nfrom pkg.coro_jobs import flush\n\n\ndef start(items):\n    threading.Thread(target=flush, args=(1,)).start()\n    return list(filter(flush, items))\n";
+// Generators nothing iterates (`EFF116`): a function of another module changes between a plain
+// function and a generator function, and so do a method and its override in a third module.
+const GEN_JOBS: &str = "def rows(n):\n    return [n]\n";
+const GEN_JOBS_GENERATOR: &str = "def rows(n):\n    yield n\n";
+const GEN_BASE: &str = "class Source:\n    def rows(self):\n        yield 1\n";
+const GEN_BASE_PLAIN: &str = "class Source:\n    def rows(self):\n        return [1]\n";
+const GEN_SUB: &str = "from pkg.gen_base import Source\n\n\nclass Cached(Source):\n    def rows(self):\n        yield 2\n";
+const GEN_SUB_PLAIN: &str = "from pkg.gen_base import Source\n\n\nclass Cached(Source):\n    def rows(self):\n        return [2]\n";
+const GEN_USE: &str = "import threading\n\nfrom pkg.gen_base import Source\nfrom pkg.gen_jobs import rows\n\n\ndef start(n, source: Source):\n    rows(n)\n    threading.Thread(target=rows, args=(n,)).start()\n    source.rows()\n    if not rows(n):\n        return 0\n    return 1\n";
 
 // `MUT115`: the declarations of a copied class and of the builtin containers' subclasses in
 // other modules, and a helper in another module, decide whether a change below a copy states
@@ -955,6 +964,10 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/rec_walk.py", REC_WALK),
         ("pkg/coro_jobs.py", CORO_JOBS),
         ("pkg/coro_use.py", CORO_USE),
+        ("pkg/gen_jobs.py", GEN_JOBS),
+        ("pkg/gen_base.py", GEN_BASE),
+        ("pkg/gen_sub.py", GEN_SUB),
+        ("pkg/gen_use.py", GEN_USE),
         ("pkg/plot.py", RO_PLOT),
         ("pkg/loops.py", LOOPS),
         ("pkg/compat.py", COMPAT),
@@ -4192,6 +4205,42 @@ fn steps_eff115() -> Vec<Step> {
     ]
 }
 
+/// `EFF116`: whether a call's callees are generator functions comes from their declarations in
+/// other modules, a function's and a method's and its override's, which change between a
+/// generator function and a plain one; a call that may run a plain override is no report.
+fn steps_eff116() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the dropped function becomes a generator function",
+            vec![save("pkg/gen_jobs.py", GEN_JOBS_GENERATOR)],
+        )
+        .present(&[("pkg/gen_use.py", "EFF116")]),
+        Step::new(
+            "the function becomes a plain function again",
+            vec![save("pkg/gen_jobs.py", GEN_JOBS)],
+        )
+        .present(&[("pkg/gen_use.py", "EFF116")]),
+        Step::new(
+            "an override in a third module becomes a plain function",
+            vec![save("pkg/gen_sub.py", GEN_SUB_PLAIN)],
+        )
+        .absent(&[("pkg/gen_use.py", "EFF116")]),
+        Step::new(
+            "the base method becomes a plain function too",
+            vec![save("pkg/gen_base.py", GEN_BASE_PLAIN)],
+        )
+        .absent(&[("pkg/gen_use.py", "EFF116")]),
+        Step::new(
+            "both become generator functions again",
+            vec![
+                save("pkg/gen_base.py", GEN_BASE),
+                save("pkg/gen_sub.py", GEN_SUB),
+            ],
+        )
+        .present(&[("pkg/gen_use.py", "EFF116")]),
+    ]
+}
+
 const LLM_CLIENT: &str = "from openai import OpenAI\n\nclient = OpenAI()\n";
 
 const LLM_VIEW: &str = "from pkg.llm_client import client\n\n\nasync def answer():\n    return client.chat.completions.create(model=\"m\")\n";
@@ -4794,8 +4843,8 @@ fn steps_configuration() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"EFF115\", \"MUT115\", \"MUT118\", \"MUT119\"]",
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"EFF115\", \"MUT115\", \"MUT118\", \"MUT119\"]\nselect = [\"NOPE1\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"EFF115\", \"EFF116\", \"MUT115\", \"MUT118\", \"MUT119\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"EFF115\", \"EFF116\", \"MUT115\", \"MUT118\", \"MUT119\"]\nselect = [\"NOPE1\"]",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),
@@ -5501,6 +5550,7 @@ sessions!(editing, Session::start, {
     eff112: steps_eff112,
     eff114: steps_eff114,
     eff115: steps_eff115,
+    eff116: steps_eff116,
     attribute_types: steps_attribute_types,
     receiver_typing: steps_receiver_typing,
     effect_index: steps_effect_index,

@@ -1779,7 +1779,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   callers, with the same initializer and allowed-context rules as `MUT201`. Reads through
   parameters without a project-class type are not seen.
 
-### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF111`, `EFF112`, `EFF113`, `EFF114`, `EFF115`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF111`, `EFF112`, `EFF113`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
 0. **Must-facts and the exact tier** (`EffectSummary::must_exec`, computed only when `EFF101`,
    `EFF111`, `EFF103`, or `EFF113` runs: `OptInFacts::must_effects`):
    - Per call instruction, the path facts (`heki_ir::Paths`, with the reader of
@@ -2067,7 +2067,27 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      that is no async generator, worded as certain when every one is an `async def` no decorator
      replaces, and as possible otherwise. Only catalog APIs count: a project function taking a
      callable resolves to the project and is never one, whatever it does with the coroutine.
-13. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
+13. **`EFF116`** (opt-in): a call of a project generator function whose generator nothing
+   iterates, so its body does not run.
+   - The rule (`eff_rules::never_iterated`) reads each function's IR: a call (not awaited)
+     whose result has no name and whose every reader is a truth test (a branch's condition,
+     `not`, or a call of the builtin `bool` the resolver confirms) is a candidate, one with no
+     reader at all a statement. Only a function with a candidate is typed (`TypeCtx::infer`);
+     the call is resolved there (`resolve_call`, `resolve_method`) and judged complete as
+     `CallSite::complete` is (`TypeCtx::inst_targets_complete`). The callees' declarations are
+     read at check time (`FunctionDecl::is_generator`: a generator function no decorator
+     replaces), so a change of one between a generator and a plain function in another module
+     re-checks the caller's file.
+   - The hand-off form reads `EFF115`'s records (`OptInTables::unawaited_handoffs`, computed
+     when either rule runs) and skips the APIs that hand the result back
+     (`UnawaitedHandoff::hands_back`); each record also says whether its callees are every
+     implementation calling the handed value can run (`UnawaitedHandoff::complete`).
+   - Every callee must be a generator function: a call that may run a plain or decorated
+     implementation is no report. A report says so when a callee's name is bound to more than one
+     definition (`MustExec::bound_twice` of its summary). Its tier is exact when no name is bound
+     twice and the call is complete; the rule is heuristic until it is certified, which caps the
+     tier.
+14. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function (and each module body a scope names as `<module>`,
    `DottedPattern::names_module_bodies`) finds the shortest chain to each forbidden effect,
    without entering `allowed-callees`, other scope functions, or bodies that do not run at the
@@ -2407,11 +2427,12 @@ and `obj.__dict__.pop(<name>)` act on it, and, for Werkzeug, the slot an instanc
 through the module's imports (`ModuleDecls::decorator_symbol`), is listed; only such a getter makes
 a cached property an exact claim's (R3), and any other `cached_property` is one by its name.
 
-A fourth table, `[[calls_unawaited]]` (`heki_kb::UnawaitedCall`, `EFF115`), names the callable
-argument a call calls as a plain function without awaiting what it returns (by position, the
-receiver not counted, or by keyword), and whether it tests the result for truth:
-`threading.Thread`'s `target`, `atexit.register`, `signal.signal`, `filter`. Every
-`offloads_blocking_arg` API counts as one too. Each listed call also has an entry; the table
+A fourth table, `[[calls_unawaited]]` (`heki_kb::UnawaitedCall`, `EFF115`, `EFF116`), names the
+callable argument a call calls as a plain function without awaiting what it returns (by position,
+the receiver not counted, or by keyword), whether it tests the result for truth, and whether it
+hands the result back to its caller (`hands_back`: an executor's `submit` and `map`,
+`weakref.finalize`): `threading.Thread`'s `target`, `atexit.register`, `signal.signal`, `filter`.
+Every `offloads_blocking_arg` API counts as one too, and hands the result back. Each listed call also has an entry; the table
 stands beside the entries so that the entries without such an argument, nearly all, keep no word
 for it.
 

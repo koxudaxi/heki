@@ -5201,6 +5201,19 @@ impl<'a> Extractor<'a> {
         }
     }
 
+    /// Whether `callee`, what [`Self::callable_callee`] resolves calling `var` to, is every
+    /// implementation that call can run ([`crate::TypeCtx::method_targets_complete`] for a
+    /// bound method, [`crate::TypeCtx::call_targets_complete`] otherwise).
+    fn callable_targets_complete(&self, var: VarId, callee: &Callee) -> bool {
+        match self.bound_method(var) {
+            Some((recv, method)) => {
+                self.cx
+                    .method_targets_complete(self.val(recv), &method, callee)
+            }
+            None => self.cx.call_targets_complete(self.val(var), callee),
+        }
+    }
+
     fn child_callee(&self, id: FunctionId) -> Callee {
         let child = self.cx.ir().function(id);
         Callee::Project(
@@ -6911,7 +6924,9 @@ impl<'a> Extractor<'a> {
         if self.class_called(target).is_some() {
             return;
         }
-        let (Callee::Project(callees, _), _) = self.callable_callee(target) else {
+        let (callee, _) = self.callable_callee(target);
+        let complete = self.callable_targets_complete(target, &callee);
+        let Callee::Project(callees, _) = callee else {
             return;
         };
         self.unawaited.push(UnawaitedHandoff {
@@ -6919,6 +6934,8 @@ impl<'a> Extractor<'a> {
             api: symbol.to_owned(),
             callees,
             tests_result: slot.tests_result,
+            hands_back: slot.hands_back,
+            complete,
         });
     }
 

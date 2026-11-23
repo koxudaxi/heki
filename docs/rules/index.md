@@ -2,7 +2,7 @@
 
 # Rules
 
-heki has 46 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](../precision.md) says how a rule is certified and what each one measured. Each rule's page says what a report states.
+heki has 47 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](../precision.md) says how a rule is certified and what each one measured. Each rule's page says what a report states.
 
 - The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report of an exact rule that did not establish every premise (an `OPT` report whose rewrite is not proven) is shown where a heuristic rule would run.
 - A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
@@ -65,6 +65,7 @@ Work that runs where it should not: blocking calls on the event loop, clients an
 | EFF112 | [set-order-output](set-order-output.md) | Opt-in: the iteration order of a set of strings, which changes between runs, reaches a file, a stream, a serializer, or a raised exception's message across a call. | ≈ 🔌 🧪 |
 | EFF114 | [recursion-error-as-value](recursion-error-as-value.md) | Opt-in: an `except` clause around a recursion (a call cycle reached from its `try` body) takes the `RecursionError` and goes on without raising, so the result depends on the stack depth. | ≈ 🔌 🧪 |
 | EFF115 | [async-def-as-sync-callback](async-def-as-sync-callback.md) | Opt-in: an `async def` handed to a library call that calls it without awaiting what it returns (a thread's target, an executor's function, an `atexit` or signal handler, a `filter` predicate), so the call only creates a coroutine and the body does not run. | ≈ 🔌 🧪 |
+| EFF116 | [generator-never-iterated](generator-never-iterated.md) | Opt-in: a call of a generator function whose generator nothing iterates (a statement, a value only tested for truth, a function handed to a thread, an `atexit` handler, or a `filter` predicate), so its body does not run. | ≈ 🔌 🧪 |
 | EFF201 | [effect-boundary-violation](effect-boundary-violation.md) | Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope. | ≈ 📜 |
 
 ## Data Pipelines (DATA)

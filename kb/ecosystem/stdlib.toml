@@ -1958,13 +1958,16 @@ versions = "CPython 3.11, 3.15"
 keeps = "a non-data descriptor whose __get__ stores the getter's value in instance.__dict__[attrname], which later reads find before the descriptor"
 invalidation = "del obj.<name> and obj.__dict__.pop(<name>) remove the entry (the descriptor defines no __delete__); an instance without a __dict__ raises TypeError and keeps nothing"
 
-# --- Calls a callable without awaiting it (`[[calls_unawaited]]`, EFF115, opt-in) ---
+# --- Calls a callable without awaiting it (`[[calls_unawaited]]`, EFF115 and EFF116, opt-in) ---
 # Each entry names the callable argument (position `arg`, the receiver not counted, or the
 # keyword `param`) that the call calls as a plain function, now or later, on this thread or
 # another, without awaiting what it returns: an `async def` handed there only makes a coroutine,
 # and its body does not run. `tests_result` says that the call tests the result for truth, which
-# a coroutine always passes. The offloading APIs above (`offloads_blocking_arg`) count as such
-# calls too. `map`, `itertools.starmap`, and `functools.reduce` hand the coroutines on, which
+# a coroutine always passes. `hands_back` says that the call gives what the callable returns back
+# to its caller (an executor's future and `map` results, a finalizer called by hand): a generator
+# handed there may still be iterated (EFF116). The offloading APIs above (`offloads_blocking_arg`)
+# count as such calls too, and hand back what the callable returns to the caller that awaits
+# them. `map`, `itertools.starmap`, and `functools.reduce` hand the coroutines on, which
 # may be awaited (`asyncio.gather(*map(fetch, urls))`); a sort key's coroutines are no
 # comparable values, which the type checkers report. `loop.call_soon` and the scheduling
 # methods next to it raise `TypeError` for a coroutine function only in debug mode.
@@ -1972,10 +1975,12 @@ invalidation = "del obj.<name> and obj.__dict__.pop(<name>) remove the entry (th
 [[calls_unawaited]]
 symbol = "concurrent.futures.ThreadPoolExecutor.submit"
 arg = 0
+hands_back = true
 
 [[calls_unawaited]]
 symbol = "concurrent.futures.ProcessPoolExecutor.submit"
 arg = 0
+hands_back = true
 
 [[calls_unawaited]]
 symbol = "threading.Thread"
@@ -1995,21 +2000,25 @@ param = "target"
 [[calls_unawaited]]
 symbol = "concurrent.futures.Executor.submit"
 arg = 0
+hands_back = true
 
 [[calls_unawaited]]
 symbol = "concurrent.futures.Executor.map"
 arg = 0
 param = "fn"
+hands_back = true
 
 [[calls_unawaited]]
 symbol = "concurrent.futures.ThreadPoolExecutor.map"
 arg = 0
 param = "fn"
+hands_back = true
 
 [[calls_unawaited]]
 symbol = "concurrent.futures.ProcessPoolExecutor.map"
 arg = 0
 param = "fn"
+hands_back = true
 
 [[calls_unawaited]]
 symbol = "asyncio.AbstractEventLoop.call_soon"
@@ -2062,6 +2071,7 @@ arg = 0
 [[calls_unawaited]]
 symbol = "weakref.finalize"
 arg = 1
+hands_back = true
 
 [[calls_unawaited]]
 symbol = "builtins.filter"
