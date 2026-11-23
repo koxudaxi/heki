@@ -86,10 +86,10 @@ fn changes_of_new_objects_found_on_a_corpus() {
         diags[3]["help"],
         "bind the new `dict` to a name and change it there, or build the changed value in one expression (`sorted(...)`, `{**a, **b}`, `[*a, *b]`)"
     );
-    // An experimental opt-in rule: heuristic until it is certified, and off unless named.
-    assert!(diags.iter().all(|d| d["certainty"] == "heuristic"));
-    let (_, stdout, _) = p.heki(&["check", "--output-format", "json", "--heuristic"]);
-    assert!(!stdout.contains("MUT119"), "{stdout}");
+    // A default rule: its report is exact where every premise holds, and a plain run shows it.
+    assert!(diags.iter().all(|d| d["certainty"] == "exact"));
+    let (_, stdout, _) = p.heki(&["check", "--output-format", "json"]);
+    assert!(stdout.contains("MUT119"), "{stdout}");
 }
 
 /// Every builtin container kind, made by its constructor, a display, a copy (a method, or a
@@ -172,6 +172,9 @@ fn every_container_kind_and_every_way_a_new_one_is_made() {
     assert!(message(15).starts_with("`appendleft` changes a new `deque`,"));
     assert!(message(21).starts_with("the item deletion changes a new `dict`,"));
     assert!(message(26).ends_with("and the assignment stores the `None` that `extend` returns"));
+    // A project subclass that keeps the copy hooks leaves the copy of a `list` exact.
+    let quiet = diags.iter().find(|d| d["line"] == 48).unwrap();
+    assert_eq!(quiet["certainty"], "exact");
 }
 
 /// Changes some other code sees, or results the code reads: a method of a project class named
@@ -263,8 +266,11 @@ fn a_copy_hook_of_a_subclass_makes_the_report_heuristic() {
     let diags = diagnostics(&p);
     assert_eq!(reported(&diags), at("hooked.py", &[10]));
     assert_eq!(diags[0]["certainty"], "heuristic");
-    let (_, stdout, _) = p.check(&["--output-format", "json"]);
+    // A plain run leaves the heuristic report out; `--heuristic` shows it.
+    let (_, stdout, _) = p.heki(&["check", "--output-format", "json"]);
     assert_eq!(stdout.trim(), "[]");
+    let (_, stdout, _) = p.check(&["--output-format", "json"]);
+    assert!(stdout.contains("\"certainty\": \"heuristic\""), "{stdout}");
 }
 
 /// What other objects are handed: a deep copy whose `memo` the caller passes keeps the copy there,

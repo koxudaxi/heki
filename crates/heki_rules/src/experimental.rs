@@ -134,15 +134,6 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         tracking: None,
     },
     ExperimentalFeature {
-        id: "rule.MUT119",
-        kind: ExperimentalKind::Rule,
-        target: "MUT119",
-        since: "0.2.5",
-        reason: "Its precision has not been measured yet, and its premises are not yet \
-            certified.",
-        tracking: None,
-    },
-    ExperimentalFeature {
         id: "cli-option.profile",
         kind: ExperimentalKind::CliOption,
         target: "heki check --profile",

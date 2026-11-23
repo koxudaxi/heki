@@ -2,17 +2,9 @@
 
 # change-lost-on-new-object (MUT119)
 
-Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+Family: Mutation & State (MUT) · Exact · Enabled by default · Severity `error` (a bug) · No automatic fix
 
-Opt-in: an in-place change of a builtin container applied to a new object that nothing else holds and no name keeps (`list(xs).sort()`, `env = os.environ.copy().update(...)`, `obj.settings[k] = v` with a getter returning a new dict): the change is lost when the statement ends.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
-
-!!! warning "Experimental"
-
-    Its precision has not been measured yet, and its premises are not yet certified. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](../experimental.md).
+An in-place change of a builtin container applied to a new object that nothing else holds and no name keeps (`list(xs).sort()`, `env = os.environ.copy().update(...)`, `obj.settings[k] = v` with a getter returning a new dict): the change is lost when the statement ends.
 
 ## What it does
 Checks in-place changes of a builtin container (`list`, `dict`, `set`, `bytearray`,
@@ -20,7 +12,6 @@ Checks in-place changes of a builtin container (`list`, `dict`, `set`, `bytearra
 names: `list(xs).sort()`, `env = os.environ.copy().update(HOME=home)`,
 `task.environment["KEY"] = value` when the `environment` getter returns a new dict. Nothing can
 read the object after the statement, so the change is lost.
-The rule is opt-in: enable it with `--extend-select MUT119` or `extend-select = ["MUT119"]`.
 
 The object is the value of the expression the change is applied to, and it is new when it is:
 
@@ -56,6 +47,9 @@ It does not report:
 - what a function returns when it may return state that outlives the call, keeps the new object
   somewhere, returns `None` on some path, is a generator or `async def`, or is decorated with a
   cache (`functools.cache`, `cached_property`): the change is then seen elsewhere.
+
+A test that changes a returned copy on purpose to check that it is a copy is reported; suppress
+it there.
 
 Type checkers report one of these shapes: mypy reports a `None` result stored into an item or an
 attribute (`opts[k] = list(v).extend(w)`) as `func-returns-value`, in the functions it checks,

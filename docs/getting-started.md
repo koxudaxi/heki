@@ -22,6 +22,7 @@ frozen holdout corpus was checked by hand, and none was false
 - [`MUT110` (readonly-param-mutation)](rules/readonly-param-mutation.md)
 - [`MUT111` (cached-property-stale-read)](rules/cached-property-stale-read.md)
 - [`MUT114` (cached-result-mutation)](rules/cached-result-mutation.md)
+- [`MUT119` (change-lost-on-new-object)](rules/change-lost-on-new-object.md)
 - [`EFF101` (async-blocking-call)](rules/async-blocking-call.md)
 - [`EFF103` (loop-db-query)](rules/loop-db-query.md)
 - [`DATA101` (loop-carried-concat)](rules/loop-carried-concat.md)

@@ -36,7 +36,7 @@
 - [cached-property-stale-read (MUT111)](https://heki.koxudaxi.dev/rules/cached-property-stale-read/): Family: Mutation & State (MUT) · Exact · Opt-in · Experimental · Severity error (a bug) · No automatic fix
 - [cached-result-mutation (MUT114)](https://heki.koxudaxi.dev/rules/cached-result-mutation/): Family: Mutation & State (MUT) · Exact · Enabled by default · Severity error (a bug) · No automatic fix
 - [call-owner-violation (MUT204)](https://heki.koxudaxi.dev/rules/call-owner-violation/): Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity error (a bug) · No automatic fix
-- [change-lost-on-new-object (MUT119)](https://heki.koxudaxi.dev/rules/change-lost-on-new-object/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
+- [change-lost-on-new-object (MUT119)](https://heki.koxudaxi.dev/rules/change-lost-on-new-object/): Family: Mutation & State (MUT) · Exact · Enabled by default · Severity error (a bug) · No automatic fix
 - [conditional-ownership-mutation (MUT112)](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
 - [effect-boundary-violation (EFF201)](https://heki.koxudaxi.dev/rules/effect-boundary-violation/): Family: Execution Effects (EFF) · Heuristic · Runs when its contract is declared · Severity error (a bug) · No automatic fix
 - [exclusive-object-fanout (EFF110)](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/): Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
