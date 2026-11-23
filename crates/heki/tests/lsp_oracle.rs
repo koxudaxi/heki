@@ -3906,8 +3906,9 @@ fn steps_initial_index() -> Vec<Step> {
 }
 
 /// A sync helper two modules below an `async def` starts blocking; comments around the call
-/// are Early Cutoffs, a module global the helper changes is not, and a syntax error in the
-/// middle callee hides the chain until it parses again; then the helper stops blocking.
+/// are Early Cutoffs, a module global the helper changes and a call it cannot resolve are not,
+/// and a syntax error in the middle callee hides the chain until it parses again; then the
+/// helper stops blocking.
 fn steps_blocking_chain() -> Vec<Step> {
     vec![
         Step::new(
@@ -3962,6 +3963,29 @@ fn steps_blocking_chain() -> Vec<Step> {
             )],
         )
         .present(&[("pkg/top.py", "EFF101")]),
+        // A callee starts and stops making a call heki cannot resolve: no rule reports it, but
+        // `heki inspect` names it in the purity of every caller, so the edit is no Early Cutoff.
+        Step::new(
+            "the helper below the async def starts a call heki cannot resolve",
+            vec![save(
+                "pkg/low.py",
+                &format!(
+                    "# network helpers\n{}# done\n",
+                    LOW_BLOCKING.replace("    return", "    url.strip()\n    return")
+                ),
+            )],
+        )
+        .present(&[("pkg/top.py", "EFF101")])
+        .propagates(),
+        Step::new(
+            "the helper stops making the call",
+            vec![save(
+                "pkg/low.py",
+                &format!("# network helpers\n{LOW_BLOCKING}# done\n"),
+            )],
+        )
+        .present(&[("pkg/top.py", "EFF101")])
+        .propagates(),
         // 6. A syntax error in the middle of an edit of a callee, saved, then the fix.
         Step::new(
             "the middle callee stops parsing",

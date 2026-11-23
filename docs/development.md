@@ -376,7 +376,7 @@ parameter at as many calls, and thousands of references to a `call-owners` targe
 a long chain of phis carries to one `return`, an argument handed down through thousands of functions
 of one module to the one that changes it, thousands of reports whose call chains enter one module,
 the callers of the bottom of a lattice of calls thirty levels deep, the chains `heki inspect` walks
-down thousands of calls of one module, a value chosen among a thousand module globals before it is
+down thousands of calls of one module and past thousands of functions it cannot follow, a value chosen among a thousand module globals before it is
 changed, thousands of calls handing a global to a helper that changes it, thousands of
 comprehensions or generator expressions, each over a value the function creating them binds just
 before, through `heki dump-recommend-facts`, the calls heki is blind to in a chain of

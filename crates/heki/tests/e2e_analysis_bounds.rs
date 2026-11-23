@@ -3651,8 +3651,9 @@ fn callers_of_a_diamond_lattice_are_walked_once_each() {
 }
 
 /// Five thousand methods of one class, each calling the next on `self`, the last changing a
-/// `self` attribute; the call chain of the change, and the walks to an unresolved call and to
-/// a changed module global through as many functions, are walked once.
+/// `self` attribute; the call chain of the change, the walks to an unresolved call and to a
+/// changed module global through as many functions, and the walk past thousands of functions
+/// that each make an unresolved call, are walked once, and the last lists only the first ones.
 #[test]
 fn chains_down_thousands_of_calls_of_one_module_are_walked_once() {
     // The last function of each chain is named apart, so that every size has it.
@@ -3700,6 +3701,21 @@ fn chains_down_thousands_of_calls_of_one_module_are_walked_once() {
             "    G = 1".to_owned(),
             "    return x.anything()".to_owned(),
         ]);
+        for i in 0..n - 1 {
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("def g{i}(x):"),
+                "    x.anything()".to_owned(),
+                format!("    return {}(x)", next(i, "g")),
+            ]);
+        }
+        lines.extend([
+            String::new(),
+            String::new(),
+            "def g_end(x):".to_owned(),
+            "    return x.anything()".to_owned(),
+        ]);
         let p = Project::new(&format!("bounds_inspect_chains_{n}"));
         p.write("m.py", &(lines.join("\n") + "\n"));
         p
@@ -3718,8 +3734,21 @@ fn chains_down_thousands_of_calls_of_one_module_are_walked_once() {
             .len(),
         n - 1
     );
-    // Impure: the unknown call does not decide the verdict, but `--callers` walks the module.
+    // Impure: the unknown call does not decide the verdict, but it is named.
     assert_eq!(f["purity"]["verdict"], "impure");
+    assert_eq!(f["purity"]["unknown_at"]["fqn"], "m.f_end");
+    assert_eq!(
+        f["purity"]["unknown_at"]["chain"].as_array().unwrap().len(),
+        n - 1
+    );
+    assert_eq!(f["purity"]["unknown_reach"]["truncated"], false);
+    let g = inspect(&p, &["m.g0"]);
+    let unknown = &g["purity"]["unknown_reach"];
+    let entries = unknown["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 100);
+    assert_eq!(entries[99]["fqn"], "m.g99");
+    assert_eq!(entries[99]["chain"].as_array().unwrap().len(), 99);
+    assert_eq!(unknown["truncated"], true);
     let last = inspect(&p, &["m.f_end", "--callers", "--depth", "100"]);
     assert_eq!(last["callers"]["count"], 100);
 }

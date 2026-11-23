@@ -526,13 +526,18 @@ impl ProjectIndex {
         })
     }
 
-    /// The nearest function whose own calls heki cannot all resolve (`unknown_calls`), or whose
-    /// body it does not know (defined only in a stub), among `start` and the callees whose facts
-    /// run in it (in its body, or in what iterating its result runs), with the chain to it. A
-    /// call cycle stopped at its recomputation budget is unknown as a whole: its functions are
-    /// their own nearest.
-    pub fn first_unknown(&self, calls: &mut CallsByCaller<'_>, start: &FuncKey) -> ChangeChain {
-        self.nearest(
+    /// The functions whose own calls heki cannot all resolve (`unknown_calls`), or whose body it
+    /// does not know (defined only in a stub), among `start` and the callees whose facts run in
+    /// it (in its body, or in what iterating its result runs), nearest first, each with the
+    /// shortest chain to it: at most `limit`. A call cycle stopped at its recomputation budget is
+    /// unknown as a whole: each of its functions is found itself.
+    pub fn unknown_within(
+        &self,
+        calls: &mut CallsByCaller<'_>,
+        start: &FuncKey,
+        limit: usize,
+    ) -> Vec<ChangeChain> {
+        self.found_within(
             calls,
             start,
             |site, callee| self.delivery(site, callee).is_some(),
@@ -540,6 +545,7 @@ impl ProjectIndex {
                 self.summary(key).is_some_and(|s| s.unknown_calls)
                     || self.file_of(key).is_some_and(crate::is_stub)
             },
+            limit,
         )
     }
 
@@ -572,7 +578,7 @@ impl ProjectIndex {
                     .iter()
                     .any(|h| h.state.is_change_of(cell))
             },
-            false,
+            usize::MAX,
         )
     }
 
@@ -660,21 +666,21 @@ impl ProjectIndex {
         enters: impl Fn(&CallSite, &EffectSummary) -> bool,
         found: impl Fn(&FuncKey, &[&CallSite]) -> bool,
     ) -> ChangeChain {
-        self.found_within(calls, start, enters, found, true)
+        self.found_within(calls, start, enters, found, 1)
             .pop()
             .unwrap_or_default()
     }
 
     /// Breadth first from `start` over the calls `enters` accepts, each function `found`
-    /// accepts with the shortest hops to it, in the order reached (only the first with
-    /// `first_only`). Each function is entered once.
+    /// accepts with the shortest hops to it, in the order reached: the first `limit`. Each
+    /// function is entered once.
     fn found_within(
         &self,
         calls: &mut CallsByCaller<'_>,
         start: &FuncKey,
         enters: impl Fn(&CallSite, &EffectSummary) -> bool,
         found: impl Fn(&FuncKey, &[&CallSite]) -> bool,
-        first_only: bool,
+        limit: usize,
     ) -> Vec<ChangeChain> {
         let mut out = Vec::new();
         // (function, parent state, hop into it)
@@ -701,7 +707,7 @@ impl ProjectIndex {
                     changed_in: Some(func.clone()),
                     param: None,
                 });
-                if first_only {
+                if out.len() == limit {
                     return out;
                 }
             }

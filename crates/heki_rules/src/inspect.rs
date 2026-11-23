@@ -29,6 +29,8 @@ pub const INSPECT_VERSION: u32 = 1;
 /// The most callers `--callers` lists, and the most direct callers otherwise.
 pub const MAX_CALLERS: usize = 500;
 pub const MAX_DIRECT_CALLERS: usize = 100;
+/// The most functions heki cannot follow `purity.unknown_reach` lists.
+pub const MAX_UNKNOWN: usize = 100;
 /// The most candidates an ambiguous name lists.
 pub const MAX_CANDIDATES: usize = 20;
 /// The most suggestions an unknown name lists.
@@ -312,8 +314,20 @@ pub struct FunctionInfo {
 pub struct Purity {
     pub verdict: &'static str,
     pub because: Vec<&'static str>,
+    /// The first entry of `unknown_reach`, whatever the verdict.
     pub unknown_at: Option<UnknownAt>,
+    pub unknown_reach: UnknownReach,
     pub assumes: Vec<&'static str>,
+}
+
+/// The functions heki cannot follow (calls it cannot resolve, or a body only a stub declares)
+/// among the function and the callees whose facts run in it, nearest first.
+#[derive(Debug, Clone, Serialize)]
+pub struct UnknownReach {
+    /// At most [`MAX_UNKNOWN`].
+    pub entries: Vec<UnknownAt>,
+    /// More functions are reached than `entries` lists.
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1314,32 +1328,44 @@ fn purity(
     .into_iter()
     .filter_map(|(reason, holds)| holds.then_some(reason))
     .collect();
+    let mut calls = b.calls.borrow_mut();
+    let mut unknown = index.unknown_within(&mut calls, key, MAX_UNKNOWN + 1);
+    let truncated = unknown.len() > MAX_UNKNOWN;
+    unknown.truncate(MAX_UNKNOWN);
+    let unknown_reach = UnknownReach {
+        entries: unknown
+            .iter()
+            .filter_map(|u| {
+                Some(UnknownAt {
+                    fqn: u.changed_in.as_ref()?.fqn(),
+                    chain: b.hops(&u.hops),
+                })
+            })
+            .collect(),
+        truncated,
+    };
+    let unknown_at = unknown_reach.entries.first().cloned();
     if !impure.is_empty() {
         return Purity {
             verdict: "impure",
             because: impure,
-            unknown_at: None,
+            unknown_at,
+            unknown_reach,
             assumes: ASSUMES.to_vec(),
         };
     }
-    let mut calls = b.calls.borrow_mut();
-    let unresolved = index.first_unknown(&mut calls, key);
     let untracked = !index.propagates_typed_writes()
         && index
             .first_object_write(&mut calls, key)
             .changed_in
             .is_some();
     // The nearest function heki cannot follow: unresolved calls, or a body only a stub declares.
-    let stub_below = unresolved
-        .changed_in
-        .as_ref()
-        .and_then(|f| index.file_of(f))
+    let stub_below = unknown
+        .first()
+        .and_then(|u| index.file_of(u.changed_in.as_ref()?))
         .is_some_and(is_stub);
     let because: Vec<&'static str> = [
-        (
-            "unresolved_calls",
-            unresolved.changed_in.is_some() && !stub_below,
-        ),
+        ("unresolved_calls", unknown_at.is_some() && !stub_below),
         ("untracked_writes", untracked),
         ("no_body", stub || s.is_abstract() || stub_below),
     ]
@@ -1353,10 +1379,8 @@ fn purity(
             "unknown"
         },
         because,
-        unknown_at: unresolved.changed_in.map(|f| UnknownAt {
-            fqn: f.fqn(),
-            chain: b.hops(&unresolved.hops),
-        }),
+        unknown_at,
+        unknown_reach,
         assumes: ASSUMES.to_vec(),
     }
 }
