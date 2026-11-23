@@ -5,9 +5,9 @@
 //! and read, the stores through namespaces and `setattr`, the classes whose code may store into
 //! an instance, the size of the Soundness lane's proof state, the values `EFF107` follows from a
 //! task factory, the walk to the callable a builtin calls once per item, contracts with many call
-//! targets and argument lists, the walk to the uses handing a reference to a call target on, the
-//! locks `EFF109` follows, the values class statements pass as bases, and the bindings the deque
-//! rewrite's candidates check.
+//! targets and argument lists, the mappings a call unpacks, the walk to the uses handing a
+//! reference to a call target on, the locks `EFF109` follows, the values class statements pass as
+//! bases, and the bindings the deque rewrite's candidates check.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -3429,6 +3429,41 @@ fn argument_lists_are_looked_up_from_the_bound_parameters() {
     // Only the forbidden caller's hundred calls passing the constants are reported.
     assert_eq!(diags.len(), 100, "{diags:#?}");
     assert!(diags.iter().all(|d| d["qualname"] == "u0"));
+}
+
+/// A long chain of mappings, each merging the one before it (`f2 = {**f1, "kind": True}`) or
+/// a phi of it and a display merging it (`f3 = f2 if flag else {**f2}`), each unpacked into a
+/// call matching an argument list: the ways of each mapping are decided once and kept, so the
+/// walk from each stops at the one before it instead of walking the chain again.
+#[test]
+fn a_long_chain_of_merged_mappings_is_decided_once_per_link() {
+    let found = check_linear(2000, |links| {
+        let mut lines = vec![
+            "def plain(kind=False):".to_owned(),
+            "    return kind".to_owned(),
+            String::new(),
+            String::new(),
+            "def chain(flag):".to_owned(),
+            "    f0 = {\"kind\": True}".to_owned(),
+        ];
+        for i in 0..links {
+            lines.push(match i % 2 {
+                0 => format!("    f{} = {{**f{i}, \"kind\": True}}", i + 1),
+                _ => format!("    f{} = f{i} if flag else {{**f{i}}}", i + 1),
+            });
+            lines.push(format!("    plain(**f{})", i + 1));
+        }
+        let p = Project::new(&format!("bounds_merged_mappings_{links}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n\
+             [[tool.heki.call-owners]]\nname = \"c\"\ntargets = [\"plain(kind=True)\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    });
+    let reported = found.iter().filter(|d| d["rule_code"] == "MUT204").count();
+    assert_eq!(reported, 2000, "{found:#?}");
 }
 
 /// Thousands of references to a `call-owners` target, each a rebinding of one name that a long
