@@ -1,16 +1,19 @@
 //! A call through a name the project binds to another object (assumption R1), end to end
 //! through the real binary: the call's targets are no longer every implementation it can run,
 //! so `EFF101` does not claim the chain and `EFF111` reports it with "Every implementation"
-//! open. The stores are those of the module defining the name (another store or a `del` of the
-//! global, also on a branch, a decorator applied by hand, a second binding in the class body,
-//! a `del` in the class body, a store on the class object, also through `setattr`, `__code__`,
-//! also in a function, `__bases__`, `__class__` through `self`, and `globals()`) and those of
-//! another module (by name, through `setattr` with a string literal, `del` and `delattr`,
-//! `__code__`, `__bases__`, on a class a subclass reaches through `super()`, on a property, and
-//! `setattr` under a name heki cannot read on a module), for a call by name, on an instance, on
-//! the class object, and through `super()`. The names nothing binds again keep the exact
-//! report. `MUT114`'s claim that the changed object is what a cached function returned rests on
-//! the same targets, and a module constant set through `setattr` is no constant.
+//! open. The stores are those of the module defining the name (a `del` of the global, a
+//! decorator applied by hand, a `del` in the class body, a store on the class object, also
+//! through `setattr`, `__code__`, also in a function, `__bases__`, `__class__` through `self`,
+//! and `globals()`) and those of another module (by name, through `setattr` with a string
+//! literal, `del` and `delattr`, `__code__`, `__bases__`, on a class a subclass reaches through
+//! `super()`, on a property, and `setattr` under a name heki cannot read on a module), for a
+//! call by name, on an instance, on the class object, and through `super()`. The names nothing
+//! binds again keep the exact report. A name the module body or the class body binds last to
+//! one named object on every path is that object (`assigned = fast`, `body = fast`,
+//! `Made = Other`, none of which waits), and one bound so on a branch is either object, a
+//! target without the fact. `MUT114`'s claim that the changed object is what a cached function
+//! returned rests on the same targets, and a module constant set through `setattr` is no
+//! constant.
 //!
 //! Every fixture marks each line with the report it must get ([`MARKS`]).
 
@@ -36,6 +39,11 @@ const MARKS: &[Mark] = &[
         "# EFF111",
         "EFF111",
         &[("Every implementation", "incomplete-targets")],
+    ),
+    (
+        "# EFF111 either",
+        "EFF111",
+        &[("Every implementation", "implementation-without-the-fact")],
     ),
     (
         "# MUT114 heuristic",
@@ -243,11 +251,11 @@ const OWN_MODULE_CALLS: &str = r#"from pkg import dynamic, lib
 
 
 async def assigned():
-    lib.assigned()  # EFF111
+    lib.assigned()
 
 
 async def branch():
-    lib.branch()  # EFF111
+    lib.branch()  # EFF111 either
 
 
 async def deleted():
@@ -271,7 +279,6 @@ async def late():
 
 
 async def body():
-    # The class body binds the name to `fast` after the `def`: the call runs `fast`.
     lib.C().body()
 
 
@@ -308,7 +315,7 @@ async def morph(m: lib.Morph):
 
 
 async def made():
-    lib.Made()  # EFF111
+    lib.Made()
 
 
 async def built():
@@ -360,7 +367,7 @@ C.stored = fast
 
 
 async def calls_assigned():
-    assigned()  # EFF111
+    assigned()
 
 
 async def calls_kept():
