@@ -1615,10 +1615,59 @@ mod tests {
             environment_reads(),
             ordered_outputs(),
             pydantic_models(),
+            llm_requests(),
         ]
         .into_iter()
         .flatten()
         .collect()
+    }
+
+    /// The requests of the LLM SDKs, reached through the clients' attributes, and the builders
+    /// returning a client of the receiver's class.
+    fn llm_requests() -> Vec<(Vec<String>, EcosystemEntry)> {
+        const BUILDERS: &[&str] = &["with_options", "copy"];
+        vec![
+            (
+                with_prefix_all(
+                    &["openai.OpenAI", "openai.AzureOpenAI", "anthropic.Anthropic"],
+                    BUILDERS,
+                ),
+                returning(SELF_RETURN_TYPE, entry(&[])),
+            ),
+            (
+                with_prefix_all(
+                    &[
+                        "openai.AsyncOpenAI",
+                        "openai.AsyncAzureOpenAI",
+                        "anthropic.AsyncAnthropic",
+                    ],
+                    BUILDERS,
+                ),
+                async_safe(returning(SELF_RETURN_TYPE, entry(&[]))),
+            ),
+            (
+                s(&[
+                    "openai.resources.chat.Completions.create",
+                    "openai.resources.responses.Responses.create",
+                    "openai.resources.Embeddings.create",
+                    "anthropic.resources.Messages.create",
+                    "google.genai.models.Models.generate_content",
+                    "google.genai.models.Models.embed_content",
+                ]),
+                entry(&[BlockingNet]),
+            ),
+            (
+                s(&[
+                    "openai.resources.chat.AsyncCompletions.create",
+                    "openai.resources.responses.AsyncResponses.create",
+                    "openai.resources.AsyncEmbeddings.create",
+                    "anthropic.resources.AsyncMessages.create",
+                    "google.genai.models.AsyncModels.generate_content",
+                    "google.genai.models.AsyncModels.embed_content",
+                ]),
+                async_safe(entry(&[])),
+            ),
+        ]
     }
 
     /// How a pydantic model stores and deletes its attributes, and what a field left out at
@@ -2692,6 +2741,19 @@ mod tests {
             prefix: s(&["http://", "https://"]),
             ..source_case("source", true)
         };
+        // Raw `bytes` and in-memory buffers are parsed without I/O.
+        let polars_data = ArgCase {
+            instance_of: s(&["builtins.bytes", "io.StringIO", "io.BytesIO"]),
+            ..source_case("source", false)
+        };
+        // A connection opened in memory sends the query without waiting; one only annotated as
+        // a `sqlite3.Connection` waits only on disk, as `sqlite3` calls do.
+        let polars_connection = |class: &str| ArgCase {
+            arg: Some(1),
+            param: Some("connection".into()),
+            instance_of: s(&[class]),
+            ..ArgCase::default()
+        };
         let buffer = |arg: u8| ArgCase {
             arg: Some(arg),
             param: Some("f".into()),
@@ -2714,13 +2776,26 @@ mod tests {
                         "read_ods",
                     ],
                 ),
+                with_cases(vec![polars_url, polars_data], entry(&[BlockingFs])),
+            ),
+            (
+                s(&["polars.read_database"]),
                 with_cases(
-                    vec![polars_url, source_case("source", false)],
-                    entry(&[BlockingFs]),
+                    vec![
+                        ArgCase {
+                            effects: Some(vec![DbQuery]),
+                            ..polars_connection("sqlite3.connect(\":memory:\")")
+                        },
+                        ArgCase {
+                            emits: Some(Emits::IfOnDisk),
+                            ..polars_connection("sqlite3.Connection")
+                        },
+                    ],
+                    entry(&[BlockingDb, DbQuery]),
                 ),
             ),
             (
-                with_prefix("polars", &["read_database", "read_database_uri"]),
+                s(&["polars.read_database_uri"]),
                 entry(&[BlockingDb, DbQuery]),
             ),
             (
@@ -3551,7 +3626,7 @@ mod tests {
                     "{symbol}"
                 );
                 assert!(
-                    case.effects.is_some() || case.return_type.is_some(),
+                    case.effects.is_some() || case.return_type.is_some() || case.emits.is_some(),
                     "{symbol}"
                 );
                 if let Some(class) = &case.return_type {
@@ -4039,6 +4114,86 @@ mod tests {
         assert_eq!(builtin.declared("time.sleep"), None);
         assert_eq!(kb.opaque_packages, builtin.opaque_packages);
         assert_ne!(kb.digest, builtin.digest);
+    }
+
+    /// Every attribute row names a class with catalogued members and is no entry (an attribute
+    /// is not a method the class defines), and the releases of its package that the row was
+    /// checked against are listed ([`Distribution`]).
+    #[test]
+    fn attribute_rows_name_catalogued_classes_in_verified_distributions() {
+        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        let distributions = &kb.distributions;
+        let operators = ["~=", "==", "!=", "<=", ">=", "<", ">"];
+        for d in distributions {
+            assert!(!d.name.is_empty() && !d.packages.is_empty(), "{d:?}");
+            for clause in d.verified.split(',') {
+                let version = operators
+                    .iter()
+                    .find_map(|op| clause.trim().strip_prefix(op))
+                    .unwrap_or_else(|| panic!("{}: {clause}", d.name));
+                assert!(version.starts_with(|c: char| c.is_ascii_digit()), "{d:?}");
+            }
+        }
+        let under = |symbol: &str, package: &str| {
+            symbol
+                .strip_prefix(package)
+                .is_some_and(|rest| rest.starts_with('.'))
+        };
+        for (symbol, class) in &kb.attributes {
+            let members = format!("{class}.");
+            assert!(
+                kb.entries.keys().any(|k| k.starts_with(&members))
+                    || kb.attributes.keys().any(|k| k.starts_with(&members)),
+                "{symbol} -> {class}"
+            );
+            assert_eq!(kb.lookup(symbol), None, "{symbol}");
+            assert!(
+                distributions
+                    .iter()
+                    .any(|d| d.packages.iter().any(|p| under(symbol, p))),
+                "{symbol}"
+            );
+        }
+        // From the class an async-safe constructor builds, no attribute row or result reaches
+        // a call that blocks: the asynchronous client's resources are classes of their own.
+        let mut reached: Vec<String> = kb
+            .entries
+            .iter()
+            .filter(|(s, e)| {
+                e.async_safe
+                    && s.rsplit('.')
+                        .next()
+                        .is_some_and(|n| n.starts_with(char::is_uppercase))
+            })
+            .map(|(s, _)| s.clone())
+            .collect();
+        let mut seen = BTreeSet::new();
+        while let Some(class) = reached.pop() {
+            if !seen.insert(class.clone()) {
+                continue;
+            }
+            let members = format!("{class}.");
+            for (symbol, e) in kb.entries.range(members.clone()..) {
+                let Some(member) = symbol.strip_prefix(&members) else {
+                    break;
+                };
+                assert!(
+                    !e.effects.iter().any(|x| x.blocks()),
+                    "{symbol}, reached from an async-safe constructor"
+                );
+                reached.extend(
+                    e.return_type_in(None)
+                        .filter(|_| !member.contains('.'))
+                        .map(str::to_owned),
+                );
+            }
+            for (symbol, t) in kb.attributes.range(members.clone()..) {
+                if !symbol.starts_with(&members) {
+                    break;
+                }
+                reached.push(t.clone());
+            }
+        }
     }
 
     /// `return_type = "Self"`: an instance of the receiver's class, never a class of that name.

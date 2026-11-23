@@ -2121,7 +2121,12 @@ clients of a library have rows of their own at every step, and a row whose meani
 across the verified releases under one name is left out. `[[distributions]]`
 (`heki_kb::Distribution`) names, per distribution (its PyPI name), the import packages its rows
 cover and the PEP 440 range of releases they were checked against (`verified`). The analysis never
-reads a project's versions: its output does not depend on the installed environment.
+reads a project's versions: its output does not depend on the installed environment. The rows
+type the resources of the LLM SDKs: openai's clients (`OpenAI`, `AzureOpenAI`, and their async
+twins) to `chat.completions`, `responses`, and `embeddings`, anthropic's to `messages`, and
+google-genai's `Client` to `models` and to its async client `aio`; the synchronous requests
+(`create`, `generate_content`, `embed_content`) wait on the network, the asynchronous ones are
+`async_safe`, and `with_options()` / `copy()` return `"Self"`.
 
 A third table, `[[cached_properties]]` (`heki_kb::CachedPropertyDecorator`), lists the
 cached-property decorators known to keep the getter's value in the instance `__dict__` under the

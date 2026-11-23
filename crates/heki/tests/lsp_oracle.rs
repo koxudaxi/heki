@@ -89,31 +89,6 @@ allowed-callees = ["requests.get"]
 symbol = "pkg.natives.fetch"
 effects = ["blocking_net"]
 
-# A library's synchronous and asynchronous clients, reaching their calls through attributes.
-[[tool.heki.ecosystem]]
-symbol = "acme.Completions.create"
-effects = ["blocking_net"]
-
-[[tool.heki.ecosystem]]
-symbol = "acme.AsyncCompletions.create"
-async-safe = true
-
-[[tool.heki.ecosystem]]
-symbol = "acme.Client.chat"
-attribute-type = "acme.Chat"
-
-[[tool.heki.ecosystem]]
-symbol = "acme.AsyncClient.chat"
-attribute-type = "acme.AsyncChat"
-
-[[tool.heki.ecosystem]]
-symbol = "acme.Chat.completions"
-attribute-type = "acme.Completions"
-
-[[tool.heki.ecosystem]]
-symbol = "acme.AsyncChat.completions"
-attribute-type = "acme.AsyncCompletions"
-
 [[tool.heki.readonly-returns]]
 name = "catalog"
 producers = ["pkg.catalog.Catalog.entry"]
@@ -3584,11 +3559,11 @@ fn steps_eff114() -> Vec<Step> {
     ]
 }
 
-const LLM_CLIENT: &str = "from acme import Client\n\nclient = Client()\n";
+const LLM_CLIENT: &str = "from openai import OpenAI\n\nclient = OpenAI()\n";
 
 const LLM_VIEW: &str = "from pkg.llm_client import client\n\n\nasync def answer():\n    return client.chat.completions.create(model=\"m\")\n";
 
-/// Attribute types of library classes (`attribute-type`): the class of a client another module
+/// Attribute types of library classes (`[[attributes]]`): the class of a client another module
 /// constructs, a project subclass binding the attribute, and a local client of the other class.
 fn steps_attribute_types() -> Vec<Step> {
     vec![
@@ -3604,7 +3579,7 @@ fn steps_attribute_types() -> Vec<Step> {
             "the other module constructs the asynchronous client",
             vec![save(
                 "pkg/llm_client.py",
-                &LLM_CLIENT.replace("Client", "AsyncClient"),
+                &LLM_CLIENT.replace("OpenAI", "AsyncOpenAI"),
             )],
         )
         .absent(&[("pkg/llm_view.py", "EFF101")]),
@@ -3617,7 +3592,7 @@ fn steps_attribute_types() -> Vec<Step> {
             "a project subclass of the client binds the attribute",
             vec![Action::Create(
                 "pkg/llm_mine.py",
-                "from acme import Client\n\n\nclass Mine(Client):\n    chat = None\n".to_owned(),
+                "from openai import OpenAI\n\n\nclass Mine(OpenAI):\n    chat = None\n".to_owned(),
             )],
         )
         .absent(&[("pkg/llm_view.py", "EFF101")]),
@@ -3625,7 +3600,7 @@ fn steps_attribute_types() -> Vec<Step> {
             "the subclass binds it no more",
             vec![save(
                 "pkg/llm_mine.py",
-                "from acme import Client\n\n\nclass Mine(Client):\n    pass\n",
+                "from openai import OpenAI\n\n\nclass Mine(OpenAI):\n    pass\n",
             )],
         )
         .present(&[("pkg/llm_view.py", "EFF101")]),
@@ -3635,7 +3610,7 @@ fn steps_attribute_types() -> Vec<Step> {
                 "pkg/llm_view.py",
                 &LLM_VIEW.replace(
                     "    return client.",
-                    "    from acme import AsyncClient\n\n    client = AsyncClient()\n    return client.",
+                    "    from openai import AsyncOpenAI\n\n    client = AsyncOpenAI()\n    return client.",
                 ),
             )],
         )
