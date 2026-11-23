@@ -32,8 +32,8 @@
 - [async-blocking-call (EFF101)](https://heki.koxudaxi.dev/rules/async-blocking-call/): Family: Execution Effects (EFF) · Exact · Enabled by default · Severity warning (slower code) · No automatic fix
 - [async-blocking-fs (EFF105)](https://heki.koxudaxi.dev/rules/async-blocking-fs/): Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity warning (slower code) · No automatic fix
 - [async-possibly-blocking-call (EFF111)](https://heki.koxudaxi.dev/rules/async-possibly-blocking-call/): Family: Execution Effects (EFF) · Heuristic · Off by default · Severity warning (slower code) · No automatic fix
-- [cached-property-stale-mutation (MUT101)](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
-- [cached-property-stale-read (MUT111)](https://heki.koxudaxi.dev/rules/cached-property-stale-read/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
+- [cached-property-stale-mutation (MUT101)](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/): Family: Mutation & State (MUT) · Exact · Opt-in · Experimental · Severity error (a bug) · No automatic fix
+- [cached-property-stale-read (MUT111)](https://heki.koxudaxi.dev/rules/cached-property-stale-read/): Family: Mutation & State (MUT) · Exact · Opt-in · Experimental · Severity error (a bug) · No automatic fix
 - [cached-result-mutation (MUT114)](https://heki.koxudaxi.dev/rules/cached-result-mutation/): Family: Mutation & State (MUT) · Exact · Enabled by default · Severity error (a bug) · No automatic fix
 - [call-owner-violation (MUT204)](https://heki.koxudaxi.dev/rules/call-owner-violation/): Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity error (a bug) · No automatic fix
 - [change-lost-on-new-object (MUT119)](https://heki.koxudaxi.dev/rules/change-lost-on-new-object/): Family: Mutation & State (MUT) · Exact · Enabled by default · Severity error (a bug) · No automatic fix

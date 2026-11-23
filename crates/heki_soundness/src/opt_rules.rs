@@ -15,7 +15,7 @@ use crate::liveness::Liveness;
 use crate::obligations::{Checker, ObligationKind, ProofObligation, SafetyVerdict};
 use crate::{FrameState, KindMask, ObligationStatus, ProfitabilityTier, SafetyTier};
 use heki_ast::{LineIndex, Span};
-use heki_ir::walk::{Answer, Def, FnShape};
+use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, JoinMap, KeySet, Memo, Min};
 use heki_ir::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, DictEntry, FnIndex, FunctionId, Inst, InstKind,
     IrFunction, LoopBound, ModuleBindings, ModuleIr, NaturalLoop, Terminator, VarId,
@@ -23,7 +23,8 @@ use heki_ir::{
 use heki_kb::{EffectiveSoundnessKb, SoundnessParamEffect};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
+use std::borrow::Cow;
+use std::cell::{OnceCell, RefCell};
 use std::cmp::Reverse;
 use std::rc::Rc;
 
@@ -394,6 +395,7 @@ pub fn analyze_module(
             ix: &ix,
             hoisted_names: RefCell::new(FxHashSet::default()),
             set_order: RefCell::default(),
+            bindings: BindingOrigins::default(),
         };
         for site in &sites {
             if let Some(c) = rules.evaluate(site) {
@@ -424,6 +426,11 @@ enum Membership<'a> {
     /// `if v not in seen: seen.append(v)`: the append at `(block, index)` (`OPT111`).
     Dedup(BlockId, usize),
 }
+
+/// Why a deque rewrite is blocked when the walk over the bindings of the variables the list
+/// reaches runs past its budget.
+const BINDINGS_PAST_BUDGET: &str =
+    "the bindings of the variables it reaches are past the walk budget; rewrite it by hand";
 
 #[derive(Debug, Clone, Copy)]
 enum FrontForm {
@@ -800,6 +807,40 @@ impl SetOrderWalk {
     }
 }
 
+/// What makes an object a value may hold: the caller of a parameter, or an instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Origin {
+    Param(VarId),
+    Made(BlockId, usize),
+}
+
+/// The value an instruction binds unchanged: a copy's source, the target of `q += ...`.
+fn passed_on(inst: &Inst) -> Option<VarId> {
+    match inst.kind {
+        InstKind::Copy { src, .. } => Some(src),
+        InstKind::BinOp {
+            lhs,
+            in_place: true,
+            ..
+        } => Some(lhs),
+        _ => None,
+    }
+}
+
+/// The objects the variables of one function may hold, for the deque rewrite's check that every
+/// variable a list reaches holds the deque alone (`OPT120` / `OPT121`): one budget, and one
+/// answer per value and per variable for all the function's candidates.
+#[derive(Default)]
+struct BindingOrigins<'a> {
+    budget: OnceCell<Budget>,
+    /// The values of each variable.
+    values: OnceCell<FxHashMap<&'a str, Vec<VarId>>>,
+    /// Per value, the origins of the objects it may hold, through copies, `+=`, and phis.
+    of_value: Closure<VarId, KeySet<Origin>>,
+    /// Per variable, each origin with the first of its values that may hold one.
+    of_name: Memo<&'a str, Rc<JoinMap<Origin, Min<VarId>>>>,
+}
+
 /// What `SetOrderUnobserved` has decided in one function: the observing use of each value it
 /// visited (`None`: none), and the exact types of the values of the blocks it stepped through.
 #[derive(Default)]
@@ -820,6 +861,7 @@ struct Rules<'a, 'c> {
     /// the same name.
     hoisted_names: RefCell<FxHashSet<String>>,
     set_order: RefCell<SetOrderFacts>,
+    bindings: BindingOrigins<'a>,
 }
 
 fn established(evidence: &str) -> ObligationStatus {
@@ -2712,11 +2754,13 @@ impl<'a, 'c> Rules<'a, 'c> {
                 .iterated_while_changed(&allocs)
                 .or_else(|| self.iterator_used_otherwise(&st, &allocs));
         }
-        // A type checker must accept the rewritten variable: its `list` annotations become
-        // `deque` ones, and one that cannot be rewritten blocks the fix.
+        // A type checker must accept every variable the deque reaches: its `list` annotations
+        // become `deque` ones, and one that cannot be rewritten, or a binding of the variable
+        // to another object, blocks the fix.
         let mut type_edits = Vec::new();
         if bad_use.is_none() {
-            match self.declared_type_edits(&init_sites, &aliases) {
+            let slice = matches!(form, Some(FrontForm::SliceRebind { .. })).then_some(at);
+            match self.declared_type_edits(&init_sites, slice, &aliases) {
                 Ok(edits) => type_edits = edits,
                 Err(why) => bad_use = Some(why),
             }
@@ -2734,9 +2778,6 @@ impl<'a, 'c> Rules<'a, 'c> {
             &name,
             match &bad_use {
                 Some(why) => blocked(why.clone()),
-                None if init_sites.is_empty() => {
-                    blocked("no list display or `list(...)` to turn into a deque")
-                }
                 None => established("every use has a `collections.deque` equivalent"),
             },
         ));
@@ -2868,11 +2909,13 @@ impl<'a, 'c> Rules<'a, 'c> {
 
     /// The edits turning the annotations of the deque's variables into `deque` ones: the
     /// annotation of an initializing assignment (`q: list[int] = []`) is rewritten; one that is
-    /// not `list` / `list[...]` / `List[...]`, or another annotated declaration of a variable
-    /// that may hold the deque (a parameter, a bare `q: list[int]`), blocks the fix.
+    /// not `list` / `list[...]` / `List[...]`, another annotated declaration of a variable
+    /// that may hold the deque (a parameter, a bare `q: list[int]`), or a binding of such a
+    /// variable to another object ([`Self::binding_to_other_object`]) blocks the fix.
     fn declared_type_edits(
         &self,
         init_sites: &[(BlockId, usize)],
+        slice: Option<(BlockId, usize)>,
         aliases: &FxHashSet<VarId>,
     ) -> Result<Vec<TextEdit>, String> {
         let f = self.f();
@@ -2940,7 +2983,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         names.sort_unstable();
         names.dedup();
         let text = self.m.text(f.span).unwrap_or_default();
-        for name in names {
+        for &name in &names {
             if let Some(off) = annotated_declarations(text, name)
                 .map(|o| f.span.start + o)
                 .find(|o| !handled.contains(o))
@@ -2951,7 +2994,121 @@ impl<'a, 'c> Rules<'a, 'c> {
                 ));
             }
         }
-        Ok(edits)
+        match self.binding_to_other_object(&names, init_sites, slice) {
+            Some(why) => Err(why),
+            None => Ok(edits),
+        }
+    }
+
+    /// Why a variable named in `names` is also bound to an object the rewrite leaves alone: a
+    /// parameter, or an assignment of another value (`s = [...]` next to `s = q`). A type
+    /// checker gives an unannotated variable one type from its bindings (mypy from the first
+    /// one), which the deque and the other object need not share.
+    ///
+    /// Every object such a variable may hold must be made at one of `init_sites`, or be the
+    /// `q[1:]` at `slice`, which the fix replaces by keeping the deque (`q.popleft()`).
+    fn binding_to_other_object(
+        &self,
+        names: &[&'a str],
+        init_sites: &[(BlockId, usize)],
+        slice: Option<(BlockId, usize)>,
+    ) -> Option<String> {
+        let deque = |o: &Origin| match *o {
+            Origin::Made(b, i) => init_sites.contains(&(b, i)) || slice == Some((b, i)),
+            Origin::Param(_) => false,
+        };
+        names
+            .iter()
+            .find_map(|&name| {
+                self.origins_of_name(name)
+                    .map(|origins| {
+                        let (&origin, &Min(value)) = origins.iter().find(|(o, _)| !deque(o))?;
+                        Some(Cow::Owned(self.other_object(name, origin, value)))
+                    })
+                    // A walk past its budget establishes nothing.
+                    .open_means(Some(Cow::Borrowed(BINDINGS_PAST_BUDGET)))
+            })
+            .map(Cow::into_owned)
+    }
+
+    /// Why `name` may not hold the deque: its value `value` may hold an object `origin` makes.
+    fn other_object(&self, name: &str, origin: Origin, value: VarId) -> String {
+        let f = self.f();
+        match origin {
+            Origin::Param(p) if f.var_name(p) == Some(name) => format!(
+                "`{name}` is a parameter (line {}): a type checker gives `{name}` its parameter type, which the `collections.deque` may not match; rewrite it by hand",
+                self.line(f.span.start)
+            ),
+            _ => {
+                // The statement binding `value`, or where the object is made when a phi binds it.
+                let made = match origin {
+                    Origin::Made(b, i) => inst_at(f, (b, i)).span,
+                    Origin::Param(_) => f.span,
+                };
+                let at = self.cx().shape.inst(value).map_or(made, |i| i.span);
+                format!(
+                    "`{name}` is also bound to another object at line {}: a type checker gives `{name}` one type, which the `collections.deque` may not match; rewrite it by hand",
+                    self.line(at.start)
+                )
+            }
+        }
+    }
+
+    /// Each origin of the objects the variable `name` may hold, with the first of its values
+    /// that may hold one ([`BindingOrigins`]).
+    fn origins_of_name(&self, name: &'a str) -> Answer<Rc<JoinMap<Origin, Min<VarId>>>> {
+        let f = self.f();
+        let shape = &self.cx().shape;
+        let b = &self.bindings;
+        let budget = b
+            .budget
+            .get_or_init(|| Budget::of_function("OPT120/OPT121 deque bindings", f));
+        let values = b.values.get_or_init(|| {
+            let mut values: FxHashMap<&'a str, Vec<VarId>> = FxHashMap::default();
+            for (i, n) in f.var_names.iter().enumerate() {
+                if let Some(n) = n {
+                    values.entry(n.as_str()).or_default().push(VarId(i as u32));
+                }
+            }
+            values
+        });
+        let own = |v: VarId| match shape.def(v) {
+            // `LoadName` is the name before its first binding, or after `del`: no object.
+            Def::Inst(b, i) => {
+                let inst = &f.block(b).insts[i as usize];
+                let holds_made =
+                    passed_on(inst).is_none() && !matches!(inst.kind, InstKind::LoadName { .. });
+                holds_made
+                    .then_some(Origin::Made(b, i as usize))
+                    .into_iter()
+                    .collect()
+            }
+            Def::Param => KeySet::from_iter([Origin::Param(v)]),
+            // A phi holds what its inputs hold; a phi the builder found trivial is read nowhere.
+            Def::Phi(..) | Def::None => KeySet::new(),
+        };
+        let next = |v: VarId, out: &mut Vec<VarId>| match shape.def(v) {
+            Def::Phi(b, i) => {
+                let phi = &f.block(b).phis[i as usize];
+                out.extend(phi.incoming.iter().map(|(_, src)| *src));
+            }
+            _ => out.extend(shape.inst(v).and_then(passed_on)),
+        };
+        b.of_name.ask(budget, name, || {
+            let mut origins = JoinMap::new();
+            for &v in values.get(name).into_iter().flatten() {
+                // Past the budget the memo answers open, whatever this joins, so an open answer
+                // for one value adds no origin.
+                let of_value = b
+                    .of_value
+                    .ask(budget, v, own, next)
+                    .open_means(Rc::default());
+                for &o in of_value.iter() {
+                    origins.insert(o, Min(v));
+                }
+            }
+            Rc::new(origins)
+        })
     }
 
     fn front_edits(

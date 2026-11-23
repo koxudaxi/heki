@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -346,7 +347,11 @@ def example_files(text: str, page: Path) -> dict[str, str]:
 
 
 def run_in_project(heki: Path, files: dict[str, str], args: list[str]) -> subprocess.CompletedProcess:
-    """`heki <args>` in a new project holding `files` (and a `pyproject.toml`)."""
+    """`heki <args>` in a new project holding `files` (and a `pyproject.toml`), as from a terminal:
+    without the variables that choose `heki check`'s output format (`GITHUB_ACTIONS` is set in
+    CI)."""
+    chosen_format = {"GITHUB_ACTIONS", "HEKI_OUTPUT_FORMAT"}
+    terminal = {k: v for k, v in os.environ.items() if k not in chosen_format}
     with tempfile.TemporaryDirectory() as directory:
         project = Path(directory)
         files = {"pyproject.toml": '[project]\nname = "t"\n', **files}
@@ -354,7 +359,12 @@ def run_in_project(heki: Path, files: dict[str, str], args: list[str]) -> subpro
             (project / path).parent.mkdir(parents=True, exist_ok=True)
             (project / path).write_text(text, encoding="utf-8", newline="\n")
         return subprocess.run(
-            [str(heki), *args], capture_output=True, cwd=project, encoding="utf-8", check=False
+            [str(heki), *args],
+            capture_output=True,
+            cwd=project,
+            encoding="utf-8",
+            check=False,
+            env=terminal,
         )
 
 
@@ -395,15 +405,19 @@ def example_image(heki: Path) -> str:
     return ansi_svg.render(prompt + out.stdout + out.stderr, TERMINAL_COLUMNS, EXAMPLE_IMAGE_TITLE)
 
 
-def certifications_table(precision: dict) -> str:
+def certifications_table(precision: dict, rules: list[dict]) -> str:
+    """The certifications; a certified rule that is still experimental (opt-in for its harm
+    share) says so in its row."""
+    experimental = {r["code"] for r in rules if r["experimental"]}
     lines = [
         "| Rule | Certified | Census: reports / false | Holdout: reports / false |",
         "| ---- | --------- | ----------------------: | -----------------------: |",
     ]
     for c in precision["certifications"]:
         census, holdout = c["census"], c["holdout"]
+        release = c["release"] + (" (experimental)" if c["rule"] in experimental else "")
         lines.append(
-            f"| `{c['rule']}` | {c['release']} | {census['reports']} / {census['false_claims']} "
+            f"| `{c['rule']}` | {release} | {census['reports']} / {census['false_claims']} "
             f"| {holdout['reports']} / {holdout['false_claims']} |"
         )
     return "\n".join(lines) + "\n"
@@ -460,7 +474,7 @@ def outputs(heki: Path, rules: list[dict], registry: dict, precision: dict) -> d
         PRECISION_PAGE: with_generated_parts(
             PRECISION_PAGE,
             {
-                "certifications": certifications_table(precision),
+                "certifications": certifications_table(precision, rules),
                 "measurements": measurements_table(precision, rules),
             },
         ),

@@ -176,6 +176,29 @@ impl<'a> CachedReads<'a> {
         out
     }
 
+    /// `MUT111`'s exact claim about `read`: every class the read object may be (the read's
+    /// class and each project subclass, R2) gets the property from a `@cached_property` getter
+    /// and runs a write of it whose `MUT101` report is exact.
+    fn exact_read(
+        &self,
+        cx: &CheckContext<'_>,
+        read: &CachedRead<'_>,
+        stale: &FxHashMap<&FuncKey, Vec<StaleWrite<'_, '_>>>,
+    ) -> bool {
+        let class = &read.site.class_qualname;
+        std::iter::once(class.clone())
+            .chain(cx.decls.subclasses_of(class))
+            .all(|c| {
+                let Some((_, getter)) = read.props.iter().find(|(pc, _)| *pc == c) else {
+                    return false;
+                };
+                let lineage = &self.lineages[&c];
+                stale.get(getter).into_iter().flatten().any(|w| {
+                    w.exact && lineage.runs_stale(cx.index, &w.writer.key, &read.site.attr)
+                })
+            })
+    }
+
     /// The classes defining the cached properties read.
     pub(super) fn property_classes(&self) -> FxHashSet<String> {
         self.reads
@@ -202,7 +225,13 @@ impl<'a> CachedReads<'a> {
         type Writes<'w> = BTreeMap<(&'w Path, Span, &'w FuncKey), (bool, &'w StaleWrite<'w, 'w>)>;
         let mut found: BTreeMap<(&FuncKey, &str), (Span, &ModuleUnit<'_>, Writes<'_>)> =
             BTreeMap::new();
+        // Per reading function and property name, the reads whose every class runs an exact
+        // stale write.
+        let mut exact_reads: FxHashSet<(&FuncKey, &str, Span)> = FxHashSet::default();
         for read in &self.reads {
+            if self.exact_read(cx, read, stale) {
+                exact_reads.insert((read.reader, read.site.attr.as_str(), read.site.span));
+            }
             let mut writes = Writes::new();
             for (class, getter) in &read.props {
                 let lineage = &self.lineages[class];
@@ -231,10 +260,13 @@ impl<'a> CachedReads<'a> {
             }
         }
         for ((reader, attr), (span, unit, writes)) in found {
+            // The write named is one on the read's own class when there is one, an exact one
+            // first among those.
             let &(_, named) = writes
                 .values()
-                .min_by_key(|(foreign, _)| *foreign)
+                .min_by_key(|(foreign, w)| (*foreign, !w.exact))
                 .expect("a read is recorded only with a stale write");
+            let exact = named.exact && exact_reads.contains(&(reader, attr, span));
             let writer = &named.writer.key.qualname;
             let class_qualname = cx
                 .index
@@ -271,6 +303,7 @@ impl<'a> CachedReads<'a> {
                 &[],
             ) {
                 d.related = related;
+                d.certainty = crate::premises::tier("MUT111", exact).at_most(d.certainty);
             }
         }
     }

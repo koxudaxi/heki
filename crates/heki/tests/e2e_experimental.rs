@@ -15,26 +15,27 @@ const POLICY: &str = "Experimental features can still change in behavior or prec
 #[test]
 fn rule_command_says_that_a_rule_is_experimental() {
     let p = Project::new("experimental_rule");
-    let (code, doc, _) = p.heki(&["rule", "MUT101"]);
+    let (code, doc, _) = p.heki(&["rule", "MUT112"]);
     assert_eq!(code, 0);
-    let summary = "# cached-property-stale-mutation (MUT101)\n\nMutating an attribute read by \
-        `@cached_property` without invalidating the cache.\n\n";
+    let summary = "# conditional-ownership-mutation (MUT112)\n\nOpt-in: changing in place a value \
+        that is a new object on one path and borrowed state (a parameter, an attribute, a global, or \
+        what a function returns of such state) on another.\n\n";
     let heuristic = "This rule is heuristic: a premise of its claim can be open (\"What a report \
         states\" lists them), so a report can be wrong about the code. It runs only when `select` \
         or `extend-select` names its code or name.\n\n";
-    let note = "This rule is experimental. Its precision outside a few code bases is still low.";
+    let note = "This rule is experimental. Its precision on real code bases is still low: much of \
+        what it reports is code that changes a borrowed container on purpose.";
     assert!(
         doc.starts_with(&format!(
             "{summary}{heuristic}{note} {POLICY}\n\n## What it does\n"
         )),
         "{doc}"
     );
-    let (_, reader, _) = p.heki(&["rule", "MUT111"]);
-    let note = "This rule is experimental. It reports the readers of the stale writes `MUT101` \
-        finds, so it shares `MUT101`'s precision.";
+    let (_, other, _) = p.heki(&["rule", "MUT113"]);
+    let note = "This rule is experimental. It has few reports, and most of them are still false.";
     assert!(
-        reader.contains(&format!(".\n\n{note} {POLICY}\n\n## What it does\n")),
-        "{reader}"
+        other.contains(&format!(".\n\n{note} {POLICY}\n\n## What it does\n")),
+        "{other}"
     );
     let (_, stable, _) = p.heki(&["rule", "MUT107"]);
     assert!(!stable.to_lowercase().contains("experimental"), "{stable}");
@@ -44,10 +45,10 @@ fn rule_command_says_that_a_rule_is_experimental() {
         assert_eq!(code, 0);
         serde_json::from_str(&out).unwrap()
     };
-    let entry = &json("cached-property-stale-mutation")["experimental"];
+    let entry = &json("conditional-ownership-mutation")["experimental"];
     assert_eq!(
         (&entry["id"], &entry["kind"], &entry["since"]),
-        (&json!("rule.MUT101"), &json!("rule"), &json!("0.1.0"))
+        (&json!("rule.MUT112"), &json!("rule"), &json!("0.2.0"))
     );
     assert_eq!(json("MUT107")["experimental"], Value::Null);
 }
@@ -112,8 +113,8 @@ fn docs_check_fails_on_a_stale_experimental_page() {
     let page = docs.0.read("docs/experimental.md");
     assert!(
         page.contains(
-            "| `rule.MUT101` | rule | [`MUT101`](rules/cached-property-stale-mutation.md) | \
-             0.1.0 | - |"
+            "| `rule.MUT112` | rule | [`MUT112`](rules/conditional-ownership-mutation.md) | \
+             0.2.0 | - |"
         ),
         "{page}"
     );
@@ -128,7 +129,7 @@ fn docs_check_fails_on_a_stale_experimental_page() {
         )),
         "{index}"
     );
-    let rule_page = docs.0.read("docs/rules/cached-property-stale-mutation.md");
+    let rule_page = docs.0.read("docs/rules/conditional-ownership-mutation.md");
     assert!(
         rule_page.contains("· Heuristic · Opt-in · Experimental · ")
             && rule_page.contains("!!! warning \"Experimental\"\n\n    Its precision"),
@@ -142,7 +143,7 @@ fn docs_check_fails_on_a_stale_experimental_page() {
     );
     assert_eq!(docs.build_docs(&["--check"]).0, 0);
 
-    let (code, out) = docs.check_with("docs/experimental.md", "0.1.0", "0.0.9");
+    let (code, out) = docs.check_with("docs/experimental.md", "0.2.0", "0.0.9");
     assert_eq!(code, 1);
     assert!(
         out.starts_with("Generated docs are out of date") && out.contains("experimental.md"),
@@ -186,14 +187,14 @@ fn docs_check_fails_where_a_page_marks_a_rule_differently_from_the_registry() {
     // The row of an experimental rule says so.
     let (code, out) = docs.check_with(
         "ARCHITECTURE.md",
-        "| **MUT101** | Opt-in (experimental, heuristic) |",
-        "| **MUT101** | Opt-in (heuristic) |",
+        "| **MUT112** | Opt-in (experimental, heuristic) |",
+        "| **MUT112** | Opt-in (heuristic) |",
     );
     assert_eq!(code, 1);
     assert!(
         out.starts_with(heading)
             && out.contains("ARCHITECTURE.md:")
-            && out.contains(": the row of MUT101 does not say experimental"),
+            && out.contains(": the row of MUT112 does not say experimental"),
         "{out}"
     );
     // The row of a stable rule does not, in the README and in its copy on the site, which names
@@ -226,7 +227,7 @@ fn docs_check_fails_where_a_page_marks_a_rule_differently_from_the_registry() {
     let (code, out) = docs.check_with(
         "ARCHITECTURE.md",
         "| **MUT106** | Opt-in (heuristic) |",
-        "| **MUT106** | Opt-in (heuristic; see `MUT101`) |",
+        "| **MUT106** | Opt-in (heuristic; see `MUT112`) |",
     );
     assert_eq!(code, 0, "{out}");
 
@@ -234,13 +235,13 @@ fn docs_check_fails_where_a_page_marks_a_rule_differently_from_the_registry() {
     // experimental: a rule by its code, an option by the command and the option.
     let (code, out) = docs.check_with(
         "CHANGELOG.md",
-        "(experimental: its precision",
-        "(its precision",
+        "`MUT112` (`conditional-ownership-mutation`, opt-in, experimental)",
+        "`MUT112` (`conditional-ownership-mutation`, opt-in)",
     );
     assert_eq!(code, 1);
     assert!(
         out.starts_with(heading)
-            && out.contains("CHANGELOG.md: [0.1.0] does not call MUT101 experimental"),
+            && out.contains("CHANGELOG.md: [0.2.0] does not call MUT112 experimental"),
         "{out}"
     );
     let (code, out) = docs.check_with(
