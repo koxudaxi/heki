@@ -785,20 +785,37 @@ its call sites (`Workspace::caller_view`) and shows them in call chains.
 
 `CallSite.arguments` holds, only when a call target has an argument list
 (`Contracts::marked_params`), the constants the call passes for the parameters those lists name,
-those every callee the call may run agrees on: by keyword, by position, or as a default decided
-by its class and truthiness, as the parameter binding of the extraction binds them, a keyword
-only for a class without a project `__init__`. That binding (`BoundCallee::params`, and the rules'
+those every callee the call may run, on every way the mappings it unpacks may be built, agrees
+on (`summary::keywords::agreed_marks`): by keyword, by position, or as a default decided by its
+class and truthiness, as the parameter binding of the extraction binds them, a keyword only for a
+class without a project `__init__` and for a library method building its receiver's class
+(Layer 2 `builds_receiver`: the keywords of `model_construct`, the entries of the mapping
+`model_validate` and `model_copy` take, whose site is a construction of the receiver's class,
+`CallSite::constructs`). That binding (`BoundCallee::params`, and the rules'
 `bind_arguments`) follows Python's: a position binds the parameter of its slot only among the
 positional parameters (`FunctionDecl::positional_param`; one past them lands in `*args`, a new
 tuple, and binds no parameter, never a keyword-only one: only a hand-over asks whether the callee
 keeps `*args`, which holds it), and a keyword never binds a positional-only parameter
 (`FunctionDecl::keyword_param`; one binding no parameter is, for the argument lists, a parameter of
-its own name in `**kwargs`); the receiver is the first position. A `**` operand that is a dict
-display with string constant keys passes its entries as keywords when nothing changes it
-(`Extractor::constant_display`: each value holding it, through copies and phis, is only copied,
-merged, unpacked with `**`, tested, returned, or raised; one walk per display; the entries a call
-binds are taken from the function's budget, past which the display may pass any keyword); any other
-`**` operand may bind any parameter. A callee the call raises `TypeError` for instead of running
+its own name in `**kwargs`); the receiver is the first position. A `**` operand that is a
+mapping the function builds passes its entries as keywords when nothing changes it, on each way
+it may be built (`Extractor::mapping`): a dict display with string constant keys, a merge of
+mappings (a display's `**` entries, `dict(...)` of at most one mapping and keywords, `a | b` of
+two mappings the function builds), whose later entries replace earlier ones and where a mapping
+heki does not build replaces every key before it, and a phi of mappings, one way per way of each
+input, at most `MAPPING_WAYS` (8) ways, past which it may pass anything. Each value holding a
+mapping, through copies and phis, is only copied, merged into another mapping, unpacked with `**`,
+read as the field values of a `builds_receiver` call, tested, returned, or raised
+(`Extractor::only_unpacked`). The mappings a mapping is built from are found with one `reach`, and
+their ways with a `fixpoint` over them (a mapping a loop merges into itself grows each pass); the
+answer of each mapping decided is kept, so a later walk stops at it, and the entries a call binds
+are taken from the function's budget, past which the mapping may pass any keyword. Where a call
+unpacks several ways, the parameter binding of the extraction takes the keywords written and any
+other; any other `**` operand may bind any parameter. A call of a `functools.partial` object the
+function makes through copies (`Extractor::partial`) is a call of the callable it holds, passed the
+positions it holds first and its keywords, which a keyword the call writes replaces
+(`Partial::called_with`); one unpacking a mapping over keywords the object holds stays
+unresolved. A callee the call raises `TypeError` for instead of running
 (`Bindings::raises`: two keywords of one name, a parameter bound twice, a keyword without
 `**kwargs`, a position past the parameters without `*args`, a parameter without a default left
 unbound where no unpacking may bind it, counted from `FunctionDecl::required_positional` and
@@ -2189,7 +2206,11 @@ the caller's thread with a synchronous facade over an async connection), `exclud
 `stores_on_instance` (a class's `__setattr__` / `__delattr__` that stores the value, possibly a
 validated conversion of it, or deletes the attribute on the instance itself, or raises, handing
 the value to no other object, in a class that installs no descriptor for it and defines no
-`__getattribute__`, so a read finds the stored value: `pydantic.BaseModel.__setattr__`), `keeps_hashable_defaults` (an
+`__getattribute__`, so a read finds the stored value: `pydantic.BaseModel.__setattr__`),
+`builds_receiver` (the call builds a new instance of its receiver's class without its `__init__`,
+the fields set from its keywords or from the mapping at a position or keyword, only from a dict
+where `only_from_dict` says so: `pydantic.BaseModel.model_construct`, `model_validate`,
+`model_copy`; a call contract sees a construction of the class), `keeps_hashable_defaults` (an
 instance built without a field starts from the field's default itself when it is hashable, and
 from a deep copy of an unhashable one, then holds what validating the default returns where the
 field validates it: pydantic 2's `BaseModel`), `return_type` (factories such as

@@ -12,6 +12,10 @@ use std::path::{Path, PathBuf};
 /// The documentation site (`site_url` in `zensical.toml`).
 pub const SITE: &str = "https://heki.koxudaxi.dev/";
 
+/// What each release changed, on the default branch (the binary also prints its own release's
+/// section with `heki version --changelog`).
+pub const CHANGELOG: &str = "https://github.com/koxudaxi/heki/blob/main/CHANGELOG.md";
+
 /// Where heki's bugs are reported.
 pub const ISSUES: &str = "https://github.com/koxudaxi/heki/issues";
 
@@ -50,6 +54,7 @@ docs_pages! {
     SourceRoots => "configuration/#module-names-follow-the-source-roots",
     TopLevel => "configuration/#top-level-settings",
     TargetVersion => "configuration/#the-default-target-version",
+    RequiredVersion => "configuration/#requiring-a-heki-version",
     CheckedFiles => "configuration/#which-files-are-checked",
     Lint => "configuration/#rule-selection-toolhekilint",
     Contracts => "configuration/#contracts",
@@ -73,6 +78,7 @@ docs_pages! {
     CliInspect => "cli-reference/#heki-inspect",
     CliRecommend => "cli-reference/#heki-recommend",
     CliSkillInstall => "cli-reference/#heki-skill-install",
+    CliVersion => "cli-reference/#heki-version",
     Inspect => "coding-agents/#what-a-function-does-heki-inspect-experimental",
 }
 
@@ -103,6 +109,7 @@ impl Docs {
         match (table, key) {
             ("", "target-version") => Self::TargetVersion,
             ("", "exclude" | "extend-exclude") => Self::CheckedFiles,
+            ("", "required-version") => Self::RequiredVersion,
             ("", "src") => Self::SourceRoots,
             ("", "baseline") => Self::Baselines,
             ("", table) => Self::of_table(table),
