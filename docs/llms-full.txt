@@ -3860,7 +3860,8 @@ a rule becomes exact](https://heki.koxudaxi.dev/precision/#how-a-rule-becomes-ex
    (`fakes.py`: `time.sleep`, `requests`, `sqlite3`, `socket`, `subprocess`, `urllib`, queues,
    `numpy`, `pandas`), so the program runs offline. `monitor.py` records with `sys.monitoring`
    which call was running, which iteration of a loop, and which line, when each fake was called,
-   what each line changed, and what the objects a line plan names hold in an attribute.
+   what each line changed, what the objects a line plan names hold in an attribute, and how
+   many references the program keeps to the object a change ran on when its line ends.
 4. `checkers.py` refutes a claim from the runs: an `EFF101` call that returned without a waiting
    call during it, an `EFF103` iteration that completed without a statement, a `DATA101`
    iteration whose new value was not built from the previous one, a `MUT110` or `MUT114` line
@@ -3868,7 +3869,9 @@ a rule becomes exact](https://heki.koxudaxi.dev/precision/#how-a-rule-becomes-ex
    object than the copied value held at the access path when the copy line ran (or left it as it
    was, or whose copy held another object there; `monitor.py` loads each path at those lines
    without running code of the program), a `MUT118` deep copy whose copy kept the `object()` the
-   original held in the attribute, an `OPT` accumulator of another type,
+   original held in the attribute, a `MUT119` change whose object the program still holds when
+   the statement ends (or that ran a method of the program, or whose assigned result is not
+   `None`), an `OPT` accumulator of another type,
    or an `OPT113` inner item with a different key that ran more than the comparison. For the
    `OPT` rewrites, the driver applies `heki check --fix --include-size-dependent` to a copy and
    compares results, exceptions, arguments, output, and library calls on the same inputs.
@@ -3882,7 +3885,8 @@ by construction on an input the program runs. With a premise stripped, an exact 
 rule is a refutation whatever the runs show (step 1 of the certification, premise stripping); a
 base program heki does not report is counted, not refuted. A premise of the table the generator
 cannot strip stops the run, so the generator grows with the table. `--table-heki` takes the
-table from another build, to check a release older than the table with it.
+table from another build, to check a release older than the table with it, and `--table-rules`
+keeps only the rules it names, for the oracle run of one rule's certification.
 
 For the rules whose heuristic reports record the premises they leave open (`OPEN_PREMISE_CODES`
 in `premise_generator.py`: `EFF101` through `EFF111`, `EFF103` through `EFF113`, and the `OPT`
