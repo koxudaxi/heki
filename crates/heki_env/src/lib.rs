@@ -383,6 +383,9 @@ pub fn contract_label(table: &str, index: usize, name: &str) -> String {
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct HekiConfig {
     pub target_version: Option<String>,
+    /// A PEP 440 specifier the running heki must satisfy (`>=0.2.6`); [`schema::check_keys`]
+    /// refuses an older heki before it reads any other key.
+    pub required_version: Option<String>,
     pub exclude: Option<Vec<String>>,
     pub extend_exclude: Vec<String>,
     /// Source roots ([`source_root`]): project-relative directories whose files are named
@@ -466,6 +469,14 @@ pub enum ConfigError {
         key: String,
         position: Option<(u32, u32)>,
     },
+    /// `required-version` names a heki release this one is not.
+    #[error("this is heki {running}, but the configuration requires `{required}`")]
+    RequiredVersion {
+        path: PathBuf,
+        position: Option<(u32, u32)>,
+        required: String,
+        running: &'static str,
+    },
     #[error("invalid `src` entry `{entry}`: {reason}")]
     SourceRoot {
         path: PathBuf,
@@ -515,6 +526,16 @@ impl Explain for ConfigError {
                 problem.help.extend(help);
                 problem.docs(key.as_ref().map_or(Docs::ConfigTables, |(t, k)| Docs::of_key(t, k)))
             }
+            Self::RequiredVersion {
+                path,
+                position,
+                required,
+                ..
+            } => at(problem, path, position)
+                .help(format!(
+                    "install a heki that satisfies `{required}` (`pip install --upgrade heki`), or change `required-version` in this file"
+                ))
+                .docs(Docs::RequiredVersion),
             Self::ToolTable { path, position } => at(problem, path, position)
                 .help("only a `pyproject.toml` holds the settings under `tool.heki`; this file holds them at the top level: write `[lint]` and `[[write-owners]]`, not `[tool.heki.lint]`")
                 .docs(Docs::ConfigTables),
@@ -774,6 +795,20 @@ pub fn requires_python_lower_bound(spec: &str) -> Option<PythonVersion> {
     })
 }
 
+/// The version of this heki (`workspace.package.version`).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Whether `version` satisfies the PEP 440 specifier `spec` (`>=0.2.6, <0.3`), compared on release
+/// segments; `None` when `spec` is not a specifier.
+pub fn version_satisfies(spec: &str, version: &str) -> Option<bool> {
+    let clauses = spec
+        .split(',')
+        .map(VersionClause::parse)
+        .collect::<Option<Vec<_>>>()?;
+    let release = VersionClause::parse(&format!("=={version}"))?.release;
+    Some(clauses.iter().all(|c| c.admits(&release)))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VersionOp {
     /// `===`: arbitrary equality, compared here as `==`.
@@ -876,6 +911,7 @@ impl HekiConfig {
     /// The top-level keys of the configuration (`[tool.heki]` of a `pyproject.toml`).
     pub const KEYS: &'static [&'static str] = &[
         "target-version",
+        "required-version",
         "exclude",
         "extend-exclude",
         "src",
@@ -1310,6 +1346,7 @@ writes-in-order = { arg = 0, param = "data", sorted-by = "sort_keys" }
     fn keys_name_every_setting() {
         let all = HekiConfig {
             target_version: Some(String::new()),
+            required_version: Some(String::new()),
             exclude: Some(Vec::new()),
             extend_exclude: Vec::new(),
             src: Some(Vec::new()),

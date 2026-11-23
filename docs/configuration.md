@@ -154,6 +154,7 @@ the same file is `services.api.app` and the import is not resolved. Put a `pypro
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `target-version` | the oldest version `project.requires-python` admits, else `py312` | Python version of the code: `py311` … `py315` (or `3.11` … `3.15`). `--target-version` overrides it. See [below](#the-default-target-version) for the inference and [Scope](scope.md#the-target-python-version) for what the version changes. |
+| `required-version` | none | A [PEP 440](https://peps.python.org/pep-0440/) version specifier (`">=0.2.6"`) the running heki must satisfy; an older or newer one stops with an error. See [Requiring a heki version](#requiring-a-heki-version). |
 | `exclude` | the Ruff defaults (`.git`, `.venv`, `build`, `dist`, `node_modules`, …) | Replaces the excluded paths: globs, matched against the project-relative path and each of its components, and covering everything below a matched directory. |
 | `extend-exclude` | `[]` | Adds excluded paths. |
 | `src` | the detected source roots | Source roots, relative to the project root: the module names of the files below each are relative to it (`src = ["lib"]` names `lib/pkg/net.py` `pkg.net`). See [Module names follow the source roots](#module-names-follow-the-source-roots). |
@@ -173,6 +174,29 @@ supported version that every clause admits:
 | `>=3.16` (only newer versions) | `py315` |
 | `<4` (no lower bound, admits 3.12) | `py312` |
 | missing, or not a version specifier | `py312` |
+
+### Requiring a heki version
+
+`required-version` makes a heki that does not satisfy the specifier refuse to run, as Ruff's
+`required-version` does. heki checks it before any other key, so a configuration that uses keys
+a newer release adds fails with this message on an older heki:
+
+```toml
+[tool.heki]
+required-version = ">=0.2.6"
+```
+
+```text
+error: pyproject.toml:2:20: this is heki 0.2.4, but the configuration requires `>=0.2.6`
+```
+
+An older heki cannot know which release adds a key it has never heard of. Without
+`required-version` (and any heki before the release that added it ignores the key too), an
+unknown key is an error that says only what the table accepts. When the key is not close to a
+key of its table (a close one is a typo, and the error offers it), the error also says that the
+key may belong to a newer heki, names the running version, and points to `required-version` and
+the changelog. It cannot say which release adds the key. `heki version --changelog` prints what
+the installed release changed, and the changelog on GitHub lists every release.
 
 ### Which files are checked
 
