@@ -13,6 +13,7 @@ use heki_kb::FieldValues;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::rc::Rc;
 
 /// The most ways a mapping may be built that its entries are followed through: a phi of
 /// displays is as many ways as its inputs, and merging two mappings is one way per pair of their
@@ -69,12 +70,13 @@ impl Way {
     }
 }
 
-/// The ways a mapping value may be built ([`Extractor::mapping`]).
+/// The ways a mapping value may be built ([`Extractor::mapping`]). The ways are shared: a mapping
+/// kept for a value is read by every call unpacking it, and a read must not copy its entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Ways {
     /// A dict the function builds, by each way it may be built (sorted, at most
     /// [`MAPPING_WAYS`]).
-    Built(Vec<Way>),
+    Built(Rc<Vec<Way>>),
     /// A value heki does not build as a mapping, or one of more ways than [`MAPPING_WAYS`].
     Any,
 }
@@ -84,7 +86,7 @@ impl Ways {
     fn built(mut ways: Vec<Way>) -> Self {
         ways.sort_unstable();
         ways.dedup();
-        Self::Built(ways)
+        Self::Built(Rc::new(ways))
     }
 }
 
@@ -97,17 +99,21 @@ impl Join for Ways {
             *self = Self::Any;
             return grew;
         };
-        let before = mine.len();
-        for way in theirs {
-            if let Err(i) = mine.binary_search(way) {
-                mine.insert(i, way.clone());
-            }
+        let added: Vec<&Way> = theirs
+            .iter()
+            .filter(|way| mine.binary_search(way).is_err())
+            .collect();
+        if added.is_empty() {
+            return false;
         }
-        if mine.len() > MAPPING_WAYS {
+        if mine.len() + added.len() > MAPPING_WAYS {
             *self = Self::Any;
             return true;
         }
-        mine.len() != before
+        let mine = Rc::make_mut(mine);
+        mine.extend(added.into_iter().cloned());
+        mine.sort_unstable();
+        true
     }
 
     fn weight(&self) -> usize {
@@ -370,9 +376,10 @@ impl<'a> Extractor<'a> {
                 }
                 continue;
             }
-            let built = match self.mapping(*v) {
+            let mapping = self.mapping(*v);
+            let built: &[Way] = match &mapping {
                 Ways::Built(built) if ways.len() * built.len() <= MAPPING_WAYS => built,
-                Ways::Built(_) | Ways::Any => Vec::new(),
+                Ways::Built(_) | Ways::Any => &[],
             };
             let bound: usize = built.iter().map(|w| w.entries.len()).sum::<usize>() * ways.len();
             if built.is_empty() || !self.walk_budget.take(bound) {

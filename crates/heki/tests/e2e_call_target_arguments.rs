@@ -1090,8 +1090,9 @@ fn a_constant_dict_display_unpacked_with_two_stars_binds_its_keys_as_keywords() 
 /// pairs, `a | b` of displays, of a merge, a `dict(...)` call, a phi, and a parameter, a phi of
 /// displays agreeing on the key or not or of a parameter, a loop merging the mapping into itself
 /// with another key or the same one, a mapping or a merged display changed in place, a mapping
-/// asked again inside another, a call heki cannot resolve, and more ways than are followed (a
-/// merge of four mappings of two ways each, a phi of nine displays).
+/// asked again inside another, a call heki cannot resolve, more ways than are followed (a merge
+/// of four mappings of two ways each, a phi of nine displays), `dict(**m)`, and a mapping also
+/// unpacked into a project method.
 const MERGED_USE: &str = r#"from pkg.sig import KEY, Record, opts, two
 
 
@@ -1247,6 +1248,21 @@ def nine_paths(n: int):
     else:
         flags = {"kind": True, "other": 8}
     opts(**flags)
+
+
+def dict_of_an_unpacked_display():
+    two(**dict(**{"kind": True}))
+
+
+class Holder:
+    def put(self, kind=False):
+        return kind
+
+
+def unpacked_into_a_method():
+    flags = {"kind": True}
+    Holder().put(**flags)
+    two(**flags)
 "#;
 
 /// A mapping merged from others (`{**a, **b}`, `dict(a, k=v)`, `a | b` of mappings the function
@@ -1297,6 +1313,8 @@ fn mappings_merged_or_built_on_several_paths_pass_the_keys_every_way_agrees_on()
             call(115, "union_of_paths"),
             call(120, "asked_in_order"),
             call(121, "asked_in_order"),
+            call(159, "dict_of_an_unpacked_display"),
+            call(170, "unpacked_into_a_method"),
         ]
     );
 }
