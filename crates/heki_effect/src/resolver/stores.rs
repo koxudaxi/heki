@@ -731,10 +731,15 @@ pub(super) fn record(
             (Some(types), Some(body)) => tables(decls, &fns, body, types, &unfixed),
             _ => BTreeMap::new(),
         };
-        (decided, fallbacks, foreign.into_decl(), tables)
+        let refined: BTreeMap<String, Ty> = decided
+            .globals
+            .iter()
+            .filter_map(|(name, t)| declared(name).filter(|d| d != t).map(|d| (name.clone(), d)))
+            .collect();
+        (decided, fallbacks, foreign.into_decl(), (tables, refined))
     };
     decided.write(decls);
-    decls.tables = tables;
+    (decls.tables, decls.refined_globals) = tables;
     decls.store_fallbacks = fallbacks.map(Box::new);
     decls.stores_elsewhere = foreign.map(Box::new);
 }
@@ -1768,8 +1773,9 @@ impl<'c, 'f> Classifier<'c, 'f> {
 
     /// A change in place of the object the load `load` gives (an item store, a method call
     /// that may add items, an in-place operator): a store, into the name the load reads, of the
-    /// object's class with its items unknown. The name keeps its class and no items the code
-    /// may add or replace (`HANDLERS = {"a": run}`, then `HANDLERS[kind] = other`).
+    /// object's class with its items unknown, or of an annotated global's declaration. The name
+    /// keeps its class and no items the code may add or replace (`HANDLERS = {"a": run}`, then
+    /// `HANDLERS[kind] = other`).
     fn changed_in_place(&self, out: &mut Sink<'_>, load: &Inst) {
         // The loaded value's class with its items unknown, when it has items; another module's
         // names are marked instead, decided by their own module's stores.
@@ -1788,11 +1794,13 @@ impl<'c, 'f> Classifier<'c, 'f> {
                         let fqn = self.cx.project.canonical(fqn);
                         foreign.globals.entry(fqn).or_default().changed = true;
                     }
-                } else if self.decls.unknown_globals.contains(name)
-                    && let Some(value) = value
-                {
-                    let target = StoreTarget::Global(name.clone());
-                    out.own.store(target, false, Some(value));
+                } else if self.decls.unknown_globals.contains(name) {
+                    // An annotation types the items any change adds, as it types every store.
+                    let declared = (self.declared)(name);
+                    if let Some(value) = declared.as_ref().map(Some).or(value) {
+                        let target = StoreTarget::Global(name.clone());
+                        out.own.store(target, false, Some(value));
+                    }
                 }
             }
             InstKind::AttrLoad { obj, attr, .. } => {
@@ -2591,6 +2599,15 @@ impl ProjectDecls {
         }
         match self.elsewhere.globals.get(&fqn) {
             None => Some(own.clone()),
+            // Another module's change in place leaves an annotated global its declaration.
+            Some(stored) if stored.changed && m.refined_globals.contains_key(name) => {
+                let declared = &m.refined_globals[name];
+                StoredElsewhere {
+                    changed: false,
+                    ..stored.clone()
+                }
+                .joined_with(declared)
+            }
             Some(stored) => stored.joined_with(own),
         }
     }

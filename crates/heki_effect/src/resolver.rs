@@ -888,6 +888,11 @@ pub struct ModuleDecls {
     /// ([`ProjectDecls::table`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tables: BTreeMap<String, Table>,
+    /// The annotations of the module globals whose type the values stored refine
+    /// (`ProjectDecls::refine`: the functions of `HANDLERS: dict[str, Callable] = {...}`), by
+    /// name: what another module changing the object in place leaves of the type.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub refined_globals: BTreeMap<String, Ty>,
     /// Module-level names bound once to another object by name (`_set = object.__setattr__`,
     /// `run = helpers.run`), or so after imports of the name that binding always replaces, by
     /// the fqn of that object ([`module_aliases`]): as a value or in
@@ -1089,6 +1094,7 @@ impl ModuleDecls {
         }
         out.global_types.clear();
         out.tables.clear();
+        out.refined_globals.clear();
         out.stores_elsewhere = None;
         out.store_fallbacks = None;
         out.global_capacities.clear();
@@ -7270,6 +7276,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     functions: BTreeMap::new(),
     global_types: BTreeMap::new(),
     tables: BTreeMap::new(),
+    refined_globals: BTreeMap::new(),
     aliases: BTreeMap::new(),
     type_vars: BTreeMap::new(),
     unknown_globals: BTreeSet::new(),
