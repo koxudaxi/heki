@@ -136,6 +136,14 @@ def outer(xs):
 
 
 X = list(range(3)).sort()
+
+
+class Quiet(list):
+    pass
+
+
+def sub(xs: list):
+    copy.copy(xs).append(1)
 "#;
 
 #[test]
@@ -148,7 +156,7 @@ fn every_container_kind_and_every_way_a_new_one_is_made() {
         at(
             "kinds.py",
             &[
-                7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 26, 34, 40
+                7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 26, 34, 40, 48
             ]
         )
     );
@@ -164,6 +172,9 @@ fn every_container_kind_and_every_way_a_new_one_is_made() {
     assert!(message(15).starts_with("`appendleft` changes a new `deque`,"));
     assert!(message(21).starts_with("the item deletion changes a new `dict`,"));
     assert!(message(26).ends_with("and the assignment stores the `None` that `extend` returns"));
+    // A project subclass that keeps the copy hooks leaves the copy of a `list` exact.
+    let quiet = diags.iter().find(|d| d["line"] == 48).unwrap();
+    assert_eq!(quiet["certainty"], "exact");
 }
 
 /// Changes some other code sees, or results the code reads: a method of a project class named
@@ -232,6 +243,35 @@ class Cache:
         self.memo["a"] = 1
         self.plain["a"] = 1
 "#;
+
+/// A copy of a value whose class may be a project subclass replacing a copy hook is heuristic: its
+/// `__copy__` may return the value itself.
+const HOOKED: &str = r#"import copy
+
+
+class Shared(list):
+    def __copy__(self):
+        return self
+
+
+def hooked(xs: list):
+    copy.copy(xs).append(1)
+"#;
+
+#[test]
+fn a_copy_hook_of_a_subclass_makes_the_report_heuristic() {
+    let p = Project::new("mut119_hooked");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/hooked.py", HOOKED);
+    let diags = diagnostics(&p);
+    assert_eq!(reported(&diags), at("hooked.py", &[10]));
+    assert_eq!(diags[0]["certainty"], "heuristic");
+    // A plain run leaves the heuristic report out; `--heuristic` shows it.
+    let (_, stdout, _) = p.heki(&["check", "--output-format", "json"]);
+    assert_eq!(stdout.trim(), "[]");
+    let (_, stdout, _) = p.check(&["--output-format", "json"]);
+    assert!(stdout.contains("\"certainty\": \"heuristic\""), "{stdout}");
+}
 
 #[test]
 fn changes_other_code_sees_and_results_the_code_reads() {
