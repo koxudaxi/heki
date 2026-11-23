@@ -1479,8 +1479,13 @@ impl<'a> Extractor<'a> {
 
     /// The value of `var` in the block being read (`pos`).
     fn val(&self, var: VarId) -> Option<&Val> {
+        self.val_in(self.pos.0, var)
+    }
+
+    /// [`Self::val`] in block `bb`.
+    fn val_in(&self, bb: BlockId, var: VarId) -> Option<&Val> {
         self.narrowed
-            .get(&(self.pos.0, var))
+            .get(&(bb, var))
             .or_else(|| self.types.get(&var))
     }
 
@@ -4351,9 +4356,14 @@ impl<'a> Extractor<'a> {
             let Def::Inst(b, i) = shape.def(v) else {
                 return None;
             };
+            let at = (b, i as usize);
+            let callee = self.callees.get(&at);
+            let complete =
+                matches!(callee, Some(Callee::Project(..))) && self.targets_complete_at(at);
             fresh::source(
                 &shape.inst(v)?.kind,
-                self.callees.get(&(b, i as usize)),
+                callee,
+                complete,
                 self.types.get(&v),
                 class_of,
                 self.cx.kb,
@@ -7316,23 +7326,24 @@ impl<'a> Extractor<'a> {
         self.targets_complete_at(self.pos)
     }
 
-    /// [`Self::targets_complete`] of the call at `(bb, index)`.
+    /// [`Self::targets_complete`] of the call at `(bb, index)`, with the types its block narrows
+    /// (those its callee was resolved with).
     fn targets_complete_at(&self, (bb, index): Position) -> bool {
         match self.f.block(bb).insts.get(index).map(|i| &i.kind) {
             Some(InstKind::MethodCall { recv, method, .. }) => {
-                let recv = self.val(*recv);
+                let recv = self.val_in(bb, *recv);
                 let callee = self.cx.resolve_method(recv, method);
                 self.cx.method_targets_complete(recv, method, &callee)
             }
             Some(InstKind::Call { callee_var, .. }) => {
-                let value = callee_var.and_then(|v| self.val(v));
+                let value = callee_var.and_then(|v| self.val_in(bb, v));
                 let callee = self.cx.resolve_call(value);
                 self.cx.call_targets_complete(value, &callee)
             }
             // A read that runs property getters ([`Self::property_read`]): the getter each class
             // the object may be finds for the name (more than CHA follows are none).
             Some(InstKind::AttrLoad { obj, attr, .. }) => {
-                let recv = self.val(*obj);
+                let recv = self.val_in(bb, *obj);
                 matches!(
                     self.cx.resolve_attr_load(recv, attr),
                     Some(Callee::Project(keys, _)) if self.cx.getter_targets_complete(recv, attr, &keys)

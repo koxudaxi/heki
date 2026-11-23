@@ -9,8 +9,9 @@
 //! through copies and phis to where each is made, then forward from there over every use. An
 //! object stored, captured, yielded, raised, handed to a call that may keep it, handed to a
 //! method that may return something holding it (`d.values()`, unless the walk follows the view),
-//! or read through an attribute (a bound method holds its object) may be held elsewhere. The
-//! calls' own facts come from propagation, which resolves the functions a local fact names.
+//! used as a key (the special method of the object it indexes receives it), or read through an
+//! attribute (a bound method holds its object) may be held elsewhere. The calls' own facts come
+//! from propagation, which resolves the functions a local fact names.
 
 use crate::decorators::keeps_returned_value;
 use crate::ownership::Live;
@@ -29,7 +30,8 @@ use serde::{Deserialize, Serialize};
 pub struct FreshReturn {
     /// `None` only in a local fact whose returned values all come from `calls`.
     pub kind: Option<ContainerKind>,
-    /// Every returned container is built as the builtin class itself. A copy's class comes from
+    /// Every returned container is built as the builtin class itself, and every call or property
+    /// read returning one resolves to every implementation it can run. A copy's class comes from
     /// the copied value's inferred type, which under R2 may be a project subclass's.
     pub built: bool,
     /// The project functions whose results the function returns, each of which must return a
@@ -43,7 +45,8 @@ impl FreshReturn {
     /// Add one source of a returned value; `false` when its kind differs from the others'.
     fn add(&mut self, source: Source<'_>) -> bool {
         let kind = match source {
-            Source::Calls(keys) => {
+            Source::Calls { keys, complete } => {
+                self.built &= complete;
                 self.calls.extend(keys.iter().cloned());
                 return true;
             }
@@ -122,8 +125,9 @@ pub enum Source<'k> {
     /// A copy the catalog describes (`x.copy()`, `copy.copy(x)`, `os.environ.copy()`) or a
     /// slice of a list or `bytearray`, of the kind its inferred type names.
     Copied(ContainerKind),
-    /// What these project functions return (the getters of a property read).
-    Calls(&'k [FuncKey]),
+    /// What these project functions return (the getters of a property read); `complete`: they
+    /// are every implementation the call or the read can run.
+    Calls { keys: &'k [FuncKey], complete: bool },
 }
 
 /// The builtin calls that make a container of their own kind.
@@ -137,11 +141,12 @@ const CONSTRUCTORS: &[(&str, ContainerKind)] = &[
 ];
 
 /// The source of the object the instruction `inst` defines: `callee` is what a call (or a
-/// property read) resolves to, `result` the defined value's inferred value, and `class_of` the
-/// inferred class of an operand.
+/// property read) resolves to, `complete` whether that is every implementation it can run,
+/// `result` the defined value's inferred value, and `class_of` the inferred class of an operand.
 pub fn source<'k, 't>(
     inst: &InstKind,
     callee: Option<&'k Callee>,
+    complete: bool,
     result: Option<&Val>,
     class_of: impl Fn(VarId) -> Option<&'t str>,
     kb: &EffectiveEcosystemKb,
@@ -174,10 +179,31 @@ pub fn source<'k, 't>(
         (
             InstKind::Call { .. } | InstKind::MethodCall { .. } | InstKind::AttrLoad { .. },
             Some(Callee::Project(keys, _)),
-        ) if !keys.is_empty() => (!keys.iter().any(is_init)).then_some(Source::Calls(keys)),
-        (InstKind::Call { .. } | InstKind::MethodCall { .. }, Some(Callee::External(symbol))) => {
+        ) if !keys.is_empty() => {
+            (!keys.iter().any(is_init)).then_some(Source::Calls { keys, complete })
+        }
+        (
+            InstKind::Call {
+                args,
+                kwargs,
+                star_from,
+                ..
+            }
+            | InstKind::MethodCall {
+                args,
+                kwargs,
+                star_from,
+                ..
+            },
+            Some(Callee::External(symbol)),
+        ) => {
             if let Some((_, kind)) = CONSTRUCTORS.iter().find(|(s, _)| s == symbol) {
                 return Some(Source::Built(*kind));
+            }
+            // An argument besides the value copied may be handed the copy: `copy.deepcopy` keeps
+            // it in its `memo`.
+            if args.len() > 1 || !kwargs.is_empty() || star_from.is_some() {
+                return None;
             }
             kb.lookup(symbol)
                 .and_then(|e| e.copy_sanitizer)
@@ -338,7 +364,6 @@ fn keeps_nothing(
         | InstKind::Convert { .. }
         | InstKind::Format { .. }
         | InstKind::MakeIter { .. }
-        | InstKind::SubscriptDelete { .. }
         | InstKind::Delete { .. } => true,
         // A view, an iterator, or a bound method holds its container: a method keeps nothing
         // when it returns none of it, or a view or an iterator the forward walk follows.
@@ -356,7 +381,11 @@ fn keeps_nothing(
         InstKind::Call {
             callee_var, kwargs, ..
         } => *callee_var != Some(v) && passes(kwargs) && inspects(b, i),
-        InstKind::SubscriptLoad { obj, index, .. } => only(obj, std::slice::from_ref(index).iter()),
+        // A key is handed to the special method of the object it indexes, which may keep it.
+        InstKind::SubscriptLoad { obj, index, .. }
+        | InstKind::SubscriptDelete { obj, index, .. } => {
+            only(obj, std::slice::from_ref(index).iter())
+        }
         InstKind::SubscriptStore {
             obj, index, value, ..
         } => only(obj, [*index, *value].iter()),
