@@ -416,6 +416,55 @@ pub fn container_mutator(method: &str) -> bool {
         || matches!(method, "__setitem__" | "__delitem__")
 }
 
+/// The methods of the builtin containers, besides the changing ones, whose result holds none of
+/// their receiver: a count, a test, an item, text, `None`, or a new object. What `keys`,
+/// `values`, `items`, `__iter__`, and `__reversed__` return holds the container (a view or an
+/// iterator), and so does an in-place operator's result (`__iadd__` returns it).
+const DETACHED_RESULT_METHODS: &[&str] = &[
+    "__contains__",
+    "__copy__",
+    "__delitem__",
+    "__getitem__",
+    "__len__",
+    "__setitem__",
+    "copy",
+    "count",
+    "decode",
+    "difference",
+    "endswith",
+    "find",
+    "fromkeys",
+    "get",
+    "hex",
+    "index",
+    "intersection",
+    "isdisjoint",
+    "issubset",
+    "issuperset",
+    "rfind",
+    "rindex",
+    "startswith",
+    "symmetric_difference",
+    "union",
+];
+
+/// Whether what `method` returns holds none of its receiver, on every builtin container kind that
+/// has the method: a changing method ([`ContainerKind::mutators`], which returns `None` or an
+/// item) or one of [`DETACHED_RESULT_METHODS`].
+pub fn result_detached_from_container(method: &str) -> bool {
+    ContainerKind::EVERY.iter().any(|k| k.mutator(method))
+        || DETACHED_RESULT_METHODS.contains(&method)
+}
+
+/// Whether what `method` returns, on every builtin container kind that has the method, is a view
+/// of its receiver or an iterator over it, which holds nothing else.
+pub fn returns_container_view(method: &str) -> bool {
+    matches!(
+        method,
+        "__iter__" | "__reversed__" | "items" | "keys" | "values"
+    )
+}
+
 /// A function whose results a `functools` cache keeps and hands to every later call with the
 /// same arguments (`MUT114`'s producer): decorated with `functools.cache`, or with
 /// `functools.lru_cache` whose `maxsize` is left out, `None`, or a literal number above 0,

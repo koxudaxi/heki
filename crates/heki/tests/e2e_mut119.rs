@@ -241,11 +241,13 @@ fn changes_other_code_sees_and_results_the_code_reads() {
 }
 
 /// Project functions whose every return is a new container nothing else holds (directly, through
-/// another such function, through copies, branches, and the uses that keep nothing, through a
-/// copy or a slice of a typed value, and two definitions of one function), and those for which it
-/// is not so: two kinds, recursion, a path returning `None`, a dict stored, handed to a call that
-/// may keep it, or captured by a closure, a cached function, a tuple, a slice of a value of unknown
-/// type, two definitions of different kinds, and a new instance of a project subclass of `dict`.
+/// another such function, through copies, branches, and the uses that keep nothing, among them
+/// methods returning a count or an item and views only a loop reads, through a copy or a slice of
+/// a typed value, and two definitions of one function), and those for which it is not so: two
+/// kinds, recursion, a path returning `None`, a dict stored, handed to a call that may keep it,
+/// or captured by a closure, a cached function, a tuple, a slice of a value of unknown type, two
+/// definitions of different kinds, a new instance of a project subclass of `dict`, and a view,
+/// an iterator, a bound method, or a `getattr` default kept in an attribute.
 const MAKERS: &str = r#"import sys
 from functools import lru_cache
 
@@ -371,6 +373,51 @@ class Settings(dict):
 
 def settings():
     return Settings()
+
+
+def viewed(owner):
+    d = {}
+    owner.view = d.values()
+    return d
+
+
+def walked(owner, xs):
+    items = list(xs)
+    rest = items.__iter__()
+    owner.rest = rest
+    return items
+
+
+def iterated(owner, xs):
+    items = list(xs)
+    owner.rest = iter(items)
+    return items
+
+
+def defaulted(owner):
+    d = {}
+    owner.config = getattr(owner, "config", d)
+    return d
+
+
+def bound(owner):
+    d = {}
+    owner.add = d.setdefault
+    return d
+
+
+def counted(xs, key):
+    items = list(xs)
+    if len(items) > 3 and items.count(key) and key in items:
+        print(items.index(key), items.copy())
+    return items
+
+
+def looped(pairs):
+    d = dict(pairs)
+    for k, v in d.items():
+        print(k, len(d.keys()), v in d.values(), d.get(k))
+    return d
 "#;
 
 const MAKERS_USE: &str = r#"from . import makers
@@ -399,6 +446,13 @@ def run(xs, pairs, owner, sink, d):
     makers.settings().update(a=1)
     makers.tail(xs).append(1)
     empty().append(4)
+    makers.viewed(owner).update(k=1)
+    makers.walked(owner, xs).append(1)
+    makers.iterated(owner, xs).append(1)
+    makers.defaulted(owner).clear()
+    makers.bound(owner).clear()
+    makers.counted(xs, 1).sort()
+    makers.looped(pairs).clear()
 "#;
 
 #[test]
@@ -410,7 +464,7 @@ fn functions_whose_every_return_is_a_new_container_nothing_else_holds() {
     let diags = diagnostics(&p);
     assert_eq!(
         reported(&diags),
-        at("use.py", &[6, 7, 8, 9, 10, 11, 12, 13, 26])
+        at("use.py", &[6, 7, 8, 9, 10, 11, 12, 13, 26, 32, 33])
     );
     assert_eq!(
         diags[1]["message"],
