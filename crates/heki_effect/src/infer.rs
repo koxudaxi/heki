@@ -2055,9 +2055,13 @@ impl<'e, 'a> Engine<'e, 'a> {
         let cx = self.cx;
         let (class, skip_self, self_ty) = self.static_receiver(recv)?;
         // A class body binding `method` to a name (`factory = Scope`): the call calls what it
-        // names, a bound method returning what the function does.
-        if !skip_self && let Some((named, _)) = cx.project.class_alias(class, method) {
-            return self.called(&cx.named(named), call);
+        // names, a bound method returning what the function does. Bound to different objects on
+        // different paths, the call gives what one of them returns, of no one type.
+        if !skip_self && let Some(alias) = cx.project.class_aliases(class, method) {
+            return match (&alias.names[..], alias.defined) {
+                ([(named, _)], None) => self.called(&cx.named(named), call),
+                _ => None,
+            };
         }
         if let Some(key) = cx.project.mro_definition(class, method, skip_self) {
             let decl = cx.project.function_decl(&key)?;

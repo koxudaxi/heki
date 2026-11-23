@@ -551,17 +551,28 @@ reads each module once, however many paths of star imports reach it; a star impo
 module being decided binds nothing more. A change another module makes to the `__all__` of the
 module would have to run before the star import, and is not followed.
 
-A class-body name bound once, outside a field, to a module-level name (a function, class, or
-alias of its module, a name an import binds, or an attribute of one) or to `staticmethod` of one
-(`factory = Scope`, `REQUIRE: ClassVar[...] = staticmethod(require)`) is that object
-(`ClassDecl::named_attrs`, `ProjectDecls::class_alias`), when no code of the module stores the
-attribute on the class or on an instance, no other module rebinds it, and no hook runs on the
-read. Read through the class object (`Holder.REQUIRE`, also inherited) it is the object itself;
-read on an instance, a function outside `staticmethod` is a bound method, which binds the
-instance first, and anything else is the object. A call through `cls` or an instance runs the
-object of every class the receiver may be (the class and its project subclasses, at most
-`DISPATCH_CLASS_LIMIT`); a class among them finding the name as anything else leaves the call
-unresolved. A call of a class bound so constructs it (`self.factory(...)`).
+A class-body name bound last, outside a field, to a module-level name (a function or class of
+its module the module binds once, an alias of its module, a name an import binds, or an attribute
+of one) or to `staticmethod` of one (`factory = Scope`, `REQUIRE: ClassVar[...] =
+staticmethod(require)`) is that object (`ClassDecl::named_attrs`, `ProjectDecls::class_alias`),
+when no code of the module stores the attribute on the class or on an instance, no other module
+rebinds it, and no hook runs on the read. The binding a name holds once its body has run is the
+last one every path runs and each later one that runs on some paths only
+(`heki_ir::LastBindings::last_of`): `def fetch(...)` then `fetch = _quiet` is `_quiet`, and
+`if flag: fetch = _quiet` after the `def` is either the method or `_quiet`
+(`NamedAttr::body_paths`), a call through it running both. Read through the class object
+(`Holder.REQUIRE`, also inherited) it is the object itself; read on an instance, a function
+outside `staticmethod` is a bound method, which binds the instance first, and anything else is
+the object. A call through `cls` or an instance runs the object of every class the receiver may
+be (the class and its project subclasses, at most `DISPATCH_CLASS_LIMIT`); a class among them
+finding the name as anything else leaves the call unresolved, and so do objects that bind a
+receiver differently. A call of a class bound so constructs it (`self.factory(...)`).
+
+A module-level function or class that the module body binds again, to named objects only, holds
+in the same way what binds it last (`ModuleDecls::aliases`), or one of the objects the bindings
+that may be last bind (`ModuleDecls::alias_paths`): a call through the name, in the module, from
+another one, or imported, runs each of them. An alias of the definition bound before the
+rebinding (`_original = fetch`) keeps the definition (`ProjectDecls::follow`).
 
 A value bound to one of several named objects (a branch `f = a if c else b`, the values of a
 table) is one of them (`Ty::OneOf`, at most `MAX_NAMED`, eight): a call runs every one, which must
