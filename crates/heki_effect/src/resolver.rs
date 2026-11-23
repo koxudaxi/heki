@@ -27,7 +27,7 @@ use heki_ir::{
 use heki_kb::{
     ArgFact, CopyDepth, EcosystemEntry, EffectiveEcosystemKb, ExecEffectKind, LiteralValue,
 };
-use heki_semantic::{ModuleImport, ScopeKind, SemanticModel, mangling};
+use heki_semantic::{ModuleImport, ScopeKind, SemanticModel, StarImport, mangling};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -312,6 +312,17 @@ pub fn resolve_relative_module(
         Some(m) if base.is_empty() => m.to_owned(),
         Some(m) => format!("{base}.{m}"),
     })
+}
+
+/// The module the star import `star` of the module `input` names (`from ._utils import *`).
+fn star_import_module(input: &ModuleInput<'_>, star: &StarImport) -> Option<String> {
+    resolve_relative_module(
+        &input.module_name,
+        input.is_package,
+        star.level,
+        star.module.as_deref(),
+        input.root_is_package,
+    )
 }
 
 /// Fully qualified symbol bound by one import.
@@ -975,6 +986,10 @@ pub struct ModuleDecls {
     /// bound once to a tuple or an unchanged list of string literals (`stores::exported_names`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exports: Option<Box<[String]>>,
+    /// The modules the module's runtime star imports name (`from ._utils import *`), in source
+    /// order: they bind the names the module binds no other way (`ProjectDecls::star_binding`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub star_imports: Option<Box<[String]>>,
     /// The packages whose `__path__` the module changes, by the fqn its imports give them
     /// (`plugins.__path__.append(d)`), or by its own name when it is a package changing its own
     /// (`__path__ = extend_path(__path__, __name__)`), and how
@@ -1097,6 +1112,16 @@ impl ModuleDecls {
                 .as_ref()
                 .is_some_and(|names| names.contains(name))
         })
+    }
+
+    /// Whether a statement of the module itself binds the module global `name` at run time: an
+    /// import, a `def` or `class` statement, a module alias, or any other store or deletion.
+    pub fn binds(&self, name: &str) -> bool {
+        self.imports.contains_key(name)
+            || self.aliases.contains_key(name)
+            || self.classes.contains_key(name)
+            || self.functions.contains_key(name)
+            || self.unknown_globals.contains(name)
     }
 
     /// The declarations of a module heki could not read or parse: none. A name under it is
@@ -1910,6 +1935,9 @@ pub struct ProjectDecls {
     attr_joins: KeptAnswers<(String, String), Option<Ty>>,
     /// The answers of [`Self::capacity`] so far; cleared with the indexes.
     capacities: KeptAnswers<CapacityOf, CapacityOf>,
+    /// The answers of [`Self::star_binding`] so far, by module and name; cleared with the
+    /// indexes.
+    star_bindings: KeptAnswers<(String, String), StarBinding>,
     /// The answers of [`Self::catalog_attribute`] so far, by class and name; cleared with the
     /// indexes.
     catalog_attributes: SharedMemo<(String, String), Option<String>, DeclKeys>,
@@ -1959,6 +1987,46 @@ pub enum FromImport {
     /// depends on the order modules are imported in. Also any name of a package heki could not
     /// read.
     Open,
+}
+
+/// What the star imports of a module bind a name to that the module binds no other way
+/// ([`ProjectDecls::star_binding`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StarBinding {
+    /// No star import binds it, as far as heki reads the modules they name: a module outside
+    /// the project, which only the catalog describes, is not followed.
+    Unbound,
+    /// A star import binds it to `target`, the name read on the module it imports
+    /// (`pkg.utils._utils.fetch`), and every other star import binding it binds the same
+    /// object: the name read on `origin`, the module whose own statement binds it.
+    Bound { target: String, origin: String },
+    /// It may hold an object heki cannot name: a star import binds it through a module heki
+    /// could not read or an `__all__` heki cannot read; or star imports bind it to different
+    /// objects (`try: from ._speedups import *` with a fallback), which one of a module outside
+    /// the project may do for any name, and which of them ran last is not known.
+    Open,
+}
+
+/// What one star import binds a name to ([`ProjectDecls::star_import_binds`]).
+enum StarSource {
+    /// It binds no such name.
+    Nothing,
+    /// It imports a module outside the project, which may bind any name.
+    Anything,
+    /// It binds the name ([`StarBinding::Bound`]), or binds it to an object heki cannot name
+    /// (`None`).
+    Binds(Option<(String, String)>),
+}
+
+/// Whether a module's namespace holds a name once its body has run, as its own statements and
+/// its star imports bind it ([`ProjectDecls::module_holds`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Holds {
+    No,
+    /// The name read on the module whose own statement binds it.
+    Yes(String),
+    /// Through a star import heki cannot follow ([`StarBinding::Open`]).
+    Maybe,
 }
 
 /// `a`, `a.b`, and `a.b.c` of `a.b.c`.
@@ -2146,6 +2214,10 @@ impl ProjectDecls {
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
         self.capacities
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.star_bindings
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
@@ -2603,10 +2675,11 @@ impl ProjectDecls {
     /// `package` once its `__init__.py` has run and imports the submodule only when there is
     /// none; the first import of a submodule binds it on its package, and a later binding in
     /// the package's body replaces it. So the package's last binding of `name` decides: none,
-    /// or an import of the submodule itself, leaves the submodule; an import or alias whose
-    /// object is read through the submodule (`from .parse import parse`, `parse =
-    /// parse.parse` after `from . import parse`) is bound after the submodule was loaded, for
-    /// good; any other binding holds only until something first imports the submodule.
+    /// or an import of the submodule itself, leaves the submodule; an import, alias, or star
+    /// import whose object is read through the submodule (`from .parse import parse`, `parse =
+    /// parse.parse` after `from . import parse`, `from .parse import *`) is bound after the
+    /// submodule was loaded, for good; any other binding holds only until something first
+    /// imports the submodule.
     pub fn from_import(&self, package: &str, name: &str) -> FromImport {
         let Some(decls) = self.module(package) else {
             return FromImport::Submodule;
@@ -2622,29 +2695,148 @@ impl ProjectDecls {
         {
             return FromImport::Open;
         }
+        // The object the package's binding names: its import or alias, or the one a star
+        // import takes the name from when the package binds it no other way.
+        let star;
+        let bound = match decls.imports.get(name).or_else(|| decls.aliases.get(name)) {
+            Some(target) => Some(target.as_str()),
+            None if decls.binds(name) => return FromImport::Open,
+            None => match self.star_binding(decls, name) {
+                StarBinding::Unbound => None,
+                StarBinding::Bound { target, .. } => {
+                    star = target;
+                    Some(star.as_str())
+                }
+                StarBinding::Open => return FromImport::Open,
+            },
+        };
         // The name of the object bound past the submodule's: `""` for the submodule itself.
-        let past_submodule = decls
-            .imports
-            .get(name)
-            .or_else(|| decls.aliases.get(name))
-            .map(|target| {
-                target
-                    .strip_prefix(package)
-                    .and_then(|t| t.strip_prefix('.'))
-                    .and_then(|t| t.strip_prefix(name))
-            });
+        let past_submodule = bound.map(|target| {
+            target
+                .strip_prefix(package)
+                .and_then(|t| t.strip_prefix('.'))
+                .and_then(|t| t.strip_prefix(name))
+        });
         match past_submodule {
             Some(Some("")) => FromImport::Submodule,
             Some(Some(rest)) if rest.starts_with('.') => FromImport::Attribute,
             Some(_) => FromImport::Open,
-            None if decls.classes.contains_key(name)
-                || decls.functions.contains_key(name)
-                || decls.unknown_globals.contains(name) =>
-            {
-                FromImport::Open
-            }
             None => FromImport::Submodule,
         }
+    }
+
+    /// What the star imports of the module `m` bind `name` to, for a name `m` binds no other
+    /// way ([`ModuleDecls::binds`]). `from s import *` binds the names `s` lists in its
+    /// `__all__` ([`ModuleDecls::exports`]), and without one the public names (no leading
+    /// underscore) the namespace of `s` holds, those its own star imports bind among them.
+    /// Through an `__all__` heki cannot read (built at run time, changed in place), it binds
+    /// any name the namespace may hold to an object heki cannot name. A star import of a
+    /// module outside the project binds names only the catalog describes; it leaves open a
+    /// name another star import binds. The answer is kept for the life of the indexes.
+    pub(crate) fn star_binding(&self, m: &ModuleDecls, name: &str) -> StarBinding {
+        if m.star_imports.is_none() || m.binds(name) {
+            return StarBinding::Unbound;
+        }
+        let key = (m.module_name.clone(), name.to_owned());
+        self.kept(&self.star_bindings, key, || {
+            let mut held = FxHashMap::default();
+            held.insert(m.module_name.clone(), Holds::No);
+            self.stars_bind(m, name, &mut held)
+        })
+    }
+
+    /// [`Self::star_binding`] for the star imports of `m`; `held` keeps what
+    /// [`Self::module_holds`] answered so far, and `No` for the modules it is still answering,
+    /// so a star import back into one of them binds nothing more: each module is read once.
+    fn stars_bind(
+        &self,
+        m: &ModuleDecls,
+        name: &str,
+        held: &mut FxHashMap<String, Holds>,
+    ) -> StarBinding {
+        let mut outside = false;
+        let mut binding = StarBinding::Unbound;
+        for source in m.star_imports.as_deref().unwrap_or_default() {
+            match self.star_import_binds(source, name, held) {
+                StarSource::Nothing => {}
+                StarSource::Anything => outside = true,
+                StarSource::Binds(Some((target, origin))) => match &binding {
+                    StarBinding::Unbound => binding = StarBinding::Bound { target, origin },
+                    // Whichever ran last, the name holds the object of `origin`.
+                    StarBinding::Bound { origin: kept, .. } if *kept == origin => {}
+                    _ => return StarBinding::Open,
+                },
+                StarSource::Binds(None) => return StarBinding::Open,
+            }
+        }
+        match binding {
+            StarBinding::Bound { .. } if outside => StarBinding::Open,
+            binding => binding,
+        }
+    }
+
+    /// What `from source import *` binds `name` to ([`Self::stars_bind`]).
+    fn star_import_binds(
+        &self,
+        source: &str,
+        name: &str,
+        held: &mut FxHashMap<String, Holds>,
+    ) -> StarSource {
+        let Some(s) = self.module(source) else {
+            return StarSource::Anything;
+        };
+        if s.unread {
+            return StarSource::Binds(None);
+        }
+        let read_there = || format!("{source}.{name}");
+        let listed = match s.exports.as_deref() {
+            Some(names) if names.iter().any(|n| n == name) => true,
+            Some(_) => return StarSource::Nothing,
+            None if s.binds("__all__") => {
+                return match self.module_holds(s, name, held) {
+                    Holds::No => StarSource::Nothing,
+                    Holds::Yes(_) | Holds::Maybe => StarSource::Binds(None),
+                };
+            }
+            None if name.starts_with('_') => return StarSource::Nothing,
+            None => false,
+        };
+        match self.module_holds(s, name, held) {
+            Holds::Yes(origin) => StarSource::Binds(Some((read_there(), origin))),
+            // A listed name the module does not bind is the submodule the import loads.
+            Holds::No if listed => StarSource::Binds(Some((read_there(), read_there()))),
+            Holds::No => StarSource::Nothing,
+            Holds::Maybe => StarSource::Binds(None),
+        }
+    }
+
+    /// Whether the namespace of the module `s` holds `name` once its body has run
+    /// ([`Self::stars_bind`]).
+    fn module_holds(
+        &self,
+        s: &ModuleDecls,
+        name: &str,
+        held: &mut FxHashMap<String, Holds>,
+    ) -> Holds {
+        if s.binds(name) {
+            // An import the module does not bind again holds the object it imports.
+            let origin = s.fixed_import(name).cloned();
+            return Holds::Yes(origin.unwrap_or_else(|| format!("{}.{name}", s.module_name)));
+        }
+        if s.star_imports.is_none() {
+            return Holds::No;
+        }
+        if let Some(holds) = held.get(&s.module_name) {
+            return holds.clone();
+        }
+        held.insert(s.module_name.clone(), Holds::No);
+        let holds = match self.stars_bind(s, name, held) {
+            StarBinding::Unbound => Holds::No,
+            StarBinding::Bound { origin, .. } => Holds::Yes(origin),
+            StarBinding::Open => Holds::Maybe,
+        };
+        held.insert(s.module_name.clone(), holds.clone());
+        holds
     }
 
     /// The direct project subclasses of the canonical class `class`.
@@ -2689,14 +2881,23 @@ impl ProjectDecls {
             // `imports` holds the names an import binds once the module has run
             // (`ModuleImport::rebound_at`): a class or function of the same name is shadowed by
             // it.
+            let star;
             let target = match m.imports.get(first) {
                 Some(_) if values && m.fixed_import(first).is_none() => return None,
                 Some(target) => target,
-                None if aliases => match m.aliases.get(first) {
-                    Some(target) if !self.alias_rebound(&m.module_name, first) => target,
-                    _ => break,
+                None => match m.aliases.get(first) {
+                    Some(target) if aliases && !self.alias_rebound(&m.module_name, first) => target,
+                    Some(_) => break,
+                    // A name the module binds no other way is what its star imports bind.
+                    None => match self.star_binding(m, first) {
+                        StarBinding::Bound { target, .. } => {
+                            star = target;
+                            &star
+                        }
+                        StarBinding::Open if values => return None,
+                        StarBinding::Open | StarBinding::Unbound => break,
+                    },
                 },
-                None => break,
             };
             let next = match tail {
                 Some(t) => format!("{target}.{t}"),
@@ -3053,12 +3254,15 @@ impl ProjectDecls {
             return Symbol::Global(t);
         }
         // A name the module does not bind is bound where heki does not read the module: a
-        // submodule it does not index (a compiled extension) or a name a star import binds,
-        // which only the catalog describes.
+        // submodule it does not index (a compiled extension) or a name a star import of a
+        // module outside the project binds, which only the catalog describes. A star import of
+        // a project module binds what `canonical` reads through it, unless that is an object
+        // heki cannot name.
         let head = rest.split('.').next().unwrap_or(rest);
         if m.unknown_globals.contains(head)
             || m.classes.contains_key(head)
             || m.functions.contains_key(head)
+            || self.star_binding(m, head) != StarBinding::Unbound
         {
             Symbol::Unknown
         } else {
@@ -5351,6 +5555,14 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     decls.small_globals = input.ir.constants.displays.clone();
     decls.calls_setstate = stores::calls_setstate(input);
     decls.exports = stores::exported_names(input);
+    let star_imports: Box<[String]> = input
+        .semantic
+        .star_imports
+        .iter()
+        .filter(|star| !star.in_type_checking)
+        .filter_map(|star| star_import_module(input, star))
+        .collect();
+    decls.star_imports = (!star_imports.is_empty()).then_some(star_imports);
     (decls.grown_globals, decls.rebound_globals) = foreign_grown_globals(input, &decls.imports);
     let path_changes = package_paths::path_changes(input, &decls);
     decls.path_changes = (!path_changes.is_empty()).then(|| Box::new(path_changes));
@@ -7581,6 +7793,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     store_fallbacks: None,
     calls_setstate: false,
     exports: None,
+    star_imports: None,
     path_changes: None,
     str_constants: BTreeMap::new(),
     literal_constants: BTreeMap::new(),
@@ -7673,11 +7886,14 @@ impl<'a> TypeCtx<'a> {
     }
 
     /// The fully qualified name of the object a module-level name read inside this module is:
-    /// what an import binds (`from pkg.locks import LOCK`), or this module's own global.
+    /// what an import or a star import binds (`from pkg.locks import LOCK`), or this module's
+    /// own global.
     pub fn global_fqn(&self, name: &str) -> String {
         match self.module.imports.get(name) {
             Some(t) => self.project.canonical(t),
-            None => format!("{}.{name}", self.module_name()),
+            None => self
+                .project
+                .canonical(&format!("{}.{name}", self.module_name())),
         }
     }
 
@@ -7758,6 +7974,10 @@ impl<'a> TypeCtx<'a> {
         if self.module.unknown_globals.contains(name) {
             return Ty::Ref(format!("{}.{name}", self.module_name()));
         }
+        // A name a star import binds is the object other modules read through this one.
+        if self.project.star_binding(self.module, name) != StarBinding::Unbound {
+            return self.named(&format!("{}.{name}", self.module_name()));
+        }
         Ty::Ref(format!("builtins.{name}"))
     }
 
@@ -7776,13 +7996,17 @@ impl<'a> TypeCtx<'a> {
     }
 
     /// The value of the module-level string constant `name` read inside this module: one of
-    /// its own constants, or one it imports (`from pkg.keys import KEY`).
+    /// its own constants, or one it imports (`from pkg.keys import KEY`, also through a star
+    /// import).
     pub fn global_str(&self, name: &str) -> Option<&'a str> {
         let Some(constant) = self.module.str_constants.get(name) else {
-            return self
-                .module
-                .fixed_import(name)
-                .and_then(|fqn| self.project.str_constant(fqn));
+            return match self.project.star_binding(self.module, name) {
+                StarBinding::Bound { target, .. } => self.project.str_constant(&target),
+                _ => self
+                    .module
+                    .fixed_import(name)
+                    .and_then(|fqn| self.project.str_constant(fqn)),
+            };
         };
         let fqn = || format!("{}.{name}", self.module.module_name);
         if constant.rebindable && self.project.rebound_elsewhere(&fqn()) {

@@ -6,8 +6,8 @@
 //! an instance, the size of the Soundness lane's proof state, the values `EFF107` follows from a
 //! task factory, the walk to the callable a builtin calls once per item, contracts with many call
 //! targets and argument lists, the walk to the uses handing a reference to a call target on, the
-//! locks `EFF109` follows, the values class statements pass as bases, and the bindings the deque
-//! rewrite's candidates check.
+//! locks `EFF109` follows, the values class statements pass as bases, the bindings the deque
+//! rewrite's candidates check, and the star imports a name is bound through.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -6262,6 +6262,60 @@ fn open_premises_of_rewrite_candidates_over_shared_iterables_are_explained() {
         assert_eq!(r["certainty"], "heuristic", "{r:#?}");
         assert!(!r["open_premises"].as_array().unwrap().is_empty(), "{r:#?}");
     }
+}
+
+/// `levels` levels of two modules each, every module star-importing both modules of the next
+/// level and the last level's second module importing the first module back, with a blocking
+/// `near` two levels down and a blocking `far` on the last level, which a function calls each
+/// through the first module.
+fn star_import_lattice(levels: usize) -> Project {
+    let p = Project::new(&format!("bounds_star_lattice_{levels}"));
+    p.write("pkg/__init__.py", "");
+    let blocking = |name: &str| format!("import time\n\n\ndef {name}(url):\n    time.sleep(1)\n");
+    for level in 0..levels {
+        let next = level + 1;
+        for side in ["a", "b"] {
+            let mut text = if next < levels {
+                format!("from pkg.l{next}a import *\nfrom pkg.l{next}b import *\n")
+            } else if side == "b" {
+                "from pkg.l0a import *\n".to_owned()
+            } else {
+                String::new()
+            };
+            if side == "a" && (level == 2 || next == levels) {
+                let name = if level == 2 { "near" } else { "far" };
+                text.push_str(&blocking(name));
+            }
+            p.write(&format!("pkg/l{level}{side}.py"), &text);
+        }
+    }
+    p.write(
+        "pkg/users.py",
+        "from pkg.l0a import far, near\n\n\nasync def use_near(url):\n    near(url)\n\n\nasync def use_far(url):\n    far(url)\n",
+    );
+    p
+}
+
+/// Deciding the name a star import binds reads each module once, however many paths of star
+/// imports reach it and around the cycle back to the first module; a call through it is
+/// followed at most `MAX_ALIAS_CHASE` star imports deep, past which the name is open.
+#[test]
+fn star_imports_are_followed_a_bounded_depth() {
+    let blocking = |found: &[Value]| -> Vec<String> {
+        found
+            .iter()
+            .filter(|d| d["rule_code"] == "EFF101")
+            .map(|d| d["qualname"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        blocking(&check(&star_import_lattice(6))),
+        ["use_near", "use_far"]
+    );
+    assert_eq!(
+        blocking(&check_linear(8 * SCALE, star_import_lattice)),
+        ["use_near"]
+    );
 }
 
 /// A module of `n` functions, the first of which blocks, a table binding a key to each, and an
