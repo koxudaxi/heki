@@ -2903,15 +2903,9 @@ impl<'a> Extractor<'a> {
                     .insts
                     .get(at.1)
                     .and_then(|i| self.cx.import_target(i.span));
+                // Whatever the name is bound to, `from pkg import name` loads `pkg`.
                 match target {
-                    Some(t)
-                        if matches!(
-                            self.cx.project.symbol(t),
-                            crate::resolver::Symbol::External
-                        ) =>
-                    {
-                        None
-                    }
+                    Some(t) if !self.cx.project.in_project_module(t) => None,
                     _ => any,
                 }
             }

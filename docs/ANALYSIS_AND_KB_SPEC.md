@@ -489,8 +489,21 @@ next to it), then the greater path. A relative import resolves inside the packag
 that climbs past the top-level package binds nothing (`ImportError`), except that a project root
 holding `__init__.py` is itself the package of the top-level modules.
 
-A module-level name bound once to another object by name, not by an import statement
-(`_set = object.__setattr__`, `sleep = time.sleep`, `Alias = Node`), is that object, as a value
+`from pkg import parse`, `import pkg.parse as p`, and `pkg.parse` read after `import pkg` take
+the attribute `parse` of the package once `pkg/__init__.py` has run; Python imports the submodule
+`pkg.parse` only when there is none, and its first import binds it on the package, replacing what
+the package bound before. So when the project has the module `pkg.parse`, the name is decided by
+the package's last binding of it (`ProjectDecls::from_import`): none, or an import of the
+submodule itself (`from . import parse`), gives the submodule; an import or alias whose object is
+read through the submodule (`from .parse import parse`, `parse = parse.parse` after
+`from . import parse`), bound after the submodule was loaded, gives that object; any other binding
+(`def parse`, `from .core import parse`) holds only until something first imports the submodule,
+so the name is open (`Symbol::Unknown`); a name read on it (`parse.helper`) is still the
+submodule's, which it is spelled like. `from pkg.parse import x` always takes the module.
+
+A module-level name bound once to another object by name, besides the imports of the name that
+binding always replaces (`_set = object.__setattr__`, `sleep = time.sleep`, `Alias = Node`,
+`parse = parse.parse` after `from . import parse`), is that object, as a value
 or in an annotation, in its module and imported from it (`ModuleDecls::aliases`,
 `ProjectDecls::object_named`), unless another module rebinds or deletes it. Any other global a
 module binds is the module's own object of unknown value (`Symbol::Unknown`), never the builtin
