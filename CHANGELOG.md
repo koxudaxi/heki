@@ -5,6 +5,227 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
+## [0.2.6] - Unreleased
+
+### Breaking changes
+
+- `heki check` warns about each contract entry that names nothing in the analyzed files (see
+  Added). A project whose `heki.toml` names a renamed or removed definition sees new warnings.
+  The exit code is unchanged unless `lint.unmatched-contract-entries = "error"`, and `"ignore"`
+  turns the warnings off.
+- A call through a name the project binds to another object is no longer an exact target (see
+  Fixed). An `EFF101` or `EFF103` report whose chain runs through such a call is now a heuristic
+  `EFF111` or `EFF113` report, which a default run does not show.
+- A report naming a private attribute names it the way its class stores it
+  (`self._GifImageFile__offset` where the code writes `self.__offset`), so a baseline entry for
+  such a report no longer matches.
+- Default output can change both ways: calls of a `functools.partial` object the function makes,
+  calls through dispatch tables, class attributes bound to functions, and names a package
+  re-exports with a star import are now followed (new reports possible), and more memo fills and
+  lazy initializations are recognized (fewer reports possible). On the 378 packages heki is
+  measured on, the default output is unchanged.
+- Contract output: `EFF201` reports an item write under a key heki cannot tell where the
+  boundary names an entry of the attribute, and `write-owners`, `read-owners`, and `call-owners`
+  with `unresolved = "report"` judge a function that some code hands on as a value by its own
+  accesses (see Changed).
+
+### Added
+
+- `EFF116` (`generator-never-iterated`, opt-in, experimental, heuristic until it is certified): a
+  call of a project generator function whose generator nothing iterates, so its body never runs.
+  The call is a statement (`self.load()`), only truth tests read its value (`if gen():`,
+  `while gen():`, `assert gen()`, `not gen()`, `bool(gen())`), or the function is handed to a
+  library call that drops what it returns or tests it for truth (`threading.Thread(target=gen)`,
+  `atexit.register(gen)`, `loop.call_soon(gen)`, `filter(gen, xs)`). Every function the call may
+  run must be a generator function without a replacing decorator; generators that are iterated,
+  stepped, returned, stored, bound to a name, or passed on, and calls that hand the result back
+  (an executor's `submit` and `map`, the offloading APIs, `weakref.finalize`), are not reported.
+- `heki check` warns about each contract entry that names no definition, attribute, method, or
+  `__dict__` key in the analyzed files (a target, an `allowed-*` or `forbidden-*` pattern, an
+  exempt method, a scope, a class pattern), once per kind, key, and text, with the existing names
+  one part away (`pkg.model.Field._type_cache` for `pkg.model.Field._gone_cache`). An entry whose
+  last part is a glob needs only what holds it, and only contracts whose rules run are judged.
+  `lint.unmatched-contract-entries = "error"` makes the entries fail the run and `"ignore"` turns
+  them off; unset, only a run over the whole project judges them. `heki recommend` lists them in a
+  new section and the `unmatched_entries` field of its JSON object.
+- The help of a contract report names the allowed code that already does what the report shows:
+  after the contract's `message`, up to three public functions or methods by fully qualified
+  name (``allowed writers of `Order.items`: `app.store.Store.add_item` ``). For `write-owners`,
+  `read-owners`, and `call-owners` (`MUT201`, `MUT203`, `MUT204`, and the strict `MUT205`,
+  `MUT206`, `MUT207`), these are the functions an `allowed-*` pattern names (or every function
+  outside `forbidden-*`) that write, read, or call the target themselves; for `invalidation`
+  (`MUT109`), the functions that write the target and announce it on every path, and the exempt
+  writers writing it. JSON output gives them as `allowed_examples` (`fqn`, `path`), and the
+  language server shows the same help.
+- `effect-boundaries`: `unresolved = "report"` reports, under `EFF201`, what the boundary cannot
+  judge in its scopes' reach: a call heki cannot resolve, a function it does not model or whose
+  body only a stub declares, and a write of an attribute the boundary names on an object of
+  unknown class or under a name computed at run time, each with its chain.
+- An entry target (`Class.attr["key"]`, in `write-owners`, `write-targets`, `write-universe`,
+  and `allow-writes`) matches the writes of a store operation called with the key:
+  `set_extra(field, "init", v)`, where `set_extra` writes `field.extras[key]`, writes
+  `Field.extras["init"]`, through any number of functions passing the key on, also as a `Final`
+  constant; `MUT201` and `EFF201` report it at the call. `heki inspect` names the entries a
+  function writes (`Field.extras["init"]`, `Field.extras[key]` for the parameter a store
+  operation keys by, `Field.extras[?]`; `keys` in the JSON).
+- A call target with an argument list (`DataType(is_dict=True)`, in `call-owners` and in the
+  `calls` boundaries of `EFF201`) now sees the keyword when it reaches the call through a mapping
+  the function builds and unpacks with `**`: a merge (`{**a, **b}`, `dict(a, is_dict=True)`,
+  `a | b` of two mappings the function builds), where the last entry of each key counts and a
+  mapping heki does not build (a parameter) replaces every key before it, and a mapping built on
+  several paths, which passes a key where every path passes the same constant. A call of a
+  `functools.partial` object the function makes is a call of what the object holds, with the
+  positions it holds first and its keywords, which a keyword of the call replaces; the report
+  names the call of the object, where the class is constructed.
+- The ecosystem catalog says which library methods build an instance of their receiver's class
+  without its `__init__` (`builds_receiver`): pydantic's `BaseModel.model_construct` (from its
+  keywords), `model_validate` (from the dict it is passed; given anything else it may return an
+  instance as it is), and `model_copy` (from `update`). `MUT204` and the `calls` boundaries of
+  `EFF201` count these calls as constructing the receiver's class, for class targets too, and an
+  argument list matches the field values they pass. `calls_unawaited` entries say whether the
+  call hands what the callable returns back to its caller (`hands_back`).
+- `heki version` prints the version, and `heki version --changelog` also prints the section of
+  `CHANGELOG.md` for this release, which the binary carries, so what a release changed can be read
+  offline. The source distribution ships `CHANGELOG.md`, and the package metadata links the
+  changelog (`Project-URL: Changelog`); the wheel does not carry the file, which would install as
+  `site-packages/CHANGELOG.md`.
+- `required-version` in `[tool.heki]` takes a PEP 440 specifier (`">=0.2.6"`). A heki that does not
+  satisfy it stops with an error before it reads any other key, so a configuration that uses keys
+  from a newer release fails with a clear message on an older heki.
+- `docs/coding-agents.md` has a section on architecture rules with agents: three lines for
+  `AGENTS.md` or `CLAUDE.md`, the contract `message` as the fix the agent reads, an owner for
+  `heki.toml`, and a Stop hook script for Claude Code. `docs/scope.md` lists the shapes heki
+  measured on its corpus and did not build, with the tools that cover each. The agent skill also
+  says not to weaken a contract.
+
+### Changed
+
+- Calls through values a project binds by name are followed:
+  - a module-level dict of functions bound once and changed by no code
+    (`HANDLERS["create"](...)` runs `create`; any other key, and iterating the values, run one
+    of them);
+  - a class attribute bound last to a function, a `staticmethod` of one, or a class
+    (`REQUIRE: ClassVar[...] = staticmethod(require)`, `factory = Scope`), read through the
+    class, `cls`, or an instance (a plain function binds the instance), over every class the
+    receiver may be; bound so on some paths only (`if flag: fetch = _quiet` after the `def`), a
+    call runs either object, and a report through it is not exact;
+  - a function every return of which gives a module one import binds (a local import that
+    breaks an import cycle, also behind `functools.cache`), also when it is annotated
+    `ModuleType`;
+  - a value typed by a `TypeVar` with a bound or constraints, which is typed by them.
+- A module-level function or class the module binds again to another function or class is
+  that object once the module has run (`fetch = _quiet` after `def fetch`), or one of them when
+  the rebinding runs on some paths only. A call through the name ran the `def`, and was reported
+  exact when only the `def` waited.
+- A value typed `types.ModuleType` says nothing of the module's functions: a call of one is
+  unresolved (`heki inspect` called such a function pure).
+- A dict or list a global or an attribute holds keeps no item types once the module's code
+  changes it in place (an item store, `append`, `update`, an in-place operator), or another
+  module does; an annotated global keeps the items it declares. A display's items were kept
+  however other code changed it (`heki inspect` called a function calling `HANDLERS[kind]` pure
+  after `register()` added a handler).
+- An annotated global's declaration is refined by the items of the display it is bound to
+  (`HANDLERS: dict[str, Callable[..., None]] = {...}` holds those functions), and a slice of a
+  builtin sequence of unknown items is still one of its class.
+- Calling a `functools.partial` object that the same function makes now runs the callable it
+  holds for every rule, as handing it to `map` or `sorted` already did: effects, recursions, and
+  call chains through such a call are followed.
+- heki recognizes more memo fills and lazy initializations, so the rules that leave them alone
+  (`MUT101`, `MUT107`, `MUT111`, `MUT114`, `MUT115`, `MUT202`, and the once-per-object guard of
+  `EFF102` / `EFF103`) report fewer: an attribute is found unset by a `None` or falsy test of
+  `getattr(obj, "x", None)`, by `hasattr(obj, "x")`, and in the `except AttributeError:` clause of
+  a `try` that reads it, and stored by `setattr`, `object.__setattr__`, and `__setattr__`; a store
+  is a memo fill under the `else` of `if k in memo:` and under a `None` or falsy `memo.get(k)`,
+  also when the key is computed again by the same expression (`id(raw)`, `name.lower()`); and a
+  container a parameter has as its default (`def f(x, _memo={})`) is filled as a memo.
+- A report naming a private attribute names it as its class holds it, the key of the instance's
+  `__dict__` (`self._GifImageFile__offset` where the code writes `self.__offset`).
+- `write-owners`, `read-owners`, and `call-owners` with `unresolved = "report"`: a function some
+  code hands on as a value (a display, a class attribute, an argument, a return) judges its
+  accesses itself, as if it had no callers, instead of being allowed by the callers heki sees.
+- `references = "calls"` sees a function a `def` or `lambda` makes used as a value in the same
+  scope (`HANDLERS = [run]` after `def run`).
+- `EFF201` reports an item write whose key heki cannot tell (computed, a parameter of the scope
+  function, or an argument that is neither) where the boundary names an entry of the attribute
+  and allows no write of the whole container: "writes an entry of `Field.extras` under a key heki
+  cannot tell".
+- `heki inspect` (experimental) names the functions heki cannot follow whatever the purity
+  verdict. `purity.unknown_at` was set only while the function was otherwise pure, so a function
+  that changed anything and reached a call heki cannot resolve, and every caller of it, showed
+  none. `unknown_at` now names the nearest such function for every verdict, and the new
+  `purity.unknown_reach` lists every one the function reaches (a call heki cannot resolve, or a
+  body only a stub declares), nearest first, each with its call chain: at most 100, with
+  `truncated` set when there are more. The text form lists them under the verdict, which no
+  longer repeats the first one.
+- An unknown configuration key that is not close to any key of its table now also says that it may
+  come from a newer heki, names the running version, and points to `required-version` and the
+  changelog. An older heki cannot name the release that adds a key.
+- A default run takes about 6 % longer than with 0.2.5 on the measured packages, most of it from
+  following calls through dispatch tables (#289).
+
+### Fixed
+
+- A call through a name the project binds to another object is no longer an exact target
+  (assumption R1, as ARCHITECTURE 3.4 states it): another store or a `del` of a function,
+  class, or method in its module (also on a branch, after `global`, or by `globals()` or
+  `exec`), in its class body, on the class object, or from another module, also through
+  `setattr` or `delattr` with a string literal; any name of a module that `setattr` stores into
+  under a name heki cannot read; a store of a function's `__code__`, of `__bases__` on a class
+  along the MRO, or of `self.__class__`. `EFF101` and `EFF103` no longer claim a chain through
+  such a call (`EFF111` and `EFF113` report it), and `MUT114` no longer claims that the changed
+  object is what a cached function returned when the function's name is bound again. A
+  `mock.patch` target patched outside tests, a store through `sys.modules`, `setattr` on a class
+  under a name heki cannot read, and `__class__` stored on another receiver are not read yet
+  (the rule pages' known limitations).
+- Stores through `setattr` and `delattr` with a string literal (`setattr(cfg, "KEY", v)`) count as
+  rebinding the attribute as `cfg.KEY = v` does, for the string constants, displays, and queue
+  capacities other modules read.
+- A name a package re-exports with a star import (`from ._utils import *` in
+  `pkg/utils/__init__.py`) is now the function, class, or constant of the module it comes from,
+  read as `from pkg.utils import fetch`, as `utils.fetch`, and inside the package itself. The star
+  import binds the names the module's `__all__` lists, when it is a constant list or tuple of
+  strings, and without `__all__` its public names, also down a chain of star imports. heki took
+  such a name for an external symbol, so `heki inspect` called a function reaching
+  `requests.get` through it pure, and the rules following calls did not see the effect. A name
+  the star import binds through an `__all__` heki cannot read (built at run time, changed in
+  place) or through a module heki could not parse, and one that two star imports bind to
+  different objects (`try: from ._speedups import *` with a fallback, or a star import of a
+  library module next to one of the project), is now unresolved rather than external.
+- A private name of a class (`self.__cache`, `def __run`, `__limit = 3` in class `Parser`) is
+  the member Python's name mangling makes of it (`_Parser__run`). A receiver typed `Parser`, a
+  subclass's `self`, or `type[Parser]` reaching `_Parser__run` now calls or reads the member, so
+  the contracts see those accesses, and a target may name the member either way (`Parser.__run` or
+  `Parser._Parser__run`, also as a glob such as `Parser._Parser__*`). A subclass's own private
+  name (`self.__run` in `JsonParser`, the member `_JsonParser__run`) is another member: it no
+  longer counts as calling or overriding `Parser.__run`.
+- The body of a class at module level runs when the module does, and its code is now the module
+  body's for every rule, as a class body in a function already was the function's: a class
+  attribute's value, a method's decorator, and its default arguments (`held = FinalFacts(())`,
+  `@decorate(FinalFacts(()))`, `facts: FinalFacts = FinalFacts(())`) are calls, reads, writes, and
+  effects of `<module>`. `call-owners` reports constructing a guarded class there, `read-owners`
+  and `write-owners` judge the reads and writes, and an effect boundary naming `<module>` sees what
+  the class bodies reach in the project, not only outside it.
+- `EFF201`: a class's own initialization covers the helpers its initializer passes `self` to, as
+  it already did for the owner contracts: `_link(self)` called from `Node.__init__` is no write
+  (or read) of an existing `Node` in a scope that constructs one (`Node(...)`, a factory
+  returning one, a subclass through `super().__init__()`). The same helper given another object,
+  or called by a method after `__init__` returned, is still reported, with the chain of that
+  path.
+- `heki inspect`: constructing an object is no change of an existing one. A write of an
+  initializer on its own `self`, directly or through a helper it passes `self` to, is marked
+  `fresh` in `changes.class_attrs`, so `Node(...)` no longer makes its callers `impure:
+  writes_objects`, and an initializer is `impure: changes_self` alone.
+- `MUT205`: with `unlisted-dict-keys = "report"` and `unresolved = "report"`, a constant `__dict__`
+  key that no `write-owners` target names is now reported when it is written on an object of
+  unknown class (an unannotated parameter, a loop variable), as a key a target names already was.
+  A helper whose callers hand it an instance of a target's class is reported too; one handed only
+  other classes is not, and a class's own initialization through a helper stays allowed.
+- `heki server` exits as soon as its client closes stdin or goes away, also while it indexes the
+  workspace or runs an analysis. It used to finish every analysis it had accepted first, and a
+  document opened or a request sent during an analysis kept it from seeing the end of its input
+  until that analysis ended, so a server whose editor had crashed could stay busy for hours. The
+  exit code is 1 unless the client sent `shutdown`.
+
 ## [0.2.5] - 2026-11-23
 
 ### Breaking changes
@@ -1493,6 +1714,7 @@ The first public preview.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
+[0.2.6]: https://github.com/koxudaxi/heki/compare/v0.2.5...HEAD
 [0.2.5]: https://github.com/koxudaxi/heki/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/koxudaxi/heki/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/koxudaxi/heki/compare/v0.2.2...v0.2.3
