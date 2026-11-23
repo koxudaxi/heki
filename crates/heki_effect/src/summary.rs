@@ -158,6 +158,7 @@ fn extract_module(
             kept_points,
             types,
             mut blind,
+            fresh_return,
         } = Extractor::new(
             &shape,
             &key,
@@ -275,6 +276,13 @@ fn extract_module(
             calls.extend(blind);
             calls.sort();
             calls.dedup();
+        }
+        if file.local_functions.contains_key(&key) {
+            if let Some(fresh) = &mut file.fresh_returns {
+                fresh.join_definition(&key, fresh_return);
+            }
+        } else if let Some(fact) = fresh_return {
+            file.fresh_returns_mut().local.insert(key.clone(), fact);
         }
         // Same qualname defined twice (conditional definitions): keep the union of facts.
         match file.local_functions.get_mut(&key) {
@@ -521,17 +529,6 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
         }
         _ => ReturnsNew::No,
     };
-    // A must-fact too: new containers only when both definitions return them, of one kind.
-    into.fresh_return = match (into.fresh_return.take(), other.fresh_return) {
-        (Some(mut a), Some(b)) => b.kind.is_none_or(|k| a.joins(k)).then(|| {
-            a.built &= b.built;
-            a.calls.extend(b.calls);
-            a.calls.sort();
-            a.calls.dedup();
-            a
-        }),
-        _ => None,
-    };
     if let Some(other) = other.return_origins {
         let facts = into.return_origins.get_or_insert_with(Box::default);
         facts.returned.known.join(other.returned.known);
@@ -680,6 +677,8 @@ struct Extracted {
     types: FxHashMap<VarId, Val>,
     /// [`FileSummary::blind_spots`].
     blind: Vec<BlindCall>,
+    /// The local fact of [`FileSummary::fresh_returns`].
+    fresh_return: Option<fresh::FreshReturn>,
 }
 
 /// The points of a function that read one `self` attribute ([`Extractor::self_read_points`]).
@@ -2619,9 +2618,11 @@ impl<'a> Extractor<'a> {
         if self.opt_in.return_origins {
             self.returned_origins();
         }
-        if self.opt_in.fresh_returns {
-            self.fresh_return();
-        }
+        let fresh_return = if self.opt_in.fresh_returns {
+            self.fresh_return()
+        } else {
+            None
+        };
         if self.opt_in.set_order {
             let calls: Vec<order_flow::OrderCall<'_>> = self
                 .project_calls
@@ -2697,6 +2698,7 @@ impl<'a> Extractor<'a> {
             kept_points: self.kept_points,
             types: self.types,
             blind: self.blind,
+            fresh_return,
         }
     }
 
@@ -4316,9 +4318,9 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// [`EffectSummary::fresh_return`] of the visited function, from the callees its calls and
-    /// property reads resolve to.
-    fn fresh_return(&mut self) {
+    /// The local fact of [`FileSummary::fresh_returns`] of the visited function, from the
+    /// callees its calls and property reads resolve to.
+    fn fresh_return(&self) -> Option<fresh::FreshReturn> {
         let shape = self.shape;
         let class_of = |v: VarId| match self.types.get(&v) {
             Some(Val::Inst(class)) => Some(class.as_str()),
@@ -4344,8 +4346,7 @@ impl<'a> Extractor<'a> {
                     .is_some_and(|n| INSPECTING_BUILTINS.contains(&n))
             )
         };
-        let fact = fresh::fresh_return(shape, &self.live, source_of, inspects);
-        self.summary.fresh_return = fact.map(Box::new);
+        fresh::fresh_return(shape, &self.live, source_of, inspects)
     }
 
     /// Answer the construction queries of the visited function (`construction`): the

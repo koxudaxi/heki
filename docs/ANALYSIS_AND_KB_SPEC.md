@@ -518,12 +518,6 @@ EffectSummary(f) = {
                                                            // propagated), the project calls whose results (or
                                                            // elements of them) it may return, by span, and the
                                                            // phis its origin walks met (local)
-    fresh_return:             Option<Box<FreshReturn>>,    // MUT119, absent for most functions: every
-                                                           // returned value is a builtin container of one
-                                                           // kind the call made and keeps nowhere (built, or
-                                                           // a copy); local facts name the project functions
-                                                           // whose results it returns, which propagation
-                                                           // resolves
     unresolved_write_sites:   Set<UnresolvedWrite>,        // target-named writes on objects of unknown class,
                                                            // computed names on guarded classes and on
                                                            // objects of unknown class (MUT205)
@@ -1162,20 +1156,23 @@ which module imports which.
    `bytearray`; the type comes from the copied value under R2. Or a call of project functions or
    a property read (its getters). A call of a project class is none: it returns the new
    instance, not what `__init__` returns.
-2. **The summary fact** (`EffectSummary::fresh_return`, only while `MUT119` runs:
-   `OptInFacts::fresh_returns`): for a plain function (not `async`, not a generator, no decorator
-   but those that call the body each time, no A1 hazard) with no bare return on a path a run can
-   take, one walk back from the returned values through copies and phis (along the edges a run
+2. **The function fact** (`FreshReturn`, kept beside the summaries in
+   `FileSummary::fresh_returns`, local and final, and only while `MUT119` runs:
+   `OptInFacts::fresh_returns`; a file none of whose functions has one keeps one word): for a
+   plain function (not `async`, not a generator, no decorator but those that call the body each
+   time, no A1 hazard) with no bare return on a path a run can take, one walk back from the returned values through copies and phis (along the edges a run
    can take) to their sources, all of one container kind, and one walk forward from the sources
    through copies, phis, and in-place operators: every use keeps nothing (a method call on the
    object itself, an item load, store, or delete on it, a comparison, a conversion, an
    iteration, a call of a builtin that only inspects it); a store, a capture, a yield, a raise,
    an attribute load (a bound method), or any other call ends the fact. Both walks share one
    budget per function. `built` says every source is the builtin itself.
-3. **Propagation** (`Resolver::resolve_own`): a local fact naming project functions holds when
+3. **Propagation** (`Resolver::fresh_return`): a local fact naming project functions holds when
    each has a final fact of the same kind outside the SCC being computed (a recursive function
    has none), and is `built` only when they all are. Two definitions of one function keep the
-   fact only when both have it with one kind.
+   fact only when both have it with one kind. Early Cutoff compares the final facts with the
+   summaries (`FinalFacts`), so a change of one re-propagates the callers as a summary change
+   does.
 4. **The rule** (`heki_rules::mut_rules::lost_changes`): a changing method of a container kind,
    an item store, or an item delete, applied to a value with no name that nothing reads but the
    change (and the item load of an augmented assignment), whose defining instruction is a source
