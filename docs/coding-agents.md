@@ -108,7 +108,7 @@ $ heki inspect app/users.py::load_user --callers --depth 3
 | `changes` | the parameters, `self` attributes, other objects' attributes, module globals, and closure cells it changes, directly or through calls, with the call chain to the change |
 | `retains` | the parameters it stores where they outlive the call |
 | `returns` | whether its result is a new object, a parameter, or state that outlives the call |
-| `purity` | `pure`, `impure` with the reasons, or `unknown` with the first function whose calls heki cannot resolve, and what the verdict assumes |
+| `purity` | `pure`, `impure` with the reasons, or `unknown` with the reasons; whatever the verdict, the functions below it whose calls heki cannot resolve, nearest first, each with the call chain to it; and what the verdict assumes |
 | `callers` | who calls it, whether in a loop; with `--callers`, transitively |
 | `reports` | what `heki check` reports in it; with `--callers`, also above it |
 | `contracts` | the contracts that name it |
@@ -121,6 +121,10 @@ $ heki inspect app/users.py::load_user --callers --depth 3
 - `pure` means heki found no effect and no change of an input or of shared state, and resolved
   every call below. Libraries the [catalog](configuration.md#ecosystem-knowledge-toolhekiecosystem)
   does not list count as having no effects.
+- `purity.unknown_reach.entries` lists the functions heki cannot follow among the function and
+  its callees (a call it cannot resolve, or a body only a stub declares), nearest first, at most
+  100; `truncated` says there are more. `purity.unknown_at` is the first of them. Both are given
+  for an `impure` function too: what it changes may then be incomplete.
 - A field the configuration does not compute is `null`, with the setting that computes it.
 - Exit code 0 when the function was inspected, 2 otherwise or when a file could not be analyzed
   (the report is still printed, with `complete: false`).

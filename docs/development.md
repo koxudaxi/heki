@@ -258,7 +258,8 @@ The engines of `heki_ir::walk` apply these rules by construction, and every walk
 the call graph, or the class hierarchy goes through them:
 
 - `Memo` keeps one answer per key, a value and a question. `Closure` joins the facts of every
-  node a node reaches, the members of a cycle sharing one. `reach` walks with a visited set.
+  node a node reaches, the members of a cycle sharing one. `reach` walks with a visited set,
+  depth first, and `reach_breadth_first` nearest first (a shortest call chain to each node).
   `fixpoint` joins the facts of nodes that read each other, and visits a node again only when a
   fact it reads grows, up to a visit limit.
 - A `Budget` per owner (a rule run on one function, the summary of one function, the store
@@ -380,7 +381,7 @@ parameter at as many calls, and thousands of references to a `call-owners` targe
 a long chain of phis carries to one `return`, an argument handed down through thousands of functions
 of one module to the one that changes it, thousands of reports whose call chains enter one module,
 the callers of the bottom of a lattice of calls thirty levels deep, the chains `heki inspect` walks
-down thousands of calls of one module, a value chosen among a thousand module globals before it is
+down thousands of calls of one module and past thousands of functions it cannot follow, a value chosen among a thousand module globals before it is
 changed, thousands of calls handing a global to a helper that changes it, thousands of
 comprehensions or generator expressions, each over a value the function creating them binds just
 before, through `heki dump-recommend-facts`, the calls heki is blind to in a chain of

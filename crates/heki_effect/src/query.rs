@@ -5,8 +5,9 @@ use crate::{
     AttrKeyPath, BlindSpotReach, BoundCallee, CallHop, CallSite, CellChange, EffectSummary, Facts,
     FuncKey, ProjectIndex, Runner, SharedState, SiteRole, Slot,
 };
-use heki_ir::walk::{Answer, Budget, Closure, Visit, reach};
+use heki_ir::walk::{Answer, Budget, Closure, Visit, reach, reach_breadth_first};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -527,13 +528,18 @@ impl ProjectIndex {
         })
     }
 
-    /// The nearest function whose own calls heki cannot all resolve (`unknown_calls`), or whose
-    /// body it does not know (defined only in a stub), among `start` and the callees whose facts
-    /// run in it (in its body, or in what iterating its result runs), with the chain to it. A
-    /// call cycle stopped at its recomputation budget is unknown as a whole: its functions are
-    /// their own nearest.
-    pub fn first_unknown(&self, calls: &mut CallsByCaller<'_>, start: &FuncKey) -> ChangeChain {
-        self.nearest(
+    /// The functions whose own calls heki cannot all resolve (`unknown_calls`), or whose body it
+    /// does not know (defined only in a stub), among `start` and the callees whose facts run in
+    /// it (in its body, or in what iterating its result runs), nearest first, each with the
+    /// shortest chain to it: at most `limit`. A call cycle stopped at its recomputation budget is
+    /// unknown as a whole: each of its functions is found itself.
+    pub fn unknown_within(
+        &self,
+        calls: &mut CallsByCaller<'_>,
+        start: &FuncKey,
+        limit: usize,
+    ) -> Vec<ChangeChain> {
+        self.found_within(
             calls,
             start,
             |site, callee| self.delivery(site, callee).is_some(),
@@ -541,6 +547,7 @@ impl ProjectIndex {
                 self.summary(key).is_some_and(|s| s.unknown_calls)
                     || self.file_of(key).is_some_and(crate::is_stub)
             },
+            limit,
         )
     }
 
@@ -573,7 +580,7 @@ impl ProjectIndex {
                     .iter()
                     .any(|h| h.state.is_change_of(cell))
             },
-            false,
+            usize::MAX,
         )
     }
 
@@ -661,69 +668,85 @@ impl ProjectIndex {
         enters: impl Fn(&CallSite, &EffectSummary) -> bool,
         found: impl Fn(&FuncKey, &[&CallSite]) -> bool,
     ) -> ChangeChain {
-        self.found_within(calls, start, enters, found, true)
+        self.found_within(calls, start, enters, found, 1)
             .pop()
             .unwrap_or_default()
     }
 
     /// Breadth first from `start` over the calls `enters` accepts, each function `found`
-    /// accepts with the shortest hops to it, in the order reached (only the first with
-    /// `first_only`). Each function is entered once.
-    fn found_within(
+    /// accepts with the shortest hops to it, in the order reached: the first `limit`. Each
+    /// function is entered once.
+    fn found_within<'i>(
         &self,
-        calls: &mut CallsByCaller<'_>,
+        calls: &mut CallsByCaller<'i>,
         start: &FuncKey,
         enters: impl Fn(&CallSite, &EffectSummary) -> bool,
         found: impl Fn(&FuncKey, &[&CallSite]) -> bool,
-        first_only: bool,
+        limit: usize,
     ) -> Vec<ChangeChain> {
-        let mut out = Vec::new();
-        // (function, parent state, hop into it)
-        let mut states: Vec<(FuncKey, Option<usize>, Option<CallHop>)> =
-            vec![(start.clone(), None, None)];
-        let mut visited: FxHashSet<FuncKey> = FxHashSet::from_iter([start.clone()]);
-        let mut i = 0;
-        while i < states.len() {
-            let func = states[i].0.clone();
-            let path = self
-                .file_of(&func)
-                .expect("states are summarized functions");
-            let sites = calls.of(&func);
-            if found(&func, sites) {
-                let mut hops = Vec::new();
-                let mut at = Some(i);
-                while let Some(j) = at {
-                    hops.extend(states[j].2.clone());
-                    at = states[j].1;
-                }
-                hops.reverse();
-                out.push(ChangeChain {
-                    hops,
-                    changed_in: Some(func.clone()),
-                    param: None,
-                });
-                if first_only {
-                    return out;
-                }
-            }
-            for &site in sites {
-                for bc in site.project_callees() {
-                    let entered = self
-                        .summary(&bc.callee)
-                        .is_some_and(|callee| enters(site, callee));
-                    if entered && visited.insert(bc.callee.clone()) {
-                        let hop = CallHop {
-                            caller: func.clone(),
-                            callee: bc.callee.fqn(),
-                            span: site.span,
-                            path: path.to_path_buf(),
-                        };
-                        states.push((bc.callee.clone(), Some(i), Some(hop)));
+        let (start, _) = calls
+            .index
+            .func_files
+            .get_key_value(start)
+            .expect("walks start at summarized functions");
+        let calls = RefCell::new(calls);
+        // The hop into each function from the first function listing it: the nearest one.
+        let mut into: FxHashMap<&'i FuncKey, (&'i FuncKey, CallHop)> = FxHashMap::default();
+        let mut reached: Vec<&'i FuncKey> = Vec::new();
+        let _ = reach_breadth_first::<_, ()>(
+            &Budget::unmetered("found_within"),
+            [start],
+            |func, next| {
+                let path = self
+                    .file_of(func)
+                    .expect("functions reached are summarized");
+                for &site in calls.borrow_mut().of(func) {
+                    for bc in site.project_callees() {
+                        if self
+                            .summary(&bc.callee)
+                            .is_some_and(|callee| enters(site, callee))
+                        {
+                            into.entry(&bc.callee).or_insert_with(|| {
+                                let hop = CallHop {
+                                    caller: func.clone(),
+                                    callee: bc.callee.fqn(),
+                                    span: site.span,
+                                    path: path.to_path_buf(),
+                                };
+                                (func, hop)
+                            });
+                            next.push(&bc.callee);
+                        }
                     }
                 }
+            },
+            |func| {
+                if !found(func, calls.borrow_mut().of(func)) {
+                    return Visit::Expand;
+                }
+                reached.push(func);
+                if reached.len() == limit {
+                    Visit::Stop(())
+                } else {
+                    Visit::Expand
+                }
+            },
+        );
+        let chain_to = |func: &FuncKey| {
+            let mut hops = Vec::new();
+            let mut at = func;
+            while at != start {
+                let (caller, hop) = &into[at];
+                hops.push(hop.clone());
+                at = caller;
             }
-            i += 1;
-        }
-        out
+            hops.reverse();
+            ChangeChain {
+                hops,
+                changed_in: Some(func.clone()),
+                param: None,
+            }
+        };
+        reached.into_iter().map(chain_to).collect()
     }
 }

@@ -967,6 +967,127 @@ fn calls_on_values_whose_type_says_nothing_are_unresolved() {
     assert_eq!(report(&p, "known")["purity"]["verdict"], "pure");
 }
 
+/// A dispatch through a table heki does not resolve, in functions that also write.
+const DISPATCH: &str = r#"from typing import Callable
+
+
+class Field:
+    def __init__(self):
+        self.required = False
+
+
+def _flag(field: Field) -> None:
+    field.required = True
+
+
+TABLE: dict[str, Callable[[Field], None]] = {"flag": _flag}
+
+
+def only_dispatches(field: Field) -> None:
+    TABLE["flag"](field)
+
+
+def writes_and_dispatches(field: Field, other: Field) -> None:
+    other.required = False
+    TABLE["flag"](field)
+
+
+def calls_one_that_dispatches(field: Field, other: Field) -> None:
+    other.required = False
+    only_dispatches(field)
+
+
+def vague(x):
+    return x.thing()
+
+
+def through_both(field: Field, other: Field, x):
+    calls_one_that_dispatches(field, other)
+    vague(x)
+"#;
+
+fn unknown_fqns(purity: &Value) -> Vec<String> {
+    purity["unknown_reach"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["fqn"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn unresolved_calls_in_reach_are_named_whatever_the_verdict() {
+    let p = Project::new("inspect_unknown_reach");
+    p.write("m.py", DISPATCH);
+    let only = &report(&p, "only_dispatches")["purity"];
+    assert_eq!(only["verdict"], "unknown");
+    assert_eq!(only["unknown_at"]["fqn"], "m.only_dispatches");
+    // A function that writes is impure, and still names the call heki cannot follow.
+    let writes = &report(&p, "writes_and_dispatches")["purity"];
+    assert_eq!(writes["verdict"], "impure");
+    assert_eq!(writes["because"], serde_json::json!(["changes_params"]));
+    assert_eq!(writes["unknown_at"]["fqn"], "m.writes_and_dispatches");
+    assert_eq!(writes["unknown_at"]["chain"], serde_json::json!([]));
+    // So does every caller, with the chain down to it.
+    let calls = &report(&p, "calls_one_that_dispatches")["purity"];
+    assert_eq!(calls["verdict"], "impure");
+    assert_eq!(calls["unknown_at"]["fqn"], "m.only_dispatches");
+    assert_eq!(
+        hops(&calls["unknown_at"]["chain"]),
+        [(27, "m.only_dispatches".to_owned())]
+    );
+    // Every one reached, nearest first; `unknown_at` is the first.
+    let both = &report(&p, "through_both")["purity"];
+    assert_eq!(both["verdict"], "impure");
+    assert_eq!(unknown_fqns(both), ["m.vague", "m.only_dispatches"]);
+    assert_eq!(both["unknown_at"], both["unknown_reach"]["entries"][0]);
+    assert_eq!(
+        hops(&both["unknown_reach"]["entries"][1]["chain"]),
+        [
+            (35, "m.calls_one_that_dispatches".to_owned()),
+            (27, "m.only_dispatches".to_owned())
+        ]
+    );
+    assert_eq!(both["unknown_reach"]["truncated"], false);
+    let known = &report(&p, "_flag")["purity"];
+    assert_eq!(known["verdict"], "impure");
+    assert_eq!(known["unknown_at"], Value::Null);
+    assert_eq!(known["unknown_reach"]["entries"], serde_json::json!([]));
+    let (code, out, err) = p.heki(&["inspect", "through_both"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains(
+            "  impure: changes_params\n  cannot follow\n    vague            m.py:36 m.vague\n    only_dispatches  m.py:35 m.calls_one_that_dispatches -> m.py:27 m.only_dispatches\n"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn the_functions_heki_cannot_follow_stop_at_their_cap() {
+    let p = Project::new("inspect_unknown_cap");
+    let mut src = String::new();
+    for i in 0..101 {
+        src.push_str(&format!("def vague{i}(x):\n    return x.thing()\n\n\n"));
+    }
+    let calls = |n: usize| -> String { (0..n).map(|i| format!("    vague{i}(x)\n")).collect() };
+    src.push_str(&format!("def hundred(x):\n{}\n\n", calls(100)));
+    src.push_str(&format!("def more(x):\n{}", calls(101)));
+    p.write("m.py", &src);
+    let hundred = &report(&p, "hundred")["purity"];
+    assert_eq!(unknown_fqns(hundred).len(), 100);
+    assert_eq!(hundred["unknown_reach"]["truncated"], false);
+    let more = &report(&p, "more")["purity"];
+    assert_eq!(
+        unknown_fqns(more),
+        (0..100).map(|i| format!("m.vague{i}")).collect::<Vec<_>>()
+    );
+    assert_eq!(more["unknown_reach"]["truncated"], true);
+    let (code, out, err) = p.heki(&["inspect", "more"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("  cannot follow (the first 100)\n"), "{out}");
+}
+
 const CALLERS: &str = r#"class Base:
     def step(self):
         return 1
@@ -1618,7 +1739,10 @@ fn the_text_form_shows_every_kind_of_fact() {
     let users = users_project("inspect_text_unknown");
     users.write("pkg/calls.py", "from pkg.users import fetch\n\n\ndef far(u):\n    return fetch(u)\n\n\ndef vague(x):\n    return x.thing()\n");
     let (_, out, _) = users.heki(&["inspect", "--heuristic", "pkg.calls.vague"]);
-    has(&out, "unknown: unresolved_calls (first at pkg.calls.vague)");
+    has(
+        &out,
+        "  unknown: unresolved_calls\n  cannot follow\n    vague  itself\n",
+    );
     let (_, out, _) = users.heki(&["inspect", "--heuristic", "fetch", "--callers"]);
     has(&out, "  calls.far  calls.py:5  (return)");
 }
