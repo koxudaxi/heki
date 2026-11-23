@@ -87,7 +87,11 @@ fn named_value(shape: &FnShape<'_>, value: VarId, decls: &ModuleDecls) -> Option
         _ => None,
     };
     if let Some(name) = global(value) {
-        if decls.object_sentinels.contains(name) {
+        let own = decls.object_sentinels.contains(name)
+            || decls.classes.contains_key(name)
+            || decls.functions.contains_key(name)
+            || decls.aliases.contains_key(name);
+        if own && !decls.imports.contains_key(name) {
             return Some(format!("{}.{name}", decls.module_name));
         }
         return decls.fixed_import(name).cloned();
@@ -106,8 +110,10 @@ fn named_value(shape: &FnShape<'_>, value: VarId, decls: &ModuleDecls) -> Option
 pub(super) fn named_attrs(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
     let mut found: Vec<(String, String, NamedAttr)> = Vec::new();
     let mut defaults: FxHashMap<FunctionId, Vec<(VarId, String)>> = FxHashMap::default();
+    let constants = &input.ir.constants;
+    let staticmethod_trusted = !constants.dynamic && !constants.shadowed.contains("staticmethod");
     for body in input.ir.functions.iter().filter(|f| f.is_class_body) {
-        class_body_names(body, decls, &mut found);
+        class_body_names(body, decls, staticmethod_trusted, &mut found);
         method_defaults(input, body, decls, &mut defaults);
     }
     // The methods of the module's classes that run on an instance, with their receiver.
@@ -152,6 +158,9 @@ pub(super) fn named_attrs(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
     for (class, attr, named) in found {
         if let Some(c) = decls.classes.get_mut(&class) {
             let entry = c.named_attrs.entry(attr).or_default();
+            if entry.body.is_none() && named.body.is_some() {
+                entry.body_static = named.body_static;
+            }
             entry.body = entry.body.take().or(named.body);
             entry.annotated |= named.annotated;
             entry.validates_default |= named.validates_default;
@@ -202,6 +211,7 @@ fn method_defaults(
 fn class_body_names(
     body: &IrFunction,
     decls: &ModuleDecls,
+    staticmethod_trusted: bool,
     found: &mut Vec<(String, String, NamedAttr)>,
 ) {
     let resolve = |name: &str| decls.resolve_dotted(name, true);
@@ -251,12 +261,15 @@ fn class_body_names(
         let (field, validates_default) = fields.get(name).copied().unwrap_or((false, false));
         // `attr: T = field(default=NAME)`: a stdlib dataclass makes `NAME` the class attribute,
         // and `init=False` leaves the field out of `__init__`.
-        let (named, init) = match field_default(&shape, value, &resolve) {
+        let (named, init, body_static) = match field_default(&shape, value, &resolve) {
             Some((default, init)) if dataclass.is_some() => {
-                (named_value(&shape, default, decls), init)
+                (named_value(&shape, default, decls), init, false)
             }
             Some(_) => continue,
-            None => (named_value(&shape, value, decls), true),
+            None => match static_method_of(&shape, value, staticmethod_trusted) {
+                Some(wrapped) => (named_value(&shape, wrapped, decls), true, true),
+                None => (named_value(&shape, value, decls), true, false),
+            },
         };
         let Some(named) = named else { continue };
         let held = if field && init && generated_init {
@@ -266,11 +279,30 @@ fn class_body_names(
         };
         let attr = NamedAttr {
             body: Some(named),
+            body_static,
             annotated: field,
             validates_default,
             held,
         };
         found.push((body.qualname.clone(), name.to_owned(), attr));
+    }
+}
+
+/// The value `staticmethod(value)` wraps, when `value` holds such a call of the builtin
+/// (`trusted`: the module does not rebind the name).
+fn static_method_of(shape: &FnShape<'_>, value: VarId, trusted: bool) -> Option<VarId> {
+    match shape.inst(shape.copy_root(value)).map(|i| &i.kind) {
+        Some(InstKind::Call {
+            callee,
+            args,
+            kwargs,
+            star_from: None,
+            ..
+        }) if trusted && callee == "staticmethod" && kwargs.is_empty() => match args[..] {
+            [wrapped] => Some(wrapped),
+            _ => None,
+        },
+        _ => None,
     }
 }
 

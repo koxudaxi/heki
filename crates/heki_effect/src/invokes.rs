@@ -394,7 +394,7 @@ pub(crate) fn attribute_access_runs_project_code(
             }
         }
         Some(Val::Class(_) | Val::Ref(_)) => false,
-        Some(Val::Super(_)) | None => true,
+        Some(Val::Super(_) | Val::OneOf(_)) | None => true,
     }
 }
 
@@ -502,7 +502,7 @@ fn class_method_runs(
         Some(Val::Ref(symbol)) => {
             class_object(symbol) || (name == "*" && project_named(project, symbol))
         }
-        Some(Val::Super(_)) | None => true,
+        Some(Val::Super(_) | Val::OneOf(_)) | None => true,
     }
 }
 
@@ -669,6 +669,7 @@ fn calls_project_code(project: &ProjectDecls, kb: &EffectiveEcosystemKb, h: &Han
     }
     match h.val {
         Some(Val::Ref(symbol)) => project_named(project, symbol),
+        Some(Val::OneOf(symbols)) => symbols.iter().any(|s| project_named(project, s)),
         Some(Val::Class(class)) => project.is_project_class(class),
         Some(Val::Inst(class)) if CALLABLE_CLASSES.contains(&class.as_str()) => true,
         Some(Val::Inst(_) | Val::Union(_)) => may_define(project, kb, h, "__call__"),

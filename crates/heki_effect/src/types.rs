@@ -15,6 +15,10 @@ pub(crate) const MAX_DEPTH: usize = 4;
 /// type.
 pub(crate) const MAX_UNION: usize = 3;
 
+/// Most named objects a [`Ty::OneOf`] keeps: the targets a call of the value may run, as many as
+/// a call through a class hierarchy follows (`resolver::CHA_CANDIDATE_LIMIT`).
+pub(crate) const MAX_NAMED: usize = 8;
+
 /// What the Advisory lane knows about a value.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Ty {
@@ -36,6 +40,9 @@ pub enum Ty {
     Coroutine(Box<Ty>),
     /// An instance of one of two or three classes (sorted by class, one entry per class).
     Union(Vec<Obj>),
+    /// One of two to [`MAX_NAMED`] named objects, by fqn (sorted): what several paths bind, or
+    /// an item of a table of functions (`HANDLERS[kind]`). Calling it calls one of them.
+    OneOf(Vec<String>),
 }
 
 /// An instance of a class, with the type arguments of a known generic container.
@@ -218,7 +225,8 @@ impl Ty {
             | Ty::SelfType
             | Ty::Partial(_)
             | Ty::Coroutine(_)
-            | Ty::Union(_) => None,
+            | Ty::Union(_)
+            | Ty::OneOf(_) => None,
         }
     }
 
@@ -232,7 +240,8 @@ impl Ty {
             | Ty::Super(_)
             | Ty::SelfType
             | Ty::Partial(_)
-            | Ty::Coroutine(_) => &[],
+            | Ty::Coroutine(_)
+            | Ty::OneOf(_) => &[],
         }
     }
 
@@ -263,8 +272,21 @@ impl Ty {
             | Ty::Super(_)
             | Ty::SelfType
             | Ty::Partial(_)
-            | Ty::Coroutine(_) => Some(self.clone()),
+            | Ty::Coroutine(_)
+            | Ty::OneOf(_) => Some(self.clone()),
         }
+    }
+
+    /// The type with the items of every instance unknown: what a container holds once code
+    /// heki does not follow item by item adds to it.
+    pub(crate) fn without_items(&self) -> Ty {
+        self.map_members(|o| {
+            Some(Obj {
+                class: o.class.clone(),
+                args: Args::None,
+            })
+        })
+        .unwrap_or_else(|| self.clone())
     }
 
     /// The declared type with `Self` bound to the receiver type `recv`, or `None` when it
@@ -295,6 +317,9 @@ impl Ty {
             (Ty::Ref(a), Ty::Class(b)) | (Ty::Class(b), Ty::Ref(a)) if a == b => {
                 Some(Ty::Class(b.clone()))
             }
+            (Ty::Ref(_) | Ty::OneOf(_), Ty::Ref(_) | Ty::OneOf(_)) => {
+                Ty::one_of(self.named().iter().chain(other.named()).cloned())
+            }
             // Either coroutine may be awaited: the result is either declared result.
             (Ty::Coroutine(a), Ty::Coroutine(b)) => a.join(b).map(|t| Ty::Coroutine(Box::new(t))),
             // Catalog awaitables carry their awaited result: join by it (EFF107 only misses).
@@ -313,7 +338,29 @@ impl Ty {
             Ty::Inst(o) => 1 + o.args.depth(),
             Ty::Union(os) => 1 + os.iter().map(|o| o.args.depth()).max().unwrap_or(0),
             Ty::Partial(t) | Ty::Coroutine(t) => 1 + t.depth(),
-            Ty::Ref(_) | Ty::Class(_) | Ty::Super(_) | Ty::SelfType => 1,
+            Ty::Ref(_) | Ty::Class(_) | Ty::Super(_) | Ty::SelfType | Ty::OneOf(_) => 1,
+        }
+    }
+
+    /// The named objects a value is one of: one for a named object, those of a [`Ty::OneOf`].
+    pub(crate) fn named(&self) -> &[String] {
+        match self {
+            Ty::Ref(fqn) => std::slice::from_ref(fqn),
+            Ty::OneOf(fqns) => fqns,
+            _ => &[],
+        }
+    }
+
+    /// The value that is one of the named objects `fqns`: one of them, a [`Ty::OneOf`] of at
+    /// most [`MAX_NAMED`], or `None` for none or more.
+    pub(crate) fn one_of(fqns: impl IntoIterator<Item = String>) -> Option<Ty> {
+        let mut out: Vec<String> = fqns.into_iter().collect();
+        out.sort();
+        out.dedup();
+        match out.len() {
+            1 => out.pop().map(Ty::Ref),
+            n if (2..=MAX_NAMED).contains(&n) => Some(Ty::OneOf(out)),
+            _ => None,
         }
     }
 }

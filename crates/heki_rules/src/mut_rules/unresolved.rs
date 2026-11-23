@@ -12,7 +12,8 @@
 
 use super::call_owners::CallOwnerRule;
 use super::{
-    Allowance, ContractTarget, MergedReports, Named, OwnerRule, ReadOwnerRule, runs_inside_allowed,
+    Allowance, AllowedExamples, ContractTarget, MergedReports, Named, OwnerRule, ReadOwnerRule,
+    place_functions, runs_inside_allowed, write_hits,
 };
 use crate::{CheckContext, SitesByCaller};
 use heki_ast::Span;
@@ -20,6 +21,7 @@ use heki_diagnostics::Diagnostic;
 use heki_effect::{Access, Construction, FuncKey, Unresolved};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
+use std::path::Path;
 
 pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut Vec<Diagnostic>) {
     if !cx.selection.is_enabled("MUT205") {
@@ -128,7 +130,25 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
             }
         }
     }
-    reports.emit(cx, "MUT205", out);
+    reports.emit(cx, ("MUT205", "allowed writers"), out, |examples| {
+        let owners = |k: &FuncKey| strict.iter().any(|(_, r)| r.allowance.names_place(k));
+        for (key, path, s) in place_functions(cx, owners) {
+            for w in s
+                .typed_field_write_sites
+                .iter()
+                .filter(|w| w.via_chain.is_empty())
+            {
+                for &(contract, rule) in &strict {
+                    if rule.allowance.names_place(key)
+                        && !(rule.allow_fresh && w.construction == Construction::Yes)
+                        && !write_hits(&rule.targets, w).is_empty()
+                    {
+                        add_example(examples, contract, &w.attr, (key, path));
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// The classes `targets` cover: their class families together.
@@ -226,7 +246,20 @@ pub(super) fn mut206(
             }
         }
     }
-    reports.emit(cx, "MUT206", out);
+    reports.emit(cx, ("MUT206", "allowed readers"), out, |examples| {
+        let owners = |k: &FuncKey| strict.iter().any(|(_, r)| r.allowance.names_place(k));
+        for (key, path, s) in place_functions(cx, owners) {
+            let own = s.typed_field_read_sites.iter();
+            for read in own.filter(|r| r.counts_for_contracts()) {
+                for &(contract, rule) in &strict {
+                    let hits = |t: &ContractTarget| t.matches(&read.class_qualname, &read.attr);
+                    if rule.allowance.names_place(key) && rule.targets.iter().any(hits) {
+                        add_example(examples, contract, &read.attr, (key, path));
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// `MUT207`: calls of a method named like a target of a strict `call-owners` contract on an
@@ -298,7 +331,23 @@ pub(super) fn mut207(
             }
         }
     }
-    reports.emit(cx, "MUT207", out);
+    reports.emit(cx, ("MUT207", "allowed callers"), out, |examples| {
+        let owners = |k: &FuncKey| strict.iter().any(|(_, r)| r.allowance.names_place(k));
+        for (key, path, _) in place_functions(cx, owners) {
+            for &(_, site) in sites.get(key).into_iter().flatten() {
+                for &(contract, rule) in &strict {
+                    if !rule.allowance.names_place(key) {
+                        continue;
+                    }
+                    let called = rule.targets.called(site).into_iter().flatten();
+                    for callee in called.flat_map(|i| rule.targets.called_at(i, site)) {
+                        let method = callee.rsplit('.').next().unwrap_or(&callee);
+                        add_example(examples, contract, method, (key, path));
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// The rules of `rules` that `strict` holds for, each with its contract's place in the
@@ -342,6 +391,24 @@ fn add<'u>(
         message,
         Vec::new,
     );
+}
+
+/// Record that `func`, defined in `path`, accesses `name` from a place `contract` allows: a
+/// function a report of an access of `name` on an object of unknown class names ([`add`]).
+fn add_example<'a>(
+    examples: &mut AllowedExamples<'a, String>,
+    contract: usize,
+    name: &str,
+    (func, path): (&'a FuncKey, &'a Path),
+) {
+    let quoted = format!("`{name}`");
+    let named = Named {
+        target: name,
+        named: &quoted,
+        rank: 0,
+        contract,
+    };
+    examples.add((&name.to_owned(), named), func, path);
 }
 
 /// `a`, `a` and `b`, `a`, `b` and 3 more.

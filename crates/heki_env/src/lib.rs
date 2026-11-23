@@ -283,6 +283,11 @@ pub struct EffectBoundaryRule {
     /// `"allow"` (default) or `"report"`: whether `reads-environment` also forbids the imports
     /// that probe whether a module is installed (`try: import yaml` / `except ImportError:`).
     pub import_probes: Option<String>,
+    /// `"report"`: also report what the boundary cannot judge in its scopes' reach: a call heki
+    /// cannot resolve, a function it does not model or whose body only a stub declares, and a
+    /// write of an attribute `write-targets` or `write-universe` names on an object of unknown
+    /// class; `"ignore"` (default) does not.
+    pub unresolved: Option<String>,
     /// The help of every `EFF201` report of this contract.
     pub message: Option<String>,
 }
@@ -1159,6 +1164,7 @@ import-probes = "report"
                 fresh_objects: Some("allow".into()),
                 references: Some("calls".into()),
                 import_probes: Some("report".into()),
+                unresolved: None,
             }
         );
         assert!(cfg.readonly_returns[0].deep);

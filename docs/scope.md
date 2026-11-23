@@ -274,6 +274,13 @@ Missed findings close as heki learns more:
   nothing: what the instance keeps can be replaced.
 - A `write-owners` contract with `unresolved = "report"` reports the writes heki cannot tie to a
   class ([`MUT205`](rules/unresolved-guarded-write.md)).
+- A private helper hands its accesses to the callers heki sees. A helper some code also hands on
+  as a value (a table, a class attribute, an argument) has callers heki does not see: an owner
+  contract with `unresolved = "report"` judges it as if it had no callers, and one without lets
+  its callers decide.
+- An effect boundary is silent where heki cannot see: a call it cannot resolve, or a write on an
+  object of unknown class, in a scope's reach. With `unresolved = "report"` it reports them
+  (`EFF201`).
 
 ### Objects without a known class
 
@@ -284,8 +291,13 @@ Missed findings close as heki learns more:
   [`MUT207`](rules/unresolved-guarded-call.md).
 - A write in an unannotated helper is still found where a caller passes it an object of a known
   class. A read is not.
-- Not typed: values declared `Any`, generics substituted through `TypeVar`s, and calls of
-  `type[C]` attributes.
+- Not typed: values declared `Any` or `types.ModuleType`, generics substituted through
+  unbounded `TypeVar`s (a bounded or constrained one gives its bound or constraints), and calls
+  of `type[C]` attributes.
+- A module-level table of functions (`HANDLERS = {"create": create}`) gives the value of a key
+  a string constant gives, and one of its values for any other key, only while no code changes
+  it in place; a change through a call it is handed to (`register(HANDLERS)`) is not seen.
+  Changing a dict or list a global or an attribute holds in place leaves its items untyped.
 - The type of a module global or an instance attribute joins every store of it through a
   receiver whose type heki knows: `self`, an instance of the class (a parameter `obj: Helper`,
   `cls()` in a class method, one the storing module keeps in its own attribute or global, as

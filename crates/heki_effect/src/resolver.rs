@@ -27,10 +27,11 @@ use heki_ir::{
 use heki_kb::{
     ArgFact, CopyDepth, EcosystemEntry, EffectiveEcosystemKb, ExecEffectKind, LiteralValue,
 };
-use heki_semantic::{ModuleImport, ScopeKind, SemanticModel};
+use heki_semantic::{ModuleImport, ScopeKind, SemanticModel, mangling};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
@@ -48,6 +49,7 @@ struct Indexes {
     subclasses: FxHashMap<String, Vec<String>>,
     property_names: FxHashSet<String>,
     returning_names: FxHashSet<String>,
+    alias_names: FxHashSet<String>,
     frozen: FxHashSet<String>,
     built: FxHashSet<String>,
     typed_dicts: FxHashSet<String>,
@@ -443,6 +445,10 @@ pub struct StoredElsewhere {
     /// (`obj.items += [x]`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_place: bool,
+    /// The module's code changes the object the name holds in place (`cfg.HANDLERS[kind] =
+    /// run`, `obj.items.append(x)`): its items are unknown.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub changed: bool,
 }
 
 /// A module's global and attribute types decided without what reading them gives, where they
@@ -606,6 +612,10 @@ pub struct NamedAttr {
     /// and `attr: T = field(default=NAME)` in a stdlib dataclass): the class attribute.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// The class body binds it to `staticmethod(NAME)` (`body` names `NAME`): reading the
+    /// attribute on an instance gives the object `NAME` names, never a bound method.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub body_static: bool,
     /// The class body annotates the attribute outside `ClassVar` and `InitVar`: a field, where
     /// a base the project does not define may build an `__init__` that stores the default.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -734,6 +744,13 @@ pub struct FunctionDecl {
     /// function, or reading the property, gives that object of the argument.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returns_param_attr: Option<(u8, String)>,
+    /// The fqn an import binds when every `return` of every definition returns what that import
+    /// binds, a module or an object of one ([`returned_import`]): an import in the function
+    /// (`from pkg import ops` then `return ops`, which breaks an import cycle) or one of the
+    /// module. Calling the function gives that object when it is a project module or the return
+    /// annotation names no class of its own (`-> ModuleType`, [`Self::declared_return`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returned_import: Option<Box<str>>,
     /// A `__getstate__` returning a state built only from the instance's own attributes
     /// (`stores::state_of_self`), which `__setstate__` restores.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -789,6 +806,31 @@ impl FunctionDecl {
 
     /// What calling it gives when its declaration says it returns `returned`: for an
     /// `async def` that no decorator replaces, the coroutine that awaiting gives `returned`.
+    /// The value calling it gives by the declarations: what the return annotation names (`Self`
+    /// left unbound), unless every return gives an object an import binds
+    /// ([`Self::returned_import`]) and that object is a project module or the annotation names
+    /// none of its own (`-> ModuleType`, none).
+    pub(crate) fn declared_return(&self, project: &ProjectDecls) -> Option<Ty> {
+        let declared = self
+            .return_type
+            .as_ref()
+            .and_then(|t| project.declared_ty(t))
+            .and_then(|t| t.bind_self(None));
+        let Some(fqn) = &self.returned_import else {
+            return declared;
+        };
+        let says_nothing = self
+            .return_type
+            .as_ref()
+            .is_none_or(|t| t.obj().is_some_and(|o| is_any_module(&o.class)));
+        let module = matches!(project.symbol(&project.object_named(fqn)), Symbol::Module);
+        if module || says_nothing {
+            Some(project.named_ty(fqn))
+        } else {
+            declared
+        }
+    }
+
     pub(crate) fn call_type(&self, returned: Ty) -> Ty {
         if self.called_as_defined && self.is_async && !self.is_generator {
             Ty::Coroutine(Box::new(returned))
@@ -851,6 +893,19 @@ pub struct ModuleDecls {
     /// Module global `name -> type` of the instance it holds (`client = httpx.Client()`): the
     /// join of every store of the module (`stores::record`).
     pub global_types: BTreeMap<String, Ty>,
+    /// Module globals bound once, by the module body, to a dict display whose keys are string
+    /// literals and some of whose values are functions or classes, that nothing changes in
+    /// place (`HANDLERS = {"create": create, "drop": drop}`): each key with its value's type
+    /// (`None`: unknown), in order (`stores::record`). `HANDLERS["create"]` is that value
+    /// ([`ProjectDecls::table`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tables: BTreeMap<String, Table>,
+    /// The annotations of the module globals that declare their items (`SLOTS: dict[str, Slot]`,
+    /// `HANDLERS: dict[str, Callable]`), by name: what another module changing the object in
+    /// place leaves of the type, whose items the values stored may refine
+    /// (`ProjectDecls::refine`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub declared_items: BTreeMap<String, Ty>,
     /// Module-level names bound once to another object by name (`_set = object.__setattr__`,
     /// `run = helpers.run`), or so after imports of the name that binding always replaces, by
     /// the fqn of that object ([`module_aliases`]): as a value or in
@@ -858,6 +913,12 @@ pub struct ModuleDecls {
     /// another module rebinds it ([`ProjectDecls::object_named`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub aliases: BTreeMap<String, String>,
+    /// Module-level `TypeVar`s with a bound or constraints (`C = TypeVar("C", bound=View)`), by
+    /// name, with the type an annotation naming them gives: the bound, or the union of the
+    /// constraints ([`type_vars`]). A value of the variable's type is one of those classes, in
+    /// the module or where an import names it ([`ProjectDecls::declared_ty`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub type_vars: BTreeMap<String, Ty>,
     /// The module globals the module stores or deletes (in its body, or in a function after
     /// `global name`) that are no runtime import, class, or function of it: its own objects,
     /// of a value heki may not know ([`Symbol::Unknown`]), never a builtin of the same name.
@@ -955,6 +1016,10 @@ pub struct ModuleDecls {
     pub unread: bool,
 }
 
+/// The entries of a table ([`ModuleDecls::tables`]): each string key with the type of its value
+/// (`None`: unknown), in order.
+pub type Table = Box<[(Box<str>, Option<Ty>)]>;
+
 /// How a module changes the `__path__` of a package, the directories Python finds the modules
 /// under the package in, which start as the package's own directory
 /// ([`ModuleDecls::path_changes`]).
@@ -1009,6 +1074,20 @@ pub enum StrValue {
 }
 
 impl ModuleDecls {
+    /// `path`, a qualname in this module, as the qualname of the class or function it names: a
+    /// class member reached by the mangled name its class holds it under (`Parser._Parser__run`)
+    /// is the definition written with the private name (`def __run`, qualname `Parser.__run`).
+    fn definition_path<'p>(&self, path: &'p str) -> Cow<'p, str> {
+        let defines = |q: &str| self.functions.contains_key(q) || self.classes.contains_key(q);
+        if defines(path) {
+            return Cow::Borrowed(path);
+        }
+        match mangling::source_path(path) {
+            Some(written) if defines(&written) => Cow::Owned(written),
+            _ => Cow::Borrowed(path),
+        }
+    }
+
     /// The fqn the runtime import of `name` binds, when nothing else in the module binds the
     /// name ([`Self::rebound_imports`]): reading it gives what the import bound.
     pub fn fixed_import(&self, name: &str) -> Option<&String> {
@@ -1050,6 +1129,8 @@ impl ModuleDecls {
             function.state_of_self = false;
         }
         out.global_types.clear();
+        out.tables.clear();
+        out.declared_items.clear();
         out.stores_elsewhere = None;
         out.store_fallbacks = None;
         out.global_capacities.clear();
@@ -1184,6 +1265,9 @@ impl ModuleDecls {
             ) && t.rsplit('.').next() == Some("Self")
             {
                 return Some(Ty::SelfType);
+            }
+            if let Some(bound) = self.type_vars.get(t) {
+                return Some(bound.clone());
             }
             return self
                 .resolve_type_head(t)
@@ -1632,6 +1716,10 @@ pub struct DeclKeys {
     /// parameter (`FunctionDecl::returns_param_attr`).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub returning_names: BTreeSet<String>,
+    /// Attribute names looked up among the names class bodies bind to a module-level name
+    /// (`ClassDecl::named_attrs`, [`ProjectDecls::class_alias`]).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub alias_names: BTreeSet<String>,
     /// Classes whose project-wide derived facts were looked up: whether they are frozen (a
     /// `dataclass_transform` or a base in another module can make them so) or a `TypedDict`.
     pub class_facts: BTreeSet<String>,
@@ -1657,6 +1745,7 @@ impl DeclKeys {
             && self.subclasses.is_empty()
             && self.property_names.is_empty()
             && self.returning_names.is_empty()
+            && self.alias_names.is_empty()
             && self.class_facts.is_empty()
             && self.protocols.is_empty()
             && self.grown_globals.is_empty()
@@ -1668,6 +1757,7 @@ impl DeclKeys {
         self.subclasses.extend(other.subclasses);
         self.property_names.extend(other.property_names);
         self.returning_names.extend(other.returning_names);
+        self.alias_names.extend(other.alias_names);
         self.class_facts.extend(other.class_facts);
         self.protocols.extend(other.protocols);
         self.grown_globals.extend(other.grown_globals);
@@ -1681,6 +1771,7 @@ impl DeclKeys {
             || !self.subclasses.is_disjoint(&other.subclasses)
             || !self.property_names.is_disjoint(&other.property_names)
             || !self.returning_names.is_disjoint(&other.returning_names)
+            || !self.alias_names.is_disjoint(&other.alias_names)
             || !self.class_facts.is_disjoint(&other.class_facts)
             || !self.protocols.is_disjoint(&other.protocols)
             || !self.grown_globals.is_disjoint(&other.grown_globals)
@@ -1774,6 +1865,10 @@ pub struct ProjectDecls {
     /// (`FunctionDecl::returns_param_attr`): a call or a read with another name hands out no
     /// such attribute, without resolving it.
     returning_names: FxHashSet<String>,
+    /// Names class bodies bind to a module-level name outside a field
+    /// (`ClassDecl::named_attrs`): an attribute with another name is no class alias
+    /// ([`Self::class_alias`]), without walking any class hierarchy.
+    alias_names: FxHashSet<String>,
     /// Every project class deriving (transitively) from `TypedDict`.
     typed_dicts: FxHashSet<String>,
     /// Every frozen project class (`Self::transform_builds`).
@@ -1988,6 +2083,7 @@ impl ProjectDecls {
         };
         out.property_names = differ(&before.property_names, &self.property_names);
         out.returning_names = differ(&before.returning_names, &self.returning_names);
+        out.alias_names = differ(&before.alias_names, &self.alias_names);
         out.class_facts = differ(&before.frozen, &self.frozen);
         out.class_facts.extend(differ(&before.built, &self.built));
         out.class_facts
@@ -2019,6 +2115,7 @@ impl ProjectDecls {
             subclasses: self.subclasses.clone(),
             property_names: self.property_names.clone(),
             returning_names: self.returning_names.clone(),
+            alias_names: self.alias_names.clone(),
             frozen: self.frozen.clone(),
             built: self.built.clone(),
             typed_dicts: self.typed_dicts.clone(),
@@ -2064,9 +2161,15 @@ impl ProjectDecls {
         let mut subclasses: FxHashMap<String, Vec<String>> = FxHashMap::default();
         let mut property_names = FxHashSet::default();
         let mut returning_names = FxHashSet::default();
+        let mut alias_names = FxHashSet::default();
         for m in out.modules.values() {
             for (qualname, class) in &m.classes {
                 let fqn = format!("{}.{qualname}", m.module_name);
+                for (attr, named) in &class.named_attrs {
+                    if named.body.is_some() && !named.annotated {
+                        alias_names.insert(attr.clone());
+                    }
+                }
                 for base in class.bases.iter().filter(|b| !is_unknown_base(b)) {
                     subclasses
                         .entry(out.canonical(base))
@@ -2075,12 +2178,14 @@ impl ProjectDecls {
                 }
             }
             for (qualname, f) in &m.functions {
-                let name = qualname.rsplit('.').next().unwrap_or(qualname);
+                // A method is read by the name its class holds it under (`_Parser__run` of
+                // `def __run`).
+                let name = mangling::member_name(qualname);
                 if f.reads_as_property() {
-                    property_names.insert(name.to_owned());
+                    property_names.insert(name.clone().into_owned());
                 }
                 if f.returns_param_attr.is_some() {
-                    returning_names.insert(name.to_owned());
+                    returning_names.insert(name.into_owned());
                 }
             }
         }
@@ -2091,6 +2196,7 @@ impl ProjectDecls {
         self.subclasses = subclasses;
         self.property_names = property_names;
         self.returning_names = returning_names;
+        self.alias_names = alias_names;
         self.typed_dicts = TYPED_DICT_BASES
             .iter()
             .flat_map(|b| self.subclasses_of(b))
@@ -2616,7 +2722,34 @@ impl ProjectDecls {
     /// through the module aliases it names (`pkg.model._set` for `_set = object.__setattr__` in
     /// `pkg.model`). The name itself stays the alias's: only values are the object.
     pub fn object_named(&self, fqn: &str) -> String {
-        self.chase(fqn, true)
+        let named = self.chase(fqn, true);
+        self.class_aliased(&named)
+            .map_or(named, |target| self.chase(&target, true))
+    }
+
+    /// The name `Class.attr` stands for when the class body defining `attr` binds it to one
+    /// (`Holder.REQUIRE` of `REQUIRE = staticmethod(require)`, [`Self::class_alias`]).
+    fn class_aliased(&self, fqn: &str) -> Option<String> {
+        let (class, attr) = fqn.rsplit_once('.')?;
+        let (m, qualname) = self.split_module(class)?;
+        // A function the class body defines is a method, no alias.
+        if !m.classes.contains_key(qualname)
+            || m.functions.contains_key(&format!("{qualname}.{attr}"))
+        {
+            return None;
+        }
+        self.class_alias(class, attr)
+            .map(|(named, _)| named.to_owned())
+    }
+
+    /// The value the name `fqn` gives: a project global holding an instance is that instance,
+    /// a module alias the object it names, anything else the object of that name.
+    pub(crate) fn named_ty(&self, fqn: &str) -> Ty {
+        let fqn = self.object_named(fqn);
+        match self.symbol(&fqn) {
+            Symbol::Global(t) => self.declared_ty(&t).unwrap_or(Ty::Ref(fqn)),
+            _ => Ty::Ref(fqn),
+        }
     }
 
     /// The value of the number or boolean constant `fqn` (`pkg.settings.PAUSE`), through
@@ -2905,13 +3038,14 @@ impl ProjectDecls {
         if m.unread {
             return Symbol::Unread;
         }
-        if let Some(c) = m.classes.get(rest) {
+        let definition = m.definition_path(rest);
+        if let Some(c) = m.classes.get(definition.as_ref()) {
             return Symbol::Class(c);
         }
-        if let Some(f) = m.functions.get(rest) {
+        if let Some(f) = m.functions.get(definition.as_ref()) {
             let key = FuncKey {
                 module: m.module_name.clone(),
-                qualname: rest.to_owned(),
+                qualname: definition.into_owned(),
             };
             return Symbol::Function(key, f);
         }
@@ -3827,7 +3961,8 @@ impl ProjectDecls {
     /// The method `name` defined directly in project class `class`.
     fn own_method(&self, class: &str, name: &str) -> Option<FuncKey> {
         let (m, rest) = self.split_module(class)?;
-        let qualname = format!("{rest}.{name}");
+        let member = format!("{rest}.{name}");
+        let qualname = m.definition_path(&member).into_owned();
         m.functions.contains_key(&qualname).then(|| FuncKey {
             module: m.module_name.clone(),
             qualname,
@@ -3984,8 +4119,20 @@ impl ProjectDecls {
     /// such a type is unknown. A name below a module heki does not see (a compiled submodule of a
     /// project package) stays as it is. A class object (`type[C]`) is [`Self::class_object`].
     pub(crate) fn declared_ty(&self, ty: &Ty) -> Option<Ty> {
+        self.declared_ty_with(ty, true)
+    }
+
+    /// [`Self::declared_ty`]; with `type_vars`, a project `TypeVar` an import names is its bound
+    /// ([`ModuleDecls::type_vars`]), whose own names are taken as they are.
+    fn declared_ty_with(&self, ty: &Ty, type_vars: bool) -> Option<Ty> {
         if let Ty::Class(class) = ty {
             return self.class_object(&self.object_named(class));
+        }
+        if type_vars
+            && let Some(o) = ty.obj()
+            && let Some(bound) = self.type_var_bound(&o.class)
+        {
+            return self.declared_ty_with(bound, false);
         }
         ty.map_members(|o| {
             let class = self.object_named(&o.class);
@@ -3995,9 +4142,16 @@ impl ProjectDecls {
             {
                 return None;
             }
-            let args = o.args.map_elems(|t| self.declared_ty(t));
+            let args = o.args.map_elems(|t| self.declared_ty_with(t, type_vars));
             Some(crate::types::Obj { class, args })
         })
+    }
+
+    /// The type a value of the project `TypeVar` named `fqn` has ([`ModuleDecls::type_vars`]).
+    fn type_var_bound(&self, fqn: &str) -> Option<&Ty> {
+        let named = self.object_named(fqn);
+        let (m, rest) = self.split_module(&named)?;
+        m.type_vars.get(rest)
     }
 
     /// The type of a class object that is the canonical class `class` or one of its subclasses
@@ -4023,9 +4177,41 @@ impl ProjectDecls {
         }
         declared.obj().is_some_and(|d| {
             of_any_class(&d.class)
+                || (is_any_callable(&d.class) && t.obj().is_none())
                 || t.obj()
                     .is_some_and(|i| i.class != d.class && self.is_subclass(&i.class, &d.class))
         })
+    }
+
+    /// The declared type `declared` with what the inferred `t` says beyond it: `t` when it is
+    /// narrower ([`Self::narrower`]); for an instance of the declared container class, each
+    /// item slot of `t` that is narrower than the declared one or that the declaration leaves
+    /// unknown (`dict[str, Callable]` declared, a display of functions stored); else
+    /// `declared`.
+    pub(crate) fn refine(&self, t: &Ty, declared: &Ty) -> Ty {
+        if self.narrower(t, declared) {
+            return t.clone();
+        }
+        let (Some(i), Some(d)) = (t.obj(), declared.obj()) else {
+            return declared.clone();
+        };
+        if i.class != d.class {
+            return declared.clone();
+        }
+        let slot = |a: &Elem, b: &Elem| match (a, b) {
+            (Elem::Of(x), Elem::Of(y)) if self.narrower(x, y) => a.clone(),
+            (Elem::Of(_), Elem::Unknown) => a.clone(),
+            _ => b.clone(),
+        };
+        let args = match (&i.args, &d.args) {
+            (Args::Items(a), Args::Items(b)) => Args::Items(Box::new(slot(a, b))),
+            (Args::Map(ka, va), Args::Map(kb, vb)) => {
+                Args::Map(Box::new(slot(ka, kb)), Box::new(slot(va, vb)))
+            }
+            (a, Args::None) => a.clone(),
+            (_, b) => b.clone(),
+        };
+        Ty::container(&d.class, args)
     }
 
     /// The project functions `name` names on an instance of the canonical project class
@@ -4242,6 +4428,46 @@ impl ProjectDecls {
     /// first (heki does not know what it binds), or none binds it.
     pub fn function_taken(&self, class: &str, name: &str) -> Option<FuncKey> {
         self.function_taken_along(&self.mro(class), name)
+    }
+
+    /// The name reading `attr` on the class `class` or on one of its instances finds, when the
+    /// first class along the MRO defining it binds it in its body once, to a module-level name
+    /// (`ClassDecl::named_attrs`: `factory = Scope`, `REQUIRE: ClassVar[...] =
+    /// staticmethod(require)`), with whether the body wraps it in `staticmethod`. None of the
+    /// module's code may store the attribute on the class or an instance (`rebound_attrs`,
+    /// what `stores::record` decides, attributes stored under names heki cannot read), another
+    /// module may rebind it, or a hook run on the read (`__getattribute__`, a metaclass heki
+    /// does not know); a field the class body annotates is the instance's own.
+    pub(crate) fn class_alias(&self, class: &str, attr: &str) -> Option<(&str, bool)> {
+        self.read(|k| note(&mut k.alias_names, attr));
+        if !self.alias_names.contains(attr) {
+            return None;
+        }
+        let class = self.canonical(class);
+        for c in self.mro(&class) {
+            self.read(|k| note(&mut k.class_facts, &c));
+            let decl = self.class(&c)?;
+            if decl.rebound_attrs.contains(attr) {
+                return None;
+            }
+            if !decl.members.contains(attr) {
+                continue;
+            }
+            let named = decl.named_attrs.get(attr)?;
+            let body = named.body.as_deref()?;
+            let stored =
+                self.attr_store(&c, decl, attr).is_some() || self.stores_any_attr(&c, decl);
+            if named.annotated || !named.held.is_empty() || stored {
+                return None;
+            }
+            if self.rebound_elsewhere(&format!("{c}.{attr}"))
+                || self.attr_read(&class, attr).runs_hook(false)
+            {
+                return None;
+            }
+            return Some((body, named.body_static));
+        }
+        None
     }
 
     /// [`Self::function_taken`] along `mro`: an MRO, or the part of one after a class (what
@@ -4822,6 +5048,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
         }
     }
     decls.aliases = module_aliases(input, &decls);
+    decls.type_vars = type_vars(input, &decls);
     let stores = GlobalStores::of(&input.ir.functions);
     decls.unknown_globals = unknown_globals(&stores, &decls);
     let rebound = rebound_imports(input, &stores, &decls);
@@ -5008,6 +5235,13 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     }
     // Definitions sharing a qualname (a property's setter, conditional definitions) must agree.
     let mut returned_attrs: FxHashMap<&str, Option<(u8, String)>> = FxHashMap::default();
+    let mut returned_imports: FxHashMap<&str, Option<Box<str>>> = FxHashMap::default();
+    let import_targets: FxHashMap<Span, String> = semantic
+        .imports
+        .iter()
+        .filter(|imp| !imp.in_type_checking)
+        .filter_map(|imp| Some((imp.span, import_target(imp, input)?)))
+        .collect();
     for f in input
         .ir
         .functions
@@ -5023,6 +5257,15 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                 }
             })
             .or_insert(returned);
+        let imported = returned_import(f, &decls, &import_targets);
+        returned_imports
+            .entry(&f.qualname)
+            .and_modify(|r| {
+                if *r != imported {
+                    *r = None;
+                }
+            })
+            .or_insert(imported);
     }
     // The return annotation of a property's getter (its setter shares the qualname).
     let mut getter_types: FxHashMap<&str, Ty> = FxHashMap::default();
@@ -5096,6 +5339,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             is_abstract: crate::is_abstract_method(&f.decorators),
             property_type: getter_types.get(f.qualname.as_str()).cloned(),
             returns_param_attr: returned_attrs[f.qualname.as_str()].clone(),
+            returned_import: returned_imports[f.qualname.as_str()].clone(),
             state_of_self: false,
             captured_params: captured_params
                 .get(f.qualname.as_str())
@@ -5702,6 +5946,56 @@ fn returned_param_attr(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Strin
 
 /// [`ModuleDecls::unknown_globals`]: the globals the module stores or deletes (`stores`) that are
 /// no runtime import, class, or function of it.
+/// [`FunctionDecl::returned_import`] of `f`: every `return` gives what one import binds, an
+/// import of the function (`import_targets`, by the span of the import) or a module-level one
+/// nothing rebinds. The function's decorators keep what its body returns: those that keep
+/// calling it as defined, and a `functools` cache, which hands out the object a call returned.
+fn returned_import(
+    f: &IrFunction,
+    decls: &ModuleDecls,
+    import_targets: &FxHashMap<Span, String>,
+) -> Option<Box<str>> {
+    if !matches!(f.kind, FunctionKind::Sync) || is_generator_function(f) {
+        return None;
+    }
+    let keeps_result = |d: &String| {
+        decorators::keeps(decorators::last_name(d), |k| k.keeps_call)
+            || matches!(
+                decls.decorator_symbol(d).as_deref(),
+                Some("functools.cache" | "functools.lru_cache")
+            )
+    };
+    if !f.decorators.iter().all(keeps_result) {
+        return None;
+    }
+    let shape = FnShape::new(f);
+    let mut out: Option<String> = None;
+    for bb in &f.blocks {
+        let Terminator::Return(value) = bb.terminator else {
+            continue;
+        };
+        let imported = |var: VarId| {
+            let inst = shape.inst(shape.copy_root(var))?;
+            match &inst.kind {
+                InstKind::Import { .. } => import_targets.get(&inst.span),
+                InstKind::LoadGlobal { name, .. } => decls.fixed_import(name),
+                _ => None,
+            }
+        };
+        let root = shape.copy_root(value?);
+        let target = match shape.inst(root).map(|i| &i.kind) {
+            // `import pkg.ops` binds `pkg`; `return pkg.ops` gives the submodule.
+            Some(InstKind::AttrLoad { obj, attr, .. }) => format!("{}.{attr}", imported(*obj)?),
+            _ => imported(root)?.clone(),
+        };
+        if out.as_ref().is_some_and(|o| *o != target) {
+            return None;
+        }
+        out = Some(target);
+    }
+    out.map(Box::from)
+}
+
 fn unknown_globals(stores: &GlobalStores<'_>, decls: &ModuleDecls) -> BTreeSet<String> {
     stores
         .names()
@@ -5712,6 +6006,112 @@ fn unknown_globals(stores: &GlobalStores<'_>, decls: &ModuleDecls) -> BTreeSet<S
         })
         .map(str::to_owned)
         .collect()
+}
+
+/// [`ModuleDecls::type_vars`]: the module-level names bound once, by the module body, to a
+/// `TypeVar(...)` call (`typing` or `typing_extensions`) whose `bound=` or constraints the
+/// module's names resolve to classes. A bound or a constraint is a name, an attribute of one, or
+/// the string of an annotation (`bound="ContextView"`); anything else leaves the variable
+/// unbounded, and so does a variable a star import, `exec`, or `globals()` may rebind.
+fn type_vars(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<String, Ty> {
+    let mut out = BTreeMap::new();
+    let Some(body) = input.ir.functions.iter().find(|f| f.is_module_body) else {
+        return out;
+    };
+    if input.ir.constants.dynamic || input.ir.has_star_import {
+        return out;
+    }
+    let stores = GlobalStores::of(&input.ir.functions);
+    let shape = FnShape::new(body);
+    let text = |var: VarId| annotation_text(&shape, var);
+    for inst in body.blocks.iter().flat_map(|b| &b.insts) {
+        let InstKind::StoreGlobal { name, value } = &inst.kind else {
+            continue;
+        };
+        if !stores.once(name) {
+            continue;
+        }
+        let (callee, args, kwargs) = match shape.inst(shape.copy_root(*value)).map(|i| &i.kind) {
+            Some(InstKind::Call {
+                callee_var: Some(c),
+                args,
+                kwargs,
+                star_from: None,
+                ..
+            }) => (text(*c), args, kwargs),
+            Some(InstKind::MethodCall {
+                recv,
+                method,
+                args,
+                kwargs,
+                star_from: None,
+                ..
+            }) => (text(*recv).map(|r| format!("{r}.{method}")), args, kwargs),
+            _ => continue,
+        };
+        let is_type_var = callee
+            .and_then(|c| decls.resolve_dotted(&c, false))
+            .is_some_and(|c| matches!(c.as_str(), "typing.TypeVar" | "typing_extensions.TypeVar"));
+        if !is_type_var {
+            continue;
+        }
+        let bound = kwargs
+            .iter()
+            .find(|(k, _)| k.as_deref() == Some("bound"))
+            .map(|(_, v)| *v);
+        let ty = match (bound, args.get(1..).unwrap_or_default()) {
+            (Some(bound), []) => text(bound).and_then(|t| decls.resolve_annotation_ty(&t)),
+            (None, constraints) if !constraints.is_empty() => {
+                let texts: Option<Vec<String>> = constraints.iter().map(|c| text(*c)).collect();
+                texts.and_then(|ts| {
+                    let parts: Vec<&str> = ts.iter().map(String::as_str).collect();
+                    decls.union_annotation(&parts)
+                })
+            }
+            _ => None,
+        };
+        if let Some(ty) = ty {
+            out.insert(name.clone(), ty);
+        }
+    }
+    out
+}
+
+/// The annotation text the module-body variable `var` holds or names: a string literal, a name
+/// the body binds or reads (an import, a class, a global), or an attribute of one
+/// (`views.ContextView`), at most [`MAX_ALIAS_SEGMENTS`] segments.
+fn annotation_text(shape: &FnShape<'_>, var: VarId) -> Option<String> {
+    let mut attrs: Vec<&str> = Vec::new();
+    let mut cur = var;
+    let named = |base: &str, attrs: &[&str]| {
+        let mut text = base.to_owned();
+        for attr in attrs.iter().rev() {
+            text.push('.');
+            text.push_str(attr);
+        }
+        text
+    };
+    for _ in 0..MAX_ALIAS_CHASE + MAX_ALIAS_SEGMENTS {
+        if let Some(name) = shape.f.var_name(cur).filter(|n| !n.starts_with('.')) {
+            return Some(named(name, &attrs));
+        }
+        match &shape.inst(cur)?.kind {
+            InstKind::Const {
+                literal: heki_ir::ConstLiteral::Str(s),
+                ..
+            } if attrs.is_empty() => return Some(s.to_string()),
+            InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
+                return Some(named(name, &attrs));
+            }
+            InstKind::Copy { src, .. } => cur = *src,
+            InstKind::AttrLoad { obj, attr, .. } if attrs.len() < MAX_ALIAS_SEGMENTS => {
+                attrs.push(attr);
+                cur = *obj;
+            }
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// [`ModuleDecls::rebound_imports`]: the import's own store is one of the module's stores of
@@ -6915,6 +7315,8 @@ pub enum Val {
     Super(String),
     /// An instance of one of two or three classes (sorted).
     Union(Vec<String>),
+    /// One of several named objects ([`Ty::OneOf`]).
+    OneOf(Vec<String>),
 }
 
 /// A receiver or callee as call resolution sees it, borrowed from a [`Val`].
@@ -6928,13 +7330,17 @@ pub(crate) enum Recv<'v> {
 
 impl Recv<'_> {
     /// Whether the receiver says nothing of the code a call on it runs: a value of `Any` or
-    /// `object` ([`of_any_class`]) or of `Callable` ([`is_any_callable`]), or a name nothing heki
-    /// sees binds ([`is_unbound_name`]: one a star import of a library binds, or none, and the
-    /// call raises `NameError`). Its library name (`typing.Any.save`, `builtins.undefined`) is
-    /// no library's function, so the call is unresolved, with effects heki does not know.
+    /// `object` ([`of_any_class`]), of `Callable` ([`is_any_callable`]), or of
+    /// `types.ModuleType` ([`is_any_module`]), or a name nothing heki sees binds
+    /// ([`is_unbound_name`]: one a star import of a library binds, or none, and the call raises
+    /// `NameError`). Its library name (`typing.Any.save`, `types.ModuleType.run`,
+    /// `builtins.undefined`) is no library's function, so the call is unresolved, with effects
+    /// heki does not know.
     fn says_nothing(self) -> bool {
         match self {
-            Recv::Inst(class) | Recv::Class(class) => of_any_class(class) || is_any_callable(class),
+            Recv::Inst(class) | Recv::Class(class) => {
+                of_any_class(class) || is_any_callable(class) || is_any_module(class)
+            }
             Recv::Ref(fqn) => is_unbound_name(fqn),
             Recv::Super(_) => false,
         }
@@ -6948,6 +7354,12 @@ pub(crate) fn of_any_class(class: &str) -> bool {
         class,
         "typing.Any" | "typing_extensions.Any" | "builtins.object"
     )
+}
+
+/// Whether a value of `class` may be any module: `types.ModuleType` says nothing of the names
+/// the module binds.
+pub(crate) fn is_any_module(class: &str) -> bool {
+    class == "types.ModuleType"
 }
 
 /// Whether a value of `class` may be any function: `Callable` says nothing of the function.
@@ -6979,7 +7391,7 @@ impl Val {
             Val::Inst(c) => Some(Recv::Inst(c)),
             Val::Class(c) => Some(Recv::Class(c)),
             Val::Super(c) => Some(Recv::Super(c)),
-            Val::Union(_) => None,
+            Val::Union(_) | Val::OneOf(_) => None,
         }
     }
 }
@@ -7027,6 +7439,33 @@ fn union_targets(
     }
 }
 
+/// The targets of a call on a value that is one of the named objects `fqns` (`each` resolves it
+/// on one): the project functions of all, when they bind the receiver alike, or the one external
+/// function they all resolve it to; anything else leaves the call unresolved.
+fn named_targets(fqns: &[String], each: impl Fn(&str) -> Callee) -> Callee {
+    let mut out: Option<Callee> = None;
+    for fqn in fqns {
+        out = Some(match (out, each(fqn)) {
+            (None, callee) => callee,
+            (Some(Callee::Project(mut keys, binds)), Callee::Project(more, b)) if binds == b => {
+                for k in more {
+                    if !keys.contains(&k) {
+                        keys.push(k);
+                    }
+                }
+                if keys.len() > CHA_CANDIDATE_LIMIT {
+                    return Callee::TooMany;
+                }
+                Callee::Project(keys, binds)
+            }
+            (Some(Callee::External(a)), Callee::External(b)) if a == b => Callee::External(a),
+            (Some(Callee::TooMany), _) | (_, Callee::TooMany) => return Callee::TooMany,
+            _ => return Callee::Unresolved,
+        });
+    }
+    out.unwrap_or(Callee::Unresolved)
+}
+
 impl Ty {
     /// The value consumers see: the class of an instance (the classes of a union), the fqn of a
     /// named object (none for a partial object).
@@ -7037,6 +7476,7 @@ impl Ty {
             Ty::Inst(o) => Some(Val::Inst(o.class.clone())),
             Ty::Super(c) => Some(Val::Super(c.clone())),
             Ty::Union(os) => Some(Val::Union(os.iter().map(|o| o.class.clone()).collect())),
+            Ty::OneOf(fqns) => Some(Val::OneOf(fqns.clone())),
             Ty::SelfType | Ty::Partial(_) | Ty::Coroutine(_) => None,
         }
     }
@@ -7127,7 +7567,10 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     classes: BTreeMap::new(),
     functions: BTreeMap::new(),
     global_types: BTreeMap::new(),
+    tables: BTreeMap::new(),
+    declared_items: BTreeMap::new(),
     aliases: BTreeMap::new(),
+    type_vars: BTreeMap::new(),
     unknown_globals: BTreeSet::new(),
     rebound_imports: None,
     small_globals: BTreeMap::new(),
@@ -7354,11 +7797,7 @@ impl<'a> TypeCtx<'a> {
     /// A named fqn: a project global holding an instance becomes that instance, a module
     /// alias the object it names.
     pub(crate) fn named(&self, fqn: &str) -> Ty {
-        let fqn = self.project.object_named(fqn);
-        match self.project.symbol(&fqn) {
-            Symbol::Global(t) => self.project.declared_ty(&t).unwrap_or(Ty::Ref(fqn)),
-            _ => Ty::Ref(fqn),
-        }
+        self.project.named_ty(fqn)
     }
 
     /// What calling the name `fqn` calls ([`ProjectDecls::symbol`]): a module global that a
@@ -7383,12 +7822,7 @@ impl<'a> TypeCtx<'a> {
             Symbol::Function(_, decl) => {
                 return self
                     .declared_result(fqn, arg)
-                    .or_else(|| {
-                        decl.return_type
-                            .as_ref()
-                            .and_then(|t| self.project.declared_ty(t))
-                            .and_then(|t| t.bind_self(None))
-                    })
+                    .or_else(|| decl.declared_return(self.project))
                     .map(|t| decl.call_type(t));
             }
             Symbol::Module | Symbol::Global(_) | Symbol::Unknown | Symbol::Unread => return None,
@@ -7413,6 +7847,9 @@ impl<'a> TypeCtx<'a> {
 
     /// Resolve calling a value (`f(...)`).
     pub fn resolve_call(&self, callee: Option<&Val>) -> Callee {
+        if let Some(Val::OneOf(fqns)) = callee {
+            return named_targets(fqns, |f| self.call_targets(Some(Recv::Ref(f))));
+        }
         match self.dispatch_classes(callee) {
             Some(classes) => union_targets(
                 classes,
@@ -7430,7 +7867,7 @@ impl<'a> TypeCtx<'a> {
         match value? {
             Val::Union(classes) => Some(classes),
             Val::Inst(class) => self.project.protocol_implementers(class),
-            Val::Ref(_) | Val::Class(_) | Val::Super(_) => None,
+            Val::Ref(_) | Val::Class(_) | Val::Super(_) | Val::OneOf(_) => None,
         }
     }
 
@@ -7588,12 +8025,17 @@ impl<'a> TypeCtx<'a> {
             Some(Val::Inst(class)) => self
                 .project
                 .instance_targets_complete(class, "__call__", callee, self.kb),
-            Some(Val::Union(_) | Val::Class(_) | Val::Super(_)) | None => false,
+            Some(Val::Union(_) | Val::Class(_) | Val::Super(_) | Val::OneOf(_)) | None => false,
         }
     }
 
     /// Resolve `recv.method(...)`.
     pub fn resolve_method(&self, recv: Option<&Val>, method: &str) -> Callee {
+        if let Some(Val::OneOf(fqns)) = recv {
+            return named_targets(fqns, |f| {
+                self.method_call_targets(Some(Recv::Ref(f)), method)
+            });
+        }
         match self.dispatch_classes(recv) {
             Some(classes) => union_targets(
                 classes,
@@ -7605,7 +8047,17 @@ impl<'a> TypeCtx<'a> {
     }
 
     pub(crate) fn method_call_targets(&self, recv: Option<Recv<'_>>, method: &str) -> Callee {
-        match recv.filter(|r| !r.says_nothing()) {
+        let recv = recv.filter(|r| !r.says_nothing());
+        if let Some(callee) = recv.and_then(|r| self.alias_call_targets(r, method)) {
+            return callee;
+        }
+        self.defined_method_targets(recv, method)
+    }
+
+    /// [`Self::method_call_targets`] by the methods the classes define, past the class bodies
+    /// binding `method` to a name.
+    fn defined_method_targets(&self, recv: Option<Recv<'_>>, method: &str) -> Callee {
+        match recv {
             Some(Recv::Ref(fqn)) => {
                 if self.project.is_project_class(fqn) {
                     return self.through_class(self.project.class_targets(fqn, method, self.kb));
@@ -7631,6 +8083,86 @@ impl<'a> TypeCtx<'a> {
             }
             None => Callee::Unresolved,
         }
+    }
+
+    /// The targets of `recv.method(...)` when the class body defining `method` binds it to a
+    /// name ([`ProjectDecls::class_alias`]), on every class the receiver may be: a class object
+    /// is exactly its class, an instance or `cls` also a project subclass. Calling the named
+    /// object calls it as it is, except a function read on an instance outside `staticmethod`,
+    /// a bound method, which binds the instance first. A class finding a method of the name, or
+    /// none, runs what the methods give ([`Self::defined_method_targets`]). `None` when no class
+    /// binds the name to a name; unresolved when the targets bind differently; too many past
+    /// [`DISPATCH_CLASS_LIMIT`] classes.
+    fn alias_call_targets(&self, recv: Recv<'_>, method: &str) -> Option<Callee> {
+        let (class, on_instance, family) = match recv {
+            Recv::Ref(class) if self.project.is_project_class(class) => (class, false, false),
+            Recv::Class(class) => (class, false, true),
+            Recv::Inst(class) => (class, true, true),
+            Recv::Ref(_) | Recv::Super(_) => return None,
+        };
+        let mut classes = vec![self.project.canonical(class)];
+        if family {
+            classes.extend(self.project.subclasses_of(class));
+        }
+        let found: Vec<Option<(&str, bool)>> = classes
+            .iter()
+            .map(|c| self.project.class_alias(c, method))
+            .collect();
+        if found.iter().all(Option::is_none) {
+            return None;
+        }
+        // As for the implementations of a method (`instance_targets_complete`).
+        if classes.len() > DISPATCH_CLASS_LIMIT {
+            return Some(Callee::TooMany);
+        }
+        let mut out: Option<Callee> = found
+            .iter()
+            .any(Option::is_none)
+            .then(|| self.defined_method_targets(Some(recv), method));
+        for (named, is_static) in found.into_iter().flatten() {
+            let named = self.project.object_named(named);
+            let callee = match self.called_symbol(&named) {
+                Symbol::Function(key, _) if on_instance && !is_static => {
+                    Callee::Project(vec![key], true)
+                }
+                // A library function read on an instance may bind it (a Python function) or
+                // not (a builtin).
+                Symbol::External if on_instance && !is_static => Callee::Unresolved,
+                _ => self.call_targets(Some(Recv::Ref(&named))),
+            };
+            out = Some(match (out, callee) {
+                (None, callee) => callee,
+                (Some(Callee::Project(mut keys, b)), Callee::Project(more, b2)) if b == b2 => {
+                    for k in more {
+                        if !keys.contains(&k) {
+                            keys.push(k);
+                        }
+                    }
+                    if keys.len() > CHA_CANDIDATE_LIMIT {
+                        return Some(Callee::TooMany);
+                    }
+                    Callee::Project(keys, b)
+                }
+                (Some(Callee::External(a)), Callee::External(b)) if a == b => Callee::External(a),
+                _ => return Some(Callee::Unresolved),
+            });
+        }
+        out
+    }
+
+    /// What reading `attr` on an instance of `class` gives when the class body defining it binds
+    /// it to a name ([`ProjectDecls::class_alias`]): the named object, unless it is a function
+    /// outside `staticmethod`, which the read binds to the instance (`Some(None)`, a bound
+    /// method); `None` for no such attribute.
+    pub(crate) fn instance_alias(&self, class: &str, attr: &str) -> Option<Option<Ty>> {
+        let (named, is_static) = self.project.class_alias(class, attr)?;
+        let named = self.project.object_named(named);
+        let binds = !is_static
+            && matches!(
+                self.called_symbol(&named),
+                Symbol::Function(..) | Symbol::External | Symbol::Unknown | Symbol::Unread
+            );
+        Some((!binds).then(|| self.named(&named)))
     }
 
     /// Whether `recv.attr(...)` calls the value of a property ([`Self::property_value`]) on some
@@ -7697,7 +8229,9 @@ impl<'a> TypeCtx<'a> {
                 .project
                 .protocol_implementers(class)
                 .unwrap_or(std::slice::from_ref(class)),
-            Some(Val::Ref(_) | Val::Class(_) | Val::Super(_)) | None => return true,
+            Some(Val::Ref(_) | Val::Class(_) | Val::Super(_) | Val::OneOf(_)) | None => {
+                return true;
+            }
         };
         classes.iter().all(|class| {
             let key = (class.clone(), name.to_owned());
@@ -7731,7 +8265,7 @@ impl<'a> TypeCtx<'a> {
         match recv? {
             Val::Inst(class) => self.project.property_targets(class, attr, false),
             Val::Super(class) => self.project.property_targets(class, attr, true),
-            Val::Union(_) | Val::Ref(_) | Val::Class(_) => None,
+            Val::Union(_) | Val::Ref(_) | Val::Class(_) | Val::OneOf(_) => None,
         }
     }
 
@@ -7756,12 +8290,7 @@ impl<'a> TypeCtx<'a> {
             Callee::Project(keys, _) if keys.len() == 1 => {
                 let decl = self.project.function_decl(&keys[0])?;
                 self.declared_result(&keys[0].fqn(), arg)
-                    .or_else(|| {
-                        decl.return_type
-                            .as_ref()
-                            .and_then(|t| self.project.declared_ty(t))
-                            .and_then(|t| t.bind_self(None))
-                    })
+                    .or_else(|| decl.declared_return(self.project))
                     .map(|t| decl.call_type(t))
             }
             Callee::External(fqn) => self.call_result(fqn, arg),
@@ -7910,6 +8439,22 @@ impl<'a> TypeCtx<'a> {
         types: &FxHashMap<VarId, Val>,
     ) -> Option<String> {
         self.str_constant_with(var, &|v| shape.inst(v), types)
+    }
+
+    /// The value the item `key` of the table `read` reads gives ([`ProjectDecls::table`]):
+    /// `Some(None)` for an entry of unknown value, `None` when `read` reads no table or the
+    /// table has no such key (reading it raises `KeyError`).
+    pub(crate) fn table_value(&self, read: GlobalRead<'_>, key: &str) -> Option<Option<Ty>> {
+        let fqn = match read {
+            GlobalRead::Own(name) => match self.module.imports.get(name) {
+                Some(_) => self.module.fixed_import(name)?.clone(),
+                None => format!("{}.{name}", self.module_name),
+            },
+            GlobalRead::Other(fqn) => fqn,
+        };
+        let entries = self.project.table(&fqn)?;
+        let (_, value) = entries.iter().find(|(k, _)| &**k == key)?;
+        Some(value.as_ref().and_then(|t| self.project.declared_ty(t)))
     }
 
     /// [`ProjectDecls::catalog`] of this module's project.
