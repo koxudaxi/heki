@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// How many times smaller the shape is that a shape's steps are compared with. Linear walks take
 /// `SCALE` times the steps on the full shape, quadratic ones `SCALE²` times.
@@ -40,7 +40,7 @@ const MIN_BOUNDED_STEPS: u64 = 4096;
 
 /// The output of `heki <args>` in the project, which must exit with one of `codes`.
 fn run(p: &Project, args: &[&str], codes: &[i32]) -> Vec<u8> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
+    let mut child = common::heki_command()
         .args(args)
         .current_dir(&p.dir)
         .stdout(Stdio::piped())
