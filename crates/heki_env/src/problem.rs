@@ -156,7 +156,8 @@ impl Setting {
 }
 
 /// What a command could not do, and how to fix it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, thiserror::Error)]
+#[error("{message}")]
 pub struct Problem {
     pub message: String,
     /// Where the cause is, when it is in a file.
@@ -248,14 +249,6 @@ impl Problem {
         self
     }
 }
-
-impl std::fmt::Display for Problem {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for Problem {}
 
 /// An error that says what to do about it.
 pub trait Explain {

@@ -202,6 +202,15 @@ fn unknown_rules_offer_the_nearest_ones() {
             "  = help: did you mean `MUT109` (write-without-invalidation)?",
         ],
     );
+    // Nothing is close to `NOPE1`: no guess, only the way to list the rules.
+    let (code, _, stderr) = p.heki(&["check", "--select", "NOPE1"]);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("unknown rule selector `NOPE1` in `--select`"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("did you mean"), "{stderr}");
+    assert!(stderr.contains(all), "{stderr}");
     for (config, lines) in [
         (
             "[tool.heki.lint]\nignore = [\"EFF1O1\"]\n",
@@ -407,8 +416,7 @@ fn file_errors_say_what_to_do_with_the_file() {
         ],
     );
     let baselines = docs("adoption/#ratchet-baselines");
-    let rewrite =
-        "  = help: `heki check --update-baseline` writes it again from the current reports";
+    let rewrite = "  = help: repair the file, or delete or rename it and record it again with `heki check --update-baseline`";
     p.write("b.toml", "version = 9\n");
     fails_with(
         &p,
@@ -423,6 +431,15 @@ fn file_errors_say_what_to_do_with_the_file() {
     fails_with(
         &p,
         &["check", "--baseline", "b.toml"],
+        &[
+            "error: b.toml: invalid baseline: invalid array; expected `]`",
+            rewrite,
+        ],
+    );
+    // Updating reads the baseline first, so the repair advice is the only way out.
+    fails_with(
+        &p,
+        &["check", "--baseline", "b.toml", "--update-baseline"],
         &[
             "error: b.toml: invalid baseline: invalid array; expected `]`",
             rewrite,

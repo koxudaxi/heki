@@ -638,10 +638,10 @@ impl FileError {
     /// `path:line:col: message` (`path: message` without a position), with the path written as
     /// `path_text` (the caller's choice: `heki check` writes it relative to the working directory).
     pub fn report(&self, path_text: &str) -> String {
-        match self.position {
-            Some((line, col)) => format!("{path_text}:{line}:{col}: {}", self.message),
-            None => format!("{path_text}: {}", self.message),
-        }
+        let at = self
+            .position
+            .map_or_else(String::new, |(line, col)| format!(":{line}:{col}"));
+        format!("{path_text}{at}: {}", self.message)
     }
 }
 

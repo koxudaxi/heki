@@ -1806,8 +1806,7 @@ mod docs_links {
                     .collect();
                 assert!(
                     anchors.iter().any(|a| a == fragment),
-                    "{url}: no heading of {} has the anchor `{fragment}`",
-                    file.display()
+                    "{url}: no heading of `{path}` has the anchor `{fragment}`"
                 );
             }
         }
