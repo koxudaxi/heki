@@ -907,7 +907,7 @@ pub(crate) fn write_hits<'t>(
 }
 
 /// `Class.attr["key"]` / `Class.attr['key']` -> (`Class.attr`, `key`).
-fn split_item(text: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_item(text: &str) -> Option<(&str, &str)> {
     let quote = match text.as_bytes() {
         [.., q @ (b'"' | b'\''), b']'] => char::from(*q),
         _ => return None,

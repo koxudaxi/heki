@@ -10,7 +10,7 @@
 use crate::inspect::ContractRole;
 use crate::mut_rules::{
     Allowance, AllowanceKeys, FunctionMatcher, FunctionMatchers, ReadOnlyProducers, References,
-    patterns, split_arguments,
+    patterns, split_arguments, split_item,
 };
 use crate::{
     CheckContext, DottedPattern, RuleConfigError, RuleSelection, last_name, split_last_dot,
@@ -542,6 +542,113 @@ pub fn recommend_facts(selection: &RuleSelection) -> OptInFacts {
         blind_spots: true,
         ..opt_in_facts(selection)
     }
+}
+
+/// A name a contract of the configuration gives project definitions by, with the patterns the
+/// rules compile from it.
+pub(crate) struct ConfiguredName<'c> {
+    /// The contract's kind and name, and the key the name is configured under.
+    pub kind: &'static str,
+    pub contract: &'c str,
+    pub key: &'static str,
+    pub text: &'c str,
+    /// The name without its item key or argument list, then the part of that before its last
+    /// dot: the class or module holding a member ([`FunctionMatcher`], `parse_targets`).
+    pub patterns: Vec<DottedPattern>,
+}
+
+/// Every name the contracts of `config` give project functions, classes, attributes, or modules
+/// by (effects and messages are no names).
+pub(crate) fn configured_names(config: &HekiConfig) -> Vec<ConfiguredName<'_>> {
+    fn add<'c>(
+        out: &mut Vec<ConfiguredName<'c>>,
+        kind: &'static str,
+        contract: &'c str,
+        lists: &[(&'static str, &'c [String])],
+    ) {
+        for &(key, texts) in lists {
+            for text in texts {
+                let base = split_item(text).map_or(text.as_str(), |(base, _)| base);
+                let base = split_arguments(base, key).map_or(base, |(name, _)| name);
+                let holder = split_last_dot(base).map(|(holder, _)| holder);
+                let patterns = std::iter::once(base)
+                    .chain(holder)
+                    .filter_map(|p| DottedPattern::new(p, key).ok())
+                    .collect();
+                out.push(ConfiguredName {
+                    kind,
+                    contract,
+                    key,
+                    text,
+                    patterns,
+                });
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for r in &config.write_owners {
+        let lists = [
+            ("targets", &r.targets[..]),
+            ("allowed-writers", &r.allowed_writers[..]),
+            ("forbidden-writers", &r.forbidden_writers[..]),
+            (
+                "forbid-cached-property-on",
+                &r.forbid_cached_property_on[..],
+            ),
+            ("exempt-methods", &r.exempt_methods[..]),
+            ("allowed-protocols", &r.allowed_protocols[..]),
+        ];
+        add(&mut out, "write-owners", &r.name, &lists);
+    }
+    for r in &config.read_owners {
+        let lists = [
+            ("targets", &r.targets[..]),
+            ("allowed-readers", &r.allowed_readers[..]),
+            ("forbidden-readers", &r.forbidden_readers[..]),
+            ("exempt-methods", &r.exempt_methods[..]),
+            ("allowed-protocols", &r.allowed_protocols[..]),
+        ];
+        add(&mut out, "read-owners", &r.name, &lists);
+    }
+    for r in &config.call_owners {
+        let lists = [
+            ("targets", &r.targets[..]),
+            ("allowed-callers", &r.allowed_callers[..]),
+            ("forbidden-callers", &r.forbidden_callers[..]),
+            ("exempt-methods", &r.exempt_methods[..]),
+            ("allowed-protocols", &r.allowed_protocols[..]),
+        ];
+        add(&mut out, "call-owners", &r.name, &lists);
+    }
+    for r in &config.effect_boundaries {
+        let lists = [
+            ("scopes", &r.scopes[..]),
+            ("write-targets", &r.write_targets[..]),
+            ("read-targets", &r.read_targets[..]),
+            ("call-targets", &r.call_targets[..]),
+            ("allow-writes", &r.allow_writes[..]),
+            ("write-universe", &r.write_universe[..]),
+            ("allowed-callees", &r.allowed_callees[..]),
+        ];
+        add(&mut out, "effect-boundaries", &r.name, &lists);
+    }
+    for r in &config.readonly_returns {
+        add(
+            &mut out,
+            "readonly-returns",
+            &r.name,
+            &[("producers", &r.producers[..])],
+        );
+    }
+    for r in &config.invalidation {
+        let lists = [
+            ("targets", &r.targets[..]),
+            ("invalidators", &r.invalidators[..]),
+            ("exempt-writers", &r.exempt_writers[..]),
+        ];
+        add(&mut out, "invalidation", &r.name, &lists);
+    }
+    out
 }
 
 /// The roles `key` has in the declared contracts, in configuration order, and in the ecosystem

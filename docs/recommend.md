@@ -35,6 +35,8 @@ It takes the options of `heki check` that decide what is analyzed: `--select`,
   code; heki's catalog, which no configuration sets (the row says where to report the case);
   or nothing you can apply. None of it enters the block. A report whose rule records no cause
   is counted as "not recorded", never given a guessed one.
+- **What heki cannot see**: where heki is silent, so no count of reports applies (see
+  [below](#what-heki-cannot-see)).
 - **Rules worth enabling here**: every rule the configuration leaves off, and every exact rule
   whose heuristic reports it withholds, with the reports naming it in `extend-select` would add
   (exact and heuristic, and with a baseline the regressions among them), its consequence, and
@@ -50,6 +52,57 @@ It takes the options of `heki check` that decide what is analyzed: `--select`,
   `.heki.toml`, or a `--config` file. Without a configuration file, the keys go into a new
   `pyproject.toml`. The block only adds: an array the file already sets is written whole, with
   the additions named in a comment, since TOML cannot append to an array.
+
+## What heki cannot see
+
+heki reports nothing through a call it cannot follow, so these parts list calls, not reports.
+For each call it says how many are awaited, how many may hold up an event loop (not awaited, in
+an `async def` or in a function one runs on its thread), and how many run in a loop or below
+one.
+
+- **Calls of packages heki's catalog does not cover**, by the name an entry of
+  `[[tool.heki.ecosystem]]` needs (entries are looked up by that exact name, without
+  inheritance or aliases). heki takes such a call to have no effect. For the 64 names with the
+  most reach, a trial run gives each a catalog entry that waits on the network and sends a
+  database query (`effects = ["blocking_net", "db_query"]`) and says what `heki check` would
+  then print through it: "if it waits" (`EFF101`, `EFF111`) and "if it sends a query"
+  (`EFF103`, `EFF113`). heki cannot know what a library call does, so no entry enters the
+  block, and the trial's counts are kept out of every count of reports: add an entry if you know
+  what the call does.
+- **Names heki's catalog lacks in packages it covers**: the same, for the names the trial shows
+  heki would report through. If such a call waits or sends a query, report it at heki's issue
+  tracker: the catalog should list it.
+- **Calls heki does not resolve**, by function and reason: a parameter without annotation, an
+  annotation that names no class heki knows, a value annotated `Any`, `object`, or `Callable`, a
+  name nothing heki sees binds, a protocol whose implementations heki cannot list, a call's
+  result or an attribute heki gives no class, a method named at run time, more implementations
+  than heki follows, or a member heki does not find. An annotation would resolve most of them;
+  an annotation is an edit of the program, so none enters the block.
+- **Source roots**: a directory below the project root, neither a source root nor a regular
+  package (a directory with `__init__.py` is imported by its own name, so heki never takes one
+  for a source root), below which the dotted path of an import that names no project module is a
+  file (`backend/config/env.py` for `import config.env`) is a candidate for `src`. An import of
+  the standard library or of a package heki's catalog covers is no candidate's, and neither is
+  one whose path is below several directories none of which holds the importing file. The first
+  8 candidates by imports are tried, each added to `src` with those already taken (the source
+  roots heki detects are written out with them, since setting `src` turns detection off). A
+  trial computes the module names with the directory added for every Python file below the
+  project root, those the paths given leave out included (heki reads them for this; when they
+  are more than the 50 it reads, no directory is tried), resolves each import as heki's index
+  does, and takes the directory into the block only when the imports it was tried for name its
+  own files, no two files of one kind then define one module unless just those files did before,
+  every import that names a module of the project now, and every import a directory already
+  taken was taken for, still names the same module of the same file, and every contract of the
+  configuration and every baseline entry still names what it names now (the rules' matchers
+  judge each definition by its name now and its name with the directory; a baseline entry must
+  not spell a module whose name would change). The block is then checked whole: when it would
+  make some other import resolve into a file below a source root that does not hold the
+  importing file (`import utils` in `tool.py`, below `svc_a/` and `svc_b/`, would name
+  `svc_a/utils.py`), the directory that file is below stays out and the others are tried again.
+  heki cannot tell such a file is the one meant, and the block holds only what the trial
+  checked. The calls of names of those files are left out of the library names.
+- **Functions with an A1 hazard** (frame introspection, `exec`, a body too large to model):
+  the Soundness lane proves nothing in them. `heki assumptions` lists them.
 
 ## Which rules the block enables
 
@@ -73,6 +126,9 @@ listed with the reason they stay out:
   sample, interval, and date; a rule without one is "not measured". No score is computed.
 - What keeps a report heuristic comes from the report itself, as the analysis decided its
   tier; a cause the analysis does not record is shown as not recorded, never guessed.
+- No library catalog entry enters the block: heki cannot verify what a library call does. What
+  a trial entry would make `heki check` print is said as a condition ("if it waits") and kept
+  out of every count of reports. `src` enters only after its trial.
 - The same input, configuration, and heki version give the same report, on any machine and
   with any number of threads.
 - It writes nothing and keeps every value the configuration sets.
@@ -121,6 +177,14 @@ async def get_user(user_id: int) -> dict[str, str]:
 ```
 
 ```python
+# app/billing.py
+import stripe
+
+async def charge(amount: int) -> None:
+    stripe.Charge.create(amount=amount)
+```
+
+```python
 # tests/test_users.py
 def test_load_user() -> None:
     pass
@@ -130,7 +194,7 @@ def test_load_user() -> None:
 
 ```console
 $ heki recommend app
-heki recommend (experimental) on .: 3 file(s), 9 function(s)
+heki recommend (experimental) on .: 4 file(s), 11 function(s)
 
 Reports now  1 shown (1 exact, 0 heuristic), 1 heuristic withheld, 5 heuristic rule(s) off
 
@@ -145,6 +209,11 @@ What keeps reports heuristic
     e.g. app/users.py:14 OPT110
   Nothing here enters the block: an annotation or a change of the code is an edit of the program.
 
+What heki cannot see (no report either way)
+  calls of packages heki's catalog does not cover: 1 call(s) of 1 name(s) in 1 package(s)
+    name                  calls  async  loops  if it waits  if it sends a query
+    stripe.Charge.create      1      1      0  EFF101 1     -
+
 Rules worth enabling here
   rule    reports  exact  consequence  right about the code (published)  real harm  block
   MUT106        1      -  bug          not measured                      -          yes
@@ -154,6 +223,7 @@ Rules worth enabling here
 
 Notes
   - 1 Python file(s) below the project root were not analyzed (tests/test_users.py): heki takes the analyzed files as the whole project, so what it says about callers, readers, and writers holds for those files only.
+  - "if it waits" and "if it sends a query" come from a trial run that gives each library name tried a catalog entry with `effects = ["blocking_net", "db_query"]`: what `heki check` would print if the call waited on the network or sent a database query. heki cannot see what these calls do, so no entry for them is in the block; add one in `[[tool.heki.ecosystem]]` if you know.
 
 pyproject.toml: keys to add or change
   [tool.heki.lint]
@@ -175,9 +245,10 @@ changes meaning.
 | `kind`, `version`, `heki` | `heki-recommend`, the version of the object, and the version of heki |
 | `root`, `config_file`, `table_prefix` | the project root, the configuration file (`null` without one), and the table its keys are under (`tool.heki`, or empty) |
 | `analyzed` | the files and functions analyzed, the files that could not be read or parsed, the paths given, and the Python files below the root they leave out |
-| `runs` | the analyses the report was computed from |
+| `runs` | the analyses the report was computed from: `discovery`, then `source-roots` (the source-root trial) and `hypothetical-catalog` (the trial of library names) when they ran |
 | `reports_now` | the counts of "Reports now" |
 | `open_premises` | the counts of "What keeps reports heuristic": by code; by premise or condition and cause, with what the cause states, what closes it, the reports, the reports it is the only open cause of, and the first 50 reports; the sets of causes that reports leave open together |
+| `blind_spots` | the counts of "What heki cannot see": the calls of library names without a catalog entry, by package and name, with what the trial run found; the names heki's catalog lacks in packages it covers; the calls heki does not resolve, by function and reason; the source-root candidates and their trials; the functions with an A1 hazard; the totals |
 | `rules` | each rule of "Rules worth enabling here": its metadata, the reports it would add, its published measurement, whether the block enables it, and why |
 | `notes` | the notes |
 | `config`, `config_toml` | the keys to add or change, as keys and values and as TOML |

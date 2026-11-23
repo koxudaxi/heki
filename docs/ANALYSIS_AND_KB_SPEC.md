@@ -764,7 +764,12 @@ one kind, its body or what iterating its result runs, as each call hands them on
 (`ProjectIndex::delivery`: a helper returning a generator it does not iterate runs no generator
 body where it is called), once from every `async def` (not through a worker thread) and once from
 the calls inside a loop or once per item, giving the functions on an event loop and below a loop; `heki_rules::blind_spots` counts the calls by package and name and by function and reason,
-and the hidden `heki dump-recommend-facts` prints them.
+and the hidden `heki dump-recommend-facts` prints them. `heki recommend` lists them
+(`heki_rules::recommend::blind_spots`), after two trials that build no fact of their own: a run
+of `EFF101`, `EFF111`, `EFF103`, and `EFF113` with a hypothetical catalog entry
+(`blocking_net`, `db_query`) for each of the 64 library names with the most reach, whose
+reports count for the name at the end of their chain; and the module names of the files with a
+candidate directory added to `src`, by which it resolves the imports again.
 
 The census contract candidates are drawn from (`heki_rules::census`) is a pass over the index and
 computes no fact of its own: every local summary keeps the function's own typed read and write
