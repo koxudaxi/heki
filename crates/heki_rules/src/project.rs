@@ -812,6 +812,14 @@ impl IndexFacts {
             Facts::Recommend => crate::recommend_facts(selection),
             Facts::Imports => crate::import_facts(selection),
         };
+        // `IMP201` and `IMP202` read the import facts of every file once a contract is declared.
+        let declared = ["IMP201", "IMP202"]
+            .iter()
+            .any(|code| selection.is_enabled(code));
+        let opt_in = OptInFacts {
+            imports: opt_in.imports || declared && !config.import_owners.is_empty(),
+            ..opt_in
+        };
         Ok(Self {
             contracts: crate::summary_contracts(config, kb)?,
             typed_writes: crate::typed_writes(config, selection),

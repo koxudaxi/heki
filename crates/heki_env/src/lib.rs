@@ -247,6 +247,36 @@ pub struct CallOwnerRule {
     pub protocol_subclasses: Option<bool>,
 }
 
+/// `[[tool.heki.import-owners]]` contract for `IMP201`: which modules the modules of
+/// `importers` may import. Module patterns are whole module names or globs; `<stdlib>`,
+/// `<project>`, and `<third-party>` name groups.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ImportOwnerRule {
+    pub name: String,
+    /// The modules judged; `None` for every module.
+    pub importers: Option<Vec<String>>,
+    /// The modules of `importers` that are not judged.
+    pub exempt_importers: Vec<String>,
+    /// The modules the importers may import: every other import is reported.
+    pub allowed_imports: Vec<String>,
+    /// When set, only imports of these modules are reported (less the allowed ones).
+    pub forbidden_imports: Vec<String>,
+    /// `"importer -> imported"` pairs of module patterns whose imports the contract accepts.
+    pub ignored_imports: Vec<String>,
+    /// `"report"`: imports under `if TYPE_CHECKING:` count too; `"ignore"` (default) does not.
+    pub type_checking: Option<String>,
+    /// `"statement"` (default): each import statement or call is judged; `"import-time"`: what
+    /// loading an importer loads while it loads; `"all"`: what any chain of imports that run
+    /// leads to.
+    pub reach: Option<String>,
+    /// `"report"`: also report (`IMP202`) the imports whose module heki cannot name;
+    /// `"ignore"` (default) does not.
+    pub unresolved: Option<String>,
+    /// The help of every `IMP201` report of this contract.
+    pub message: Option<String>,
+}
+
 /// `[[tool.heki.effect-boundaries]]` contract for `EFF201`: effects that must not be reached,
 /// directly or through calls, from the functions of `scopes`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -398,6 +428,7 @@ pub struct HekiConfig {
     pub readonly_returns: Vec<ReadOnlyReturnRule>,
     pub invalidation: Vec<InvalidationRule>,
     pub effect_boundaries: Vec<EffectBoundaryRule>,
+    pub import_owners: Vec<ImportOwnerRule>,
     pub ecosystem: Vec<EcosystemOverride>,
     /// The version `project.requires-python` of the project's `pyproject.toml` selects
     /// ([`requires_python_lower_bound`]): the `target-version` default (read by the loaders,
@@ -900,6 +931,7 @@ impl HekiConfig {
         "readonly-returns",
         "invalidation",
         "effect-boundaries",
+        "import-owners",
         "ecosystem",
     ];
 
@@ -911,6 +943,7 @@ impl HekiConfig {
         "effect-boundaries",
         "readonly-returns",
         "invalidation",
+        "import-owners",
     ];
 
     /// Load an explicit configuration file ([`ConfigLayout`]): the `[tool.heki]` table of a
@@ -1334,6 +1367,7 @@ writes-in-order = { arg = 0, param = "data", sorted-by = "sort_keys" }
             readonly_returns: Vec::new(),
             invalidation: Vec::new(),
             effect_boundaries: Vec::new(),
+            import_owners: Vec::new(),
             ecosystem: Vec::new(),
             requires_python: None,
             project_name: None,

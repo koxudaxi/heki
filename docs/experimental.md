@@ -18,6 +18,8 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `rule.EFF112` | rule | [`EFF112`](rules/set-order-output.md) | 0.2.4 | - |
 | `rule.EFF114` | rule | [`EFF114`](rules/recursion-error-as-value.md) | 0.2.4 | - |
 | `rule.EFF115` | rule | [`EFF115`](rules/async-def-as-sync-callback.md) | 0.2.5 | - |
+| `rule.IMP201` | rule | [`IMP201`](rules/import-owner-violation.md) | 0.2.6 | - |
+| `rule.IMP202` | rule | [`IMP202`](rules/unresolved-guarded-import.md) | 0.2.6 | - |
 | `rule.MUT101` | rule | [`MUT101`](rules/cached-property-stale-mutation.md) | 0.1.0 | - |
 | `rule.MUT111` | rule | [`MUT111`](rules/cached-property-stale-read.md) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](rules/conditional-ownership-mutation.md) | 0.2.0 | - |
@@ -102,6 +104,22 @@ Its precision is measured on a sample of reports of one corpus only, and its pre
 - **Since:** 0.2.5
 
 The development corpus has no report of it, so its precision is not measured, and its premises are not yet certified.
+
+## `rule.IMP201`
+
+- **Kind:** rule
+- **Target:** [`IMP201`](rules/import-owner-violation.md)
+- **Since:** 0.2.6
+
+It is new: its reports are heuristic until a review of its reports on real code bases certifies its claim.
+
+## `rule.IMP202`
+
+- **Kind:** rule
+- **Target:** [`IMP202`](rules/unresolved-guarded-import.md)
+- **Since:** 0.2.6
+
+It is the strict mode of `IMP201`, which is experimental.
 
 ## `rule.MUT101`
 

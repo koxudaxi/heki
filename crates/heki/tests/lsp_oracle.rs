@@ -99,6 +99,17 @@ name = "index"
 targets = ["Node.kids"]
 invalidators = ["Index.refresh"]
 
+[[tool.heki.import-owners]]
+name = "imports"
+importers = ["pkg.imp_user"]
+forbidden-imports = ["pkg.imp_db", "pkg.imp_pkg.sub"]
+
+[[tool.heki.import-owners]]
+name = "startup"
+importers = ["pkg.imp_cli"]
+forbidden-imports = ["pkg.imp_heavy"]
+reach = "import-time"
+
 [[tool.heki.invalidation]]
 name = "dial"
 targets = ["pkg.dials:*.level"]
@@ -4677,6 +4688,68 @@ fn steps_package_names() -> Vec<Step> {
     ]
 }
 
+/// `import-owners`: an import added to the importer, a module created that turns a `from`
+/// import of a name into an import of the submodule, and with `reach`, an import added to,
+/// moved in, and removed from a module the importer imports.
+fn steps_import_owners() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a module imports nothing forbidden",
+            vec![
+                Action::Create("pkg/imp_db.py", String::new()),
+                Action::Create("pkg/imp_pkg/__init__.py", String::new()),
+                Action::Create(
+                    "pkg/imp_user.py",
+                    "import json\nfrom pkg.imp_pkg import sub\n".to_owned(),
+                ),
+            ],
+        )
+        .absent(&[("pkg/imp_user.py", "IMP201")]),
+        Step::new(
+            "the package gets the submodule the from-import names",
+            vec![Action::Create("pkg/imp_pkg/sub.py", String::new())],
+        )
+        .present(&[("pkg/imp_user.py", "IMP201")]),
+        Step::new(
+            "the submodule is gone again",
+            vec![Action::Delete("pkg/imp_pkg/sub.py")],
+        )
+        .absent(&[("pkg/imp_user.py", "IMP201")]),
+        Step::new(
+            "the module imports a forbidden module",
+            vec![save("pkg/imp_user.py", "import json\nimport pkg.imp_db\n")],
+        )
+        .present(&[("pkg/imp_user.py", "IMP201")]),
+        Step::new(
+            "a start-up module imports a light one",
+            vec![
+                Action::Create("pkg/imp_heavy.py", String::new()),
+                Action::Create("pkg/imp_mid.py", String::new()),
+                Action::Create("pkg/imp_cli.py", "import pkg.imp_mid\n".to_owned()),
+            ],
+        )
+        .absent(&[("pkg/imp_cli.py", "IMP201")]),
+        Step::new(
+            "the light module imports the heavy one",
+            vec![save("pkg/imp_mid.py", "import pkg.imp_heavy\n")],
+        )
+        .present(&[("pkg/imp_cli.py", "IMP201")]),
+        Step::new(
+            "the import moves down a line",
+            vec![save("pkg/imp_mid.py", "\nimport pkg.imp_heavy\n")],
+        )
+        .present(&[("pkg/imp_cli.py", "IMP201")]),
+        Step::new(
+            "the light module imports it only when a function runs",
+            vec![save(
+                "pkg/imp_mid.py",
+                "def load():\n    import pkg.imp_heavy\n",
+            )],
+        )
+        .absent(&[("pkg/imp_cli.py", "IMP201")]),
+    ]
+}
+
 // ---------------------------------------------------------------------------------- the oracle
 
 /// One diagnostic in LSP coordinates: `(file, (line, UTF-16 column) start, end)`.
@@ -5131,6 +5204,7 @@ sessions!(editing, Session::start, {
     declarations: steps_declarations,
     re_exports: steps_re_exports,
     package_names: steps_package_names,
+    import_owners: steps_import_owners,
 });
 
 // ------------------------------------------------------- files, layout, and buffers (session 2)

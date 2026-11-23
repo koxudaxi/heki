@@ -82,7 +82,7 @@ fn configuration_errors_name_the_fix_and_the_section() {
             "[tool.heki]\nnope = 1\n",
             &[
                 "error: pyproject.toml:5:1: unknown key `nope` in [tool.heki]",
-                "  = help: expected one of `baseline`, `call-owners`, `ecosystem`, `effect-boundaries`, `exclude`, `extend-exclude`, `invalidation`, `lint`, `read-owners`, `readonly-returns`, `src`, `target-version`, `write-owners`",
+                "  = help: expected one of `baseline`, `call-owners`, `ecosystem`, `effect-boundaries`, `exclude`, `extend-exclude`, `import-owners`, `invalidation`, `lint`, `read-owners`, `readonly-returns`, `src`, `target-version`, `write-owners`",
                 &docs("configuration/#top-level-settings"),
             ],
         ),
