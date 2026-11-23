@@ -177,6 +177,8 @@ supported version that every clause admits:
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF111`, `EFF105`, and `EFF106` in test code as pytest finds it: `test_*` functions and the functions nested in them, `test_*.py` and `*_test.py` files, and files under `test/` or `tests/`. |
 | `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
 | `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. Warnings are reported either way, and the language server shows them. `--fail-on` overrides it. |
+| `report-unused-suppressions` | `false` | Report the codes of suppression comments that suppressed no report, and the baseline entries that matched none. See [Unused suppressions](#unused-suppressions). |
+| `require-suppression-codes` | `false` | Report the `# heki: ignore` comments that name no rule. See [Suppressions that name no rule](#suppressions-that-name-no-rule). |
 
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
   (`EFF`, `MUT2`), or `ALL`. An unknown rule is a configuration error.
@@ -295,7 +297,10 @@ A container entry (`Class.attr["key"]`):
 - is reported once, under the entry, when its container is a target too.
 
 A write into the entries of a target's container (`model.meta["kw"][name] = v`) is a write of
-the target.
+the target. So is a write through a local alias of the container (`kw = model.meta["kw"]`), also
+after an augmented assignment that changes the container in place and so keeps it
+(`kw |= other`, `items += more`, `-=`, `&=`, `^=` on a set); one on any other value
+(`count += 1`) binds a new object.
 
 With `fresh-objects = "allow"`, a write is no violation when it constructs the object it writes:
 
@@ -705,6 +710,15 @@ holds for `invalidation` too:
 - **A class's own initialization is allowed.** An initializer (`__init__`, `__post_init__`,
   `__new__`, `model_post_init`, `__setstate__`) of a target class or a subclass may access its own
   `self`: directly, through `super().__init__()`, or through helpers it passes `self` to.
+- **A nested scope uses the parameters of the functions enclosing it.** A comprehension,
+  generator expression, lambda, or nested `def` reading a parameter of an enclosing function
+  (`[self._fmt(x) for x in xs]`) reaches that parameter's object, as a helper the function hands
+  it does: a call of the scope by that function, or by another scope nested in it, hands the
+  object over. So a comprehension in `__init__` writing `self.imports` is part of the class's own
+  initialization. The variable is another object when the function or a nested scope rebinds it
+  (`self = other`, `nonlocal self`). A closure called away from the function (stored, then
+  called later elsewhere) still reads the same object, but heki does not tie it to the
+  parameter: no call of the function hands it over.
 - **A function that only runs inside allowed functions is allowed.** Every path of project
   callers above it starts in an allowed function, an exempt method, or such an initialization.
 - **A private helper reports at its callers.** An access in a private helper (`_name`) with
@@ -714,24 +728,28 @@ holds for `invalidation` too:
   apply: an access is judged in the function whose code holds it, whoever calls that function.
   A lambda, comprehension, or generator expression is part of the function it is written in, a
   class body's code part of the function running the class statement, and a nested `def` a
-  function of its own. For `write-owners`, a call handing a typed object to a helper that
-  changes it without knowing its class is the caller's write. With `unresolved = "report"`, the
-  callers binding a parameter only tell its object's class, allowed callers included. A class's
-  own initialization stays allowed, a helper it passes `self` to included when every path of
-  project callers above the helper starts in such an initialization; so do `exempt-methods`,
-  `fresh-objects`, and the targets of a call contract calling each other. Effect boundaries have
-  no such key: they judge what their scope functions reach through any number of calls.
+  function of its own; the parameters of the function a lambda, comprehension, or generator
+  expression reads are the function's, wherever it runs. For `write-owners`, a call handing a
+  typed object to a helper that changes it without knowing its class is the caller's write.
+  With `unresolved = "report"`, the callers binding a parameter only tell its object's class,
+  allowed callers included. A class's own initialization stays allowed, a helper it passes
+  `self` to included when every path of project callers above the helper starts in such an
+  initialization; so do `exempt-methods`, `fresh-objects`, and the targets of a call contract
+  calling each other. Effect boundaries have no such key: they judge what their scope functions
+  reach through any number of calls.
 - **`own-receiver = "allow"` allows the accesses through a method's own receiver.** An access is
   allowed when the function it is judged in (the function reported, or with `attribution =
   "lexical"` the function holding the access) is a method that is no static method, and the
   object the member is looked up on may be its first parameter: `self._cache[k] = v`,
   `self._seen`, `cls._kind()`, `super()._label()`, `self._norm(x)` of a static method,
   `Resolver._label(self)`. A member the class inherits counts like its own. Another parameter, an
-  attribute of the receiver, a static method called through its class, the parameter of a static
-  method or of a function, and a nested `def`, lambda, or comprehension using the enclosing
-  method's `self` (heki does not tie a variable a nested scope captures to the enclosing
-  function's parameter) stay reported. By the call graph, a private helper the method hands its
-  `self` (`_count(self)`) is judged at the method, and is allowed with it.
+  attribute of the receiver, a static method called through its class, and the parameter of a
+  static method or of a function stay reported. By the call graph, a private helper the method
+  hands its `self` (`_count(self)`) is judged at the method, and is allowed with it, and so are
+  a comprehension, generator expression, lambda, or private nested `def` the method runs that
+  uses its `self`; a public nested `def` reports itself, as a public helper does. With
+  `attribution = "lexical"`, a lambda, comprehension, or generator expression using the method's
+  `self` is allowed wherever it runs, and a nested `def` is judged by itself, as any helper is.
 - **`allowed-protocols` allows the accesses through the protocols it names.** A read, call, or
   write through a value typed with a project protocol a pattern names (or a subprotocol of one)
   that declares the member, itself or through its protocol bases, is allowed wherever it is
@@ -821,3 +839,56 @@ w = load()            # noqa: EFF101
 - A bracketed list that is not closed or names no rule (`# heki: ignore[`, `# heki: ignore[]`)
   silences nothing.
 - To keep a rule away from whole files, use [`per-file-ignores`](#rule-selection-toolhekilint).
+
+### Unused suppressions
+
+```toml
+[tool.heki.lint]
+report-unused-suppressions = true
+```
+
+With `report-unused-suppressions = true`, `heki check`, `--watch`, and the language server report
+each code of a suppression comment that suppressed no report in the run (`unused-suppression`), as
+Ruff's `RUF100` and basedpyright's `reportUnnecessaryTypeIgnoreComment` do:
+
+```console
+$ heki check --output-format concise
+a.py:6:12: unused-suppression No `EFF101` report on this line to suppress
+```
+
+- A code is judged only when its rule ran on the file. A rule that did not run reported nothing a
+  suppression could match, so its codes are never reported: a heuristic rule left off (select it,
+  or set `heuristic = true`, to have its suppressions judged), an opt-in rule not selected, a
+  rule `--select` leaves out or `per-file-ignores` turns off in the file, and `MUT103` without
+  its summary snapshot.
+- A code that names no heki rule is another tool's and stays: `F401` in `# noqa: F401, EFF101`.
+  A suppression without codes is never reported as unused: a bare `# heki: ignore` covers rules
+  that did not run, and a bare `# noqa` belongs to Ruff as much as to heki.
+- A run judges what it reported, under its configuration: with `relax-async-in-tests`, a
+  suppression of `EFF101` in a test suppresses nothing. A run over some files of a project misses
+  the reports that come from the others (`heki check a.py` when the blocking call is in `b.py`),
+  so judge, and fix, on the whole project, as a pre-commit hook with `pass_filenames: false` does.
+- `heki check --fix` (and `--diff`) removes the unused codes, and the language server offers the
+  same edit as a quick fix. The other codes stay; a suppression left without codes goes, with
+  the blanks before it, and so does its line when the comment is alone on it. Other text of the
+  comment stays (`# type: ignore`). Without the setting, `--fix` leaves suppressions as they are.
+- The reports are errors, so they fail `heki check`. A suppression comment does not suppress
+  them: the setting turns them off. A baseline records them as it records other reports.
+- With a [baseline](adoption.md#ratchet-baselines), `heki check` also reports an entry that
+  matched no report of a rule that ran on its file, when the file was checked, and exits with
+  code 1: `error: baseline entry a.py::handler EFF101 `time.sleep` matched no report
+  (`--update-baseline` removes it)`. A heuristic report that the run withholds still matches its
+  entry. Without the setting, the entry gets a note that it can shrink.
+
+### Suppressions that name no rule
+
+```toml
+[tool.heki.lint]
+require-suppression-codes = true
+```
+
+With `require-suppression-codes = true`, a `# heki: ignore` without codes is reported
+(`suppression-without-code`, an error), as basedpyright's `reportIgnoreCommentWithoutRule` does.
+Its help names the rules it suppressed in the run (`# heki: ignore[EFF101]`). It still suppresses
+every rule on its line: the setting reports the comment and changes nothing else. A bare `# noqa`
+is not reported, since Ruff reads it too (its `PGH004` reports it).

@@ -30,7 +30,7 @@ impl Project {
 
     /// `heki check --heuristic <args>` in the project directory.
     fn command(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_heki"));
+        let mut cmd = common::heki_command();
         cmd.args(["check", "--heuristic"])
             .args(args)
             .current_dir(&self.dir);
@@ -603,7 +603,7 @@ fn baselines_and_snapshots_are_kept_when_a_file_fails_to_parse() {
     let update = ["--baseline", "b.toml", "--update-baseline"];
     assert_eq!(p.heki(&update).0, 0);
     let snapshot = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_heki"))
+        common::heki_command()
             .arg("snapshot")
             .args(args)
             .current_dir(&p.dir)

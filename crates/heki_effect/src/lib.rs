@@ -73,9 +73,9 @@ pub use readonly::{
 };
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
-    Callee, ClassDecl, DeclKeys, DeclPasses, DeepCopy, FunctionDecl, HeldSentinel, ModuleDecls,
-    ModuleLayout, NamedAttr, ProjectDecls, ReadOnlyAttr, ReadOnlyKind, StrConstant, StrValue,
-    TypeCtx, Val, aliases_of, detect_source_roots, func_qualname, module_name_for_path,
+    Callee, CapturedParams, ClassDecl, DeclKeys, DeclPasses, DeepCopy, FunctionDecl, HeldSentinel,
+    ModuleDecls, ModuleLayout, NamedAttr, ProjectDecls, ReadOnlyAttr, ReadOnlyKind, StrConstant,
+    StrValue, TypeCtx, Val, aliases_of, detect_source_roots, func_qualname, module_name_for_path,
     resolve_relative_module, self_aliases,
 };
 pub use summary::{BLOCKING_EFFECTS, offloaded_callable};
@@ -2146,12 +2146,26 @@ pub struct FileSummary {
     /// through [`Self::blind_calls`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blind_spots: Option<Box<FxHashMap<FuncKey, Vec<BlindCall>>>>,
+    /// The names under which the file's functions themselves remove or replace the value an
+    /// object keeps in its `__dict__` (`del obj.<name>`, a removal of the constant key
+    /// `<name>` from a `__dict__`; local, IR-free; `None` unless [`OptInFacts::kept_values`]
+    /// finds one). Read through [`Self::kept_removals`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_removals: Option<Box<BTreeSet<String>>>,
 }
 
 impl FileSummary {
     /// [`Self::blind_spots`], by function.
     pub fn blind_calls(&self) -> impl Iterator<Item = (&FuncKey, &[BlindCall])> {
         (self.blind_spots.iter().flat_map(|b| b.iter())).map(|(f, calls)| (f, calls.as_slice()))
+    }
+
+    /// [`Self::kept_removals`] (none while the facts are not computed).
+    pub fn kept_removals(&self) -> impl Iterator<Item = &str> {
+        self.kept_removals
+            .iter()
+            .flat_map(|r| r.iter())
+            .map(String::as_str)
     }
 
     /// The summary of a project file heki could not read or parse: a module that defines

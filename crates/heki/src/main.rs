@@ -17,7 +17,8 @@ mod recommend;
 mod watch;
 
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::parser::ValueSource;
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use heki_ast::LineIndex;
 use heki_rules::experimental::{
     EXPERIMENTAL_FEATURES, EXPERIMENTAL_POLICY, ExperimentalFeature, experimental_rule,
@@ -143,8 +144,16 @@ struct CheckArgs {
     /// `warning` to fail on warnings too (`lint.fail-on`).
     #[arg(long, value_enum)]
     fail_on: Option<FailOn>,
-    /// Output format.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Full)]
+    /// Output format: `full`, or `github` in GitHub Actions (`GITHUB_ACTIONS=true`);
+    /// `HEKI_OUTPUT_FORMAT` sets it when the option is not given.
+    #[arg(
+        long,
+        value_enum,
+        env = "HEKI_OUTPUT_FORMAT",
+        hide_env = true,
+        default_value_t = OutputFormat::Full,
+        hide_default_value = true
+    )]
     output_format: OutputFormat,
     /// When to color the `full` and `concise` output and `--diff`, as Ruff does: `auto` colors
     /// them on a terminal unless `NO_COLOR` is set (`FORCE_COLOR` or `CLICOLOR_FORCE` color them
@@ -601,6 +610,22 @@ fn run_assumptions(args: AssumptionsArgs) -> Result<ExitCode> {
     )
 }
 
+/// The command line. Without `--output-format` and `HEKI_OUTPUT_FORMAT`, `heki check` writes
+/// GitHub Actions annotations in GitHub Actions, as basedpyright does: its job logs show them, and
+/// the pull request shows them at the lines they are about.
+fn parse_cli() -> Cli {
+    let matches = Cli::command().get_matches();
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    if let Commands::Check(args) = &mut cli.command
+        && let Some((_, check)) = matches.subcommand()
+        && check.value_source("output_format") == Some(ValueSource::DefaultValue)
+        && std::env::var_os("GITHUB_ACTIONS").is_some_and(|v| v == "true")
+    {
+        args.output_format = OutputFormat::Github;
+    }
+    cli
+}
+
 /// The memory gate's allocator (`count-alloc`): it counts the bytes heki asks for, which do not
 /// depend on the system allocator's caching or on the machine's memory pressure.
 #[cfg(feature = "count-alloc")]
@@ -616,7 +641,7 @@ fn main() -> ExitCode {
         .use_current_thread()
         .build_global()
         .expect("the global thread pool is built before any parallel work");
-    let cli = Cli::parse();
+    let cli = parse_cli();
     let format = match &cli.command {
         Commands::Check(args) => args.output_format,
         _ => OutputFormat::Full,
