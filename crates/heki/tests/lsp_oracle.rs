@@ -1624,6 +1624,87 @@ fn steps_method_lookups() -> Vec<Step> {
     ]
 }
 
+const PV: &str = "class Pv:\n    def __run(self) -> int:\n        return 1\n\n    def go(self) -> int:\n        return self.__run()\n";
+const PV_USE: &str = "from pkg.pv import Pv\n\n\ndef use(p: Pv) -> int:\n    return p._Pv__run()\n";
+const PV_SUB: &str = "from pkg.pv import Pv\n\n\nclass Sub(Pv):\n    def __run(self) -> int:\n        return 2\n\n    def own(self) -> int:\n        return self.__run()\n\n    def peek(self) -> int:\n        return self._Pv__run()\n";
+const PV_DOC: &str = "from functools import cached_property\n\n\nclass PvDoc:\n    def __init__(self) -> None:\n        self.size = 0\n\n    @cached_property\n    def total(self) -> int:\n        return self.size + 1\n\n    def __grow(self) -> None:\n        self.size = 1\n";
+const PV_SHOW: &str =
+    "from pkg.pv_doc import PvDoc\n\n\ndef show(doc: PvDoc) -> int:\n    return doc.total\n";
+
+/// A private method (`def __run`, the member `_Pv__run`) called by its mangled name from other
+/// modules: the call follows the class's declarations when the method is renamed and back, and a
+/// subclass's own `__run` is another method, which `self.__run` in the subclass calls. A private
+/// method (`_PvDoc__grow`) that leaves a cached property stale makes its reads in another module
+/// stale reads until it invalidates the property.
+fn steps_private_names() -> Vec<Step> {
+    let contract = format!(
+        "{CONFIG}\n[[tool.heki.call-owners]]\nname = \"private-run\"\ntargets = [\"pkg.pv.Pv.__run\"]\nallowed-callers = [\"pkg.pv:Pv.*\"]\n"
+    );
+    vec![
+        Step::new(
+            "a module calls a private method of a class in another module by its mangled name",
+            vec![
+                Action::Configure(contract),
+                Action::Create("pkg/pv.py", PV.to_owned()),
+                Action::Create("pkg/pv_use.py", PV_USE.to_owned()),
+            ],
+        )
+        .present(&[("pkg/pv_use.py", "MUT204")])
+        .absent(&[("pkg/pv.py", "MUT204")]),
+        Step::new(
+            "the private method is renamed",
+            vec![save("pkg/pv.py", &PV.replace("__run", "__walk"))],
+        )
+        .absent(&[("pkg/pv_use.py", "MUT204")]),
+        Step::new(
+            "it is named back, and a subclass in another module defines its own `__run`",
+            vec![
+                save("pkg/pv.py", PV),
+                Action::Create("pkg/pv_sub.py", PV_SUB.to_owned()),
+            ],
+        )
+        .present(&[("pkg/pv_use.py", "MUT204"), ("pkg/pv_sub.py", "MUT204")]),
+        Step::new(
+            "the subclass calls only its own `__run`",
+            vec![save(
+                "pkg/pv_sub.py",
+                &PV_SUB.replace("self._Pv__run()", "self.__run()"),
+            )],
+        )
+        .absent(&[("pkg/pv_sub.py", "MUT204")]),
+        Step::new(
+            "a private method leaves a cached property stale that another module reads",
+            vec![
+                Action::Create("pkg/pv_doc.py", PV_DOC.to_owned()),
+                Action::Create("pkg/pv_show.py", PV_SHOW.to_owned()),
+            ],
+        )
+        .present(&[("pkg/pv_show.py", "MUT111"), ("pkg/pv_doc.py", "MUT101")]),
+        Step::new(
+            "the private method invalidates the cached property",
+            vec![save(
+                "pkg/pv_doc.py",
+                &PV_DOC.replace(
+                    "self.size = 1\n",
+                    "self.size = 1\n        self.__dict__.pop(\"total\", None)\n",
+                ),
+            )],
+        )
+        .absent(&[("pkg/pv_show.py", "MUT111"), ("pkg/pv_doc.py", "MUT101")]),
+        Step::new(
+            "the files and the contract are removed",
+            vec![
+                Action::Delete("pkg/pv_show.py"),
+                Action::Delete("pkg/pv_doc.py"),
+                Action::Delete("pkg/pv_sub.py"),
+                Action::Delete("pkg/pv_use.py"),
+                Action::Delete("pkg/pv.py"),
+                Action::Configure(CONFIG.to_owned()),
+            ],
+        ),
+    ]
+}
+
 /// A helper over a dispatch keeps every implementation's wait (`MustExec::alternatives`, compared
 /// by Early Cutoff): the report through it names and relates each, and follows an edit of the
 /// wait that is not on the helper's shortest chain.
@@ -5148,6 +5229,7 @@ sessions!(editing, Session::start, {
     helper_witnesses: steps_helper_witnesses,
     imported_constants: steps_imported_constants,
     method_lookups: steps_method_lookups,
+    private_names: steps_private_names,
     contracts: steps_contracts,
     contract_extensions: steps_contract_extensions,
     references: steps_references,

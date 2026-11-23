@@ -285,6 +285,17 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   contract: it names the target configured first among them, and lists the others (`(also
   `A.items`)`).
 - A `Class.attr` target covers the subclasses of the class too.
+- A private name of a class (`__cache`, `__run`: two leading underscores and not two trailing)
+  is the member Python's name mangling makes of it (`_Parser__cache` in class `Parser`), and a
+  name may spell it either way: `pkg.Parser.__run` and `pkg.Parser._Parser__run` (or
+  `pkg.Parser._Parser__*`) name the same method. An access is matched as Python runs it: inside
+  `Parser`, `self.__run` reaches `_Parser__run`; outside, a receiver typed `Parser`, a
+  subclass's `self`, or `type[Parser]` reaches it as `_Parser__run`. A subclass's own private
+  name (`self.__run` in `JsonParser`, the member `_JsonParser__run`) is another member, and
+  overrides nothing of its base. With `unresolved = "report"`, the last name of such a target
+  counts in both spellings (`__run`, and `_Parser__run` for a class the target names); a
+  target without a class (`__run`) names the member of any class (`other.__run()` in class
+  `Driver` calls `_Driver__run`).
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, a name with more than one colon or an empty module or qualified name, call
   targets whose globs are too many to match together (tens of thousands of complex ones), an

@@ -4614,7 +4614,7 @@ impl<'a> Extractor<'a> {
                     && let Some(Val::Inst(class)) = self.val(*obj)
                     && let Some(c) = self.contracts
                 {
-                    let class = ContractClass::new(c, self.cx.project, class.clone());
+                    let class = ContractClass::with_qualname(self.cx.project, class.clone());
                     let (fqn, qualname) = class.member(attr);
                     if let Some(deep) = c.readonly_producer(&fqn, &qualname) {
                         self.seed_protected(fqn, deep, step, span);
@@ -6664,11 +6664,11 @@ impl<'a> Extractor<'a> {
         let Some(Val::Inst(protocol)) = self.val(call.recv_var?) else {
             return None;
         };
-        let name = callees.first()?.callee.qualname.rsplit('.').next()?;
+        let name = heki_semantic::mangling::member_name(&callees.first()?.callee.qualname);
         let project = self.cx.project;
         project
-            .protocol_declares(protocol, name)
-            .then(|| project.mro_method(protocol, name))?
+            .protocol_declares(protocol, &name)
+            .then(|| project.mro_method(protocol, &name))?
     }
 
     /// What the receiver of `call` tells about the implementations `callees` run
