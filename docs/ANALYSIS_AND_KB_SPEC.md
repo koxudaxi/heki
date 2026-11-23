@@ -551,8 +551,9 @@ not read, through an `__all__` heki cannot read (built at run time, changed in p
 or when star imports bind it to different objects, which a star import of a module outside the
 project may do for any name (`try: from ._speedups import *` with a fallback). Deciding a name
 reads each module once, however many paths of star imports reach it; a star import back into a
-module being decided binds nothing more. A change another module makes to the `__all__` of the
-module would have to run before the star import, and is not followed.
+module being decided binds nothing more. It follows at most 128 star imports nested in one
+another (`MAX_STAR_IMPORT_DEPTH`), and past them the name is open. A change another module makes
+to the `__all__` of the module would have to run before the star import, and is not followed.
 
 A class-body name bound last, outside a field, to a module-level name (a function or class of
 its module the module binds once, an alias of its module, a name an import binds, or an attribute
