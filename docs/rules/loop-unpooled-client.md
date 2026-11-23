@@ -131,8 +131,10 @@ set on it with each of them
 An `httpx.Client` also persists cookies across requests, and applies the headers and auth passed
 to its constructor to every request
 ([Clients](https://www.python-httpx.org/advanced/clients/#why-use-a-client)). When the loop
-makes requests for unrelated parties (other sites, other users), clear that state between them
-(`client.cookies.clear()` in both libraries), or keep one client per party.
+makes requests for unrelated parties (other sites, other users), keep one client per party:
+clearing the cookies (`client.cookies.clear()` in both libraries) leaves the `auth` and the
+headers set on the client, so the next party's requests still carry the first party's
+credentials. A client shared across parties needs all three reset before each party's requests.
 
 ## Fix safety
 No automatic fix.
