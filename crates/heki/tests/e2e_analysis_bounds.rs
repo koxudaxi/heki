@@ -6328,7 +6328,7 @@ fn a_table_past_its_entry_bound_gives_no_item() {
 }
 
 /// A class binding `RUN` to a blocking function, `n` subclasses binding it again, and an
-/// `async def` calling it on an instance of the class.
+/// `async def` calling it on an instance of the class, and another calling what it reads.
 fn aliased_family(n: usize) -> String {
     let mut out = vec![
         "import time".to_owned(),
@@ -6342,11 +6342,13 @@ fn aliased_family(n: usize) -> String {
         ));
     }
     out.push("\nasync def handle(base: Base):\n    base.RUN()\n".to_owned());
+    out.push("\nasync def handle_read(base: Base):\n    run = base.RUN\n    run()\n".to_owned());
     out.join("\n")
 }
 
-/// A call through a class attribute bound to a function follows at most 64 classes the receiver
-/// may be (`resolver::DISPATCH_CLASS_LIMIT`), as the implementations of a method do.
+/// A call through a class attribute bound to a function, and a read of it, follow at most 64
+/// classes the receiver may be (`resolver::DISPATCH_CLASS_LIMIT`), as the implementations of a
+/// method do.
 #[test]
 fn class_aliases_past_the_dispatch_limit_run_unknown_code() {
     let shape = |n: usize| {
@@ -6355,7 +6357,7 @@ fn class_aliases_past_the_dispatch_limit_run_unknown_code() {
         p
     };
     let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();
-    assert_eq!(blocking(check(&shape(63))), 1);
+    assert_eq!(blocking(check(&shape(63))), 2);
     assert_eq!(blocking(check_linear(512, shape)), 0);
 }
 

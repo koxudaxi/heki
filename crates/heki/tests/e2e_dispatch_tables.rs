@@ -173,11 +173,14 @@ fn a_table_of_functions_bound_once_gives_the_value_of_each_key() {
 }
 
 /// Something changing a table in place (an item store, `update`, through an import of it or in
-/// another module) leaves its items unknown: no key gives a value, and the function calling
-/// one is not pure. An annotated global keeps the items it declares.
+/// another module, through the module's own object) leaves its items unknown: no key gives a
+/// value, and the function calling one is not pure. An annotated global keeps the items it
+/// declares.
 const CHANGED: &str = r#"from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
+import pkg.changed as this_module
 
 if TYPE_CHECKING:
     from pkg.model import Field
@@ -190,6 +193,8 @@ def _noop(field: Field) -> None:
 HANDLERS = {"noop": _noop}
 UPDATED = {"noop": _noop}
 ELSEWHERE = {"noop": _noop}
+THROUGH_MODULE = {"noop": _noop}
+THROUGH_IMPORT = {"noop": _noop}
 ITEMS = [_noop]
 KEPT = [_noop]
 
@@ -215,6 +220,16 @@ def update(more: dict) -> None:
     UPDATED.update(more)
 
 
+def register_through_module(name: str, run) -> None:
+    this_module.THROUGH_MODULE[name] = run
+
+
+def register_through_import(name: str, run) -> None:
+    from pkg import changed
+
+    changed.THROUGH_IMPORT[name] = run
+
+
 def add(run) -> None:
     ITEMS.append(run)
 
@@ -235,7 +250,18 @@ const CHANGED_CALLS: &str = r#"from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from pkg import changed
-from pkg.changed import ELSEWHERE, HANDLERS, ITEMS, KEPT, SHARED_SLOTS, SLOTS, UPDATED, Slot
+from pkg.changed import (
+    ELSEWHERE,
+    HANDLERS,
+    ITEMS,
+    KEPT,
+    SHARED_SLOTS,
+    SLOTS,
+    THROUGH_IMPORT,
+    THROUGH_MODULE,
+    UPDATED,
+    Slot,
+)
 
 if TYPE_CHECKING:
     from pkg.model import Field
@@ -256,6 +282,14 @@ def by_updated(field: Field) -> None:
 
 def by_elsewhere(field: Field) -> None:
     changed.ELSEWHERE["noop"](field)
+
+
+def by_through_module(field: Field) -> None:
+    THROUGH_MODULE["noop"](field)
+
+
+def by_through_import(field: Field) -> None:
+    THROUGH_IMPORT["noop"](field)
 
 
 def by_item(field: Field) -> None:
@@ -286,7 +320,14 @@ fn a_table_something_changes_in_place_keeps_no_items() {
         ],
     );
     assert_eq!(reported(&p), marked(&[("pkg/passes.py", CHANGED_CALLS)]));
-    for f in ["by_handler", "by_updated", "by_elsewhere", "by_item"] {
+    for f in [
+        "by_handler",
+        "by_updated",
+        "by_elsewhere",
+        "by_through_module",
+        "by_through_import",
+        "by_item",
+    ] {
         assert_eq!(verdict(&p, &format!("pkg.passes.{f}")), "unknown", "{f}");
     }
     assert_eq!(verdict(&p, "pkg.changed.Registry.run"), "unknown");
@@ -296,7 +337,8 @@ fn a_table_something_changes_in_place_keeps_no_items() {
 /// A class attribute bound once to a function, a `staticmethod` of one, or bound in a base:
 /// through the class, `cls`, and an instance (a plain function binds the instance first). A
 /// subclass binding the name to a method of its own, or an instance store of the name, leave
-/// the call to what the value may be.
+/// the call to what the value may be. Read on an instance, the attribute is what any subclass
+/// binds it to.
 const HELPERS: &str = r#"from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -311,13 +353,17 @@ def _require(field: Field) -> None:
 
 def _set(holder: object, field: Field) -> None:
     field.required = True
+
+
+def _skip(field: Field) -> None:
+    pass
 "#;
 
 const CLASS_ALIASES: &str = r#"from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar
 
-from pkg.helpers import _require, _set
+from pkg.helpers import _require, _set, _skip
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -379,6 +425,24 @@ def held(field: Field) -> None:
 
 def overridden(o: Overriding, field: Field) -> None:
     o.REQUIRE(field)
+
+
+class Quiet:
+    RUN = staticmethod(_skip)
+
+
+class Loud(Quiet):
+    RUN = staticmethod(_require)
+
+
+def read_on_a_base(q: Quiet, field: Field) -> None:
+    run = q.RUN
+    run(field)  # EFF201
+
+
+def read_overridden(o: Overriding, field: Field) -> None:
+    run = o.REQUIRE
+    run(field)
 
 
 def shadowed(s: Shadowed, field: Field) -> None:

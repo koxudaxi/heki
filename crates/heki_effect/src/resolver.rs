@@ -8369,10 +8369,32 @@ impl<'a> TypeCtx<'a> {
     }
 
     /// What reading `attr` on an instance of `class` gives when the class body defining it binds
-    /// it to a name ([`ProjectDecls::class_alias`]): the named object, unless it is a function
-    /// outside `staticmethod`, which the read binds to the instance (`Some(None)`, a bound
-    /// method); `None` for no such attribute.
+    /// it to a name ([`ProjectDecls::class_alias`]), on every class the instance may be: the
+    /// class and its project subclasses, as for a call ([`Self::alias_call_targets`]). The join
+    /// of what each gives ([`Self::exact_instance_alias`]); unknown (`Some(None)`) when one gives
+    /// a bound method, when a subclass finds another object (its own `def`, an attribute stored),
+    /// and past [`DISPATCH_CLASS_LIMIT`] classes. `None` when `class` binds no such name.
     pub(crate) fn instance_alias(&self, class: &str, attr: &str) -> Option<Option<Ty>> {
+        let mut value = self.exact_instance_alias(class, attr)?;
+        let subclasses = self.project.subclasses_of(class);
+        if subclasses.len() >= DISPATCH_CLASS_LIMIT {
+            return Some(None);
+        }
+        for sub in &subclasses {
+            let read = self.exact_instance_alias(sub, attr).flatten();
+            value = value.zip(read).and_then(|(a, b)| a.join(&b));
+            if value.is_none() {
+                break;
+            }
+        }
+        Some(value)
+    }
+
+    /// What reading `attr` on an instance of exactly `class` gives when the class body defining
+    /// it binds it to a name ([`ProjectDecls::class_alias`]): the named object, unless it is a
+    /// function outside `staticmethod`, which the read binds to the instance (`Some(None)`, a
+    /// bound method); `None` for no such attribute.
+    fn exact_instance_alias(&self, class: &str, attr: &str) -> Option<Option<Ty>> {
         let (named, is_static) = self.project.class_alias(class, attr)?;
         let named = self.project.object_named(named);
         let binds = !is_static

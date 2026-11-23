@@ -5921,6 +5921,9 @@ const BOUND_TABLE_USE: &str =
     "from pkg.defs import TABLE\n\n\ndef use(field):\n    TABLE[\"run\"](field)\n";
 const BOUND_ALIAS_USE: &str =
     "from pkg.defs import Holder\n\n\ndef use(holder: Holder, field):\n    holder.RUN(field)\n";
+const BOUND_ALIAS_READ_USE: &str = "from pkg.defs import Holder\n\n\ndef use(holder: Holder, field):\n    run = holder.RUN\n    run(field)\n";
+const BOUND_DEFS_PATCHING: &str =
+    "\n\ndef patch(run):\n    from pkg import defs\n\n    defs.TABLE[\"run\"] = run\n";
 const BOUND_MODULE_USE: &str =
     "from pkg.defs import ops\n\n\ndef use(field):\n    ops().require(field)\n";
 const BOUND_TYPE_VAR_USE: &str = "from pkg.defs import V\n\n\ndef use(view: V):\n    for field in view.fields:\n        field.required = True\n";
@@ -5997,6 +6000,48 @@ fn lsp_diagnostics_equal_a_full_check_through_bound_values_across_modules() {
         .absent(&[("pkg/use_type_var.py", "EFF201")]),
         Step::new("the bound is the view again", vec![save("pkg/defs.py", BOUND_DEFS)])
             .present(all),
+        Step::new(
+            "the table's module changes it through its own module object",
+            vec![save("pkg/defs.py", &format!("{BOUND_DEFS}{BOUND_DEFS_PATCHING}"))],
+        )
+        .absent(&[("pkg/use_table.py", "EFF201")]),
+        Step::new("it no longer changes the table", vec![save("pkg/defs.py", BOUND_DEFS)])
+            .present(all),
+        Step::new(
+            "a module calls the attribute it reads, which binds the function that writes nothing",
+            vec![
+                Action::Create("pkg/use_alias_read.py", BOUND_ALIAS_READ_USE.to_owned()),
+                save(
+                    "pkg/defs.py",
+                    &BOUND_DEFS.replace("RUN = staticmethod(require)", "RUN = staticmethod(skip)"),
+                ),
+            ],
+        )
+        .absent(&[
+            ("pkg/use_alias.py", "EFF201"),
+            ("pkg/use_alias_read.py", "EFF201"),
+        ]),
+        Step::new(
+            "a subclass binds the attribute to the writer",
+            vec![Action::Create(
+                "pkg/sub.py",
+                "from pkg.defs import Holder\nfrom pkg.helpers import require\n\n\nclass Sub(Holder):\n    RUN = staticmethod(require)\n"
+                    .to_owned(),
+            )],
+        )
+        .present(&[
+            ("pkg/use_alias.py", "EFF201"),
+            ("pkg/use_alias_read.py", "EFF201"),
+        ]),
+        Step::new("the subclass is deleted", vec![Action::Delete("pkg/sub.py")]).absent(&[
+            ("pkg/use_alias.py", "EFF201"),
+            ("pkg/use_alias_read.py", "EFF201"),
+        ]),
+        Step::new("the class binds the writer again", vec![save("pkg/defs.py", BOUND_DEFS)])
+            .present(&[
+                ("pkg/use_alias.py", "EFF201"),
+                ("pkg/use_alias_read.py", "EFF201"),
+            ]),
     ];
     run_steps(s, &steps);
 }
