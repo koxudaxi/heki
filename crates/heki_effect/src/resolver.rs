@@ -4852,15 +4852,15 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             decls.functions.insert(f.qualname.clone(), Box::default());
         }
     }
-    decls.private_members = (decls.classes.keys())
-        .chain(decls.functions.keys())
-        .any(|qualname| mangling::member_path(qualname).is_some());
     decls.aliases = module_aliases(input, &decls);
     let stores = GlobalStores::of(&input.ir.functions);
     decls.unknown_globals = unknown_globals(&stores, &decls);
     let rebound = rebound_imports(input, &stores, &decls);
     decls.rebound_imports = (!rebound.is_empty()).then(|| Box::new(rebound));
     decls.rebound_definitions = rebound_definitions(input, &stores, &decls);
+    decls.private_members = (decls.classes.keys())
+        .chain(decls.functions.keys())
+        .any(|qualname| mangling::member_path(qualname).is_some());
     // Qualnames whose every definition is a property getter (a setter, a deleter, or any other
     // function with the same qualname shares its summary).
     let mut getters_only: FxHashMap<&str, bool> = FxHashMap::default();
