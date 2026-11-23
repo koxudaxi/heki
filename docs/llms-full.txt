@@ -4612,7 +4612,11 @@ levels deep with a `try` at each level above a recursion, and a ladder of thousa
 above a recursion with a `try` calling each, and, for the import graph (`heki inspect
 --imports`), a chain of ten thousand modules each importing the next, every module of a chain
 of two thousand asked at once (made to pass the budget the walks share), three hundred modules
-each importing every other, and a package importing two thousand submodules.
+each importing every other, a package importing two thousand submodules, two thousand reads of
+a lazy name bound on two branches, each after a branch, and five hundred lazy names each bound
+on two branches and read after five hundred branches (made to pass the budget the walks to the
+bindings share), and, for the declarations, forty layers of dependency groups each including
+both groups of the next layer.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
