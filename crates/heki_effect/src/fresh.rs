@@ -7,13 +7,14 @@
 //! [`FreshReturn`] says that every value it returns comes from one of them, with one container
 //! kind, and that nothing the function does may keep it: walking back from the returned values
 //! through copies and phis to where each is made, then forward from there over every use. An
-//! object stored, captured, yielded, raised, handed to a call that may keep it, or read through
-//! an attribute (a bound method holds its object) may be held elsewhere. The calls' own facts
-//! come from propagation, which resolves the functions a local fact names.
+//! object stored, captured, yielded, raised, handed to a call that may keep it, handed to a
+//! method that may return something holding it (`d.values()`, unless the walk follows the view),
+//! or read through an attribute (a bound method holds its object) may be held elsewhere. The
+//! calls' own facts come from propagation, which resolves the functions a local fact names.
 
 use crate::decorators::keeps_returned_value;
 use crate::ownership::Live;
-use crate::readonly::ContainerKind;
+use crate::readonly::{ContainerKind, result_detached_from_container, returns_container_view};
 use crate::resolver::is_generator_function;
 use crate::{Callee, FuncKey, Val};
 use heki_ir::walk::{Budget, Def, FnShape, Use, Visit, reach};
@@ -193,7 +194,8 @@ fn is_init(k: &FuncKey) -> bool {
 
 /// The function's local [`FreshReturn`], when every value it returns is a new builtin container
 /// that nothing in it may keep. `source_of` is [`source`] of the instruction defining a value,
-/// and `inspects(block, index)` says whether the call there only inspects its arguments.
+/// and `inspects(block, index)` says whether the call there only inspects its arguments and
+/// returns nothing that holds them.
 pub(crate) fn fresh_return<'k>(
     shape: &FnShape<'_>,
     live: &Live,
@@ -259,8 +261,9 @@ pub(crate) fn fresh_return<'k>(
     if back.open_means(Some(())).is_some() || fact.kind.is_none() && fact.calls.is_empty() {
         return None;
     }
-    // Forward from where they are made, through copies, phis, and in-place operators (which
-    // return their left operand): every use must keep nothing.
+    // Forward from where they are made, through copies, phis, in-place operators (which return
+    // their left operand), and the views and iterators the object's methods return: every use
+    // must keep nothing.
     let held = reach(
         &budget,
         made,
@@ -275,6 +278,11 @@ pub(crate) fn fresh_return<'k>(
                             in_place: true,
                             ..
                         } => out.push(*dst),
+                        InstKind::MethodCall { dst, method, .. }
+                            if returns_container_view(method) =>
+                        {
+                            out.push(*dst);
+                        }
                         _ => {}
                     },
                     Use::Terminator(_) => {}
@@ -322,6 +330,8 @@ fn keeps_nothing(
         |at: &VarId, mut others: std::slice::Iter<'_, VarId>| *at == v && others.all(|o| *o != v);
     let passes = |kwargs: &[(Option<String>, VarId)]| kwargs.iter().all(|(_, a)| *a != v);
     match &f.block(b).insts[i as usize].kind {
+        // The iterator a loop makes holds the object, but only the loop's `IterNext` reads it,
+        // and it dies with the frame.
         InstKind::Copy { .. }
         | InstKind::Compare { .. }
         | InstKind::UnaryOp { .. }
@@ -330,10 +340,19 @@ fn keeps_nothing(
         | InstKind::MakeIter { .. }
         | InstKind::SubscriptDelete { .. }
         | InstKind::Delete { .. } => true,
-        // A builtin container's own methods keep none of their receiver.
+        // A view, an iterator, or a bound method holds its container: a method keeps nothing
+        // when it returns none of it, or a view or an iterator the forward walk follows.
         InstKind::MethodCall {
-            recv, args, kwargs, ..
-        } => only(recv, args.iter()) && passes(kwargs),
+            recv,
+            method,
+            args,
+            kwargs,
+            ..
+        } => {
+            only(recv, args.iter())
+                && passes(kwargs)
+                && (result_detached_from_container(method) || returns_container_view(method))
+        }
         InstKind::Call {
             callee_var, kwargs, ..
         } => *callee_var != Some(v) && passes(kwargs) && inspects(b, i),

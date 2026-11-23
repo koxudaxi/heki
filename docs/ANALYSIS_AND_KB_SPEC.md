@@ -1177,12 +1177,15 @@ which module imports which.
    plain function (not `async`, not a generator, no decorator but those that call the body each
    time, no A1 hazard) with no bare return on a path a run can take, one walk back from the
    returned values through copies and phis (along the edges a run can take) to their sources, all
-   of one container kind, and one walk forward from the sources through copies, phis, and in-place
-   operators: every use keeps nothing (a method call on the object itself, an item load, store, or
-   delete on it, a comparison, a conversion, an iteration, a call of a builtin that only inspects
-   it); a store, a capture, a yield, a raise, an attribute load (a bound method), or any other
-   call ends the fact. Both walks share one budget per function. `built` says every source is the
-   builtin itself.
+   of one container kind, and one walk forward from the sources through copies, phis, in-place
+   operators, and the views and iterators the object's methods return (`keys`, `values`, `items`,
+   `__iter__`, `__reversed__`): every use keeps nothing (a method of the builtin containers whose
+   result holds none of the object, `readonly::result_detached_from_container`: a changing
+   method, a count, a test, an item, or a copy; an item load, store, or delete on it, a
+   comparison, a conversion, a loop over it, a call of a builtin that only inspects it and returns
+   nothing holding it, which `getattr` may); a store, a capture, a yield, a raise, an attribute
+   load (a bound method), or any other method or call ends the fact. Both walks share one budget
+   per function. `built` says every source is the builtin itself.
 3. **Propagation** (`Resolver::resolve_fresh_return`): a local fact naming project functions holds
    when each has a final fact of the same kind outside the SCC being computed (a recursive
    function has none), and is `built` only when they all are. Two definitions of one function keep
