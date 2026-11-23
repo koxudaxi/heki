@@ -173,7 +173,7 @@ fn a_table_of_functions_bound_once_gives_the_value_of_each_key() {
 
 /// Something changing a table in place (an item store, `update`, through an import of it or in
 /// another module) leaves its items unknown: no key gives a value, and the function calling
-/// one is not pure.
+/// one is not pure. An annotated global keeps the items it declares.
 const CHANGED: &str = r#"from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -191,6 +191,19 @@ UPDATED = {"noop": _noop}
 ELSEWHERE = {"noop": _noop}
 ITEMS = [_noop]
 KEPT = [_noop]
+
+
+class Slot:
+    def end(self, field: Field) -> None:
+        field.required = True
+
+
+SLOTS: dict[str, Slot] = {}
+SHARED_SLOTS: dict[str, Slot] = {}
+
+
+def open_slot(key: str) -> None:
+    SLOTS[key] = Slot()
 
 
 def register(name: str, run) -> None:
@@ -221,7 +234,7 @@ const CHANGED_CALLS: &str = r#"from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from pkg import changed
-from pkg.changed import ELSEWHERE, HANDLERS, ITEMS, KEPT, UPDATED
+from pkg.changed import ELSEWHERE, HANDLERS, ITEMS, KEPT, SHARED_SLOTS, SLOTS, UPDATED, Slot
 
 if TYPE_CHECKING:
     from pkg.model import Field
@@ -229,6 +242,7 @@ if TYPE_CHECKING:
 
 def changes_elsewhere(name: str, run) -> None:
     ELSEWHERE[name] = run
+    SHARED_SLOTS[name] = Slot()
 
 
 def by_handler(field: Field) -> None:
@@ -251,6 +265,14 @@ def by_item(field: Field) -> None:
 def by_kept(field: Field) -> None:
     for run in KEPT:
         run(field)
+
+
+def by_annotated(field: Field, key: str) -> None:
+    SLOTS[key].end(field)  # EFF201
+
+
+def by_annotated_elsewhere(field: Field, key: str) -> None:
+    SHARED_SLOTS[key].end(field)  # EFF201
 "#;
 
 #[test]
@@ -262,7 +284,7 @@ fn a_table_something_changes_in_place_keeps_no_items() {
             ("pkg/passes.py", CHANGED_CALLS),
         ],
     );
-    assert_eq!(reported(&p), vec![]);
+    assert_eq!(reported(&p), marked(&[("pkg/passes.py", CHANGED_CALLS)]));
     for f in ["by_handler", "by_updated", "by_elsewhere", "by_item"] {
         assert_eq!(verdict(&p, &format!("pkg.passes.{f}")), "unknown", "{f}");
     }

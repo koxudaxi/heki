@@ -731,15 +731,18 @@ pub(super) fn record(
             (Some(types), Some(body)) => tables(decls, &fns, body, types, &unfixed),
             _ => BTreeMap::new(),
         };
-        let refined: BTreeMap<String, Ty> = decided
+        let declaring: BTreeMap<String, Ty> = decided
             .globals
-            .iter()
-            .filter_map(|(name, t)| declared(name).filter(|d| d != t).map(|d| (name.clone(), d)))
+            .keys()
+            .filter_map(|name| {
+                let d = declared(name)?;
+                (d.without_items() != d).then(|| (name.clone(), d))
+            })
             .collect();
-        (decided, fallbacks, foreign.into_decl(), (tables, refined))
+        (decided, fallbacks, foreign.into_decl(), (tables, declaring))
     };
     decided.write(decls);
-    (decls.tables, decls.refined_globals) = tables;
+    (decls.tables, decls.declared_items) = tables;
     decls.store_fallbacks = fallbacks.map(Box::new);
     decls.stores_elsewhere = foreign.map(Box::new);
 }
@@ -2600,8 +2603,8 @@ impl ProjectDecls {
         match self.elsewhere.globals.get(&fqn) {
             None => Some(own.clone()),
             // Another module's change in place leaves an annotated global its declaration.
-            Some(stored) if stored.changed && m.refined_globals.contains_key(name) => {
-                let declared = &m.refined_globals[name];
+            Some(stored) if stored.changed && m.declared_items.contains_key(name) => {
+                let declared = &m.declared_items[name];
                 StoredElsewhere {
                     changed: false,
                     ..stored.clone()
