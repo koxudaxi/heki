@@ -211,10 +211,8 @@ fn extract_module(
             // The module body runs the bodies of its classes: what they hand on (a dataclass
             // field's `default_factory`) is handed on by the module, what they take from
             // outside the project (`sys.platform`) the module takes, and the calls heki is
-            // blind to and the modules imported by name there are the module's. Their other
-            // facts are not the module's.
-            // blind to there, or that call a callable without awaiting it, are the module's.
-            // Their other facts are not the module's.
+            // blind to there, that call a callable without awaiting it, and the modules imported
+            // by name there are the module's. Their other facts are not the module's.
             for body in class_bodies_run_by(input.ir, f) {
                 let body = FnShape::new(body);
                 let facts = Extractor::new(
@@ -230,8 +228,8 @@ fn extract_module(
                 references.extend(facts.references);
                 external.extend(facts.external);
                 blind.extend(facts.blind);
-                // blind to there, that call a callable without awaiting it, and the modules imported by
-                // name there are the module's. Their other facts are not the module's.
+                imported_by_name.extend(facts.imports);
+                unawaited.extend(facts.unawaited);
             }
         }
         if let Some(mut flow) = flow {
