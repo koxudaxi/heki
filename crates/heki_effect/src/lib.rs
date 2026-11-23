@@ -2247,6 +2247,14 @@ impl FileSummary {
             .map(|(f, calls)| (f, calls.as_slice()))
     }
 
+    /// [`OptInTables::blind_spots`] of `func`: none when the table was not built.
+    pub fn blind_calls_of(&self, func: &FuncKey) -> &[BlindCall] {
+        self.opt_in_tables
+            .as_ref()
+            .and_then(|t| t.blind_spots.get(func))
+            .map_or(&[], Vec::as_slice)
+    }
+
     /// [`OptInTables::unawaited_handoffs`], by function.
     pub fn unawaited_handoffs(&self) -> impl Iterator<Item = (&FuncKey, &[UnawaitedHandoff])> {
         self.opt_in_tables

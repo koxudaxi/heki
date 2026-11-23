@@ -6052,8 +6052,38 @@ fn lsp_diagnostics_equal_a_full_check_through_what_contracts_cannot_attribute() 
             vec![Action::Delete("pkg/registry.py")],
         )
         .absent(&[("pkg/passes.py", "MUT204")]),
+        Step::new(
+            "a check constructs a field that names its attribute at run time",
+            vec![
+                save("pkg/model.py", &strict_model("self")),
+                save("pkg/checks.py", &format!("{STRICT_CHECKS}{STRICT_BUILD}")),
+            ],
+        )
+        .absent(&[("pkg/checks.py", "EFF201")]),
+        Step::new(
+            "the initializer writes an object it is handed",
+            vec![save("pkg/model.py", &strict_model("source"))],
+        )
+        .present(&[("pkg/checks.py", "EFF201")]),
+        Step::new(
+            "the initializer writes its own instance again",
+            vec![save("pkg/model.py", &strict_model("self"))],
+        )
+        .absent(&[("pkg/checks.py", "EFF201")]),
     ];
     run_steps(s, &steps);
+}
+
+const STRICT_BUILD: &str = "\n\ndef build():\n    return Field()\n";
+
+/// [`STRICT_MODEL`] with an initializer writing an attribute named at run time on `written`.
+fn strict_model(written: &str) -> String {
+    STRICT_MODEL.replace(
+        "    def __init__(self):\n        self.required = False\n",
+        &format!(
+            "    def __init__(self, name=\"required\", source=None):\n        setattr({written}, name, False)\n"
+        ),
+    )
 }
 
 // ------------------------------------------------- argument lists across modules (session 4)

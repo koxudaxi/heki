@@ -1874,10 +1874,7 @@ impl<'a> Reach<'a> {
             return;
         };
         let summary = cx.index.summary(func);
-        let blind = cx.index.files[path]
-            .blind_calls()
-            .find(|(f, _)| *f == func)
-            .map_or(&[][..], |(_, calls)| calls);
+        let blind = cx.index.files[path].blind_calls_of(func);
         let mut unresolved = false;
         for call in blind {
             let heki_effect::Blind::Unresolved { name, .. } = &call.blind else {
@@ -1929,17 +1926,24 @@ impl<'a> Reach<'a> {
         }
         let writes = summary.into_iter().flat_map(|s| &s.unresolved_write_sites);
         for w in writes {
-            let named = b
-                .write_targets
-                .iter()
-                .filter(|_| b.writes_targets)
+            if b.allow_fresh && w.construction == Construction::Yes {
+                continue;
+            }
+            let mut named = (b.write_targets.iter().filter(|_| b.writes_targets))
                 .chain(&b.write_universe)
-                .any(|t| match &w.what {
+                .filter(|t| match &w.what {
                     Unresolved::Receiver(attr) => t.matches_attr(attr),
                     Unresolved::Name(class) => t.classes.contains(class),
                     Unresolved::Anything => true,
-                });
-            if !named || b.allow_fresh && w.construction == Construction::Yes {
+                })
+                .peekable();
+            // A class's own initialization (constructing a fresh object) is not a write, as in
+            // `collect_writes`, also through the helpers it hands `self` to. Which target the
+            // write hits is not known, so the initialization of a class of any target it may hit
+            // decides, as for `MUT205`.
+            if named.peek().is_none()
+                || named.any(|t| self.initializes(cx, i, &t.classes, w.obj_params))
+            {
                 continue;
             }
             let attr = match &w.what {
