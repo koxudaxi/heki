@@ -172,6 +172,7 @@ fn changed(
     let mut changed = match source(
         made,
         callee.as_ref(),
+        complete,
         types.get(&change.object),
         class_of,
         cx.kb,
@@ -211,7 +212,7 @@ fn changed(
                 exact: copy_kept && decls.method_not_overridden(kind.class(), method, by_name),
             }
         }
-        Source::Calls(keys) => {
+        Source::Calls { keys, complete } => {
             let mut fact = FreshReturn {
                 kind: None,
                 built: complete,
