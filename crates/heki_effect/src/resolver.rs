@@ -17,7 +17,7 @@ use crate::types::{Args, Elem, Generic, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
 use heki_env::HekiConfig;
-use heki_ir::walk::{Answer, Budget, FnShape, Visit, reach};
+use heki_ir::walk::{Answer, Budget, FnShape, ReadLog, SharedMemo, Visit, reach};
 use heki_ir::{
     BinOpKind, BlockId, ConstLiteral, FnIndex, FunctionKind, GlobalStores, Inst, InstKind,
     IrFunction, ModuleIr, SmallDisplay, Terminator, VarId,
@@ -1611,6 +1611,9 @@ pub struct ProjectDecls {
     class_constants: RwLock<FxHashMap<(String, String, ConstantRead), KnownConstant>>,
     /// The answers of [`Self::capacity`] so far; cleared with the indexes.
     capacities: RwLock<FxHashMap<CapacityOf, KnownCapacity>>,
+    /// The answers of [`Self::catalog_attribute`] so far, by class and name; cleared with the
+    /// indexes.
+    catalog_attributes: SharedMemo<(String, String), Option<String>, DeclKeys>,
 }
 
 /// Why an attribute (or `TypedDict` key) of a project class is read-only (`MUT108`).
@@ -1680,6 +1683,24 @@ pub(crate) enum Symbol<'a> {
     /// A name under a project module heki could not read.
     Unread,
     External,
+}
+
+/// The answers kept in a [`SharedMemo`] over the declarations record what deciding them read.
+impl ReadLog for ProjectDecls {
+    type Reads = DeclKeys;
+
+    fn recording(&self) -> bool {
+        self.recorder.on.load(Ordering::Relaxed)
+    }
+
+    fn isolated<A>(&self, decide: impl FnOnce() -> A) -> (A, Arc<DeclKeys>) {
+        let (answer, reads) = self.reads_of(decide);
+        (answer, Arc::new(reads.unwrap_or_default()))
+    }
+
+    fn replay(&self, reads: Arc<DeclKeys>) {
+        ProjectDecls::replay(self, reads);
+    }
 }
 
 impl ProjectDecls {
@@ -1804,6 +1825,7 @@ impl ProjectDecls {
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
+        self.catalog_attributes.clear();
         // Maintenance, not a lookup of an analysis.
         let recording = std::mem::replace(self.recorder.on.get_mut(), false);
         self.build_indexes();
@@ -3646,6 +3668,110 @@ impl ProjectDecls {
         }
     }
 
+    /// The class the catalog gives reading `attr` on an instance of `class`
+    /// (`heki_kb::AttributeType`, R3): the row of the class outside the project that each class
+    /// the value may be under R2 (`class` and every project subclass) finds first along its MRO,
+    /// the same row for all of them. `None` when a project class on the way binds the name (its
+    /// own declaration types the read, or nothing does), a base heki knows nothing of or a
+    /// library class without the row comes first (it may define the name), a class along the
+    /// MRO of one the value may be defines `__getattribute__` or has a metaclass heki does not
+    /// know, or there are more than [`DISPATCH_CLASS_LIMIT`] classes.
+    ///
+    /// The answer is kept per class and name for the life of the indexes, so the reads of a
+    /// catalogued name on instances of one class walk its subclasses once; the catalog is the
+    /// project's, fixed while the indexes are (a change of the configuration loads the project
+    /// again).
+    pub(crate) fn catalog_attribute(
+        &self,
+        class: &str,
+        attr: &str,
+        kb: &EffectiveEcosystemKb,
+    ) -> Option<String> {
+        // No row of the name: the read depends on no declaration.
+        if !kb.types_attribute_named(attr) {
+            return None;
+        }
+        let class = self.canonical(class);
+        self.catalog_attributes
+            .ask(self, (class.clone(), attr.to_owned()), || {
+                self.find_catalog_attribute(&class, attr, kb)
+                    .map(str::to_owned)
+            })
+    }
+
+    /// [`Self::catalog_attribute`] of the canonical `class`, decided: the walk over the classes
+    /// the value may be stops at the first that takes another row or none, or past
+    /// [`DISPATCH_CLASS_LIMIT`] of them.
+    fn find_catalog_attribute<'k>(
+        &self,
+        class: &str,
+        attr: &str,
+        kb: &'k EffectiveEcosystemKb,
+    ) -> Option<&'k str> {
+        let found = self.attribute_row_along(&self.mro(class), attr, kb)?;
+        let budget = Budget::unmetered("heki_effect::resolver::ProjectDecls::catalog_attribute");
+        let mut visited = 0;
+        let differs = reach(
+            &budget,
+            [class],
+            |c, out| out.extend(self.direct_subclasses(c).iter().map(String::as_str)),
+            |c| {
+                visited += 1;
+                if visited > DISPATCH_CLASS_LIMIT {
+                    return Visit::Stop(());
+                }
+                let mro = self.mro(c);
+                let same = !self.hooks_attribute_reads(&mro)
+                    && self.attribute_row_along(&mro, attr, kb) == Some(found);
+                if same { Visit::Expand } else { Visit::Stop(()) }
+            },
+        );
+        (differs == Answer::Known(None)).then_some(found)
+    }
+
+    /// Whether a project class along `mro` defines `__getattribute__`, which runs on every read,
+    /// or has a metaclass heki does not know, which may install a descriptor.
+    fn hooks_attribute_reads(&self, mro: &[String]) -> bool {
+        mro.iter().any(|c| {
+            self.read(|k| note(&mut k.class_facts, c));
+            self.class(c)
+                .is_some_and(|d| d.custom_metaclass || d.members.contains("__getattribute__"))
+        })
+    }
+
+    /// The `[[attributes]]` row reading `attr` finds along `mro`: that of the first class
+    /// outside the project, a builtin type without one passed over; none past a project class
+    /// binding the name, in its body, on `self`, or on the class object outside its body.
+    fn attribute_row_along<'k>(
+        &self,
+        mro: &[String],
+        attr: &str,
+        kb: &'k EffectiveEcosystemKb,
+    ) -> Option<&'k str> {
+        for c in mro {
+            if self.is_project_class(c) {
+                self.read(|k| note(&mut k.class_facts, c));
+                let binds = self
+                    .class(c)
+                    .is_some_and(|d| d.members.contains(attr) || d.rebound_attrs.contains(attr));
+                if binds {
+                    return None;
+                }
+                continue;
+            }
+            if is_unknown_base(c) || self.under_unread(c) {
+                return None;
+            }
+            if let Some(found) = kb.attribute_type(c, attr) {
+                return Some(found);
+            }
+            if !c.starts_with("builtins.") {
+                return None;
+            }
+        }
+        None
+    }
+
     /// Whether no class of the MRO of the project class `class` has the member `name`: no
     /// project class defines it, and every base outside the project is a builtin type that
     /// does not ([`Self::inherited_external`]).
@@ -3889,7 +4015,8 @@ impl ProjectDecls {
     /// definition when it is a getter, plus the getters of overriding project subclasses
     /// (Priority 4 CHA), at most `CHA_CANDIDATE_LIMIT` of them (`TooMany` beyond). `None` when
     /// no modeled getter runs: a plain attribute, a method, an attribute of an external class
-    /// (never a Layer 2 symbol: the catalog describes calls), or a property with a setter or
+    /// (never a Layer 2 symbol: an `[[attributes]]` row types what a read gives, not what it
+    /// runs), or a property with a setter or
     /// deleter (`FunctionDecl::is_property`).
     pub(crate) fn property_targets(
         &self,
@@ -5875,9 +6002,21 @@ pub(crate) fn arg_fact<'i>(
     ArgFact {
         literal: literal(&def, globals, var),
         names_file: names_a_file(&def, &name_of, globals, var),
-        class: class_of(var),
+        class: class_of(var).or_else(|| bytes_literal_class(&def, var)),
         flags: set_flags(&def, &name_of, var),
     }
+}
+
+/// The class of a `bytes` literal, which carries no inferred type of its own.
+fn bytes_literal_class<'i>(def: &impl Fn(VarId) -> Option<&'i Inst>, var: VarId) -> Option<String> {
+    matches!(
+        def(var)?.kind,
+        InstKind::Const {
+            literal: ConstLiteral::Bytes,
+            ..
+        }
+    )
+    .then(|| "builtins.bytes".to_owned())
 }
 
 /// Whether a database name opens a database in memory (`sqlite3.connect`), or opens none that

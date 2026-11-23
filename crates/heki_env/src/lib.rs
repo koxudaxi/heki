@@ -329,6 +329,9 @@ pub struct EcosystemOverride {
     /// `EFF112`: the call writes an argument, or serializes it into text, in the order of its
     /// elements.
     pub writes_in_order: Option<OrderedOutputSetting>,
+    /// The class of what reading the attribute `symbol` names on an instance of a library
+    /// class gives (`package.module.Client.chat`); it takes no other key.
+    pub attribute_type: Option<String>,
 }
 
 /// `writes-in-order`: the argument written (`arg`, a position not counting the receiver, or

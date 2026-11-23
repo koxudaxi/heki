@@ -68,6 +68,8 @@ cargo run -p heki -- rule --all
 python3.15 tests/symtable_verify/verify_symtable.py --heki target/debug/heki tests/symtable_verify/fixtures/
 # Layer 1 knowledge base sentinels
 python3.15 tests/sentinel/verify_soundness_kb.py
+# Layer 2 rows against releases of their distributions (needs uv and PyPI; its own workflow)
+uv run --no-project --python 3.12 --with "packaging==25.0" python tests/sentinel/verify_ecosystem_kb.py
 # Adversarial Soundness counterexamples (every one Blocked or Disproved)
 python3.15 tests/difftest/counterexamples.py
 python3.15 tests/difftest/soundness_e2e_counterexamples.py
