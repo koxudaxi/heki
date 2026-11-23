@@ -1855,10 +1855,14 @@ holds for `invalidation` too:
   list), and a protocol-typed value handed to a helper that changes it without typing its
   parameter stay reported. By the call graph, a private method of an implementation that a call
   through the protocol runs still hands its writes of its own `self` to the caller.
-- **One report stands for every site behind it.** A report at a call stands for every access
-  behind the call, and an effect boundary's report for every site its scope function reaches.
-  JSON output gives their number as `sites`, and a
-  [Ratchet baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) counts each of them.
+- **The help names the allowed code that does it today.** After the contract's `message`, the
+  help of a report names up to three public functions and methods whose own body does what the
+  report shows from a place the contract allows (an `allowed-*` pattern names them, or the
+  `forbidden-*` patterns leave them out; for `invalidation`, the writes announced on every path
+  and the `exempt-writers`), by fully qualified name:
+  ``add entries through `Store`; allowed writers of `Registry.entries`: `pkg.store.Store.add` ``.
+  Private functions (`_name`), special methods (`__init__`), and the exempt methods are not named.
+  JSON output gives them with their files as `allowed_examples` (`fqn`, `path`).
 
 ## Ecosystem knowledge: `[[tool.heki.ecosystem]]`
 
@@ -4030,6 +4034,7 @@ Each diagnostic has:
 | `blocker` | the obligation that blocks an automatic fix, if any |
 | `fix` | byte-span edits for proven-safe rewrites |
 | `sites` | the violation sites a contract report stands for, when more than one |
+| `allowed_examples` | for a contract report, up to three public functions (`fqn`, `path`) that do the same from a place the contract allows, which `help` names |
 
 A text run ends with one line per reported rule: `heki rule <CODE>` and the rule's page.
 
@@ -5917,6 +5922,14 @@ declares the method, itself or through its protocol bases, is allowed wherever i
 is a reference handing the method on through such a value (`return h._helper` with `references`);
 a call through another protocol or the implementation's class stays reported. A pattern names the
 subprotocols of the protocols it matches too, unless `protocol-subclasses = false`.
+
+The help starts with the contract's `message` and then names up to three allowed callers that
+make the call the report names themselves: public functions and methods an `allowed-callers`
+pattern names (with `forbidden-callers`, every function outside them), by fully qualified name
+(``allowed callers of `DataType.replace_reference`: `pkg.store.GenerationStore.replace_ref` ``).
+A reference handing a target on, the targets calling each other, private functions (`_name`),
+special methods, and the exempt methods do not count. JSON output gives them with their files as
+`allowed_examples` (`fqn`, `path`).
 
 ## What a report states
 
@@ -8684,6 +8697,13 @@ declares the attribute, itself or through its protocol bases, is allowed whereve
 read through another protocol or the implementation's class stays reported. A pattern names the
 subprotocols of the protocols it matches too, unless `protocol-subclasses = false`.
 
+The help starts with the contract's `message` and then names up to three allowed readers that
+read the member the report names themselves: public functions and methods an `allowed-readers`
+pattern names (with `forbidden-readers`, every function outside them), by fully qualified name
+(``allowed readers of `Reference.children`: `pkg.index.GenerationIndex.children_of` ``). Private
+functions (`_name`), special methods, and the exempt methods do not count. JSON output gives them
+with their files as `allowed_examples` (`fqn`, `path`).
+
 ## What a report states
 
 A report states that the function reads a target of a `read-owners` contract outside the contract's
@@ -9853,6 +9873,10 @@ name is no target: a class outside the target's family (`DataType` and its subcl
 caller path through an allowed caller counts like any other: the call is the function's own, and
 its callers only tell the receiver's class.
 
+The help names up to three allowed callers that call a target of the method's name
+themselves, as for `MUT204`, after the contract's `message`:
+``allowed callers of `replace_reference`: ...``.
+
 ## What a report states
 
 A report states that, outside the call owners, the function calls a method named like a target of
@@ -9946,6 +9970,10 @@ of a target class is reported here: that read is a read of the target that no ot
 With `attribution = "lexical"`, a function that only runs inside allowed readers is not allowed,
 and a caller path through an allowed reader counts like any other: the read is the function's
 own, and its callers only tell the object's class.
+
+The help names up to three allowed readers that read a target of the attribute's name
+themselves, as for `MUT203`, after the contract's `message`:
+``allowed readers of `children`: ...``.
 
 ## What a report states
 
@@ -10057,6 +10085,10 @@ caller path through an allowed writer counts like any other, while a helper that
 own initialization runs on its own `self` (`self._assign(name)` in `__init__`) stays allowed.
 With `own-receiver = "allow"`, a computed name written on the receiver of the method judging it
 (`setattr(self, name, v)`) is allowed.
+
+The help names up to three allowed writers that write a target of the attribute's name
+themselves, as for `MUT201`, after the contract's `message`:
+``allowed writers of `fields`: ...``.
 
 ## What a report states
 
@@ -10394,6 +10426,15 @@ containers with the original, so only rebinding its attributes constructs it
 (`copied.data_types = [...]`); `copied.data_types.append(x)` changes the original's list and is
 reported. `fresh-objects = "report"` reports these writes like any other.
 
+The help starts with the contract's `message` and then names up to three allowed writers that
+write the member the report names themselves: public functions and methods an `allowed-writers`
+pattern names (with `forbidden-writers`, every function outside them), by fully qualified name
+(``allowed writers of `Model.fields`: `pkg.store.Store.add_field` ``). A write through a helper,
+a write that constructs the object it writes (with `fresh-objects = "allow"`), private functions
+(`_name`), special methods (`__init__`), and the exempt methods do not count. JSON output gives
+them with their files as `allowed_examples` (`fqn`, `path`); a report without one has no such
+field.
+
 ## What a report states
 
 A report states that the function writes a target of a `write-owners` contract (an attribute, or the
@@ -10552,6 +10593,13 @@ It does not report:
   a caller, at any distance);
 - paths that leave the function by raising: exception edges are not followed and only normal
   returns count.
+
+The help starts with the contract's `message` and then names up to three announcing writers of
+the target the report names: public functions and methods that write it themselves and announce
+the change on every path, and `exempt-writers` that write it themselves, by fully qualified name
+(``announcing writers of `DataModel.fields`: `pkg.passes.narrow` ``). Private functions (`_name`)
+and special methods do not count. JSON output gives them with their files as `allowed_examples`
+(`fqn`, `path`).
 
 ## What a report states
 

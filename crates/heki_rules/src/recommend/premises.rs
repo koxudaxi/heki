@@ -457,6 +457,7 @@ mod tests {
                 )
                 .collect(),
             contracts: Vec::new(),
+            allowed_examples: Vec::new(),
         }
     }
 

@@ -16,10 +16,10 @@ use heki_rules::project::{
     RulesRun, discovers, exclude_set, parse_source, retain_unsuppressed, unread_module,
 };
 use heki_rules::{
-    CHAIN_RULES, ChainFacts, CheckExtras, RuleSelection, SNAPSHOT_FILE, SelectionError,
-    SentinelTestKey, SnapshotError, StaleWriteKey, SummarySnapshot, chain_facts, check_project,
-    deep_copy_files, family_readers, kept_removals_in, lazy_setup_files, sentinel_tests_in,
-    stale_writes_by_file,
+    CHAIN_RULES, ChainFacts, CheckExtras, EXAMPLE_RULES, ExampleOwners, RuleSelection,
+    SNAPSHOT_FILE, SelectionError, SentinelTestKey, SnapshotError, StaleWriteKey, SummarySnapshot,
+    chain_facts, check_project, deep_copy_files, example_digest, family_readers, kept_removals_in,
+    lazy_setup_files, sentinel_tests_in, stale_writes_by_file,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
@@ -84,6 +84,9 @@ struct FileMeta {
     /// Where the spans of the file that other files' diagnostics can show are in its text
     /// ([`shown_places`]).
     shown_places: Vec<SitePlace>,
+    /// What the help of contract reports can name of the file's functions, as of its latest
+    /// analysis (`heki_rules::example_digest`; 0 for none).
+    example_digest: u64,
 }
 
 /// A span, the line and columns of both its ends (`(line, byte column, UTF-16 column)`, as the
@@ -240,6 +243,12 @@ pub struct Workspace {
     /// call chain walks the own in-place changes and calls of functions in other files
     /// (`heki_rules::ChainFacts`).
     chain_reports: FxHashSet<PathBuf>,
+    /// The functions the contracts accept as places to access their targets from (`None`
+    /// without an owner or `invalidation` contract).
+    example_owners: Option<ExampleOwners>,
+    /// The files whose latest diagnostics include a report of `heki_rules::EXAMPLE_RULES`: its
+    /// help names allowed functions of any file.
+    example_reports: FxHashSet<PathBuf>,
     /// The heuristic reports of exact rules the latest check of each file withheld
     /// (`RuleSelection::withhold_heuristic`).
     withheld: FxHashMap<PathBuf, usize>,
@@ -472,10 +481,11 @@ impl Workspace {
                 FileMeta {
                     module_name: m.module_name.clone(),
                     shown_places: Vec::new(),
+                    example_digest: 0,
                 },
             )
         });
-        let files = project
+        let mut files: BTreeMap<PathBuf, FileMeta> = project
             .files
             .iter()
             .zip(&summaries)
@@ -485,6 +495,7 @@ impl Workspace {
                     FileMeta {
                         module_name: f.module_name.clone(),
                         shown_places: shown_places(summary, &f.source),
+                        example_digest: 0,
                     },
                 )
             })
@@ -502,6 +513,7 @@ impl Workspace {
                     .any(|b| b.forbid.iter().any(|t| t == "calls")),
             ecosystem_calls: !env_cfg.effect_boundaries.is_empty(),
         };
+        let example_owners = ExampleOwners::new(env_cfg);
         // Every file's IR, semantic model, and text go before propagation: only the index stays.
         let Project {
             env,
@@ -511,6 +523,11 @@ impl Workspace {
         } = project;
         drop(parsed);
         let index = ProjectIndex::build_for(summaries, contracts, typed_writes, opt_in);
+        // What the help of contract reports names comes from the propagated summaries.
+        for (path, meta) in files.iter_mut().filter(|_| example_owners.is_some()) {
+            meta.example_digest =
+                (example_owners.as_ref()).map_or(0, |owners| example_digest(owners, &index, path));
+        }
         let decls = index.decl_passes();
         // The options of the rules (contract targets and patterns) are read by every check, and
         // an invalid one fails them all: the workspace fails to load, as `heki check` fails
@@ -567,6 +584,8 @@ impl Workspace {
                 decls,
                 shown: FxHashMap::default(),
                 chain_reports: FxHashSet::default(),
+                example_owners,
+                example_reports: FxHashSet::default(),
                 withheld: FxHashMap::default(),
                 check_reads: CheckReads::default(),
                 patching_builtins,
@@ -672,6 +691,14 @@ impl Workspace {
             self.chain_reports.insert(parsed.path.clone());
         } else {
             self.chain_reports.remove(&parsed.path);
+        }
+        let examples = diags
+            .iter()
+            .any(|d| EXAMPLE_RULES.contains(&d.rule_code.as_str()));
+        if examples {
+            self.example_reports.insert(parsed.path.clone());
+        } else {
+            self.example_reports.remove(&parsed.path);
         }
         let withheld = self.selection.withhold_heuristic(&mut diags);
         self.withheld.insert(parsed.path.clone(), withheld);
@@ -923,12 +950,14 @@ impl Workspace {
         lazy_setup_files(&self.index, &changed)
     }
 
-    /// Re-summarize one parsed file; returns the update, what changed in the declarations, and
-    /// whether the places other files' diagnostics can show changed ([`shown_places`]).
+    /// Re-summarize one parsed file; returns the update, what changed in the declarations,
+    /// whether the places other files' diagnostics can show changed ([`shown_places`]), and
+    /// whether what the help of contract reports can name of it changed since its latest
+    /// analysis (`heki_rules::example_digest`).
     fn summarize(
         &mut self,
         parsed: &ParsedFile,
-    ) -> (heki_effect::IncrementalUpdate, DeclKeys, bool) {
+    ) -> (heki_effect::IncrementalUpdate, DeclKeys, bool, bool) {
         let out =
             self.index
                 .reanalyze_module_cached(&parsed.input(), &self.env.kb, &mut self.decls);
@@ -937,16 +966,23 @@ impl Workspace {
             .files
             .get(&parsed.path)
             .map_or_else(Vec::new, |f| shown_places(f, &parsed.source));
+        let example_digest = (self.example_owners.as_ref()).map_or(0, |owners| {
+            example_digest(owners, &self.index, &parsed.path)
+        });
         let before = self.files.insert(
             parsed.path.clone(),
             FileMeta {
                 module_name: parsed.module_name.clone(),
                 shown_places: places,
+                example_digest,
             },
         );
-        let moved = before.is_none_or(|b| b.shown_places != self.files[&parsed.path].shown_places);
+        let moved = before
+            .as_ref()
+            .is_none_or(|b| b.shown_places != self.files[&parsed.path].shown_places);
+        let examples_moved = before.map_or(0, |b| b.example_digest) != example_digest;
         self.stats.indexed_files = self.index.files.len();
-        (out.0, out.1, moved)
+        (out.0, out.1, moved, examples_moved)
     }
 
     /// Files of the generators handed to the `changed` functions (`SiteRole::Through`): whether
@@ -1157,7 +1193,7 @@ impl Workspace {
         let callers_before = self.caller_view(&parsed.path);
         let chains_before = chain_facts(&self.index, &parsed.path);
         let ecosystem_before = self.ecosystem_view(&parsed.path);
-        let (update, change, places_moved) = self.summarize(&parsed);
+        let (update, change, places_moved, examples_moved) = self.summarize(&parsed);
         let callers_after = self.caller_view(&parsed.path);
         let chains_after = chain_facts(&self.index, &parsed.path);
         let ecosystem_after = self.ecosystem_view(&parsed.path);
@@ -1177,6 +1213,10 @@ impl Workspace {
         // (the summaries copying call sites were re-propagated).
         if places_moved {
             affected.extend(self.showing(&parsed.path));
+        }
+        // The help of a contract report names the allowed functions of every file.
+        if examples_moved {
+            affected.extend(self.example_reports.iter().cloned());
         }
         affected.remove(&parsed.path);
         let mut affected: Vec<PathBuf> = affected.into_iter().collect();
@@ -1243,13 +1283,16 @@ impl Workspace {
     fn replace_file(&mut self, path: &Path, unread: Option<UnreadModule>) -> Vec<PathBuf> {
         self.shown.remove(path);
         self.chain_reports.remove(path);
+        self.example_reports.remove(path);
         self.withheld.remove(path);
         self.check_reads.remove(path);
+        let named_examples = self.files.get(path).is_some_and(|m| m.example_digest != 0);
         let module_name = match &unread {
             Some(m) => {
                 let meta = FileMeta {
                     module_name: m.module_name.clone(),
                     shown_places: Vec::new(),
+                    example_digest: 0,
                 };
                 self.files.insert(path.to_path_buf(), meta);
                 m.module_name.clone()
@@ -1282,6 +1325,9 @@ impl Workspace {
         affected.extend(self.note_stale_writes(path));
         affected.extend(self.note_sentinel_tests(path));
         affected.extend(self.note_kept_removals(path));
+        if named_examples {
+            affected.extend(self.example_reports.iter().cloned());
+        }
         let mut v: Vec<PathBuf> = affected.into_iter().collect();
         v.sort();
         v

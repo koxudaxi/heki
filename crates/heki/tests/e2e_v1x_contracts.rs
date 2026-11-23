@@ -392,10 +392,11 @@ fn mut203_reads_aliases_getattr_dict_and_private_delegation() {
         ],
         "{diags:#?}"
     );
+    // The contract's `message`, then the allowed reader that reads the target itself.
     assert!(
-        diags
-            .iter()
-            .all(|d| d["help"] == "read children through GenerationIndex instead"),
+        diags.iter().all(|d| d["help"]
+            == "read children through GenerationIndex instead; allowed readers of \
+                `Reference.children`: `pkg.model.GenerationIndex.kids`"),
         "{diags:#?}"
     );
     assert_eq!(

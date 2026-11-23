@@ -13,9 +13,9 @@ use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
     AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite, CallTarget, Callee,
     Construction, ContractClass, Delivery, EffectSummary, Facts, FuncKey, ProjectDecls,
-    ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx, TypedFieldWriteSite, Val,
-    WriteKind, attr_writes, container_mutator, initializes_own_self, is_initializer,
-    self_attr_writes,
+    ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx, TypedFieldReadSite,
+    TypedFieldWriteSite, Val, WriteKind, attr_writes, container_mutator, initializes_own_self,
+    is_initializer, self_attr_writes,
 };
 use heki_env::HekiConfig;
 use heki_ir::walk::{Answer, Budget, FnShape, Visit, reach};
@@ -851,11 +851,14 @@ fn private_methods_called_from_init(
     out
 }
 
+mod allowed_examples;
 mod kept_values;
 mod lost_changes;
 mod sentinel_copies;
 mod stale_reads;
 
+use allowed_examples::{AllowedExamples, contract_help, place_functions};
+pub use allowed_examples::{EXAMPLE_RULES, ExampleOwners, example_digest};
 pub use kept_values::{kept_removals_in, lazy_setup_files};
 pub(crate) use lost_changes::mut119;
 pub(crate) use sentinel_copies::mut118;
@@ -1275,6 +1278,14 @@ impl Allowance {
     /// Whether an `allowed-*` pattern names `key`.
     pub(crate) fn names_allowed(&self, key: &FuncKey) -> bool {
         names(&self.allowed, key)
+    }
+
+    /// Whether the contract names `key` as a place to access its targets from: an `allowed-*`
+    /// pattern names it, or the `forbidden-*` patterns leave it out. Exempt methods (construction
+    /// and copies) and the guarded functions themselves are allowed for what they are, not as
+    /// such places (`Diagnostic::allowed_examples`).
+    pub(crate) fn names_place(&self, key: &FuncKey) -> bool {
+        self.names_allowed(key) || !self.in_scope(key)
     }
 
     /// The same allowance, with the guarded functions `targets` allowed too.
@@ -2053,7 +2064,8 @@ struct MergedReport<'u> {
     /// The member the message names (quoted), and the other members behind the key.
     named: String,
     also: BTreeSet<String>,
-    help: Option<String>,
+    /// The contract's `message`, which the help starts with.
+    note: Option<String>,
     chain: Vec<CallHop>,
     sites: BTreeSet<SiteId>,
     groups: BTreeSet<SiteGroup>,
@@ -2097,7 +2109,7 @@ impl<'u, K: Ord> MergedReports<'u, K> {
                 rank: name.rank,
                 named: name.named.to_owned(),
                 also: BTreeSet::new(),
-                help: note.map(str::to_owned),
+                note: note.map(str::to_owned),
                 chain: chain(),
                 sites: BTreeSet::new(),
                 groups: BTreeSet::new(),
@@ -2117,7 +2129,18 @@ impl<'u, K: Ord> MergedReports<'u, K> {
         }
     }
 
-    pub(crate) fn emit(self, cx: &CheckContext<'_>, code: &'static str, out: &mut Vec<Diagnostic>) {
+    /// Emit the reports under `code`. The help of each names the functions doing what it shows
+    /// from places its contract allows (`who` of the member it names), which `collect` finds
+    /// with [`AllowedExamples::add`], under the key and name such a report would have.
+    pub(crate) fn emit<'c>(
+        self,
+        cx: &CheckContext<'c>,
+        (code, who): (&'static str, &str),
+        out: &mut Vec<Diagnostic>,
+        collect: impl FnOnce(&mut AllowedExamples<'c, K>),
+    ) where
+        K: Clone,
+    {
         // Groups of equal sites are one group: the groups of two targets of one access hold the
         // same sites.
         let mut first_of: FxHashMap<&BTreeSet<SiteId>, usize> = FxHashMap::default();
@@ -2162,15 +2185,28 @@ impl<'u, K: Ord> MergedReports<'u, K> {
                 }
             }
         }
-        for (distinct, members) in merged {
+        // The target configured first names the report; the others' names, with their members,
+        // follow its own members.
+        let merged: Vec<(usize, Vec<usize>, usize)> = merged
+            .into_iter()
+            .map(|(distinct, members)| {
+                let lead = *members
+                    .iter()
+                    .min_by_key(|&&i| reports[i].1.rank)
+                    .unwrap_or(&members[0]);
+                (distinct, members, lead)
+            })
+            .collect();
+        let mut examples = AllowedExamples::wanting(merged.iter().map(|&(_, _, lead)| {
+            let ((_, _, key, target), r) = reports[lead];
+            (key, target.as_str(), r.named.as_str())
+        }));
+        if !examples.is_empty() {
+            collect(&mut examples);
+        }
+        for (distinct, members, lead) in merged {
             let sites = u32::try_from(distinct).unwrap_or(u32::MAX);
-            // The target configured first names the report; the others' names, with their
-            // members, follow its own members.
-            let lead = *members
-                .iter()
-                .min_by_key(|&&i| reports[i].1.rank)
-                .unwrap_or(&members[0]);
-            let ((func, span, _, target), r) = reports[lead];
+            let ((func, span, key, target), r) = reports[lead];
             let mut also: Vec<(usize, &str)> =
                 r.also.iter().map(|m| (r.rank, m.as_str())).collect();
             for &i in members.iter().filter(|&&i| i != lead) {
@@ -2194,6 +2230,8 @@ impl<'u, K: Ord> MergedReports<'u, K> {
                 .flat_map(|&i| &reports[i].1.contracts)
                 .copied()
                 .collect();
+            let found = examples.of(key, target, &r.named);
+            let (help, allowed) = contract_help(r.note.as_deref(), (who, &r.named), &found);
             if let Some(d) = cx.emit(
                 out,
                 code,
@@ -2202,11 +2240,12 @@ impl<'u, K: Ord> MergedReports<'u, K> {
                 &func.qualname,
                 target.clone(),
                 message,
-                r.help.clone(),
+                help,
                 &r.chain,
             ) {
                 d.sites = sites;
                 d.contracts = contract_places(contracts);
+                d.allowed_examples = allowed;
             }
         }
     }
@@ -2555,6 +2594,20 @@ impl<'r> NamedDictKeys<'r> {
     }
 }
 
+/// The name a report of the write `site` of the target `t` gives the target ([`matched_name`]):
+/// the configured text, or the member written, with the key of an entry target.
+fn written_member(t: &ContractTarget, site: &TypedFieldWriteSite) -> String {
+    matched_name(&t.text, || {
+        let entry = t.key.as_ref().map(|k| format!("[\"{k}\"]"));
+        format!(
+            "{}.{}{}",
+            site.class_qualname,
+            site.attr,
+            entry.unwrap_or_default()
+        )
+    })
+}
+
 /// What a write site writes of a `write-owners` contract ([`OwnerRule::written`]).
 enum Written<'r> {
     Target(&'r ContractTarget),
@@ -2766,13 +2819,7 @@ pub(crate) fn mut201(
                         // The report's target: the configured one, or the unlisted key as a
                         // target naming it would (`Class.key`).
                         let (text, named, unlisted) = match written {
-                            Written::Target(t) => {
-                                let named = matched_name(&t.text, || {
-                                    let entry = t.key.as_ref().map(|k| format!("[\"{k}\"]"));
-                                    format!("{member}{}", entry.unwrap_or_default())
-                                });
-                                (t.text.clone(), named, "")
-                            }
+                            Written::Target(t) => (t.text.clone(), written_member(t, site), ""),
                             Written::UnlistedKey(_) => {
                                 let class = &site.class_qualname;
                                 let qualname = cx.decls.class_qualname(class).unwrap_or(class);
@@ -2818,7 +2865,34 @@ pub(crate) fn mut201(
             }
         }
     }
-    reports.emit(cx, "MUT201", out);
+    reports.emit(cx, ("MUT201", "allowed writers"), out, |examples| {
+        let owners = |k: &FuncKey| rules.iter().any(|r| r.allowance.names_place(k));
+        for (key, path, s) in place_functions(cx, owners) {
+            for site in s
+                .typed_field_write_sites
+                .iter()
+                .filter(|w| w.via_chain.is_empty())
+            {
+                for (r, rule) in rules.iter().enumerate() {
+                    if !rule.allowance.names_place(key)
+                        || rule.allow_fresh && site.construction == Construction::Yes
+                    {
+                        continue;
+                    }
+                    for (ti, t) in write_hits(&rule.targets, site) {
+                        let named = format!("`{}`", written_member(t, site));
+                        let name = Named {
+                            target: &t.text,
+                            named: &named,
+                            rank: ti,
+                            contract: r,
+                        };
+                        examples.add((&r, name), key, path);
+                    }
+                }
+            }
+        }
+    });
 
     // `forbid-cached-property-on`: a `@cached_property` defined on a guarded class.
     for unit in cx.units {
@@ -4325,8 +4399,7 @@ pub(crate) fn mut203<'c>(
                     .enumerate()
                     .filter(|(_, (t, _))| t.matches(&read.class_qualname, &read.attr))
                 {
-                    let named =
-                        matched_name(&t.text, || format!("{}.{}", read.class_qualname, read.attr));
+                    let named = read_member(t, read);
                     let walk = || {
                         delegated_reports(
                             cx,
@@ -4382,8 +4455,37 @@ pub(crate) fn mut203<'c>(
             }
         }
     }
-    reports.emit(cx, "MUT203", out);
+    reports.emit(cx, ("MUT203", "allowed readers"), out, |examples| {
+        let owners = |k: &FuncKey| rules.iter().any(|r| r.allowance.names_place(k));
+        for (key, path, s) in place_functions(cx, owners) {
+            let own = s.typed_field_read_sites.iter();
+            for read in own.filter(|r| r.counts_for_contracts()) {
+                for (contract, rule) in rules.iter().enumerate() {
+                    if !rule.allowance.names_place(key) {
+                        continue;
+                    }
+                    let hits = rule.targets.iter().enumerate();
+                    for (k, t) in hits.filter(|(_, t)| t.matches(&read.class_qualname, &read.attr))
+                    {
+                        let named = format!("`{}`", read_member(t, read));
+                        let name = Named {
+                            target: &t.text,
+                            named: &named,
+                            rank: k,
+                            contract,
+                        };
+                        examples.add((&contract, name), key, path);
+                    }
+                }
+            }
+        }
+    });
     Ok(())
+}
+
+/// The name a report of the read `read` of the target `t` gives the target ([`matched_name`]).
+fn read_member(t: &ContractTarget, read: &TypedFieldReadSite) -> String {
+    matched_name(&t.text, || format!("{}.{}", read.class_qualname, read.attr))
 }
 
 /// One state of the walk from an access up the reverse call graph.
