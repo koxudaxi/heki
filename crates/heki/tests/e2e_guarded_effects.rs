@@ -292,8 +292,9 @@ fn lazy_initialization_runs_once_per_object() {
 }
 
 /// A lazy initialization written with `hasattr`, `getattr(..., None)`, `try` / `except
-/// AttributeError`, or a store through `object.__setattr__` runs once per object as one under a
-/// `None` test does; one under `except KeyError` runs on every call.
+/// AttributeError` (also after a clause that takes another error), or a store through
+/// `object.__setattr__` runs once per object as one under a `None` test does; one under `except
+/// KeyError` runs on every call.
 #[test]
 fn lazy_initialization_spelled_otherwise_runs_once_per_object() {
     let source = r#"import requests
@@ -329,6 +330,15 @@ class Lazy:
             self._other = requests.Session()
             return self._other
 
+    def by_second_clause(self) -> object:
+        try:
+            return self._second
+        except KeyError:
+            raise
+        except AttributeError:
+            self._second = requests.Session()
+            return self._second
+
 
 def run(lazy: Lazy, urls: list[str]) -> None:
     for u in urls:
@@ -337,6 +347,7 @@ def run(lazy: Lazy, urls: list[str]) -> None:
         lazy.by_try()
         lazy.by_setattr()
         lazy.by_other_error()  # EFF102
+        lazy.by_second_clause()
 "#;
     check_marks(
         "guards_lazy_spelled",

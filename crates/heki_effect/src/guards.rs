@@ -36,7 +36,7 @@ use crate::{
     ArgBinding, BoundCallee, CallSite, ConstArg, ConstClass, EffectGuards, EffectSummary,
     GuardSubject, GuardTest, InputGuard, SiteRole, Slot,
 };
-use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, Or};
+use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, Or, Visit, reach};
 use heki_ir::{
     BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, Inst, InstKind, IrFunction,
     NaturalLoop, PhiNode, Terminator, UnaryOpKind, VarId,
@@ -498,24 +498,25 @@ fn attr_tests(shape: &FnShape<'_>, def: DefOf<'_, '_>) -> Vec<StateTest<(VarId, 
 
 /// The `except AttributeError:` clauses: the first of each `try` that takes an
 /// `AttributeError`, finding unset each attribute its body reads (`try: return self._x`).
-/// Each `try`'s clauses are walked once, from the block its body raises into.
+/// Each `try`'s clauses are walked once, from the block its body raises into. Past the
+/// function's budget none is recognized: which ones fit would depend on the order of the trys.
 fn attribute_error_clauses(shape: &FnShape<'_>) -> Vec<StateTest<(VarId, String)>> {
     let f = shape.f;
-    let catches = |b: BlockId| match f.block(b).insts.first().map(|i| &i.kind) {
-        Some(InstKind::CatchException { exc_types, .. }) => Some(exc_types),
-        _ => None,
-    };
     let mut bodies: FxHashMap<BlockId, Vec<BlockId>> = FxHashMap::default();
     for b in &f.blocks {
         if let Some(t) = b.exc_target {
             bodies.entry(t).or_default().push(b.id);
         }
     }
+    let budget = Budget::of_function("guards::attribute_error_clauses", f);
+    let clauses: Answer<Vec<_>> = bodies
+        .iter()
+        .map(|(dispatch, body)| {
+            attribute_error_clause(f, *dispatch, &budget).map(|c| c.map(|c| (c, body)))
+        })
+        .collect();
     let mut found = Vec::new();
-    for (dispatch, body) in &bodies {
-        let Some((clause, init)) = attribute_error_clause(f, *dispatch, catches) else {
-            continue;
-        };
+    for ((clause, init), body) in clauses.open_means(Vec::new()).into_iter().flatten() {
         for inst in body.iter().flat_map(|b| &f.block(*b).insts) {
             if let InstKind::AttrLoad { obj, attr, .. } = &inst.kind {
                 found.push(StateTest {
@@ -533,23 +534,35 @@ fn attribute_error_clauses(shape: &FnShape<'_>) -> Vec<StateTest<(VarId, String)
 
 /// The first clause of the `try` whose body raises into `dispatch` that takes an
 /// `AttributeError`: the block ending in its test, and its handler. Each clause tests its types
-/// and falls through to the next one's test.
-fn attribute_error_clause<'f>(
-    f: &'f IrFunction,
+/// and falls through to the next one's test; a test whose branch catches nothing ends the
+/// clauses.
+fn attribute_error_clause(
+    f: &IrFunction,
     dispatch: BlockId,
-    catches: impl Fn(BlockId) -> Option<&'f Vec<String>>,
-) -> Option<(BlockId, BlockId)> {
-    let mut clause = dispatch;
-    while let Terminator::Branch {
-        then_bb, else_bb, ..
-    } = f.block(clause).terminator
-    {
-        if catches(then_bb)?.iter().any(|t| names_attribute_error(t)) {
-            return Some((clause, then_bb));
-        }
-        clause = else_bb;
-    }
-    None
+    budget: &Budget,
+) -> Answer<Option<(BlockId, BlockId)>> {
+    let catches = |b: BlockId| match f.block(b).insts.first().map(|i| &i.kind) {
+        Some(InstKind::CatchException { exc_types, .. }) => Some(exc_types),
+        _ => None,
+    };
+    let test = |clause: BlockId| match f.block(clause).terminator {
+        Terminator::Branch {
+            then_bb, else_bb, ..
+        } => Some((then_bb, else_bb)),
+        _ => None,
+    };
+    reach(
+        budget,
+        [dispatch],
+        |clause, next| next.extend(test(clause).map(|(_, otherwise)| otherwise)),
+        |clause| match test(clause).and_then(|(handler, _)| Some((handler, catches(handler)?))) {
+            Some((handler, types)) if types.iter().any(|t| names_attribute_error(t)) => {
+                Visit::Stop((clause, handler))
+            }
+            Some(_) => Visit::Expand,
+            None => Visit::Prune,
+        },
+    )
 }
 
 /// Whether the text of an `except` clause's type names `AttributeError` (alone or in a tuple).
