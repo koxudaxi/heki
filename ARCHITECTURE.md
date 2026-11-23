@@ -30,8 +30,9 @@ ownership boundaries) semantic checker**.
 | **2: type checking** | ty, mypy, Pyright, Pyrefly | Type lattice | Type consistency. No aliasing, escapes, write ownership, or I/O effects. |
 | **3: Effect & Alias semantic checking (this project)** | **heki** | **Effects and aliases over an SSA control-flow graph and the call graph** | **State corruption across function and class boundaries, write-ownership violations, stale caches, blocking calls, and $O(n^2)$ complexity regressions** |
 
-*(Import dependencies between layers of modules and import cycles belong to tach /
-import-linter and to Python 3.15+ PEP 810 `lazy import`; heki stays with effects and aliases.)*
+*(Which modules may import which, and import cycles, are walls in heki's scope
+([ADR-022](docs/DESIGN_HISTORY_AND_ADR.md#adr-022)); the import rules are planned, and until
+they ship tach and import-linter check them.)*
 
 ### 1.1 What the product is: semantic checks first, speedups as a by-product
 
@@ -52,7 +53,7 @@ import-linter and to Python 3.15+ PEP 810 `lazy import`; heki stays with effects
 ### 1.2 Two lanes on one IR, three rule families
 
 On a shared frontend and SSA-CFG IR sit **two analysis lanes of different nature**, separated
-by crate boundaries, carrying three rule families.
+by crate boundaries, carrying three rule families and a planned fourth, imports.
 
 1. **Advisory / Effect lane (`heki_effect`)**: call-graph analysis that uses standard `typing`,
    `self` attributes, and a light class hierarchy.
@@ -73,6 +74,12 @@ by crate boundaries, carrying three rule families.
      `RecursionError` a broad `except` turns into a value (`EFF114`), an `async def` handed to a
      library call that never awaits what it returns (`EFF115`) (all opt-in), and **effect
      boundaries** declared in `pyproject.toml` (`EFF201`).
+   - **Family 4: Imports (`IMP`, planned in [ADR-022](docs/DESIGN_HISTORY_AND_ADR.md#adr-022))**:
+     import facts with the time each import runs (while its module loads, lazily, inside a
+     function, or never under `TYPE_CHECKING`); without configuration, circular imports that
+     fail, package code importing test or development code, and development or extra
+     dependencies loaded while a package module loads; the import contracts of import-linter,
+     tach, and Ruff's bans; and heki's own import contracts.
 2. **Soundness / Alias lane (`heki_soundness`)**: conservative abstract interpretation that never
    trusts type annotations (zero unsafe rewrites).
    - **Family 3: Complexity Rewrite (`OPT`)**: behavior-preserving $O(n^2) \to O(n)$ rewrites
@@ -107,15 +114,14 @@ by crate boundaries, carrying three rule families.
   obstacle to a fix (`blocker`), and the call path (`related`; SARIF carries the call path as
   `relatedLocations`), for large existing code bases
   and for the fix loops of humans and agents in CI.
-- **G5. Coexistence with existing tools**: no overlap with Ruff, ty, mypy, Pyright, or tach;
-  `# noqa` compatible.
+- **G5. Coexistence with existing tools**: no overlap with Ruff, ty, mypy, or Pyright; heki
+  reads the import contracts a project keeps for import-linter or tach (ADR-022); `# noqa`
+  compatible.
 
 ### Non-goals
 - Custom contract APIs in user code (`Owned`, `Borrowed`, `move()`, `@pure`, ...).
 - Theorem provers such as Lean 4.
 - Constant-factor micro-optimizations (hoisting `re.compile` included).
-- **General import-layer boundaries and import cycles** (left to tach / import-linter and Python
-  3.15+ PEP 810 `lazy import`; heki stays with effects and aliases).
 - **Single-expression syntax lints, dead code, and duplicated code** (`df.iterrows()`, unused
   variables, duplicated functions: Ruff / vulture / CodeQL).
 - **Ahead-of-time native extensions (mypyc / C / Rust bridges) and build-time rewriting** (loading
@@ -813,7 +819,8 @@ message = "render entry points must not mutate model state"
 - **Decisions**: `EFF101` / `EFF102` / `EFF103` / `DATA101` adopted as the core, `MUT101` adopted
   with strict noise exclusions, `MUT102` / `DATA102` rejected by measurement; from the
   datamodel-code-generator study, **`MUT201` / `MUT202`, the Ratchet baseline, and the
-  `symtable` comparison** were added; import boundaries are left to tach and Python 3.15 PEP 810.
+  `symtable` comparison** were added; import boundaries were left to tach and Python 3.15 PEP 810
+  (ADR-022 later took them into heki's scope).
 
 ### Implementation milestones (completed)
 | Milestone | Delivered |
