@@ -1518,6 +1518,16 @@ def keywords_an_outer_unpacking_may_override(urls, options):
     return list(map(key, urls))  # EFF102
 
 
+def an_outer_keyword_replaces_an_inner_one(urls):
+    key = functools.partial(functools.partial(fetch_if_asked, enabled=False), enabled=True)
+    return list(map(key, urls))  # EFF102
+
+
+def an_outer_keyword_switches_it_off(urls):
+    key = functools.partial(functools.partial(fetch_if_asked, enabled=True), enabled=False)
+    return list(map(key, urls))
+
+
 def fetch_columns(url, enabled, *items):
     if enabled:
         return requests.get(url)
