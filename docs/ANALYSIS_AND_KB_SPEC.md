@@ -399,10 +399,10 @@ the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores
   (`ProjectDecls::elsewhere`).
 - **Changes in place.** A change the module's code makes to the object a global or an
   attribute holds, through a load of it (an item store `HANDLERS[kind] = run`, a method that may
-  add items such as `append`, `update`, or `setdefault`, an in-place operator;
-  `heki_ir::FnIndex::changed_vars`, through copies and phis), is a store of the object's class
-  with its items unknown: a name holding `{"noop": noop}` keeps `dict` and no item type the code
-  may replace. Another module's change marks the name (`StoredElsewhere::changed`), whose type
+  add items such as `append`, `update`, or `setdefault`; `heki_ir::FnIndex::changed_vars`,
+  through copies and phis), is a store of the object's class with its items unknown (of an
+  annotated global's declaration): a name holding `{"noop": noop}` keeps `dict` and no item
+  type the code may replace. Another module's change marks the name (`StoredElsewhere::changed`), whose type
   then keeps no items where it is read. What a call the object is handed to does is not
   followed (the assumption on objects of unknown origin).
 - **Annotations.** An annotation types every store of the name it declares (Priority 2): an

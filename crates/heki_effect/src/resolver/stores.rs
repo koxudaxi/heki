@@ -1271,10 +1271,11 @@ fn insts(f: &IrFunction) -> impl Iterator<Item = &Inst> {
 /// ([`heki_ir::FnIndex::changed_vars`]: `HANDLERS[kind] = run`, `self.items.append(x)`), by
 /// their place in the function's instructions.
 fn changed_loads(input: &ModuleInput<'_>, f: &IrFunction) -> Box<[(BlockId, usize)]> {
-    let changes = insts(f).any(|inst| match &inst.kind {
-        InstKind::SubscriptStore { .. } | InstKind::MethodCall { .. } => true,
-        InstKind::BinOp { in_place, .. } => *in_place,
-        _ => false,
+    let changes = insts(f).any(|inst| {
+        matches!(
+            inst.kind,
+            InstKind::SubscriptStore { .. } | InstKind::MethodCall { .. }
+        )
     });
     if !changes {
         return Box::default();
@@ -1775,7 +1776,7 @@ impl<'c, 'f> Classifier<'c, 'f> {
     }
 
     /// A change in place of the object the load `load` gives (an item store, a method call
-    /// that may add items, an in-place operator): a store, into the name the load reads, of the
+    /// that may add items): a store, into the name the load reads, of the
     /// object's class with its items unknown, or of an annotated global's declaration. The name
     /// keeps its class and no items the code may add or replace (`HANDLERS = {"a": run}`, then
     /// `HANDLERS[kind] = other`).
