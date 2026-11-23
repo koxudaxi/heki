@@ -325,3 +325,89 @@ fn an_entry_many_contracts_hold_is_one_line() {
         "{stderr}"
     );
 }
+
+const PRIVATE_MODEL: &str = "\
+class Parser:
+    def __init__(self) -> None:
+        self.items = []
+
+    def __postprocess(self) -> None:
+        pass
+
+    def __run(self) -> None:
+        def step() -> None:
+            self.__postprocess()
+
+        step()
+
+
+class Outer:
+    class __Inner:
+        value = 0
+
+        def run(self) -> None:
+            pass
+";
+
+const PRIVATE_CONFIG: &str = r#"[project]
+name = "t"
+
+[[tool.heki.call-owners]]
+name = "private"
+targets = [
+    "pkg.base:Parser._Parser__postprocess",
+    "pkg.base:Parser.__postprocess",
+    "pkg.base:Parser._Parser__gone",
+    "pkg.base:Parser._Other__postprocess",
+    "pkg.base:Outer._Outer__Inner.run",
+]
+allowed-callers = [
+    "pkg.base:Parser._Parser__run",
+    "pkg.base:Parser._Parser__run.*",
+    "pkg.base:Parser._Parser__walk",
+]
+
+[[tool.heki.write-owners]]
+name = "items"
+targets = [
+    "pkg.base.Parser.items",
+    "pkg.base.Outer._Outer__Inner.value",
+    "pkg.base.Outer._Outer__Inner.gone",
+]
+allowed-writers = ["pkg.base:Parser._Parser__run", "pkg.base:Parser._Parser__*"]
+exempt-methods = ["Parser._Parser__postprocess", "_Parser__postprocess"]
+forbid-cached-property-on = ["pkg.base.Outer._Outer__Inner", "pkg.base.Outer.__Inner"]
+
+[[tool.heki.effect-boundaries]]
+name = "pure"
+scopes = ["pkg.base:Parser._Parser__run", "pkg.base:Outer._Outer__Inner"]
+forbid = ["writes-targets"]
+write-targets = ["pkg.base.Parser.items"]
+"#;
+
+/// A private member is named in either spelling the contracts accept, as written in its class
+/// (`Parser.__postprocess`) or as the class holds it (`Parser._Parser__postprocess`): by a call
+/// target, a function pattern and the functions a glob names inside it, a class and the
+/// attributes of a target, and a scope.
+/// The held spelling of a member or attribute that does not exist, or with another class's
+/// prefix, names nothing, and an exempt method without its class is named by its last part as
+/// written.
+#[test]
+fn a_private_member_is_named_in_either_spelling() {
+    let p = Project::new("unmatched_private_members");
+    p.write("pyproject.toml", PRIVATE_CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/base.py", PRIVATE_MODEL);
+    let (_, stdout, stderr) = p.heki(&["check"]);
+    assert_eq!(
+        lines(&stderr, "warning: "),
+        [
+            "`targets` entry `pkg.base.Outer._Outer__Inner.gone` of write-owners `items` names no attribute, method, or `__dict__` key of `pkg.base.Outer._Outer__Inner` in the analyzed files",
+            "`exempt-methods` entry `_Parser__postprocess` of write-owners `items` names no method in the analyzed files; `__postprocess` exists",
+            "`targets` entry `pkg.base:Parser._Parser__gone` of call-owners `private` names no function, method, or class in the analyzed files",
+            "`targets` entry `pkg.base:Parser._Other__postprocess` of call-owners `private` names no function, method, or class in the analyzed files; `pkg.base:Parser.__postprocess` exists",
+            "`allowed-callers` entry `pkg.base:Parser._Parser__walk` of call-owners `private` names no function or method in the analyzed files",
+        ],
+        "{stdout}{stderr}"
+    );
+}

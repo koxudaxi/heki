@@ -3765,3 +3765,124 @@ write-targets = ['Field.extras["init"]']
     assert!(inspect("pkg.model.set_extra").contains("pkg.model.Field.extras[key]  container_mut"));
     assert!(inspect("pkg.model.set_flag").contains("pkg.model.Field.extras[?]  container_mut"));
 }
+
+const ROUTES_MODEL: &str = r#"class Field:
+    def __init__(self) -> None:
+        self.extras: dict[str, object] = {}
+
+
+def set_extra(field: Field, key: str, value: object) -> None:
+    field.extras[key] = value
+
+
+def trusted(field: Field, key: str) -> None:
+    set_extra(field, key, True)
+
+
+def relay(field: Field, key: str) -> None:
+    _forward(field, key)
+
+
+def _forward(field: Field, key: str) -> None:
+    set_extra(field, key, True)
+
+
+def _store(field: Field, key: str) -> None:
+    field.extras[key] = 1
+"#;
+
+const ROUTES: &str = r#"from pkg.model import Field, relay, trusted
+
+
+def through_both_routes(field: Field) -> None:
+    trusted(field, "init")
+    relay(field, "init")
+
+
+def through_the_allowed_route(field: Field) -> None:
+    trusted(field, "init")
+
+
+def through_two_keys(field: Field, key: str) -> None:
+    relay(field, "other")
+    relay(field, key)
+"#;
+
+const ROUTES_OTHER: &str = r#"from pkg.model import Field, _store
+
+
+def reset(field: Field) -> None:
+    field.extras.clear()
+    field.extras["init"] = 1
+
+
+def through_a_private_store(field: Field) -> None:
+    _store(field, "init")
+"#;
+
+/// The keys a store operation writes are the ones each followed route passes: a scope function
+/// passing `"init"` through an allowed callee (`trusted`) and through a relay that is not
+/// allowed is reported for the relay, whose route is longer; through the allowed callee alone it
+/// is not. Each key is reported through a call passing it. `heki inspect` lists a write of the
+/// whole container next to an entry the same function writes, and a private store operation's
+/// write only under the entry its call passes.
+#[test]
+fn a_store_operation_is_judged_on_each_route_passing_its_key() {
+    let p = Project::new("store_operation_routes");
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["EFF201"]
+
+[[tool.heki.effect-boundaries]]
+name = "routes"
+scopes = ["pkg.routes.*"]
+write-universe = ['Field.extras["init"]']
+allowed-callees = ["pkg.model.trusted"]
+"#,
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", ROUTES_MODEL)
+    .write("pkg/routes.py", ROUTES)
+    .write("pkg/other.py", ROUTES_OTHER);
+    let diags = diagnostics(&p, &[]);
+    let r = "pkg/routes.py";
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(
+                r,
+                6,
+                "EFF201",
+                "through_both_routes",
+                "routes:Field.extras[\"init\"]"
+            ),
+            d(
+                r,
+                15,
+                "EFF201",
+                "through_two_keys",
+                "routes:Field.extras[?]"
+            ),
+        ],
+        "{diags:#?}"
+    );
+    let changed = |name: &str| -> Vec<String> {
+        let out = p.heki(&["inspect", name]).1;
+        out.lines()
+            .filter(|l| l.ends_with("container_mut"))
+            .filter_map(|l| l.split_whitespace().next().map(str::to_owned))
+            .collect()
+    };
+    assert_eq!(
+        changed("pkg.other.reset"),
+        ["pkg.model.Field.extras", "pkg.model.Field.extras[\"init\"]"]
+    );
+    assert_eq!(
+        changed("pkg.other.through_a_private_store"),
+        ["pkg.model.Field.extras[\"init\"]"]
+    );
+}

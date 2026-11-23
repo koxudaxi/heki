@@ -16,13 +16,15 @@ use crate::mut_rules::{
 };
 use crate::selection::RuleSelection;
 use crate::{
-    CheckContext, DottedPattern, RuleConfigError, has_glob_syntax, last_name, split_last_dot,
+    CheckContext, DottedPattern, RuleConfigError, def_spellings, has_glob_syntax, last_name,
+    split_last_dot,
 };
 use heki_effect::{ContractClass, FuncKey, Unresolved};
 use heki_env::HekiConfig;
 use rustc_hash::{FxHashMap, FxHashSet};
 use schemars::JsonSchema;
 use serde::Serialize;
+use std::borrow::Cow;
 use std::fmt::Write as _;
 
 /// The most contracts the message of an entry several contracts hold names.
@@ -315,13 +317,14 @@ fn judged_keys<'c>(config: &'c HekiConfig, selection: &RuleSelection) -> Vec<Key
 /// the classes have.
 struct ProjectNames<'a> {
     functions: Vec<&'a FuncKey>,
-    /// The functions by the last part of their qualname.
-    functions_by_last: FxHashMap<&'a str, Vec<&'a FuncKey>>,
-    /// The functions by each part of their module and qualname: those a module, class, or
-    /// function of that name may hold.
-    functions_within: FxHashMap<&'a str, Vec<&'a FuncKey>>,
+    /// The functions by the last part of each spelling of their qualname ([`def_spellings`]:
+    /// `Parser.__run` and `Parser._Parser__run`), as the matchers accept either.
+    functions_by_last: FxHashMap<Cow<'a, str>, Vec<&'a FuncKey>>,
+    /// The functions by each part of their module and of each spelling of their qualname: those
+    /// a module, class, or function of that name may hold.
+    functions_within: FxHashMap<Cow<'a, str>, Vec<&'a FuncKey>>,
     classes: Vec<ContractClass>,
-    /// The classes (by index) by the last part of their qualname.
+    /// The classes (by index) by the last part of each spelling of their qualname.
     classes_by_last: FxHashMap<String, Vec<usize>>,
     /// The attributes and constant `__dict__` keys the code reads or writes on objects typed with
     /// each class (fqn).
@@ -338,8 +341,8 @@ struct ProjectNames<'a> {
 impl<'a> ProjectNames<'a> {
     fn new(cx: &CheckContext<'a>) -> Self {
         let defined = cx.defined_functions();
-        let mut functions_by_last: FxHashMap<&str, Vec<&FuncKey>> = FxHashMap::default();
-        let mut functions_within: FxHashMap<&str, Vec<&FuncKey>> = FxHashMap::default();
+        let mut functions_by_last: FxHashMap<Cow<'a, str>, Vec<&FuncKey>> = FxHashMap::default();
+        let mut functions_within: FxHashMap<Cow<'a, str>, Vec<&FuncKey>> = FxHashMap::default();
         let mut accessed: FxHashMap<&str, FxHashSet<&str>> = FxHashMap::default();
         let (mut on_unknown, mut computed) = (FxHashSet::default(), FxHashSet::default());
         for &(key, s) in &defined {
@@ -356,15 +359,17 @@ impl<'a> ProjectNames<'a> {
                     Unresolved::Anything => {}
                 }
             }
-            functions_by_last
-                .entry(last_part(&key.qualname))
-                .or_default()
-                .push(key);
-            let mut parts: Vec<&str> = key
-                .module
-                .split('.')
-                .chain(key.qualname.split('.'))
-                .collect();
+            let mut parts: Vec<Cow<'a, str>> = key.module.split('.').map(Cow::Borrowed).collect();
+            let mut lasts: Vec<Cow<'a, str>> = Vec::new();
+            for (_, qualname) in def_spellings(&key.fqn(), &key.qualname) {
+                let spelled = dotted_parts(qualname);
+                lasts.extend(spelled.last().cloned());
+                parts.extend(spelled);
+            }
+            lasts.dedup();
+            for last in lasts {
+                functions_by_last.entry(last).or_default().push(key);
+            }
             parts.sort_unstable();
             parts.dedup();
             for part in parts {
@@ -380,10 +385,13 @@ impl<'a> ProjectNames<'a> {
         let mut classes_by_last: FxHashMap<String, Vec<usize>> = FxHashMap::default();
         for (i, c) in classes.iter().enumerate() {
             let qualname = c.qualname.as_deref().unwrap_or(&c.fqn);
-            classes_by_last
-                .entry(last_part(qualname).to_owned())
-                .or_default()
-                .push(i);
+            let mut lasts: Vec<String> = def_spellings(&c.fqn, qualname)
+                .map(|(_, q)| last_part(&q).to_owned())
+                .collect();
+            lasts.dedup();
+            for last in lasts {
+                classes_by_last.entry(last).or_default().push(i);
+            }
         }
         Self {
             functions: defined.into_iter().map(|(key, _)| key).collect(),
@@ -447,6 +455,17 @@ impl<'a> ProjectNames<'a> {
 /// The last part of a qualname (`save` of `Store.save`).
 fn last_part(qualname: &str) -> &str {
     qualname.rsplit('.').next().unwrap_or(qualname)
+}
+
+/// The dotted parts of `path`, borrowed as `path` is.
+fn dotted_parts(path: Cow<'_, str>) -> Vec<Cow<'_, str>> {
+    match path {
+        Cow::Borrowed(p) => p.split('.').map(Cow::Borrowed).collect(),
+        Cow::Owned(p) => p
+            .split('.')
+            .map(|part| Cow::Owned(part.to_owned()))
+            .collect(),
+    }
 }
 
 /// The entries of the contracts that match nothing in the analyzed files, one per kind, key,
@@ -747,8 +766,13 @@ fn nearest_methods(names: &ProjectNames<'_>, entry: &str) -> Vec<String> {
     if entry.contains(['.', ':']) || has_glob_syntax(entry) {
         return nearest_functions(names, entry);
     }
-    let mut methods: Vec<&str> = names.functions_by_last.keys().copied().collect();
+    // An exempt method without its class matches the last part as written
+    // (`Allowance::exempts`), never the spelling its class holds.
+    let mut methods: Vec<&str> = (names.functions.iter())
+        .map(|k| last_part(&k.qualname))
+        .collect();
     methods.sort_unstable();
+    methods.dedup();
     heki_env::problem::nearest(entry, methods)
         .into_iter()
         .map(str::to_owned)

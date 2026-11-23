@@ -690,6 +690,7 @@ pub(super) fn record(
         let declared = |name: &str| body_types.as_ref().and_then(|t| t.declared(name).cloned());
         let mut foreign = Foreign::default();
         let mut first: Vec<First> = Vec::with_capacity(fns.len());
+        let mut changed: FxHashSet<&str> = FxHashSet::default();
         for s in &fns {
             let (types, alone, earlier) = match &body_types {
                 Some(types) if s.f.is_module_body => {
@@ -702,8 +703,9 @@ pub(super) fn record(
                 }
             };
             let mut own = Joins::default();
-            Classifier::new(&cx0, decls, s, &types, &declared, &unfixed)
-                .classify(&mut own, Some(&mut foreign));
+            let classifier = Classifier::new(&cx0, decls, s, &types, &declared, &unfixed);
+            classifier.classify(&mut own, Some(&mut foreign));
+            changed.extend(classifier.changed_globals());
             let named = first_reads.consulted.take().into_iter().collect();
             let trace = first_reads.recorder.take();
             let trace = alone.then(|| earlier.iter().cloned().chain(trace).collect());
@@ -721,7 +723,7 @@ pub(super) fn record(
             &mut foreign,
         );
         let tables = match (&body_types, fns.iter().find(|s| s.f.is_module_body)) {
-            (Some(types), Some(body)) => tables(decls, &fns, body, types, &unfixed),
+            (Some(types), Some(body)) => tables(decls, body, types, &unfixed, &changed),
             _ => BTreeMap::new(),
         };
         let declaring: BTreeMap<String, Ty> = decided
@@ -746,30 +748,17 @@ const TABLE_ENTRIES: usize = 256;
 /// [`ModuleDecls::tables`]: the module body's stores of a global it binds once (`body`, typed
 /// by `types`), outside a loop, to a dict display with string-literal keys and no `**`
 /// entry, one of whose values is a function, a class, or a `functools.partial` object, when
-/// no function of the module changes the global's object in place ([`StoringFn::changed`])
-/// and nothing may rebind the name (`unfixed`).
+/// no function of the module changes the global's object in place (`changed`,
+/// [`Classifier::changed_globals`]) and nothing may rebind the name (`unfixed`).
 fn tables(
     decls: &ModuleDecls,
-    fns: &[StoringFn<'_>],
     body: &StoringFn<'_>,
     types: &Inferred,
     unfixed: &Unfixed<'_>,
+    changed: &FxHashSet<&str>,
 ) -> BTreeMap<String, Table> {
     let mut out = BTreeMap::new();
     let stores = heki_ir::GlobalStores::of(std::slice::from_ref(body.f));
-    let changed: FxHashSet<&str> = fns
-        .iter()
-        .flat_map(|s| {
-            s.changed
-                .iter()
-                .filter_map(|&(b, i)| match &s.f.block(b).insts[i].kind {
-                    InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
-                        Some(name.as_str())
-                    }
-                    _ => None,
-                })
-        })
-        .collect();
     let shape = &body.shape;
     for bb in body.f.blocks.iter().filter(|b| shape.loop_depth(b.id) == 0) {
         for inst in &bb.insts {
@@ -1768,18 +1757,40 @@ impl<'c, 'f> Classifier<'c, 'f> {
         }
     }
 
+    /// The module's globals whose object the function changes in place
+    /// ([`StoringFn::changed`]), by any spelling of the receiver: the name
+    /// (`HANDLERS[kind] = run`), or an attribute of the module's own object, which the module
+    /// imports (`tables.HANDLERS[kind] = run`).
+    fn changed_globals(&self) -> Vec<&'f str> {
+        let module = self.cx.module_name();
+        let own_module = |obj: VarId| {
+            (self.holders(obj).iter()).any(|h| matches!(h, Holder::Module(m) if m == module))
+        };
+        let loads = self.s.changed.iter();
+        let loads = loads.map(|&(block, i)| &self.s.f.block(block).insts[i].kind);
+        loads
+            .filter_map(|load| match load {
+                InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
+                    Some(name.as_str())
+                }
+                InstKind::AttrLoad { obj, attr, .. } if own_module(*obj) => Some(attr.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// A change in place of the object the load `load` gives (an item store, a method call
     /// that may add items): a store, into the name the load reads, of the
     /// object's class with its items unknown, or of an annotated global's declaration. The name
     /// keeps its class and no items the code may add or replace (`HANDLERS = {"a": run}`, then
-    /// `HANDLERS[kind] = other`).
+    /// `HANDLERS[kind] = other`). A global read through the module's own object, which types it
+    /// by its name alone (`tables.HANDLERS[kind] = other` in a module importing itself), keeps
+    /// its declaration or no type.
     fn changed_in_place(&self, out: &mut Sink<'_>, load: &Inst) {
         // The loaded value's class with its items unknown, when it has items; another module's
         // names are marked instead, decided by their own module's stores.
-        let without_items = load
-            .kind
-            .dst()
-            .and_then(|d| self.types.ty(d))
+        let loaded = load.kind.dst().and_then(|d| self.types.ty(d));
+        let without_items = loaded
             .map(|t| (t.without_items(), t))
             .and_then(|(changed, t)| (changed != *t).then_some(changed));
         let value = without_items.as_ref().map(Some);
@@ -1811,6 +1822,10 @@ impl<'c, 'f> Classifier<'c, 'f> {
                             }
                         }
                         Holder::Module(m) if m == module => {
+                            let declared = (self.declared)(attr);
+                            let named_only = loaded.is_none_or(|t| matches!(t, Ty::Ref(_)));
+                            let known = declared.as_ref().map(Some).or(value);
+                            let value = known.or(named_only.then_some(None));
                             if let Some(value) = value {
                                 let target = StoreTarget::Global(attr.clone());
                                 out.own.store(target, false, Some(value));
