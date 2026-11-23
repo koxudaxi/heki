@@ -86,7 +86,7 @@ pub(crate) fn install(args: &SkillInstallArgs) -> Result<ExitCode> {
     }
     eprintln!(
         "Installed the heki Agent Skill (experimental) at {}",
-        shown.display()
+        heki_diagnostics::path_text(&shown)
     );
     Ok(ExitCode::SUCCESS)
 }

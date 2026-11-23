@@ -333,12 +333,8 @@ fn the_installer_writes_the_repository_skill_where_the_agent_reads_it() {
     let (code, _, stderr) = p.heki(&["skill", "install", "--agent", "claude-code"]);
     assert_eq!(code, 0, "{stderr}");
     let installed = p.dir.join(".claude/skills/heki");
-    // The binary prints the path with the separator of the platform.
-    let shown = Path::new(".claude")
-        .join("skills")
-        .join("heki")
-        .display()
-        .to_string();
+    // Paths are written with `/` on every platform, as in reports.
+    let shown = ".claude/skills/heki";
     assert_eq!(
         stderr,
         format!("Installed the heki Agent Skill (experimental) at {shown}\n")
@@ -397,10 +393,7 @@ fn the_installer_leaves_what_is_not_a_skill_directory() {
     let (code, _, stderr) = p.heki(&["skill", "install", "--agent", "claude-code"]);
     assert_eq!(code, 2);
     assert!(
-        stderr.starts_with(&format!(
-            "error: {}: cannot write the skill: ",
-            Path::new(".claude").join("skills").join("heki").display()
-        )),
+        stderr.starts_with("error: .claude/skills/heki: cannot write the skill: "),
         "{stderr}"
     );
 }
