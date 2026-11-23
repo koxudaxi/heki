@@ -583,7 +583,7 @@ fn required_version_and_keys_of_a_newer_heki() {
     );
     let p = project(
         "required_version_ok",
-        &format!("[tool.heki]\nrequired-version = \">=0.1, <99\"\n"),
+        "[tool.heki]\nrequired-version = \">=0.1, <99\"\n",
     );
     let (code, stdout, stderr) = p.heki(&["check", "--no-heuristic"]);
     assert_ne!(code, 2, "{stdout}{stderr}");
