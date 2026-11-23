@@ -36,8 +36,9 @@ name, `path.py:LINE`, or `path.py::NAME`.
 
 The configuration, a path, or an option is wrong. The error names the file and line, says what
 to write instead (`= help:`), and links the section of the documentation about it (`= docs:`).
-With `--output-format json` the same error is `{"error": {...}}` on stdout: `help`, `docs`, and
-`candidates` (the keys, rules, or values a misspelled one may have meant). Apply the help: for
+With `--output-format json`, an error in the configuration or a path is `{"error": {...}}` on
+stdout: `help`, `docs`, and `candidates` (the keys, rules, or values a misspelled one may have
+meant). An unknown or invalid option is reported before that, as text on stderr only. Apply the help: for
 example, `select` written in `[tool.heki]` belongs in `[tool.heki.lint]`.
 
 ## `heki check` exits with 2 and still prints diagnostics

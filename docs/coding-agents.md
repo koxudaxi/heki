@@ -61,7 +61,9 @@ A text run ends with one line per reported rule: `heki rule <CODE>` and the rule
 
 When the run cannot check (exit code 2: a configuration, path, or file error), the error says
 where the cause is, what to write instead, and which section of the documentation explains it.
-With `--output-format json` it is an object on stdout:
+With `--output-format json`, an error that stops the run (the configuration or a path) is an
+object on stdout; a file that cannot be read or parsed is named on stderr, and stdout keeps the
+diagnostics of the other files:
 
 ```json
 {
