@@ -19,20 +19,21 @@ use crate::{Callee, FuncKey, Val};
 use heki_ir::walk::{Budget, Def, FnShape, Use, Visit, reach};
 use heki_ir::{BlockId, BuiltinKind, FunctionKind, InstKind, Terminator, VarId};
 use heki_kb::EffectiveEcosystemKb;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-/// What every value a function returns is ([`crate::EffectSummary::fresh_return`]): a builtin
-/// container of one kind that the call made and that nothing else holds when it returns.
+/// What every value a function returns is ([`FreshReturns`]): a builtin container of one kind
+/// that the call made and that nothing else holds when it returns.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FreshReturn {
-    /// `None` only in a local summary whose returned values all come from `calls`.
+    /// `None` only in a local fact whose returned values all come from `calls`.
     pub kind: Option<ContainerKind>,
     /// Every returned container is built as the builtin class itself. A copy's class comes from
     /// the copied value's inferred type, which under R2 may be a project subclass's.
     pub built: bool,
     /// The project functions whose results the function returns, each of which must return a
-    /// new container of the same kind (local: propagation resolves them, and a final summary
-    /// names none).
+    /// new container of the same kind (local: propagation resolves them, and a final fact names
+    /// none).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub calls: Vec<FuncKey>,
 }
@@ -67,6 +68,51 @@ impl FreshReturn {
         };
         self.built &= callee.built;
         callee.kind.is_some_and(|kind| self.joins(kind))
+    }
+}
+
+/// The [`FreshReturn`] facts of a file's functions ([`crate::OptInTables::fresh_returns`]), kept
+/// beside their summaries: only the functions that have one pay for it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreshReturns {
+    /// The local facts (IR-free).
+    #[serde(default, skip_serializing_if = "FxHashMap::is_empty")]
+    pub local: FxHashMap<FuncKey, FreshReturn>,
+    /// The final facts: the local ones whose functions propagation found to return new
+    /// containers of the same kind ([`crate::ProjectIndex::fresh_return`]).
+    #[serde(default, skip_serializing_if = "FxHashMap::is_empty")]
+    pub resolved: FxHashMap<FuncKey, FreshReturn>,
+}
+
+impl FreshReturns {
+    pub fn is_empty(&self) -> bool {
+        self.local.is_empty() && self.resolved.is_empty()
+    }
+
+    /// Join the local fact of another definition of `func` (conditional definitions) into the
+    /// first one's. A must-fact: it holds only when both return new containers, of one kind.
+    pub(crate) fn join_definition(&mut self, func: &FuncKey, fact: Option<FreshReturn>) {
+        let joined = match (self.local.remove(func), fact) {
+            (Some(mut a), Some(b)) => b.kind.is_none_or(|k| a.joins(k)).then(|| {
+                a.built &= b.built;
+                a.calls.extend(b.calls);
+                a.calls.sort();
+                a.calls.dedup();
+                a
+            }),
+            _ => None,
+        };
+        if let Some(fact) = joined {
+            self.local.insert(func.clone(), fact);
+        }
+    }
+
+    /// Make the final fact of `func` its local one again (before propagation).
+    pub(crate) fn reset(&mut self, func: &FuncKey) {
+        match self.local.get(func) {
+            Some(fact) => self.resolved.insert(func.clone(), fact.clone()),
+            None => self.resolved.remove(func),
+        };
     }
 }
 
@@ -256,7 +302,7 @@ pub(crate) fn fresh_return<'k>(
     }
     fact.calls.sort();
     fact.calls.dedup();
-    // The local summary keeps the list for the whole run.
+    // The local fact keeps the list for the whole run.
     fact.calls.shrink_to_fit();
     Some(fact)
 }
