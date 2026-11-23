@@ -695,10 +695,12 @@ pub trait ReadLog {
 /// read, and every later read of it while recording replays that, so an answer read from here
 /// records the same dependencies as one decided again. The only engine shared between threads.
 /// Deciding an answer must not ask for itself: there is no cycle detection across threads.
+#[derive(Debug)]
 pub struct SharedMemo<K, A, R> {
     slots: RwLock<FxHashMap<K, Kept<A, R>>>,
 }
 
+#[derive(Debug)]
 struct Kept<A, R> {
     answer: A,
     /// `None`: decided while nothing recorded.
