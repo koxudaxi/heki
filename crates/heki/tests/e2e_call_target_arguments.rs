@@ -899,9 +899,9 @@ class Record:
 
 /// `**` operands: dict displays with constant keys (inline, through copies, a module constant as
 /// a key, a key given twice), beside written keywords, landing in `**kwargs`, binding a required
-/// parameter, and constructing a dataclass; displays something changes before the call, other
-/// mappings, calls that raise `TypeError`, and a display merged with another or tested and
-/// returned.
+/// parameter, and constructing a dataclass; displays something changes before the call, a
+/// parameter, calls that raise `TypeError`, `dict(...)`, a display merging a parameter before its
+/// key, the same display on two paths, and a display tested and returned.
 const DISPLAY_USE: &str = r#"from pkg.sig import KEY, Record, mutate, opts, plain, required, two
 
 
@@ -973,16 +973,16 @@ def computed_key(name: str):
     plain(**{name: True})
 
 
-def not_a_display(kw: dict):
+def dict_call_and_parameter(kw: dict):
     plain(**dict(kind=True))
     plain(**kw)
 
 
-def unpacks_inside(base: dict):
+def merged_before_the_key(base: dict):
     plain(**{**base, "kind": True})
 
 
-def either_display(flag: bool):
+def same_on_both_paths(flag: bool):
     flags = {"kind": True} if flag else {"kind": True}
     plain(**flags)
 
@@ -1028,9 +1028,10 @@ def tested_and_returned():
 
 /// A `**` operand that is a dict display with string constant keys, which nothing changes (each
 /// value holding it is only copied, merged, unpacked with `**`, tested, or returned), binds its
-/// keys as written keywords bind, a later entry of a key replacing an earlier one. Any other mapping may pass any
-/// keyword, so it claims no argument; a key given twice (by two operands, or by an operand and a
-/// written keyword) makes the call raise `TypeError`, so it passes nothing.
+/// keys as written keywords bind, a later entry of a key replacing an earlier one. A mapping heki
+/// does not build (a parameter) may pass any keyword, so it claims no argument, but a key after it
+/// is passed; a key given twice (by two operands, or by an operand and a written keyword) makes
+/// the call raise `TypeError`, so it passes nothing.
 #[test]
 fn a_constant_dict_display_unpacked_with_two_stars_binds_its_keys_as_keywords() {
     let p = Project::new("call_target_arguments_displays");
@@ -1068,6 +1069,9 @@ fn a_constant_dict_display_unpacked_with_two_stars_binds_its_keys_as_keywords() 
             call(33, "into_kwargs", "opts(kind=True)"),
             call(37, "binds_required", "required(kind=True)"),
             call(41, "dataclass_fields", "Record(kind=True)"),
+            call(73, "dict_call_and_parameter", "plain(kind=True)"),
+            call(78, "merged_before_the_key", "plain(kind=True)"),
+            call(83, "same_on_both_paths", "plain(kind=True)"),
             call(112, "rebound_later", "plain(kind=True)"),
             report(
                 "pkg/use.py",
@@ -1076,6 +1080,525 @@ fn a_constant_dict_display_unpacked_with_two_stars_binds_its_keys_as_keywords() 
                 "MUT204",
                 "`tested_and_returned` calls `plain(kind=True)` outside the call owners of `c`",
             ),
+        ]
+    );
+}
+
+/// Mappings built from others or on several paths, unpacked with `**`: merged displays (a later
+/// entry replacing an earlier one, a parameter merged before or after the key, a display merging
+/// a parameter merged in turn), `dict(...)` of a display, of a parameter with a keyword, and of
+/// pairs, `a | b` of displays, of a merge, a `dict(...)` call, a phi, and a parameter, a phi of
+/// displays agreeing on the key or not or of a parameter, a loop merging the mapping into itself
+/// with another key or the same one, a mapping or a merged display changed in place, a mapping
+/// asked again inside another, a call heki cannot resolve, more ways than are followed (a merge
+/// of four mappings of two ways each, a phi of nine displays), `dict(**m)`, and a mapping also
+/// unpacked into a project method.
+const MERGED_USE: &str = r#"from pkg.sig import KEY, Record, opts, two
+
+
+def merged():
+    a = {"kind": True}
+    b = {"other": 1}
+    two(**{**a, **b})
+
+
+def merged_later_wins():
+    two(**{**{"kind": False}, **{"kind": True}})
+
+
+def merged_earlier_loses():
+    two(**{**{"kind": True}, **{"kind": False}})
+
+
+def unknown_after_the_key(base: dict):
+    two(**{"kind": True, **base})
+
+
+def dict_of_a_display():
+    two(**dict({"kind": True}))
+
+
+def dict_with_keywords(base: dict):
+    two(**dict(base, kind=True))
+
+
+def dict_of_pairs(pairs: list):
+    two(**dict(pairs))
+
+
+def union():
+    two(**({"other": 1} | {"kind": True}))
+
+
+def union_replaced():
+    two(**({"kind": True} | {"kind": False}))
+
+
+def union_of_a_parameter(base: dict):
+    two(**(base | {"kind": True}))
+
+
+def both_paths(flag: bool):
+    if flag:
+        flags = {"kind": True, "other": 1}
+    else:
+        flags = {KEY: True}
+    two(**flags)
+
+
+def paths_disagree(flag: bool):
+    flags = {"kind": True} if flag else {"other": 1}
+    two(**flags)
+
+
+def path_of_a_parameter(flag: bool, base: dict):
+    flags = {"kind": True} if flag else base
+    two(**flags)
+
+
+def loop_adds_keys(n: int):
+    flags = {"kind": True}
+    for i in range(n):
+        flags = {**flags, "other": i}
+    two(**flags)
+
+
+def loop_replaces_the_key(n: int):
+    flags = {"kind": True}
+    for _ in range(n):
+        flags = {**flags, "kind": False}
+    two(**flags)
+
+
+def merged_then_changed():
+    flags = {**{"kind": True}}
+    flags["kind"] = False
+    two(**flags)
+
+
+def source_changed():
+    a = {"kind": True}
+    a["kind"] = False
+    two(**{**a})
+
+
+def source_kept_in_another():
+    a = {"kind": True}
+    holder = {"a": a}
+    holder["a"]["kind"] = False
+    two(**{**a})
+
+
+def dataclass_on_both_paths(flag: bool):
+    flags = {"kind": True} if flag else {KEY: True}
+    Record(**flags)
+
+
+def merged_open_mapping(base: dict):
+    two(**{"other": 1, **{**base, "kind": True}})
+
+
+def union_of_a_union():
+    two(**(({"other": 1} | {"other": 2}) | {"kind": True}))
+
+
+def union_of_a_call():
+    two(**(dict(other=1) | {"kind": True}))
+
+
+def union_of_paths(flag: bool):
+    two(**(({"other": 1} if flag else {"other": 2}) | {"kind": True}))
+
+
+def asked_in_order():
+    a = {"kind": True}
+    two(**a)
+    two(**{**a, "other": 1})
+
+
+def unknown_receiver(obj):
+    obj.put(**{"kind": True})
+
+
+def many_ways(a: bool, b: bool, c: bool, d: bool):
+    f = {"kind": True, "w": 0} if a else {"kind": True, "w": 1}
+    g = {"x": 0} if b else {"x": 1}
+    h = {"y": 0} if c else {"y": 1}
+    i = {"z": 0} if d else {"z": 1}
+    opts(**{**f, **g, **h, **i})
+
+
+def nine_paths(n: int):
+    if n == 0:
+        flags = {"kind": True, "other": 0}
+    elif n == 1:
+        flags = {"kind": True, "other": 1}
+    elif n == 2:
+        flags = {"kind": True, "other": 2}
+    elif n == 3:
+        flags = {"kind": True, "other": 3}
+    elif n == 4:
+        flags = {"kind": True, "other": 4}
+    elif n == 5:
+        flags = {"kind": True, "other": 5}
+    elif n == 6:
+        flags = {"kind": True, "other": 6}
+    elif n == 7:
+        flags = {"kind": True, "other": 7}
+    else:
+        flags = {"kind": True, "other": 8}
+    opts(**flags)
+
+
+def dict_of_an_unpacked_display():
+    two(**dict(**{"kind": True}))
+
+
+class Holder:
+    def put(self, kind=False):
+        return kind
+
+
+def unpacked_into_a_method():
+    flags = {"kind": True}
+    Holder().put(**flags)
+    two(**flags)
+"#;
+
+/// A mapping merged from others (`{**a, **b}`, `dict(a, k=v)`, `a | b` of mappings the function
+/// builds) passes the entries of the last one of each key, and one heki does not build replaces
+/// every key before it; a phi of mappings passes a key where every input passes the same
+/// constant for it, as two callees must agree. A mapping something changes, or one merged from
+/// a mapping something changes, passes nothing heki claims, nor does one of more than eight
+/// ways.
+#[test]
+fn mappings_merged_or_built_on_several_paths_pass_the_keys_every_way_agrees_on() {
+    let p = Project::new("call_target_arguments_merged");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"c\"\ntargets = [\"two(kind=True)\", \"Record(kind=True)\", \"opts(kind=True)\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/sig.py", DISPLAY_SIGNATURES)
+    .write("pkg/use.py", MERGED_USE);
+    let call = |line: u64, func: &str| {
+        report(
+            "pkg/use.py",
+            line,
+            5,
+            "MUT204",
+            &format!("`{func}` calls `two(kind=True)` outside the call owners of `c`"),
+        )
+    };
+    assert_eq!(
+        reports(&p),
+        vec![
+            call(7, "merged"),
+            call(11, "merged_later_wins"),
+            call(23, "dict_of_a_display"),
+            call(27, "dict_with_keywords"),
+            call(35, "union"),
+            call(51, "both_paths"),
+            call(68, "loop_adds_keys"),
+            report(
+                "pkg/use.py",
+                99,
+                5,
+                "MUT204",
+                "`dataclass_on_both_paths` constructs `Record(kind=True)` outside the call owners of `c`",
+            ),
+            call(103, "merged_open_mapping"),
+            call(107, "union_of_a_union"),
+            call(111, "union_of_a_call"),
+            call(115, "union_of_paths"),
+            call(120, "asked_in_order"),
+            call(121, "asked_in_order"),
+            call(159, "dict_of_an_unpacked_display"),
+            call(170, "unpacked_into_a_method"),
+        ]
+    );
+}
+
+/// Calls of `functools.partial` objects the function makes: holding a keyword, a position, or a
+/// mapping, passed the keyword at the call, nested, constructing a class, a keyword replaced at
+/// the call, a mapping unpacked at the call over held keywords, objects the function does not
+/// make here (a parameter, one of two on different paths), one returned uncalled, and positions
+/// unpacked with `*` in the object or at the call.
+const PARTIAL_USE: &str = r#"import functools
+from functools import partial
+
+from pkg.sig import Record, plain, two
+
+
+def held_keyword():
+    make = functools.partial(plain, kind=True)
+    make()
+
+
+def held_position():
+    partial(plain, True)()
+
+
+def passed_at_the_call():
+    make = partial(two)
+    make(kind=True)
+
+
+def nested():
+    make = partial(partial(two, other=1), kind=True)
+    make()
+
+
+def held_mapping():
+    make = partial(two, **{"kind": True})
+    make(other=2)
+
+
+def constructs():
+    make = partial(Record, kind=True)
+    return make()
+
+
+def replaced_at_the_call():
+    make = partial(plain, kind=True)
+    make(kind=False)
+
+
+def unpacked_at_the_call(opts: dict):
+    make = partial(plain, kind=True)
+    make(**opts)
+
+
+def handed_in(make):
+    make()
+
+
+def made_on_two_paths(flag: bool):
+    make = partial(plain, kind=True) if flag else partial(plain, kind=True)
+    make()
+
+
+def kept_for_later():
+    return partial(Record, kind=True)
+
+
+def positions_unpacked_in_the_object(xs: list):
+    partial(plain, *xs)()
+
+
+def positions_unpacked_at_the_call(xs: list):
+    make = partial(two, kind=True)
+    make(*xs)
+"#;
+
+/// Calling a `functools.partial` object calls the callable it holds with the positions it holds
+/// first and its keywords, which a keyword the call writes replaces: the call of the object is
+/// the call site, where the callable runs (the `partial(...)` call only keeps the arguments, so
+/// with `references = "calls"` it is no reference there). An object the function does not make
+/// through copies, or a call unpacking a mapping that may replace the keywords it holds, is not
+/// followed; one only returned is a reference, which passes no arguments.
+#[test]
+fn a_call_of_a_partial_object_passes_what_the_object_holds() {
+    let p = Project::new("call_target_arguments_partial");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"c\"\ntargets = [\"plain(kind=True)\", \"two(kind=True)\", \"Record(kind=True)\"]\n\n[[tool.heki.call-owners]]\nname = \"records\"\ntargets = [\"pkg.sig.Record\"]\nreferences = \"calls\"\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/sig.py", DISPLAY_SIGNATURES)
+    .write("pkg/use.py", PARTIAL_USE);
+    let call = |line: u64, column: u64, func: &str, target: &str| {
+        report(
+            "pkg/use.py",
+            line,
+            column,
+            "MUT204",
+            &format!("`{func}` calls `{target}` outside the call owners of `c`"),
+        )
+    };
+    assert_eq!(
+        reports(&p),
+        vec![
+            call(9, 5, "held_keyword", "plain(kind=True)"),
+            call(13, 5, "held_position", "plain(kind=True)"),
+            call(18, 5, "passed_at_the_call", "two(kind=True)"),
+            call(23, 5, "nested", "two(kind=True)"),
+            call(28, 5, "held_mapping", "two(kind=True)"),
+            report(
+                "pkg/use.py",
+                33,
+                12,
+                "MUT204",
+                "`constructs` constructs `Record(kind=True)` outside the call owners of `c`",
+            ),
+            report(
+                "pkg/use.py",
+                33,
+                12,
+                "MUT204",
+                "`constructs` constructs `pkg.sig.Record` outside the call owners of `records`",
+            ),
+            report(
+                "pkg/use.py",
+                56,
+                20,
+                "MUT204",
+                "`kept_for_later` hands on `pkg.sig.Record` outside the call owners of `records`",
+            ),
+            call(65, 5, "positions_unpacked_at_the_call", "two(kind=True)"),
+        ]
+    );
+}
+
+const MODELS: &str = r#"from pydantic import BaseModel
+
+
+class DataType(BaseModel):
+    is_dict: bool = False
+    is_list: bool = False
+
+
+class MapType(DataType):
+    @classmethod
+    def of_map(cls) -> "MapType":
+        return cls.model_construct(is_dict=True)
+
+
+class Reference(BaseModel):
+    path: str = ""
+"#;
+
+/// Pydantic's builders of a model without its `__init__`: `model_construct` with a keyword, a
+/// mapping, another keyword, and through `cls`; `model_validate` of a display, by keyword, with
+/// another value, of a parameter annotated `dict`, of an unannotated one, and of an instance;
+/// `model_copy` with `update` and without, on a value of either of two models; and
+/// `model_construct` of the library's class.
+const MODEL_USE: &str = r#"from pydantic import BaseModel
+
+from pkg.models import DataType, Reference
+
+
+def construct():
+    return DataType.model_construct(is_dict=True)
+
+
+def construct_from_a_mapping():
+    flags = {"is_dict": True}
+    return DataType.model_construct(**flags)
+
+
+def construct_other():
+    return DataType.model_construct(is_list=True)
+
+
+def validate():
+    return DataType.model_validate({"is_dict": True})
+
+
+def validate_by_keyword():
+    return DataType.model_validate(obj={"is_dict": True})
+
+
+def validate_other():
+    return DataType.model_validate({"is_dict": False})
+
+
+def validate_a_dict(data: dict):
+    return Reference.model_validate(data)
+
+
+def validate_anything(data):
+    return Reference.model_validate(data)
+
+
+def validate_an_instance(ref: Reference):
+    return Reference.model_validate(ref)
+
+
+def copy_with_update(data_type: DataType):
+    return data_type.model_copy(update={"is_dict": True})
+
+
+def copy_without(data_type: DataType):
+    return data_type.model_copy()
+
+
+def copy_reference(ref: Reference):
+    return ref.model_copy()
+
+
+def copy_either(model: DataType | Reference):
+    return model.model_copy()
+
+
+def library_class():
+    return BaseModel.model_construct()
+"#;
+
+/// The catalog's builders of a pydantic model (Layer 2 `builds_receiver`) construct the class of
+/// their receiver from the field values they take: `model_construct` from its keywords,
+/// `model_validate` from the dict it is passed (given anything else, it may return an instance
+/// as it is, and builds nothing heki claims), and `model_copy` from `update`. A class target
+/// counts each of them as a construction, and one with an argument list each passing its
+/// constants.
+#[test]
+fn a_pydantic_builder_constructs_its_receivers_class_from_the_values_it_takes() {
+    let p = Project::new("call_target_arguments_pydantic");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"maps\"\ntargets = [\"pkg.models.DataType(is_dict=True)\"]\n\n[[tool.heki.call-owners]]\nname = \"references\"\ntargets = [\"pkg.models.Reference\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/models.py", MODELS)
+    .write("pkg/use.py", MODEL_USE);
+    let built = |path: &str, line: u64, func: &str, target: &str, contract: &str| {
+        report(
+            path,
+            line,
+            16,
+            "MUT204",
+            &format!("`{func}` constructs `{target}` outside the call owners of `{contract}`"),
+        )
+    };
+    let map = |line: u64, func: &str| {
+        let mut r = built(
+            "pkg/use.py",
+            line,
+            func,
+            "pkg.models.DataType(is_dict=True)",
+            "maps",
+        );
+        r.2 = 12;
+        r
+    };
+    let reference = |line: u64, func: &str| {
+        let mut r = built(
+            "pkg/use.py",
+            line,
+            func,
+            "pkg.models.Reference",
+            "references",
+        );
+        r.2 = 12;
+        r
+    };
+    assert_eq!(
+        reports(&p),
+        vec![
+            built(
+                "pkg/models.py",
+                12,
+                "MapType.of_map",
+                "pkg.models.DataType(is_dict=True)",
+                "maps"
+            ),
+            map(7, "construct"),
+            map(12, "construct_from_a_mapping"),
+            map(20, "validate"),
+            map(24, "validate_by_keyword"),
+            reference(32, "validate_a_dict"),
+            map(44, "copy_with_update"),
+            reference(52, "copy_reference"),
         ]
     );
 }
