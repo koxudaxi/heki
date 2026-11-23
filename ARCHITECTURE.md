@@ -791,6 +791,13 @@ allowed-callees = ["my_pkg.logging.*"]
 message = "render entry points must not mutate model state"
 ```
 
+- **Contract entries that match nothing**: an entry naming no definition, attribute, method, or
+  `__dict__` key of the analyzed files guards nothing, so a rename silences its contract.
+  `heki check` warns about each (`lint.unmatched-contract-entries = "error"` fails the run,
+  `"ignore"` turns it off; unset, only a run over the whole project judges), with the existing
+  names one part away, and `heki recommend` lists them. Each entry is matched as its rule
+  matches it (`heki_rules::unmatched`); `--watch` and the language server do not report them.
+
 ### 9.3 Inline suppressions (no conflict with Ruff's `RUF100`)
 - **Recommended (no configuration, no conflict with Ruff)**: `# heki: ignore` /
   `# heki: ignore[EFF101]` / `# heki: ignore[async-blocking-call]` at the end of the line, the

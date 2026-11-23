@@ -2054,3 +2054,41 @@ fn names_the_catalog_lacks_come_by_what_heki_would_report_through_them() {
     );
     assert_follows_the_schema(&report);
 }
+
+/// The report lists the entries of the configured contracts that match nothing in the analyzed
+/// files, as `heki check` warns about them, whatever `lint.unmatched-contract-entries` says.
+#[test]
+fn the_report_lists_the_contract_entries_that_match_nothing() {
+    let p = Project::new("recommend_unmatched_entries");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nunmatched-contract-entries = \"ignore\"\n\n\
+         [[tool.heki.write-owners]]\nname = \"fields\"\n\
+         targets = [\"pkg.model.Field.kind\", \"pkg.model.Field.knd\"]\n\
+         allowed-writers = [\"pkg.model:*\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/model.py",
+        "class Field:\n    def __init__(self) -> None:\n        self.kind = \"str\"\n",
+    );
+    let (code, report, err) = recommend_json(&p, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        report["unmatched_entries"],
+        json!([{
+            "kind": "write-owners",
+            "key": "targets",
+            "entry": "pkg.model.Field.knd",
+            "contracts": ["fields"],
+            "names_no": "attribute, method, or `__dict__` key of `pkg.model.Field`",
+            "nearest": ["pkg.model.Field.kind"],
+        }])
+    );
+    assert_follows_the_schema(&report);
+    let (_, text, _) = p.heki(&["recommend"]);
+    assert!(
+        text.contains("\nContract entries that match nothing\n  - `targets` entry `pkg.model.Field.knd` of write-owners `fields` names no attribute, method, or `__dict__` key of `pkg.model.Field` in the analyzed files; `pkg.model.Field.kind` exists\n"),
+        "{text}"
+    );
+}

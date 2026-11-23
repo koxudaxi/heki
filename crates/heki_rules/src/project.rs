@@ -388,6 +388,40 @@ pub fn files_left_out(
     (found, complete)
 }
 
+/// The Python files that discovery from the root of `project` finds (with the same ignore files
+/// and `exclude`) and the `paths` it was loaded from leave out ([`files_left_out`]: at most
+/// `limit`, among the first `max_entries` entries of the walk, with whether it saw every entry).
+/// Paths that hold the root leave nothing out.
+pub fn paths_leave_out(
+    project: &Project,
+    paths: &[PathBuf],
+    limit: usize,
+    max_entries: usize,
+) -> Result<(Vec<PathBuf>, bool), ProjectError> {
+    let env = &project.env;
+    let holds_root = paths
+        .iter()
+        .any(|p| canonical(p).is_ok_and(|p| env.root.starts_with(p)));
+    if holds_root {
+        return Ok((Vec::new(), true));
+    }
+    let analyzed: FxHashSet<String> = project
+        .files
+        .iter()
+        .map(|f| f.rel.clone())
+        .chain(project.errors.iter().map(|e| rel_posix(&e.path, &env.root)))
+        .collect();
+    let exclude = exclude_set(&env.cfg)?;
+    let analyzed = |rel: &str| analyzed.contains(rel);
+    Ok(files_left_out(
+        &env.root,
+        &exclude,
+        &analyzed,
+        limit,
+        max_entries,
+    ))
+}
+
 /// Whether [`collect_files`] over the directory `dir` finds `file` (both absolute): the same
 /// walk, entering only the directories on the way to `file`. Of a file that does not exist (an
 /// unsaved document, maybe in a directory that does not exist either), the walk judges the part

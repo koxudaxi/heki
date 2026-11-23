@@ -24,6 +24,7 @@ pub mod project;
 pub mod recommend;
 pub mod selection;
 pub mod snapshot;
+pub mod unmatched;
 
 pub use contracts::{
     MAX_INVALIDATIONS, declares_ownership, inspect_facts, opt_in_facts, recommend_facts,
@@ -1138,6 +1139,19 @@ pub fn contract_roles(
 ) -> Result<Vec<inspect::ContractRole>, RuleConfigError> {
     let cx = CheckContext::of_declarations(config, kb, soundness_kb, index, decls, selection);
     contracts::roles_of(&cx, key)
+}
+
+/// The entries of the contracts of `env`'s configuration that match nothing in the files of
+/// `index` (`heki check`, `heki recommend`).
+pub fn unmatched_entries(
+    env: &project::ProjectEnv,
+    index: &ProjectIndex,
+    selection: &RuleSelection,
+) -> Result<Vec<unmatched::UnmatchedEntry>, RuleConfigError> {
+    let decls = index.project_decls();
+    let (config, kb, soundness) = (&env.cfg, &env.kb, &env.soundness_kb);
+    let cx = CheckContext::of_declarations(config, kb, soundness, index, &decls, selection);
+    unmatched::unmatched_entries(&cx)
 }
 
 /// What the contracts of `env`'s configuration already declare (`heki recommend`).

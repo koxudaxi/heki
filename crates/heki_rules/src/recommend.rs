@@ -18,8 +18,7 @@ pub mod premises;
 pub mod rules;
 
 use crate::project::{
-    Facts, Indexed, ParsedFile, Project, ProjectError, canonical, exclude_set, files_left_out,
-    regressed, rel_posix,
+    Facts, Indexed, ParsedFile, Project, ProjectError, paths_leave_out, regressed,
 };
 use crate::selection::{RuleSelection, SelectionError, Selectors};
 use crate::{CORE_RULES, Certainty, RuleConfigError, SummarySnapshot, fold_root_causes};
@@ -136,6 +135,9 @@ pub struct RecommendReport {
     pub rejected_contracts: Vec<contracts::RejectedContract>,
     /// The candidates past the cap of their kind, which no trial declared.
     pub contracts_not_tried: Vec<contracts::NotTried>,
+    /// The entries of the contracts configured now that match nothing in the analyzed files, one
+    /// per kind, key, and text, in configuration order.
+    pub unmatched_entries: Vec<crate::unmatched::UnmatchedEntry>,
     /// What the reader should know to weigh the advice.
     pub notes: Vec<String>,
     /// The keys `config_toml` adds or changes, as the configuration's keys and values.
@@ -278,6 +280,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     drop(diags);
     let env = &discovery.project.env;
     let declared = crate::declared_contracts(env, &discovery.index, &current)?;
+    let unmatched_entries = crate::unmatched_entries(env, &discovery.index, &current)?;
     // Test code as `relax-async-in-tests` finds it: a test file, or a `test_*` function in any
     // file (a test class's method in Django's `tests.py`, for one).
     let tests: FxHashSet<&Path> = (discovery.project.files.iter())
@@ -415,6 +418,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         contracts: section.advice(),
         rejected_contracts: section.rejected,
         contracts_not_tried: section.not_tried,
+        unmatched_entries,
         notes,
         config: block.config,
         config_toml: block.toml,
@@ -559,32 +563,7 @@ fn left_out(
     paths: &[PathBuf],
     shown: &dyn Fn(&Path) -> String,
 ) -> Result<(LeftOut, Vec<PathBuf>), ProjectError> {
-    let env = &project.env;
-    let holds_root = paths
-        .iter()
-        .any(|p| canonical(p).is_ok_and(|p| env.root.starts_with(p)));
-    if holds_root {
-        let none = LeftOut {
-            python_files: 0,
-            files: Vec::new(),
-            truncated: false,
-        };
-        return Ok((none, Vec::new()));
-    }
-    let analyzed: FxHashSet<String> = project
-        .files
-        .iter()
-        .map(|f| f.rel.clone())
-        .chain(project.errors.iter().map(|e| rel_posix(&e.path, &env.root)))
-        .collect();
-    let exclude = exclude_set(&env.cfg)?;
-    let (found, complete) = files_left_out(
-        &env.root,
-        &exclude,
-        &|rel| analyzed.contains(rel),
-        MAX_LISTED,
-        MAX_CENSUS_ENTRIES,
-    );
+    let (found, complete) = paths_leave_out(project, paths, MAX_LISTED, MAX_CENSUS_ENTRIES)?;
     let left_out = LeftOut {
         python_files: found.len(),
         files: found.iter().map(|p| shown(p)).collect(),
@@ -647,6 +626,12 @@ pub fn render_text(report: &RecommendReport) -> String {
         &report.rejected_contracts,
         &report.contracts_not_tried,
     );
+    if !report.unmatched_entries.is_empty() {
+        out.push_str("\nContract entries that match nothing\n");
+        for entry in &report.unmatched_entries {
+            let _ = writeln!(out, "  - {}", entry.message());
+        }
+    }
     if !report.notes.is_empty() {
         out.push_str("\nNotes\n");
         for note in &report.notes {

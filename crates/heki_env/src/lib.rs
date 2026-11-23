@@ -133,6 +133,23 @@ pub struct LintConfig {
     pub report_unused_suppressions: Option<bool>,
     /// Report `# heki: ignore` comments that name no rule. Defaults to `false`.
     pub require_suppression_codes: Option<bool>,
+    /// What `heki check` does with a contract entry that matches nothing in the analyzed files.
+    /// Unset, a run over the whole project warns about them.
+    pub unmatched_contract_entries: Option<UnmatchedEntries>,
+}
+
+/// `lint.unmatched-contract-entries`: how `heki check` reports a contract entry that names no
+/// definition, attribute, method, or `__dict__` key in the analyzed files.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UnmatchedEntries {
+    /// A warning: the run does not fail.
+    #[default]
+    Warning,
+    /// An error: the run fails.
+    Error,
+    /// Not reported.
+    Ignore,
 }
 
 /// `[[tool.heki.write-owners]]` contract for `MUT201`.
