@@ -849,6 +849,11 @@ pub struct ModuleDecls {
     pub classes: BTreeMap<String, Box<ClassDecl>>,
     /// Function qualname -> declaration (module body excluded).
     pub functions: BTreeMap<String, Box<FunctionDecl>>,
+    /// Whether a class or function here is a member written with a private name (`def __run`
+    /// in class `Parser`, held as `_Parser__run`): only then may a path name a definition by
+    /// another spelling ([`Self::definition_path`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub private_members: bool,
     /// Module global `name -> type` of the instance it holds (`client = httpx.Client()`): the
     /// join of every store of the module (`stores::record`).
     pub global_types: BTreeMap<String, Ty>,
@@ -1014,6 +1019,10 @@ impl ModuleDecls {
     /// class member reached by the mangled name its class holds it under (`Parser._Parser__run`)
     /// is the definition written with the private name (`def __run`, qualname `Parser.__run`).
     fn definition_path<'p>(&self, path: &'p str) -> Cow<'p, str> {
+        // Every lookup of a definition comes here, and few modules define a private member.
+        if !self.private_members {
+            return Cow::Borrowed(path);
+        }
         let defines = |q: &str| self.functions.contains_key(q) || self.classes.contains_key(q);
         if defines(path) {
             return Cow::Borrowed(path);
@@ -1803,6 +1812,9 @@ pub struct ProjectDecls {
     grown_elsewhere: FxHashSet<String>,
     /// Those another project module rebinds or deletes (`ModuleDecls::rebound_globals`).
     rebound_elsewhere: FxHashSet<String>,
+    /// The dotted prefixes of the names in `rebound_elsewhere` (`pkg.mod.C` of
+    /// `pkg.mod.C.run.__code__`): another module rebinds no attribute of a class not among them.
+    rebound_owners: FxHashSet<String>,
     /// What project modules store into the globals of other modules and into the instances of
     /// their classes, joined (`ModuleDecls::stores_elsewhere`), and the modules whose own types
     /// then hold no longer.
@@ -2116,6 +2128,9 @@ impl ProjectDecls {
         self.protocols = self.protocol_implementations();
         self.grown_elsewhere = self.globals_changed_elsewhere(|m| &m.grown_globals);
         self.rebound_elsewhere = self.globals_changed_elsewhere(|m| &m.rebound_globals);
+        self.rebound_owners = (self.rebound_elsewhere.iter())
+            .flat_map(|fqn| fqn.match_indices('.').map(|(dot, _)| fqn[..dot].to_owned()))
+            .collect();
         self.setstate_called = self.modules.values().any(|m| m.calls_setstate);
         self.elsewhere = self.stores_elsewhere();
         self.changed_paths = self.package_path_changes();
@@ -2220,8 +2235,9 @@ impl ProjectDecls {
     /// project gives a project class of `mro` other bases (`__bases__`), or its instances
     /// another class (`__class__`).
     pub(crate) fn lookup_rebound(&self, mro: &[String], name: &str) -> bool {
-        // Only an analysis whose reads are recorded asks for keys no module stores yet.
-        let elsewhere = !self.rebound_elsewhere.is_empty() || self.recording();
+        // Only an analysis whose reads are recorded asks for keys no module stores yet. Every
+        // call whose targets are checked asks for each class it may run on, along its MRO.
+        let recording = self.recording();
         let mut found = false;
         for c in mro {
             let Some((m, qualname, decl)) = self
@@ -2230,6 +2246,7 @@ impl ProjectDecls {
             else {
                 continue;
             };
+            let elsewhere = recording || self.rebound_owners.contains(c);
             let stored = |attr: &str| {
                 decl.rebound_attrs.contains(attr)
                     || (elsewhere && self.rebound_elsewhere_canonical(&format!("{c}.{attr}")))
@@ -3846,7 +3863,10 @@ impl ProjectDecls {
     fn own_method(&self, class: &str, name: &str) -> Option<FuncKey> {
         let (m, rest) = self.split_module(class)?;
         let member = format!("{rest}.{name}");
-        let qualname = m.definition_path(&member).into_owned();
+        let qualname = match m.definition_path(&member) {
+            Cow::Owned(written) => written,
+            Cow::Borrowed(_) => member,
+        };
         m.functions.contains_key(&qualname).then(|| FuncKey {
             module: m.module_name.clone(),
             qualname,
@@ -4846,6 +4866,9 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     let rebound = rebound_imports(input, &stores, &decls);
     decls.rebound_imports = (!rebound.is_empty()).then(|| Box::new(rebound));
     decls.rebound_definitions = rebound_definitions(input, &stores, &decls);
+    decls.private_members = (decls.classes.keys())
+        .chain(decls.functions.keys())
+        .any(|qualname| mangling::member_path(qualname).is_some());
     // Qualnames whose every definition is a property getter (a setter, a deleter, or any other
     // function with the same qualname shares its summary).
     let mut getters_only: FxHashMap<&str, bool> = FxHashMap::default();
@@ -7146,6 +7169,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     type_checking_imports: BTreeMap::new(),
     classes: BTreeMap::new(),
     functions: BTreeMap::new(),
+    private_members: false,
     global_types: BTreeMap::new(),
     aliases: BTreeMap::new(),
     unknown_globals: BTreeSet::new(),
