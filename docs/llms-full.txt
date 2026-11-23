@@ -3735,8 +3735,8 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `rule.EFF112` | rule | [`EFF112`](https://heki.koxudaxi.dev/rules/set-order-output/) | 0.2.4 | - |
 | `rule.EFF114` | rule | [`EFF114`](https://heki.koxudaxi.dev/rules/recursion-error-as-value/) | 0.2.4 | - |
 | `rule.EFF115` | rule | [`EFF115`](https://heki.koxudaxi.dev/rules/async-def-as-sync-callback/) | 0.2.5 | - |
-| `rule.IMP201` | rule | [`IMP201`](https://heki.koxudaxi.dev/rules/import-owner-violation/) | 0.2.6 | - |
-| `rule.IMP202` | rule | [`IMP202`](https://heki.koxudaxi.dev/rules/unresolved-guarded-import/) | 0.2.6 | - |
+| `rule.IMP201` | rule | [`IMP201`](https://heki.koxudaxi.dev/rules/import-owner-violation/) | 0.2.7 | - |
+| `rule.IMP202` | rule | [`IMP202`](https://heki.koxudaxi.dev/rules/unresolved-guarded-import/) | 0.2.7 | - |
 | `rule.MUT101` | rule | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | 0.1.0 | - |
 | `rule.MUT111` | rule | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | 0.2.0 | - |
@@ -3826,7 +3826,7 @@ The development corpus has no report of it, so its precision is not measured, an
 
 - **Kind:** rule
 - **Target:** [`IMP201`](https://heki.koxudaxi.dev/rules/import-owner-violation/)
-- **Since:** 0.2.6
+- **Since:** 0.2.7
 
 It is new: its reports are heuristic until a review of its reports on real code bases certifies its claim.
 
@@ -3834,7 +3834,7 @@ It is new: its reports are heuristic until a review of its reports on real code 
 
 - **Kind:** rule
 - **Target:** [`IMP202`](https://heki.koxudaxi.dev/rules/unresolved-guarded-import/)
-- **Since:** 0.2.6
+- **Since:** 0.2.7
 
 It is the strict mode of `IMP201`, which is experimental.
 
