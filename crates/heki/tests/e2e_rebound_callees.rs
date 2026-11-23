@@ -271,7 +271,8 @@ async def late():
 
 
 async def body():
-    lib.C().body()  # EFF111
+    # The class body binds the name to `fast` after the `def`: the call runs `fast`.
+    lib.C().body()
 
 
 async def removed():

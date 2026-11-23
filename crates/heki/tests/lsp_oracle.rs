@@ -677,8 +677,9 @@ const EXACT_SUB_OVERRIDING: &str = "from pkg.exact_base import Base\n\n\nclass Q
 const EXACT_SUB_BLOCKING: &str = "import requests\n\nfrom pkg.exact_base import Base\n\n\nclass Quiet(Base):\n    def fetch(self, url):\n        return requests.post(url)\n";
 const EXACT_USE: &str =
     "from pkg.exact_base import Base\n\n\nasync def serve(b: Base):\n    b.fetch(\"u\")\n";
-// The third module binds the base's method to another function, and the base's class body
-// binds it again: the call may run that function instead.
+// The third module binds the base's method to another function: the call may run that function
+// instead. The base's class body binds the name again after the `def`: the call runs that
+// function, which does not wait.
 const EXACT_SUB_REBINDING: &str = "from pkg import exact_base\n\n\ndef quiet(self, url):\n    return url\n\n\nsetattr(exact_base.Base, \"fetch\", quiet)\n";
 const EXACT_BASE_REBOUND: &str = "import requests\n\n\ndef _quiet(self, url):\n    return url\n\n\nclass Base:\n    def fetch(self, url):\n        return requests.get(url)\n\n    fetch = _quiet\n";
 
@@ -1353,8 +1354,10 @@ fn steps_exact_effects() -> Vec<Step> {
             "the base's class body binds the method again",
             vec![save("pkg/exact_base.py", EXACT_BASE_REBOUND)],
         )
-        .present(&[("pkg/exact_use.py", "EFF111")])
-        .absent(&[("pkg/exact_use.py", "EFF101")]),
+        .absent(&[
+            ("pkg/exact_use.py", "EFF101"),
+            ("pkg/exact_use.py", "EFF111"),
+        ]),
         Step::new(
             "the base binds it once again",
             vec![save("pkg/exact_base.py", EXACT_BASE)],
