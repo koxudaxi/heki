@@ -49,7 +49,7 @@ use heki_env::{Docs, Explain, HekiConfig, Problem, Setting, Severity};
 use heki_ir::{IrFunction, ModuleConstants};
 use heki_kb::{EffectiveEcosystemKb, EffectiveSoundnessKb};
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::path::Path;
@@ -1254,6 +1254,20 @@ impl<'a> CheckContext<'a> {
     /// defining file and in source order (the IR-free call graph the contract rules walk).
     pub fn sites_by_caller(&self) -> SitesByCaller<'a> {
         self.by_caller(|file| &file.call_sites)
+    }
+
+    /// The project functions some code hands on as values (a reference site of one that is no
+    /// read only: an argument, a stored attribute, item, or global, a display a module binds to
+    /// a name, a `return`; `FileSummary::reference_sites`): they have callers heki does not see.
+    pub fn escaping_functions(&self) -> FxHashSet<FuncKey> {
+        self.index
+            .files
+            .values()
+            .flat_map(|file| &file.reference_sites)
+            .filter(|site| !site.is_read)
+            .flat_map(|site| site.project_callees())
+            .map(|bc| bc.callee.clone())
+            .collect()
     }
 
     /// The reference sites of every summarized function (`FileSummary::reference_sites`), as

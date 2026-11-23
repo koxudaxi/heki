@@ -442,7 +442,18 @@ fn counts_references(config: &HekiConfig) -> References {
         .iter()
         .filter(|b| b.forbid.iter().any(|t| t == "calls"))
         .map(|b| counted(&b.references));
-    calls.chain(boundaries).max().unwrap_or(References::Ignored)
+    // A strict owner contract judges a function handed on as a value in that function
+    // (`CheckContext::escaping_functions`), which the references handing it on tell.
+    let strict = |unresolved: &Option<String>| unresolved.as_deref() == Some("report");
+    let handed = config.write_owners.iter().any(|r| strict(&r.unresolved))
+        || config.read_owners.iter().any(|r| strict(&r.unresolved))
+        || config.call_owners.iter().any(|r| strict(&r.unresolved));
+    let handed = handed.then_some(References::Calls);
+    calls
+        .chain(boundaries)
+        .chain(handed)
+        .max()
+        .unwrap_or(References::Ignored)
 }
 
 /// Bit `i` set for every contract `i` that `has` holds for.
