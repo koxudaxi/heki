@@ -610,6 +610,13 @@ const LOST_SETTINGS: &str = "class Settings:\n    def __init__(self):\n        s
 const LOST_SETTINGS_FIELD: &str = "class Settings:\n    def __init__(self):\n        self._values = {}\n        self._last = None\n\n    @property\n    def values(self):\n        return self._values\n";
 const LOST_SETTINGS_KEPT: &str = "class Settings:\n    def __init__(self):\n        self._values = {}\n        self._last = None\n\n    @property\n    def values(self):\n        copied = dict(self._values)\n        self._last = copied\n        return copied\n";
 const LOST_USE: &str = "from pkg.lost_settings import Settings\n\n\ndef enable(settings: Settings):\n    settings.values[\"debug\"] = True\n";
+// An item store on what a function returns that returns what a function in a third module
+// builds: a dict, then a set. Only the kind of the new container changes, no summary does.
+const LOST_MAKE: &str = "def make():\n    return dict()\n";
+const LOST_MAKE_SET: &str = "def make():\n    return set()\n";
+const LOST_MIDDLE: &str = "from pkg.lost_make import make\n\n\ndef options():\n    return make()\n";
+const LOST_ITEM: &str =
+    "from pkg.lost_middle import options\n\n\ndef enable():\n    options()[\"debug\"] = True\n";
 
 // Values new on one path and borrowed on another (`MUT112`): a caller two modules above a
 // function that copies its argument (through a wrapper in a third module), and a class whose
@@ -999,6 +1006,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/mark_copies.py", MARK_COPIES),
         ("pkg/lost_settings.py", LOST_SETTINGS),
         ("pkg/lost_use.py", LOST_USE),
+        ("pkg/lost_make.py", LOST_MAKE),
+        ("pkg/lost_middle.py", LOST_MIDDLE),
+        ("pkg/lost_item.py", LOST_ITEM),
         ("pkg/fresh_ops.py", FRESH_OPS),
         ("pkg/fresh_build.py", FRESH_BUILD),
         ("pkg/strict_ops.py", STRICT_OPS),
@@ -3222,9 +3232,10 @@ fn steps_mut118() -> Vec<Step> {
     ]
 }
 
-/// `MUT119`: an item store through a property of a class in another module, by the final
-/// summary of its getter: the getter returns a copy of its field, then the field itself, then a
-/// copy it also keeps on the instance.
+/// `MUT119`: an item store through a property of a class in another module, by the final fact
+/// of its getter: the getter returns a copy of its field, then the field itself, then a copy it
+/// also keeps on the instance. Then an item store on what a function returns, two modules above
+/// the function building it, when only the kind it builds changes.
 fn steps_mut119() -> Vec<Step> {
     vec![
         Step::new(
@@ -3251,7 +3262,20 @@ fn steps_mut119() -> Vec<Step> {
             "and returns a copy it does not keep",
             vec![save("pkg/lost_settings.py", LOST_SETTINGS)],
         )
-        .present(&[("pkg/lost_use.py", "MUT119")]),
+        .present(&[
+            ("pkg/lost_use.py", "MUT119"),
+            ("pkg/lost_item.py", "MUT119"),
+        ]),
+        Step::new(
+            "the function two modules below builds a set",
+            vec![save("pkg/lost_make.py", LOST_MAKE_SET)],
+        )
+        .absent(&[("pkg/lost_item.py", "MUT119")]),
+        Step::new(
+            "and a dict again",
+            vec![save("pkg/lost_make.py", LOST_MAKE)],
+        )
+        .present(&[("pkg/lost_item.py", "MUT119")]),
     ]
 }
 
