@@ -28,7 +28,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "MUT115", "MUT118", "MUT119"]
+extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "EFF115", "MUT115", "MUT118", "MUT119"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -817,6 +817,11 @@ const ORDER_USE_SORTED: &str = "import json\nfrom pathlib import Path\n\nfrom pk
 const REC_HANDLER: &str = "from pkg.rec_walk import descend\n\n\ndef visit(node):\n    return descend(node)\n\n\ndef measure(node):\n    try:\n        return visit(node)\n    except Exception:\n        return 0\n";
 const REC_WALK: &str = "def descend(node):\n    return len(node)\n";
 const REC_WALK_BACK: &str = "from pkg import rec_handler\n\n\ndef descend(node):\n    return sum(rec_handler.visit(child) for child in node)\n";
+// A function of another module handed to a thread and to `filter` (`EFF115`): it changes between
+// `def` and `async def` there.
+const CORO_JOBS: &str = "def flush(n):\n    return n\n";
+const CORO_JOBS_ASYNC: &str = "async def flush(n):\n    return n\n";
+const CORO_USE: &str = "import threading\n\nfrom pkg.coro_jobs import flush\n\n\ndef start(items):\n    threading.Thread(target=flush, args=(1,)).start()\n    return list(filter(flush, items))\n";
 
 // `MUT115`: the declarations of a copied class and of the builtin containers' subclasses in
 // other modules, and a helper in another module, decide whether a change below a copy states
@@ -920,6 +925,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/order_use.py", ORDER_USE),
         ("pkg/rec_handler.py", REC_HANDLER),
         ("pkg/rec_walk.py", REC_WALK),
+        ("pkg/coro_jobs.py", CORO_JOBS),
+        ("pkg/coro_use.py", CORO_USE),
         ("pkg/plot.py", RO_PLOT),
         ("pkg/loops.py", LOOPS),
         ("pkg/compat.py", COMPAT),
@@ -3902,6 +3909,23 @@ fn steps_eff114() -> Vec<Step> {
     ]
 }
 
+/// `EFF115`: whether the function a thread and `filter` are handed creates a coroutine comes
+/// from its declaration in another module, which changes between `def` and `async def`.
+fn steps_eff115() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the handed function becomes an async def",
+            vec![save("pkg/coro_jobs.py", CORO_JOBS_ASYNC)],
+        )
+        .present(&[("pkg/coro_use.py", "EFF115")]),
+        Step::new(
+            "the handed function becomes a plain def again",
+            vec![save("pkg/coro_jobs.py", CORO_JOBS)],
+        )
+        .absent(&[("pkg/coro_use.py", "EFF115")]),
+    ]
+}
+
 const LLM_CLIENT: &str = "from openai import OpenAI\n\nclient = OpenAI()\n";
 
 const LLM_VIEW: &str = "from pkg.llm_client import client\n\n\nasync def answer():\n    return client.chat.completions.create(model=\"m\")\n";
@@ -4353,8 +4377,8 @@ fn steps_configuration() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"MUT115\", \"MUT118\", \"MUT119\"]",
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"MUT115\", \"MUT118\", \"MUT119\"]\nselect = [\"NOPE1\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"EFF115\", \"MUT115\", \"MUT118\", \"MUT119\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"EFF115\", \"MUT115\", \"MUT118\", \"MUT119\"]\nselect = [\"NOPE1\"]",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),
@@ -5020,6 +5044,7 @@ sessions!(editing, Session::start, {
     eff110: steps_eff110,
     eff112: steps_eff112,
     eff114: steps_eff114,
+    eff115: steps_eff115,
     attribute_types: steps_attribute_types,
     receiver_typing: steps_receiver_typing,
     effect_index: steps_effect_index,

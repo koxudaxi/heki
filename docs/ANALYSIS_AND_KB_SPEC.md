@@ -820,12 +820,13 @@ index alone, for a method of any indexed file. `FileSummary.kept_removals` (only
 object keeps in its `__dict__`: a project-wide fact the language server compares per file
 (`Workspace::note_kept_removals`), as it does the sentinel comparisons of `MUT118`.
 
-`FileSummary.blind_spots` (`heki_effect::BlindCall`, only with `OptInFacts::blind_spots`, which
-`heki_rules::recommend_facts` sets and neither `heki check` nor the language server does) holds,
-per function, the calls heki is blind to in its own body and the class bodies it runs, each once
-in source order: a call resolving to no function (`Callee::Unresolved` or `TooMany`), with the
-name called and why, from the receiver or the called value (`UnresolvedReason`: an unannotated
-parameter, an annotation giving no class, `Any` or `object`, a `Callable`, a name nothing heki
+`OptInTables::blind_spots` (`heki_effect::BlindCall`, in `FileSummary::opt_in_tables`, the one
+box per file that holds the opt-in tables of its functions; only with `OptInFacts::blind_spots`,
+which `heki_rules::recommend_facts` sets and neither `heki check` nor the language server does)
+holds, per function, the calls heki is blind to in its own body and the class bodies it runs,
+each once in source order: a call resolving to no function (`Callee::Unresolved` or `TooMany`),
+with the name called and why, from the receiver or the called value (`UnresolvedReason`: an
+unannotated parameter, an annotation giving no class, `Any` or `object`, a `Callable`, a name nothing heki
 sees binds, an unlisted protocol, a call result, an attribute, a computed `getattr` name, more
 implementations than CHA follows, a member heki does not find, any other untyped value). A call
 on a value of `Any`, `object`, or `Callable` (an instance or a class object), or of an unbound
@@ -1262,21 +1263,20 @@ which module imports which.
    implementation it can run. A call of a project class is none: it returns the new instance,
    not what `__init__` returns.
 2. **The function fact** (`FreshReturn`, kept beside the summaries in
-   `FileSummary::fresh_returns`, local and final, and only while `MUT119` runs:
-   `OptInFacts::fresh_returns`; a file none of whose functions has one keeps one word): for a
-   plain function (not `async`, not a generator, no decorator but those that call the body each
-   time, no A1 hazard) with no bare return on a path a run can take, one walk back from the
-   returned values through copies and phis (along the edges a run can take) to their sources, all
-   of one container kind, and one walk forward from the sources through copies, phis, in-place
-   operators, and the views and iterators the object's methods return (`keys`, `values`, `items`,
-   `__iter__`, `__reversed__`): every use keeps nothing (a method of the builtin containers whose
-   result holds none of the object, `readonly::result_detached_from_container`: a changing
-   method, a count, a test, an item, or a copy; an item load, store, or delete on it, not with it
-   as the key, a comparison, a conversion, a loop over it, a call of a builtin that only inspects
-   it and returns nothing holding it, which `getattr` may); a store, a capture, a yield, a raise,
-   an attribute load (a bound method), or any other method or call ends the fact. Both walks
-   share one budget per function. `built` says every source is the builtin itself or a complete
-   call or property read.
+   `OptInTables::fresh_returns`, local and final, and only while `MUT119` runs:
+   `OptInFacts::fresh_returns`; a file without opt-in facts keeps one word): for a plain function
+   (not `async`, not a generator, no decorator but those that call the body each time, no A1 hazard)
+   with no bare return on a path a run can take, one walk back from the returned values through
+   copies and phis (along the edges a run can take) to their sources, all of one container kind, and
+   one walk forward from the sources through copies, phis, in-place operators, and the views and
+   iterators the object's methods return (`keys`, `values`, `items`, `__iter__`, `__reversed__`):
+   every use keeps nothing (a method of the builtin containers whose result holds none of the
+   object, `readonly::result_detached_from_container`: a changing method, a count, a test, an item,
+   or a copy; an item load, store, or delete on it, not with it as the key, a comparison, a
+   conversion, a loop over it, a call of a builtin that only inspects it and returns nothing holding
+   it, which `getattr` may); a store, a capture, a yield, a raise, an attribute load (a bound
+   method), or any other method or call ends the fact. Both walks share one budget per function.
+   `built` says every source is the builtin itself or a complete call or property read.
 3. **Propagation** (`Resolver::resolve_fresh_return`): a local fact naming project functions holds
    when each has a final fact of the same kind outside the SCC being computed (a recursive
    function has none), and is `built` only when they all are. Two definitions of one function keep
@@ -1662,7 +1662,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   callers, with the same initializer and allowed-context rules as `MUT201`. Reads through
   parameters without a project-class type are not seen.
 
-### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF111`, `EFF112`, `EFF113`, `EFF114`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF111`, `EFF112`, `EFF113`, `EFF114`, `EFF115`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
 0. **Must-facts and the exact tier** (`EffectSummary::must_exec`, computed only when `EFF101`,
    `EFF111`, `EFF103`, or `EFF113` runs: `OptInFacts::must_effects`):
    - Per call instruction, the path facts (`heki_ir::Paths`, with the reader of
@@ -1932,7 +1932,25 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      `sys.stderr.write`, `traceback.print_exc`, a `logging` call with the exception, also on a
      logger of unknown class by its method name) and returning an integer constant on every
      `return` is a CLI boundary and is left out.
-12. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
+12. **`EFF115`** (opt-in): an `async def` handed to a library call that never awaits what it
+   returns.
+   - The summary (`summary::Extractor::unawaited_handoff`, only with
+     `OptInFacts::unawaited_handoffs`) records, at each call of a catalog API with a callable
+     argument it calls without awaiting (`EffectiveEcosystemKb::unawaited_callable`: the API's
+     `[[calls_unawaited]]` entry, or its entry's `offloads_blocking_arg`), the project functions
+     the argument calls
+     (a `functools.partial` object followed to the function it holds, a bound method resolved to
+     the implementations it may run; a class constructs instead and is left out), in
+     `OptInTables::unawaited_handoffs` (`FileSummary::opt_in_tables`) by calling function, the
+     class bodies a function or the module body runs included. The record holds every such function, `def` or `async def`.
+   - The rule (`eff_rules::unawaited_callables`) reads the declarations of the recorded
+     functions at check time (`FunctionDecl::is_async`, `is_generator`, `called_as_defined`), so
+     a change of a function between `def` and `async def` in another module re-checks the
+     caller's file through its declaration reads. It reports when one of them is an `async def`
+     that is no async generator, worded as certain when every one is an `async def` no decorator
+     replaces, and as possible otherwise. Only catalog APIs count: a project function taking a
+     callable resolves to the project and is never one, whatever it does with the coroutine.
+13. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function (and each module body a scope names as `<module>`,
    `DottedPattern::names_module_bodies`) finds the shortest chain to each forbidden effect,
    without entering `allowed-callees`, other scope functions, or bodies that do not run at the
@@ -2268,6 +2286,14 @@ and `obj.__dict__.pop(<name>)` act on it, and, for Werkzeug, the slot an instanc
 `__dict__` keeps it in. `KeptFacts::listed_cache` records that a getter's decorator, resolved
 through the module's imports (`ModuleDecls::decorator_symbol`), is listed; only such a getter makes
 a cached property an exact claim's (R3), and any other `cached_property` is one by its name.
+
+A fourth table, `[[calls_unawaited]]` (`heki_kb::UnawaitedCall`, `EFF115`), names the callable
+argument a call calls as a plain function without awaiting what it returns (by position, the
+receiver not counted, or by keyword), and whether it tests the result for truth:
+`threading.Thread`'s `target`, `atexit.register`, `signal.signal`, `filter`. Every
+`offloads_blocking_arg` API counts as one too. Each listed call also has an entry; the table
+stands beside the entries so that the entries without such an argument, nearly all, keep no word
+for it.
 
 The entries follow the public API of each package, with three conventions:
 - An async API is `async_safe` and carries no blocking effect: it is often called without a

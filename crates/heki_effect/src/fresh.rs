@@ -75,7 +75,7 @@ impl FreshReturn {
     }
 }
 
-/// The [`FreshReturn`] facts of a file's functions ([`crate::FileSummary::fresh_returns`]), kept
+/// The [`FreshReturn`] facts of a file's functions ([`crate::OptInTables::fresh_returns`]), kept
 /// beside their summaries: only the functions that have one pay for it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FreshReturns {

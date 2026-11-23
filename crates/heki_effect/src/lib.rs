@@ -2141,50 +2141,91 @@ pub struct FileSummary {
     /// boundary names such an access, [`Contracts::external_call`]).
     #[serde(default, skip_serializing_if = "FxHashMap::is_empty")]
     pub external_accesses: FxHashMap<FuncKey, Vec<ExternalAccess>>,
-    /// The calls of each function of the file that heki is blind to, in its own body and in
-    /// the class bodies it runs, each once, in source order (local, IR-free; `None` unless
-    /// [`OptInFacts::blind_spots`], so that a run without them keeps one word per file). Read
-    /// through [`Self::blind_calls`].
+    /// The facts of the file's functions that only opt-in readers ask for (IR-free; `None`
+    /// while the file has none of them, so that a run without them keeps one word per file).
+    /// Read through [`Self::blind_calls`], [`Self::unawaited_handoffs`], and
+    /// [`ProjectIndex::fresh_return`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blind_spots: Option<Box<FxHashMap<FuncKey, Vec<BlindCall>>>>,
+    pub opt_in_tables: Option<Box<OptInTables>>,
+}
+
+/// The opt-in facts of a file's functions, each table by function
+/// ([`FileSummary::opt_in_tables`]); a table stays empty unless its [`OptInFacts`] flag is set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptInTables {
+    /// The calls heki is blind to, in the function's own body and in the class bodies it runs,
+    /// each once, in source order ([`OptInFacts::blind_spots`]).
+    #[serde(default, skip_serializing_if = "FxHashMap::is_empty")]
+    pub blind_spots: FxHashMap<FuncKey, Vec<BlindCall>>,
+    /// The project functions the function hands to a library call that calls them without
+    /// awaiting what they return, in its own body and in the class bodies it runs, in source
+    /// order ([`OptInFacts::unawaited_handoffs`]).
+    #[serde(default, skip_serializing_if = "FxHashMap::is_empty")]
+    pub unawaited_handoffs: FxHashMap<FuncKey, Vec<UnawaitedHandoff>>,
     /// The names under which the file's functions themselves remove or replace the value an
     /// object keeps in its `__dict__` (`del obj.<name>`, a removal of the constant key
-    /// `<name>` from a `__dict__`; local, IR-free; `None` unless [`OptInFacts::kept_values`]
-    /// finds one). Read through [`Self::kept_removals`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kept_removals: Option<Box<BTreeSet<String>>>,
-    /// `MUT119`: the functions of the file whose every returned value is a builtin container of
-    /// one kind that the call made and that nothing else holds, local and final facts (`None`
-    /// unless [`OptInFacts::fresh_returns`] finds one, so that a run without them keeps one word
-    /// per file). Read through [`ProjectIndex::fresh_return`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fresh_returns: Option<Box<fresh::FreshReturns>>,
+    /// `<name>` from a `__dict__`; [`OptInFacts::kept_values`]). Read through
+    /// [`FileSummary::kept_removals`].
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub kept_removals: BTreeSet<String>,
+    /// `MUT119`: the functions whose every returned value is a builtin container of one kind
+    /// that the call made and that nothing else holds, local and final facts
+    /// ([`OptInFacts::fresh_returns`]). Read through [`ProjectIndex::fresh_return`].
+    #[serde(default)]
+    pub fresh_returns: fresh::FreshReturns,
+}
+
+/// A project function handed to a library call that calls it as a plain function and never
+/// awaits what it returns (`heki_kb::EffectiveEcosystemKb::unawaited_callable`):
+/// `threading.Thread`'s target, `atexit.register(f)`, `filter(f, xs)`, a `functools.partial` of
+/// one, a bound method.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnawaitedHandoff {
+    /// The library call.
+    pub span: Span,
+    /// The library API, as the catalog names it.
+    pub api: String,
+    /// What calling the handed value calls: one function, or every implementation of a method.
+    pub callees: Vec<FuncKey>,
+    /// The API tests what the callable returns for truth (`heki_kb::UnawaitedCall::tests_result`).
+    pub tests_result: bool,
 }
 
 impl FileSummary {
-    /// [`Self::blind_spots`], by function.
+    /// [`OptInTables::blind_spots`], by function.
     pub fn blind_calls(&self) -> impl Iterator<Item = (&FuncKey, &[BlindCall])> {
-        (self.blind_spots.iter().flat_map(|b| b.iter())).map(|(f, calls)| (f, calls.as_slice()))
-    }
-
-    /// [`Self::kept_removals`] (none while the facts are not computed).
-    pub fn kept_removals(&self) -> impl Iterator<Item = &str> {
-        self.kept_removals
+        self.opt_in_tables
             .iter()
-            .flat_map(|r| r.iter())
-            .map(String::as_str)
+            .flat_map(|t| &t.blind_spots)
+            .map(|(f, calls)| (f, calls.as_slice()))
     }
 
-    /// [`Self::fresh_returns`], made when the file first has one.
-    pub(crate) fn fresh_returns_mut(&mut self) -> &mut fresh::FreshReturns {
-        self.fresh_returns.get_or_insert_with(Box::default)
+    /// [`OptInTables::unawaited_handoffs`], by function.
+    pub fn unawaited_handoffs(&self) -> impl Iterator<Item = (&FuncKey, &[UnawaitedHandoff])> {
+        self.opt_in_tables
+            .iter()
+            .flat_map(|t| &t.unawaited_handoffs)
+            .map(|(f, handoffs)| (f, handoffs.as_slice()))
+    }
+
+    /// The opt-in tables of the file, made when it first has one of their facts.
+    pub(crate) fn opt_in_tables_mut(&mut self) -> &mut OptInTables {
+        self.opt_in_tables.get_or_insert_with(Box::default)
+    }
+
+    /// [`OptInTables::kept_removals`] (none while the facts are not computed).
+    pub fn kept_removals(&self) -> impl Iterator<Item = &str> {
+        self.opt_in_tables
+            .iter()
+            .flat_map(|t| &t.kept_removals)
+            .map(String::as_str)
     }
 
     /// The final facts as the local ones, where propagation starts.
     fn reset_final_facts(&mut self) {
         self.functions = self.local_functions.clone();
-        if let Some(fresh) = &mut self.fresh_returns {
-            fresh.resolved = fresh.local.clone();
+        if let Some(tables) = &mut self.opt_in_tables {
+            tables.fresh_returns.resolved = tables.fresh_returns.local.clone();
         }
     }
 
@@ -2214,7 +2255,7 @@ impl FileSummary {
 }
 
 /// A function's final facts: its summary and the facts kept beside it
-/// ([`FileSummary::fresh_returns`]). Early Cutoff compares all of them.
+/// ([`OptInTables::fresh_returns`]). Early Cutoff compares all of them.
 #[derive(Clone)]
 struct FinalFacts {
     summary: Arc<EffectSummary>,
@@ -2224,10 +2265,12 @@ struct FinalFacts {
 impl FinalFacts {
     /// What callers read of `file`'s `func` after propagation.
     fn of(file: &FileSummary, func: &FuncKey) -> Option<Self> {
-        let fresh = file.fresh_returns.as_ref();
+        let tables = file.opt_in_tables.as_ref();
         Some(Self {
             summary: Arc::clone(file.functions.get(func)?),
-            fresh_return: fresh.and_then(|f| f.resolved.get(func)).cloned(),
+            fresh_return: tables
+                .and_then(|t| t.fresh_returns.resolved.get(func))
+                .cloned(),
         })
     }
 
@@ -2381,8 +2424,8 @@ pub enum TypedWrites {
 /// `CallSite::under_lock`), `EFF112`'s set-order flows (`EffectSummary::set_order`), `EFF114`'s
 /// call cycles (`EffectSummary::call_cycle`), and the shared state functions change
 /// (`EffectSummary::shared_state`), which only `heki inspect` reads, the calls heki is blind to
-/// (`FileSummary::blind_spots`), which only `heki recommend` reads, and `MUT119`'s new returned
-/// containers (`FileSummary::fresh_returns`).
+/// (`OptInTables::blind_spots`), which only `heki recommend` reads, and `MUT119`'s new returned
+/// containers (`OptInTables::fresh_returns`).
 /// `CallSite::returned`, which `MUT202` reads too, is always computed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OptInFacts {
@@ -2401,7 +2444,9 @@ pub struct OptInFacts {
     pub blind_spots: bool,
     pub set_order: bool,
     pub call_cycles: bool,
-    /// [`FileSummary::fresh_returns`].
+    /// [`OptInTables::unawaited_handoffs`] (`EFF115`).
+    pub unawaited_handoffs: bool,
+    /// [`OptInTables::fresh_returns`].
     pub fresh_returns: bool,
 }
 
@@ -2419,6 +2464,7 @@ impl OptInFacts {
         blind_spots: false,
         set_order: true,
         call_cycles: true,
+        unawaited_handoffs: true,
         fresh_returns: true,
     };
 
@@ -2648,7 +2694,11 @@ impl ProjectIndex {
     /// The final `MUT119` fact of `func` ([`fresh::FreshReturns::resolved`]), if it has one.
     pub fn fresh_return(&self, func: &FuncKey) -> Option<&fresh::FreshReturn> {
         let file = self.files.get(self.func_files.get(func)?)?;
-        file.fresh_returns.as_ref()?.resolved.get(func)
+        file.opt_in_tables
+            .as_ref()?
+            .fresh_returns
+            .resolved
+            .get(func)
     }
 
     fn final_facts(&self, func: &FuncKey) -> Option<FinalFacts> {

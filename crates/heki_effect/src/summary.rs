@@ -34,8 +34,8 @@ use crate::{
     Dispatch, EffectSummary, FileSummary, FuncKey, GuardSubject, HandedState, Implementers, Items,
     KeptFacts, ListedCache, ModuleInput, MustExec, NewArg, NewCond, NewKind, OnEveryReturn,
     OptInFacts, PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SharedState,
-    SharedStateFacts, SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, Unresolved,
-    UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
+    SharedStateFacts, SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, UnawaitedHandoff,
+    Unresolved, UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, KeySet, Memo, Use, Visit, reach};
@@ -158,6 +158,7 @@ fn extract_module(
             kept_points,
             types,
             mut blind,
+            mut unawaited,
             fresh_return,
         } = Extractor::new(
             &shape,
@@ -188,6 +189,7 @@ fn extract_module(
                 absorb_class_body(&mut summary, facts.summary);
                 external.extend(facts.external);
                 blind.extend(facts.blind);
+                unawaited.extend(facts.unawaited);
                 sites.extend(
                     facts
                         .sites
@@ -197,12 +199,14 @@ fn extract_module(
                 references.extend(facts.references);
             }
         } else if opt_in.blind_spots
+            || opt_in.unawaited_handoffs
             || contracts.is_some_and(|c| c.references() || c.checks_module_bodies())
         {
             // The module body runs the bodies of its classes: what they hand on (a dataclass
             // field's `default_factory`) is handed on by the module, what they take from
             // outside the project (`sys.platform`) the module takes, and the calls heki is
-            // blind to there are the module's. Their other facts are not the module's.
+            // blind to there, or that call a callable without awaiting it, are the module's.
+            // Their other facts are not the module's.
             for body in class_bodies_run_by(input.ir, f) {
                 let body = FnShape::new(body);
                 let facts = Extractor::new(
@@ -218,6 +222,7 @@ fn extract_module(
                 references.extend(facts.references);
                 external.extend(facts.external);
                 blind.extend(facts.blind);
+                unawaited.extend(facts.unawaited);
             }
         }
         if let Some(mut flow) = flow {
@@ -242,9 +247,7 @@ fn extract_module(
         // A replaced value is still kept: only removals make a getter run again.
         for point in &kept_points {
             if let cache_flow::KeptRemovalKind::Named(name) = &point.kind {
-                file.kept_removals
-                    .get_or_insert_default()
-                    .insert(name.clone());
+                file.opt_in_tables_mut().kept_removals.insert(name.clone());
             }
         }
         let kept = opt_in.kept_values.then_some(kept_points.as_slice());
@@ -271,18 +274,28 @@ fn extract_module(
         }
         if !blind.is_empty() {
             // A `finally` body is built once per way out of its `try`: its calls once each.
-            let by_function = file.blind_spots.get_or_insert_with(Box::default);
-            let calls = by_function.entry(key.clone()).or_default();
+            let calls = (file.opt_in_tables_mut().blind_spots)
+                .entry(key.clone())
+                .or_default();
             calls.extend(blind);
             calls.sort();
             calls.dedup();
         }
+        if !unawaited.is_empty() {
+            // A `finally` body is built once per way out of its `try`: its calls once each.
+            let handoffs = (file.opt_in_tables_mut().unawaited_handoffs)
+                .entry(key.clone())
+                .or_default();
+            handoffs.extend(unawaited);
+            handoffs.sort_by_key(|h| h.span);
+            handoffs.dedup();
+        }
         if file.local_functions.contains_key(&key) {
-            if let Some(fresh) = &mut file.fresh_returns {
-                fresh.join_definition(&key, fresh_return);
+            if let Some(tables) = &mut file.opt_in_tables {
+                tables.fresh_returns.join_definition(&key, fresh_return);
             }
         } else if let Some(fact) = fresh_return {
-            file.fresh_returns_mut().local.insert(key.clone(), fact);
+            (file.opt_in_tables_mut().fresh_returns.local).insert(key.clone(), fact);
         }
         // Same qualname defined twice (conditional definitions): keep the union of facts.
         match file.local_functions.get_mut(&key) {
@@ -675,9 +688,11 @@ struct Extracted {
     kept_points: Vec<cache_flow::KeptPoint>,
     /// The values of the function's variables ([`TypeCtx::infer`]).
     types: FxHashMap<VarId, Val>,
-    /// [`FileSummary::blind_spots`].
+    /// [`FileSummary::blind_calls`].
     blind: Vec<BlindCall>,
-    /// The local fact of [`FileSummary::fresh_returns`].
+    /// [`FileSummary::unawaited_handoffs`].
+    unawaited: Vec<UnawaitedHandoff>,
+    /// The local fact of [`crate::OptInTables::fresh_returns`].
     fresh_return: Option<fresh::FreshReturn>,
 }
 
@@ -856,9 +871,13 @@ struct Extractor<'a> {
     /// The span and argument position of each callable a call is handed that has a project site
     /// of its own ([`Self::as_handed`]), built on first use.
     followed_callables: OnceCell<FxHashSet<(Span, u8)>>,
-    /// The calls heki is blind to (`FileSummary::blind_spots`), with
+    /// The calls heki is blind to (`OptInTables::blind_spots`), with
     /// [`OptInFacts::blind_spots`].
     blind: Vec<BlindCall>,
+    /// The project functions handed to a library call that calls them without awaiting what
+    /// they return (`OptInTables::unawaited_handoffs`), with
+    /// [`OptInFacts::unawaited_handoffs`].
+    unawaited: Vec<UnawaitedHandoff>,
 }
 
 /// A key of a container as [`Extractor::key_present`] compares keys: the same variable through
@@ -1213,6 +1232,7 @@ impl<'a> Extractor<'a> {
             established: OnceCell::new(),
             followed_callables: OnceCell::new(),
             blind: Vec::new(),
+            unawaited: Vec::new(),
         };
         ex.ownership = contracts.is_some_and(|c| c.ownership());
         ex.track = ex.ownership && ex.may_construct();
@@ -2703,6 +2723,7 @@ impl<'a> Extractor<'a> {
             kept_points: self.kept_points,
             types: self.types,
             blind: self.blind,
+            unawaited: self.unawaited,
             fresh_return,
         }
     }
@@ -4323,8 +4344,8 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// The local fact of [`FileSummary::fresh_returns`] of the visited function, from the
-    /// callees its calls and property reads resolve to.
+    /// The local fact of [`crate::OptInTables::fresh_returns`] of the visited function, from
+    /// the callees its calls and property reads resolve to.
     fn fresh_return(&self) -> Option<fresh::FreshReturn> {
         let shape = self.shape;
         let class_of = |v: VarId| match self.types.get(&v) {
@@ -6271,7 +6292,7 @@ impl<'a> Extractor<'a> {
         self.callees.insert((bb, index), callee);
     }
 
-    /// [`FileSummary::blind_spots`]: the call `call` (of `name`, as for [`Self::call_inst`]) in
+    /// [`FileSummary::blind_calls`]: the call `call` (of `name`, as for [`Self::call_inst`]) in
     /// block `bb` when heki resolves it to no function, or to a library name the catalog has no
     /// entry for.
     fn note_blind(&mut self, bb: BlockId, name: &str, callee: &Callee, call: &Call<'_>) {
@@ -6461,6 +6482,9 @@ impl<'a> Extractor<'a> {
                         on_every_return: crate::OnEveryReturn::default(),
                         made_by: None,
                     });
+                }
+                if self.opt_in.unawaited_handoffs {
+                    self.unawaited_handoff(symbol, call);
                 }
                 self.handed_callable(bb, symbol, call);
                 None
@@ -6976,6 +7000,38 @@ impl<'a> Extractor<'a> {
             self.sites[site].handed_callable = position;
             self.sites[site].per_item = per_item;
         }
+    }
+
+    /// A project function handed to the library call `call` of `symbol` that calls it without
+    /// awaiting what it returns (`OptInTables::unawaited_handoffs`): the callable the catalog
+    /// names (`heki_kb::EffectiveEcosystemKb::unawaited_callable`), through a
+    /// `functools.partial` object and a bound method. A class constructs an object instead.
+    fn unawaited_handoff(&mut self, symbol: &str, call: &Call<'_>) {
+        let catalog = self.cx.catalog(symbol);
+        let Some(slot) = catalog.and_then(|entry| self.cx.kb.unawaited_callable(entry)) else {
+            return;
+        };
+        let Some(callable) = resolver::passed_var(
+            call.args,
+            call.kwargs,
+            call.star_from,
+            (slot.arg, slot.param.as_deref()),
+        ) else {
+            return;
+        };
+        let target = self.partial(callable).map_or(callable, |p| p.callable);
+        if self.class_called(target).is_some() {
+            return;
+        }
+        let (Callee::Project(callees, _), _) = self.callable_callee(target) else {
+            return;
+        };
+        self.unawaited.push(UnawaitedHandoff {
+            span: call.span,
+            api: symbol.to_owned(),
+            callees,
+            tests_result: slot.tests_result,
+        });
     }
 
     /// What a builtin passes the callable it calls once per item (`Runner::PerItem`): items

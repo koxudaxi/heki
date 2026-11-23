@@ -100,8 +100,8 @@ pub(crate) fn reset_to_local(index: &mut ProjectIndex, region: &FxHashSet<FuncKe
             Arc::make_mut(&mut local).sync_driven_only = true;
         }
         file.functions.insert(func.clone(), local);
-        if let Some(fresh) = &mut file.fresh_returns {
-            fresh.reset(func);
+        if let Some(tables) = &mut file.opt_in_tables {
+            tables.fresh_returns.reset(func);
         }
     }
 }
@@ -259,11 +259,11 @@ fn store_fresh_return(index: &mut ProjectIndex, func: &FuncKey, fact: Option<Fre
         .expect("a propagation node belongs to an indexed file");
     match fact {
         Some(fact) => {
-            file.fresh_returns_mut().resolved.insert(func.clone(), fact);
+            (file.opt_in_tables_mut().fresh_returns.resolved).insert(func.clone(), fact);
         }
         None => {
-            if let Some(fresh) = &mut file.fresh_returns {
-                fresh.resolved.remove(func);
+            if let Some(tables) = &mut file.opt_in_tables {
+                tables.fresh_returns.resolved.remove(func);
             }
         }
     }
@@ -981,7 +981,7 @@ impl Resolver<'_> {
     /// (by its final fact, outside the SCC being computed).
     fn resolve_fresh_return(&self, func: &FuncKey) -> Option<FreshReturn> {
         let file = &self.index.files[&self.index.func_files[func]];
-        let local = file.fresh_returns.as_ref()?.local.get(func)?;
+        let local = file.opt_in_tables.as_ref()?.fresh_returns.local.get(func)?;
         let mut fact = FreshReturn {
             calls: Vec::new(),
             ..*local
