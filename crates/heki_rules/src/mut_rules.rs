@@ -3270,12 +3270,16 @@ impl<'a> Mut202Fn<'a> {
         })
     }
 
-    /// The one project function the call instruction `inst` runs.
+    /// The one project function the call instruction `inst` runs: its one target, whose name
+    /// the project binds to no other object (R1, [`ProjectDecls::call_rebound`]).
     fn single_callee(&self, inst: &'a Inst) -> Option<&'a FuncKey> {
         let shape = self.shape();
         let call = site_call(&|v| shape.inst(v), self.sites, inst, false)?;
         let callees = call.site?.project_callees();
         let bc = callees.first().filter(|_| callees.len() == 1)?;
+        if self.cx.decls.call_rebound(&bc.callee.fqn()) {
+            return None;
+        }
         self.cx.index.summary(&bc.callee).map(|_| &bc.callee)
     }
 

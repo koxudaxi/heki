@@ -2376,6 +2376,15 @@ impl ProjectDecls {
         }
     }
 
+    /// Whether another project module stores into the global `fqn` of `m`, by name in any
+    /// spelling (`lib.f = g`, `setattr(lib, "f", g)`) or under a name heki cannot read
+    /// (`setattr(lib, name, g)`).
+    pub(super) fn global_stored_elsewhere(&self, m: &ModuleDecls, fqn: &str) -> bool {
+        self.read(|k| note(&mut k.grown_globals, fqn));
+        self.read(|k| note(&mut k.grown_globals, &m.module_name));
+        self.elsewhere.globals.contains_key(fqn) || self.elsewhere.unnamed.contains(&m.module_name)
+    }
+
     /// What the module's code stores in `attr` of the instances of the canonical class `class`
     /// (`decl`), with its fallback when another module stores into the class's module.
     pub(super) fn attr_store<'s>(
