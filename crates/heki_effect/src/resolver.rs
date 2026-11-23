@@ -8332,16 +8332,19 @@ impl<'a> TypeCtx<'a> {
         if family {
             classes.extend(self.project.subclasses_of(class));
         }
+        // As for the implementations of a method (`instance_targets_complete`). Past the limit,
+        // the first class binding the name to a name decides, not what each one binds.
+        if classes.len() > DISPATCH_CLASS_LIMIT {
+            return (classes.iter())
+                .any(|c| self.project.class_aliases(c, method).is_some())
+                .then_some(Callee::TooMany);
+        }
         let found: Vec<Option<ClassAlias<'_>>> = classes
             .iter()
             .map(|c| self.project.class_aliases(c, method))
             .collect();
         if found.iter().all(Option::is_none) {
             return None;
-        }
-        // As for the implementations of a method (`instance_targets_complete`).
-        if classes.len() > DISPATCH_CLASS_LIMIT {
-            return Some(Callee::TooMany);
         }
         let mut out: Option<Callee> = found
             .iter()
