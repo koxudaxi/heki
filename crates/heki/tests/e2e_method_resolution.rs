@@ -2973,3 +2973,53 @@ fn every_spelling_of_a_store_and_every_read_of_one() {
         &["EFF101"],
     );
 }
+
+/// A `__setstate__` that also reads an attribute heki is deciding is solved with the stores, and
+/// its restores hold the type its `__init__` gave; a base and its subclass, read through
+/// one family, are decided together.
+const REVIVED: &str = r#"import httpx
+
+
+class Revived:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __setstate__(self, state) -> None:
+        for attr, value in state.items():
+            setattr(self, attr, value)
+        self.client.close()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+
+
+class Open:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+
+class OpenSub(Open):
+    def put(self, name: str) -> None:
+        setattr(self, name, httpx.AsyncClient())
+
+
+class ReaderOfBase:
+    def __init__(self, source: Open) -> None:
+        self.copy = source.client
+
+    async def handle(self) -> None:
+        self.copy.get("https://example.com")
+
+
+class ReaderOfSub:
+    def __init__(self, source: OpenSub) -> None:
+        self.copy = source.client
+
+    async def handle(self) -> None:
+        self.copy.get("https://example.com")
+"#;
+
+#[test]
+fn restores_and_families_are_solved_with_the_stores_they_read() {
+    check_marks("revived", &[("pkg/revived.py", REVIVED)], &["EFF101"]);
+}
