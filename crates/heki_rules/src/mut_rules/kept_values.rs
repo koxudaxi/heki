@@ -19,6 +19,7 @@ use heki_effect::{
 };
 use heki_ir::BlockId;
 use heki_ir::walk::{Budget, Facts, Sparse, fixpoint};
+use heki_semantic::mangling;
 use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -88,11 +89,9 @@ fn setup_step(
     prop: &str,
     holders: &[&String],
 ) -> bool {
-    let name = writer
-        .qualname
-        .rsplit('.')
-        .next()
-        .unwrap_or(&writer.qualname);
+    // The attribute the writer's class holds it under (`_C__cache` of `def __cache`).
+    let name = mangling::member_name(&writer.qualname);
+    let name = name.as_ref();
     if name == "__del__" {
         return true;
     }
@@ -164,8 +163,7 @@ pub fn lazy_setup_files(index: &ProjectIndex, names: &BTreeSet<&str>) -> Vec<Pat
         .values()
         .filter(|f| {
             f.cache_flows.keys().any(|key| {
-                let name = key.qualname.rsplit('.').next().unwrap_or(&key.qualname);
-                names.contains(name)
+                names.contains(mangling::member_name(&key.qualname).as_ref())
                     && f.local_functions
                         .get(key)
                         .is_some_and(|s| s.is_cached_property)

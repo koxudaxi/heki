@@ -23,8 +23,12 @@ the allowed callers and resolves to a target:
 - a module-level function (`pkg.util.reset_cache()`);
 - a class: constructing it or a subclass (`FinalFacts(...)`, `pkg.facts.FinalFacts(...)`,
   `cls(...)` in a class method, a value typed `type[FinalFacts]` or `typing.Type[FinalFacts]`,
-  `type(facts)(...)`), also for a dataclass or another class without an `__init__` of its own;
-  with `subclasses = false`, constructing exactly the class;
+  `type(facts)(...)`), also for a dataclass or another class without an `__init__` of its own,
+  through a `functools.partial` object holding the class (`make = partial(FinalFacts)`, then
+  `make()`, reported at `make()`), and through a library method building an instance of its
+  receiver's class without its `__init__` (a pydantic model's `FinalFacts.model_construct(...)`,
+  `FinalFacts.model_validate({...})` of a dict, `facts.model_copy(...)`); with
+  `subclasses = false`, constructing exactly the class;
 - what a property returns, called (`self.data_type(is_dict=True)` with a property `data_type`
   returning `type[DataType]` constructs `DataType`): the value the getter's return annotation
   names is called, and the getter runs as reading the property does;
@@ -45,9 +49,18 @@ where every function the call may run binds that position to the parameter, or l
 every such function's default is `True`, `False`, `None`, `0`, or `""` and the value. A keyword
 binds as Python binds it: never a positional-only parameter, and one naming no parameter passes its
 value under its name into `**kwargs`; the receiver is the first position. A `**` operand that is a
-dict display with string constant keys, which nothing changes (a name holding it is only unpacked
-with `**`, bound to another name, tested, or returned), passes its entries as keywords
-(`DataType(**{"is_dict": True})`, `flags = {"is_dict": True}` then `DataType(**flags)`). A call that
+mapping the function builds, which nothing changes (a name holding it is only unpacked with `**`,
+merged into another mapping, bound to another name, tested, or returned), passes its entries as
+keywords: a dict display with string constant keys (`DataType(**{"is_dict": True})`,
+`flags = {"is_dict": True}` then `DataType(**flags)`); a merge (`{**a, **b}`, `dict(a, k=v)`,
+`a | b` of two mappings the function builds), which passes the last entry of each key, a mapping
+heki does not build (a parameter) replacing every key before it; and one built on several paths
+(`flags = a if c else b`), which passes a key where every path passes the same constant for it.
+Calling a `functools.partial` object the function makes passes what the object holds first (its
+positions, and its keywords, which a keyword of the call replaces), then the call's arguments; a
+call unpacking a mapping over keywords the object holds is not followed. A pydantic model's
+`model_construct` passes its keywords to the fields, `model_validate` the entries of the dict it
+is passed, and `model_copy` those of `update`. A call that
 raises `TypeError` instead of running the function (two keywords of one name, a parameter bound by a
 position, or the receiver, and a keyword, a keyword without `**kwargs` to land in, a position past
 the parameters without `*args`, a parameter without a default left unbound where no `*` unpacking or
@@ -199,7 +212,12 @@ Its premises:
   target (whether a test of a display holding it looks at it) is not part of the claim.
 - **Arguments** (a target with an argument list): the call binds each parameter the list names to
   its constant, as Python binds the call. Established: an argument heki cannot tell is no match,
-  and a call that raises `TypeError` instead of running the function binds nothing.
+  a mapping built on several paths passes a key only where every path passes the same constant
+  (as every function the call may run must agree), and a call that raises `TypeError` instead of
+  running the function binds nothing. Not followed: a mapping or a `functools.partial` object
+  the function does not build itself through copies (a parameter, an attribute, a call's result,
+  one chosen on several paths), a mapping something changes in place, a key computed at run time,
+  and a pydantic model's `model_validate` of a value not established to be a dict.
 
 ## Why is this bad?
 Some operations keep invariants only when one component runs them: a store that updates its
