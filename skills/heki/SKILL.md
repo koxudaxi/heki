@@ -65,8 +65,10 @@ heki inspect app/users.py::load_user --callers --depth 3 --output-format json
   pure (`purity`), its callers, the reports in it, and the contracts that name it.
 - After the edit, inspect it again and compare `effects`, `changes`, `retains`, and `returns`: a
   new entry is new behavior. Tell the user about it unless they asked for it.
-- An ambiguous or unknown name exits with 2 and lists the candidates (under `error.candidates`
-  in JSON): pick one and run the command again.
+- An ambiguous or unknown name exits with 2. `error.help` says what to do (a misspelled name
+  gets the functions whose names look like it), and the functions to choose from are under
+  `error.candidates`, `error.suggestions`, `error.methods`, or `error.functions`: pick one and
+  run the command again.
 
 ### 2. After an edit: `heki check`
 
@@ -81,6 +83,10 @@ heki check --output-format json
 - Exit codes: 0 nothing fails the run, 1 a diagnostic fails it, 2 a configuration, I/O, or
   syntax error. A file that does not parse is reported on stderr, and the other files are still
   checked.
+- An error says where its cause is, what to do (`= help:`), and which page explains it
+  (`= docs:`). With `--output-format json` it is `{"error": {...}}` on stdout, with `message`,
+  `path`, `line`, `help`, `docs`, and `candidates` (the names a misspelled one may have meant).
+  Do what `help` says; do not guess configuration keys.
 - The fields of a diagnostic are listed in [references/output.md](references/output.md).
 
 ### 3. Fix at the root cause

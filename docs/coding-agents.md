@@ -30,8 +30,10 @@ $ heki inspect app/users.py::load_user --callers --depth 3
 | `contracts` | the contracts that name it |
 
 - A name is a dotted name (`pkg.mod.Class.method`, or a suffix such as `Class.method`, or a
-  glob), `path.py:line`, or `path.py::name`. An ambiguous or unknown name exits with 2 and lists
-  the candidates (in JSON, under `error.candidates`).
+  glob), `path.py:line`, or `path.py::name`. An ambiguous or unknown name exits with 2: the error
+  says what to do (in JSON, `error.help`; a misspelled name gets the functions whose names look
+  like it) and lists the functions to choose from (`error.candidates`, `error.suggestions`,
+  `error.methods`, or `error.functions`).
 - `pure` means heki found no effect and no change of an input or of shared state, and resolved
   every call below. Libraries the [catalog](configuration.md#ecosystem-knowledge-toolhekiecosystem)
   does not list count as having no effects.
@@ -75,6 +77,32 @@ Each diagnostic has:
 | `blocker` | the obligation that blocks an automatic fix, if any |
 | `fix` | byte-span edits for proven-safe rewrites |
 | `sites` | the violation sites a contract report stands for, when more than one |
+
+A text run ends with one line per reported rule: `heki rule <CODE>` and the rule's page.
+
+When the run cannot check (exit code 2: a configuration, path, or file error), the error says
+where the cause is, what to write instead, and which section of the documentation explains it.
+With `--output-format json` it is an object on stdout:
+
+```json
+{
+  "error": {
+    "message": "unknown key `select` in [tool.heki]",
+    "path": "pyproject.toml",
+    "line": 5,
+    "column": 1,
+    "help": [
+      "`select` is a key of [tool.heki.lint]: move it there",
+      "for example: `select = [\"EFF\", \"MUT101\"]`"
+    ],
+    "docs": "https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint",
+    "candidates": []
+  }
+}
+```
+
+Apply what `help` says; `candidates` holds the names a misspelled one may have meant, the closest
+first.
 
 `heki rule <CODE>` prints a rule's documentation: what it does, why it matters, and what to do
 instead, which makes a good prompt for the fix. `heki rule --all --output-format json` gives
@@ -129,6 +157,21 @@ The skill is experimental: its wording, when agents load it, and the install com
 as the agents evolve.
 
 ### Install the skill
+
+heki installs the skill it was built with, which describes its own commands and output:
+
+```console
+$ heki skill install --agent claude-code
+$ heki skill install --agent codex --scope user
+```
+
+- `--agent claude-code` writes `.claude/skills/heki/`, `--agent codex` writes
+  `.agents/skills/heki/`.
+- `--scope project` (the default) writes under the working directory, `--scope user` under the
+  home directory, for every project.
+- A skill already there is replaced only with `--overwrite`. The command is experimental.
+
+Without heki installed, or to follow the repository instead:
 
 | Agent | Command |
 | ----- | ------- |

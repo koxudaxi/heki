@@ -712,6 +712,29 @@ fn walk_steps_are_written_as_json_and_hidden_from_help() {
     assert!(!help.contains("walk-steps"), "{help}");
 }
 
+/// The full text output ends with where each reported rule is explained; the other formats
+/// are for programs, and SARIF holds each rule's page in its `helpUri`.
+#[test]
+fn full_output_ends_with_the_pages_of_the_reported_rules() {
+    let p = Project::new("rule_pages");
+    p.write("a.py", BLOCKING);
+    let (_, _, full) = p.heki(&[]);
+    assert!(
+        full.ends_with(
+            "\nEFF101 (async-blocking-call): `heki rule EFF101`, https://heki.koxudaxi.dev/rules/async-blocking-call/\n"
+        ),
+        "{full}"
+    );
+    let (_, _, concise) = p.heki(&["--output-format", "concise"]);
+    assert!(!concise.contains("heki rule"), "{concise}");
+    let (_, sarif, _) = p.heki(&["--output-format", "sarif"]);
+    let sarif: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+    assert_eq!(
+        sarif["runs"][0]["tool"]["driver"]["rules"][0]["helpUri"],
+        "https://heki.koxudaxi.dev/rules/async-blocking-call/"
+    );
+}
+
 /// The escape codes of the colored text output, as Ruff writes them.
 mod codes {
     pub const RESET: &str = "\x1b[0m";

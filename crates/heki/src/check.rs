@@ -610,6 +610,9 @@ fn report(
         summary(&diags, project.files.len(), baseline_path.is_some());
         heuristic_hint(analyzed.heuristic_off, analyzed.withheld.len());
     }
+    if matches!(args.output_format, OutputFormat::Full) {
+        rule_pages(&diags);
+    }
     let code = if refused_update
         || unused_entries
         || any_failing(&diags, fail_on(args, &project.env.cfg.lint))
@@ -702,6 +705,18 @@ fn summary(diags: &[Diagnostic], files: usize, baseline: bool) {
         eprintln!("All checks passed ({files} file(s)).");
     } else {
         eprintln!("Found {} {what} in {files} file(s).", diags.len());
+    }
+}
+
+/// After the summary of the full text format: where each reported rule is explained.
+pub(crate) fn rule_pages(diags: &[Diagnostic]) {
+    let rules: BTreeMap<&str, &str> = diags
+        .iter()
+        .map(|d| (d.rule_code.as_str(), d.rule_slug.as_str()))
+        .collect();
+    for (code, slug) in rules {
+        let page = heki_env::problem::rule_page(slug);
+        eprintln!("{code} ({slug}): `heki rule {code}`, {page}");
     }
 }
 

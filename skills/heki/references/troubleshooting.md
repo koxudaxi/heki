@@ -20,8 +20,18 @@ do. Check the project (`heki check`, the default `.`) and filter the JSON by `pa
 ## `heki inspect` exits with 2
 
 The symbol names no single function: it is ambiguous, unknown, a class, or a module. The error
-lists the candidates (under `error.candidates` with `--output-format json`); inspect one of them,
-by its dotted name, `path.py:LINE`, or `path.py::NAME`.
+says what to do (`error.help` with `--output-format json`; a misspelled name gets the functions
+whose names look like it) and lists the functions to choose from (`error.candidates`,
+`error.suggestions`, `error.methods`, or `error.functions`); inspect one of them, by its dotted
+name, `path.py:LINE`, or `path.py::NAME`.
+
+## A command exits with 2 before checking anything
+
+The configuration, a path, or an option is wrong. The error names the file and line, says what
+to write instead (`= help:`), and links the section of the documentation about it (`= docs:`).
+With `--output-format json` the same error is `{"error": {...}}` on stdout: `help`, `docs`, and
+`candidates` (the keys, rules, or values a misspelled one may have meant). Apply the help: for
+example, `select` written in `[tool.heki]` belongs in `[tool.heki.lint]`.
 
 ## `heki check` exits with 2 and still prints diagnostics
 
