@@ -27,7 +27,11 @@ the allowed callers and resolves to a target:
   with `subclasses = false`, constructing exactly the class;
 - what a property returns, called (`self.data_type(is_dict=True)` with a property `data_type`
   returning `type[DataType]` constructs `DataType`): the value the getter's return annotation
-  names is called, and the getter runs as reading the property does.
+  names is called, and the getter runs as reading the property does;
+- a private method by the name Python's name mangling gives it (`parser._Parser__run()` with
+  `parser: Parser`, `Parser._Parser__run(p)`, `self._Parser__run()` in a subclass): a target
+  names it `Parser.__run` or `Parser._Parser__run`. A subclass's own `__run` is another method
+  (`_JsonParser__run`), no override of the target.
 
 A target ending in an argument list names only the calls passing those constants:
 `DataType(is_dict=True)` is `DataType(is_dict=True)`, not `DataType(is_list=True)`, and

@@ -6780,11 +6780,11 @@ impl<'a> Extractor<'a> {
         let Some(Val::Inst(protocol)) = self.val(call.recv_var?) else {
             return None;
         };
-        let name = callees.first()?.callee.qualname.rsplit('.').next()?;
+        let name = heki_semantic::mangling::member_name(&callees.first()?.callee.qualname);
         let project = self.cx.project;
         project
-            .protocol_declares(protocol, name)
-            .then(|| project.mro_method(protocol, name))?
+            .protocol_declares(protocol, &name)
+            .then(|| project.mro_method(protocol, &name))?
     }
 
     /// What the receiver of `call` tells about the implementations `callees` run
