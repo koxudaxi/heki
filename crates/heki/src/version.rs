@@ -7,18 +7,28 @@ use std::process::ExitCode;
 /// The changelog the binary was built from: the same file the source distribution carries.
 const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
 
-/// The newest release's section: from its `## [` heading up to the next release's.
-fn newest_section(changelog: &str) -> Option<&str> {
-    let mut headings = changelog.match_indices("\n## [").map(|(at, _)| at + 1);
-    let start = headings.next()?;
-    let end = headings.next().unwrap_or(changelog.len());
+/// The section of `version`: from its `## [version]` heading up to the next release's.
+fn section_of<'a>(changelog: &'a str, version: &str) -> Option<&'a str> {
+    let heading = format!("\n## [{version}]");
+    let start = changelog.find(&heading)? + 1;
+    let end = changelog[start..]
+        .find("\n## [")
+        .map_or(changelog.len(), |at| start + at);
     Some(changelog[start..end].trim_end())
+}
+
+/// What `heki version --changelog` prints after the version line.
+fn changelog_text(changelog: &str, version: &str) -> String {
+    section_of(changelog, version).map_or_else(
+        || format!("The changelog has no section for {version}: this is a development build."),
+        str::to_owned,
+    )
 }
 
 pub(crate) fn run(changelog: bool) -> Result<ExitCode> {
     println!("heki {}", heki_env::VERSION);
     if changelog {
-        println!("\n{}", newest_section(CHANGELOG).unwrap_or_default());
+        println!("\n{}", changelog_text(CHANGELOG, heki_env::VERSION));
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -28,22 +38,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_newest_section_ends_before_the_next_release() {
+    fn a_section_ends_before_the_next_release() {
         let text = "# Changelog\n\n## [2.0] - now\n\n- a\n\n## [1.0] - then\n\n- b\n";
-        assert_eq!(newest_section(text), Some("## [2.0] - now\n\n- a"));
-        assert_eq!(newest_section("# Changelog\n"), None);
-        assert_eq!(
-            newest_section("x\n## [1.0] - only\n- b\n"),
-            Some("## [1.0] - only\n- b")
-        );
+        assert_eq!(section_of(text, "1.0"), Some("## [1.0] - then\n\n- b"));
+        assert_eq!(section_of(text, "2.0"), Some("## [2.0] - now\n\n- a"));
+        assert_eq!(section_of(text, "3.0"), None);
+        assert_eq!(section_of(text, "1"), None);
     }
 
     #[test]
-    fn the_embedded_section_is_the_top_one_of_the_changelog() {
-        let section = newest_section(CHANGELOG).unwrap();
-        assert!(section.starts_with("## ["), "{section}");
-        let first = CHANGELOG.find("\n## [").unwrap() + 1;
-        assert_eq!(CHANGELOG[..first].matches("\n## [").count(), 0);
-        assert!(!section[3..].contains("\n## ["));
+    fn a_version_without_a_section_says_so_and_prints_nothing_else() {
+        let text = "# Changelog\n\n## [1.0] - then\n\n- b\n";
+        assert_eq!(
+            changelog_text(text, "1.1"),
+            "The changelog has no section for 1.1: this is a development build."
+        );
+        assert_eq!(changelog_text(text, "1.0"), "## [1.0] - then\n\n- b");
     }
 }

@@ -595,10 +595,35 @@ fn required_version_and_keys_of_a_newer_heki() {
         &p,
         &["check"],
         &[
-            "error: pyproject.toml:5:20: invalid `required-version` in [tool.heki]: `newer` is not a PEP 440 version specifier",
+            "error: pyproject.toml:5:20: invalid `required-version` in [tool.heki]: `newer` is not accepted: each comma-separated clause is an operator (`==`, `!=`, `>=`, `>`, `<=`, `<`, `~=`, `===`) and a release of digits and dots, such as `>=0.2.4, <0.3`; pre-, post-, and development-release suffixes are not accepted",
             "  = help: `required-version` takes a string, for example: `required-version = \">=0.2\"`",
         ],
     );
+    for (name, spec) in [
+        ("garbage", ">=0.2garbage"),
+        ("post", ">=0.2.4.post1"),
+        ("rc", "==0.2.4rc1"),
+        ("dev", "<0.3.dev0"),
+        ("empty_part", ">=0..2"),
+    ] {
+        let p = project(
+            &format!("required_version_{name}"),
+            &format!("[tool.heki]\nrequired-version = \"{spec}\"\n"),
+        );
+        fails_with(
+            &p,
+            &["check"],
+            &[&format!(
+                "error: pyproject.toml:5:20: invalid `required-version` in [tool.heki]: `{spec}` is not accepted: each comma-separated clause is an operator (`==`, `!=`, `>=`, `>`, `<=`, `<`, `~=`, `===`) and a release of digits and dots, such as `>=0.2.4, <0.3`; pre-, post-, and development-release suffixes are not accepted"
+            )],
+        );
+    }
+    let p = project(
+        "required_version_wildcard",
+        "[tool.heki]\nrequired-version = \"==0.*, !=0.1.*, ~=0.1\"\n",
+    );
+    let (code, stdout, stderr) = p.heki(&["check", "--no-heuristic"]);
+    assert_ne!(code, 2, "{stdout}{stderr}");
     let p = project(
         "required_version_not_string",
         "[tool.heki]\nrequired-version = 3\n",
@@ -625,7 +650,7 @@ fn required_version_and_keys_of_a_newer_heki() {
     assert!(!stderr.contains("newer heki"), "{stderr}");
 }
 
-/// `heki version` prints the version, and with `--changelog` the newest section of CHANGELOG.md.
+/// `heki version` prints the version, and with `--changelog` the section of CHANGELOG.md for this version.
 #[test]
 fn version_prints_the_changelog_of_the_release() {
     let p = project("version_cmd", "");
@@ -637,8 +662,8 @@ fn version_prints_the_changelog_of_the_release() {
     let changelog =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../CHANGELOG.md"))
             .unwrap();
-    let top = changelog.find("\n## [").unwrap() + 1;
-    let rest = &changelog[top..];
+    let heading = format!("\n## [{}]", env!("CARGO_PKG_VERSION"));
+    let rest = &changelog[changelog.find(&heading).unwrap() + 1..];
     let section = rest[..rest[3..].find("\n## [").map_or(rest.len(), |n| n + 3)].trim_end();
     assert!(
         out.starts_with(&format!("heki {}\n\n## [", env!("CARGO_PKG_VERSION"))),

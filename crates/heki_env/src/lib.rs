@@ -799,8 +799,23 @@ pub fn requires_python_lower_bound(spec: &str) -> Option<PythonVersion> {
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Whether `version` satisfies the PEP 440 specifier `spec` (`>=0.2.6, <0.3`), compared on release
-/// segments; `None` when `spec` is not a specifier.
+/// segments; `None` when `spec` is not a specifier. Every clause is an operator and a release of
+/// digits and dots (`==1.2.*` allowed): a pre-, post-, or development-release suffix or trailing
+/// text is refused, since the comparison would silently drop it.
 pub fn version_satisfies(spec: &str, version: &str) -> Option<bool> {
+    let is_release_only = |clause: &str| {
+        let release = clause
+            .trim()
+            .trim_start_matches(['=', '!', '~', '<', '>'])
+            .trim();
+        let release = release.strip_suffix(".*").unwrap_or(release);
+        release
+            .split('.')
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    };
+    if !spec.split(',').all(is_release_only) {
+        return None;
+    }
     let clauses = spec
         .split(',')
         .map(VersionClause::parse)

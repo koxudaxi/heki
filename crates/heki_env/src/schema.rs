@@ -279,7 +279,9 @@ fn check_required_version(
             layout,
             position,
             key: Some((String::new(), key.get().to_owned())),
-            message: format!("`{required}` is not a PEP 440 version specifier"),
+            message: format!(
+                "`{required}` is not accepted: each comma-separated clause is an operator (`==`, `!=`, `>=`, `>`, `<=`, `<`, `~=`, `===`) and a release of digits and dots, such as `>=0.2.4, <0.3`; pre-, post-, and development-release suffixes are not accepted"
+            ),
         }),
     }
 }
