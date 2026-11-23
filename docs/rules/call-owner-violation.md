@@ -32,7 +32,11 @@ the allowed callers and resolves to a target:
   (`factory = FinalFacts` or `run = staticmethod(reset_cache)`, then `self.factory()`,
   `cls.factory()`, or `Parser.factory()`), an entry of a module-level table of functions
   (`HANDLERS["reset"]()`), and a module a function returns (`_ops().reset_cache()` of a function
-  returning the module it imports).
+  returning the module it imports);
+- a private method by the name Python's name mangling gives it (`parser._Parser__run()` with
+  `parser: Parser`, `Parser._Parser__run(p)`, `self._Parser__run()` in a subclass): a target
+  names it `Parser.__run` or `Parser._Parser__run`. A subclass's own `__run` is another method
+  (`_JsonParser__run`), no override of the target.
 
 A target ending in an argument list names only the calls passing those constants:
 `DataType(is_dict=True)` is `DataType(is_dict=True)`, not `DataType(is_list=True)`, and
@@ -71,8 +75,10 @@ only inspects its arguments (`print`, `getattr`, `type`), `super`, `typing.cast`
 function's defaults and annotations; a subscript (`Optional[Rule]`), a comparison (`f is decide`), a
 receiver (`Rule.of(...)`), and a module binding another name to it. A callable a builtin calls once
 per item (`sorted(xs, key=decide)`, `map(decide, xs)`) is a call already, and so is the
-`functools.partial` object handed to one. A reference in a class body counts for the function
-running the class statement (`<module>` for a class at module level). A class body, a function, a
+`functools.partial` object handed to one. A call or a reference in a class body (a class
+attribute's value, a method's decorator or default argument) counts for the function running the
+class statement (`<module>` for a class at module level, a nested class's included); a method's own
+body is the method's. A class body, a function, a
 lambda, or a comprehension nested in a function names what the function binds to a name it reads
 (a local import), at the name.
 
