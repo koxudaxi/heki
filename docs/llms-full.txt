@@ -763,6 +763,33 @@ Contracts reason about the callers heki sees: a private helper hands its reports
 and a function called only from allowed writers is not reported. Code outside the run, such as
 tests left out of it, is not known.
 
+## Measured and not taken
+
+These shapes were measured on the Stage 0-A corpus (378 packages, 30.75 million lines) and not built.
+Each failed the bar for a default rule: at least 10 % of the judged sample harmful, and no false exact
+claim.
+
+- Late binding of loop variables: 132 closures in 38 packages beyond the 3,865 names Ruff B023
+  reports; every harmful one is already a B023 report, and heki found none that B023 misses.
+- Resource use after close: 289 sites in 80 packages, 8 % harmful, with false exact claims. Left to
+  runtime and review.
+- Resource leaks across calls: 1,848 sites in 162 packages, 4 % harmful; about half are direct
+  constructors that Ruff `SIM115` and Pylint `R1732` flag.
+- Command-query separation (a `get_*`, `is_*`, or property that changes state): 11,558 sites in 254
+  packages, 4 % harmful; most are caches heki does not see as caches.
+- Dropped results of pure calls: 59,083 sites in 327 packages, no harm in the sample; the real bugs
+  are `str` methods on `str` values, which pyright `reportUnusedCallResult` covers.
+- Stale caches: 199 sites in 54 packages, 5 % harmful; Ruff B019 and Pylint W1518 flag the cache on
+  a method.
+- `asyncio.run` under a running loop: 71 sites in 12 packages, 1 of 25 judged right; nearly all are
+  guarded by a test heki does not model.
+- Writes lost in a child process: 62 sites in 27 packages, 4 % harmful.
+- `Popen` pipes left unread: 22 sites in 13 packages, 5 % harmful.
+- `CancelledError` swallowed: 466 sites in 62 packages, none harmful as judged; flake8-async
+  `ASYNC103` and `ASYNC104` cover the shape.
+- `BytesIO` read without a seek: 69 sites in 7 packages, 57 of them one test suite; too rare.
+- Opposite lock orders: 106 ordered pairs of named locks in 31 packages, no pair in opposite order.
+
 ## How a rule gets into heki
 
 heki only takes checks that need what it can prove. A proposed rule goes through four questions,
@@ -4104,6 +4131,67 @@ first.
 instead, which makes a good prompt for the fix. `heki rule --all --output-format json` gives
 every rule's metadata and documentation, the premises of its exact claim, and its published
 precision: its certification and its latest measurement ([Rule Precision](https://heki.koxudaxi.dev/precision/)).
+
+## Architecture rules with agents
+
+Do not describe the architecture in the project's `AGENTS.md` or `CLAUDE.md`. Declare it as
+[contracts](https://heki.koxudaxi.dev/configuration/#contracts) and let `heki check` enforce it. Three lines are enough:
+
+> After editing Python, run `heki check`.
+> A report that names a contract means the code crossed a wall the maintainers declared: change the
+> code as the report's help says.
+> Do not edit the contracts or the baseline, and do not add a suppression, unless the maintainer
+> asks.
+
+The `message` of a contract is what the agent reads as the fix, so write it as an instruction:
+
+```toml
+# heki.toml
+[[write-owners]]
+name = "generation-store"
+targets = ["pkg.model.DataModel.fields"]
+allowed-writers = ["Store.*"]
+message = "use GenerationStore.set_fields() instead"
+```
+
+Put the contracts and the baseline path in `heki.toml`, and give that file an owner (`CODEOWNERS`,
+or the host's rule for protected files). A change to a wall is then a reviewed change, and an agent
+cannot move a wall to make a report go away.
+
+### A Stop hook for Claude Code
+
+A [Stop hook](https://code.claude.com/docs/en/hooks) runs when Claude Code is about to end its turn.
+The script below runs `heki check` and, when it exits with 1 (findings), sends the text to the agent
+and keeps it working. Exit code 2 of the hook means "block, and read stderr". heki's own failure (exit
+code 2, or no `heki` on the path) lets the turn end, so a configuration error does not loop. The hook
+input has `stop_hook_active`, which is `true` while Claude Code is already continuing because of a
+stop hook; the script stops blocking then.
+
+```sh
+#!/bin/sh
+input=$(cat)
+case $input in
+  *'"stop_hook_active":true'* | *'"stop_hook_active": true'*) exit 0 ;;
+esac
+report=$(heki check 2>&1)
+status=$?
+[ "$status" -eq 1 ] || exit 0
+printf '%s\n' "$report" >&2
+exit 2
+```
+
+Register it in `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [{ "hooks": [{ "type": "command", "command": ".claude/hooks/heki-stop.sh" }] }]
+  }
+}
+```
+
+Run on a project with findings that are already known, it would block every turn: use
+`heki check --baseline heki-baseline.toml` in the script so that only new findings count.
 
 ## What a function does: `heki inspect` (experimental)
 
