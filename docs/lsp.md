@@ -122,7 +122,7 @@ On a save, the edit reaches other files only through what it changes:
 
 | The edit changes | Also re-analyzed |
 | ---------------- | ---------------- |
-| a function's effects, the locks it takes (`EFF109`), the objects it uses one operation at a time (`EFF110`), what it returns in a set's order or writes of its parameters (`EFF112`), whether it reaches a call cycle (`EFF114`), or what the object it returns may be (a new one, its argument, or state it keeps) | its callers, and the functions of a call cycle through it (their effects change with it) |
+| a function's effects, the locks it takes (`EFF109`), the objects it uses one operation at a time (`EFF110`), what it returns in a set's order or writes of its parameters (`EFF112`), whether it reaches a call cycle (`EFF114`), or what the object it returns may be (a new one, its argument, or state it keeps; for `MUT119`, a new container on every return) | its callers, and the functions of a call cycle through it (their effects change with it) |
 | a declaration that names resolve through: a re-exported class, a new method or base class, a property getter, a subclass, an offloading decorator | every file that resolved names through it |
 | a method of a class family | the classes of that family; with `MUT112` selected, every changed method counts: a value stored in `self.<attr>` is reported when a method of the family changes that attribute in place |
 | what a function changes of its own containers, or what it does with the generators it calls (`MUT113`, when selected) | the classes of its family with generators suspending inside an iteration of their containers, and those of the generators it calls |

@@ -28,7 +28,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "MUT115", "MUT118"]
+extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "MUT115", "MUT118", "MUT119"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -606,6 +606,28 @@ const MARK_COPIES: &str = "import copy\n\nfrom pkg.marked_spec import Spec\n\n\n
 const MARK_HOLDER: &str = "import copy\n\nfrom pkg.marked_spec import Spec\n\n\nclass Holder:\n    def __init__(self, spec: Spec):\n        self.spec = spec\n\n\ndef isolated_holder(holder: Holder):\n    return copy.deepcopy(holder)\n";
 const MARK_SUB: &str = "import copy\n\nfrom pkg.marked_spec import Spec\n\n\nclass NamedSpec(Spec):\n    pass\n\n\ndef isolated_named(spec: NamedSpec) -> NamedSpec:\n    return copy.deepcopy(spec)\n";
 
+// Changes lost on new objects (`MUT119`): a function in another module changes an item of what
+// a property returns, whose getter returns a copy of its field, then the field itself, then a
+// copy it keeps on the instance.
+const LOST_SETTINGS: &str = "class Settings:\n    def __init__(self):\n        self._values = {}\n        self._last = None\n\n    @property\n    def values(self):\n        return dict(self._values)\n";
+const LOST_SETTINGS_FIELD: &str = "class Settings:\n    def __init__(self):\n        self._values = {}\n        self._last = None\n\n    @property\n    def values(self):\n        return self._values\n";
+const LOST_SETTINGS_KEPT: &str = "class Settings:\n    def __init__(self):\n        self._values = {}\n        self._last = None\n\n    @property\n    def values(self):\n        copied = dict(self._values)\n        self._last = copied\n        return copied\n";
+const LOST_USE: &str = "from pkg.lost_settings import Settings\n\n\ndef enable(settings: Settings):\n    settings.values[\"debug\"] = True\n";
+// An item store on what a function returns that returns what a function in a third module
+// builds: a dict, then a set. Only the kind of the new container changes, no summary does.
+const LOST_MAKE: &str = "def make():\n    return dict()\n";
+const LOST_MAKE_SET: &str = "def make():\n    return set()\n";
+const LOST_MIDDLE: &str = "from pkg.lost_make import make\n\n\ndef options():\n    return make()\n";
+const LOST_ITEM: &str =
+    "from pkg.lost_middle import options\n\n\ndef enable():\n    options()[\"debug\"] = True\n";
+// An append to what a function returns that returns what a function in another module returns,
+// which calls it back (one SCC, whose members a full build gives no fact from each other): the
+// callee builds a set, then a list (the caller's facts stay the same), then stops calling back.
+const LOST_LOOP_COLLECT: &str = "from pkg.lost_loop_rebuild import rebuilt\n\n\ndef collect(refresh):\n    if refresh:\n        rebuilt()\n    return set()\n";
+const LOST_LOOP_COLLECT_NEW: &str = "from pkg.lost_loop_rebuild import rebuilt\n\n\ndef collect(refresh):\n    if refresh:\n        rebuilt()\n    return []\n";
+const LOST_LOOP_COLLECT_ALONE: &str = "def collect(refresh):\n    return []\n";
+const LOST_LOOP_REBUILD: &str = "from pkg.lost_loop_collect import collect\n\n\ndef rebuilt():\n    return collect(False)\n\n\ndef enable():\n    rebuilt().append(1)\n";
+
 // Values new on one path and borrowed on another (`MUT112`): a caller two modules above a
 // function that copies its argument (through a wrapper in a third module), and a class whose
 // subclass in another module reads the list its `__init__` may borrow from the caller.
@@ -1036,6 +1058,13 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/marked_spec.py", MARKED_SPEC),
         ("pkg/mark_tests.py", MARK_TESTS),
         ("pkg/mark_copies.py", MARK_COPIES),
+        ("pkg/lost_settings.py", LOST_SETTINGS),
+        ("pkg/lost_use.py", LOST_USE),
+        ("pkg/lost_make.py", LOST_MAKE),
+        ("pkg/lost_middle.py", LOST_MIDDLE),
+        ("pkg/lost_item.py", LOST_ITEM),
+        ("pkg/lost_loop_collect.py", LOST_LOOP_COLLECT),
+        ("pkg/lost_loop_rebuild.py", LOST_LOOP_REBUILD),
         ("pkg/fresh_ops.py", FRESH_OPS),
         ("pkg/fresh_build.py", FRESH_BUILD),
         ("pkg/strict_ops.py", STRICT_OPS),
@@ -3467,6 +3496,65 @@ fn steps_mut118() -> Vec<Step> {
     ]
 }
 
+/// `MUT119`: an item store through a property of a class in another module, by the final fact
+/// of its getter: the getter returns a copy of its field, then the field itself, then a copy it
+/// also keeps on the instance. Then an item store on what a function returns, two modules above
+/// the function building it, when only the kind it builds changes. Then an append to what a
+/// function returns whose callee in another module calls it back: the server recomputes the
+/// caller with the edited callee as one SCC, as a full build does.
+fn steps_mut119() -> Vec<Step> {
+    vec![
+        Step::new(
+            "an item store on the copy a property in another module returns",
+            Vec::new(),
+        )
+        .present(&[("pkg/lost_use.py", "MUT119")]),
+        Step::new(
+            "the getter returns its field",
+            vec![save("pkg/lost_settings.py", LOST_SETTINGS_FIELD)],
+        )
+        .absent(&[("pkg/lost_use.py", "MUT119")]),
+        Step::new(
+            "the getter returns a copy again",
+            vec![save("pkg/lost_settings.py", LOST_SETTINGS)],
+        )
+        .present(&[("pkg/lost_use.py", "MUT119")]),
+        Step::new(
+            "the getter keeps the copy on the instance",
+            vec![save("pkg/lost_settings.py", LOST_SETTINGS_KEPT)],
+        )
+        .absent(&[("pkg/lost_use.py", "MUT119")]),
+        Step::new(
+            "and returns a copy it does not keep",
+            vec![save("pkg/lost_settings.py", LOST_SETTINGS)],
+        )
+        .present(&[
+            ("pkg/lost_use.py", "MUT119"),
+            ("pkg/lost_item.py", "MUT119"),
+        ]),
+        Step::new(
+            "the function two modules below builds a set",
+            vec![save("pkg/lost_make.py", LOST_MAKE_SET)],
+        )
+        .absent(&[("pkg/lost_item.py", "MUT119")]),
+        Step::new(
+            "and a dict again",
+            vec![save("pkg/lost_make.py", LOST_MAKE)],
+        )
+        .present(&[("pkg/lost_item.py", "MUT119")]),
+        Step::new(
+            "a function calling its caller back builds a list instead of a set",
+            vec![save("pkg/lost_loop_collect.py", LOST_LOOP_COLLECT_NEW)],
+        )
+        .absent(&[("pkg/lost_loop_rebuild.py", "MUT119")]),
+        Step::new(
+            "and stops calling back",
+            vec![save("pkg/lost_loop_collect.py", LOST_LOOP_COLLECT_ALONE)],
+        )
+        .present(&[("pkg/lost_loop_rebuild.py", "MUT119")]),
+    ]
+}
+
 /// The blocking helper of `pkg/low.py` with a module-level cache that it reads (`False`) or
 /// clears (`True`) after its blocking call, so that the call keeps its position.
 fn low_with_cache(clears: bool) -> String {
@@ -4265,8 +4353,8 @@ fn steps_configuration() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"MUT115\", \"MUT118\"]",
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"MUT115\", \"MUT118\"]\nselect = [\"NOPE1\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"MUT115\", \"MUT118\", \"MUT119\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"MUT115\", \"MUT118\", \"MUT119\"]\nselect = [\"NOPE1\"]",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),
@@ -4925,6 +5013,7 @@ sessions!(editing, Session::start, {
     hash_writers: steps_hash_writers,
     mut111: steps_mut111,
     mut118: steps_mut118,
+    mut119: steps_mut119,
     mut112: steps_mut112,
     eff109: steps_eff109,
     mut113: steps_mut113,

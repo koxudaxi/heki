@@ -141,7 +141,7 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
          \x20 EFF111        1      -  slowdown     not measured                      -          \
          no: slower code, not a bug\n\
          \x20 No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF112, EFF113, EFF114, MUT101, \
-         MUT106, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, OPT112\n\
+         MUT106, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT119, OPT112\n\
          \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then \
          select it.\n\
          \n\
@@ -655,7 +655,7 @@ fn rules_worth_enabling_follow_the_policy() {
         \x20 Optional (experimental, never in the block)\n\
         \x20 EFF109        1      -  bug          not measured                      -          no: experimental\n\
         \x20 No reports here: EFF102, EFF105, EFF106, EFF110, EFF112, EFF113, EFF114, MUT101, MUT108, MUT111, MUT112, MUT113, \
-        MUT115, MUT118, OPT112\n\
+        MUT115, MUT118, MUT119, OPT112\n\
         \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it."
     );
     assert!(

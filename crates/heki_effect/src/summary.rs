@@ -10,6 +10,7 @@ use crate::construction::{Escape, Pos, Recorder};
 use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration};
 use crate::decorators::keeps_returned_value;
 use crate::environment::{self, AccessKind, ExternalAccess};
+use crate::fresh;
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
 use crate::held;
 use crate::infer::CellKey;
@@ -157,6 +158,7 @@ fn extract_module(
             kept_points,
             types,
             mut blind,
+            fresh_return,
         } = Extractor::new(
             &shape,
             &key,
@@ -274,6 +276,13 @@ fn extract_module(
             calls.extend(blind);
             calls.sort();
             calls.dedup();
+        }
+        if file.local_functions.contains_key(&key) {
+            if let Some(fresh) = &mut file.fresh_returns {
+                fresh.join_definition(&key, fresh_return);
+            }
+        } else if let Some(fact) = fresh_return {
+            file.fresh_returns_mut().local.insert(key.clone(), fact);
         }
         // Same qualname defined twice (conditional definitions): keep the union of facts.
         match file.local_functions.get_mut(&key) {
@@ -668,6 +677,8 @@ struct Extracted {
     types: FxHashMap<VarId, Val>,
     /// [`FileSummary::blind_spots`].
     blind: Vec<BlindCall>,
+    /// The local fact of [`FileSummary::fresh_returns`].
+    fresh_return: Option<fresh::FreshReturn>,
 }
 
 /// The points of a function that read one `self` attribute ([`Extractor::self_read_points`]).
@@ -1448,8 +1459,13 @@ impl<'a> Extractor<'a> {
 
     /// The value of `var` in the block being read (`pos`).
     fn val(&self, var: VarId) -> Option<&Val> {
+        self.val_in(self.pos.0, var)
+    }
+
+    /// [`Self::val`] in block `bb`.
+    fn val_in(&self, bb: BlockId, var: VarId) -> Option<&Val> {
         self.narrowed
-            .get(&(self.pos.0, var))
+            .get(&(bb, var))
             .or_else(|| self.types.get(&var))
     }
 
@@ -2607,6 +2623,11 @@ impl<'a> Extractor<'a> {
         if self.opt_in.return_origins {
             self.returned_origins();
         }
+        let fresh_return = if self.opt_in.fresh_returns {
+            self.fresh_return()
+        } else {
+            None
+        };
         if self.opt_in.set_order {
             let calls: Vec<order_flow::OrderCall<'_>> = self
                 .project_calls
@@ -2682,6 +2703,7 @@ impl<'a> Extractor<'a> {
             kept_points: self.kept_points,
             types: self.types,
             blind: self.blind,
+            fresh_return,
         }
     }
 
@@ -4299,6 +4321,40 @@ impl<'a> Extractor<'a> {
                 ownership::source(self.f, kind, callee, constructs, self.cx.kb, made_here)
             }
         }
+    }
+
+    /// The local fact of [`FileSummary::fresh_returns`] of the visited function, from the
+    /// callees its calls and property reads resolve to.
+    fn fresh_return(&self) -> Option<fresh::FreshReturn> {
+        let shape = self.shape;
+        let class_of = |v: VarId| match self.types.get(&v) {
+            Some(Val::Inst(class)) => Some(class.as_str()),
+            _ => None,
+        };
+        let source_of = |v: VarId| {
+            let Def::Inst(b, i) = shape.def(v) else {
+                return None;
+            };
+            let at = (b, i as usize);
+            let callee = self.callees.get(&at);
+            let complete =
+                matches!(callee, Some(Callee::Project(..))) && self.targets_complete_at(at);
+            fresh::source(
+                &shape.inst(v)?.kind,
+                callee,
+                complete,
+                self.types.get(&v),
+                class_of,
+                self.cx.kb,
+            )
+        };
+        let inspects = |b: BlockId, i: u32| {
+            matches!(
+                self.callees.get(&(b, i as usize)),
+                Some(Callee::External(s)) if inspecting_builtin(s, true)
+            )
+        };
+        fresh::fresh_return(shape, &self.live, source_of, inspects)
     }
 
     /// Answer the construction queries of the visited function (`construction`): the
@@ -7214,23 +7270,24 @@ impl<'a> Extractor<'a> {
         self.targets_complete_at(self.pos)
     }
 
-    /// [`Self::targets_complete`] of the call at `(bb, index)`.
+    /// [`Self::targets_complete`] of the call at `(bb, index)`, with the types its block narrows
+    /// (those its callee was resolved with).
     fn targets_complete_at(&self, (bb, index): Position) -> bool {
         match self.f.block(bb).insts.get(index).map(|i| &i.kind) {
             Some(InstKind::MethodCall { recv, method, .. }) => {
-                let recv = self.val(*recv);
+                let recv = self.val_in(bb, *recv);
                 let callee = self.cx.resolve_method(recv, method);
                 self.cx.method_targets_complete(recv, method, &callee)
             }
             Some(InstKind::Call { callee_var, .. }) => {
-                let value = callee_var.and_then(|v| self.val(v));
+                let value = callee_var.and_then(|v| self.val_in(bb, v));
                 let callee = self.cx.resolve_call(value);
                 self.cx.call_targets_complete(value, &callee)
             }
             // A read that runs property getters ([`Self::property_read`]): the getter each class
             // the object may be finds for the name (more than CHA follows are none).
             Some(InstKind::AttrLoad { obj, attr, .. }) => {
-                let recv = self.val(*obj);
+                let recv = self.val_in(bb, *obj);
                 matches!(
                     self.cx.resolve_attr_load(recv, attr),
                     Some(Callee::Project(keys, _)) if self.cx.getter_targets_complete(recv, attr, &keys)
@@ -7494,12 +7551,7 @@ impl<'a> Extractor<'a> {
             }
             // A project class without a project `__init__`: its fields keep the arguments.
             _ if constructs => (Some(NewKind::Own), true, 0),
-            _ if symbol
-                .strip_prefix("builtins.")
-                .is_some_and(|n| INSPECTING_BUILTINS.contains(&n)) =>
-            {
-                (None, true, usize::MAX)
-            }
+            _ if inspecting_builtin(symbol, false) => (None, true, usize::MAX),
             "builtins.setattr" | "builtins.object.__setattr__" | "builtins.delattr" => {
                 (None, true, 2)
             }
@@ -8143,7 +8195,8 @@ fn role_site(
     }
 }
 
-/// Builtins that only inspect their arguments: calling one keeps none of them.
+/// Builtins that only inspect their arguments: calling one keeps none of them, and what it
+/// returns holds none of them.
 const INSPECTING_BUILTINS: &[&str] = &[
     "len",
     "isinstance",
@@ -8151,8 +8204,6 @@ const INSPECTING_BUILTINS: &[&str] = &[
     "id",
     "type",
     "hasattr",
-    "getattr",
-    "object.__getattribute__",
     "vars",
     "callable",
     "repr",
@@ -8162,6 +8213,20 @@ const INSPECTING_BUILTINS: &[&str] = &[
     "print",
     "format",
 ];
+
+/// Builtins that read an attribute of their first argument: calling one keeps none of its
+/// arguments, but what it returns may hold one (a bound method holds its object, and `getattr`
+/// returns its default as it is).
+const ATTRIBUTE_READING_BUILTINS: &[&str] = &["getattr", "object.__getattribute__"];
+
+/// Whether calling the builtin `symbol` keeps none of its arguments ([`INSPECTING_BUILTINS`],
+/// [`ATTRIBUTE_READING_BUILTINS`]); with `detached`, also whether what it returns holds none of
+/// them.
+fn inspecting_builtin(symbol: &str, detached: bool) -> bool {
+    symbol.strip_prefix("builtins.").is_some_and(|n| {
+        INSPECTING_BUILTINS.contains(&n) || !detached && ATTRIBUTE_READING_BUILTINS.contains(&n)
+    })
+}
 
 /// Calls that only name what they are handed: typing forms, `super`, and the call form of an
 /// `except` clause.
@@ -8177,15 +8242,12 @@ const NAMING_CALLS: &[&str] = &[
 ];
 
 /// Whether calling `callee` hands none of its arguments on: a builtin that only inspects them
-/// ([`INSPECTING_BUILTINS`]), or a call of [`NAMING_CALLS`].
+/// ([`inspecting_builtin`]), or a call of [`NAMING_CALLS`].
 fn names_only(callee: &Callee) -> bool {
     let Callee::External(symbol) = callee else {
         return false;
     };
-    NAMING_CALLS.contains(&symbol.as_str())
-        || symbol
-            .strip_prefix("builtins.")
-            .is_some_and(|n| INSPECTING_BUILTINS.contains(&n))
+    NAMING_CALLS.contains(&symbol.as_str()) || inspecting_builtin(symbol, false)
 }
 
 /// The construction of a write (`rebinds`: it rebinds an attribute) of an object the answer
