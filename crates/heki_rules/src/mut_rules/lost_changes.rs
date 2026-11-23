@@ -185,18 +185,25 @@ fn changed(
         // Under R2 the copied value may be of a project subclass that replaces the copy or the
         // change.
         Source::Copied(kind) => {
-            let copy_kept = match made {
-                InstKind::MethodCall { recv, method, .. } => {
-                    class_of(*recv).is_none_or(|c| decls.method_not_overridden(c, method, true))
-                }
-                InstKind::SubscriptLoad { obj, .. } => class_of(*obj)
-                    .is_none_or(|c| decls.method_not_overridden(c, "__getitem__", false)),
-                // `copy.copy` and `copy.deepcopy` run the copy hooks of the argument's class.
-                InstKind::Call { args, .. } => args.first().is_none_or(|a| {
+            // `copy.copy` and `copy.deepcopy` run the copy hooks of the argument's class.
+            let hooks_kept = match (made, callee.as_ref()) {
+                (
+                    InstKind::Call { args, .. } | InstKind::MethodCall { args, .. },
+                    Some(Callee::External(symbol)),
+                ) if symbol.starts_with("copy.") => args.first().is_none_or(|a| {
                     class_of(*a).is_none_or(|c| decls.special_methods_not_in_project(c, COPY_HOOKS))
                 }),
                 _ => true,
             };
+            let copy_kept = hooks_kept
+                && match made {
+                    InstKind::MethodCall { recv, method, .. } => {
+                        class_of(*recv).is_none_or(|c| decls.method_not_overridden(c, method, true))
+                    }
+                    InstKind::SubscriptLoad { obj, .. } => class_of(*obj)
+                        .is_none_or(|c| decls.method_not_overridden(c, "__getitem__", false)),
+                    _ => true,
+                };
             Changed {
                 kind,
                 returned_by: None,
