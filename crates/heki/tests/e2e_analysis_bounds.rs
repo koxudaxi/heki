@@ -1,11 +1,13 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
 //! narrowing through phis, the passes of the type inference and of the classes of merged values,
 //! the closure cells child scopes read, the iterables child scopes receive from the functions
-//! creating them, the size of the Soundness lane's proof state, the values
-//! `EFF107` follows from a task factory, the walk to the callable a builtin calls once per item,
-//! contracts with many call targets and argument lists, the walk to the uses handing a reference to
-//! a call target on, the locks `EFF109` follows, the values class statements pass as bases, and
-//! the bindings the deque rewrite's candidates check.
+//! creating them, the fixpoint joining the stores of attributes, the names its functions store
+//! and read, the stores through namespaces and `setattr`, the classes whose code may store into
+//! an instance, the size of the Soundness lane's proof state, the values `EFF107` follows from a
+//! task factory, the walk to the callable a builtin calls once per item, contracts with many call
+//! targets and argument lists, the walk to the uses handing a reference to a call target on, the
+//! locks `EFF109` follows, the values class statements pass as bases, and the bindings the deque
+//! rewrite's candidates check.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -305,6 +307,351 @@ fn types_past_the_inference_pass_bound_are_unknown() {
     let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();
     assert_eq!(blocking(check(&shape(4))), 1);
     assert_eq!(blocking(check_linear(30, shape)), 0);
+}
+
+/// A class whose `__init__` binds an attribute to a client, then `links` attributes in turn each
+/// to the one before, and an `async def` calling the client's blocking method through the last.
+fn attribute_chain_before_blocking_call(links: usize) -> String {
+    let mut out = vec![
+        "import httpx".to_owned(),
+        String::new(),
+        String::new(),
+        "class Holder:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.a0 = httpx.Client()".to_owned(),
+    ];
+    for k in 1..=links {
+        out.push(format!("        self.a{k} = self.a{}", k - 1));
+    }
+    out.push(String::new());
+    out.push("    async def handle(self):".to_owned());
+    out.push(format!(
+        "        self.a{links}.get(\"https://example.com\")"
+    ));
+    out.join("\n") + "\n"
+}
+
+/// The types of a module's attributes are a fixpoint over the functions storing them, each
+/// inferred again a bounded number of times when an attribute it reads grew: past the bound the
+/// stores reading attributes bind values of unknown type, so the receiver of the call is unknown
+/// and nothing is reported.
+#[test]
+fn attributes_past_the_store_join_rounds_are_unknown() {
+    let shape = |links: usize| {
+        let p = Project::new(&format!("bounds_store_rounds_{links}"));
+        p.write("m.py", &attribute_chain_before_blocking_call(links));
+        p
+    };
+    let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();
+    assert_eq!(blocking(check(&shape(2))), 1);
+    assert_eq!(blocking(check_linear(30, shape)), 0);
+}
+
+/// A class whose `__init__` binds an attribute to a client and makes `stores` stores of other
+/// attributes, each one `store(k)` writes, and an `async def` calling the client's blocking
+/// method.
+fn many_attribute_stores(stores: usize, store: impl Fn(usize) -> String) -> String {
+    let mut out = vec![
+        "import httpx".to_owned(),
+        String::new(),
+        String::new(),
+        "class Holder:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.client = httpx.Client()".to_owned(),
+    ];
+    out.extend((0..stores).map(|k| format!("        {}", store(k))));
+    out.push(String::new());
+    out.push("    async def handle(self):".to_owned());
+    out.push("        self.client.get(\"https://example.com\")".to_owned());
+    out.join("\n") + "\n"
+}
+
+/// The stores through an instance's namespace are found in one pass over the function: the
+/// aliases of every namespace it loads, and the names their keys hold from the function's table
+/// of definitions. Stores of other attributes keep the client's type.
+#[test]
+fn stores_through_namespaces_are_found_in_one_pass() {
+    let shape = |stores: usize| {
+        let p = Project::new(&format!("bounds_namespace_stores_{stores}"));
+        let text = many_attribute_stores(stores, |k| format!("self.__dict__[\"a{k}\"] = {k}"));
+        p.write("m.py", &text);
+        p
+    };
+    let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();
+    assert_eq!(blocking(check_linear(2000, shape)), 1);
+}
+
+/// The names `setattr` stores are read from the function's table of definitions, each in a
+/// constant number of steps.
+#[test]
+fn names_setattr_stores_are_read_from_a_table() {
+    let shape = |stores: usize| {
+        let p = Project::new(&format!("bounds_setattr_stores_{stores}"));
+        let text = many_attribute_stores(stores, |k| format!("setattr(self, \"a{k}\", {k})"));
+        p.write("m.py", &text);
+        p
+    };
+    let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();
+    assert_eq!(blocking(check_linear(2000, shape)), 1);
+}
+
+/// A class whose `__setstate__` hands its state through `copies` copies to `stores` stores under
+/// a name the code does not give, then pads and (with `namespace`) writes through its namespace;
+/// its `handle` calls a blocking method on the client `__init__` binds.
+fn restoring_class(
+    name: &str,
+    copies: usize,
+    stores: usize,
+    padding: usize,
+    namespace: bool,
+) -> String {
+    let mut lines = vec![
+        format!("class {name}:"),
+        "    def __init__(self):".to_owned(),
+        "        self.client = httpx.Client()".to_owned(),
+        String::new(),
+        "    def __setstate__(self, state, key):".to_owned(),
+        "        s0 = state".to_owned(),
+    ];
+    lines.extend((1..=copies).map(|i| format!("        s{i} = s{}", i - 1)));
+    lines.extend((0..stores).map(|_| format!("        setattr(self, key, s{copies})")));
+    lines.extend((0..padding).map(|i| format!("        pad{i} = {i}")));
+    if namespace {
+        lines.push("        ns = self.__dict__".to_owned());
+        lines.push("        ns[\"a\"] = 1".to_owned());
+    }
+    lines.extend(
+        [
+            "",
+            "    async def handle(self):",
+            "        self.client.get(\"https://example.com\")",
+            "",
+            "",
+        ]
+        .map(str::to_owned),
+    );
+    lines.join("\n")
+}
+
+/// The store budget's steps of `Probe.__setstate__` in a project of one `Probe` class.
+fn store_steps(p: &Project, copies: usize, padding: usize, namespace: bool) -> Steps {
+    let text = restoring_class("Probe", copies, STORES, padding, namespace);
+    p.write("m.py", &format!("import httpx\n\n\n{text}"));
+    let (_, steps) = check_counted(p);
+    steps[&(
+        "store targets".to_owned(),
+        Some("Probe.__setstate__".to_owned()),
+    )]
+}
+
+const STORES: usize = 101;
+
+/// The steps the walk finding the aliases of a namespace takes before it reads their uses.
+const WALK_STEPS: i64 = 2;
+
+/// The state copies and pads of a `__setstate__` whose stores leave exactly the steps of that
+/// walk, so that the first read of a use of the namespace finds none.
+///
+/// The steps the stores take grow linearly with the copies, and what a spent budget leaves is
+/// read from the steps taken: a walk that finds none counts its own step, so a spent function
+/// took `left_after_the_stores + 1` steps more than the stores need. That is measured on
+/// functions of three sizes that spend the budget, and the sizes solve for the steps of the walk.
+fn copies_and_pads_leaving_the_walk() -> (usize, usize) {
+    let p = Project::new("bounds_store_budget_probe");
+    let at = |copies, pads| store_steps(&p, copies, pads, true);
+    let plain = |copies| store_steps(&p, copies, 60, false).taken as i64;
+    let (base, next) = (plain(300), plain(301));
+    let stores_taken = |copies: usize| base + (next - base) * (copies as i64 - 300);
+    let (copies, pads) = (520_usize, 0_usize);
+    let (spent, more_copies, more_pads) =
+        (at(copies, pads), at(copies + 1, pads), at(copies, pads + 1));
+    assert!(spent.spent && more_copies.spent && more_pads.spent);
+    let left = |taken: u64, copies: usize| taken as i64 - stores_taken(copies) - 1;
+    let left_here = left(spent.taken, copies);
+    let per_copy = left(more_copies.taken, copies + 1) - left_here;
+    let per_pad = more_pads.taken as i64 - spent.taken as i64;
+    assert!(per_copy < 0 && per_pad > 0, "{per_copy} {per_pad}");
+    // Copies and pads change the steps left only by multiples of their common factor.
+    fn gcd(a: i64, b: i64) -> i64 {
+        if b == 0 { a.abs() } else { gcd(b, a % b) }
+    }
+    let common = gcd(per_copy, per_pad);
+    assert_eq!(
+        (WALK_STEPS - left_here) % common,
+        0,
+        "the steps of a copy ({per_copy}) and of a pad ({per_pad}) share the factor {common}, \
+         which does not divide the steps of the walk ({WALK_STEPS}) less those left \
+         ({left_here}): no size leaves exactly the steps of the walk"
+    );
+    for fewer in 0..per_pad {
+        let left_after = left_here - per_copy * fewer;
+        let more_pads = WALK_STEPS - left_after;
+        if more_pads < 0 || more_pads % per_pad != 0 {
+            continue;
+        }
+        let found = (
+            copies - fewer as usize,
+            pads + (more_pads / per_pad) as usize,
+        );
+        let walk_left = at(found.0, found.1);
+        assert!(walk_left.spent, "{walk_left:?}");
+        assert_eq!(left(walk_left.taken, found.0), WALK_STEPS);
+        return found;
+    }
+    panic!("no size leaves the steps of the walk: {per_copy} {per_pad}");
+}
+
+/// The stores of a function share one budget with the walks that read what they store. Once a
+/// `__setstate__` spends it on following its state, later stores and the namespace it writes are
+/// stores of unknown names, so no attribute of the class keeps its type: where the stores spend
+/// it (`Spent`), and where the first read of the namespace's uses does (`WalkLeft`). A function within it keeps
+/// its attributes' types.
+#[test]
+fn a_function_past_its_store_budget_stores_attributes_of_unknown_names() {
+    let (copies, pads) = copies_and_pads_leaving_the_walk();
+    let p = Project::new("bounds_store_budget");
+    let text = [
+        "import httpx\n\n\n".to_owned(),
+        restoring_class("Spent", copies, STORES + 20, 0, true),
+        restoring_class("WalkLeft", copies, STORES, pads, true),
+        restoring_class("Within", 10, 3, 0, true),
+    ]
+    .concat();
+    p.write("m.py", text.trim_end_matches('\n'));
+    let (found, steps) = check_counted(&p);
+    let spent = |class: &str| {
+        steps[&(
+            "store targets".to_owned(),
+            Some(format!("{class}.__setstate__")),
+        )]
+            .spent
+    };
+    assert!(spent("Spent") && spent("WalkLeft") && !spent("Within"));
+    let blocking: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF101")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(blocking, vec!["Within.handle"], "{found:#?}");
+}
+
+/// A class whose `__init__` binds `pairs` pairs of attributes to clients, a `reset` binding
+/// each first one to its second (`self.a0 = self.d0`), and an `async def` calling the client's
+/// blocking method through the first; with `touched`, another module stores into `d0`.
+fn one_function_storing_what_it_reads(pairs: usize, touched: bool) -> Project {
+    let p = Project::new(&format!("bounds_store_dependencies_{pairs}_{touched}"));
+    let mut out = vec![
+        "import httpx".to_owned(),
+        String::new(),
+        String::new(),
+        "class Holder:".to_owned(),
+        "    def __init__(self):".to_owned(),
+    ];
+    for k in 0..pairs {
+        out.push(format!("        self.d{k} = httpx.Client()"));
+        out.push(format!("        self.a{k} = httpx.Client()"));
+    }
+    out.push(String::new());
+    out.push("    def reset(self):".to_owned());
+    out.extend((0..pairs).map(|k| format!("        self.a{k} = self.d{k}")));
+    out.push(String::new());
+    out.push("    async def handle(self):".to_owned());
+    out.push("        self.a0.get(\"https://example.com\")".to_owned());
+    p.write("m.py", &(out.join("\n") + "\n"));
+    if touched {
+        let other = "import httpx\n\nfrom m import Holder\n\n\ndef touch(holder: Holder):\n    holder.d0 = httpx.Client(timeout=1)\n";
+        p.write("other.py", other);
+    }
+    p
+}
+
+/// What the stores of each attribute read is kept once per storing function, not once per
+/// attribute: a function storing many attributes, each from another one, keeps its reads once,
+/// and the attributes whose types another module's store may change are found in one walk over
+/// the functions. The store into `d0` elsewhere makes the types of every attribute `reset`
+/// stores those of the first round, which do not type `a0`.
+#[test]
+fn the_names_a_function_stores_and_reads_are_kept_once() {
+    let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();
+    let alone = |pairs: usize| one_function_storing_what_it_reads(pairs, false);
+    assert_eq!(blocking(check_linear(2000, alone)), 1);
+    let touched = |pairs: usize| one_function_storing_what_it_reads(pairs, true);
+    assert_eq!(blocking(check_linear(2000, touched)), 0);
+}
+
+/// A class whose `__init__` binds `links` attributes to clients, a method per attribute after
+/// the first binding it to the one before (`def m1(self): self.a1 = self.a0`), and an
+/// `async def` calling the client's blocking method through the last.
+fn methods_storing_down_a_chain(links: usize) -> String {
+    let mut out = vec![
+        "import httpx".to_owned(),
+        String::new(),
+        String::new(),
+        "class Holder:".to_owned(),
+        "    def __init__(self):".to_owned(),
+    ];
+    out.extend((0..links).map(|k| format!("        self.a{k} = httpx.Client()")));
+    for k in 1..links {
+        out.push(String::new());
+        out.push(format!("    def m{k}(self):"));
+        out.push(format!("        self.a{k} = self.a{}", k - 1));
+    }
+    out.push(String::new());
+    out.push("    async def handle(self):".to_owned());
+    out.push(format!(
+        "        self.a{}.get(\"https://example.com\")",
+        links - 1
+    ));
+    out.join("\n") + "\n"
+}
+
+/// Methods each storing an attribute from the one before keep one dependency each, however
+/// long the chain of their reads.
+#[test]
+fn a_chain_of_stores_across_methods_keeps_one_dependency_per_method() {
+    let shape = |links: usize| {
+        let p = Project::new(&format!("bounds_store_chain_{links}"));
+        p.write("m.py", &methods_storing_down_a_chain(links));
+        p
+    };
+    let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();
+    assert_eq!(blocking(check_linear(2000, shape)), 1);
+}
+
+/// A class whose `__init__` stores an attribute, with a chain of two thousand subclasses, and a
+/// thousand functions reading the attribute on an instance of it: the classes whose code may
+/// store into the instance (the subclasses and the bases of each) are walked once, each class
+/// at most twice, not along the bases of each subclass in turn.
+#[test]
+fn the_classes_storing_into_a_deep_subclass_chain_are_walked_once() {
+    let shape = |k: usize| {
+        let (depth, functions) = (250 * k, 125 * k);
+        let mut lines = vec![
+            "import httpx".to_owned(),
+            String::new(),
+            String::new(),
+            "class C0:".to_owned(),
+            "    def __init__(self) -> None:".to_owned(),
+            "        self.client = httpx.Client()".to_owned(),
+        ];
+        for i in 1..depth {
+            lines.push(String::new());
+            lines.push(String::new());
+            lines.push(format!("class C{i}(C{}):", i - 1));
+            lines.push("    pass".to_owned());
+        }
+        for i in 0..functions {
+            lines.push(String::new());
+            lines.push(String::new());
+            lines.push(format!("async def use{i}(node: C0) -> None:"));
+            lines.push("    node.client.get(\"https://example.com\")".to_owned());
+        }
+        let p = Project::new(&format!("bounds_store_family_{k}"));
+        p.write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();
+    assert_eq!(blocking(check_linear(SCALE, shape)), 1);
 }
 
 /// A function binding `names` variables in turn `bindings` times in all, each binding followed

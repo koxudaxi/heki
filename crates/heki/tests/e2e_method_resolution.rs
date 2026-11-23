@@ -4,7 +4,8 @@
 //! calling an instance (`__call__`), constructions through a module, the targets of `with`
 //! statements, module-level names bound twice, the parameters `*` arguments bind, project
 //! methods named like container mutators, augmented assignments, the bases of class statements
-//! in functions, and what calling and awaiting an `async def` give.
+//! in functions, what calling and awaiting an `async def` give, and the types of globals and
+//! instance attributes, which every store of each must agree on.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# EFF101`); every other line must not be.
@@ -1220,4 +1221,1967 @@ fn a_call_of_an_async_def_is_a_coroutine_of_what_awaiting_it_gives() {
         ],
         &["EFF101", "EFF103"],
     );
+}
+
+/// A module global's type is what every store binds it to: the module body's, a function's
+/// after `global client`, and another module's. A store of another class, of a value of unknown
+/// type, or through `globals()` leaves the call unresolved; one of the same class, or `None` (on
+/// which the call raises), keeps it. An annotated global keeps its declaration.
+const REBOUND_GLOBALS: &str = r#"import httpx
+
+from pkg.factory import make
+
+client = httpx.Client()
+
+
+def configure() -> None:
+    global client
+    client = httpx.AsyncClient()
+
+
+async def rebound() -> None:
+    client.get("https://example.com")
+
+
+same = httpx.Client()
+
+
+def reset() -> None:
+    global same
+    same = httpx.Client(timeout=5)
+
+
+def close() -> None:
+    global same
+    same.close()
+    same = None
+
+
+async def kept() -> None:
+    same.get("https://example.com")  # EFF101
+
+
+opened = httpx.Client()
+
+
+def reopen(factory) -> None:
+    global opened
+    opened = factory()
+
+
+async def unknown() -> None:
+    opened.get("https://example.com")
+
+
+declared: httpx.Client = httpx.Client()
+
+
+def redeclare() -> None:
+    global declared
+    declared = make()
+
+
+async def annotated() -> None:
+    declared.get("https://example.com")  # EFF101
+
+
+def nested() -> None:
+    def inner() -> None:
+        global inner_client
+        inner_client = httpx.AsyncClient()
+
+    inner()
+
+
+inner_client = httpx.Client()
+
+
+async def through_nested() -> None:
+    inner_client.get("https://example.com")
+
+
+elsewhere = httpx.Client()
+
+
+async def from_another_module() -> None:
+    elsewhere.get("https://example.com")
+
+
+pool = [httpx.Client()]
+
+
+def drop_first() -> None:
+    global pool
+    pool = pool[1:]
+
+
+async def each() -> None:
+    for client in pool:
+        client.get("https://example.com")  # EFF101
+"#;
+
+const REBINDER: &str = r#"import httpx
+
+from pkg import rebound
+from pkg.rebound import same
+
+
+def rebind() -> None:
+    rebound.elsewhere = httpx.AsyncClient()
+    rebound.same = httpx.Client(timeout=1)
+
+
+async def read_across() -> None:
+    rebound.client.get("https://example.com")
+    same.get("https://example.com")  # EFF101
+    rebound.same.get("https://example.com")  # EFF101
+"#;
+
+const FACTORY: &str = r#"import httpx
+
+
+def make() -> httpx.Client:
+    return httpx.Client()
+"#;
+
+/// `globals()` may store any global of its module.
+const DYNAMIC_GLOBALS: &str = r#"import httpx
+
+client = httpx.Client()
+
+
+def configure(name, value) -> None:
+    globals()[name] = value
+
+
+async def handler() -> None:
+    client.get("https://example.com")
+"#;
+
+/// A star import may rebind the names the module body stores before it, not those it stores
+/// after it on every path; one under `if TYPE_CHECKING:` never runs.
+const STAR_GLOBALS: &str = r#"from typing import TYPE_CHECKING
+
+import httpx
+
+before = httpx.Client()
+
+from pkg.factory import *  # noqa: E402, F403
+
+after = httpx.Client()
+checked = httpx.Client()
+
+if TYPE_CHECKING:
+    from pkg.factory import *  # noqa: F403
+
+
+async def read_before() -> None:
+    before.get("https://example.com")
+
+
+async def read_after() -> None:
+    after.get("https://example.com")  # EFF101
+
+
+async def read_checked() -> None:
+    checked.get("https://example.com")  # EFF101
+"#;
+
+/// A star import on one branch leaves the names the other branch stores to what it binds; so is
+/// a string constant bound there no constant, and `setattr` through it stores an attribute heki
+/// cannot name. A store after both branches binds the name for good.
+const STAR_BRANCHES: &str = r#"import os
+
+import httpx
+
+if os.environ.get("PLUGIN"):
+    from pkg.factory import *  # noqa: F403
+else:
+    branched = httpx.Client()
+    KEY = "other"
+
+LISTED = "other"
+
+
+async def read_branched() -> None:
+    branched.get("https://example.com")
+
+
+class Keyed:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        self.other = None
+
+    def configure(self) -> None:
+        setattr(self, KEY, httpx.AsyncClient())
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Listed:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        self.other = None
+
+    def configure(self) -> None:
+        setattr(self, LISTED, httpx.AsyncClient())
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+"#;
+
+/// A fallback an `except` clause binds when the star import fails.
+const STAR_FALLBACK: &str = r#"import httpx
+
+try:
+    from pkg.factory import *  # noqa: F403
+except ImportError:
+    fallback = httpx.Client()
+
+
+async def read_fallback() -> None:
+    fallback.get("https://example.com")
+"#;
+
+#[test]
+fn a_global_has_the_type_every_store_of_it_binds() {
+    check_marks(
+        "rebound_globals",
+        &[
+            ("pkg/rebound.py", REBOUND_GLOBALS),
+            ("pkg/rebinder.py", REBINDER),
+            ("pkg/factory.py", FACTORY),
+            ("pkg/dynamic_globals.py", DYNAMIC_GLOBALS),
+            ("pkg/star_globals.py", STAR_GLOBALS),
+            ("pkg/star_branches.py", STAR_BRANCHES),
+            ("pkg/star_fallback.py", STAR_FALLBACK),
+        ],
+        &["EFF101"],
+    );
+}
+
+/// An instance attribute `__init__` binds has the type every store into an instance agrees
+/// on: of the class's other methods, of a subclass's, through `setattr` or the instance's
+/// namespace, and of a function nested in a method through its closure cell (into what the cell
+/// holds when the method rebinds `self`). A store of the
+/// same class, of `None`, of a value computed from the attribute that keeps its type, or one
+/// that only `__init__` makes keeps it, and so does an annotation; a namespace written under a
+/// key naming another attribute does too.
+const REBOUND_ATTRS: &str = r#"import httpx
+
+
+class Swapped:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def swap(self) -> None:
+        self.client = httpx.AsyncClient()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Kept:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        self.other = self.client
+
+    def reset(self) -> None:
+        self.client = httpx.Client(timeout=5)
+
+    def close(self) -> None:
+        self.client.close()
+        self.client = None
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+
+
+class OnlyInit:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+
+
+async def through_parameter(a: Swapped, b: OnlyInit) -> None:
+    a.client.get("https://example.com")
+    b.client.get("https://example.com")  # EFF101
+
+
+class Declared:
+    def __init__(self) -> None:
+        self.client: httpx.Client = httpx.Client()
+
+    def swap(self, other) -> None:
+        self.client = other
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+
+
+class Base:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class AsyncChild(Base):
+    def __init__(self) -> None:
+        super().__init__()
+        self.client = httpx.AsyncClient()
+
+
+class SetAttr:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def swap(self) -> None:
+        setattr(self, "client", httpx.AsyncClient())
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Options:
+    def __init__(self, **options) -> None:
+        self.client = httpx.Client()
+        for name, value in options.items():
+            setattr(self, name, value)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Namespace:
+    def __init__(self, state) -> None:
+        self.client = httpx.Client()
+        self.__dict__.update(state)
+
+    def __repr__(self) -> str:
+        return f"{self.__dict__}"
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class ReadsNamespace:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __repr__(self) -> str:
+        return f"{self.__dict__} {vars(self).get('client')}"
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+
+
+class Callback:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def on_reconnect(self):
+        def swap() -> None:
+            self.client = httpx.AsyncClient()
+
+        return swap
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Lent:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Lender:
+    def lend(self, other: Lent) -> None:
+        def swap() -> None:
+            self.client = httpx.AsyncClient()
+
+        self = other
+        swap()
+
+
+class KeyedNamespace:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        self.__dict__.setdefault("seen", set())
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+
+
+class Trimmed:
+    def __init__(self) -> None:
+        self.clients = [httpx.Client()]
+
+    def drop_first(self) -> None:
+        self.clients = self.clients[1:]
+
+    def snapshot(self) -> None:
+        self.clients = self.clients.copy()
+
+    async def handle(self) -> None:
+        for client in self.clients:
+            client.get("https://example.com")  # EFF101
+
+
+class Replaced:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def fetch(self) -> None:
+        self.client = self.client.get("https://example.com")
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+"#;
+
+#[test]
+fn an_attribute_has_the_type_every_store_into_an_instance_binds() {
+    check_marks(
+        "rebound_attrs",
+        &[("pkg/rebound_attrs.py", REBOUND_ATTRS)],
+        &["EFF101"],
+    );
+}
+
+/// `setattr` and `vars` called on their module (`builtins.setattr(self, name, v)`) are the
+/// builtins, and `__setattr__` called on a project class stores as `object.__setattr__` does; a
+/// function of a project module that is also named `setattr` stores nothing.
+const QUALIFIED_BUILTINS: &str = r#"import builtins
+
+import httpx
+
+from pkg import helpers
+
+
+class ThroughModule:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def swap(self) -> None:
+        builtins.setattr(self, "client", httpx.AsyncClient())
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class ThroughModuleVars:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def swap(self) -> None:
+        builtins.vars(self)["client"] = httpx.AsyncClient()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Plain:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class ThroughClass(Plain):
+    def swap(self) -> None:
+        Plain.__delattr__(self, "client")
+        Plain.__setattr__(self, "client", httpx.AsyncClient())
+
+
+class ThroughHelper:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def swap(self) -> None:
+        helpers.setattr(self, "client", httpx.AsyncClient())
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+"#;
+
+const HELPERS: &str = r#"def setattr(obj, name, value) -> None:
+    print(obj, name, value)
+"#;
+
+#[test]
+fn a_builtin_called_on_its_module_stores_as_the_builtin() {
+    check_marks(
+        "qualified_builtins",
+        &[
+            ("pkg/qualified_builtins.py", QUALIFIED_BUILTINS),
+            ("pkg/helpers.py", HELPERS),
+        ],
+        &["EFF101"],
+    );
+}
+
+/// A store reading another attribute (`self.active = self.client`) binds what reading it gives
+/// once every store is joined: the join over the class's family, here and in another module.
+const READ_ATTRS: &str = r#"import httpx
+
+
+class Base:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        self.active = self.client
+
+    def activate(self) -> None:
+        self.active = self.client
+
+    async def handle(self) -> None:
+        self.active.get("https://example.com")
+
+
+class Child(Base):
+    def swap(self) -> None:
+        self.client = httpx.AsyncClient()
+
+
+class Alone:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        self.active = self.client
+
+    def activate(self) -> None:
+        self.active = self.client
+
+    async def handle(self) -> None:
+        self.active.get("https://example.com")  # EFF101
+
+
+class Extended:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        self.active = self.client
+
+    async def handle(self) -> None:
+        self.active.get("https://example.com")
+"#;
+
+const EXTENDING: &str = r#"import httpx
+
+from pkg.read_attrs import Extended
+
+
+class Swapping(Extended):
+    def swap(self) -> None:
+        self.client = httpx.AsyncClient()
+"#;
+
+/// A store reading another global binds what reading it gives with the stores of other
+/// modules joined.
+const READ_GLOBALS: &str = r#"import httpx
+
+clients = [httpx.Client()]
+active = [httpx.Client()]
+
+
+def activate() -> None:
+    global active
+    active = clients[:]
+
+
+async def handle() -> None:
+    for c in active:
+        c.get("https://example.com")
+
+
+kept = [httpx.Client()]
+current = [httpx.Client()]
+
+
+def use_kept() -> None:
+    global current
+    current = kept[:]
+
+
+async def handle_kept() -> None:
+    for c in current:
+        c.get("https://example.com")  # EFF101
+"#;
+
+const SWAPS_GLOBALS: &str = r#"import httpx
+
+import pkg.read_globals
+
+
+def swap() -> None:
+    pkg.read_globals.clients = [httpx.AsyncClient()]
+"#;
+
+#[test]
+fn a_store_reading_a_name_binds_what_every_store_of_that_name_gives() {
+    check_marks(
+        "read_names",
+        &[
+            ("pkg/read_attrs.py", READ_ATTRS),
+            ("pkg/extending.py", EXTENDING),
+            ("pkg/read_globals.py", READ_GLOBALS),
+            ("pkg/swaps_globals.py", SWAPS_GLOBALS),
+        ],
+        &["EFF101"],
+    );
+}
+
+/// Another module stores into a global through any receiver the inference types as the
+/// module: an import in a function, `setattr`, and the module's namespace. A store of the same
+/// class keeps the type.
+const STORED_INTO: &str = r#"import httpx
+
+local_import = httpx.Client()
+by_setattr = httpx.Client()
+by_namespace = httpx.Client()
+same = httpx.Client()
+
+
+async def handle() -> None:
+    local_import.get("https://example.com")
+    by_setattr.get("https://example.com")
+    by_namespace.get("https://example.com")
+    same.get("https://example.com")  # EFF101
+"#;
+
+const STORES_INTO: &str = r#"import httpx
+
+import pkg.stored_into
+from pkg import stored_into as cfg
+
+
+def through_local_import() -> None:
+    import pkg.stored_into
+
+    pkg.stored_into.local_import = httpx.AsyncClient()
+
+
+def through_setattr() -> None:
+    setattr(pkg.stored_into, "by_setattr", httpx.AsyncClient())
+
+
+def through_namespace() -> None:
+    vars(cfg)["by_namespace"] = httpx.AsyncClient()
+    vars(cfg)["same"] = httpx.Client(timeout=1)
+"#;
+
+#[test]
+fn another_module_stores_into_a_global_through_any_receiver_of_its_module() {
+    check_marks(
+        "stored_into",
+        &[
+            ("pkg/stored_into.py", STORED_INTO),
+            ("pkg/stores_into.py", STORES_INTO),
+        ],
+        &["EFF101"],
+    );
+}
+
+/// Stores into an instance the inference can type: `self.__dict__ = state` stores any
+/// attribute, and so does replacing the namespace or the class through `object.__setattr__` or
+/// `setattr`; `super().__setattr__`, an alias of `object.__setattr__`, a `Final` name, and a
+/// keyword of the namespace's `update` are named stores; deletions store nothing; a class
+/// method's new instance and an annotated parameter are instances of the class.
+const RECEIVERS: &str = r#"from typing import Final
+
+import httpx
+
+_set = object.__setattr__
+KEY: Final = "client"
+
+
+class DictAssign:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def load(self, state) -> None:
+        self.__dict__ = state
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class FrozenDict:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def load(self, state) -> None:
+        object.__setattr__(self, "__dict__", state)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class ClassSwap:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def become(self, cls) -> None:
+        setattr(self, "__class__", cls)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class SuperSetattr:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def swap(self) -> None:
+        super().__setattr__("client", httpx.AsyncClient())
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class AliasSet:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def swap(self) -> None:
+        _set(self, "client", httpx.AsyncClient())
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class FinalName:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def swap(self) -> None:
+        setattr(self, KEY, httpx.Client(timeout=1))
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+
+
+class Factory:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    @classmethod
+    def make_async(cls) -> "Factory":
+        inst = cls()
+        inst.client = httpx.AsyncClient()
+        return inst
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Helper:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        use_async(self)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+def use_async(obj: Helper) -> None:
+    obj.client = httpx.AsyncClient()
+
+
+class KeywordUpdate:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def swap(self) -> None:
+        self.__dict__.update(client=httpx.AsyncClient())
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Deleted:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        self.other = httpx.Client()
+
+    def close(self) -> None:
+        delattr(self, "other")
+        object.__delattr__(self, "other")
+        self.__dict__.pop("other", None)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+
+
+class Reset:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+
+
+def reset(obj: Reset) -> None:
+    obj.client = httpx.Client(timeout=1)
+"#;
+
+const ELSEWHERE: &str = r#"import httpx
+
+from pkg.receivers import Reset
+
+
+class Owner:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+def swap(reset: Reset) -> None:
+    reset.client = httpx.Client(timeout=2)
+"#;
+
+const OTHER_OWNER: &str = r#"import httpx
+
+from pkg.elsewhere import Owner
+
+
+def swap(owner: Owner) -> None:
+    owner.client = httpx.AsyncClient()
+"#;
+
+/// Instances another module keeps in an attribute or a global, which only the stores of that
+/// attribute or global type.
+const HELD: &str = r#"import httpx
+
+
+class Held:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class HeldGlobally:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class HeldPastTheRounds:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Kept:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+"#;
+
+const KEEPERS: &str = r#"import httpx
+
+from pkg.held import Held, HeldGlobally, Kept
+
+
+class Holder:
+    def __init__(self) -> None:
+        self.held = Held()
+        self.kept = Kept()
+
+    def swap(self) -> None:
+        self.held.client = httpx.AsyncClient()
+        self.kept.other = httpx.AsyncClient()
+
+
+holder = HeldGlobally()
+
+
+def swap() -> None:
+    holder.client = httpx.AsyncClient()
+"#;
+
+/// The stores of `__init__` read each attribute the one before binds, past the rounds the types
+/// of the module's stores take: the first round's types hold, and they type `self.held`.
+const KEEPER_PAST_THE_ROUNDS: &str = r#"import httpx
+
+from pkg.held import HeldPastTheRounds, Kept
+
+
+class Holder:
+    def __init__(self) -> None:
+        self.a0 = httpx.Client()
+        self.a1 = self.a0
+        self.a2 = self.a1
+        self.a3 = self.a2
+        self.a4 = self.a3
+        self.a5 = self.a4
+        self.held = HeldPastTheRounds()
+        self.kept = Kept()
+
+    def swap(self) -> None:
+        self.held.client = httpx.AsyncClient()
+        self.kept.other = httpx.AsyncClient()
+"#;
+
+#[test]
+fn stores_into_an_instance_through_any_receiver_the_inference_types() {
+    check_marks(
+        "receivers",
+        &[
+            ("pkg/receivers.py", RECEIVERS),
+            ("pkg/elsewhere.py", ELSEWHERE),
+            ("pkg/other_owner.py", OTHER_OWNER),
+            ("pkg/held.py", HELD),
+            ("pkg/keepers.py", KEEPERS),
+            ("pkg/keeper_past_the_rounds.py", KEEPER_PAST_THE_ROUNDS),
+        ],
+        &["EFF101"],
+    );
+}
+
+/// `__setstate__` restores what an instance held when pickle or copy took the state: unless
+/// the family builds the state otherwise (`__reduce__`, a `__getstate__` reading anything but
+/// the instance, on one branch or in one of its definitions) or project code calls
+/// `__setstate__` itself.
+const RESTORED: &str = r#"import sys
+
+import httpx
+
+
+class Restored:
+    __attrs__ = ["client"]
+
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        self.active = self.client
+
+    def __getstate__(self):
+        return {attr: getattr(self, attr, None) for attr in self.__attrs__}
+
+    def __setstate__(self, state) -> None:
+        for attr, value in state.items():
+            setattr(self, attr, value)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+
+
+class Namespace:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+
+
+class Reduced:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        self.active = self.client
+
+    def __reduce__(self):
+        return (Reduced, (), {"client": httpx.AsyncClient()})
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Built:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __getstate__(self):
+        return {"client": httpx.AsyncClient()}
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Transformed:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __setstate__(self, state) -> None:
+        for attr, value in state.items():
+            setattr(self, attr, wrap(value))
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+def wrap(value):
+    return value
+
+
+class OwnDict:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        self.active = self.client
+
+    def __getstate__(self):
+        if self.client is None:
+            return vars(self).copy()
+        return self.__dict__.copy()
+
+    def __setstate__(self, state) -> None:
+        self.__dict__ = state
+
+    async def handle(self) -> None:
+        self.active.get("https://example.com")  # EFF101
+
+
+class OwnLiteral:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __getstate__(self):
+        state = {"client": self.client, "kind": "literal"}
+        state["copy"] = self.client
+        return state
+
+    def __setstate__(self, state) -> None:
+        state = dict(state)
+        state.pop("kind", None)
+        self.__dict__.update(state)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+
+
+class ReturnsNamespace:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __getstate__(self):
+        return self.__dict__
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+
+
+class Mixed:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        self.n = 0
+
+    def __getstate__(self):
+        return {"n": self.n + 1, "client": self.client}
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Updated:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __getstate__(self):
+        state = {"client": self.client}
+        state.update(extra())
+        return state
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Called:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __getstate__(self):
+        return extra()
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Branched:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __setstate__(self, state) -> None:
+        if state.get("version") == 2:
+            state = dict(state)
+        self.__dict__.update(state)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+
+
+class Constant:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __setstate__(self, state) -> None:
+        for attr in state:
+            setattr(self, attr, 0)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Versioned:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    if sys.version_info >= (3, 11):
+
+        def __getstate__(self):
+            return self.__dict__.copy()
+
+    else:
+
+        def __getstate__(self):
+            return {"client": httpx.AsyncClient()}
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Redefined:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __getstate__(self):
+        return {"client": httpx.AsyncClient()}
+
+    def __getstate__(self):  # noqa: F811
+        return self.__dict__.copy()
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Unpacked:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __getstate__(self):
+        return {**self.__dict__}
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+def extra():
+    return {"client": httpx.AsyncClient()}
+"#;
+
+const CALLS_SETSTATE: &str = r#"import httpx
+
+from pkg.restored import Restored
+
+
+def load(target: Restored) -> None:
+    target.__setstate__({"client": httpx.AsyncClient()})
+"#;
+
+/// The method read and called later, under its name as a string.
+const READS_SETSTATE: &str = r#"import httpx
+
+from pkg.restored import Restored
+
+
+def load(target: Restored) -> None:
+    restore = getattr(target, "__setstate__")
+    restore({"client": httpx.AsyncClient()})
+"#;
+
+/// A class whose `__setstate__` restores its namespace, and whose other method then stores an
+/// attribute heki cannot name: a read of its attributes made before that method is visited is
+/// read again, so a global copying one is not left with the restored type.
+const RESTORED_THEN_UNNAMED: &str = r#"import httpx
+
+copied = httpx.Client()
+kept = httpx.Client()
+
+
+class Unnamed:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+
+    def remember(self) -> None:
+        global copied
+        copied = self.client
+
+    def configure(self, name, value) -> None:
+        self.client.close()
+        setattr(self, name, value)
+
+
+class Restored:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+
+    def remember(self) -> None:
+        global kept
+        kept = self.client
+
+
+async def handle() -> None:
+    copied.get("https://example.com")
+
+
+async def handle_kept() -> None:
+    kept.get("https://example.com")  # EFF101
+"#;
+
+#[test]
+fn setstate_restores_what_an_instance_held() {
+    check_marks("restored", &[("pkg/restored.py", RESTORED)], &["EFF101"]);
+    // A direct call may hand `__setstate__` anything, and so may the method read and called
+    // later.
+    let unmarked = RESTORED.replace("  # EFF101", "");
+    for (name, caller) in [
+        ("restored_called", CALLS_SETSTATE),
+        ("restored_read", READS_SETSTATE),
+    ] {
+        check_marks(
+            name,
+            &[
+                ("pkg/restored.py", unmarked.as_str()),
+                ("pkg/calls_setstate.py", caller),
+            ],
+            &["EFF101"],
+        );
+    }
+    check_marks(
+        "restored_then_unnamed",
+        &[("pkg/restored_then_unnamed.py", RESTORED_THEN_UNNAMED)],
+        &["EFF101"],
+    );
+}
+
+/// A star import binds the names its module's `__all__` lists, when the module fixes it: the
+/// module body's stores of other names before it keep their types.
+const STAR_EXPORTS: &str = r#"import httpx
+
+listed = httpx.Client()
+unlisted = httpx.Client()
+in_tuple = httpx.Client()
+
+from pkg.exporting import *  # noqa: E402, F403
+from pkg.exporting_tuple import *  # noqa: E402, F403
+
+
+async def handle() -> None:
+    listed.get("https://example.com")
+    unlisted.get("https://example.com")  # EFF101
+    in_tuple.get("https://example.com")
+"#;
+
+const EXPORTING: &str = r#"import httpx
+
+__all__ = ["listed"]
+
+listed = httpx.AsyncClient()
+"#;
+
+const EXPORTING_TUPLE: &str = r#"import httpx
+
+__all__ = ("in_tuple",)
+
+in_tuple = httpx.AsyncClient()
+"#;
+
+/// An `__all__` bound on some paths only, or a list the module body changes after binding it,
+/// does not fix what the star import binds: without `__all__` it binds every public name, and an
+/// appended name is exported too.
+const EXPORTING_ON_ONE_PATH: &str = r#"import sys
+
+import httpx
+
+if sys.platform == "win32":
+    __all__ = ("other",)
+
+other = 1
+client = httpx.AsyncClient()
+"#;
+
+const EXPORTING_APPENDED: &str = r#"import httpx
+
+__all__ = ["other"]
+try:
+    import pkg.speedups  # noqa: F401
+
+    __all__.append("client")
+except ImportError:
+    pass
+
+other = 1
+client = httpx.AsyncClient()
+"#;
+
+const STAR_ON_ONE_PATH: &str = r#"import httpx
+
+client = httpx.Client()
+
+from pkg.exporting_on_one_path import *  # noqa: E402, F403
+
+
+async def handle() -> None:
+    client.get("https://example.com")
+"#;
+
+#[test]
+fn a_star_import_rebinds_the_names_its_module_exports() {
+    check_marks(
+        "star_exports",
+        &[
+            ("pkg/star_exports.py", STAR_EXPORTS),
+            ("pkg/exporting.py", EXPORTING),
+            ("pkg/exporting_tuple.py", EXPORTING_TUPLE),
+            ("pkg/exporting_on_one_path.py", EXPORTING_ON_ONE_PATH),
+            ("pkg/exporting_appended.py", EXPORTING_APPENDED),
+            ("pkg/star_on_one_path.py", STAR_ON_ONE_PATH),
+            (
+                "pkg/star_appended.py",
+                STAR_ON_ONE_PATH.replace("on_one_path", "appended").as_str(),
+            ),
+        ],
+        &["EFF101"],
+    );
+}
+
+/// A module whose `__all__` is neither a list nor a tuple of string literals has exports heki does
+/// not fix (a set makes the star import raise `TypeError`): the star import may rebind every
+/// name.
+const EXPORTING_SET: &str = r#"import httpx
+
+__all__ = {"listed"}
+
+listed = httpx.AsyncClient()
+"#;
+
+const STAR_SET: &str = r#"import httpx
+
+listed = httpx.Client()
+
+from pkg.exporting_set import *  # noqa: E402, F403
+
+
+async def handle() -> None:
+    listed.get("https://example.com")
+"#;
+
+/// An attribute declared by a subclass keeps the type its base's stores bind, and a subclass
+/// storing attributes under names the code does not give leaves the base's reads unknown.
+const FAMILIES: &str = r#"import httpx
+
+
+class Annotated:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+
+
+class AnnotatedSub(Annotated):
+    client: httpx.Client
+
+
+class Open:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class OpenSub(Open):
+    def put(self, name: str) -> None:
+        setattr(self, name, httpx.AsyncClient())
+
+
+class AnnotatedReader:
+    def __init__(self, source: Annotated) -> None:
+        self.copy = source.client
+
+    async def handle(self) -> None:
+        self.copy.get("https://example.com")  # EFF101
+
+
+class OpenReader:
+    def __init__(self, source: Open) -> None:
+        self.copy = source.client
+
+    async def handle(self) -> None:
+        self.copy.get("https://example.com")
+"#;
+
+const FAMILY_BASE: &str = r#"import httpx
+
+
+class Base:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+"#;
+
+const FAMILY_SUB: &str = r#"import httpx
+
+from pkg.family_base import Base
+
+
+class Sub(Base):
+    client: httpx.Client
+"#;
+
+/// A module storing through a module that re-exports the name binds the re-exporting module's
+/// name: the module's own name keeps its type.
+const REEXPORTED: &str = r#"import httpx
+
+import pkg.reexporting
+
+shared = httpx.Client()
+
+
+def swap() -> None:
+    pkg.reexporting.shared = httpx.AsyncClient()
+
+
+async def handle() -> None:
+    shared.get("https://example.com")  # EFF101
+"#;
+
+const REEXPORTING: &str = r#"from pkg.reexported import shared  # noqa: F401
+"#;
+
+#[test]
+fn stores_through_families_and_re_exports_keep_what_they_bind() {
+    check_marks(
+        "store_edges",
+        &[
+            ("pkg/exporting_set.py", EXPORTING_SET),
+            ("pkg/star_set.py", STAR_SET),
+            ("pkg/families.py", FAMILIES),
+            ("pkg/family_base.py", FAMILY_BASE),
+            ("pkg/family_sub.py", FAMILY_SUB),
+            ("pkg/reexported.py", REEXPORTED),
+            ("pkg/reexporting.py", REEXPORTING),
+        ],
+        &["EFF101"],
+    );
+}
+
+/// More spellings of stores and deletions, recognized by the value of the callee: `setattr`
+/// through `builtins`, a local alias, an import in the function, a closure cell, or names bound
+/// on both branches; deletions and namespace reads store nothing; a namespace handed on,
+/// merged, updated from keywords or another dict, or written under another method stores any
+/// attribute; stores through a union of classes, the module itself, and in place.
+const FORMS: &str = r#"import builtins
+import collections
+from typing import Protocol
+
+import httpx
+
+import pkg.forms
+
+
+class Spelled:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        self.items = [httpx.Client()]
+        self.pool = [httpx.Client()]
+
+    def through_builtins(self) -> None:
+        builtins.setattr(self, "client", httpx.Client(timeout=1))
+
+    def through_local_alias(self) -> None:
+        put = setattr
+        put(self, "client", httpx.Client(timeout=2))
+
+    def through_import(self) -> None:
+        from builtins import setattr as put
+
+        put(self, "client", httpx.Client(timeout=3))
+
+    def through_cell(self) -> None:
+        put = setattr
+
+        def inner() -> None:
+            put(self, "client", httpx.Client(timeout=4))
+
+        inner()
+
+    def through_branches(self, fast: bool) -> None:
+        if fast:
+            put = setattr
+        else:
+            put = setattr
+        put(self, "client", httpx.Client(timeout=5))
+
+    def deletions(self, name) -> None:
+        delattr(self, name)
+        del self.items
+        self.__delattr__("items")
+        object.__delattr__(self, "items")
+        del self.__dict__["items"]
+        self.__dict__.clear()
+        vars(self).popitem()
+
+    def namespace_reads(self) -> bool:
+        vars(self).setdefault("other")
+        if self.__dict__:
+            return "client" in vars(self)
+        return False
+
+    def grow(self) -> None:
+        self.items += [httpx.Client()]
+
+    def reset_pool(self) -> None:
+        self.pool = collections.deque()
+
+    def grow_pool(self) -> None:
+        self.pool += [httpx.Client()]
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+        for c in self.items:
+            c.get("https://example.com")  # EFF101
+
+
+def fill(namespace) -> None:
+    namespace.clear()
+
+
+class HandsOn:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        self.__dict__.__ior__({"client": httpx.AsyncClient()})
+
+    def state(self):
+        return self.__dict__
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Merged:
+    def __init__(self, other: dict) -> None:
+        self.client = httpx.Client()
+        namespace = self.__dict__ if other else other
+        namespace["client"] = other
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Passed:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        fill(vars(self))
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Keywords:
+    def __init__(self, **options) -> None:
+        self.client = httpx.Client()
+        self.__dict__.update(**options)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class SetItem:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        self.__dict__.__setitem__("client", httpx.AsyncClient())
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Unnamed:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def swap(self, name) -> None:
+        super().__setattr__(name, httpx.AsyncClient())
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Left:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Right:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+def swap_either(obj: Left | Right) -> None:
+    obj.client = httpx.AsyncClient()
+
+
+class HasClient(Protocol):
+    def ping(self) -> None: ...
+
+
+def through_protocol(obj: HasClient) -> None:
+    obj.client = httpx.AsyncClient()
+
+
+module_client = httpx.Client()
+module_items = [httpx.Client()]
+pool = [httpx.Client()]
+
+
+def rebind_self() -> None:
+    pkg.forms.module_client = httpx.AsyncClient()
+
+
+def grow_self() -> None:
+    pkg.forms.module_items += [httpx.Client()]
+
+
+def grow_pool() -> None:
+    global pool
+    pool += [httpx.Client()]
+
+
+async def module_reads() -> None:
+    module_client.get("https://example.com")
+    for c in module_items:
+        c.get("https://example.com")  # EFF101
+    for c in pool:
+        c.get("https://example.com")  # EFF101
+"#;
+
+/// A store reading another name: the reads of the fixpoint through a property, an annotation,
+/// an attribute no `__init__` binds, a base in another module, a class storing names heki
+/// cannot name, a store of unknown type, an attribute rebound in place to an `int`, and a global
+/// of unknown type. A cycle of stores no value enters leaves the module the first round's types.
+const READS: &str = r#"import httpx
+
+from pkg.forms import Left
+
+
+class WithProperty:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        self.backup = self.client
+        self.typed: httpx.Client = httpx.Client()
+        self.copy_of_typed = self.typed
+        self.active = self.current
+
+    @property
+    def current(self) -> httpx.Client:
+        return self.client
+
+    def start(self) -> None:
+        self.later = httpx.Client()
+        self.after = self.later
+
+    async def handle(self) -> None:
+        self.active.get("https://example.com")  # EFF101
+        self.copy_of_typed.get("https://example.com")  # EFF101
+
+
+class Below(Left):
+    def swap(self) -> None:
+        self.client = httpx.Client(timeout=1)
+        self.previous = self.client
+
+
+class AnyAndRead:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        self.active = self.client
+
+    def load(self, name) -> None:
+        setattr(self, name, self.client)
+
+    async def handle(self) -> None:
+        self.active.get("https://example.com")
+
+
+class OpenInit:
+    def __init__(self, make) -> None:
+        self.client = make()
+        self.active = self.client
+
+    async def handle(self) -> None:
+        self.active.get("https://example.com")
+
+
+class Counter:
+    def __init__(self) -> None:
+        self.count = 0
+        self.total = self.count
+
+    def bump(self) -> None:
+        self.count += 1
+        self.total = self.count
+
+
+class Wide:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        self.active = self.client
+
+    async def handle(self) -> None:
+        self.active.get("https://example.com")
+
+
+class WideChild(Wide):
+    def swap(self, client) -> None:
+        self.client = client
+
+
+def factory():
+    return None
+
+
+unknown = factory()
+copied = unknown
+"#;
+
+const STORE_CYCLE: &str = r#"class Cycle:
+    def __init__(self) -> None:
+        self.a = self.b
+        self.b = self.a
+
+    async def handle(self) -> None:
+        self.a.get("https://example.com")
+"#;
+
+/// Modules other modules store into: under names heki cannot read, an attribute a store of the
+/// module reads, in place, of the same class, of unknown type, and `None`.
+const TARGET_ANY: &str = r#"import httpx
+
+client = httpx.Client()
+
+
+async def handle() -> None:
+    client.get("https://example.com")
+"#;
+
+const TARGET_ATTR: &str = r#"import httpx
+
+
+class Holder:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+        self.active = self.client
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+        self.active.get("https://example.com")
+
+
+class Opaque:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+"#;
+
+const TARGET_GLOB: &str = r#"import httpx
+
+items = [httpx.Client()]
+pool = [httpx.Client()]
+shared = httpx.Client()
+unknown = httpx.Client()
+cleared = httpx.Client()
+
+
+async def handle() -> None:
+    for c in items:
+        c.get("https://example.com")  # EFF101
+    for c in pool:
+        c.get("https://example.com")  # EFF101
+    shared.get("https://example.com")  # EFF101
+    unknown.get("https://example.com")
+    cleared.get("https://example.com")  # EFF101
+"#;
+
+const TARGET_SELF_ANY: &str = r#"import httpx
+
+client = httpx.Client()
+
+
+def configure(name) -> None:
+    import pkg.target_self_any
+
+    setattr(pkg.target_self_any, name, client)
+
+
+async def handle() -> None:
+    client.get("https://example.com")
+"#;
+
+const STORES_ELSEWHERE: &str = r#"import httpx
+
+import pkg.target_any
+import pkg.target_glob
+from pkg.target_attr import Holder, Opaque
+
+
+def unnamed(name, opaque: Opaque) -> None:
+    setattr(pkg.target_any, name, httpx.AsyncClient())
+    setattr(opaque, name, httpx.AsyncClient())
+
+
+def same_class(holder: Holder) -> None:
+    holder.client = httpx.Client(timeout=1)
+    pkg.target_glob.items = [httpx.Client()]
+    pkg.target_glob.shared = httpx.Client(timeout=1)
+
+
+def others(make) -> None:
+    pkg.target_glob.items += [httpx.Client()]
+    pkg.target_glob.unknown = make()
+    pkg.target_glob.cleared = None
+"#;
+
+const MORE_ELSEWHERE: &str = r#"import httpx
+
+import pkg.target_glob
+
+
+def again(make) -> None:
+    pkg.target_glob.shared = httpx.Client(timeout=2)
+    pkg.target_glob.unknown = make()
+    pkg.target_glob.items += [httpx.Client()]
+    pkg.target_glob.pool += [httpx.Client()]
+"#;
+
+// Two projects: past a number of sites, one report names the others.
+#[test]
+fn every_spelling_of_a_store_and_every_read_of_one() {
+    check_marks(
+        "store_forms",
+        &[
+            ("pkg/forms.py", FORMS),
+            ("pkg/reads.py", READS),
+            ("pkg/store_cycle.py", STORE_CYCLE),
+        ],
+        &["EFF101"],
+    );
+    check_marks(
+        "store_targets",
+        &[
+            ("pkg/target_any.py", TARGET_ANY),
+            ("pkg/target_attr.py", TARGET_ATTR),
+            ("pkg/target_glob.py", TARGET_GLOB),
+            ("pkg/target_self_any.py", TARGET_SELF_ANY),
+            ("pkg/stores_elsewhere.py", STORES_ELSEWHERE),
+            ("pkg/more_elsewhere.py", MORE_ELSEWHERE),
+        ],
+        &["EFF101"],
+    );
+}
+
+/// A `__setstate__` that also reads an attribute heki is deciding is solved with the stores, and
+/// its restores hold the type its `__init__` gave; a base and its subclass, read through
+/// one family, are decided together.
+const REVIVED: &str = r#"import httpx
+
+
+class Revived:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __setstate__(self, state) -> None:
+        for attr, value in state.items():
+            setattr(self, attr, value)
+        self.client.close()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+
+
+class Open:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+
+class OpenSub(Open):
+    def put(self, name: str) -> None:
+        setattr(self, name, httpx.AsyncClient())
+
+
+class ReaderOfBase:
+    def __init__(self, source: Open) -> None:
+        self.copy = source.client
+
+    async def handle(self) -> None:
+        self.copy.get("https://example.com")
+
+
+class ReaderOfSub:
+    def __init__(self, source: OpenSub) -> None:
+        self.copy = source.client
+
+    async def handle(self) -> None:
+        self.copy.get("https://example.com")
+"#;
+
+#[test]
+fn restores_and_families_are_solved_with_the_stores_they_read() {
+    check_marks("revived", &[("pkg/revived.py", REVIVED)], &["EFF101"]);
 }

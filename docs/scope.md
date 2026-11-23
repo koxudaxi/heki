@@ -142,7 +142,8 @@ heki looks for the callee in this order:
 
 1. local constructors and imports;
 2. annotations;
-3. attributes assigned in `__init__`;
+3. attributes `__init__` or `__post_init__` assigns and globals the module body assigns: the
+   join of what every store of each binds;
 4. the class hierarchy, up to eight overriding methods.
 
 It also follows container item types (`list[Model]`), return annotations along the MRO,
@@ -234,7 +235,8 @@ Missed findings close as heki learns more:
   module-level string bound once in its module, or a class constant declared `ClassVar` or
   `Final` and bound once (`Model.KEY`, `self.KEY`, `cls.KEY`).
 - **Not followed** for a module-level name without `Final` that another module rebinds or deletes,
-  one bound in a loop or before a star import that may rebind it, a class constant stored on its
+  one bound in a loop, or before a star import that may rebind it or on only some of the paths
+  after it (`if flag: from m import *` / `else: KEY = "x"`), a class constant stored on its
   class or an instance outside the class body (`Model.KEY = "x"`; from another module, only one
   without `Final`), a class constant a subclass defines again, is given its own value
   (`Child.KEY = "x"`), or inherits first from another base it lists before the class
@@ -243,7 +245,7 @@ Missed findings close as heki learns more:
   (`Keys("x").KEY` is `"x"`), or on a class object whose default a class with `slots=True` or built
   by a transform replaces, or a computed name.
 - `setattr` and `object.__setattr__` are followed through a module-level name bound once to them
-  (`_set = object.__setattr__`), and `getattr(obj, "fields")` is `obj.fields` itself: changing
+  (`_set = object.__setattr__`) and called on their module (`builtins.setattr`), and `getattr(obj, "fields")` is `obj.fields` itself: changing
   what it returns changes the attribute's object.
 - `vars(obj)` (the builtin, not a name shadowing it) is `obj.__dict__`: an entry stored, deleted,
   set by a container method, or updated in place (`vars(obj) |= other`, also on
@@ -266,6 +268,34 @@ Missed findings close as heki learns more:
   class. A read is not.
 - Not typed: values declared `Any`, generics substituted through `TypeVar`s, and calls of
   `type[C]` attributes.
+- The type of a module global or an instance attribute joins every store of it through a
+  receiver whose type heki knows: `self`, an instance of the class (a parameter `obj: Helper`,
+  `cls()` in a class method, one the storing module keeps in its own attribute or global, as
+  in `self.base.client = ...`), the module (also imported in a function, or through `setattr` or
+  `vars`). A store through a receiver without a known type (`def configure(obj): obj.client =
+  ...`, a parameter whose default is the module) is not joined, nor is one through a `Protocol`
+  value, so the join of the other stores may be wrong for values it stores. The same holds
+  for a receiver read from an attribute or a global of another module (`def swap(app: App):
+  app.state.client = ...`, where `App`'s module types `state`), and a receiver kept in an
+  attribute or a global of the storing module has the type that module's stores give it: when
+  yet another module stores an instance of another class there (`owner.base = Other()`), a store
+  through it is not joined into that class.
+- The items of a container an attribute or a global holds are those of the values its stores
+  bind (`self.clients = [httpx.Client()]`): what another function adds to the container
+  (`self.clients.append(client)`, `self.clients += [client]`) is not joined, so a loop over it
+  takes every item to be of the classes the stores give.
+- `__setstate__` restoring an instance's namespace from its state keeps the attributes' types when
+  the class's `__getstate__` builds the state from the instance's own attributes. One putting an
+  attribute's value under another attribute's name (`return {"client": self.other}`) is not seen.
+- A store into an instance's namespace through a method called with a `*` argument
+  (`self.__dict__.setdefault(*pair)`) is not seen.
+- Two shapes of module-level names that no linted code writes are taken wrongly. After a
+  `global` statement at the module level (where it does nothing), a store of the name in a `try`
+  body counts as run even when a call before it in the body raises, and a list bound to
+  `__all__` counts as unchanged when the module body appends to it. A `TYPE_CHECKING` that a
+  branch binds to the flag after the module bound it to something else (`TYPE_CHECKING = True`,
+  then `if cond: from typing import TYPE_CHECKING`) counts as the flag on every path, so imports
+  under a later `if TYPE_CHECKING:` count as not running.
 
 ### Names the catalog does not list
 

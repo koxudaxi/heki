@@ -21,6 +21,7 @@
 //! the value its enclosing function hands it, and a nested scope reads the closure cells of the
 //! functions enclosing it, so those functions are inferred first.
 
+use crate::resolver::stores::Read;
 use crate::resolver::{self, Callee, ProjectDecls, TypeCtx, Val};
 use crate::types::{Args, Elem, Obj, Ty};
 use heki_ast::Span;
@@ -140,6 +141,16 @@ impl Inferred {
         }
     }
 
+    /// The type of the value a store of `var` binds: `None` when no value reaches it (`None`,
+    /// on which every call raises), `Some(None)` when its type is unknown.
+    pub(crate) fn stored(&self, var: VarId) -> Option<Option<&Ty>> {
+        match &self.facts[var.0 as usize] {
+            Fact::Unset => None,
+            Fact::Known(t) => Some(Some(t)),
+            Fact::Unknown => Some(None),
+        }
+    }
+
     /// The values consumers see of the variables `isinstance` checks narrow, by block.
     pub(crate) fn narrowed_vals(&self) -> FxHashMap<(BlockId, VarId), Val> {
         self.narrowed
@@ -196,6 +207,14 @@ pub(crate) struct Scopes {
     enclosing: RefCell<FxHashMap<FunctionId, Rc<Inferred>>>,
     /// What a child scope produces in each run.
     outputs: RefCell<FxHashMap<ChildRun, Elem>>,
+}
+
+impl Scopes {
+    /// Forget the types and outputs kept so far (the nesting of the scopes stays).
+    pub(crate) fn forget(&self) {
+        self.enclosing.borrow_mut().clear();
+        self.outputs.borrow_mut().clear();
+    }
 }
 
 /// A run of a child scope: the scope, the type of the value it iterates, and the facts of the
@@ -551,7 +570,7 @@ struct Seed {
     cells: FxHashMap<String, Fact>,
 }
 
-impl TypeCtx<'_> {
+impl<'a> TypeCtx<'a> {
     /// The types of `f`'s variables.
     pub(crate) fn infer_types(&self, f: &IrFunction) -> Rc<Inferred> {
         if let Some(done) = self.scopes.enclosing.borrow().get(&f.id) {
@@ -607,7 +626,11 @@ impl TypeCtx<'_> {
 
     /// The function enclosing scope `f` whose parameter the variable `name` `f` reads from it is
     /// on every path, and that parameter.
-    pub(crate) fn captured_param(&self, f: &IrFunction, name: &str) -> Option<(&IrFunction, u8)> {
+    pub(crate) fn captured_param(
+        &self,
+        f: &IrFunction,
+        name: &str,
+    ) -> Option<(&'a IrFunction, u8)> {
         self.nesting().captured_param(self.ir(), f, name)
     }
 
@@ -1465,9 +1488,9 @@ impl<'e, 'a> Engine<'e, 'a> {
             InstKind::Convert { dst, .. }
             | InstKind::Format { dst, .. }
             | InstKind::BuildString { dst, .. } => Some(self.display(*dst, BuiltinKind::Str, &[])),
-            InstKind::LoadGlobal { name, .. } => Some(cx.global(name)),
+            InstKind::LoadGlobal { name, .. } => return self.global(name),
             // An unassigned local of a function holds no value on this path.
-            InstKind::LoadName { name, .. } if self.reads_globals => Some(cx.global(name)),
+            InstKind::LoadName { name, .. } if self.reads_globals => return self.global(name),
             InstKind::LoadName { .. } => return Err(Pending),
             InstKind::LoadDeref { name, .. } => {
                 return self.cells.get(name).map_or(Ok(None), Fact::as_step);
@@ -1509,7 +1532,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             }
             InstKind::AttrLoad { obj, attr, .. } => match self.need(*obj)? {
                 Some(Ty::Ref(fqn) | Ty::Class(fqn)) => Some(cx.named(&format!("{fqn}.{attr}"))),
-                Some(recv) => self.member(recv, attr),
+                Some(recv) => return self.member(recv, attr),
                 None => None,
             },
             InstKind::SubscriptLoad {
@@ -1921,27 +1944,51 @@ impl<'e, 'a> Engine<'e, 'a> {
         }
     }
 
+    /// The value of the module global `name` read inside this module (no value yet while the
+    /// stores deciding its type have bound none, `resolver::stores`).
+    fn global(&self, name: &str) -> Step {
+        match self.cx.store_read_global(name) {
+            Some(Read::Pending) => Err(Pending),
+            Some(Read::Of(t)) => Ok(Some(t)),
+            None => Ok(Some(self.cx.global(name))),
+        }
+    }
+
     /// The declared type of reading `attr` on a value of type `recv`: a property getter's
     /// return annotation or the attribute's annotation along its MRO (`Self` bound to it); on
     /// an instance whose MRO declares none, the class the catalog gives the attribute of a
-    /// library class.
-    fn member(&self, recv: &Ty, attr: &str) -> Option<Ty> {
+    /// library class. The members of a union no store has bound a value of yet
+    /// (`resolver::stores`) add nothing.
+    fn member(&self, recv: &Ty, attr: &str) -> Step {
         if let Ty::Union(os) = recv {
-            return join_all(os.iter().map(|o| self.member(&Ty::Inst(o.clone()), attr)));
+            let bound: Vec<Option<Ty>> = os
+                .iter()
+                .filter_map(|o| self.member(&Ty::Inst(o.clone()), attr).ok())
+                .collect();
+            return (!bound.is_empty()).then(|| join_all(bound)).ok_or(Pending);
         }
         let cx = self.cx;
-        let (class, skip_self, self_ty) = self.static_receiver(recv)?;
-        match cx.project.member_type(class, attr, skip_self) {
-            Some(t) => cx
+        let Some((class, skip_self, self_ty)) = self.static_receiver(recv) else {
+            return Ok(None);
+        };
+        let t = match cx.store_read_member(class, attr, skip_self) {
+            Some(Read::Pending) => return Err(Pending),
+            Some(Read::Of(t)) => Some(t),
+            None => cx.project.member_type(class, attr, skip_self),
+        };
+        if let Some(t) = t {
+            return Ok(cx
                 .project
-                .declared_ty(t)
-                .and_then(|t| t.bind_self(Some(&self_ty))),
-            None if matches!(recv, Ty::Inst(_)) => cx
+                .declared_ty(&t)
+                .and_then(|t| t.bind_self(Some(&self_ty))));
+        }
+        Ok(match recv {
+            Ty::Inst(_) => cx
                 .project
                 .catalog_attribute(class, attr, cx.kb)
                 .map(Ty::inst),
-            None => None,
-        }
+            _ => None,
+        })
     }
 
     /// What calling method `method` on a value of type `recv` returns: the return annotation of
@@ -1964,7 +2011,9 @@ impl<'e, 'a> Engine<'e, 'a> {
             // object holds the property object itself, which raises when called.
             if decl.reads_as_property() {
                 let on_instance = matches!(recv, Ty::Inst(_) | Ty::Super(_));
-                let value = on_instance.then(|| self.member(recv, method)).flatten();
+                let value = on_instance
+                    .then(|| self.member(recv, method).ok().flatten())
+                    .flatten();
                 return value.and_then(|v| self.called(&v, call));
             }
             return decl

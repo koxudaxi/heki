@@ -93,7 +93,6 @@ pub fn build_module_ir(
         loop_hints: Vec::new(),
         next_comp_id: 0,
         has_star_import: false,
-        last_star_import: None,
     };
 
     let full_span = Span {
@@ -120,12 +119,15 @@ pub fn build_module_ir(
 
     let mut functions = ctx.functions;
     record_module_introspection_aliases(&mut functions, module_fn, &ctx.introspection_imports);
-    let constants = crate::facts::refine_loops(
-        &mut functions,
-        module_fn,
-        &ctx.loop_hints,
-        ctx.last_star_import,
-    );
+    // The star imports that run: one under `if TYPE_CHECKING:` binds nothing.
+    let star_imports: Vec<u32> = semantic
+        .star_imports
+        .iter()
+        .filter(|star| !star.in_type_checking)
+        .map(|star| star.span.end)
+        .collect();
+    let constants =
+        crate::facts::refine_loops(&mut functions, module_fn, &ctx.loop_hints, &star_imports);
     for f in &mut functions {
         release_spare_capacity(f);
     }
@@ -339,8 +341,6 @@ struct ModuleLowerer<'a> {
     loop_hints: Vec<(FunctionId, Vec<LoopHint>)>,
     next_comp_id: u32,
     has_star_import: bool,
-    /// The end of the last `from m import *` (module constants bound before it may be rebound).
-    last_star_import: Option<u32>,
 }
 
 impl<'a> ModuleLowerer<'a> {
@@ -1473,9 +1473,6 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 for alias in &imp.names {
                     if alias.name.as_str() == "*" {
                         self.module.has_star_import = true;
-                        let end = Span::from(imp.range).end;
-                        self.module.last_star_import =
-                            Some(self.module.last_star_import.map_or(end, |e| e.max(end)));
                         continue;
                     }
                     let span = Span::from(alias.range);

@@ -2785,12 +2785,62 @@ impl<'a> GlobalStores<'a> {
     }
 }
 
+/// Where the module body binds a name for good: what a star import before the store binds is
+/// then not what the name holds once the module is loaded ([`Self::overrides`]).
+#[derive(Debug, Clone, Copy)]
+pub struct LastBindings {
+    /// The nearest block dominating every return of the body that runs (`None`: none does).
+    end: Option<BlockId>,
+}
+
+impl LastBindings {
+    /// Of the module body `shape`.
+    pub fn of(shape: &FnShape<'_>) -> Self {
+        let tree = shape.dominators();
+        let end = shape
+            .f
+            .blocks
+            .iter()
+            .filter(|b| matches!(b.terminator, Terminator::Return(_)) && shape.reachable(b.id))
+            .map(|b| b.id)
+            .reduce(|a, b| tree.common(a, b));
+        Self { end }
+    }
+
+    /// Whether every path to the end of the module body `shape` runs `block` once: outside a
+    /// loop, in a block that dominates the end. A store on one branch (`if flag: name = ...`,
+    /// or in an `except` clause) leaves the name unbound, or bound by something else, on the
+    /// others.
+    pub fn always_runs(&self, shape: &FnShape<'_>, block: BlockId) -> bool {
+        shape.loop_depth(block) == 0
+            && self
+                .end
+                .is_some_and(|end| shape.dominators().dominates(block, end))
+    }
+
+    /// Whether the store `store` in `block` of the module body `shape` binds its name after the
+    /// star import ending at `star_end` on every path through both: it follows the import, in a
+    /// block every path runs ([`Self::always_runs`]). A store on one branch
+    /// (`if flag: from m import *` / `else: name = ...`) leaves the name to what the import binds
+    /// on the others.
+    pub fn overrides(
+        &self,
+        shape: &FnShape<'_>,
+        block: BlockId,
+        store: &Inst,
+        star_end: u32,
+    ) -> bool {
+        store.span.start >= star_end && self.always_runs(shape, block)
+    }
+}
+
 /// The constants of a module (see [`ModuleConstants`]), knowing what its comprehension
-/// functions return (`comprehensions`).
+/// functions return (`comprehensions`). `star_imports`: the end of each star import the module
+/// runs (not one under `if TYPE_CHECKING:`).
 fn module_constants(
     functions: &[IrFunction],
     module_fn: FunctionId,
-    last_star_import: Option<u32>,
+    star_imports: &[u32],
     comprehensions: BTreeMap<u32, SmallDisplay>,
 ) -> ModuleConstants {
     let module = &functions[module_fn.0 as usize];
@@ -2798,7 +2848,7 @@ fn module_constants(
     // A star import binds the names the imported module exports, which heki does not read, so
     // it may bind the name of any builtin. Builtins are trusted per module, not per statement:
     // a function may run after the import wherever the import stands.
-    let star_import = last_star_import.is_some();
+    let star_import = !star_imports.is_empty();
     let shadowed: BTreeSet<String> = BUILTIN_NAMES
         .iter()
         .filter(|b| star_import || stores.binds(b))
@@ -2819,6 +2869,11 @@ fn module_constants(
     }
     // Ints first: displays and later ints may use them (`range(N)` only through loads).
     let ix = FnIndex::new(module, &out);
+    // Whether a store binds its name after every star import depends on the last one only.
+    let last = star_imports
+        .iter()
+        .max()
+        .map(|&end| (LastBindings::of(&ix.shape), end));
     let mut ints = BTreeMap::new();
     let mut strs = BTreeMap::new();
     let mut str_tuples = BTreeMap::new();
@@ -2836,7 +2891,8 @@ fn module_constants(
             };
             // A star import binds the public names of its module, or those its `__all__` lists,
             // which may start with an underscore.
-            let star_rebinds = last_star_import.is_some_and(|s| inst.span.start < s);
+            let star_rebinds =
+                last.is_some_and(|(last, end)| !last.overrides(&ix.shape, bb.id, inst, end));
             if !stores.once(name) || star_rebinds {
                 continue;
             }
@@ -2995,7 +3051,7 @@ pub(crate) fn refine_loops(
     functions: &mut [IrFunction],
     module_fn: FunctionId,
     hints: &[(FunctionId, Vec<LoopHint>)],
-    last_star_import: Option<u32>,
+    star_imports: &[u32],
 ) -> ModuleConstants {
     let passed_iterables = passed_iterables(functions);
     for (child, passed) in &passed_iterables {
@@ -3003,14 +3059,14 @@ pub(crate) fn refine_loops(
             f.passed_from = Some(*passed);
         }
     }
-    let mut constants = module_constants(functions, module_fn, last_star_import, BTreeMap::new());
+    let mut constants = module_constants(functions, module_fn, star_imports, BTreeMap::new());
     for _ in 0..REFINE_ROUNDS {
         refine_round(functions, hints, &constants);
         let returned = comprehension_results(functions, &constants);
         if returned == constants.comprehensions {
             break;
         }
-        constants = module_constants(functions, module_fn, last_star_import, returned);
+        constants = module_constants(functions, module_fn, star_imports, returned);
     }
     constants
 }

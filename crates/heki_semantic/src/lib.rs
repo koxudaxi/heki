@@ -125,6 +125,18 @@ pub struct Scope {
     pub inlined_comp_only_reads: Vec<String>,
 }
 
+/// A `from m import *` statement (only allowed at module level), which binds the names `m`
+/// exports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StarImport {
+    pub module: Option<String>,
+    pub level: u32,
+    pub span: Span,
+    /// Under `if TYPE_CHECKING:`: the import never runs, and binds nothing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_type_checking: bool,
+}
+
 /// Per-module semantic analysis result (JSON-serializable for `symtable` differential verification).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SemanticModel {
@@ -132,6 +144,8 @@ pub struct SemanticModel {
     pub scopes: Vec<Scope>,
     pub imports: Vec<ModuleImport>,
     pub classes: Vec<ClassInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub star_imports: Vec<StarImport>,
 }
 
 struct ScopeBuilder {
@@ -344,6 +358,7 @@ struct Analyzer<'a> {
     imported_names: FxHashSet<String>,
     /// `from m import *` (only allowed at module level).
     has_star_import: bool,
+    star_imports: Vec<StarImport>,
     /// Target names of every PEP 709 inlined comprehension, by region index.
     comp_regions: Vec<FxHashSet<String>>,
     source: &'a str,
@@ -374,6 +389,7 @@ impl<'a> Analyzer<'a> {
             type_checking_names: FxHashSet::default(),
             imported_names: FxHashSet::default(),
             has_star_import: false,
+            star_imports: Vec::new(),
             comp_regions: Vec::new(),
             source,
         }
@@ -817,6 +833,12 @@ impl<'a> Analyzer<'a> {
                 for alias in &imp.names {
                     if alias.name.as_str() == "*" {
                         self.has_star_import = true;
+                        self.star_imports.push(StarImport {
+                            module: module.clone(),
+                            level: imp.level,
+                            span: Span::from(imp.range),
+                            in_type_checking: self.in_type_checking,
+                        });
                         continue;
                     }
                     let bound = alias
@@ -1408,6 +1430,7 @@ impl<'a> Analyzer<'a> {
             scopes,
             imports: self.imports,
             classes: self.classes,
+            star_imports: self.star_imports,
         }
     }
 }

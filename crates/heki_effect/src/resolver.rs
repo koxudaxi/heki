@@ -5,7 +5,9 @@
 //! 1. Exact: local construction and direct imports (`LoadGlobal`, `Import`, `AttrLoad` on a
 //!    module, calls of classes, `AllocBuiltin`, `Copy`).
 //! 2. Typed: PEP 484 parameter / local / return annotations, `self` / `cls`.
-//! 3. Typed: `self.attr` types collected from `__init__` / `__post_init__` and annotations.
+//! 3. Typed: `self.attr` types established in `__init__` / `__post_init__` and module global
+//!    types established in the module body, each the join of every store of it
+//!    ([`stores`]), and annotations.
 //! 4. Heuristic: CHA over project subclasses, at most `CHA_CANDIDATE_LIMIT` candidates.
 //!
 //! Reading a property (`obj.attr` on a project-class instance whose `attr` is a getter) runs
@@ -37,6 +39,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 mod package_paths;
 mod sentinels;
+pub(crate) mod stores;
 mod workspace;
 
 /// The derived indexes of a [`ProjectDecls`] version (`ProjectDecls::index_changes`).
@@ -52,6 +55,7 @@ struct Indexes {
     rebound_elsewhere: FxHashSet<String>,
     changed_paths: BTreeMap<String, PathChange>,
     copy_registered: FxHashSet<String>,
+    setstate_called: bool,
 }
 
 /// Names every class has, which a protocol's body defines without requiring them.
@@ -360,12 +364,121 @@ pub struct AttrRead {
     pub code_binders: Vec<String>,
 }
 
+impl ClassDecl {
+    /// What the class's methods store in `attr` (`ClassDecl::attr_stores`).
+    pub fn stored(&self, attr: &str) -> Option<&AttrStore> {
+        let i = self
+            .attr_stores
+            .binary_search_by(|(a, _)| (**a).cmp(attr))
+            .ok()?;
+        Some(&self.attr_stores[i].1)
+    }
+
+    /// The Priority 3 attribute types, sorted by attribute: the declared ones and those
+    /// `__init__` or `__post_init__` establishes.
+    pub fn typed_attrs(&self) -> Vec<(&str, &Ty)> {
+        let established = self.attr_stores.iter().filter_map(|(a, s)| match s {
+            AttrStore::Established(t) => Some((&**a, t)),
+            AttrStore::Of(_) | AttrStore::Open => None,
+        });
+        let mut out: Vec<(&str, &Ty)> = self
+            .attr_types
+            .iter()
+            .map(|(a, t)| (a.as_str(), t))
+            .chain(established)
+            .collect();
+        out.sort_by_key(|(a, _)| *a);
+        out
+    }
+}
+
 impl AttrRead {
     /// Whether a read may run a hook of the project: `__getattribute__`, a metaclass heki does
     /// not know, and with `missing` (the instance may lack the attribute) `__getattr__`.
     pub fn runs_hook(&self, missing: bool) -> bool {
         self.getattribute || self.custom_metaclass || (missing && self.getattr)
     }
+}
+
+/// What the stores of a module's code bind one attribute of the instances of a class to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttrStore {
+    /// `__init__` or `__post_init__` binds it through `self` to a value of known type, and
+    /// every store binds a value of this type (Priority 3).
+    Established(Ty),
+    /// Every store binds a value of this type, and none of `__init__`'s does.
+    Of(Ty),
+    /// A store binds a value of unknown type, or values no tracked type covers.
+    Open,
+}
+
+/// What a module's code stores into the globals of other project modules and into the
+/// instances of their classes, through a receiver whose type the inference knows
+/// (`cfg.client = v`, `setattr(cfg, "client", v)`, `vars(cfg)["client"] = v`,
+/// `obj.client = v` with `obj: Helper`): the join of the values' types, `None` when one is
+/// unknown or no tracked type covers them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoresElsewhere {
+    /// By the global's fqn.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub globals: BTreeMap<String, StoredElsewhere>,
+    /// By the class's fqn, then the attribute.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, BTreeMap<String, StoredElsewhere>>,
+    /// The modules and classes, by fqn, it stores into under a name heki cannot read
+    /// (`setattr(cfg, name, v)`, `vars(obj).update(other)`).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub unnamed: BTreeSet<String>,
+}
+
+/// What a module's stores bind one name of another module to.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredElsewhere {
+    /// The join of the values' types, `Some(None)` when one is unknown or no tracked type covers
+    /// them; `None` when every store rebinds the name in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ty: Option<Option<Ty>>,
+    /// A store rebinds the name to what an in-place operator gives on its own value
+    /// (`obj.items += [x]`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_place: bool,
+}
+
+/// A module's global and attribute types decided without what reading them gives, where they
+/// differ from [`ModuleDecls::global_types`] and [`ClassDecl::attr_stores`]. The fallback of a
+/// name holds once another module stores into a name its stores read, directly or through the
+/// stores of the names they read ([`Self::dependencies`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreFallbacks {
+    /// By global: its type, `None` for none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub globals: BTreeMap<String, Option<Ty>>,
+    /// By class qualname, then attribute.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, BTreeMap<String, AttrStore>>,
+    /// The classes that store attributes heki cannot name, once another module stores into
+    /// the module.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub any_attr: BTreeSet<String>,
+    /// Each function whose stores read names being decided, once: what it stores and reads.
+    #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
+    pub dependencies: Box<[StoreDependency]>,
+}
+
+/// The names of a module one function stores into, and those of the names being decided it
+/// reads (sorted).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreDependency {
+    pub stores: Box<[StoreTarget]>,
+    pub reads: Box<[StoreTarget]>,
+}
+
+/// A global of a module, or an attribute of the instances of one of its classes (by
+/// qualname), whose type the module's stores decide.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum StoreTarget {
+    Global(String),
+    Attr(String, String),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -379,8 +492,30 @@ pub struct ClassDecl {
     /// ([`is_unknown_base`]); a name the module does not bind (a builtin heki does not list) is
     /// left out.
     pub bases: Vec<String>,
-    /// Priority 3 `attr -> type` (instance attribute types).
+    /// The declared instance attribute types, `attr -> type`: annotations in the class body or
+    /// on `self` in a method, which type every store of the attribute.
     pub attr_types: BTreeMap<String, Ty>,
+    /// What the module's code stores in the attributes of the class's instances it does not
+    /// annotate, through `self` or another receiver of the class, sorted by attribute
+    /// (`stores::record`). A slice rather than a map: most classes store a few, and a map's
+    /// first node would hold room for eleven.
+    #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
+    pub attr_stores: Box<[(Box<str>, AttrStore)]>,
+    /// The module's code stores an attribute of an instance heki cannot name
+    /// (`setattr(self, name, v)`, `self.__dict__.update(other)`): any attribute may hold any
+    /// value.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stores_any_attr: bool,
+    /// The attributes the module's code rebinds to what an in-place operator gives on their own
+    /// value (`self.items += [x]`), sorted: such a store binds the object it read when the
+    /// attribute holds a value the operator changes in place ([`ProjectDecls::join_family`]).
+    #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
+    pub in_place_attrs: Box<[Box<str>]>,
+    /// The only stores heki cannot name are those `__setstate__` makes from its state, which
+    /// restore what an instance held when pickle or copy took the state
+    /// ([`ProjectDecls::restores_hold`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restores_state: bool,
     /// `@dataclass(frozen=True)` / `@dataclasses.dataclass(frozen=True)`, or a `NamedTuple`:
     /// the class promises immutable instances (`MUT108`). Classes a PEP 681
     /// `dataclass_transform(frozen_default=True)` builds are frozen too, and the subclasses of a
@@ -598,6 +733,10 @@ pub struct FunctionDecl {
     /// function, or reading the property, gives that object of the argument.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returns_param_attr: Option<(u8, String)>,
+    /// A `__getstate__` returning a state built only from the instance's own attributes
+    /// (`stores::state_of_self`), which `__setstate__` restores.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub state_of_self: bool,
     /// The parameters of enclosing functions a nested scope reads through its closure cells.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub captured_params: Option<Box<CapturedParams>>,
@@ -708,7 +847,8 @@ pub struct ModuleDecls {
     pub classes: BTreeMap<String, Box<ClassDecl>>,
     /// Function qualname -> declaration (module body excluded).
     pub functions: BTreeMap<String, Box<FunctionDecl>>,
-    /// Module global `name -> type` of the instance it holds (`client = httpx.Client()`).
+    /// Module global `name -> type` of the instance it holds (`client = httpx.Client()`): the
+    /// join of every store of the module (`stores::record`).
     pub global_types: BTreeMap<String, Ty>,
     /// Module-level names bound once to another object by name (`_set = object.__setattr__`,
     /// `run = helpers.run`), by the fqn of that object ([`module_aliases`]): as a value or in
@@ -744,6 +884,25 @@ pub struct ModuleDecls {
     /// longer the string constant their own module binds ([`ProjectDecls::rebound_elsewhere`]).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub rebound_globals: BTreeSet<String>,
+    /// What the module's code stores into the globals of other project modules and into the
+    /// instances of their classes (`stores::record`). Boxed: most modules store into none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stores_elsewhere: Option<Box<StoresElsewhere>>,
+    /// The types of the module's globals and attributes without what deciding them assumed
+    /// reading them, where those differ: they hold once another module stores into the module's
+    /// globals or into the instances of its classes (`stores::record`). Boxed: most modules
+    /// have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_fallbacks: Option<Box<StoreFallbacks>>,
+    /// The module calls `__setstate__` on an object, or reads the method or names it, outside a
+    /// `__setstate__` handing its own state on: the state may be anything
+    /// ([`ProjectDecls::restores_hold`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub calls_setstate: bool,
+    /// The names a star import of the module binds when the module fixes them: its `__all__`,
+    /// bound once to a tuple or an unchanged list of string literals (`stores::exported_names`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exports: Option<Box<[String]>>,
     /// The packages whose `__path__` the module changes, by the fqn its imports give them
     /// (`plugins.__path__.append(d)`), or by its own name when it is a package changing its own
     /// (`__path__ = extend_path(__path__, __name__)`), and how
@@ -869,12 +1028,19 @@ impl ModuleDecls {
         let mut out = self.clone();
         for class in out.classes.values_mut() {
             class.attr_types.clear();
+            class.attr_stores = Box::default();
+            class.stores_any_attr = false;
+            class.restores_state = false;
+            class.in_place_attrs = Box::default();
             class.attr_capacities.clear();
         }
         for function in out.functions.values_mut() {
             function.offloaded_by = None;
+            function.state_of_self = false;
         }
         out.global_types.clear();
+        out.stores_elsewhere = None;
+        out.store_fallbacks = None;
         out.global_capacities.clear();
         out
     }
@@ -1571,20 +1737,16 @@ enum FieldDefaults {
     Replaced,
 }
 
-/// A kept answer of [`ProjectDecls::class_str_constant`], with what computing it read of the
+/// A kept answer of [`ProjectDecls`] (`ProjectDecls::kept`), with what computing it read of the
 /// declarations (`None`: it was computed without recording).
 #[derive(Debug, Clone)]
-struct KnownConstant {
-    value: Option<String>,
+struct Kept<T> {
+    value: T,
     reads: Option<Arc<DeclKeys>>,
 }
 
-/// An answer of [`ProjectDecls::capacity`], with what computing it read, as [`KnownConstant`].
-#[derive(Debug, Clone)]
-struct KnownCapacity {
-    value: CapacityOf,
-    reads: Option<Arc<DeclKeys>>,
-}
+/// The answers [`ProjectDecls`] keeps of one question, by its key.
+type KeptAnswers<K, T> = RwLock<FxHashMap<K, Kept<T>>>;
 
 /// Declarations of every project module plus derived indexes.
 #[derive(Debug, Default)]
@@ -1615,6 +1777,12 @@ pub struct ProjectDecls {
     grown_elsewhere: FxHashSet<String>,
     /// Those another project module rebinds or deletes (`ModuleDecls::rebound_globals`).
     rebound_elsewhere: FxHashSet<String>,
+    /// What project modules store into the globals of other modules and into the instances of
+    /// their classes, joined (`ModuleDecls::stores_elsewhere`), and the modules whose own types
+    /// then hold no longer.
+    elsewhere: stores::Elsewhere,
+    /// Some project module calls `__setstate__` itself (`ModuleDecls::calls_setstate`).
+    setstate_called: bool,
     /// The packages whose `__path__` a project module changes (`ModuleDecls::path_changes`, the
     /// changes joined), and the packages heki could not read, as `PathChange::Replaced`; sorted,
     /// so the packages under a name are one range.
@@ -1630,9 +1798,12 @@ pub struct ProjectDecls {
     lines: RwLock<FxHashMap<String, crate::SharedLine>>,
     /// The answers of [`Self::class_str_constant`] so far, by class, name, and whether the
     /// object may be of a subclass; cleared with the indexes.
-    class_constants: RwLock<FxHashMap<(String, String, ConstantRead), KnownConstant>>,
+    class_constants: KeptAnswers<(String, String, ConstantRead), Option<String>>,
+    /// The answers of [`Self::stored_attr_type`] so far, by class and attribute; cleared with
+    /// the indexes.
+    attr_joins: KeptAnswers<(String, String), Option<Ty>>,
     /// The answers of [`Self::capacity`] so far; cleared with the indexes.
-    capacities: RwLock<FxHashMap<CapacityOf, KnownCapacity>>,
+    capacities: KeptAnswers<CapacityOf, CapacityOf>,
     /// The answers of [`Self::catalog_attribute`] so far, by class and name; cleared with the
     /// indexes.
     catalog_attributes: SharedMemo<(String, String), Option<String>, DeclKeys>,
@@ -1697,7 +1868,7 @@ pub(crate) enum Symbol<'a> {
     Module,
     Class(&'a ClassDecl),
     Function(FuncKey, &'a FunctionDecl),
-    Global(&'a Ty),
+    Global(Ty),
     /// A name a project module binds itself that heki has no declaration for, or a name under
     /// one: a module global it holds no type of ([`ModuleDecls::unknown_globals`]). Calling it
     /// is unresolved.
@@ -1805,6 +1976,9 @@ impl ProjectDecls {
             .extend(differ(&before.rebound_elsewhere, &self.rebound_elsewhere));
         out.class_facts
             .extend(differ(&before.copy_registered, &self.copy_registered));
+        if before.setstate_called != self.setstate_called {
+            out.class_facts.insert(stores::SETSTATE_KEY.to_owned());
+        }
         for package in before.changed_paths.keys().chain(self.changed_paths.keys()) {
             if before.changed_paths.get(package) != self.changed_paths.get(package) {
                 out.package_paths
@@ -1827,6 +2001,7 @@ impl ProjectDecls {
             rebound_elsewhere: self.rebound_elsewhere.clone(),
             changed_paths: self.changed_paths.clone(),
             copy_registered: self.copy_registered.clone(),
+            setstate_called: self.setstate_called,
         }
     }
 
@@ -1840,6 +2015,10 @@ impl ProjectDecls {
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
         self.class_constants
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.attr_joins
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
@@ -1894,6 +2073,8 @@ impl ProjectDecls {
         self.protocols = self.protocol_implementations();
         self.grown_elsewhere = self.globals_changed_elsewhere(|m| &m.grown_globals);
         self.rebound_elsewhere = self.globals_changed_elsewhere(|m| &m.rebound_globals);
+        self.setstate_called = self.modules.values().any(|m| m.calls_setstate);
+        self.elsewhere = self.stores_elsewhere();
         self.changed_paths = self.package_path_changes();
         self.copy_registered = self
             .modules
@@ -2335,10 +2516,23 @@ impl ProjectDecls {
         read: ConstantRead,
     ) -> Option<String> {
         let key = (class.to_owned(), attr.to_owned(), read);
+        self.kept(&self.class_constants, key, || {
+            self.find_class_str_constant(class, attr, read)
+        })
+    }
+
+    /// The answer `cache` keeps for `key`, or `compute`'s, then kept with what computing it
+    /// read of the declarations while recording; a read of a kept answer while recording reads
+    /// what computing it read.
+    fn kept<K: Eq + std::hash::Hash, T: Clone>(
+        &self,
+        cache: &KeptAnswers<K, T>,
+        key: K,
+        compute: impl FnOnce() -> T,
+    ) -> T {
         let recording = self.recorder.on.load(Ordering::Relaxed);
         // An answer kept without its reads is computed again while recording, to record them.
-        let known = self
-            .class_constants
+        let known = cache
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&key)
@@ -2353,19 +2547,19 @@ impl ProjectDecls {
         let (value, reads) = if recording {
             // What this computation reads, apart from what the recording read before.
             let before = std::mem::take(&mut *self.recorded());
-            let value = self.find_class_str_constant(class, attr, read);
+            let value = compute();
             let mut recorded = self.recorded();
             let reads = Arc::new(std::mem::replace(&mut *recorded, before).into_keys());
             recorded.replayed.push(Arc::clone(&reads));
             (value, Some(reads))
         } else {
-            (self.find_class_str_constant(class, attr, read), None)
+            (compute(), None)
         };
-        let known = KnownConstant {
+        let known = Kept {
             value: value.clone(),
             reads,
         };
-        self.class_constants
+        cache
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(key, known);
@@ -2421,7 +2615,7 @@ impl ProjectDecls {
         self.capacities
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(name, KnownCapacity { value, reads });
+            .insert(name, Kept { value, reads });
     }
 
     /// Run `f`, and return with its result what it read of these declarations while recording
@@ -2560,7 +2754,7 @@ impl ProjectDecls {
             };
             return Symbol::Function(key, f);
         }
-        if let Some(t) = m.global_types.get(rest) {
+        if let Some(t) = self.global_type(m, rest) {
             return Symbol::Global(t);
         }
         // A name the module does not bind is bound where heki does not read the module: a
@@ -3013,7 +3207,7 @@ impl ProjectDecls {
     }
 
     /// The project classes whose instances an object of the project class `class` may hold in
-    /// its attributes, by the attribute types its classes declare (`ClassDecl::attr_types`: a
+    /// its attributes, by the attribute types its classes declare (`ClassDecl::typed_attrs`: a
     /// class, the members of a union, the items of a generic container, the structural
     /// implementations of a protocol), each once with the first attribute that holds it. A class
     /// whose own copy is decided otherwise ([`Self::copy_decided_by_class`]) is left out: what a
@@ -3023,7 +3217,7 @@ impl ProjectDecls {
         let mut seen = FxHashSet::from_iter([self.canonical(class)]);
         let mut out: Vec<(String, String)> = Vec::new();
         let declared = self.mro(class).into_iter().filter_map(|m| self.class(&m));
-        for (attr, ty) in declared.flat_map(|d| &d.attr_types) {
+        for (attr, ty) in declared.flat_map(|d| d.typed_attrs()) {
             let mut found = Vec::new();
             ty_classes(ty, &mut found);
             let mut held: Vec<String> = Vec::new();
@@ -3041,7 +3235,7 @@ impl ProjectDecls {
                     && seen.insert(h.clone())
                     && !self.copy_decided_by_class(&h)
                 {
-                    out.push((h, attr.clone()));
+                    out.push((h, attr.to_owned()));
                 }
             }
         }
@@ -3482,20 +3676,85 @@ impl ProjectDecls {
     /// the MRO (past `class` itself with `skip_self`, for `super()`) that declares it: the
     /// return annotation of a property getter (with or without a setter; another function of a
     /// name some project property has gives none), or the Priority 3 attribute type. Overriding
-    /// subclasses do not count, as for a type checker. The getter's module is a declaration
-    /// read like any other (`DeclKeys::modules`).
-    pub(crate) fn member_type(&self, class: &str, attr: &str, skip_self: bool) -> Option<&Ty> {
+    /// subclasses do not count for an annotation, as for a type checker; an inferred type joins
+    /// what the project's code stores into the instances of every class whose code may store
+    /// into the instance ([`Self::stored_attr_type`]). The getter's module is a declaration read
+    /// like any other (`DeclKeys::modules`).
+    pub(crate) fn member_type(&self, class: &str, attr: &str, skip_self: bool) -> Option<Ty> {
         self.read(|k| note(&mut k.property_names, attr));
         let property = self.property_names.contains(attr);
         for c in self.mro(class).iter().skip(usize::from(skip_self)) {
             if property && let Some(key) = self.own_method(c, attr) {
-                return self.function_decl(&key)?.property_type.as_ref();
+                return self.function_decl(&key)?.property_type.clone();
             }
-            if let Some(t) = self.class(c).and_then(|d| d.attr_types.get(attr)) {
-                return Some(t);
+            let Some(decl) = self.class(c) else {
+                continue;
+            };
+            if let Some(t) = decl.attr_types.get(attr) {
+                return Some(t.clone());
+            }
+            if let Some(AttrStore::Established(_)) = self.attr_store(c, decl, attr) {
+                return self.stored_attr_type(class, attr);
             }
         }
         None
+    }
+
+    /// The join of what the project's code stores in `attr` of the instances of the classes
+    /// whose code may store into an instance of `class` ([`Self::instance_family`],
+    /// [`Self::join_family`]). The answer is kept for the life of the indexes, as
+    /// [`Self::class_str_constant`]'s.
+    fn stored_attr_type(&self, class: &str, attr: &str) -> Option<Ty> {
+        let class = self.canonical(class);
+        let key = (class.clone(), attr.to_owned());
+        self.kept(&self.attr_joins, key, || {
+            let family = self.instance_family(&class);
+            self.join_family(&family, attr)
+        })
+    }
+
+    /// The classes whose code may store into an instance of the project class `class`:
+    /// `class`, its project subclasses, and the project classes along their MROs, sorted. One
+    /// walk visits each class at most twice, as an instance's class and as a base, however many
+    /// subclasses share its bases.
+    pub(crate) fn instance_family(&self, class: &str) -> Vec<String> {
+        let budget = Budget::unmetered("heki_effect::resolver::ProjectDecls::instance_family");
+        let mut names = vec![self.canonical(class)];
+        let mut ids: FxHashMap<String, usize> = FxHashMap::default();
+        ids.insert(names[0].clone(), 0);
+        let mut found: FxHashSet<usize> = FxHashSet::default();
+        // A node is a class and whether an instance may be of it (`class` and its subclasses,
+        // whose own subclasses may be too) or it is only a base of one.
+        let next = |(id, instance): (usize, bool), out: &mut Vec<(usize, bool)>| {
+            let class = names[id].as_str();
+            let mut next: Vec<(String, bool)> = Vec::new();
+            if instance {
+                let subclasses = self.direct_subclasses(class).iter();
+                next.extend(subclasses.map(|c| (c.clone(), true)));
+            }
+            if let Some(decl) = self.class(class) {
+                next.extend(decl.bases.iter().map(|b| (self.canonical(b), false)));
+            }
+            for (c, instance) in next {
+                let id = *ids.entry(c).or_insert_with_key(|c| {
+                    names.push(c.clone());
+                    names.len() - 1
+                });
+                out.push((id, instance));
+            }
+        };
+        // Unmetered: the walk ends, visiting every class of the family.
+        let _ = reach(&budget, [(0, true)], next, |(id, _)| {
+            found.insert(id);
+            Visit::<()>::Expand
+        });
+        let mut family: Vec<String> = found
+            .into_iter()
+            .map(|id| names[id].clone())
+            .filter(|c| self.is_project_class(c))
+            .collect();
+        family.sort_unstable();
+        family
     }
 
     /// The declared value of the property `attr` when the definition of `attr` that an instance
@@ -4096,24 +4355,35 @@ impl DeclPasses {
             return DeclKeys::default();
         }
         let before = self.structural.indexes();
+        let before_stores = self.completed.elsewhere.clone();
         self.structural.replace(completed.structural());
         self.completed.replace(completed);
-        self.changed(&name, Some(&before))
+        self.changed(&name, Some(&before), &before_stores)
     }
 
     /// Forget a deleted module; returns what changed.
     pub fn remove(&mut self, module: &str) -> DeclKeys {
         let before = self.structural.indexes();
+        let before_stores = self.completed.elsewhere.clone();
         self.structural.remove(module);
         self.completed.remove(module);
-        self.changed(module, Some(&before))
+        self.changed(module, Some(&before), &before_stores)
     }
 
-    /// What changed when `module`'s declarations did: the module, and the hierarchy indexes
-    /// that differ from `before` (unchanged without it: the module's structure stayed).
-    fn changed(&self, module: &str, before: Option<&Indexes>) -> DeclKeys {
+    /// What changed when `module`'s declarations did: the module, the hierarchy indexes that
+    /// differ from `before` (unchanged without it: the module's structure stayed), and what
+    /// other modules' stores change that differs from `before_stores`
+    /// (`ProjectDecls::elsewhere`, which the completed declarations decide).
+    fn changed(
+        &self,
+        module: &str,
+        before: Option<&Indexes>,
+        before_stores: &stores::Elsewhere,
+    ) -> DeclKeys {
         let mut out = before.map_or_else(DeclKeys::default, |b| self.structural.index_changes(b));
         out.modules.insert(module.to_owned());
+        out.grown_globals
+            .extend(before_stores.changes(&self.completed.elsewhere));
         out
     }
 }
@@ -4138,8 +4408,10 @@ pub(crate) fn update_module_decls(
         return (DeclKeys::default(), Arc::new(completed), reads);
     }
     let completed = Arc::new(completed);
+    let before_stores = passes.completed.elsewhere.clone();
     passes.completed.replace(Arc::clone(&completed));
-    (passes.changed(name, before.as_ref()), completed, reads)
+    let changed = passes.changed(name, before.as_ref(), &before_stores);
+    (changed, completed, reads)
 }
 
 /// A module's completed declarations against pass 1 without updating it (a `.pyi` stub next to
@@ -4645,6 +4917,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             is_abstract: crate::is_abstract_method(&f.decorators),
             property_type: getter_types.get(f.qualname.as_str()).cloned(),
             returns_param_attr: returned_attrs[f.qualname.as_str()].clone(),
+            state_of_self: false,
             captured_params: captured_params
                 .get(f.qualname.as_str())
                 .map(|c| Box::new(c.clone())),
@@ -4653,6 +4926,8 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     }
     readonly_metadata(input, &mut decls);
     decls.small_globals = input.ir.constants.displays.clone();
+    decls.calls_setstate = stores::calls_setstate(input);
+    decls.exports = stores::exported_names(input);
     (decls.grown_globals, decls.rebound_globals) = foreign_grown_globals(input, &decls.imports);
     let path_changes = package_paths::path_changes(input, &decls);
     decls.path_changes = (!path_changes.is_empty()).then(|| Box::new(path_changes));
@@ -5762,23 +6037,6 @@ fn complete_decls(
             continue;
         }
         if f.is_module_body {
-            let types = cx.infer_types(f);
-            for inst in f.blocks.iter().flat_map(|b| &b.insts) {
-                // An annotated global has its declaration (`REGISTRY: dict[str, Model] = {}`),
-                // unless what it holds is narrower.
-                let InstKind::StoreGlobal { name, value } = &inst.kind else {
-                    continue;
-                };
-                let stored = match (types.declared(name), types.ty(*value)) {
-                    (Some(d), Some(t)) if !project.narrower(t, d) => Some(d),
-                    (d, t) => t.or(d),
-                };
-                if let Some(t) = stored
-                    && kept_in_declarations(t)
-                {
-                    decls.global_types.insert(name.clone(), t.clone());
-                }
-            }
             continue;
         }
         let (Some(class), Some(self_param)) = (
@@ -5801,24 +6059,9 @@ fn complete_decls(
                 class.attr_types.insert(attr.to_owned(), t);
             }
         }
-        if f.name != "__init__" && f.name != "__post_init__" {
-            continue;
-        }
-        let types = cx.infer_types(f);
-        let self_vars = self_aliases(f, self_param.var);
-        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
-            if let InstKind::AttrStore { obj, attr, value } = &inst.kind
-                && self_vars.contains(obj)
-                && let Some(t) = types.ty(*value)
-                && kept_in_declarations(t)
-            {
-                class
-                    .attr_types
-                    .entry(attr.clone())
-                    .or_insert_with(|| t.clone());
-            }
-        }
     }
+    // After the annotations, which type every store of the attributes they declare.
+    stores::record(input, project, kb, &mut decls);
     crate::capacity::record(input, &cx, &mut decls);
     decls
 }
@@ -5864,8 +6107,26 @@ pub(crate) fn namespace_load<'v>(
     kind: &InstKind,
     val: impl FnOnce(VarId) -> Option<&'v Val>,
 ) -> Option<(VarId, VarId)> {
-    match kind {
-        InstKind::AttrLoad { dst, obj, attr } if attr == "__dict__" => Some((*dst, *obj)),
+    if let InstKind::AttrLoad { dst, obj, attr } = kind
+        && attr == "__dict__"
+    {
+        return Some((*dst, *obj));
+    }
+    plain_call(kind, &["builtins.vars"], val)
+        .filter(|(_, _, args)| args.len() == 1)
+        .map(|(_, dst, args)| (dst, args[0]))
+}
+
+/// Which of the objects `fqns` the call `kind`, without keywords or a `*` argument, calls, with
+/// its result and its arguments: the one its callee holds (`val`, as for [`namespace_load`]), or
+/// the member of the module or class a method is called on, as [`TypeCtx::method_call_targets`]
+/// names it (`builtins.setattr(obj, name, v)` calls `builtins.setattr`).
+pub(crate) fn plain_call<'k, 'v>(
+    kind: &'k InstKind,
+    fqns: &[&'static str],
+    val: impl FnOnce(VarId) -> Option<&'v Val>,
+) -> Option<(&'static str, VarId, &'k [VarId])> {
+    let (called, dst, args) = match kind {
         InstKind::Call {
             dst,
             callee_var: Some(f),
@@ -5873,14 +6134,32 @@ pub(crate) fn namespace_load<'v>(
             kwargs,
             star_from: None,
             ..
-        } if args.len() == 1
-            && kwargs.is_empty()
-            && matches!(val(*f), Some(Val::Ref(s)) if s == "builtins.vars") =>
-        {
-            Some((*dst, args[0]))
-        }
-        _ => None,
-    }
+        } if kwargs.is_empty() => match val(*f)? {
+            Val::Ref(s) => (fqns.iter().find(|fqn| **fqn == s.as_str())?, dst, args),
+            _ => return None,
+        },
+        InstKind::MethodCall {
+            dst,
+            recv,
+            method,
+            args,
+            kwargs,
+            star_from: None,
+            ..
+        } if kwargs.is_empty() => match val(*recv)? {
+            Val::Ref(owner) => {
+                let member = |fqn: &&&str| {
+                    fqn.strip_suffix(method.as_str())
+                        .and_then(|o| o.strip_suffix('.'))
+                        == Some(owner.as_str())
+                };
+                (fqns.iter().find(member)?, dst, args)
+            }
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some((called, *dst, args.as_slice()))
 }
 
 /// Variables that alias `root` through `Copy` and phis whose inputs all alias it.
@@ -6450,6 +6729,9 @@ pub struct TypeCtx<'a> {
     /// [`ProjectDecls::function_taken`] by class and name, asked once per module (the module's
     /// summaries are one recording, which the first answer's reads join).
     taken: RefCell<FxHashMap<(String, String), Option<FuncKey>>>,
+    /// What reading the module's globals and its classes' attributes gives while
+    /// [`stores::record`] decides their types.
+    store_reads: Option<&'a dyn stores::StoreReads>,
 }
 
 /// Declarations used when a module is missing from `ProjectDecls`.
@@ -6475,6 +6757,10 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     small_globals: BTreeMap::new(),
     grown_globals: BTreeSet::new(),
     rebound_globals: BTreeSet::new(),
+    stores_elsewhere: None,
+    store_fallbacks: None,
+    calls_setstate: false,
+    exports: None,
     path_changes: None,
     str_constants: BTreeMap::new(),
     literal_constants: BTreeMap::new(),
@@ -6533,6 +6819,7 @@ impl<'a> TypeCtx<'a> {
             bindings: std::cell::OnceCell::new(),
             string_sets: std::cell::OnceCell::new(),
             taken: RefCell::default(),
+            store_reads: None,
         }
     }
 
@@ -6584,6 +6871,49 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
+    /// This context with the reads of the module's globals and attributes going to `reads`.
+    pub(crate) fn reading_stores(mut self, reads: &'a dyn stores::StoreReads) -> Self {
+        self.store_reads = Some(reads);
+        self
+    }
+
+    /// Forget the types inferred so far, which depend on what the reads of the stores gave.
+    pub(crate) fn forget_inferred(&self) {
+        self.scopes.forget();
+    }
+
+    /// What reading the module global `name` gives while [`stores::record`] decides it, past
+    /// the names whose value the module's declarations fix (imports, classes, functions, module
+    /// aliases): `None` for what the declarations give.
+    pub(crate) fn store_read_global(&self, name: &str) -> Option<stores::Read> {
+        let reads = self.store_reads?;
+        let m = self.module;
+        let fixed = m.imports.contains_key(name)
+            || m.classes.contains_key(name)
+            || m.functions.contains_key(name)
+            || (m.aliases.contains_key(name)
+                && !self.project.alias_rebound(self.module_name(), name));
+        if fixed {
+            return None;
+        }
+        match reads.global(name)? {
+            stores::Read::Pending => Some(stores::Read::Pending),
+            stores::Read::Of(t) => self.project.declared_ty(&t).map(stores::Read::Of),
+        }
+    }
+
+    /// What reading `attr` on an instance of `class` (past `class` itself with `skip_self`)
+    /// gives while [`stores::record`] decides the module's attributes: `None` for what the
+    /// declarations give.
+    pub(crate) fn store_read_member(
+        &self,
+        class: &str,
+        attr: &str,
+        skip_self: bool,
+    ) -> Option<stores::Read> {
+        self.store_reads?.member(class, attr, skip_self)
+    }
+
     /// Value of a module-level name read inside this module.
     pub(crate) fn global(&self, name: &str) -> Ty {
         if let Some(t) = self.module.imports.get(name) {
@@ -6593,10 +6923,9 @@ impl<'a> TypeCtx<'a> {
             return Ty::Ref(format!("{}.{name}", self.module_name()));
         }
         if let Some(t) = self
-            .module
-            .global_types
-            .get(name)
-            .and_then(|t| self.project.declared_ty(t))
+            .project
+            .global_type(self.module, name)
+            .and_then(|t| self.project.declared_ty(&t))
         {
             return t;
         }
@@ -6650,7 +6979,7 @@ impl<'a> TypeCtx<'a> {
     pub(crate) fn named(&self, fqn: &str) -> Ty {
         let fqn = self.project.object_named(fqn);
         match self.project.symbol(&fqn) {
-            Symbol::Global(t) => self.project.declared_ty(t).unwrap_or(Ty::Ref(fqn)),
+            Symbol::Global(t) => self.project.declared_ty(&t).unwrap_or(Ty::Ref(fqn)),
             _ => Ty::Ref(fqn),
         }
     }
