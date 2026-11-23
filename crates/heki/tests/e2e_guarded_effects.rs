@@ -291,6 +291,61 @@ fn lazy_initialization_runs_once_per_object() {
     );
 }
 
+/// A lazy initialization written with `hasattr`, `getattr(..., None)`, `try` / `except
+/// AttributeError`, or a store through `object.__setattr__` runs once per object as one under a
+/// `None` test does; one under `except KeyError` runs on every call.
+#[test]
+fn lazy_initialization_spelled_otherwise_runs_once_per_object() {
+    let source = r#"import requests
+
+
+class Lazy:
+    def __init__(self) -> None:
+        self._conn = None
+
+    def by_hasattr(self) -> None:
+        if not hasattr(self, "_session"):
+            self._session = requests.Session()
+
+    def by_getattr(self) -> None:
+        if getattr(self, "_client", None) is None:
+            self._client = requests.Session()
+
+    def by_try(self) -> object:
+        try:
+            return self._pool
+        except AttributeError:
+            self._pool = requests.Session()
+            return self._pool
+
+    def by_setattr(self) -> None:
+        if self._conn is None:
+            object.__setattr__(self, "_conn", requests.Session())
+
+    def by_other_error(self) -> object:
+        try:
+            return self._other
+        except KeyError:
+            self._other = requests.Session()
+            return self._other
+
+
+def run(lazy: Lazy, urls: list[str]) -> None:
+    for u in urls:
+        lazy.by_hasattr()
+        lazy.by_getattr()
+        lazy.by_try()
+        lazy.by_setattr()
+        lazy.by_other_error()  # EFF102
+"#;
+    check_marks(
+        "guards_lazy_spelled",
+        &[("pkg/__init__.py", ""), ("pkg/lazy.py", source)],
+        &[],
+        &["EFF101", "EFF102", "EFF103"],
+    );
+}
+
 /// A `functools.cached_property` getter runs once per instance, as a lazy initialization of
 /// `self` does, through any number of calls: `cached_property` from `functools`, from a module
 /// of the project that imports it, or from `kombu.utils`, which re-exports it. Reading one in

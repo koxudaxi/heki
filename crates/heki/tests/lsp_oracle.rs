@@ -116,6 +116,11 @@ forbid = ["writes-targets"]
 write-targets = ["Rack.items"]
 allowed-callees = ["pkg.rack_ops.empty"]
 
+[[tool.heki.effect-boundaries]]
+name = "extras-pass"
+scopes = ["pkg.extras_pass"]
+write-universe = ['Extras.values["init"]']
+
 [[tool.heki.write-owners]]
 name = "rack"
 targets = ["Rack.items"]
@@ -233,6 +238,9 @@ const ASYNC_USER: &str = "from pkg.async_client import AsyncClient\n\n\nasync de
 // Constant keys, objects under construction, and the strict mode: a `__dict__` key names the
 // guarded attribute through a `Final` constant of another module; a private helper fills a new
 // object its caller hands it; a helper writes a target on a parameter its caller types.
+// A store operation in another module writes the entry its caller passes (`set_value(e, "init", v)`).
+const EXTRAS: &str = "class Extras:\n    def __init__(self) -> None:\n        self.values: dict[str, object] = {}\n\n\ndef set_value(e: Extras, key: str, value: object) -> None:\n    e.values[key] = value\n";
+const EXTRAS_PASS: &str = "from pkg.extras import Extras, set_value\n\n\ndef prepare(e: Extras) -> None:\n    set_value(e, \"init\", 1)\n";
 const KEY_CONSTS: &str = "from typing import Final\n\nKEY: Final = \"entries\"\n";
 const KEY_WRITER: &str = "from pkg.key_consts import KEY\nfrom pkg.model import Registry\n\n\ndef mark(r: Registry):\n    r.__dict__[KEY] = []\n";
 // A class constant names the guarded attribute for the class's own methods.
@@ -1013,6 +1021,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/stamp.py", STAMP),
         ("pkg/stamp_middle.py", STAMP_MIDDLE),
         ("pkg/stamped.py", STAMPED),
+        ("pkg/extras.py", EXTRAS),
+        ("pkg/extras_pass.py", EXTRAS_PASS),
         ("pkg/conn_mixin.py", CONN_MIXIN),
         ("pkg/conn_client.py", CONN_CLIENT),
         ("pkg/conn_pooled.py", CONN_POOLED),
@@ -2144,6 +2154,17 @@ fn steps_contract_extensions() -> Vec<Step> {
     let constructing = ACCT_OPS.replace("    return None\n", "    return Receipt(1)\n");
     let helper = |body: &str| PURE_OPS.replace("    return None\n", body);
     let two_reads = LAYER_OPS.replace("    return 0\n", "    return l.balance + l.balance\n");
+    // A pass helper constructs a ledger whose initializer hands a private helper its own `self`,
+    // then the ledger the pass was handed.
+    let opening = |handed: &str| {
+        format!(
+            "{}\n\nclass Opened(Ledger):\n    def __init__(self, other: Ledger):\n        super().__init__()\n        _open({handed})\n\n\ndef _open(l: Ledger):\n    l.balance = 0\n",
+            PURE_OPS.replace(
+                "    l.rows.append(1)\n",
+                "    l.rows.append(1)\n    Opened(l)\n"
+            )
+        )
+    };
     // The function exists before: only its calls change, not the declarations.
     let outside = CHAIN_TOP.replace(
         "def outside(r, v, l):\n    return None\n",
@@ -2197,6 +2218,21 @@ fn steps_contract_extensions() -> Vec<Step> {
         .present(&[("pkg/pure.py", "EFF201")]),
         Step::new(
             "the helpers are pure again",
+            vec![save("pkg/pure_ops.py", PURE_OPS)],
+        )
+        .absent(&[("pkg/pure.py", "EFF201")]),
+        Step::new(
+            "a pass helper constructs a ledger whose initializer hands its `self` to a helper writing it",
+            vec![Action::Save("pkg/pure_ops.py", opening("self"))],
+        )
+        .absent(&[("pkg/pure.py", "EFF201")]),
+        Step::new(
+            "the initializer hands the helper the pass's ledger instead",
+            vec![Action::Save("pkg/pure_ops.py", opening("other"))],
+        )
+        .present(&[("pkg/pure.py", "EFF201")]),
+        Step::new(
+            "the helpers are pure once more",
             vec![save("pkg/pure_ops.py", PURE_OPS)],
         )
         .absent(&[("pkg/pure.py", "EFF201")]),
@@ -2536,7 +2572,18 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
         "    r.entries.append(1)\n",
         "    KEPT.append(r)\n    r.entries.append(1)\n",
     );
+    let fixed_key = EXTRAS.replace("e.values[key]", "e.values[\"other\"]");
     vec![
+        Step::new(
+            "a store operation in another module stops writing the entry its caller passes",
+            vec![Action::Save("pkg/extras.py", fixed_key)],
+        )
+        .absent(&[("pkg/extras_pass.py", "EFF201")]),
+        Step::new(
+            "the store operation writes the entry its caller passes again",
+            vec![save("pkg/extras.py", EXTRAS)],
+        )
+        .present(&[("pkg/extras_pass.py", "EFF201")]),
         Step::new(
             "the `Final` key constant of another module names another attribute",
             vec![Action::Save(

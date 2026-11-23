@@ -12,9 +12,10 @@ use crate::iterations;
 use crate::scc::tarjan_scc;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallCycle, CallHop, CallSite, CallTarget, CellChange,
-    Construction, Delivery, EffectSummary, Facts, FuncKey, LocalOrigins, NewArg, NewCond, NewKind,
-    Origins, ProjectIndex, ProtectedReturn, ReturnsNew, Runner, Shared, SharedChain, SharedLine,
-    SharedState, SiteRole, Slot, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind, cache_flow,
+    Construction, Delivery, EffectSummary, EntryKey, Facts, FuncKey, LocalOrigins, NewArg, NewCond,
+    NewKind, Origins, ProjectIndex, ProtectedReturn, ReturnsNew, Runner, Shared, SharedChain,
+    SharedLine, SharedState, SiteRole, Slot, TypedFieldWrite, TypedFieldWriteSite,
+    UnresolvedWriteSite, WriteKind, cache_flow,
 };
 use heki_ast::Span;
 use heki_kb::ExecEffectKind;
@@ -414,7 +415,7 @@ fn recompute(
         let sites = out.get(func).map(Vec::as_slice).unwrap_or(&[]);
         crate::invalidation::propagate_facts(index, c, func, sites, &mut s);
     }
-    s.refresh_typed_field_writes();
+    s.refresh_typed_field_writes(func);
     s
 }
 
@@ -1685,43 +1686,92 @@ fn transfer_typed_writes(
                 construction,
                 contexts,
                 through_protocol: false,
+                key_from: EntryKey::Written,
+                passed: false,
             },
         );
     }
-    // Typed writes: every callee's facts reach the caller. A private callee hands its write
-    // sites to its callers too, a public one reports its own; what iterating a plain function's
-    // result runs (`rewrite`) runs nowhere in the function, so its sites go to whoever iterates.
+    // A callee's site, as the caller keeps it.
+    let copy = |w: &TypedFieldWriteSite| TypedFieldWriteSite {
+        via_chain: extend_chain(lead, &w.via_chain, rewrite),
+        obj_params: bound_params(w.obj_params, bc),
+        // A write to the callee's own new object stays construction; one to its parameter is
+        // construction when the call hands it a new object.
+        construction: match (&w.construction, here) {
+            (Construction::Yes, Some(_)) => Construction::Yes,
+            (Construction::Param { param, own, .. }, Some(r)) => {
+                r.through_arg(origin(usize::from(*param)), *own)
+            }
+            _ => Construction::No,
+        },
+        contexts: w.contexts | contexts,
+        ..w.clone()
+    };
+    // An item write keyed by a parameter of the callee writes the entry the call passes: the
+    // caller keeps it with that key, whether the callee hands its sites to its callers or not.
+    for w in &facts.typed_field_write_sites {
+        if let EntryKey::Param(p) = w.key_from {
+            let (key, key_from) = passed_key(bc, p);
+            let site = TypedFieldWriteSite {
+                key,
+                key_from,
+                passed: true,
+                ..copy(w)
+            };
+            insert_site(t, caller, site);
+        }
+    }
+    // Typed writes: every callee's facts reach the caller, on the caller's objects. A private
+    // callee hands its write sites to its callers too, a public one reports its own; what
+    // iterating a plain function's result runs (`rewrite`) runs nowhere in the function, so its
+    // sites go to whoever iterates.
     for w in &facts.typed_field_writes {
-        if !t.typed_field_writes.contains(w) {
-            t.typed_field_writes.insert(w.clone());
+        let obj_params = bound_params(w.obj_params, bc);
+        let fresh = w.fresh || crate::initializes_own_self(caller, t, obj_params);
+        if fresh == w.fresh && obj_params == w.obj_params {
+            if !t.typed_field_writes.contains(w) {
+                t.typed_field_writes.insert(w.clone());
+            }
+        } else {
+            t.typed_field_writes.insert(TypedFieldWrite {
+                fresh,
+                obj_params,
+                ..w.clone()
+            });
         }
     }
     if !rewrite && !crate::delegates_to_callers(&bc.callee.qualname) {
         return;
     }
     for w in &facts.typed_field_write_sites {
-        let site = TypedFieldWriteSite {
-            class_qualname: w.class_qualname.clone(),
-            attr: w.attr.clone(),
-            kind: w.kind,
-            span: w.span,
-            via_chain: extend_chain(lead, &w.via_chain, rewrite),
-            obj_params: bound_params(w.obj_params, bc),
-            fresh: w.fresh,
-            key: w.key.clone(),
-            // A write to the callee's own new object stays construction; one to its parameter
-            // is construction when the call hands it a new object.
-            construction: match (&w.construction, here) {
-                (Construction::Yes, Some(_)) => Construction::Yes,
-                (Construction::Param { param, own, .. }, Some(r)) => {
-                    r.through_arg(origin(usize::from(*param)), *own)
-                }
-                _ => Construction::No,
-            },
-            contexts: w.contexts | contexts,
-            through_protocol: w.through_protocol,
+        // A copy passed a key the callee's parameter holds is passed one again above; the
+        // callee's own write keyed so writes the container, in the caller's terms.
+        let key_from = match w.key_from {
+            EntryKey::Param(_) if w.passed => continue,
+            EntryKey::Param(_) => EntryKey::Written,
+            from => from,
         };
-        insert_site(t, caller, site);
+        insert_site(
+            t,
+            caller,
+            TypedFieldWriteSite {
+                key_from,
+                ..copy(w)
+            },
+        );
+    }
+}
+
+/// The key a call passes for parameter `p` of the callee it binds (`bc`): a string constant,
+/// the caller's own parameter, or a value heki cannot tell.
+fn passed_key(bc: &BoundCallee, p: u8) -> (Option<String>, EntryKey) {
+    let arg = bc.params.get(usize::from(p));
+    if let Some(text) = arg.and_then(|a| a.binding.as_ref()?.text.as_deref()) {
+        return (Some(text.to_owned()), EntryKey::Written);
+    }
+    match arg.and_then(|a| a.param.as_ref()) {
+        Some((q, None)) => (None, EntryKey::Param(*q)),
+        _ => (None, EntryKey::Unknown),
     }
 }
 
@@ -2086,6 +2136,8 @@ fn insert_site(s: &mut EffectSummary, owner: &FuncKey, site: TypedFieldWriteSite
         construction: Construction::No,
         contexts: 0,
         through_protocol: false,
+        key_from: EntryKey::Written,
+        passed: false,
     };
     let existing = s
         .typed_field_write_sites
@@ -2099,6 +2151,8 @@ fn insert_site(s: &mut EffectSummary, owner: &FuncKey, site: TypedFieldWriteSite
         .find(|t| {
             t.obj_params == site.obj_params
                 && t.key == site.key
+                && t.key_from == site.key_from
+                && t.passed == site.passed
                 && t.contexts == site.contexts
                 && site_origin(t) == origin
         })

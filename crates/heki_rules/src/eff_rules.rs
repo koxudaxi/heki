@@ -6,7 +6,8 @@ use crate::mut_rules::{
     CallTargets, ContractTarget, FunctionMatcher, FunctionMatchers, References, SiteId, Subclasses,
     allows_fresh, call_verb, contract_places, counts_references, group_texts, helper_changes_field,
     initializes_itself, parse_call_targets, parse_read_targets, parse_targets, patterns,
-    project_classes, reports_import_probes, reports_unresolved, site_callee, write_hits,
+    project_classes, reports_import_probes, reports_unresolved, site_callee, split_item,
+    write_hits,
 };
 use crate::opt_rules::{Creators, Sizes};
 use crate::premises::{self, OpenCause};
@@ -20,8 +21,9 @@ use heki_effect::guards::{loop_bit, per_item_bit};
 use heki_effect::with_paths;
 use heki_effect::{
     AccessKind, BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget,
-    Construction, EffectSummary, ExternalAccess, Facts, FuncKey, HopGap, MustGap, PerItem, Runner,
-    SiteEffect, SiteMust, TypeCtx, Unresolved, WriteKind, anchors_call_site, boundary_reports_in,
+    Construction, EffectSummary, EntryKey, ExternalAccess, Facts, FuncKey, HopGap, MustGap,
+    PerItem, Runner, SiteEffect, SiteMust, TypeCtx, TypedFieldWriteSite, Unresolved, WriteKind,
+    anchors_call_site, boundary_reports_in, initializes_own_self,
 };
 use heki_env::EffectBoundaryRule;
 pub(crate) use heki_ir::ItemOrigins;
@@ -1147,6 +1149,56 @@ impl Boundary<'_> {
         (!(own_body && self.in_scope(callee))).then_some(d)
     }
 
+    /// Whether the search follows the calls `chain` makes from the own call sites `own` of a
+    /// function down to the function that writes: the first at a site the search enters, and
+    /// none below it allowed (`allowed-callees`) or of the scopes.
+    fn follows_chain(
+        &self,
+        cx: &CheckContext<'_>,
+        own: &[(&Path, &CallSite)],
+        chain: &[Arc<CallHop>],
+    ) -> bool {
+        let [first, rest @ ..] = chain else {
+            return false;
+        };
+        let followed = own.iter().any(|(_, site)| {
+            site.span == first.span
+                && site.project_callees().iter().any(|bc| {
+                    bc.callee.fqn() == first.callee
+                        && self.follows(cx, site, &bc.callee, Facts::Body).is_some()
+                })
+        });
+        let writer = chain
+            .last()
+            .and_then(|h| cx.index.function_named(&h.callee));
+        let below = rest.iter().map(|h| Some(h.caller.clone())).chain([writer]);
+        followed
+            && below.into_iter().all(|k| {
+                k.is_some_and(|k| !names_function(&self.allowed_callees, &k) && !self.in_scope(&k))
+            })
+    }
+
+    /// The container `Class.attr` of the entry targets (`Class.attr["key"]`) the boundary judges
+    /// the item write `w` by, when it names some for the written attribute and allows no write of
+    /// the whole container: `writes-targets` entries, or `write-universe` ones. `own_init` leaves
+    /// out a class's own initialization.
+    fn names_entries_of(
+        &self,
+        w: &TypedFieldWriteSite,
+        own_init: &dyn Fn(&ContractTarget) -> bool,
+    ) -> Option<String> {
+        let allowed = self
+            .allow_writes
+            .iter()
+            .any(|a| a.key.is_none() && a.matches(&w.class_qualname, &w.attr));
+        let targets = self.write_targets.iter().filter(|_| self.writes_targets);
+        let entry = targets
+            .chain(&self.write_universe)
+            .find(|t| t.key.is_some() && t.matches(&w.class_qualname, &w.attr) && !own_init(t))?;
+        let (container, _) = split_item(&entry.text)?;
+        (!allowed).then(|| container.to_owned())
+    }
+
     /// Whether the boundary checks writes: `writes-targets`, or a `write-universe`.
     fn checks_writes(&self) -> bool {
         self.writes_targets || !self.write_universe.is_empty()
@@ -1314,6 +1366,26 @@ pub(crate) fn eff201(
 /// its facts, and the parent node with the hops from it.
 type Nodes = Vec<(FuncKey, Facts, Option<(usize, Vec<CallHop>)>)>;
 
+/// The nodes of each function and kind of facts ([`Reach::node`]): the one binding no
+/// initializer's `self`, and the one binding some.
+#[derive(Default)]
+struct NodeIndex {
+    plain: FxHashMap<(FuncKey, Facts), usize>,
+    initializing: FxHashMap<(FuncKey, Facts), usize>,
+}
+
+/// The parameters of `bc`'s callee bound to an object the caller's parameters `held` may be,
+/// with the initializer whose `self` they hold (`(initializer node, held)`,
+/// [`Reach::initialized_by`]). The objects are mapped across the call as the summaries map a
+/// helper's writes to its caller (`caller_params_of`), so an initializer initializes its `self`
+/// through every helper it passes it to.
+fn initializing_at((init, held): (usize, u64), bc: &BoundCallee) -> Option<(usize, u64)> {
+    let bound = (0..bc.params.len().min(64))
+        .filter(|&k| bc.caller_params_of(1u64 << k) & held != 0)
+        .fold(0, |mask, k| mask | 1u64 << k);
+    (bound != 0).then_some((init, bound))
+}
+
 /// Hops from the scope function down to node `i`.
 fn chain_to(nodes: &Nodes, mut i: usize) -> Vec<CallHop> {
     let mut chain = Vec::new();
@@ -1399,6 +1471,9 @@ fn undeclared_text(entry: &str, attr: &str) -> String {
 enum WriteBucket {
     Target(usize),
     Undeclared(String),
+    /// An item write of the container `Class.attr` under a key heki cannot tell, where the
+    /// boundary names entries of it.
+    UnresolvedKey(String),
 }
 
 /// The part of the call graph one scope function reaches. A node is a function's facts of one
@@ -1406,6 +1481,9 @@ enum WriteBucket {
 /// a generator hands out the generator's body, which runs where the object is iterated).
 struct Reach<'a> {
     nodes: Nodes,
+    /// By node: the parameters of its function that the path to it binds to an initializer's
+    /// own `self`, with that initializer's node ([`initializing_at`]).
+    initializing: Vec<Option<(usize, u64)>>,
     /// Followed call edges `(caller node, callee node, binding)`.
     edges: Vec<(usize, usize, &'a BoundCallee)>,
     exec: BTreeMap<ExecEffectKind, Found>,
@@ -1447,6 +1525,7 @@ impl<'a> Reach<'a> {
             .map_or(Facts::Body, EffectSummary::body_facts);
         let mut reach = Self {
             nodes: vec![(start.clone(), start_facts, None)],
+            initializing: vec![None],
             edges: Vec::new(),
             exec: BTreeMap::new(),
             writes: BTreeMap::new(),
@@ -1456,8 +1535,8 @@ impl<'a> Reach<'a> {
             unjudged: BTreeMap::new(),
             start_span,
         };
-        let mut index_of: FxHashMap<(FuncKey, Facts), usize> = FxHashMap::default();
-        index_of.insert((start.clone(), start_facts), 0);
+        let mut index_of = NodeIndex::default();
+        index_of.plain.insert((start.clone(), start_facts), 0);
         let mut i = 0;
         while i < reach.nodes.len() {
             let (func, facts) = (reach.nodes[i].0.clone(), reach.nodes[i].1);
@@ -1473,6 +1552,7 @@ impl<'a> Reach<'a> {
                 Facts::Result
             };
             let own: &[(&'a Path, &'a CallSite)] = sites.get(&func).map_or(&[], Vec::as_slice);
+            let held = reach.initialized_by(cx, i);
             if b.checks_writes() && runs_body {
                 reach.collect_writes(cx, sites, b, i, &func, own);
             }
@@ -1525,13 +1605,9 @@ impl<'a> Reach<'a> {
                                 None => vec![hop(&func, bc.callee.fqn())],
                                 Some(p) => vec![hop(&func, p.fqn()), hop(p, bc.callee.fqn())],
                             };
+                            let initializing = held.and_then(|h| initializing_at(h, bc));
                             let node = (bc.callee.clone(), d.from);
-                            let j = *index_of.entry(node).or_insert_with(|| {
-                                reach
-                                    .nodes
-                                    .push((bc.callee.clone(), d.from, Some((i, hops))));
-                                reach.nodes.len() - 1
-                            });
+                            let j = reach.node(&mut index_of, node, initializing, (i, hops));
                             reach.edges.push((i, j, bc));
                         }
                     }
@@ -1549,6 +1625,80 @@ impl<'a> Reach<'a> {
             i += 1;
         }
         reach
+    }
+
+    /// The parameters of node `i`'s function that hold an initializer's own `self`
+    /// ([`initializes_own_self`]), with that initializer's node: its own `self` when it is an
+    /// initializer, else what the path to it binds to one.
+    fn initialized_by(&self, cx: &CheckContext<'_>, i: usize) -> Option<(usize, u64)> {
+        let func = &self.nodes[i].0;
+        // Of an object that may be its `self`.
+        if (cx.index.summary(func)).is_some_and(|s| initializes_own_self(func, s, 1)) {
+            Some((i, 1))
+        } else {
+            self.initializing[i]
+        }
+    }
+
+    /// The node of `node` that the path through node `parent` (with `hops`) reaches, binding
+    /// `initializing` ([`initializing_at`]). A function has at most two nodes: one binding
+    /// no initializer's `self`, and one binding the parameters of the first path that binds
+    /// some. A later path binding others takes the second node when its parameters include all
+    /// of that node's, else the first: either way the path judges no access as initialization
+    /// that its own parameters do not make one.
+    fn node(
+        &mut self,
+        index: &mut NodeIndex,
+        node: (FuncKey, Facts),
+        initializing: Option<(usize, u64)>,
+        parent: (usize, Vec<CallHop>),
+    ) -> usize {
+        if let Some((_, held)) = initializing {
+            match index.initializing.get(&node) {
+                Some(&j) if self.initializing[j].is_some_and(|(_, h)| h & !held == 0) => {
+                    return j;
+                }
+                Some(_) => {}
+                None => {
+                    let j = self.push(node.clone(), initializing, parent);
+                    index.initializing.insert(node, j);
+                    return j;
+                }
+            }
+        }
+        if let Some(&j) = index.plain.get(&node) {
+            return j;
+        }
+        let j = self.push(node.clone(), None, parent);
+        index.plain.insert(node, j);
+        j
+    }
+
+    fn push(
+        &mut self,
+        (func, facts): (FuncKey, Facts),
+        initializing: Option<(usize, u64)>,
+        parent: (usize, Vec<CallHop>),
+    ) -> usize {
+        self.nodes.push((func, facts, Some(parent)));
+        self.initializing.push(initializing);
+        self.nodes.len() - 1
+    }
+
+    /// A class's own initialization ([`initializes_itself`], for a target's class `family`):
+    /// node `i` is an initializer accessing what may be its own `self` (`obj_params`), or the
+    /// object may be a parameter the path to node `i` binds to an initializer's `self`.
+    fn initializes(
+        &self,
+        cx: &CheckContext<'_>,
+        i: usize,
+        family: &FxHashSet<String>,
+        obj_params: u64,
+    ) -> bool {
+        initializes_itself(cx, &self.nodes[i].0, family, obj_params)
+            || self.initializing[i].is_some_and(|(init, held)| {
+                obj_params & held != 0 && initializes_itself(cx, &self.nodes[init].0, family, 1)
+            })
     }
 
     /// Note the `call-targets` groups `site` of node `i` (function `func`, in `path`) calls, or
@@ -1600,8 +1750,13 @@ impl<'a> Reach<'a> {
             .into_iter()
             .flat_map(|s| &s.typed_field_write_sites);
         for w in writes {
+            // A copy passed a parameter of this function as the key is decided by the calls
+            // above it, unless the search starts here.
+            if w.passed && matches!(w.key_from, EntryKey::Param(_)) && i != 0 {
+                continue;
+            }
             let extra = match (w.via_chain.as_slice(), w.kind) {
-                ([], _) => None,
+                ([], _) => Vec::new(),
                 // A helper of the scopes counts too: it cannot see the type of the field it
                 // is handed, so the function handing it over reports the write. The helper's
                 // summary also holds what its callees change, so the write counts only when the
@@ -1618,7 +1773,11 @@ impl<'a> Reach<'a> {
                             })
                     }) =>
                 {
-                    Some(CallHop::clone(hop))
+                    vec![CallHop::clone(hop)]
+                }
+                // A callee's item write with the key a call here passes.
+                (chain, _) if w.passed && b.follows_chain(cx, own, chain) => {
+                    heki_effect::owned_chain(chain)
                 }
                 _ => continue,
             };
@@ -1628,8 +1787,7 @@ impl<'a> Reach<'a> {
                 continue;
             }
             // A class's own initialization (constructing a fresh object) is not a write.
-            let own_init =
-                |t: &ContractTarget| initializes_itself(cx, func, &t.classes, w.obj_params);
+            let own_init = |t: &ContractTarget| self.initializes(cx, i, &t.classes, w.obj_params);
             let mut buckets: Vec<WriteBucket> = Vec::new();
             if b.writes_targets {
                 buckets.extend(
@@ -1650,11 +1808,23 @@ impl<'a> Reach<'a> {
                 };
                 buckets.push(WriteBucket::Undeclared(text));
             }
+            // An item write whose key heki cannot tell may write an entry the boundary names.
+            let key_open = match w.key_from {
+                EntryKey::Written => false,
+                EntryKey::Param(_) => i == 0,
+                EntryKey::Unknown => true,
+            };
+            if buckets.is_empty()
+                && key_open
+                && let Some(container) = b.names_entries_of(w, &own_init)
+            {
+                buckets.push(WriteBucket::UnresolvedKey(container));
+            }
             for bucket in buckets {
                 let nodes = &self.nodes;
                 note(&mut self.writes, bucket, (func.fqn(), w.span), || {
                     let mut chain = chain_to(nodes, i);
-                    chain.extend(extra.clone());
+                    chain.extend(extra.iter().cloned());
                     (chain, w.span, w.kind.describe())
                 });
             }
@@ -1662,7 +1832,7 @@ impl<'a> Reach<'a> {
     }
 
     /// Reads of `read-targets` node `i` performs (read sites are local facts of every
-    /// summary); an initializer reading its own instance is no read.
+    /// summary); a class's own initialization reading its instance is no read.
     fn collect_reads(&mut self, cx: &CheckContext<'_>, b: &Boundary<'_>, i: usize, func: &FuncKey) {
         let reads = cx
             .index
@@ -1671,10 +1841,14 @@ impl<'a> Reach<'a> {
             .flat_map(|s| &s.typed_field_read_sites)
             .filter(|r| r.counts_for_contracts());
         for r in reads {
-            for (ti, _) in b.read_targets.iter().enumerate().filter(|(_, t)| {
-                t.matches(&r.class_qualname, &r.attr)
-                    && !initializes_itself(cx, func, &t.classes, r.obj_params)
-            }) {
+            let read: Vec<usize> = (b.read_targets.iter().enumerate())
+                .filter(|(_, t)| {
+                    t.matches(&r.class_qualname, &r.attr)
+                        && !self.initializes(cx, i, &t.classes, r.obj_params)
+                })
+                .map(|(ti, _)| ti)
+                .collect();
+            for ti in read {
                 let nodes = &self.nodes;
                 note(&mut self.reads, ti, (func.fqn(), r.span), || {
                     (chain_to(nodes, i), r.span, r.kind.describe())
@@ -2021,6 +2195,13 @@ impl<'a> Reach<'a> {
                         key.qualname, found.kind, b.label
                     );
                     emit(found, attr.clone(), message);
+                }
+                WriteBucket::UnresolvedKey(container) => {
+                    let message = format!(
+                        "`{}` writes an entry of `{container}` under a key heki cannot tell ({}{via}), where {} names some of its entries",
+                        key.qualname, found.kind, b.label
+                    );
+                    emit(found, format!("{container}[?]"), message);
                 }
             }
         }
