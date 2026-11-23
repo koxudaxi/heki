@@ -2415,6 +2415,7 @@ fn mode(
             key,
             value: value.to_owned(),
             expected,
+            values,
         })
 }
 

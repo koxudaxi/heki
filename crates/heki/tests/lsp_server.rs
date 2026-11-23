@@ -484,6 +484,21 @@ fn lsp_reports_an_invalid_configuration() {
     lsp.notify("initialized", json!({}));
     let log = lsp.log("unknown rule selector `NOPE1`");
     assert_eq!(log["params"]["type"], 2);
+    // The server says what `heki check` says, with the file's path as the server has it.
+    let (_, _, cli) = p.heki(&["check"]);
+    let message = log["params"]["message"].as_str().unwrap();
+    let after_path = |text: &str| text.split_once(".toml").map(|(_, rest)| rest.to_owned());
+    assert_eq!(
+        after_path(message),
+        after_path(cli.trim_end()),
+        "{message}\n{cli}"
+    );
+    assert!(
+        message.ends_with(
+            "\n  = docs: https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint"
+        ),
+        "{message}"
+    );
     assert_eq!(
         lsp.settle(),
         json!({"ready": false, "open_documents": 0, "in_flight": 0, "published": 0})

@@ -46,6 +46,21 @@ pub enum ProfileError {
     Read { path: String, cause: std::io::Error },
 }
 
+impl heki_env::Explain for ProfileError {
+    fn explain(&self) -> heki_env::Problem {
+        let problem = match self {
+            Self::Parse(_) => heki_env::Problem::new(self.to_string()),
+            Self::Read { path, cause } => {
+                heki_env::Problem::new(format!("cannot read the profile dump: {cause}"))
+                    .at_file(Path::new(path))
+            }
+        };
+        problem
+            .help("pass the collapsed stacks of CPython 3.15's profiler or py-spy, or `--gecko` JSON, to `--profile`")
+            .docs(heki_env::Docs::Profiles)
+    }
+}
+
 /// A project function a frame may denote.
 #[derive(Debug, Clone)]
 pub struct ProfiledFunction<'a> {

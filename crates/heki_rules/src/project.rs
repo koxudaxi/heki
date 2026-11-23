@@ -17,7 +17,10 @@ use heki_effect::{
     Contracts, ModuleInput, ModuleLayout, OptInFacts, ProjectIndex, TypedWrites, UnreadModule,
     analyze_project_for,
 };
-use heki_env::{ConfigError, HekiConfig, LintConfig, PythonVersion, RuntimeProfile, Severity};
+use heki_env::{
+    ConfigError, Docs, Explain, HekiConfig, LintConfig, Problem, PythonVersion, RuntimeProfile,
+    Setting, Severity,
+};
 use heki_ir::ModuleIr;
 use heki_kb::{EcosystemPatch, EffectiveEcosystemKb, EffectiveSoundnessKb, KbError};
 use heki_semantic::SemanticModel;
@@ -72,6 +75,42 @@ pub enum ProjectError {
     MissingPath(PathBuf),
     #[error("failed to walk `{path}`: {cause}")]
     Walk { path: PathBuf, cause: ignore::Error },
+}
+
+impl Explain for ProjectError {
+    fn explain(&self) -> Problem {
+        let problem = Problem::new(self.to_string());
+        match self {
+            Self::Config(e) => e.explain(),
+            Self::Kb(e) => e.explain(),
+            Self::TargetVersion(version) => {
+                let versions: Vec<String> =
+                    PythonVersion::SUPPORTED.iter().map(|v| v.tag()).collect();
+                problem
+                    .one_of(version, &versions)
+                    .help("heki checks Python 3.11 to 3.15: `target-version = \"py312\"`, or `--target-version py312`")
+                    .docs(Docs::TargetVersion)
+                    .setting(Setting {
+                        key: Some("target-version".to_owned()),
+                        value: Some(version.clone()),
+                        ..Setting::default()
+                    })
+            }
+            Self::Glob { pattern, .. } => problem
+                .help("an entry of `exclude` and `extend-exclude` is a glob of project-relative paths, as `\"generated\"` or `\"tests/fixtures/*\"`")
+                .docs(Docs::CheckedFiles)
+                .setting(Setting {
+                    value: Some(pattern.clone()),
+                    ..Setting::default()
+                }),
+            Self::MissingPath(_) => problem
+                .help("pass files or directories that exist, relative to the working directory: `heki check src tests`")
+                .docs(Docs::Check),
+            Self::Walk { .. } => problem
+                .help("make the directory readable, or exclude it with `extend-exclude`")
+                .docs(Docs::CheckedFiles),
+        }
+    }
 }
 
 /// One parsed module (IR included: callers drop it once summarized when it must not stay
@@ -393,15 +432,8 @@ pub fn parse_source(
     layout: &ModuleLayout,
     runtime: RuntimeProfile,
 ) -> Result<ParsedFile, FileError> {
-    let parsed = heki_ast::parse_module(&source).map_err(|errs| {
-        let index = LineIndex::from_source(&source);
-        let first = &errs[0];
-        FileError {
-            path: display_path(path),
-            position: Some(index.line_col(first.span.start)),
-            message: format!("syntax error: {} ({} error(s))", first.message, errs.len()),
-        }
-    })?;
+    let parsed =
+        heki_ast::parse_module(&source).map_err(|errs| FileError::syntax(path, &source, &errs))?;
     let (rel, module_name, is_package) = module_identity(path, root, layout);
     let semantic = heki_semantic::analyze_module(&parsed, &source, runtime);
     let ir = heki_ir::build_module_ir(&parsed, &source, &semantic, runtime);
@@ -468,6 +500,34 @@ pub struct ProjectOptions<'a> {
     pub removed: Option<&'a FxHashSet<PathBuf>>,
 }
 
+impl ProjectOptions<'_> {
+    /// The file the configuration is read from: `--config`, else the first configuration file
+    /// at the project root.
+    pub fn config_file(&self) -> Option<PathBuf> {
+        self.config_file_at(&self.root())
+    }
+
+    /// The project root ([`find_root`]) of the first path.
+    fn root(&self) -> PathBuf {
+        let first = self
+            .paths
+            .first()
+            .cloned()
+            .unwrap_or_else(|| PathBuf::from("."));
+        let working_dir = match self.working_dir {
+            Some(dir) => dir.to_path_buf(),
+            None => std::env::current_dir().unwrap_or_else(|_| first.clone()),
+        };
+        find_root(&first, &working_dir)
+    }
+
+    fn config_file_at(&self, root: &Path) -> Option<PathBuf> {
+        self.config
+            .map(Path::to_path_buf)
+            .or_else(|| HekiConfig::file_in(root))
+    }
+}
+
 /// Configuration and knowledge bases of a project root.
 pub struct ProjectEnv {
     pub root: PathBuf,
@@ -482,20 +542,8 @@ pub struct ProjectEnv {
 
 impl ProjectEnv {
     pub fn load(opts: &ProjectOptions<'_>) -> Result<Self, ProjectError> {
-        let first = opts
-            .paths
-            .first()
-            .cloned()
-            .unwrap_or_else(|| PathBuf::from("."));
-        let working_dir = match opts.working_dir {
-            Some(dir) => dir.to_path_buf(),
-            None => std::env::current_dir().unwrap_or_else(|_| first.clone()),
-        };
-        let root = find_root(&first, &working_dir);
-        let config_file = opts
-            .config
-            .map(Path::to_path_buf)
-            .or_else(|| HekiConfig::file_in(&root));
+        let root = opts.root();
+        let config_file = opts.config_file_at(&root);
         let cfg = match &config_file {
             Some(path) => HekiConfig::load_from_file(path)?,
             None => HekiConfig::default(),
@@ -543,6 +591,15 @@ pub struct FileError {
     /// The 1-based line and column of a syntax error.
     pub position: Option<(u32, u32)>,
     pub message: String,
+    pub kind: FileErrorKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileErrorKind {
+    Syntax,
+    Unreadable,
+    /// The file changed on disk while `--fix` was fixing it: its fixes were not written.
+    ChangedWhileFixing,
 }
 
 impl FileError {
@@ -552,18 +609,68 @@ impl FileError {
             path: display_path(path),
             position: None,
             message: cause.to_string(),
+            kind: FileErrorKind::Unreadable,
+        }
+    }
+
+    /// The first of the syntax errors `errs` of `source`, the text of the file at `path`.
+    pub fn syntax(path: &Path, source: &str, errs: &[heki_ast::ParseError]) -> Self {
+        let first = &errs[0];
+        Self {
+            path: display_path(path),
+            position: Some(LineIndex::from_source(source).line_col(first.span.start)),
+            message: format!("syntax error: {} ({} error(s))", first.message, errs.len()),
+            kind: FileErrorKind::Syntax,
+        }
+    }
+
+    /// The file at `path` changed on disk while `--fix` was fixing it.
+    pub fn changed_while_fixing(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            position: None,
+            message: "changed on disk while heki was fixing it; its fixes were not written"
+                .to_owned(),
+            kind: FileErrorKind::ChangedWhileFixing,
         }
     }
 
     /// `path:line:col: message` (`path: message` without a position), with the path written as
     /// `path_text` (the caller's choice: `heki check` writes it relative to the working directory).
     pub fn report(&self, path_text: &str) -> String {
-        match self.position {
-            Some((line, col)) => format!("{path_text}:{line}:{col}: {}", self.message),
-            None => format!("{path_text}: {}", self.message),
+        let at = self
+            .position
+            .map_or_else(String::new, |(line, col)| format!(":{line}:{col}"));
+        format!("{path_text}{at}: {}", self.message)
+    }
+}
+
+impl Explain for FileError {
+    fn explain(&self) -> Problem {
+        let message = match self.kind {
+            FileErrorKind::Unreadable => format!("cannot read the file: {}", self.message),
+            _ => self.message.clone(),
+        };
+        let problem = Problem::new(message);
+        let problem = match self.position {
+            Some((line, column)) => problem.at(&self.path, line, column),
+            None => problem.at_file(&self.path),
+        };
+        match self.kind {
+            FileErrorKind::Syntax => problem
+                .help("fix the syntax error, or exclude the file with `extend-exclude`")
+                .docs(Docs::CheckedFiles),
+            FileErrorKind::Unreadable => problem
+                .help("make the file readable UTF-8 text, or exclude it with `extend-exclude`")
+                .docs(Docs::CheckedFiles),
+            FileErrorKind::ChangedWhileFixing => problem
+                .help("run `heki check --fix` again")
+                .docs(Docs::Fixes),
         }
     }
 }
+
+impl std::error::Error for FileError {}
 
 /// With the path as reports write it ([`heki_diagnostics::path_text`]).
 impl std::fmt::Display for FileError {

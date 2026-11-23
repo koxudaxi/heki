@@ -347,18 +347,8 @@ fn unblocking_help(e: ExecEffectKind) -> &'static str {
     }
 }
 
-pub(crate) fn effect_name(e: ExecEffectKind) -> &'static str {
-    match e {
-        ExecEffectKind::BlockingNet => "blocking_net",
-        ExecEffectKind::BlockingDb => "blocking_db",
-        ExecEffectKind::BlockingSubprocess => "blocking_subprocess",
-        ExecEffectKind::BlockingSync => "blocking_sync",
-        ExecEffectKind::Sleep => "sleep",
-        ExecEffectKind::BlockingFs => "blocking_fs",
-        ExecEffectKind::UnpooledClientAlloc => "unpooled_client_alloc",
-        ExecEffectKind::DbQuery => "db_query",
-        ExecEffectKind::QuadraticRealloc => "quadratic_realloc",
-    }
+pub(crate) const fn effect_name(e: ExecEffectKind) -> &'static str {
+    e.name()
 }
 
 /// The call with the effect, in parentheses, when the call a loop makes reaches it through
@@ -1017,6 +1007,7 @@ pub(crate) fn forbidden_effects(
                 boundary: boundary.name.clone(),
                 token: token.clone(),
                 expected: FORBID_EXPECTED.as_str(),
+                values: FORBID_NAMES.as_slice(),
             });
         };
         effects.extend(kinds.iter().copied());
@@ -1024,12 +1015,13 @@ pub(crate) fn forbidden_effects(
     Ok(effects)
 }
 
+/// The tokens of [`FORBID_TOKENS`].
+static FORBID_NAMES: LazyLock<Vec<&'static str>> =
+    LazyLock::new(|| FORBID_TOKENS.iter().map(|(t, _)| *t).collect());
+
 /// `UnknownForbid::expected`, built from [`FORBID_TOKENS`].
 static FORBID_EXPECTED: LazyLock<String> = LazyLock::new(|| {
-    let tokens: Vec<String> = FORBID_TOKENS
-        .iter()
-        .map(|(t, _)| format!("`{t}`"))
-        .collect();
+    let tokens: Vec<String> = FORBID_NAMES.iter().map(|t| format!("`{t}`")).collect();
     format!("one of {}", tokens.join(", "))
 });
 

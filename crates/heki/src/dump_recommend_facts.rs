@@ -9,7 +9,7 @@
 
 use crate::DumpRecommendFactsArgs;
 use crate::OutputFormat;
-use crate::check::{finish, selection, shown_errors, shown_text};
+use crate::check::{finish, selection, shown_text};
 use anyhow::Result;
 use heki_ast::LineIndex;
 use heki_rules::blind_spots::{
@@ -250,7 +250,7 @@ pub(crate) fn run(args: &DumpRecommendFactsArgs) -> Result<ExitCode> {
     drop(out);
     finish(
         OutputFormat::Full,
-        &shown_errors(&project.errors),
+        &crate::failure::of_files(&project.errors),
         ExitCode::SUCCESS,
     )
 }

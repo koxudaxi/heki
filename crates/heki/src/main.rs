@@ -10,6 +10,7 @@ macro_rules! log {
 mod check;
 mod dump_facts;
 mod dump_recommend_facts;
+mod failure;
 mod inspect;
 mod open_premises;
 mod prompt;
@@ -20,13 +21,14 @@ use anyhow::Result;
 use clap::parser::ValueSource;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use heki_ast::LineIndex;
+use heki_env::{Docs, Problem};
 use heki_rules::experimental::{
     EXPERIMENTAL_FEATURES, EXPERIMENTAL_POLICY, ExperimentalFeature, experimental_rule,
 };
 use heki_rules::precision::{self, Certification, Measurement};
-use heki_rules::project::{Project, ProjectOptions};
+use heki_rules::project::{FileError, Project, ProjectOptions};
 use heki_rules::{Activation, CORE_RULES, RuleMeta, find_rule};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[derive(Debug, Parser)]
@@ -444,8 +446,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             };
             let Some(r) = find_rule(q) else {
-                eprintln!("unknown rule: {q}");
-                return Ok(ExitCode::from(2));
+                let problem = Problem::new(format!("unknown rule `{q}`")).docs(Docs::Rules);
+                return Err(heki_rules::selection::unknown_rule(problem, q, false).into());
             };
             if json {
                 println!("{}", serde_json::to_string_pretty(&RuleRecord::new(r))?);
@@ -476,9 +478,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Inspect(args) => inspect::run(&args),
         Commands::Recommend(args) => recommend::run(&args),
         Commands::DumpSemantic(args) => {
-            let src = heki_ast::read_source(&args.file)?;
-            let parsed = heki_ast::parse_module(&src)
-                .map_err(|errs| anyhow::anyhow!("parse errors: {errs:?}"))?;
+            let (src, parsed) = parse_file(&args.file)?;
             let ver = heki_env::PythonVersion::parse_tag(&args.target_version)
                 .unwrap_or(heki_env::PythonVersion::PY315);
             let model =
@@ -487,9 +487,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Commands::DumpIr(args) => {
-            let src = heki_ast::read_source(&args.file)?;
-            let parsed = heki_ast::parse_module(&src)
-                .map_err(|errs| anyhow::anyhow!("parse errors: {errs:?}"))?;
+            let (src, parsed) = parse_file(&args.file)?;
             let ver = heki_env::PythonVersion::parse_tag(&args.target_version)
                 .unwrap_or(heki_env::PythonVersion::PY315);
             let profile = heki_env::RuntimeProfile::from(ver);
@@ -499,9 +497,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Commands::DumpFacts(args) => {
-            let src = heki_ast::read_source(&args.file)?;
-            let parsed = heki_ast::parse_module(&src)
-                .map_err(|errs| anyhow::anyhow!("parse errors: {errs:?}"))?;
+            let (src, parsed) = parse_file(&args.file)?;
             let ver = heki_env::PythonVersion::parse_tag(&args.target_version)
                 .unwrap_or(heki_env::PythonVersion::PY315);
             let profile = heki_env::RuntimeProfile::from(ver);
@@ -543,6 +539,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+/// The source and syntax tree of `file`, for the `dump-*` commands.
+fn parse_file(file: &Path) -> Result<(String, heki_ast::ParsedModule)> {
+    let src = heki_ast::read_source(file).map_err(|e| FileError::unreadable(file, &e))?;
+    let parsed =
+        heki_ast::parse_module(&src).map_err(|errs| FileError::syntax(file, &src, &errs))?;
+    Ok((src, parsed))
 }
 
 #[derive(serde::Serialize)]
@@ -605,7 +609,7 @@ fn run_assumptions(args: AssumptionsArgs) -> Result<ExitCode> {
     }
     check::finish(
         OutputFormat::Full,
-        &check::shown_errors(&project.errors),
+        &failure::of_files(&project.errors),
         ExitCode::SUCCESS,
     )
 }
@@ -642,14 +646,11 @@ fn main() -> ExitCode {
         .build_global()
         .expect("the global thread pool is built before any parallel work");
     let cli = parse_cli();
-    let format = match &cli.command {
-        Commands::Check(args) => args.output_format,
-        _ => OutputFormat::Full,
-    };
+    let failures = failure::Failures::of(&cli.command);
     let code = match run(cli) {
         Ok(code) => code,
         Err(err) => {
-            log!(format, "heki error: {err:#}");
+            failures.fail(&err);
             ExitCode::from(2)
         }
     };

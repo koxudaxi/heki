@@ -127,7 +127,7 @@ fn unreadable_and_malformed_configuration_is_a_configuration_error() {
     };
     fails(
         &["--config", "missing.toml"],
-        "failed to read config file missing.toml",
+        "error: cannot read the configuration file `missing.toml`: ",
     );
     // The cause is printed once (the message carries it; it is not also a `source()`).
     let (_, _, stderr) = p.check(&["--config", "missing.toml"]);
@@ -135,21 +135,21 @@ fn unreadable_and_malformed_configuration_is_a_configuration_error() {
     p.write("alt/pyproject.toml", "[tool.heki\n");
     fails(
         &["--config", "alt/pyproject.toml"],
-        "failed to parse TOML in alt/pyproject.toml",
+        "error: alt/pyproject.toml:1:11: the configuration file is not valid TOML: ",
     );
     p.write("alt/custom.toml", "[lint\n");
     fails(
         &["--config", "alt/custom.toml"],
-        "failed to parse TOML in alt/custom.toml",
+        "error: alt/custom.toml:1:6: the configuration file is not valid TOML: ",
     );
     // Configuration that is not UTF-8 cannot be read.
     std::fs::write(p.dir.join("heki.toml"), b"\xff\xfe").unwrap();
-    fails(&[], "heki.toml: stream did not contain valid UTF-8");
+    fails(&[], "heki.toml`: stream did not contain valid UTF-8");
     std::fs::remove_file(p.dir.join("heki.toml")).unwrap();
     std::fs::write(p.dir.join("pyproject.toml"), b"\xff\xfe").unwrap();
-    fails(&[], "pyproject.toml: stream did not contain valid UTF-8");
+    fails(&[], "pyproject.toml`: stream did not contain valid UTF-8");
     p.write("pyproject.toml", "[tool.heki\n");
-    fails(&[], "failed to parse TOML in");
+    fails(&[], "the configuration file is not valid TOML");
 
     let config = |toml: &str| {
         p.write(
@@ -158,11 +158,11 @@ fn unreadable_and_malformed_configuration_is_a_configuration_error() {
         );
     };
     config("[tool.heki.lint.severity]\nNOPE9 = \"warning\"\n");
-    fails(&[], "unknown rule `NOPE9` in lint.severity");
+    fails(&[], "unknown rule selector `NOPE9` in `lint.severity`");
     config("[tool.heki]\nextend-exclude = [\"gen[erated\"]\n");
     fails(&[], "invalid exclude glob `gen[erated`");
     config("[tool.heki.lint]\nper-file-ignores = { \"a[.py\" = [\"EFF101\"] }\n");
-    fails(&[], "invalid per-file-ignores glob `a[.py`");
+    fails(&[], "invalid glob `a[.py` in `lint.per-file-ignores`");
     config(
         "[[tool.heki.write-owners]]\nname = \"s\"\ntargets = [\"Model.fields\"]\nallowed-writers = [\"Store.[*\"]\n",
     );
@@ -223,10 +223,13 @@ async def handler():
     p.write("custom.toml", &format!("[[tool.heki.ecosystem]]\n{entry}"));
     fails(
         &["--config", "custom.toml"],
-        "`[tool.heki]` in custom.toml: only a `pyproject.toml` holds the settings under `tool.heki`",
+        "error: custom.toml:1:3: `[tool.heki]` outside a `pyproject.toml`\n",
     );
     p.write("heki.toml", &format!("[[tool.heki.ecosystem]]\n{entry}"));
-    fails(&[], "`[tool.heki]` in");
+    fails(
+        &[],
+        "error: heki.toml:1:3: `[tool.heki]` outside a `pyproject.toml`\n",
+    );
     std::fs::remove_file(p.dir.join("heki.toml")).unwrap();
     p.write(
         "alt/pyproject.toml",
@@ -234,23 +237,32 @@ async def handler():
     );
     fails(
         &["--config", "alt/pyproject.toml"],
-        "`ecosystem` at the top level of alt/pyproject.toml: a `pyproject.toml` holds the settings under `[tool.heki]`",
+        "error: alt/pyproject.toml:4:3: `ecosystem` at the top level of a `pyproject.toml`\n",
     );
     p.write(
         "custom.toml",
         "[lint]\nignore = [\"EFF101\"]\nbogus = true\n",
     );
-    fails(&["--config", "custom.toml"], "unknown field `bogus`");
+    fails(
+        &["--config", "custom.toml"],
+        "error: custom.toml:3:1: unknown key `bogus` in [lint]\n",
+    );
     p.write(
         "pyproject.toml",
         "[project]\nname = \"t\"\n\n[tool.heki]\ntarget_version = \"py312\"\n",
     );
-    fails(&[], "unknown field `target_version`");
+    fails(
+        &[],
+        "unknown key `target_version` in [tool.heki]\n  |\n5 | target_version = \"py312\"\n  | ^\n  = help: did you mean `target-version`?\n",
+    );
     p.write(
         "pyproject.toml",
         "[project]\nname = \"t\"\n\n[[tool.heki.write-owners]]\nname = \"s\"\ntarget = [\"Model.fields\"]\n",
     );
-    fails(&[], "unknown field `target`");
+    fails(
+        &[],
+        "unknown key `target` in [[tool.heki.write-owners]]\n  |\n6 | target = [\"Model.fields\"]\n  | ^\n  = help: did you mean `targets`?\n",
+    );
 }
 
 #[test]
@@ -359,7 +371,8 @@ fn a_source_that_is_not_utf8_is_a_read_error() {
     assert_eq!(code, 2, "{stderr}");
     assert_eq!(hits(&stdout), vec![hit("a.py", 5, "EFF101")]);
     assert!(
-        stderr.contains("error: latin1.py: stream did not contain valid UTF-8"),
+        stderr
+            .contains("error: latin1.py: cannot read the file: stream did not contain valid UTF-8"),
         "{stderr}"
     );
 }
@@ -382,7 +395,7 @@ fn fixes_that_cannot_be_written_are_an_io_error() {
     if let Some(denied) = denied {
         assert_eq!(code, 2, "{stderr}");
         assert!(
-            stderr.contains(&format!("heki error: failed to write `a.py`: {denied}")),
+            stderr.contains(&format!("error: a.py: cannot write the file: {denied}\n")),
             "{stderr}"
         );
         assert_eq!(p.read("a.py"), src);
@@ -421,7 +434,7 @@ fn ratchet_baseline_files_that_cannot_be_read_or_written() {
     let (code, _, stderr) = p.check(&["--baseline", "missing.toml"]);
     assert_eq!(code, 2);
     assert!(
-        stderr.contains("failed to read baseline missing.toml"),
+        stderr.contains("error: missing.toml: cannot read the baseline: "),
         "{stderr}"
     );
     let (code, _, stderr) = p.check(&["--baseline", "no-dir/b.toml", "--update-baseline"]);
@@ -430,7 +443,7 @@ fn ratchet_baseline_files_that_cannot_be_read_or_written() {
     let missing_dir = std::fs::write(p.dir.join("no-dir/b.toml"), "").unwrap_err();
     assert!(
         stderr.contains(&format!(
-            "failed to write baseline no-dir/b.toml: {missing_dir}"
+            "error: no-dir/b.toml: cannot write the baseline: {missing_dir}\n"
         )),
         "{stderr}"
     );
@@ -625,13 +638,13 @@ fn snapshot_files_that_cannot_be_read_or_written() {
     let (code, _, stderr) = p.check(&["--extend-select", "MUT103"]);
     assert_eq!(code, 2);
     assert!(
-        stderr.contains("failed to read summary snapshot"),
+        stderr.contains("error: .heki-summary-snapshot.json: cannot read the summary snapshot: "),
         "{stderr}"
     );
     let (code, _, stderr) = p.heki(&["snapshot", "--write"]);
     assert_eq!(code, 2);
     assert!(
-        stderr.contains("failed to write summary snapshot"),
+        stderr.contains("error: .heki-summary-snapshot.json: cannot write the summary snapshot: "),
         "{stderr}"
     );
 }
@@ -675,8 +688,8 @@ fn an_exclude_set_too_large_to_compile_is_a_configuration_error() {
     let (code, _, stderr) = p.check(&[]);
     assert_eq!(code, 2);
     assert!(
-        stderr.starts_with("heki error: invalid exclude glob `.bzr, .direnv,")
-            && stderr.trim_end().ends_with("error building NFA"),
+        stderr.starts_with("error: invalid exclude glob `.bzr, .direnv,")
+            && stderr.contains("error building NFA\n  = help: "),
         "{}",
         &stderr[..200.min(stderr.len())]
     );

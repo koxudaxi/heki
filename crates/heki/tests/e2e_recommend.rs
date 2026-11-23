@@ -377,7 +377,10 @@ fn a_file_that_does_not_parse_exits_2_after_the_report() {
     p.write("pyproject.toml", "[tool.heki]\nnope = 1\n");
     let (code, out, err) = p.heki(&["recommend"]);
     assert_eq!((code, out.as_str()), (2, ""));
-    assert!(err.starts_with("heki error: "), "{err}");
+    assert!(
+        err.starts_with("error: pyproject.toml:2:1: unknown key `nope` in [tool.heki]\n"),
+        "{err}"
+    );
 }
 
 #[test]
