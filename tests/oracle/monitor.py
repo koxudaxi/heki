@@ -843,10 +843,13 @@ class Recorder:
     def _lost_return(self, frame, code, value):
         """Project code returning to a line with a lost change, from the changed object's
         expression (a function, a property's getter, a `__getitem__`): the value is the object.
-        A class's `__init__` returns `None` to the call that makes the instance."""
+        A class's `__init__` returns `None` to the call that makes the instance. A builtin
+        constructor that runs project code (`list(Items())` calls `Items.__iter__`) is that call's
+        result, not what the callback returns at the same position."""
         watches, pos = self._lost_watches(frame)
         for watch in watches or ():
-            if pos == watch.base and code.co_name != "__init__":
+            made_by_builtin = watch.made is not None and watch.made[0] == "call" and watch.made[2]
+            if pos == watch.base and code.co_name != "__init__" and not made_by_builtin:
                 watch.held[:] = [value]
                 watch.made = ["return", code.co_qualname, False]
 

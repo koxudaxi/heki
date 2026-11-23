@@ -639,6 +639,10 @@ class RecordedLostChanges(unittest.TestCase):
         "class Log(dict):\n"
         "    def update(self, *args, **kwargs):\n"
         "        return super().update(*args, **kwargs)\n"
+        "IT = iter([1, 2])\n"
+        "class Items:\n"
+        "    def __iter__(self):\n"
+        "        return IT\n"
         "class Task:\n"
         "    def __init__(self):\n"
         "        self.kept = {}\n"
@@ -657,6 +661,7 @@ class RecordedLostChanges(unittest.TestCase):
         "    t.field['a'] = 1\n"
         "    (items := list(xs)).sort()\n"
         "    Log().update(a=1)\n"
+        "    list(Items())[0] = 9\n"
         "    return env, items\n"
     )
     CHANGES = [
@@ -668,6 +673,7 @@ class RecordedLostChanges(unittest.TestCase):
         ("t.field['a'] = 1", "dict.__setitem__"),
         ("(items := list(xs)).sort()", "list.sort"),
         ("Log().update(a=1)", "dict.update"),
+        ("list(Items())[0] = 9", "list.__setitem__"),
     ]
 
     def test_what_holds_the_changed_object_when_the_line_ends(self):
@@ -723,6 +729,7 @@ class RecordedLostChanges(unittest.TestCase):
                 (1, ["New object"]),
                 (1, ["Unnamed"]),
                 (1, ["Changed in place"]),
+                (1, []),
             ],
         )
 
