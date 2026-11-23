@@ -18,6 +18,7 @@ that `STRIPS` does not know makes `generate` raise, so a new premise needs its s
 from __future__ import annotations
 
 import random
+import re
 
 from generator import CONTROLS, HEKI_TOML, Project, Scenario, _common_import, _module_text, block
 
@@ -592,6 +593,261 @@ def mut118(sc, strip):
 
 
 # ---------------------------------------------------------------------------------------------
+# MUT119: an in-place change of a new builtin container that nothing else holds
+# ---------------------------------------------------------------------------------------------
+# Per kind: what makes a new one where it is changed (a display or a builtin maker, of the
+# entry's parameters `xs: list[int]`, `opts: dict[str, int]`, and `n`), copies of the annotated
+# parameters, one held by the module, and the changes as `(text with {x} for the object, form,
+# whether the method returns a value)`. The inputs keep `xs` non-empty and "a" in `opts`, so that
+# every change runs without an exception.
+MUT119_KINDS = {
+    "list": (
+        ["[3, 1, 2]", "list(xs)", "sorted(xs)"],
+        ["xs.copy()", "xs[:]"],
+        "[5, 6]",
+        [
+            ("{x}.sort()", "method", False),
+            ("{x}.reverse()", "method", False),
+            ("{x}.append(n)", "method", False),
+            ("{x}.extend(xs)", "method", False),
+            ("{x}.insert(0, n)", "method", False),
+            ("{x}.clear()", "method", False),
+            ("{x}.pop()", "method", True),
+            ("{x}[0] = n", "store", False),
+            ("del {x}[0]", "delete", False),
+        ],
+    ),
+    "dict": (
+        ['{"a": 1, "b": 2}', "dict(opts)", "dict(a=1, b=n)"],
+        ["opts.copy()"],
+        '{"a": 0}',
+        [
+            ("{x}.update(c=n)", "method", False),
+            ("{x}.clear()", "method", False),
+            ('{x}.setdefault("c", n)', "method", True),
+            ('{x}.pop("a", None)', "method", True),
+            ('{x}["c"] = n', "store", False),
+            ('del {x}["a"]', "delete", False),
+        ],
+    ),
+    "set": (
+        ["{1, 2, 3}", "set(xs)"],
+        [],
+        "{5, 6}",
+        [
+            ("{x}.add(n)", "method", False),
+            ("{x}.discard(1)", "method", False),
+            ("{x}.update(xs)", "method", False),
+            ("{x}.clear()", "method", False),
+            ("{x}.pop()", "method", True),
+        ],
+    ),
+    "bytearray": (
+        ['bytearray(b"abc")', "bytearray(xs)"],
+        [],
+        'bytearray(b"q")',
+        [
+            ("{x}.append(65)", "method", False),
+            ('{x}.extend(b"z")', "method", False),
+            ("{x}.reverse()", "method", False),
+            ("{x}.pop()", "method", True),
+            ("{x}[0] = 66", "store", False),
+            ("del {x}[0]", "delete", False),
+        ],
+    ),
+    "deque": (
+        ["collections.deque(xs)", "collections.deque([1, 2])"],
+        [],
+        "collections.deque([5])",
+        [
+            ("{x}.append(n)", "method", False),
+            ("{x}.appendleft(n)", "method", False),
+            ("{x}.extend(xs)", "method", False),
+            ("{x}.clear()", "method", False),
+            ("{x}.popleft()", "method", True),
+            ("{x}[0] = n", "store", False),
+            ("del {x}[0]", "delete", False),
+        ],
+    ),
+}
+# The builtin maker a module can bind to a function of its own, per kind.
+MUT119_MAKERS = {"list": "sorted", "dict": "dict", "set": "set", "bytearray": "bytearray"}
+# How each premise is stripped.
+MUT119_WAYS = {
+    # What makes the object outlives the call: a function stores it first, a getter returns its
+    # field, one path returns module state, the parameter's class copies as itself, or the module
+    # binds the maker's name to a function returning module state.
+    "New object": ["stored", "field", "path", "copy-self", "shadowed"],
+    # A name holds the object: bound first, or bound in the changed expression.
+    "Unnamed": ["bound", "walrus"],
+    # The change does more than its builtin type's: its result is read, the parameter's class
+    # replaces the copy and the change, or an augmented item assignment changes the item in place.
+    "Changed in place": ["read", "override", "augmented"],
+}
+
+
+def _mut119_owned(made):
+    """`made` as a getter computes it from the instance's copies of the parameters."""
+    return re.sub(r"\b(xs|opts|n)\b", r"self._\1", made)
+
+
+def _mut119_made(sc, made, way):
+    """Project code making the object: a function (through another one, or not) or the getter of
+    a property of an object the entry holds, returning `made`. With "New object" stripped, what
+    they return outlives the call: stored first, the getter's field, or module state on one path.
+    Returns the statements the entry runs first and the object's expression."""
+    ns = sc.ns
+    if way == "field" or (way == "stored" and sc.chance(0.5)) or (way is None and sc.chance(0.4)):
+        holder, prop = sc.name("Holder"), sc.name("value")
+        init = ["self._xs = xs", "self._opts = opts", "self._n = n"]
+        if way == "field":
+            init.append(f"self._field = {_mut119_owned(made)}")
+            getter = ["return self._field"]
+        elif way == "stored":
+            getter = [f"self._last = {_mut119_owned(made)}", "return self._last"]
+        else:
+            getter = [f"return {_mut119_owned(made)}"]
+        sc.define(
+            block(
+                f"class {holder}:",
+                block("def __init__(self, xs, opts, n):", init) + ["", "@property"] + block(f"def {prop}(self):", getter),
+            )
+        )
+        return [f"holder = {holder}(xs, opts, n)"], f"holder.{prop}"
+    make = sc.name("make")
+    if way == "stored":
+        sc.define([f"KEEP_{ns} = []"])
+        body = [f"out = {made}", f"KEEP_{ns}.append(out)", "return out"]
+    elif way == "path":
+        body = [f"return {made} if n > 1 else SHARED_{ns}"]
+    else:
+        body = [f"return {made}"]
+    sc.define(block(f"def {make}(xs, opts, n):", body))
+    if way is None and sc.chance(0.4):
+        outer = sc.name("fresh")
+        sc.define(block(f"def {outer}(xs, opts, n):", [f"return {make}(xs, opts, n)"]))
+        make = outer
+    return [], f"{make}(xs, opts, n)"
+
+
+def mut119(sc, strip):
+    ns = sc.ns
+    way = sc.pick(MUT119_WAYS[strip]) if strip else None
+    if way in ("copy-self", "override", "augmented"):
+        kind = sc.pick(["list", "dict"])
+    elif way == "shadowed":
+        kind = sc.pick(sorted(MUT119_MAKERS))
+    else:
+        kind = sc.pick(sorted(MUT119_KINDS))
+    built, copies, held, changes = MUT119_KINDS[kind]
+    if kind == "deque":
+        sc.imports("import collections")
+    if way in ("path", "shadowed"):
+        sc.define([f"SHARED_{ns} = {held}"])
+    lines = []
+    if way in ("path", "shadowed"):
+        # The entry replenishes the module state a previous input may have emptied.
+        lines += [f"global SHARED_{ns}", f"SHARED_{ns} = {held}"]
+    origin = sc.pick(["built", "built", "project"] + (["copy"] if copies else []))
+    if way in ("stored", "field", "path"):
+        origin = "project"
+    elif way in ("copy-self", "override"):
+        origin = "copy"
+    elif way == "shadowed":
+        origin = "built"
+    elif way == "augmented":
+        origin = sc.pick(["built", "project"])
+    if way == "augmented":
+        sc.define([f"ITEMS_{ns} = []"])
+        built = [f"[ITEMS_{ns}, 1]" if kind == "list" else f'{{"a": ITEMS_{ns}}}']
+    if way == "shadowed":
+        built = [b for b in built if b.startswith(MUT119_MAKERS[kind] + "(")]
+    if way in ("copy-self", "override"):
+        obj = "xs.copy()" if kind == "list" else "opts.copy()"
+    elif origin == "copy":
+        obj = sc.pick(copies)
+    elif origin == "project":
+        made_lines, obj = _mut119_made(sc, sc.pick(built), way)
+        lines += made_lines
+    else:
+        obj = sc.pick(built)
+    text, form, returns_value = sc.pick(changes)
+    if way == "read":
+        text, form, returns_value = sc.pick([c for c in changes if c[1] == "method"])
+    tail = "return len(xs)"
+    if way == "bound":
+        lines.append(f"items = {obj}")
+        obj, tail = "items", "return len(items)"
+    elif way == "walrus":
+        obj, tail = f"(items := {obj})", "return len(items)"
+    change = text.format(x=obj)
+    if way == "augmented":
+        change = f"{obj}[{'0' if kind == 'list' else repr('a')}] += [n]"
+    elif way == "read":
+        change, tail = f"top = {change}" + ("" if returns_value else " or 0"), "return top"
+    elif form == "method" and not returns_value and way is None:
+        result = sc.pick(["unused", "unused", "bound", "stored"])
+        if result == "bound":
+            change, tail = f"env = {change}", "return env"
+        elif result == "stored":
+            lines.append("out = {}")
+            change, tail = f"out[key] = {change}", "return out"
+    # A loop would run a destructive change twice on a receiver the entry retains.
+    retained = way in ("field", "path", "shadowed", "copy-self", "override")
+    place = sc.pick(["plain", "plain", "if", "try"] if retained else ["plain", "plain", "if", "for", "try"])
+    if place == "if":
+        if way in ("walrus", "read"):
+            # The change binds the name the tail reads; `flag` may be false.
+            lines.append("items = []" if way == "walrus" else "top = 0")
+        lines += block("if flag:", [change])
+    elif place == "for":
+        lines += block("for _ in range(2):", [change])
+    elif place == "try":
+        lines += block("try:", [change]) + block("except ValueError:", ["return None"])
+    else:
+        lines.append(change)
+    if way in ("copy-self", "override"):
+        _mut119_subclass(sc, kind, way, text, form)
+    entry = sc.name("lost")
+    sc.define(block(f"def {entry}(xs: list[int], opts: dict[str, int], {sc.params}):", lines + [tail]))
+    if way == "shadowed":
+        # After the entry: its annotations name the builtins.
+        sc.define(block(f"def {MUT119_MAKERS[kind]}(*args, **kwargs):", [f"return SHARED_{ns}"]))
+    subclass = f"{sc.main_module}:Shared_{ns}" if way in ("copy-self", "override") else None
+
+    def value(k):
+        xs = [3, 1, 2][: 1 + k % 3]
+        opts = {"$dict": [["a", 1], ["b", k]]}
+        if subclass is not None and k % 2:
+            if kind == "list":
+                xs = {"$obj": [subclass, [xs], {}]}
+            else:
+                opts = {"$obj": [subclass, [opts], {}]}
+        return [xs, opts]
+
+    _add_inputs(sc, entry, value)
+
+
+def _mut119_subclass(sc, kind, way, text, form):
+    """A project subclass of the copied parameter's type, which the odd inputs pass: its copy is
+    the object itself ("New object" stripped), or a new one whose change the subclass replaces
+    ("Changed in place" stripped)."""
+    ns = sc.ns
+    klass = f"Shared_{ns}"
+    if way == "copy-self":
+        body = block("def copy(self):", ["return self"])
+    else:
+        sc.define([f"LOG_{ns} = []"])
+        member = {"store": "__setitem__", "delete": "__delitem__"}.get(form) or text[4:].split("(")[0]
+        body = block("def copy(self):", [f"return {klass}(self)"]) + [""]
+        body += block(
+            f"def {member}(self, *args, **kwargs):",
+            [f'LOG_{ns}.append("{member}")', f"return super().{member}(*args, **kwargs)"],
+        )
+    sc.define(block(f"class {klass}({kind}):", body))
+
+
+# ---------------------------------------------------------------------------------------------
 # The proven OPT tier: one pattern per rule, and the contexts that keep or break each premise
 # ---------------------------------------------------------------------------------------------
 # rule: (construction, statement in the loop, the loop, what the function returns, a change in
@@ -776,6 +1032,7 @@ BUILDERS = {
     "MUT114": mut114,
     "MUT115": mut115,
     "MUT118": mut118,
+    "MUT119": mut119,
     **{rule: _opt_builder(rule) for rule in OPT_PATTERNS},
     "OPT113": opt113,
 }
@@ -812,6 +1069,7 @@ STRIPS = {
     "MUT114": ["Cached", "Keyed", "Container kind", "Same object", "Changed in place"],
     "MUT115": ["Shallow copy", "Borrowed original", "Still shared", "Changed below the copy"],
     "MUT118": ["Object sentinel", "Held by the class", "Tested by identity", "Deep-copied"],
+    "MUT119": ["New object", "Unnamed", "Changed in place"],
     **{
         rule: ["Builtin type by construction", "Loop-carried", "In a loop", "Rewrite proven safe"]
         for rule in ("OPT101", "OPT102", "OPT103")

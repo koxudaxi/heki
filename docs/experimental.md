@@ -16,6 +16,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `rule.EFF110` | rule | [`EFF110`](rules/exclusive-object-fanout.md) | 0.2.1 | - |
 | `rule.EFF112` | rule | [`EFF112`](rules/set-order-output.md) | 0.2.4 | - |
 | `rule.EFF114` | rule | [`EFF114`](rules/recursion-error-as-value.md) | 0.2.4 | - |
+| `rule.EFF115` | rule | [`EFF115`](rules/async-def-as-sync-callback.md) | 0.2.5 | - |
 | `rule.MUT101` | rule | [`MUT101`](rules/cached-property-stale-mutation.md) | 0.1.0 | - |
 | `rule.MUT111` | rule | [`MUT111`](rules/cached-property-stale-read.md) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](rules/conditional-ownership-mutation.md) | 0.2.0 | - |
@@ -84,6 +85,14 @@ Its precision is measured on a sample of reports of one corpus only, and its pre
 - **Since:** 0.2.4
 
 Its precision is measured on a sample of reports of one corpus only, and its premises are not yet certified.
+
+## `rule.EFF115`
+
+- **Kind:** rule
+- **Target:** [`EFF115`](rules/async-def-as-sync-callback.md)
+- **Since:** 0.2.5
+
+The development corpus has no report of it, so its precision is not measured, and its premises are not yet certified.
 
 ## `rule.MUT101`
 

@@ -1,10 +1,10 @@
 //! Rule registry spanning all 3 families derived from the single Effect & Alias theory.
 //!
 //! - Family 1 (`MUT`): Mutation & State Effect (`MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`,
-//!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT114`, `MUT115`, `MUT118`, `MUT201`,
-//!   `MUT202`, `MUT203`, `MUT204`, `MUT205`, `MUT206`, `MUT207`)
+//!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT114`, `MUT115`, `MUT118`, `MUT119`,
+//!   `MUT201`, `MUT202`, `MUT203`, `MUT204`, `MUT205`, `MUT206`, `MUT207`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
-//!   `EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF201`, `DATA101`)
+//!   `EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF201`, `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
 //!   `OPT112`, `OPT113`, `OPT120`, `OPT121`, `OPT130`); `OPT112` / `OPT113` are Advisory-lane
 //!   reports without a rewrite.
@@ -350,6 +350,18 @@ pub const CORE_RULES: &[RuleMeta] = &[
         doc: include_str!("../rule-docs/MUT118.md"),
     },
     RuleMeta {
+        code: "MUT119",
+        slug: "change-lost-on-new-object",
+        family: RuleFamily::Mut,
+        certainty: Certainty::Exact,
+        activation: Activation::Default,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "An in-place change of a builtin container applied to a new object that nothing else holds and no name keeps (`list(xs).sort()`, `env = os.environ.copy().update(...)`, `obj.settings[k] = v` with a getter returning a new dict): the change is lost when the statement ends.",
+        doc: include_str!("../rule-docs/MUT119.md"),
+    },
+    RuleMeta {
         code: "MUT201",
         slug: "write-owner-violation",
         family: RuleFamily::Mut,
@@ -576,6 +588,18 @@ pub const CORE_RULES: &[RuleMeta] = &[
         auto_fix_default: false,
         summary: "Opt-in: an `except` clause around a recursion (a call cycle reached from its `try` body) takes the `RecursionError` and goes on without raising, so the result depends on the stack depth.",
         doc: include_str!("../rule-docs/EFF114.md"),
+    },
+    RuleMeta {
+        code: "EFF115",
+        slug: "async-def-as-sync-callback",
+        family: RuleFamily::Eff,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Opt-in: an `async def` handed to a library call that calls it without awaiting what it returns (a thread's target, an executor's function, an `atexit` or signal handler, a `filter` predicate), so the call only creates a coroutine and the body does not run.",
+        doc: include_str!("../rule-docs/EFF115.md"),
     },
     RuleMeta {
         code: "EFF201",
@@ -993,6 +1017,7 @@ pub fn check_project(
             let mut d = Vec::new();
             mut_rules::mut106(&cx, u, &mut d);
             mut_rules::mut202(&cx, u, &readonly, &mut d);
+            mut_rules::mut119(&cx, u, &mut d);
             eff_rules::eff102_103(&cx, u, &mut d);
             eff_rules::eff106(&cx, u, &mut d);
             eff_rules::eff107(&cx, u, &mut d);
@@ -1000,6 +1025,7 @@ pub fn check_project(
             eff_rules::eff110(&cx, u, &mut d);
             eff_rules::eff112(&cx, u, &mut d);
             eff_rules::eff114(&cx, u, &mut d);
+            eff_rules::eff115(&cx, u, &mut d);
             data_rules::data101(&cx, u, &mut d);
             opt_rules::opt(&cx, u, &opt_opts, &mut d);
             opt_rules::opt112(&cx, u, &mut d);
