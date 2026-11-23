@@ -2395,7 +2395,7 @@ impl ProjectDecls {
 
     /// Whether the code of the module of the canonical class `class` (`decl`) stores attributes
     /// heki cannot name in its instances, or another module's does.
-    fn stores_any_attr(&self, class: &str, decl: &ClassDecl) -> bool {
+    pub(super) fn stores_any_attr(&self, class: &str, decl: &ClassDecl) -> bool {
         self.read(|k| note(&mut k.grown_globals, class));
         decl.stores_any_attr
             || self.elsewhere.unnamed.contains(class)

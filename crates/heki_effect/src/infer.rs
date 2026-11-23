@@ -1950,7 +1950,8 @@ impl<'e, 'a> Engine<'e, 'a> {
             | Ty::SelfType
             | Ty::Partial(_)
             | Ty::Coroutine(_)
-            | Ty::Union(_) => None,
+            | Ty::Union(_)
+            | Ty::OneOf(_) => None,
         }
     }
 
@@ -1981,6 +1982,11 @@ impl<'e, 'a> Engine<'e, 'a> {
         let Some((class, skip_self, self_ty)) = self.static_receiver(recv) else {
             return Ok(None);
         };
+        if let Ty::Inst(_) = recv
+            && let Some(value) = cx.instance_alias(class, attr)
+        {
+            return Ok(value);
+        }
         let t = match cx.store_read_member(class, attr, skip_self) {
             Some(Read::Pending) => return Err(Pending),
             Some(Read::Of(t)) => Some(t),
@@ -2015,6 +2021,11 @@ impl<'e, 'a> Engine<'e, 'a> {
         }
         let cx = self.cx;
         let (class, skip_self, self_ty) = self.static_receiver(recv)?;
+        // A class body binding `method` to a name (`factory = Scope`): the call calls what it
+        // names, a bound method returning what the function does.
+        if !skip_self && let Some((named, _)) = cx.project.class_alias(class, method) {
+            return self.called(&cx.named(named), call);
+        }
         if let Some(key) = cx.project.mro_definition(class, method, skip_self) {
             let decl = cx.project.function_decl(&key)?;
             // Calling what a property returns is calling its value, not the getter; a class
@@ -2025,6 +2036,9 @@ impl<'e, 'a> Engine<'e, 'a> {
                     .then(|| self.member(recv, method).ok().flatten())
                     .flatten();
                 return value.and_then(|v| self.called(&v, call));
+            }
+            if decl.returned_import.is_some() {
+                return decl.declared_return(cx.project).map(|t| decl.call_type(t));
             }
             return decl
                 .return_type
@@ -2055,6 +2069,10 @@ impl<'e, 'a> Engine<'e, 'a> {
             }
             // What the partial object binds shifts the arguments: they are not followed.
             Ty::Partial(inner) => self.called(inner, Passed::default()),
+            Ty::OneOf(fqns) => join_all(
+                fqns.iter()
+                    .map(|fqn| self.cx.call_result(fqn, |i, k| self.passed(call, i, k))),
+            ),
             other => self.member_call(other, "__call__", call),
         }
     }

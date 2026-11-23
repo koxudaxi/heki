@@ -284,7 +284,7 @@ struct CheckReads {
 }
 
 /// The number of fields of [`DeclKeys`].
-const DECL_KEY_KINDS: usize = 8;
+const DECL_KEY_KINDS: usize = 9;
 
 impl CheckReads {
     /// Every field of `keys` (destructured without `..`: a new kind of key does not compile
@@ -295,6 +295,7 @@ impl CheckReads {
             subclasses,
             property_names,
             returning_names,
+            alias_names,
             class_facts,
             protocols,
             grown_globals,
@@ -305,6 +306,7 @@ impl CheckReads {
             subclasses,
             property_names,
             returning_names,
+            alias_names,
             class_facts,
             protocols,
             grown_globals,
