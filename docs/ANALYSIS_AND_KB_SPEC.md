@@ -1180,10 +1180,12 @@ which module imports which.
    as the builtin itself: a list, dict, or set display or comprehension, a call of `list`,
    `dict`, `set`, `bytearray`, `collections.deque`, or `sorted`. Copied: a call the catalog
    describes as a copy (`copy_sanitizer`: a builtin container's `copy()`, `copy.copy`,
-   `os.environ.copy()`) whose result is of a builtin container type, or a slice of a list or
-   `bytearray`; the type comes from the copied value under R2. Or a call of project functions or
-   a property read (its getters). A call of a project class is none: it returns the new
-   instance, not what `__init__` returns.
+   `os.environ.copy()`) whose result is of a builtin container type, called with no argument
+   but the value it copies (another may be handed the copy: `copy.deepcopy`'s memo keeps it), or
+   a slice of a list or `bytearray`; the type comes from the copied value under R2. Or a call of
+   project functions or a property read (its getters), complete when they are every
+   implementation it can run. A call of a project class is none: it returns the new instance,
+   not what `__init__` returns.
 2. **The function fact** (`FreshReturn`, kept beside the summaries in
    `FileSummary::fresh_returns`, local and final, and only while `MUT119` runs:
    `OptInFacts::fresh_returns`; a file none of whose functions has one keeps one word): for a
@@ -1194,17 +1196,19 @@ which module imports which.
    operators, and the views and iterators the object's methods return (`keys`, `values`, `items`,
    `__iter__`, `__reversed__`): every use keeps nothing (a method of the builtin containers whose
    result holds none of the object, `readonly::result_detached_from_container`: a changing
-   method, a count, a test, an item, or a copy; an item load, store, or delete on it, a
-   comparison, a conversion, a loop over it, a call of a builtin that only inspects it and returns
-   nothing holding it, which `getattr` may); a store, a capture, a yield, a raise, an attribute
-   load (a bound method), or any other method or call ends the fact. Both walks share one budget
-   per function. `built` says every source is the builtin itself.
+   method, a count, a test, an item, or a copy; an item load, store, or delete on it, not with it
+   as the key, a comparison, a conversion, a loop over it, a call of a builtin that only inspects
+   it and returns nothing holding it, which `getattr` may); a store, a capture, a yield, a raise,
+   an attribute load (a bound method), or any other method or call ends the fact. Both walks
+   share one budget per function. `built` says every source is the builtin itself or a complete
+   call or property read.
 3. **Propagation** (`Resolver::resolve_fresh_return`): a local fact naming project functions holds
    when each has a final fact of the same kind outside the SCC being computed (a recursive
    function has none), and is `built` only when they all are. Two definitions of one function keep
    the fact only when both have it with one kind. Early Cutoff compares the final facts with the
    summaries (`FinalFacts`), so a change of one re-propagates the callers as a summary change
-   does.
+   does. Both regions of an incremental update hold whole SCCs (`callgraph::scc_closure`), so an
+   edited function on a cycle with an affected caller is recomputed with it, as in a full build.
 4. **The rule** (`heki_rules::mut_rules::lost_changes`): a changing method of a container kind,
    an item store, or an item delete, applied to a value with no name that nothing reads but the
    change (and the item load of an augmented assignment), whose defining instruction is a source
