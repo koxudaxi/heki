@@ -4531,6 +4531,13 @@ impl ProjectDecls {
         }
     }
 
+    /// Whether some class body binds `attr` to a module-level name (`ClassDecl::named_attrs`):
+    /// otherwise no class reads it as an alias ([`Self::class_aliases`]).
+    pub(crate) fn binds_alias(&self, attr: &str) -> bool {
+        self.read(|k| note(&mut k.alias_names, attr));
+        self.alias_names.contains(attr)
+    }
+
     /// What reading `attr` on the class `class` or on one of its instances finds, when the first
     /// class along the MRO defining it binds it in its body to a module-level name
     /// (`ClassDecl::named_attrs`: `factory = Scope`, `REQUIRE: ClassVar[...] =
@@ -4540,8 +4547,7 @@ impl ProjectDecls {
     /// module may rebind it, or a hook run on the read (`__getattribute__`, a metaclass heki
     /// does not know); a field the class body annotates is the instance's own.
     pub(crate) fn class_aliases(&self, class: &str, attr: &str) -> Option<ClassAlias<'_>> {
-        self.read(|k| note(&mut k.alias_names, attr));
-        if !self.alias_names.contains(attr) {
+        if !self.binds_alias(attr) {
             return None;
         }
         let class = self.canonical(class);
@@ -8317,6 +8323,11 @@ impl<'a> TypeCtx<'a> {
             Recv::Inst(class) => (class, true, true),
             Recv::Ref(_) | Recv::Super(_) => return None,
         };
+        // Every method call asks, and the receiver's class may have thousands of subclasses:
+        // they are listed only for a name some class body binds.
+        if !self.project.binds_alias(method) {
+            return None;
+        }
         let mut classes = vec![self.project.canonical(class)];
         if family {
             classes.extend(self.project.subclasses_of(class));
