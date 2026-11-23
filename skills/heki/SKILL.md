@@ -32,8 +32,8 @@ Run `heki`, or `uv run heki` when the project lists it as a development dependen
 4. A `heuristic` report can be wrong: confirm from the code what its message says before
    changing anything, and tell the user when it does not hold. A wrong `exact` report is a bug
    in heki: tell the user.
-5. Never suppress a report (`# heki: ignore[...]`, `# noqa`, `ignore`, a baseline) unless the
-   rule's documentation describes the case as intended or the user asks.
+5. Never suppress a report (`# heki: ignore[...]`, `# noqa`, `ignore`, a baseline) or weaken a
+   contract unless the rule's documentation describes the case as intended or the user asks.
 6. Apply rewrites only with `heki check --fix` (`--diff` previews them), and leave what a
    `blocker` stops.
 
