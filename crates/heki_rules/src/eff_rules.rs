@@ -2067,25 +2067,26 @@ impl<'a> Reach<'a> {
             emit(found, "reads-environment".to_owned(), message);
         }
         for (kind, found) in &self.unjudged {
-            let via = via_first(found);
             let cannot = format!("{} cannot tell what it does there", b.label);
+            let via_callee = |hops: usize| match found.chain.as_slice() {
+                [first, ..] if found.chain.len() > hops => format!(" via `{}`", first.callee),
+                _ => String::new(),
+            };
             let (target, message) = match kind {
                 Unjudged::Calls => {
                     let what = match found.kind {
+                        // The chain ends at the call heki cannot resolve.
                         "" => {
                             let callee = found.chain.last().map_or("", |h| h.callee.as_str());
-                            format!("a call heki cannot resolve (`{callee}`{via})")
+                            format!("a call heki cannot resolve (`{callee}`{})", via_callee(1))
                         }
-                        body => format!(
-                            "{body}{}",
-                            via.replacen(" via", " (via", 1)
-                                + if via.is_empty() { "" } else { ")" }
-                        ),
+                        body => match via_callee(0) {
+                            via if via.is_empty() => body.to_owned(),
+                            via => format!("{body} ({})", via.trim_start()),
+                        },
                     };
-                    (
-                        "unresolved-calls".to_owned(),
-                        format!("`{}` reaches {what}, so {cannot}", key.qualname),
-                    )
+                    let message = format!("`{}` reaches {what}, so {cannot}", key.qualname);
+                    ("unresolved-calls".to_owned(), message)
                 }
                 Unjudged::Writes(attr) => {
                     let name = attr
@@ -2093,13 +2094,14 @@ impl<'a> Reach<'a> {
                         .map_or("an attribute named at run time".to_owned(), |a| {
                             format!("`{a}`")
                         });
-                    (
-                        format!("unresolved-writes:{}", attr.as_deref().unwrap_or("*")),
-                        format!(
-                            "`{}` writes {name} on an object of unknown class ({}{via}), so {cannot}",
-                            key.qualname, found.kind
-                        ),
-                    )
+                    let message = format!(
+                        "`{}` writes {name} on an object of unknown class ({}{}), so {cannot}",
+                        key.qualname,
+                        found.kind,
+                        via_callee(0)
+                    );
+                    let target = format!("unresolved-writes:{}", attr.as_deref().unwrap_or("*"));
+                    (target, message)
                 }
             };
             emit(found, target, message);

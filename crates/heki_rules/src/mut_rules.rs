@@ -2702,12 +2702,17 @@ pub(crate) fn mut201(
                         // No initializer name is private, so on a reported chain only the
                         // outermost function can be the initializer of the written object.
                         let sites = sites.get_or_insert_with(|| cx.sites_by_caller());
-                        let kept_below = || {
-                            chain[1..=origin].iter().any(|k| {
-                                is_private(&k.qualname) && !delegates(cx, sites, k, Handover::Every)
-                            })
+                        // A function handed on as a value keeps its accesses, as a function
+                        // without callers does (`Allowance::escapes`).
+                        let keeps = |k: &FuncKey| {
+                            rule.allowance.escapes(k) || !delegates(cx, sites, k, Handover::Every)
                         };
-                        if !lexical && (kept_below() || delegates(cx, sites, key, Handover::Every))
+                        let kept_below = || {
+                            chain[1..=origin]
+                                .iter()
+                                .any(|k| is_private(&k.qualname) && keeps(k))
+                        };
+                        if !lexical && (kept_below() || !keeps(key))
                             || rule
                                 .allowance
                                 .owns(cx, &judged, family, (obj_params, obj_params))
@@ -2725,14 +2730,16 @@ pub(crate) fn mut201(
                         }
                         // A function that only runs inside the owner's operations (every caller
                         // path starts in an allowed context) writes inside them.
-                        if judged_inside_allowed(
-                            cx,
-                            sites,
-                            &rule.allowance,
-                            family,
-                            (key, site.obj_params),
-                            &mut inside[r][ti],
-                        ) {
+                        if !rule.allowance.escapes(key)
+                            && judged_inside_allowed(
+                                cx,
+                                sites,
+                                &rule.allowance,
+                                family,
+                                (key, site.obj_params),
+                                &mut inside[r][ti],
+                            )
+                        {
                             continue;
                         }
                         let span = site.via_chain.first().map_or(site.span, |h| h.span);
