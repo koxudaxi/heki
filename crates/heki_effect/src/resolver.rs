@@ -1812,6 +1812,9 @@ pub struct ProjectDecls {
     grown_elsewhere: FxHashSet<String>,
     /// Those another project module rebinds or deletes (`ModuleDecls::rebound_globals`).
     rebound_elsewhere: FxHashSet<String>,
+    /// The dotted prefixes of the names in `rebound_elsewhere` (`pkg.mod.C` of
+    /// `pkg.mod.C.run.__code__`): another module rebinds no attribute of a class not among them.
+    rebound_owners: FxHashSet<String>,
     /// What project modules store into the globals of other modules and into the instances of
     /// their classes, joined (`ModuleDecls::stores_elsewhere`), and the modules whose own types
     /// then hold no longer.
@@ -2125,6 +2128,9 @@ impl ProjectDecls {
         self.protocols = self.protocol_implementations();
         self.grown_elsewhere = self.globals_changed_elsewhere(|m| &m.grown_globals);
         self.rebound_elsewhere = self.globals_changed_elsewhere(|m| &m.rebound_globals);
+        self.rebound_owners = (self.rebound_elsewhere.iter())
+            .flat_map(|fqn| fqn.match_indices('.').map(|(dot, _)| fqn[..dot].to_owned()))
+            .collect();
         self.setstate_called = self.modules.values().any(|m| m.calls_setstate);
         self.elsewhere = self.stores_elsewhere();
         self.changed_paths = self.package_path_changes();
@@ -2229,8 +2235,9 @@ impl ProjectDecls {
     /// project gives a project class of `mro` other bases (`__bases__`), or its instances
     /// another class (`__class__`).
     pub(crate) fn lookup_rebound(&self, mro: &[String], name: &str) -> bool {
-        // Only an analysis whose reads are recorded asks for keys no module stores yet.
-        let elsewhere = !self.rebound_elsewhere.is_empty() || self.recording();
+        // Only an analysis whose reads are recorded asks for keys no module stores yet. Every
+        // call whose targets are checked asks for each class it may run on, along its MRO.
+        let recording = self.recording();
         let mut found = false;
         for c in mro {
             let Some((m, qualname, decl)) = self
@@ -2239,6 +2246,7 @@ impl ProjectDecls {
             else {
                 continue;
             };
+            let elsewhere = recording || self.rebound_owners.contains(c);
             let stored = |attr: &str| {
                 decl.rebound_attrs.contains(attr)
                     || (elsewhere && self.rebound_elsewhere_canonical(&format!("{c}.{attr}")))
