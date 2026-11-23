@@ -788,8 +788,9 @@ holds for `invalidation` too:
 - **`attribution = "lexical"` judges the code where it is written.** The two rules above do not
   apply: an access is judged in the function whose code holds it, whoever calls that function.
   A lambda, comprehension, or generator expression is part of the function it is written in, a
-  class body's code part of the function running the class statement, and a nested `def` a
-  function of its own; the parameters of the function a lambda, comprehension, or generator
+  class body's code (a class attribute's value, a decorator, a default argument) part of the
+  function running the class statement (`<module>` for a class at module level), and a nested
+  `def` a function of its own; the parameters of the function a lambda, comprehension, or generator
   expression reads are the function's, wherever it runs. For `write-owners`, a call handing a
   typed object to a helper that changes it without knowing its class is the caller's write.
   With `unresolved = "report"`, the callers binding a parameter only tell its object's class,
