@@ -1591,10 +1591,10 @@ impl DottedPattern {
 /// members spelled the other way ([`mangling::member_path`] of a qualname, which writes them
 /// as in the class, [`mangling::source_path`] of an attribute path, which has them as the class
 /// holds them), when that differs. An external symbol (`fqn` is `qualname`) has one spelling.
-pub(crate) fn def_spellings<'n>(
-    fqn: &'n str,
-    qualname: &'n str,
-) -> impl Iterator<Item = (Cow<'n, str>, Cow<'n, str>)> {
+pub(crate) fn def_spellings<'f, 'q>(
+    fqn: &'f str,
+    qualname: &'q str,
+) -> impl Iterator<Item = (Cow<'f, str>, Cow<'q, str>)> {
     let other = module_of(fqn, qualname).and_then(|module| {
         let respelled =
             mangling::member_path(qualname).or_else(|| mangling::source_path(qualname))?;
