@@ -2429,6 +2429,14 @@ impl ProjectDecls {
         if decls.unread {
             return FromImport::Open;
         }
+        // An import the package's body binds again (`try: from ._speedups import parse` with a
+        // fallback, or a later assignment) holds whichever binding ran last.
+        if !decls.aliases.contains_key(name)
+            && decls.imports.contains_key(name)
+            && decls.fixed_import(name).is_none()
+        {
+            return FromImport::Open;
+        }
         // The name of the object bound past the submodule's: `""` for the submodule itself.
         let past_submodule = decls
             .imports
