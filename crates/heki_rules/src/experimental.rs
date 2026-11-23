@@ -85,7 +85,7 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         id: "command.skill",
         kind: ExperimentalKind::Command,
         target: "heki skill",
-        since: "0.2.6",
+        since: "0.2.5",
         reason: "Where coding agents read skills, and so where `heki skill install` writes, can \
             change as the agents evolve; the skill's wording changes with heki's commands.",
         tracking: None,

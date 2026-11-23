@@ -52,8 +52,9 @@ Its premises:
 - **Keyed**: the cached function takes a parameter besides `self` / `cls`. Established.
 - **Container kind**: every return a run can reach hands out a builtin container of the named
   kind, by its return annotation (R2) or by construction. Established.
-- **Same object**: the changed object is that call's result on every path, with no copy.
-  Established.
+- **Same object**: the changed object is that call's result on every path, with no copy, and
+  the call runs that function: the project binds no name the call goes through to another object
+  (assumption R1, as for `EFF101`). Established.
 - **Changed in place**: the line is an in-place change of a container of that kind. When only
   the return annotation names the kind, no project subclass of that container overrides the
   method or operator, has a metaclass that may install it, or, for a method called by name,

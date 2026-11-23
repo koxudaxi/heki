@@ -174,6 +174,25 @@ fn a_receiver_typed_by_a_protocol_leaves_the_targets_incomplete() {
 }
 
 #[test]
+fn a_name_the_project_binds_again_leaves_the_targets_incomplete() {
+    let open = "import time\n\n\ndef load() -> None:\n    time.sleep(1)\n\n\ndef quiet() -> None:\n    global load\n    load = print\n\n\nasync def handle():\n    load()\n";
+    let report = heuristic(
+        "op_rebound",
+        EFF101,
+        open,
+        "EFF111",
+        "EFF101",
+        &[("Every implementation", "incomplete-targets")],
+    );
+    assert_eq!(
+        closer_line_detail(&report, 0),
+        ("none".to_owned(), Some(14), None)
+    );
+    let closed = open.replace("    load = print\n", "");
+    exact("op_rebound_closed", EFF101, &closed, "EFF101");
+}
+
+#[test]
 fn an_override_that_does_not_wait_is_an_implementation_without_the_fact() {
     let open = "import time\n\n\nclass Base:\n    def run(self) -> None:\n        time.sleep(1)\n\n\nclass Quiet(Base):\n    def run(self) -> None:\n        return None\n\n\nasync def handle(obj: Base):\n    obj.run()\n";
     let report = heuristic(

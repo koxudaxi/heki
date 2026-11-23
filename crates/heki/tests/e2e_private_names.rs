@@ -289,3 +289,204 @@ attribution = "lexical"
         ]
     );
 }
+
+/// `(line, rule, qualname)` of what `heki check --select <rules>` reports in `src`.
+fn selected(p: &Project, rules: &str) -> Vec<(u64, String, String)> {
+    let (code, stdout, stderr) = p.check(&["--select", rules, "--output-format", "json", "src"]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let mut out: Vec<_> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap().to_owned(),
+                d["qualname"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// A private property is a member under its mangled name too: storing `self.__key` runs the
+/// property `__key` (or raises without a setter) instead of changing what the cached property
+/// or the hash read, while storing the private plain attribute `self.__size` is reported.
+#[test]
+fn a_private_property_is_no_plain_store() {
+    let p = Project::new("private_names_properties");
+    p.write("src/pkg/__init__.py", "").write(
+        "src/pkg/doc.py",
+        r#"from functools import cached_property
+
+
+class Doc:
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self.__size = 0
+
+    @property
+    def __key(self) -> str:
+        return self._text
+
+    @cached_property
+    def total(self) -> int:
+        return len(self.__key) + self.__size
+
+    def __hash__(self) -> int:
+        return hash((self.__key, self.__size))
+
+    def grow(self) -> None:
+        self.__size = 1
+
+    def rekey(self, key: str) -> None:
+        self.__key = key
+"#,
+    );
+    assert_eq!(
+        selected(&p, "MUT101,MUT107"),
+        vec![
+            (21, "MUT101".to_owned(), "Doc.grow".to_owned()),
+            (21, "MUT107".to_owned(), "Doc.grow".to_owned()),
+        ]
+    );
+}
+
+/// A call target without a class (`__run`) names the member of any class: an untyped
+/// `other.__run()` in class `Driver` calls `_Driver__run`, which it matches, while a target
+/// with a class (`Runner.__run`) matches only the spelling of that class.
+#[test]
+fn a_private_target_without_a_class_matches_any_class() {
+    let source = r#"class Runner:
+    def __run(self) -> int:
+        return 1
+
+    def again(self, other) -> int:
+        return other.__run()
+
+
+class Driver:
+    def drive(self, other) -> int:
+        return other.__run()
+
+    def walk(self, other) -> int:
+        return other.__runner()
+
+
+def plain(other) -> int:
+    return other.__run()
+"#;
+    for (name, target, expected) in [
+        (
+            "private_names_bare_target",
+            "__run",
+            vec![
+                (6, "MUT207", "Runner.again"),
+                (11, "MUT207", "Driver.drive"),
+                (18, "MUT207", "plain"),
+            ],
+        ),
+        (
+            "private_names_class_target",
+            "pkg.base.Runner.__run",
+            vec![(6, "MUT207", "Runner.again"), (18, "MUT207", "plain")],
+        ),
+    ] {
+        let p = Project::new(name);
+        p.write("src/pkg/__init__.py", "")
+            .write("src/pkg/base.py", source)
+            .write(
+                "heki.toml",
+                &format!(
+                    r#"[[call-owners]]
+name = "runner"
+targets = ["{target}"]
+allowed-callers = ["pkg.other:*"]
+attribution = "lexical"
+unresolved = "report"
+"#
+                ),
+            );
+        let expected: Vec<_> = expected
+            .into_iter()
+            .map(|(line, rule, qualname)| (line, rule.to_owned(), qualname.to_owned()))
+            .collect();
+        assert_eq!(selected(&p, "MUT207"), expected, "{target}");
+    }
+}
+
+/// A private cached property is found by its mangled name: `self.__total` reads the cached
+/// property `__total` (`MUT111`), and a cached property `__prepare` that the getter of `total`
+/// reads is a lazy setup step, whose write stays heuristic (`MUT101`). A private plain
+/// attribute is read with no report.
+#[test]
+fn a_private_cached_property_is_found_by_its_member_name() {
+    let p = Project::new("private_names_cached_properties");
+    p.write("src/pkg/__init__.py", "").write(
+        "src/pkg/doc.py",
+        r#"from functools import cached_property
+
+
+class Doc:
+    def __init__(self) -> None:
+        self.size = 0
+        self.__seen = 0
+
+    @cached_property
+    def __total(self) -> int:
+        return self.size + 1
+
+    def grow(self) -> None:
+        self.size = 1
+
+    def show(self) -> int:
+        return self.__total
+
+    def seen(self) -> int:
+        return self.__seen
+
+
+class Lazy:
+    def __init__(self) -> None:
+        self.size = 0
+
+    @cached_property
+    def __prepare(self) -> int:
+        self.size = 2
+        return 1
+
+    @cached_property
+    def total(self) -> int:
+        return self.__prepare + self.size
+"#,
+    );
+    let (code, stdout, stderr) = p.check(&[
+        "--select",
+        "MUT101,MUT111",
+        "--output-format",
+        "json",
+        "src",
+    ]);
+    assert!(code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let mut reports: Vec<_> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap(),
+                d["qualname"].as_str().unwrap(),
+                d["certainty"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    reports.sort();
+    assert_eq!(
+        reports,
+        vec![
+            (14, "MUT101", "Doc.grow", "exact"),
+            (17, "MUT111", "Doc.show", "exact"),
+            (29, "MUT101", "Lazy.__prepare", "heuristic"),
+        ]
+    );
+}

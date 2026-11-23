@@ -12,7 +12,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `cli-option.profile` | cli-option | `heki check --profile` | 0.1.1 | - |
 | `command.inspect` | command | `heki inspect` | 0.2.1 | - |
 | `command.recommend` | command | `heki recommend` | 0.2.2 | - |
-| `command.skill` | command | `heki skill` | 0.2.6 | - |
+| `command.skill` | command | `heki skill` | 0.2.5 | - |
 | `rule.EFF109` | rule | [`EFF109`](rules/lock-reacquired-while-held.md) | 0.2.1 | - |
 | `rule.EFF110` | rule | [`EFF110`](rules/exclusive-object-fanout.md) | 0.2.1 | - |
 | `rule.EFF112` | rule | [`EFF112`](rules/set-order-output.md) | 0.2.4 | - |
@@ -59,7 +59,7 @@ The sections, their policies, the candidates it infers, and its JSON object can 
 
 - **Kind:** command
 - **Target:** `heki skill`
-- **Since:** 0.2.6
+- **Since:** 0.2.5
 
 Where coding agents read skills, and so where `heki skill install` writes, can change as the agents evolve; the skill's wording changes with heki's commands.
 

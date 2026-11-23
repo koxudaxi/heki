@@ -775,6 +775,36 @@ Contracts reason about the callers heki sees: a private helper hands its reports
 and a function called only from allowed writers is not reported. Code outside the run, such as
 tests left out of it, is not known.
 
+## Measured and not taken
+
+These shapes were measured on the Stage 0-A corpus (378 packages, 30.75 million lines) and not built.
+Each failed the bar for a default rule: at least 10 % of the judged sample harmful, and no false exact
+claim.
+
+- Late binding of loop variables: 132 closures in 38 packages beyond the 3,865 names Ruff B023
+  reports; every harmful one is already a B023 report, and heki found none that B023 misses.
+- Resource use after close: 289 sites in 80 packages, 8 % harmful, with false exact claims. Left to
+  runtime and review.
+- Resource leaks across calls: 1,848 sites in 162 packages, 4 % harmful; about half are direct
+  constructors that Ruff `SIM115` and Pylint `R1732` flag.
+- Command-query separation (a `get_*`, `is_*`, or property that changes state): 11,558 sites in 254
+  packages, 4 % harmful; most are caches heki does not see as caches.
+- Dropped results of pure calls: 59,083 sites in 327 packages, no harm in the sample; the real bugs
+  are `str` methods on `str` values, which pyright `reportUnusedCallResult` covers.
+- Stale caches: 199 sites in 54 packages, 5 % harmful; Ruff B019 and Pylint W1518 flag the cache on
+  a method.
+- `asyncio.run` under a running loop: 71 sites in 12 packages, 1 of 25 judged right; nearly all are
+  guarded by a test heki does not model.
+- Writes lost in a child process: 62 sites in 27 packages, 4 % harmful.
+- `Popen` pipes left unread: 22 sites in 13 packages, 5 % harmful.
+- `CancelledError` swallowed: 466 sites in 62 packages, none harmful as judged; flake8-async
+  `ASYNC103` and `ASYNC104` cover the shape.
+- `BytesIO` read without a seek: 69 sites in 7 packages, 57 of them one test suite; too rare.
+- Opposite lock orders: 106 ordered pairs of named locks in 31 packages, no pair in opposite order.
+- An `except` clause that nothing in its `try` body raises, through its calls: 2,730 clauses in 157 packages
+  for project exceptions and 3,597 in 153 for library ones; of 60 judged, one was harmful, and that one is a
+  one-statement shape. Which exceptions a function can raise is planned as a `heki inspect` fact instead.
+
 ## How a rule gets into heki
 
 heki only takes checks that need what it can prove. A proposed rule goes through four questions,
@@ -1220,6 +1250,7 @@ the same file is `services.api.app` and the import is not resolved. Put a `pypro
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `target-version` | the oldest version `project.requires-python` admits, else `py312` | Python version of the code: `py311` … `py315` (or `3.11` … `3.15`). `--target-version` overrides it. See [below](https://heki.koxudaxi.dev/configuration/#the-default-target-version) for the inference and [Scope](https://heki.koxudaxi.dev/scope/#the-target-python-version) for what the version changes. |
+| `required-version` | none | A [PEP 440](https://peps.python.org/pep-0440/) version specifier made of operators and plain releases (`">=0.2.6"`; no pre-, post-, or dev-release suffix) the running heki must satisfy; an older or newer one stops with an error. See [Requiring a heki version](https://heki.koxudaxi.dev/configuration/#requiring-a-heki-version). |
 | `exclude` | the Ruff defaults (`.git`, `.venv`, `build`, `dist`, `node_modules`, …) | Replaces the excluded paths: globs, matched against the project-relative path and each of its components, and covering everything below a matched directory. |
 | `extend-exclude` | `[]` | Adds excluded paths. |
 | `src` | the detected source roots | Source roots, relative to the project root: the module names of the files below each are relative to it (`src = ["lib"]` names `lib/pkg/net.py` `pkg.net`). See [Module names follow the source roots](https://heki.koxudaxi.dev/configuration/#module-names-follow-the-source-roots). |
@@ -1239,6 +1270,29 @@ supported version that every clause admits:
 | `>=3.16` (only newer versions) | `py315` |
 | `<4` (no lower bound, admits 3.12) | `py312` |
 | missing, or not a version specifier | `py312` |
+
+### Requiring a heki version
+
+`required-version` makes a heki that does not satisfy the specifier refuse to run, as Ruff's
+`required-version` does. heki checks it before any other key, so a configuration that uses keys
+a newer release adds fails with this message on an older heki:
+
+```toml
+[tool.heki]
+required-version = ">=0.2.6"
+```
+
+```text
+error: pyproject.toml:2:20: this is heki 0.2.4, but the configuration requires `>=0.2.6`
+```
+
+An older heki cannot know which release adds a key it has never heard of. Without
+`required-version` (and any heki before the release that added it rejects the key as unknown, like any
+other), an unknown key is an error that says only what the table accepts. When the key is not close to a
+key of its table (a close one is a typo, and the error offers it), the error also says that the
+key may belong to a newer heki, names the running version, and points to `required-version` and
+the changelog. It cannot say which release adds the key. `heki version --changelog` prints what
+the installed release changed, and the changelog on GitHub lists every release.
 
 ### Which files are checked
 
@@ -1335,7 +1389,9 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   subclass's `self`, or `type[Parser]` reaches it as `_Parser__run`. A subclass's own private
   name (`self.__run` in `JsonParser`, the member `_JsonParser__run`) is another member, and
   overrides nothing of its base. With `unresolved = "report"`, the last name of such a target
-  counts in both spellings (`__run`, and `_Parser__run` for a class the target names).
+  counts in both spellings (`__run`, and `_Parser__run` for a class the target names); a
+  target without a class (`__run`) names the member of any class (`other.__run()` in class
+  `Driver` calls `_Driver__run`).
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, a name with more than one colon or an empty module or qualified name, call
   targets whose globs are too many to match together (tens of thousands of complex ones), an
@@ -1495,7 +1551,7 @@ The call side of `write-owners`.
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `name` | `""` | The contract's name in reports. |
-| `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass. A target may end in an argument list (`DataType(is_dict=True)`, below). |
+| `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass, also through a `functools.partial` object holding it and through a library method building an instance of its receiver's class (a pydantic model's `model_construct`, `model_validate` of a dict, `model_copy`). A target may end in an argument list (`DataType(is_dict=True)`, below). |
 | `subclasses` | `true` | `false`: a class target means constructing exactly the class, not a subclass (an exception class whose subclasses anyone may raise). `Class.method` targets keep covering overrides. |
 | `allowed-callers` | `[]` | Functions allowed to call the targets. |
 | `forbidden-callers` | `[]` | When set, only calls by these functions are reported. |
@@ -1542,17 +1598,27 @@ The call side of `write-owners`.
   Python binds it: never a positional-only parameter (with `def f(kind=False, /, **kwargs)`,
   `f(kind=True)` leaves `kind` false), and a keyword naming no parameter passes its value under its
   name into `**kwargs`; the receiver of a method call is its first position. A `**` operand that is
-  a dict display with string constant keys (literals, or string constants as above), which nothing
-  changes (a name holding it is only unpacked with `**`, bound to another name, tested, or
-  returned), passes its entries as keywords: `DataType(**{"is_dict": True})`,
-  `flags = {"is_dict": True}; DataType(**flags)`. A call that raises `TypeError` instead of running
-  the function passes nothing: two keywords of one name (written and in such a display, or in two
-  displays), a keyword binding a parameter a position or the receiver binds too, a keyword naming no
-  parameter of a function without `**kwargs`, a position (the receiver included) past the parameters
-  of a function without `*args`, or a parameter without a default left unbound where no `*`
-  unpacking or `**` unpacking of another mapping may bind it. Any other argument (a variable, a
-  call, `*` unpacking, `**` unpacking of another mapping) is not established, and the call is not
-  reported. A reference passes no arguments, so it never matches. A target with an argument list
+  a mapping the function builds, which nothing changes (a name holding it is only unpacked with
+  `**`, merged into another mapping, bound to another name, tested, or returned), passes its
+  entries as keywords: a dict display with string constant keys (literals, or string constants as
+  above), `DataType(**{"is_dict": True})`, `flags = {"is_dict": True}; DataType(**flags)`; a merge
+  of mappings (`{**a, **b}`, `dict(a, is_dict=True)`, `a | b` of two mappings the function builds),
+  which passes the last entry of each key, a mapping heki does not build (a parameter) replacing
+  every key before it; and a mapping built on several paths (`flags = a if c else b`), which passes
+  a key where every path passes the same constant for it. Calling a `functools.partial` object the
+  function makes (through copies) calls what it holds, with the positions it holds first and its
+  keywords, which a keyword the call writes replaces: after `make = partial(DataType,
+  is_dict=True)`, `make()` constructs `DataType(is_dict=True)`, reported at `make()`, where the
+  class is constructed (a call unpacking a mapping with `**` over keywords the object holds is not
+  followed). A pydantic model's `model_construct` passes its keywords to the fields,
+  `model_validate` the entries of the dict it is passed, and `model_copy` those of `update`. A
+  call that raises `TypeError` instead of running the function passes nothing: two keywords of one
+  name (written and in such a display, or in two displays), a keyword binding a parameter a
+  position or the receiver binds too, a keyword naming no parameter of a function without
+  `**kwargs`, a position (the receiver included) past the parameters of a function without
+  `*args`, or a parameter without a default left unbound where no `*` unpacking or `**` unpacking
+  of another mapping may bind it. Any other argument (a variable, a call, `*` unpacking, `**`
+  unpacking of another mapping) is not established, and the call is not reported. A reference passes no arguments, so it never matches. A target with an argument list
   names no symbol outside the project; `unresolved = "report"` matches its last name before the
   list, whatever the arguments of a call on an object of unknown class.
 - With `references = "calls-and-bases"`, a class statement passing a class target as a base is
@@ -2784,6 +2850,7 @@ Commands:
   inspect      Experimental: what heki knows about one function (its effects, what it changes, keeps, and returns, whether it is pure, its callers, reports, and contracts)
   recommend    Experimental: advice on the configuration of a project, with counts from its analysis, and the keys to add (it writes no file)
   skill        Experimental: install heki's Agent Skill where a coding agent reads skills
+  version      Print the version of this heki, and with `--changelog` what this release changed
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -3334,6 +3401,40 @@ Examples:
       replace an installed skill with this heki's
 ```
 
+## `heki version`
+
+```text
+Print the version of this heki, and with `--changelog` what this release changed
+
+Usage: heki version [OPTIONS]
+
+Options:
+      --changelog
+          Also print this release's section of the changelog, the one the binary was built with, without a network
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Documentation:
+  This command     https://heki.koxudaxi.dev/cli-reference/#heki-version
+  Documentation    https://heki.koxudaxi.dev/
+  Getting started  https://heki.koxudaxi.dev/getting-started/
+  Configuration    https://heki.koxudaxi.dev/configuration/
+  Rules            https://heki.koxudaxi.dev/rules/
+  Coding agents    https://heki.koxudaxi.dev/coding-agents/
+  llms.txt         https://heki.koxudaxi.dev/llms.txt
+  Agent Skill      https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental
+
+Exit codes:
+  0  the version is printed
+
+Examples:
+  heki version
+      the version of this heki
+  heki version --changelog
+      the version, then the changelog section of this release: the rules, keys, and options it adds or changes
+```
+
 
 ---
 
@@ -3666,7 +3767,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `cli-option.profile` | cli-option | `heki check --profile` | 0.1.1 | - |
 | `command.inspect` | command | `heki inspect` | 0.2.1 | - |
 | `command.recommend` | command | `heki recommend` | 0.2.2 | - |
-| `command.skill` | command | `heki skill` | 0.2.6 | - |
+| `command.skill` | command | `heki skill` | 0.2.5 | - |
 | `rule.EFF109` | rule | [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) | 0.2.1 | - |
 | `rule.EFF110` | rule | [`EFF110`](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/) | 0.2.1 | - |
 | `rule.EFF112` | rule | [`EFF112`](https://heki.koxudaxi.dev/rules/set-order-output/) | 0.2.4 | - |
@@ -3713,7 +3814,7 @@ The sections, their policies, the candidates it infers, and its JSON object can 
 
 - **Kind:** command
 - **Target:** `heki skill`
-- **Since:** 0.2.6
+- **Since:** 0.2.5
 
 Where coding agents read skills, and so where `heki skill install` writes, can change as the agents evolve; the skill's wording changes with heki's commands.
 
@@ -4080,6 +4181,67 @@ first.
 instead, which makes a good prompt for the fix. `heki rule --all --output-format json` gives
 every rule's metadata and documentation, the premises of its exact claim, and its published
 precision: its certification and its latest measurement ([Rule Precision](https://heki.koxudaxi.dev/precision/)).
+
+## Architecture rules with agents
+
+Do not describe the architecture in the project's `AGENTS.md` or `CLAUDE.md`. Declare it as
+[contracts](https://heki.koxudaxi.dev/configuration/#contracts) and let `heki check` enforce it. Three lines are enough:
+
+> After editing Python, run `heki check`.
+> A report that names a contract means the code crossed a wall the maintainers declared: change the
+> code as the report's help says.
+> Do not edit the contracts or the baseline, and do not add a suppression, unless the maintainer
+> asks.
+
+The `message` of a contract is what the agent reads as the fix, so write it as an instruction:
+
+```toml
+# heki.toml
+[[write-owners]]
+name = "generation-store"
+targets = ["pkg.model.DataModel.fields"]
+allowed-writers = ["Store.*"]
+message = "use GenerationStore.set_fields() instead"
+```
+
+Put the contracts and the baseline path in `heki.toml`, and give that file an owner (`CODEOWNERS`,
+or the host's rule for protected files). A change to a wall is then a reviewed change, and an agent
+cannot move a wall to make a report go away.
+
+### A Stop hook for Claude Code
+
+A [Stop hook](https://code.claude.com/docs/en/hooks) runs when Claude Code is about to end its turn.
+The script below runs `heki check` and, when it exits with 1 (findings), sends the text to the agent
+and keeps it working. Exit code 2 of the hook means "block, and read stderr". heki's own failure (exit
+code 2, or no `heki` on the path) lets the turn end, so a configuration error does not loop. The hook
+input has `stop_hook_active`, which is `true` while Claude Code is already continuing because of a
+stop hook; the script stops blocking then.
+
+```sh
+#!/bin/sh
+input=$(cat)
+case $input in
+  *'"stop_hook_active":true'* | *'"stop_hook_active": true'*) exit 0 ;;
+esac
+report=$(heki check 2>&1)
+status=$?
+[ "$status" -eq 1 ] || exit 0
+printf '%s\n' "$report" >&2
+exit 2
+```
+
+Register it in `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [{ "hooks": [{ "type": "command", "command": ".claude/hooks/heki-stop.sh" }] }]
+  }
+}
+```
+
+Run on a project with findings that are already known, it would block every turn: use
+`heki check --baseline heki-baseline.toml` in the script so that only new findings count.
 
 ## What a function does: `heki inspect` (experimental)
 
@@ -4883,7 +5045,14 @@ Each step of the chain is established, not assumed:
   `__getattribute__`, or a metaclass heki does not know leaves the read not followed); a
   decorator other than `staticmethod`, `classmethod`, `property`, `abstractmethod`, or
   `override` may not run the body, and is not followed; a function defined twice is not
-  followed;
+  followed, and neither is a function, class, or method whose name the project binds to another
+  object (assumption R1; a name its module body or class body binds last to one named object on
+  every path is that object): another store or a `del` of the name in its module (also on a
+  branch, after `global`, or by `globals()` or `exec`), in its class body, or on its class
+  object; a store or `del` from another module, also through `setattr` with a string literal,
+  and any name of a module that `setattr` stores into under a name heki cannot read; a store of
+  the function's `__code__`; and, for a method, a store of the name on a class the lookup
+  passes, of `__bases__` on a class along the MRO, or of `self.__class__` in a method;
 - the waiting call is in the ecosystem catalog, waits on every call (a database call that may be
   answered by a session's identity map, a cache, an open connection, or that sends only pending
   changes does not), and no argument that may come from the caller can make it return at once
@@ -4924,8 +5093,8 @@ Its premises:
   returns normally, exception edges into handlers included; the last call counts as made also
   when it raised.
 - **Every implementation**: each call on the chain has as its targets every implementation it
-  can run (assumptions R2 and R5), each a synchronous function run as written, and each has the
-  fact.
+  can run (assumptions R1, R2, and R5), each a synchronous function run as written, and each
+  has the fact.
 - **Waits**: the last call waits for the network, a database, a child process, or a sleep on
   every call, as the ecosystem catalog describes it (R3), for every argument heki cannot evaluate,
   the arguments that opened its connection included (R6; a SQLite connection only when it was
@@ -4959,6 +5128,13 @@ import asyncio
 async def handler() -> bytes:
     return await asyncio.to_thread(load)
 ```
+
+## Known limitations
+These rebind a name without heki seeing it, so a call through the name still counts as running
+its definition: a `mock.patch` or `mock.patch.object` target patched outside tests, a store
+through `sys.modules` (`sys.modules[__name__] = shim`, `setattr(sys.modules[__name__], "f", g)`),
+a `setattr` on a class object under a name heki cannot read, and an instance's `__class__` stored
+other than through `self` in a method of its class (`obj.__class__ = Other` in a helper).
 
 ## Fix safety
 No automatic fix.
@@ -5712,8 +5888,9 @@ Its premises:
 - **Keyed**: the cached function takes a parameter besides `self` / `cls`. Established.
 - **Container kind**: every return a run can reach hands out a builtin container of the named
   kind, by its return annotation (R2) or by construction. Established.
-- **Same object**: the changed object is that call's result on every path, with no copy.
-  Established.
+- **Same object**: the changed object is that call's result on every path, with no copy, and
+  the call runs that function: the project binds no name the call goes through to another object
+  (assumption R1, as for `EFF101`). Established.
 - **Changed in place**: the line is an in-place change of a container of that kind. When only
   the return annotation names the kind, no project subclass of that container overrides the
   method or operator, has a metaclass that may install it, or, for a method called by name,
@@ -5788,8 +5965,12 @@ the allowed callers and resolves to a target:
 - a module-level function (`pkg.util.reset_cache()`);
 - a class: constructing it or a subclass (`FinalFacts(...)`, `pkg.facts.FinalFacts(...)`,
   `cls(...)` in a class method, a value typed `type[FinalFacts]` or `typing.Type[FinalFacts]`,
-  `type(facts)(...)`), also for a dataclass or another class without an `__init__` of its own;
-  with `subclasses = false`, constructing exactly the class;
+  `type(facts)(...)`), also for a dataclass or another class without an `__init__` of its own,
+  through a `functools.partial` object holding the class (`make = partial(FinalFacts)`, then
+  `make()`, reported at `make()`), and through a library method building an instance of its
+  receiver's class without its `__init__` (a pydantic model's `FinalFacts.model_construct(...)`,
+  `FinalFacts.model_validate({...})` of a dict, `facts.model_copy(...)`); with
+  `subclasses = false`, constructing exactly the class;
 - what a property returns, called (`self.data_type(is_dict=True)` with a property `data_type`
   returning `type[DataType]` constructs `DataType`): the value the getter's return annotation
   names is called, and the getter runs as reading the property does;
@@ -5815,9 +5996,18 @@ where every function the call may run binds that position to the parameter, or l
 every such function's default is `True`, `False`, `None`, `0`, or `""` and the value. A keyword
 binds as Python binds it: never a positional-only parameter, and one naming no parameter passes its
 value under its name into `**kwargs`; the receiver is the first position. A `**` operand that is a
-dict display with string constant keys, which nothing changes (a name holding it is only unpacked
-with `**`, bound to another name, tested, or returned), passes its entries as keywords
-(`DataType(**{"is_dict": True})`, `flags = {"is_dict": True}` then `DataType(**flags)`). A call that
+mapping the function builds, which nothing changes (a name holding it is only unpacked with `**`,
+merged into another mapping, bound to another name, tested, or returned), passes its entries as
+keywords: a dict display with string constant keys (`DataType(**{"is_dict": True})`,
+`flags = {"is_dict": True}` then `DataType(**flags)`); a merge (`{**a, **b}`, `dict(a, k=v)`,
+`a | b` of two mappings the function builds), which passes the last entry of each key, a mapping
+heki does not build (a parameter) replacing every key before it; and one built on several paths
+(`flags = a if c else b`), which passes a key where every path passes the same constant for it.
+Calling a `functools.partial` object the function makes passes what the object holds first (its
+positions, and its keywords, which a keyword of the call replaces), then the call's arguments; a
+call unpacking a mapping over keywords the object holds is not followed. A pydantic model's
+`model_construct` passes its keywords to the fields, `model_validate` the entries of the dict it
+is passed, and `model_copy` those of `update`. A call that
 raises `TypeError` instead of running the function (two keywords of one name, a parameter bound by a
 position, or the receiver, and a keyword, a keyword without `**kwargs` to land in, a position past
 the parameters without `*args`, a parameter without a default left unbound where no `*` unpacking or
@@ -5978,7 +6168,12 @@ Its premises:
   target (whether a test of a display holding it looks at it) is not part of the claim.
 - **Arguments** (a target with an argument list): the call binds each parameter the list names to
   its constant, as Python binds the call. Established: an argument heki cannot tell is no match,
-  and a call that raises `TypeError` instead of running the function binds nothing.
+  a mapping built on several paths passes a key only where every path passes the same constant
+  (as every function the call may run must agree), and a call that raises `TypeError` instead of
+  running the function binds nothing. Not followed: a mapping or a `functools.partial` object
+  the function does not build itself through copies (a parameter, an attribute, a call's result,
+  one chosen on several paths), a mapping something changes in place, a key computed at run time,
+  and a pydantic model's `model_validate` of a value not established to be a dict.
 
 ## Why is this bad?
 Some operations keep invariants only when one component runs them: a store that updates its
@@ -7828,7 +8023,7 @@ Its premises:
 - **Every return**: each function on the chain has made the next call on every path on which it
   returns normally.
 - **Every implementation**: each call on the chain has as its targets every implementation it
-  can run (assumptions R2 and R5), each with the fact.
+  can run (assumptions R1, R2, and R5), each with the fact.
 - **Sends**: the last call sends a statement on every call, as the ecosystem catalog describes it
   (R3).
 
@@ -7869,6 +8064,11 @@ def names(cursor: sqlite3.Cursor, ids: list[int]) -> list[str]:
 The query returns each matching row once and in no particular order, so the result is rebuilt
 from the IDs: in their order, with repeated IDs repeated. A database caps the number of
 parameters in one statement; split a long list of IDs into chunks.
+
+## Known limitations
+A call through a name the project binds to another object in a way `EFF101` lists among its
+known limitations (`mock.patch` outside tests, `sys.modules`) still counts as running its
+definition here too.
 
 ## Fix safety
 No automatic fix.
