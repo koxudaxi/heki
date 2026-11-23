@@ -3557,10 +3557,7 @@ impl<'a> Mut202Fn<'a> {
                 }
                 // `readonly-returns` may name a property: `obj.schema`.
                 if let Some(Val::Inst(class)) = self.types.get(obj) {
-                    let class = ContractClass {
-                        fqn: class.clone(),
-                        qualname: self.cx.decls.class_qualname(class).map(str::to_owned),
-                    };
+                    let class = ContractClass::with_qualname(self.cx.decls, class.clone());
                     let (fqn, qualname) = class.member(attr);
                     if let Some(deep) = self.returns.producers.deep_for(&fqn, &qualname) {
                         return Ro::new(fqn, true, Shared::produced(deep), vec![]);
