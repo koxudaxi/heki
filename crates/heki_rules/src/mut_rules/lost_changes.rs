@@ -6,8 +6,8 @@
 //! The changed object is an unnamed value that nothing reads but the change and an item load of
 //! the same statement (`settings()[k] += 1`), so no later code can read it and no flow analysis is
 //! needed. Where it comes from is [`heki_effect::fresh::source`]: the builtin itself, a copy, or
-//! project functions whose final summaries say every return is a new container of one kind
-//! ([`heki_effect::EffectSummary::fresh_return`]).
+//! project functions whose final facts say every return is a new container of one kind
+//! ([`heki_effect::ProjectIndex::fresh_return`]).
 
 use crate::{CheckContext, ModuleUnit};
 use heki_diagnostics::{Certainty, Diagnostic};
@@ -203,9 +203,10 @@ fn changed(
                 built: complete,
                 calls: Vec::new(),
             };
-            if !keys.iter().all(|k| {
-                fact.join_callee(cx.index.summary(k).and_then(|s| s.fresh_return.as_deref()))
-            }) {
+            if !keys
+                .iter()
+                .all(|k| fact.join_callee(cx.index.fresh_return(k)))
+            {
                 return None;
             }
             Changed {

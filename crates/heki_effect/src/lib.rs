@@ -883,12 +883,6 @@ pub struct EffectSummary {
     /// [`Self::return_origin_facts`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_origins: Option<Box<ReturnOrigins>>,
-    /// `MUT119`: every value the function returns is a builtin container of one kind that the
-    /// call made and that nothing else holds (computed only while the rule runs:
-    /// [`OptInFacts::fresh_returns`]; a local fact names the project functions whose results it
-    /// returns, which propagation resolves).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fresh_return: Option<Box<fresh::FreshReturn>>,
     /// The function's own writes heki cannot tie to a class (`MUT205`; never propagated).
     pub unresolved_write_sites: BTreeSet<UnresolvedWriteSite>,
     /// The function's own reads and calls heki cannot tie to a class (`MUT206`, `MUT207`; never
@@ -2159,6 +2153,12 @@ pub struct FileSummary {
     /// finds one). Read through [`Self::kept_removals`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kept_removals: Option<Box<BTreeSet<String>>>,
+    /// `MUT119`: the functions of the file whose every returned value is a builtin container of
+    /// one kind that the call made and that nothing else holds, local and final facts (`None`
+    /// unless [`OptInFacts::fresh_returns`] finds one, so that a run without them keeps one word
+    /// per file). Read through [`ProjectIndex::fresh_return`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fresh_returns: Option<Box<fresh::FreshReturns>>,
 }
 
 impl FileSummary {
@@ -2173,6 +2173,32 @@ impl FileSummary {
             .iter()
             .flat_map(|r| r.iter())
             .map(String::as_str)
+    }
+
+    /// [`Self::fresh_returns`], made when the file first has one.
+    pub(crate) fn fresh_returns_mut(&mut self) -> &mut fresh::FreshReturns {
+        self.fresh_returns.get_or_insert_with(Box::default)
+    }
+
+    /// The final `MUT119` fact of the file's `func`.
+    fn fresh_return(&self, func: &FuncKey) -> Option<&fresh::FreshReturn> {
+        self.fresh_returns.as_ref()?.resolved.get(func)
+    }
+
+    /// What callers read of the file's `func` after propagation.
+    fn final_facts(&self, func: &FuncKey) -> Option<FinalFacts> {
+        Some(FinalFacts {
+            summary: Arc::clone(self.functions.get(func)?),
+            fresh_return: self.fresh_return(func).cloned(),
+        })
+    }
+
+    /// The final facts as the local ones, where propagation starts.
+    fn reset_final_facts(&mut self) {
+        self.functions = self.local_functions.clone();
+        if let Some(fresh) = &mut self.fresh_returns {
+            fresh.resolved = fresh.local.clone();
+        }
     }
 
     /// The summary of a project file heki could not read or parse: a module that defines
@@ -2197,6 +2223,21 @@ impl FileSummary {
                 .iter()
                 .map(move |bc| (&site.caller, &bc.callee, site.span))
         })
+    }
+}
+
+/// A function's final facts: its summary and the facts kept beside it
+/// ([`FileSummary::fresh_returns`]). Early Cutoff compares all of them.
+#[derive(Clone)]
+struct FinalFacts {
+    summary: Arc<EffectSummary>,
+    fresh_return: Option<fresh::FreshReturn>,
+}
+
+impl FinalFacts {
+    /// Location-insensitive equality ([`EffectSummary::same_facts`]).
+    fn same_facts(&self, other: &Self) -> bool {
+        self.summary.same_facts(&other.summary) && self.fresh_return == other.fresh_return
     }
 }
 
@@ -2345,7 +2386,7 @@ pub enum TypedWrites {
 /// call cycles (`EffectSummary::call_cycle`), and the shared state functions change
 /// (`EffectSummary::shared_state`), which only `heki inspect` reads, the calls heki is blind to
 /// (`FileSummary::blind_spots`), which only `heki recommend` reads, and `MUT119`'s new returned
-/// containers (`EffectSummary::fresh_return`).
+/// containers (`FileSummary::fresh_returns`).
 /// `CallSite::returned`, which `MUT202` reads too, is always computed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OptInFacts {
@@ -2364,7 +2405,7 @@ pub struct OptInFacts {
     pub blind_spots: bool,
     pub set_order: bool,
     pub call_cycles: bool,
-    /// [`EffectSummary::fresh_return`].
+    /// [`FileSummary::fresh_returns`].
     pub fresh_returns: bool,
 }
 
@@ -2484,7 +2525,7 @@ impl ProjectIndex {
             ..Self::default()
         };
         for mut file in files {
-            file.functions = file.local_functions.clone();
+            file.reset_final_facts();
             index.add_file_links(&file);
             index.files.insert(file.path.clone(), file);
         }
@@ -2608,6 +2649,19 @@ impl ProjectIndex {
         self.shared_summary(func).map(Arc::as_ref)
     }
 
+    /// The final `MUT119` fact of `func` ([`fresh::FreshReturns::resolved`]), if it has one.
+    pub fn fresh_return(&self, func: &FuncKey) -> Option<&fresh::FreshReturn> {
+        self.files
+            .get(self.func_files.get(func)?)?
+            .fresh_return(func)
+    }
+
+    fn final_facts(&self, func: &FuncKey) -> Option<FinalFacts> {
+        self.files
+            .get(self.func_files.get(func)?)?
+            .final_facts(func)
+    }
+
     fn shared_summary(&self, func: &FuncKey) -> Option<&Arc<EffectSummary>> {
         self.files
             .get(self.func_files.get(func)?)?
@@ -2716,22 +2770,25 @@ impl ProjectIndex {
     pub fn update_file(&mut self, mut new_file: FileSummary) -> IncrementalUpdate {
         let path = new_file.path.clone();
         let old_file = self.files.remove(&path);
-        let mut previous: FxHashMap<FuncKey, Arc<EffectSummary>> = FxHashMap::default();
+        let mut previous: FxHashMap<FuncKey, FinalFacts> = FxHashMap::default();
         let mut owned_before: FxHashSet<FuncKey> = FxHashSet::default();
         if let Some(old) = &old_file {
-            for (k, v) in &old.functions {
+            for k in old.functions.keys() {
                 if self.func_files.get(k) == Some(&path) {
                     owned_before.insert(k.clone());
-                    previous.insert(k.clone(), v.clone());
+                    previous.extend(old.final_facts(k).map(|facts| (k.clone(), facts)));
                 }
             }
             self.remove_file_links(old);
         }
-        new_file.functions = new_file.local_functions.clone();
+        new_file.reset_final_facts();
         // What the callers decided before the edit: the recomputation below reports a function
         // only when its flag differs from that.
         for (func, s) in &mut new_file.functions {
-            if previous.get(func).is_some_and(|old| old.sync_driven_only) {
+            if previous
+                .get(func)
+                .is_some_and(|old| old.summary.sync_driven_only)
+            {
                 Arc::make_mut(s).sync_driven_only = true;
             }
         }
@@ -2798,9 +2855,9 @@ impl ProjectIndex {
         let mut region = callgraph::scc_closure(self, &seeds);
         for func in &region {
             if !own.contains(func)
-                && let Some(s) = self.shared_summary(func)
+                && let Some(facts) = self.final_facts(func)
             {
-                previous.insert(func.clone(), Arc::clone(s));
+                previous.insert(func.clone(), facts);
             }
         }
         callgraph::reset_to_local(self, &region);
@@ -2811,10 +2868,9 @@ impl ProjectIndex {
         // Same facts, but positions callers copy (call chains, write sites) moved.
         let mut moved: BTreeSet<FuncKey> = BTreeSet::new();
         for func in &region {
-            let now = self.summary(func);
-            match (previous.get(func), now) {
-                (Some(old), Some(new)) if old.same_facts(new) => {
-                    if !old.same_for_callers(new) {
+            match (previous.get(func), self.final_facts(func)) {
+                (Some(old), Some(new)) if old.same_facts(&new) => {
+                    if !old.summary.same_for_callers(&new.summary) {
                         moved.insert(func.clone());
                     }
                 }
@@ -2849,9 +2905,9 @@ impl ProjectIndex {
             };
         }
         region = affected.iter().chain(&relocated).cloned().collect();
-        let before: FxHashMap<FuncKey, EffectSummary> = affected
+        let before: FxHashMap<FuncKey, FinalFacts> = affected
             .iter()
-            .filter_map(|k| Some((k.clone(), self.summary(k)?.clone())))
+            .filter_map(|k| Some((k.clone(), self.final_facts(k)?)))
             .collect();
         callgraph::reset_to_local(self, &region);
         callgraph::propagate(self, &region);
@@ -2865,8 +2921,8 @@ impl ProjectIndex {
                 .filter(|k| {
                     before
                         .get(*k)
-                        .zip(self.summary(k))
-                        .is_none_or(|(old, new)| !old.same_facts(new))
+                        .zip(self.final_facts(k))
+                        .is_none_or(|(old, new)| !old.same_facts(&new))
                 })
                 .cloned(),
         );
