@@ -278,6 +278,12 @@ def main() -> int:
             versions = {v: known[v] for v in pinned[name]}
         else:
             versions = checked_versions(name, dist["verified"])
+        if not versions:
+            # A range that selects no published release would leave every row of the
+            # distribution unchecked while the sentinel passes.
+            print(f"{name}: `verified = {dist['verified']!r}` selects no published release")
+            failed += 1
+            continue
         for version, uploaded in versions.items():
             failures = check_release(name, version, uploaded, rows)
             status = "ok" if not failures else f"{len(failures)} failure(s)"
