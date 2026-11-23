@@ -2006,7 +2006,7 @@ fn rule_and_explain_commands() {
     let (code, stdout, _) = heki(&["rule", "--all", "--output-format", "json"]);
     assert_eq!(code, 0);
     let rules: Vec<Value> = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(rules.len(), 46);
+    assert_eq!(rules.len(), 47);
     for r in &rules {
         let doc = r["doc"].as_str().unwrap();
         // Every page has Ruff's sections, in order.
