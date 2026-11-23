@@ -124,6 +124,10 @@ pub struct ParamInfo {
     /// binds when the caller passes nothing. The default's value, evaluated where the function
     /// is defined, is an operand of the `MakeClosure` that builds the function object.
     pub default: Option<ConstLiteral>,
+    /// The default is a list, dict, or set display: one container, built where the function is
+    /// defined, that every call binding the default shares (a cache kept across calls).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub container_default: bool,
     /// Keyword-only (after `*` or `*args`): never bound by position.
     pub kw_only: bool,
     /// Positional-only (before `/`): never bound by keyword.

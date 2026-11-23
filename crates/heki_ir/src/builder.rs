@@ -1325,6 +1325,10 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 var,
                 has_default: p.default.is_some(),
                 default: p.default.as_deref().and_then(literal_default),
+                container_default: p
+                    .default
+                    .as_deref()
+                    .is_some_and(|d| matches!(d, Expr::List(_) | Expr::Dict(_) | Expr::Set(_))),
                 kw_only: i >= positional,
                 pos_only: i < params.posonlyargs.len(),
                 is_vararg: false,
@@ -1345,6 +1349,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 var,
                 has_default: false,
                 default: None,
+                container_default: false,
                 kw_only: false,
                 pos_only: false,
                 is_vararg: true,
@@ -1365,6 +1370,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 var,
                 has_default: false,
                 default: None,
+                container_default: false,
                 kw_only: false,
                 pos_only: false,
                 is_vararg: false,

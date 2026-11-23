@@ -83,6 +83,14 @@ count for a read.
   write of a `write-universe` entry that no `allow-writes` entry names is reported, in every form
   `writes-targets` follows. `allow-writes` also exempts writes from `write-targets` in the same
   boundary. Without `allow-writes`, the boundary allows no write of the universe.
+- An entry target (`Class.attr["key"]`, in `write-targets`, `write-universe`, or `allow-writes`)
+  also matches the writes a store operation makes with the key a call passes it: `set_extra(field,
+  "init", v)`, where `set_extra` writes `field.extras[key]`, writes `Field.extras["init"]`,
+  through any number of functions passing the key on, also as a `Final` constant. An item write
+  whose key heki cannot tell (a key the function computes, a parameter of the scope function, or
+  an argument that is neither) is reported where the boundary names an entry of the attribute and
+  allows no write of the whole container (`allow-writes = ["Field.extras"]`): "writes an entry of
+  `Field.extras` under a key heki cannot tell".
 
 Each scope function is searched breadth first over the project call graph, so the reported
 chain is a shortest one. The search does not enter:
@@ -147,7 +155,9 @@ Its premises:
   part of the claim. With `"calls-and-bases"`, so is a class statement passing a class target
   as a base, typed where the statement runs; whether the subclass is constructed is not part of
   the claim. With `"reads"`, so is any other use of the target's value, as for `MUT204`; what the
-  use does with it is not part of the claim.
+  use does with it is not part of the claim. For an item write, the entry is the one the key
+  names: a constant in the function, or the constant a call on the chain passes for the key.
+  Established. A write under a key heki cannot tell may change another entry. Open.
 
 ## Why is this bad?
 Some parts of a code base promise to be pure: rendering a model must not mutate it, domain code

@@ -1371,9 +1371,12 @@ unresolved = "report"
 
 A container entry (`Class.attr["key"]`):
 
-- matches the writes of that constant key (a literal or a string constant), not a write of the
-  whole container or with a computed key;
-- is reported once, under the entry, when its container is a target too.
+- matches the writes of that constant key (a literal or a string constant), also by a store
+  operation a call passes the key to (`set_extra(field, "init", v)` writing `field.extras[key]`,
+  reported at the call), not a write of the whole container or with a computed key;
+- is reported once, under the entry, when its container is a target too;
+- in an effect boundary, makes a write of the container under a key heki cannot tell a report of
+  its own ("under a key heki cannot tell"), unless the boundary allows the whole container.
 
 A write into the entries of a target's container (`model.meta["kw"][name] = v`) is a write of
 the target. So is a write through a local alias of the container (`kw = model.meta["kw"]`), also
@@ -5460,7 +5463,9 @@ It does not report:
   `if clear:`, leaves the other path stale and is reported;
 - private helpers whose every caller invalidates the property;
 - lazy initialization: a write where a `None` / falsy test of the attribute found it unset
-  (`if self._conn is None: self._conn = connect()`, also in a `@property` getter), when the
+  (`if self._conn is None: self._conn = connect()`, also in a `@property` getter; the test may
+  be of `getattr(self, "_conn", None)` or `hasattr(self, "_conn")`, or the write in the
+  `except AttributeError:` clause of a `try` that reads it), when the
   cached property reads the attribute only through such initializations
   (`return self._connect().db`): computing the cached value set the attribute, so the test
   cannot find it unset again. A cached property that reads it directly
@@ -6384,6 +6389,14 @@ count for a read.
   write of a `write-universe` entry that no `allow-writes` entry names is reported, in every form
   `writes-targets` follows. `allow-writes` also exempts writes from `write-targets` in the same
   boundary. Without `allow-writes`, the boundary allows no write of the universe.
+- An entry target (`Class.attr["key"]`, in `write-targets`, `write-universe`, or `allow-writes`)
+  also matches the writes a store operation makes with the key a call passes it: `set_extra(field,
+  "init", v)`, where `set_extra` writes `field.extras[key]`, writes `Field.extras["init"]`,
+  through any number of functions passing the key on, also as a `Final` constant. An item write
+  whose key heki cannot tell (a key the function computes, a parameter of the scope function, or
+  an argument that is neither) is reported where the boundary names an entry of the attribute and
+  allows no write of the whole container (`allow-writes = ["Field.extras"]`): "writes an entry of
+  `Field.extras` under a key heki cannot tell".
 
 Each scope function is searched breadth first over the project call graph, so the reported
 chain is a shortest one. The search does not enter:
@@ -6448,7 +6461,9 @@ Its premises:
   part of the claim. With `"calls-and-bases"`, so is a class statement passing a class target
   as a base, typed where the statement runs; whether the subclass is constructed is not part of
   the claim. With `"reads"`, so is any other use of the target's value, as for `MUT204`; what the
-  use does with it is not part of the claim.
+  use does with it is not part of the claim. For an item write, the entry is the one the key
+  names: a constant in the function, or the constant a call on the chain passes for the key.
+  Established. A write under a key heki cannot tell may change another entry. Open.
 
 ## Why is this bad?
 Some parts of a code base promise to be pure: rendering a model must not mutate it, domain code
@@ -6711,7 +6726,9 @@ The rule reports the write itself, once per method and attribute. It does not re
   instead, or which raises without one, and any write on a class whose MRO defines
   `__setattr__` or `__delattr__`;
 - lazy initialization: a write under a `None` / falsy check of the same attribute
-  (`if self._key is None: self._key = ...`, `if not self._parts: ...`);
+  (`if self._key is None: self._key = ...`, `if not self._parts: ...`, also of
+  `getattr(self, "_key", None)` and `hasattr(self, "_key")`), or in the `except
+  AttributeError:` clause of a `try` that reads it;
 - memo / cache dictionaries (`self._cache[key] = value`, `setdefault`, the
   `if key not in self._memo:` pattern): in-place changes of an attribute with a `cache` or
   `memo` word in its name; rebinding it (`self.cache_size = n`) and names such as
@@ -8335,8 +8352,10 @@ stop_event.is_set():`), or is a `while True:` loop that waits on every iteration
 reading its target steps through items, also when it sleeps per item.
 
 A client that is only created while an attribute is unset, which the code then sets (lazy
-initialization: `if not self._sock: self._sock = connect()`, or `if self._sock: return`
-before connecting), is created once per object, not on every iteration: the call is not
+initialization: `if not self._sock: self._sock = connect()`, `if self._sock: return` before
+connecting, `if not hasattr(self, "_sock"):`, a `None` test of `getattr(self, "_sock", None)`,
+or the `except AttributeError:` clause of a `try` reading `self._sock`; the store may be
+`setattr` or `object.__setattr__`), is created once per object, not on every iteration: the call is not
 reported unless a data-sized loop around it constructs the object in each iteration
 (`Connection().send(cmd)`); `conn.send(cmd)` on a connection made before the loop, taken from
 a pool, or held by the receiver is not reported. The receiver of a bound method, the arguments a
@@ -8900,10 +8919,14 @@ value.
 
 Filling a memo of the shared object, directly or in a method or helper it is handed to, is no
 mutation: an in-place change of an attribute named as a cache or memo (`self._style_cache[k] =
-v`, also through the methods of a cache object held there), a store under
-`if k not in self._decoders:` or through `setdefault`, and a lazy
-initialization (`if self._runtime is None: self._runtime = load()`) leave what the object
-computes as it was.
+v`, also through the methods of a cache object held there), a store under a test finding the
+key missing (`if k not in self._decoders:`, the `else` of `if k in ...:`, a `None` or falsy
+`self._index.get(k)`, the key computed again by the same expression, `id(raw)`) or through
+`setdefault`, a fill of a container a helper has as its default (`def fill(key, _seen={})`), and
+a lazy initialization leave what the object computes as it was. A lazy initialization stores
+an attribute (`self._x = v`, `setattr`, `object.__setattr__`) where a test found it unset: `if
+self._runtime is None:`, `if not hasattr(self, "_runtime"):`, a `None` test of `getattr(self,
+"_runtime", None)`, or the `except AttributeError:` clause of a `try` that reads it.
 
 ## What a report states
 
@@ -10256,8 +10279,9 @@ lists keys any function may write. A computed key, a plain attribute store (`fie
 `setattr`), and a write in a helper that does not see the object's class are not such writes. A
 target can also name one entry of the container an attribute holds, `Class.attr["key"]`: it matches
 the writes of that key (`field.extras["init"] = v`, `field.extras[INIT]` with a string constant,
-`field.extras.pop("init")`, `del field.extras["init"]`, `field.extras["init"].append(v)`), not a
-write of the whole container (`field.extras = {}`, `field.extras.update(...)`) or with a computed
+`field.extras.pop("init")`, `del field.extras["init"]`, `field.extras["init"].append(v)`, and a
+store operation called with the key, `set_extra(field, "init", v)` writing `field.extras[key]`,
+reported at the call), not a write of the whole container (`field.extras = {}`, `field.extras.update(...)`) or with a computed
 key, which are writes of `Class.attr`. When a contract names both a container and one of its
 entries, a write of the entry is reported once, under the entry.
 
