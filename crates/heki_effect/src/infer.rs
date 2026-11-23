@@ -704,6 +704,15 @@ impl<'a> TypeCtx<'a> {
     }
 }
 
+/// The builtin sequences a slice of which is a new sequence of their class.
+const SLICED_SEQUENCES: &[&str] = &[
+    "builtins.list",
+    "builtins.tuple",
+    "builtins.str",
+    "builtins.bytes",
+    "builtins.bytearray",
+];
+
 /// A transfer cannot run yet: an operand it needs is unset.
 struct Pending;
 
@@ -1781,7 +1790,12 @@ impl<'e, 'a> Engine<'e, 'a> {
         };
         let item = match (&o.args, is_slice) {
             (Args::None, false) => return Ok(self.dunder(o, "__getitem__")),
-            (Args::None, true) => return Ok(None),
+            // A slice of a builtin sequence is one of its class, whatever its items.
+            (Args::None, true) => {
+                return Ok(SLICED_SEQUENCES
+                    .contains(&o.class.as_str())
+                    .then(|| Ty::inst(o.class.as_str())));
+            }
             (Args::Map(_, v), _) => (**v).clone(),
             // A slice keeps the container type (a tuple's length is lost).
             (Args::Items(_), true) => return Ok(Some(Ty::Inst(o.clone()))),
@@ -1798,7 +1812,7 @@ impl<'e, 'a> Engine<'e, 'a> {
     }
 
     /// What `obj[index]` gives when `obj` reads a module's table of functions and `index` is
-    /// one of its keys (`HANDLERS["create"]`, [`TypeCtx::table_item`]).
+    /// one of its keys (`HANDLERS["create"]`, [`TypeCtx::table_value`]).
     fn table_item(&self, obj: VarId, index: VarId) -> Option<Option<Ty>> {
         let inst = self.shape.inst(self.shape.copy_root(obj))?;
         let module_of = |v: VarId| match self.fact(v) {
@@ -1809,7 +1823,7 @@ impl<'e, 'a> Engine<'e, 'a> {
         let key = self
             .cx
             .str_constant_in(self.shape, index, &FxHashMap::default())?;
-        self.cx.table_item(read, &key)
+        self.cx.table_value(read, &key)
     }
 
     /// The item at constant position `index` of a tuple, or any of its items. An unpacking
