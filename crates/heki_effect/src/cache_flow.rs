@@ -341,7 +341,7 @@ fn derived_from(
             Visit::<()>::Expand
         },
     );
-    (!walked.is_open()).then_some(derived).unwrap_or_default()
+    walked.map(|_| derived).open_means(FxHashSet::default())
 }
 
 /// One block of a method: its normal control flow and the points that invalidate or read a
