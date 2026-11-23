@@ -115,6 +115,16 @@ definition. The report counts every distinct site of that kind the scope functio
 a Ratchet baseline sees a second blocking call, write, or parameter change below a recorded
 report.
 
+With `unresolved = "report"`, the boundary also reports what it cannot judge in the reach: a call
+heki resolves to no function (`HANDLERS[kind](...)` on a table something changes, a parameter
+called), a function it does not model (`eval`, a body too large) or whose body only a stub
+declares, and a write of an attribute `write-targets` or `write-universe` names on an object of
+unknown class or under a name computed at run time (`thing.required = True` of an unannotated
+`thing`, `setattr(thing, name, v)`). Each kind is reported once per scope function, at the call
+in the scope function starting the shortest chain to the first one, with the chain; calls and
+writes inside `allowed-callees` are not followed. Without it, the boundary is silent where heki
+cannot see, so no report does not mean the scope stays inside the boundary.
+
 `allow-writes` is only as precise as heki's view of which object each write changes. A write
 heki cannot tell apart from a write of the pass's input is reported: state that a property
 getter writes while rendering, or a store operation whose writes depend on its arguments. A
@@ -210,6 +220,9 @@ No automatic fix.
   - `allow-writes`: `Class.attr` writes the boundary allows (needs `write-universe`).
   - `fresh-objects`: `"allow"` (default) or `"report"`: whether writes that construct the object
     they write count, as for `[[tool.heki.write-owners]]`.
+  - `unresolved`: `"ignore"` (default) or `"report"`: whether what the boundary cannot judge in
+    the reach is reported (diagnostic targets `checks:unresolved-calls`,
+    `checks:unresolved-writes:required`).
   - `references`: `"ignore"` (default), `"calls"`, `"calls-and-bases"`, or `"reads"`: whether a
     reference handing a `call-targets` entry on, with `"calls-and-bases"` a class statement
     naming one among its bases, and with `"reads"` any other use of its value, counts for

@@ -593,6 +593,13 @@ Missed findings close as heki learns more:
   nothing: what the instance keeps can be replaced.
 - A `write-owners` contract with `unresolved = "report"` reports the writes heki cannot tie to a
   class ([`MUT205`](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/)).
+- A private helper hands its accesses to the callers heki sees. A helper some code also hands on
+  as a value (a table, a class attribute, an argument) has callers heki does not see: an owner
+  contract with `unresolved = "report"` judges it as if it had no callers, and one without lets
+  its callers decide.
+- An effect boundary is silent where heki cannot see: a call it cannot resolve, or a write on an
+  object of unknown class, in a scope's reach. With `unresolved = "report"` it reports them
+  (`EFF201`).
 
 ### Objects without a known class
 
@@ -1330,7 +1337,11 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
   method named like a target, accessed on an object of unknown class (an unannotated parameter,
   a loop variable, an untyped call result, `Any`, a protocol whose implementations heki cannot
-  list). A baseline counts them apart from the violations the typed rules prove.
+  list). A baseline counts them apart from the violations the typed rules prove. An owner
+  contract with it also judges a function some code hands on as a value (a display, a class
+  attribute, an argument, a return: `HANDLERS = [helper]`, `REQUIRE = staticmethod(helper)`)
+  in that function, as if it had no callers: such a function has callers heki does not see, so
+  its allowed callers do not allow what it does.
 - An attribute named through a string (`setattr`, `getattr`, `__dict__`, `vars`) is followed
   when the string is a constant: see [Dynamic names](https://heki.koxudaxi.dev/scope/#dynamic-names).
 
@@ -1631,6 +1642,7 @@ import-probes = "report"
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes (as in `write-owners`) counts as a write of the boundary. |
 | `references` | `"ignore"` | `"ignore"`, `"calls"`, `"calls-and-bases"`, or `"reads"`, as for `call-owners`: whether a reference handing a `call-targets` entry on (and a class statement naming one among its bases, and any other use of its value) counts for `calls`. |
 | `import-probes` | `"allow"` | `"allow"` or `"report"`: whether `reads-environment` also forbids an import probe, an `import` inside a `try` with an `except` clause naming `ImportError` or `ModuleNotFoundError`. `"report"` without `reads-environment` is a configuration error. |
+| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the boundary also reports, under `EFF201`, what it cannot judge in its scopes' reach: a call heki resolves to no function, a function it does not model (`eval`, a body too large) or whose body only a stub declares, and a write of an attribute `write-targets` or `write-universe` names on an object of unknown class or under a name computed at run time. Each kind is one report per scope function, at the first one with its chain. |
 | `message` | none | The help of every report of the boundary. |
 
 | `forbid` token | Forbids |
@@ -5854,7 +5866,8 @@ parameter, `Any`) is not seen; with `unresolved = "report"`,
 `MUT207` reports it.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with project
-callers hands its calls to its callers: the call is reported at the call sites of the first
+callers hands its calls to its callers (with `unresolved = "report"`, not one that some code also
+hands on as a value, which has callers heki does not see): the call is reported at the call sites of the first
 non-private callers, with the chain of calls down to the call as related information. A call runs
 where the body holding it runs, as for `MUT201`: a generator's calls where it is iterated (a
 generator an allowed caller creates and returns calls outside it when its caller iterates it), a
@@ -5994,7 +6007,10 @@ No automatic fix.
     `allowed-callers`.
   - `message`: the help of every report of the contract.
   - `unresolved`: `"ignore"` (default) or `"report"`: also report the calls the contract cannot
-    tie to a class, under `MUT207`.
+    tie to a class, under `MUT207`. A function some code hands
+    on as a value (a display, a class attribute, an argument, a return: `HANDLERS = [helper]`,
+    `REQUIRE = staticmethod(helper)`) has callers heki does not see: with `"report"`, it judges
+    its calls itself, as if it had no callers.
   - `references`: `"ignore"` (default), `"calls"`, `"calls-and-bases"`, or `"reads"`: a
     reference handing a target on to be called later counts as a call of it, with
     `"calls-and-bases"` a class statement naming a class target among its bases too, and with
@@ -6406,6 +6422,16 @@ definition. The report counts every distinct site of that kind the scope functio
 a Ratchet baseline sees a second blocking call, write, or parameter change below a recorded
 report.
 
+With `unresolved = "report"`, the boundary also reports what it cannot judge in the reach: a call
+heki resolves to no function (`HANDLERS[kind](https://heki.koxudaxi.dev/rules/...)` on a table something changes, a parameter
+called), a function it does not model (`eval`, a body too large) or whose body only a stub
+declares, and a write of an attribute `write-targets` or `write-universe` names on an object of
+unknown class or under a name computed at run time (`thing.required = True` of an unannotated
+`thing`, `setattr(thing, name, v)`). Each kind is reported once per scope function, at the call
+in the scope function starting the shortest chain to the first one, with the chain; calls and
+writes inside `allowed-callees` are not followed. Without it, the boundary is silent where heki
+cannot see, so no report does not mean the scope stays inside the boundary.
+
 `allow-writes` is only as precise as heki's view of which object each write changes. A write
 heki cannot tell apart from a write of the pass's input is reported: state that a property
 getter writes while rendering, or a store operation whose writes depend on its arguments. A
@@ -6501,6 +6527,9 @@ No automatic fix.
   - `allow-writes`: `Class.attr` writes the boundary allows (needs `write-universe`).
   - `fresh-objects`: `"allow"` (default) or `"report"`: whether writes that construct the object
     they write count, as for `[[tool.heki.write-owners]]`.
+  - `unresolved`: `"ignore"` (default) or `"report"`: whether what the boundary cannot judge in
+    the reach is reported (diagnostic targets `checks:unresolved-calls`,
+    `checks:unresolved-writes:required`).
   - `references`: `"ignore"` (default), `"calls"`, `"calls-and-bases"`, or `"reads"`: whether a
     reference handing a `call-targets` entry on, with `"calls-and-bases"` a class statement
     naming one among its bases, and with `"reads"` any other use of its value, counts for
@@ -8715,7 +8744,10 @@ No automatic fix.
     like `allowed-readers`.
   - `message`: the help of every report of the contract.
   - `unresolved`: `"ignore"` (default) or `"report"`: also report the reads the contract cannot
-    tie to a class, under `MUT206`.
+    tie to a class, under `MUT206`. A function some code hands
+    on as a value (a display, a class attribute, an argument, a return: `HANDLERS = [helper]`,
+    `REQUIRE = staticmethod(helper)`) has callers heki does not see: with `"report"`, it judges
+    its reads itself, as if it had no callers.
   - `attribution`: `"call-graph"` (default) or `"lexical"`: whether a private helper hands its
     reads to its callers and a function that only runs inside allowed readers is allowed, or
     each read is judged in the function holding it.
@@ -10434,7 +10466,10 @@ No automatic fix.
   - `fresh-objects`: `"allow"` (default) or `"report"`: whether writes that construct the object
     they write are reported.
   - `unresolved`: `"ignore"` (default) or `"report"`: also report the writes the contract
-    cannot tie to a class, under `MUT205`.
+    cannot tie to a class, under `MUT205`. A function some code hands
+    on as a value (a display, a class attribute, an argument, a return: `HANDLERS = [helper]`,
+    `REQUIRE = staticmethod(helper)`) has callers heki does not see: with `"report"`, it judges
+    its writes itself, as if it had no callers.
   - `attribution`: `"call-graph"` (default) or `"lexical"`: whether a private helper hands its
     writes to its callers and a function that only runs inside allowed writers is allowed, or
     each write is judged in the function holding it.
