@@ -65,6 +65,7 @@ app/api.py:5:12: EFF101 (async-blocking-call) [warning] `app.users.load_user` al
 
 Found 1 diagnostic(s) in 2 file(s).
 note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+EFF101 (async-blocking-call): `heki rule EFF101`, https://heki.koxudaxi.dev/rules/async-blocking-call/
 ```
 
 ### A query one helper below a loop
@@ -96,6 +97,7 @@ app/orders.py:11:37: EFF103 (loop-db-query) [warning] every iteration over param
 
 Found 1 diagnostic(s) in 1 file(s).
 note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+EFF103 (loop-db-query): `heki rule EFF103`, https://heki.koxudaxi.dev/rules/loop-db-query/
 ```
 
 Ruff, ty, Pyrefly, pyright, and mypy report nothing for either example with their default settings.
@@ -181,6 +183,7 @@ These rules are exact and run by default. Each report shows the chain of calls t
 | A database statement on every iteration of a loop over data | [`EFF103`](rules/loop-db-query.md) |
 | A `Sequence` / `Mapping` argument changed in place by a helper | [`MUT110`](rules/readonly-param-mutation.md) |
 | A list, dict, or set that an `lru_cache` / `cache` function returned, changed in place | [`MUT114`](rules/cached-result-mutation.md) |
+| A change of a builtin container that is lost because the object is new and nothing holds it (`list(xs).sort()`) | [`MUT119`](rules/change-lost-on-new-object.md) |
 | A DataFrame or array concatenated with itself on every loop iteration | [`DATA101`](rules/loop-carried-concat.md) |
 | A quadratic list, dict, set, bytes, or queue pattern | `OPT101`-`OPT103`, `OPT110`, `OPT111`, `OPT113`, `OPT120`, `OPT121`, `OPT130` ([fixes](fixes.md)) |
 
@@ -204,7 +207,7 @@ once you declare a contract: see [Rules](rules/index.md) and [Rule precision](pr
   effect, which a diff does not show.
 - [Coding agents](coding-agents.md) get the same checks as JSON, and an
   [Agent Skill](coding-agents.md#agent-skill-experimental) teaches them the workflow.
-- [`heki inspect`](coding-agents.md#before-an-edit-heki-inspect-experimental) (experimental)
+- [`heki inspect`](coding-agents.md#what-a-function-does-heki-inspect-experimental) (experimental)
   says what one function does, so an agent does not read its callees to find out.
 
 ### Fast, quiet, and easy to adopt
@@ -234,14 +237,15 @@ across modules. heki models effects and aliases, what code does:
 | --- | --- | --- |
 | Ruff | syntax and style | the effects behind a call: a blocking call, a query, or a write, wherever it happens |
 | ty, Pyrefly, pyright, mypy | declared types | in-place changes, through aliases and helpers, to `frozen`, `ReadOnly`, and `Final` fields and to `Sequence` / `Mapping` arguments |
-| tach, import-linter | which modules may import which | which functions write or read a field, call a function, or reach I/O |
+| tach, import-linter | which modules may import which | which functions write or read a field, call a function, or reach I/O; planned: when each import runs, with these tools' contracts read as heki contracts |
 
 Their stricter settings do not close the gap. The second example above is fully annotated and
 passes Ruff's annotation rules (`ANN`), `mypy --strict`, pyright's strict mode, and Pyrefly's
 `strict` preset, yet it sends one query per order: the types are right, and what the code does
 is slow.
 
-heki leaves to these tools what they cover, and keeps doing so as they grow: use it next to them.
+heki leaves syntax, style, and types to these tools, and keeps doing so as they grow: use it next
+to them.
 
 ## 🔧 Rewrites proven under CPython's semantics
 
@@ -289,7 +293,7 @@ report names the missing obligation instead of offering a fix. See [Fixes and sa
 - 🎯 See what heki [covers and does not cover](scope.md).
 - 📦 [Install heki](installation.md) and 🚀 [run it on a project](getting-started.md).
 - ⚙️ [Configure](configuration.md) rule selection, contracts, and the Python version.
-- 📏 Browse the [44 rules](rules/index.md), and see [how precise each one is](precision.md).
+- 📏 Browse the [46 rules](rules/index.md), and see [how precise each one is](precision.md).
 - 🔧 Read how [fixes are proven safe](fixes.md).
 - 🪜 [Adopt it gradually](adoption.md) with a Ratchet baseline in CI.
 - 🖥️ Use it from [your editor](lsp.md) or 🤖 [a coding agent](coding-agents.md).

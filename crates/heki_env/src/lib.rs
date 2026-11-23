@@ -1,7 +1,10 @@
 //! Environment resolution, `RuntimeProfile`, and Ruff/`t-linter`-compatible `heki` configuration.
 
+pub mod problem;
+mod schema;
 mod stdlib;
 
+pub use problem::{Docs, Explain, Problem, Setting};
 pub use stdlib::is_stdlib_module;
 
 use serde::{Deserialize, Serialize};
@@ -37,6 +40,15 @@ impl PythonVersion {
         major: 3,
         minor: 15,
     };
+
+    /// The versions heki checks, the oldest first.
+    pub const SUPPORTED: [Self; 5] = [
+        Self::PY311,
+        Self::PY312,
+        Self::PY313,
+        Self::PY314,
+        Self::PY315,
+    ];
 
     pub fn parse_tag(tag: &str) -> Option<Self> {
         match tag {
@@ -411,31 +423,115 @@ pub struct WorkspaceMembers {
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("failed to read config file {path}: {cause}")]
+    #[error("cannot read the configuration file `{}`: {cause}", path.display())]
     Io {
         path: PathBuf,
         cause: std::io::Error,
     },
-    /// Invalid TOML, an unknown key, or a value of the wrong type.
-    #[error("failed to parse TOML in {path}: {cause}")]
-    Toml {
+    #[error("the configuration file is not valid TOML: {message}")]
+    Syntax {
         path: PathBuf,
-        cause: toml::de::Error,
+        position: Option<(u32, u32)>,
+        message: String,
     },
-    #[error(
-        "`[tool.heki]` in {path}: only a `pyproject.toml` holds the settings under `tool.heki`; this file holds them at the top level (`[lint]`, `[[ecosystem]]`)"
-    )]
-    ToolTable { path: PathBuf },
-    #[error(
-        "`{key}` at the top level of {path}: a `pyproject.toml` holds the settings under `[tool.heki]`"
-    )]
-    TopLevelSetting { path: PathBuf, key: String },
-    #[error("`src` entry `{entry}` in {path}: {reason}")]
+    /// A key its table does not have.
+    #[error("unknown key `{key}` in {}", problem::table_name(*layout, table))]
+    UnknownKey {
+        path: PathBuf,
+        layout: ConfigLayout,
+        position: Option<(u32, u32)>,
+        table: String,
+        key: String,
+        /// The keys below the key, when it opens a table.
+        keys_inside: Vec<String>,
+    },
+    /// A value of the wrong type, or not one the key takes.
+    #[error("{}{message}", key.as_ref().map(|(table, key)| format!("invalid `{key}` in {}: ", problem::table_name(*layout, table))).unwrap_or_default())]
+    Value {
+        path: PathBuf,
+        layout: ConfigLayout,
+        position: Option<(u32, u32)>,
+        /// The table and key of the value, when the error has a position.
+        key: Option<(String, String)>,
+        message: String,
+    },
+    #[error("`[tool.heki]` outside a `pyproject.toml`")]
+    ToolTable {
+        path: PathBuf,
+        position: Option<(u32, u32)>,
+    },
+    #[error("`{key}` at the top level of a `pyproject.toml`")]
+    TopLevelSetting {
+        path: PathBuf,
+        key: String,
+        position: Option<(u32, u32)>,
+    },
+    #[error("invalid `src` entry `{entry}`: {reason}")]
     SourceRoot {
         path: PathBuf,
         entry: String,
         reason: &'static str,
     },
+}
+
+impl Explain for ConfigError {
+    fn explain(&self) -> Problem {
+        let problem = Problem::new(self.to_string());
+        let at = |problem: Problem, path: &Path, position: &Option<(u32, u32)>| {
+            position.map_or(problem.clone(), |(line, column)| {
+                problem.at(path, line, column)
+            })
+        };
+        match self {
+            Self::Io { .. } => problem
+                .help("pass an existing file to `--config`, or run heki where heki.toml or pyproject.toml is readable")
+                .docs(Docs::ConfigFiles),
+            Self::Syntax { path, position, .. } => at(problem, path, position)
+                .help("heki reads its settings from this file: fix the TOML here, or name another file with `--config`")
+                .docs(Docs::ConfigFiles),
+            Self::UnknownKey {
+                path,
+                layout,
+                position,
+                table,
+                key,
+                keys_inside,
+            } => schema::explain_unknown_key(
+                at(problem, path, position),
+                *layout,
+                table,
+                key,
+                keys_inside,
+            ),
+            Self::Value {
+                path,
+                layout,
+                position,
+                key,
+                ..
+            } => {
+                let mut problem = at(problem, path, position);
+                let help = key.as_ref().and_then(|(t, k)| schema::value_help(*layout, t, k));
+                problem.help.extend(help);
+                problem.docs(key.as_ref().map_or(Docs::ConfigTables, |(t, k)| Docs::of_key(t, k)))
+            }
+            Self::ToolTable { path, position } => at(problem, path, position)
+                .help("only a `pyproject.toml` holds the settings under `tool.heki`; this file holds them at the top level: write `[lint]` and `[[write-owners]]`, not `[tool.heki.lint]`")
+                .docs(Docs::ConfigTables),
+            Self::TopLevelSetting { path, key, position } => at(problem, path, position)
+                .help(format!("a `pyproject.toml` holds heki's settings under `[tool.heki]`: move `{key}` into `[tool.heki]` (or its table, `[tool.heki.{key}]`)"))
+                .docs(Docs::ConfigTables),
+            Self::SourceRoot { path, entry, .. } => problem
+                .help("list directories relative to the project root: `src = [\"src\"]`")
+                .docs(Docs::SourceRoots)
+                .setting(Setting {
+                    key: Some("src".to_owned()),
+                    value: Some(entry.clone()),
+                    ..Setting::default()
+                })
+                .locate(Some(path)),
+        }
+    }
 }
 
 /// The project-relative POSIX form of a `src` entry (`./lib/` -> `lib`; `.`, the project root
@@ -496,22 +592,28 @@ impl ConfigLayout {
     /// unknown key, a `[tool.heki]` table outside a `pyproject.toml`, and a setting at the top
     /// level of a `pyproject.toml` are errors.
     pub fn parse(self, path: &Path, text: &str) -> Result<HekiConfig, ConfigError> {
-        let toml_error = |cause| ConfigError::Toml {
+        let doc = toml_edit::ImDocument::parse(text).map_err(|e| ConfigError::Syntax {
             path: path.to_path_buf(),
-            cause,
+            position: e.span().map(|s| problem::line_column(text, s.start)),
+            message: e.message().trim().replace('\n', "; "),
+        })?;
+        schema::check_keys(self, path, text, doc.as_table())?;
+        let toml_error = |cause: toml::de::Error| {
+            let offset = cause.span().map(|s| s.start);
+            let key = offset.and_then(|offset| {
+                let root = problem::settings_root(doc.as_table(), self)?;
+                schema::key_at("", root, offset)
+            });
+            ConfigError::Value {
+                path: path.to_path_buf(),
+                layout: self,
+                position: offset.map(|o| problem::line_column(text, o)),
+                key,
+                message: cause.message().to_owned(),
+            }
         };
-        let table: toml::Table = toml::from_str(text).map_err(toml_error)?;
         match self {
             Self::PyProject => {
-                if let Some(key) = table
-                    .keys()
-                    .find(|k| HekiConfig::KEYS.contains(&k.as_str()))
-                {
-                    return Err(ConfigError::TopLevelSetting {
-                        path: path.to_path_buf(),
-                        key: key.clone(),
-                    });
-                }
                 let wrapper: PyProjectWrapper = toml::from_str(text).map_err(toml_error)?;
                 let workspaces = wrapper.workspaces(path);
                 HekiConfig {
@@ -523,11 +625,6 @@ impl ConfigLayout {
                 .with_source_roots(path)
             }
             Self::TopLevel => {
-                if table.contains_key("tool") {
-                    return Err(ConfigError::ToolTable {
-                        path: path.to_path_buf(),
-                    });
-                }
                 let cfg: HekiConfig = toml::from_str(text).map_err(toml_error)?;
                 let dir = path.parent().unwrap_or(Path::new(""));
                 let sibling = sibling_pyproject(&dir.join("pyproject.toml"));
@@ -651,13 +748,7 @@ pub fn requires_python_lower_bound(spec: &str) -> Option<PythonVersion> {
             .iter()
             .any(|&p| clauses.iter().all(|c| c.admits(&release(p))))
     };
-    let supported = [
-        PythonVersion::PY311,
-        PythonVersion::PY312,
-        PythonVersion::PY313,
-        PythonVersion::PY314,
-        PythonVersion::PY315,
-    ];
+    let supported = PythonVersion::SUPPORTED;
     let has_lower_bound = clauses.iter().any(|c| {
         matches!(
             c.op,
@@ -1095,7 +1186,7 @@ import-probes = "report"
         std::fs::write(&heki, "target-version = [\n").unwrap();
         assert!(matches!(
             HekiConfig::load_from_file(&heki),
-            Err(ConfigError::Toml { .. })
+            Err(ConfigError::Syntax { .. })
         ));
         std::fs::remove_dir_all(&dir).unwrap();
     }

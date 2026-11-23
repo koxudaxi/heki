@@ -2,7 +2,7 @@
 
 | Item | Content |
 |---|---|
-| Status | **Experimental** (pre-release; rules, configuration, and output can still change). Architecture Baseline v4.1, updated on 2026-11-20 for the implemented v1.x rules (39 rules). Based on the Stage 0-A Wave 1/2 measurements (about 19 million lines), a study of datamodel-code-generator's 20,000 lines of in-house checkers, one CLI and configuration with Ruff / `t-linter`, the incremental LSP design, and PEP 810 support verified on `ruff_python_parser` 0.17.5. |
+| Status | **Experimental** (pre-release; rules, configuration, and output can still change). Architecture Baseline v4.1, updated on 2026-11-20 for the implemented v1.x rules (46 rules). Based on the Stage 0-A Wave 1/2 measurements (about 19 million lines), a study of datamodel-code-generator's 20,000 lines of in-house checkers, one CLI and configuration with Ruff / `t-linter`, the incremental LSP design, and PEP 810 support verified on `ruff_python_parser` 0.17.5. |
 | Date | 2026-11-20 |
 | Target language | Python (verified on CPython 3.11–3.15, including PEP 709, PEP 649 `__annotate__`, and PEP 810 `lazy import`) |
 | Implementation language | Rust: a single binary with a CLI and an incremental LSP server, distributed with `maturin`. Only the frontend uses `ruff_python_parser` / `ruff_python_ast` (`tag = "0.17.5"`), isolated in `heki_ast`. |
@@ -30,8 +30,9 @@ ownership boundaries) semantic checker**.
 | **2: type checking** | ty, mypy, Pyright, Pyrefly | Type lattice | Type consistency. No aliasing, escapes, write ownership, or I/O effects. |
 | **3: Effect & Alias semantic checking (this project)** | **heki** | **Effects and aliases over an SSA control-flow graph and the call graph** | **State corruption across function and class boundaries, write-ownership violations, stale caches, blocking calls, and $O(n^2)$ complexity regressions** |
 
-*(Import dependencies between layers of modules and import cycles belong to tach /
-import-linter and to Python 3.15+ PEP 810 `lazy import`; heki stays with effects and aliases.)*
+*(Which modules may import which, and import cycles, are walls in heki's scope
+([ADR-022](docs/DESIGN_HISTORY_AND_ADR.md#adr-022)); the import rules are planned, and until
+they ship tach and import-linter check them.)*
 
 ### 1.1 What the product is: semantic checks first, speedups as a by-product
 
@@ -52,7 +53,7 @@ import-linter and to Python 3.15+ PEP 810 `lazy import`; heki stays with effects
 ### 1.2 Two lanes on one IR, three rule families
 
 On a shared frontend and SSA-CFG IR sit **two analysis lanes of different nature**, separated
-by crate boundaries, carrying three rule families.
+by crate boundaries, carrying three rule families and a planned fourth, imports.
 
 1. **Advisory / Effect lane (`heki_effect`)**: call-graph analysis that uses standard `typing`,
    `self` attributes, and a light class hierarchy.
@@ -70,8 +71,15 @@ by crate boundaries, carrying three rule families.
      reference (`EFF107`), a non-reentrant lock taken again while it is held (`EFF109`), an
      object allowing one operation at a time used by tasks started together (`EFF110`), the
      iteration order of a set of strings reaching an output across a call (`EFF112`), a
-     `RecursionError` a broad `except` turns into a value (`EFF114`) (all opt-in), and **effect
+     `RecursionError` a broad `except` turns into a value (`EFF114`), an `async def` handed to a
+     library call that never awaits what it returns (`EFF115`) (all opt-in), and **effect
      boundaries** declared in `pyproject.toml` (`EFF201`).
+   - **Family 4: Imports (`IMP`, planned in [ADR-022](docs/DESIGN_HISTORY_AND_ADR.md#adr-022))**:
+     import facts with the time each import runs (while its module loads, lazily, inside a
+     function, or never under `TYPE_CHECKING`); without configuration, circular imports that
+     fail, package code importing test or development code, and development or extra
+     dependencies loaded while a package module loads; the import contracts of import-linter,
+     tach, and Ruff's bans; and heki's own import contracts.
 2. **Soundness / Alias lane (`heki_soundness`)**: conservative abstract interpretation that never
    trusts type annotations (zero unsafe rewrites).
    - **Family 3: Complexity Rewrite (`OPT`)**: behavior-preserving $O(n^2) \to O(n)$ rewrites
@@ -106,15 +114,14 @@ by crate boundaries, carrying three rule families.
   obstacle to a fix (`blocker`), and the call path (`related`; SARIF carries the call path as
   `relatedLocations`), for large existing code bases
   and for the fix loops of humans and agents in CI.
-- **G5. Coexistence with existing tools**: no overlap with Ruff, ty, mypy, Pyright, or tach;
-  `# noqa` compatible.
+- **G5. Coexistence with existing tools**: no overlap with Ruff, ty, mypy, or Pyright; heki
+  reads the import contracts a project keeps for import-linter or tach (ADR-022); `# noqa`
+  compatible.
 
 ### Non-goals
 - Custom contract APIs in user code (`Owned`, `Borrowed`, `move()`, `@pure`, ...).
 - Theorem provers such as Lean 4.
 - Constant-factor micro-optimizations (hoisting `re.compile` included).
-- **General import-layer boundaries and import cycles** (left to tach / import-linter and Python
-  3.15+ PEP 810 `lazy import`; heki stays with effects and aliases).
 - **Single-expression syntax lints, dead code, and duplicated code** (`df.iterrows()`, unused
   variables, duplicated functions: Ruff / vulture / CodeQL).
 - **Ahead-of-time native extensions (mypyc / C / Rust bridges) and build-time rewriting** (loading
@@ -507,7 +514,7 @@ versions.
 The adopted, rejected, and candidate rules are fixed by the Stage 0-A measurements (339
 repositories, 18.1 million lines, all 171 samples reviewed by hand), the Wave 2 measurements
 (19 million lines), and the study of datamodel-code-generator's 20,000 lines of in-house checkers.
-The 39 rules are listed in the [rules reference](docs/rules/index.md).
+The 46 rules are listed in the [rules reference](docs/rules/index.md).
 
 ### Family 1: Mutation & State Effect (`MUT`: hardening mature production code)
 
@@ -526,6 +533,7 @@ The 39 rules are listed in the [rules reference](docs/rules/index.md).
 | **MUT114** | On (exact) | **Cached results changed in place**: the list, dict, or set that a `functools.lru_cache` / `functools.cache` function (resolved by import, `maxsize` not `0`, keyed by a parameter besides `self` / `cls`) returned on every live return, changed in place where it is that function's result on every path, with no copy; its other reports (through wrappers, helpers, or objects below the result) are withheld by default | The `MUT202` copies and memo fills; the container kind by return annotation or construction |
 | **MUT115** | Opt-in (heuristic) | **A change below a shallow copy**: an object the function reaches below its own shallow copy (`x.copy()`, `dict(x)`, `{**x}`, `[*x]`, a slice, `copy.copy`, `model_copy()`, `replace`) of state that outlives the call (a parameter, an attribute, a global, an enclosing variable), changed in place directly or through a helper; the copied value holds the same object, so it sees the change. The exact claim (computed per report) needs a builtin container copy by annotation, `copy.copy` of a hook-free project class, or `model_copy()` of a pydantic model; plain loads from the copy that nothing gives a value of its own; and an in-place change of a builtin container or a plain attribute store | The `MUT202` copies (`heki_effect::readonly`) and memo fills; a change of the copy itself, a level rebound before the change on every path or named by `update=` / a `replace` keyword, deep copies, `__dict__` stores, and iterations over the copy are no report (datamodel-code-generator #5705) |
 | **MUT118** | With `--heuristic` or by name (heuristic) | **An `object()` sentinel lost in a deep copy**: `copy.deepcopy` of an instance of a class whose own code stores a module-level `object()` sentinel in an attribute (a stdlib dataclass field default its generated `__init__` stores, `self.attr = SENTINEL`, or a field default of a base the catalog says keeps hashable defaults) that a function tests against the sentinel with `is` / `is not`: the copy holds a new object there, which the test does not match; reported at the deep copy, the tests as related locations | No report for a sentinel that copies as itself, a class (or base) with `__deepcopy__` / `__reduce__` / `__reduce_ex__` / `__getstate__` / `__setstate__` or a `copyreg` registration, a `memo` argument, or `==` tests |
+| **MUT119** | On (exact, per report) | **A change lost on a new object**: an in-place change of a builtin container (a changing method, an item assignment or deletion) applied to an unnamed new object that nothing else holds: built there (`list(xs).sort()`), a catalogued copy (`os.environ.copy().update(...)`), a slice, or what project functions or a property getter return when every return of each is a new container they keep nowhere (`OptInTables::fresh_returns`); a method returning `None` is reported when its result is unused, bound, or stored | No report for a project class's method, an object bound to a name first, a result the code reads, or a function that may return shared state, keeps the new object, returns `None` on a path, or is cached |
 | **MUT201** | When configured (contract, heuristic) | **Declared write ownership**: writes to the classes and attributes listed in `[[tool.heki.write-owners]]` (through local aliases, container operations `.append()` / `[k] =`, `__dict__` / `setattr`, and helpers in other functions) are limited to the allowed modules and classes (stores, services) | Declared in `pyproject.toml` only (no decorators, no run-time cost). `exempt-methods` for construction and copy methods; a class family's initializer may initialize its own `self`; a function that only runs inside allowed contexts is not reported; `message` is appended to the report. With the Ratchet baseline an existing code base migrates step by step (generalizes datamodel-code-generator's `check_generation_store_usage.py`: 1,665 lines, 1,323 lines of tests, and 13 run-time witnesses) |
 | **MUT202** | When configured (contract, heuristic) | **Declared read-only returns**: the shared objects returned by the functions listed in `[[tool.heki.readonly-returns]]` (and the containers below them) must not be mutated by callers or downstream functions, including the values returned through wrappers: a function returning a producer's result (unless copied) becomes a producer itself, across modules (`returns_protected`, propagated bottom-up); `@lru_cache` / `@cache` results are `MUT114`'s | Checked statically through cross-function `mutates_params` and alias tracking (replaces the run-time fingerprint monitoring of datamodel-code-generator's `tests/checks/schema_graph.py`) |
 | **MUT203** | When configured (contract, heuristic) | **Declared read ownership**: reads of the classes and attributes listed in `[[tool.heki.read-owners]]` (local aliases, `getattr`, and `__dict__` included) are limited to the allowed readers (the read side of `MUT201`) | The same patterns, subclass expansion, initializer rule, `exempt-methods`, delegation from private helpers to their callers, allowed-context rule, and `message` as `MUT201`. Read sites are kept as local facts and the rule walks the reverse call graph, so summaries do not grow with propagated reads |
@@ -552,6 +560,7 @@ is **rejected**: the hits were sparse and mostly deliberate idioms;
 | **EFF110** | Opt-in (experimental, heuristic) | — | An object allowing one operation at a time (Layer 2 `one_at_a_time` methods: `asyncio.StreamReader` reads, asyncpg `Connection` queries, websockets `recv`, aiohttp WebSocket `receive`) used by tasks a function starts together (`asyncio.gather`, `asyncio.wait`, an `asyncio.TaskGroup`, an anyio task group): two tasks, or one started per item, reach a use of the same object through their callees' `EffectSummary::exclusive_uses`, mapped through each call's arguments to the fan-out function's parameter, global, closure variable, or local. SQLAlchemy's `AsyncSession` only where the fan-out can be its first operation since it was made or committed | Different objects (`stdout` and `stderr`), uses while a lock is held (`CallSite::under_lock`), the item of the loop or comprehension starting each task, a task started again only once it is done |
 | **EFF112** | Opt-in (experimental, heuristic) | — | The iteration order of a set of `str` / `bytes` values (by construction, set operators, module constants, or annotation) reaching an output across a call: a value built in the set's order (iterated, copied, formatted, a pick) returned up to the caller that writes it, or handed down to a writer (`EffectSummary::set_order`: each function's order flows to its returns, outputs, and call arguments, resolved against its callees' facts). Outputs are the catalog's `writes_in_order` calls with their sorting switch established off (`json.dumps`, `yaml.safe_dump(sort_keys=False)`, `pprint.pp`, `Path.write_text`, `print`), stream writes, and a raised builtin exception's message | A flow inside one function (a linter's), sets of other values, `sorted()` on the way, order-free uses, a set bounded to one element on every path, one element at a time written to its own file or raised, a mapping read back by key, a key stored again after a read, a set filled in order, `logging` and `warnings`, a sorting switch heki cannot evaluate |
 | **EFF114** | Opt-in (experimental, heuristic) | — | An `except` clause taking `RecursionError` (`RecursionError`, `RuntimeError`, `Exception`, `BaseException`, bare, or a tuple with one, as the builtins the module does not rebind), first of its `try` to take it, around a `try` body whose call runs a function on a call cycle (`EffectSummary::call_cycle`: the components of the propagation over calls whose bodies run on the caller's stack, joined over callees), and no path through the clause raises or exits: the function goes on with a value that depends on the stack depth. Not reported: A clause after one that re-raises it or whose classes are unknown, a clause raising on a path, a CLI boundary (the error reported to `stderr` or through `logging` with the exception, an integer constant on every `return`), cycles reached only through a worker thread, a coroutine only created, or a generator only made, `except*`, a `finally` body on the way |
+| **EFF115** | Opt-in (experimental, heuristic) | — | An `async def` (directly, as a bound method, or through `functools.partial`) handed to a library call that calls it as a plain function and never awaits what it returns (the catalog's `calls_unawaited` and every `offloads_blocking_arg` API): a thread's, timer's, or process's target, an executor's `submit` / `map`, `loop.run_in_executor`, `asyncio.to_thread`, `loop.call_soon` / `call_soon_threadsafe` / `call_later` / `call_at`, `atexit.register`, `signal.signal`, an exit stack's `callback`, `weakref.finalize`, and the predicates of `filter`, `itertools.filterfalse`, `takewhile`, and `dropwhile`, which test the coroutine for truth (`FileSummary::unawaited_handoffs`, the callees' declarations read at check time). Worded as possible when a decorator replaces the function or another implementation of the method is a plain function | `map`, `starmap`, `reduce`, and sort keys (the coroutines are handed on, or the type checkers report them), a project function or a project subclass of `threading.Thread` taking the callable, async generators, lambdas, classes |
 | **EFF201** | When configured (contract, heuristic) | — | **Declared effect boundaries**: functions matching the `scopes` of `[[tool.heki.effect-boundaries]]` must not reach a forbidden effect (`blocking-*`, `sleep`, `blocking`, `mutates-params`, `writes-targets`, `reads-targets`, `calls` of `call-targets`, `reads-environment` of the catalog's `environment` entries and, opt-in, import probes), directly or transitively; `allow-writes` with `write-universe` reports every reached write in the universe that is not allowed (one implementation with `writes-targets`; candidates, not a gate: dcg's pass declarations show over-approximation). Paths through `allowed-callees` and the inside of other scope functions are not followed (boundary-only reporting); the shortest call chain is attached |
 | **DATA101** | On (exact) | Data/ML **19.5%** (Stage 0-A audit, 2026-11: about 90% of reports right about the shape with `LoopCarried`) | Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation. **An SSA `LoopCarried` value is required**: one-off concatenation, padding, and `ConstSmall` loops are excluded |
 
@@ -810,7 +819,8 @@ message = "render entry points must not mutate model state"
 - **Decisions**: `EFF101` / `EFF102` / `EFF103` / `DATA101` adopted as the core, `MUT101` adopted
   with strict noise exclusions, `MUT102` / `DATA102` rejected by measurement; from the
   datamodel-code-generator study, **`MUT201` / `MUT202`, the Ratchet baseline, and the
-  `symtable` comparison** were added; import boundaries are left to tach and Python 3.15 PEP 810.
+  `symtable` comparison** were added; import boundaries were left to tach and Python 3.15 PEP 810
+  (ADR-022 later took them into heki's scope).
 
 ### Implementation milestones (completed)
 | Milestone | Delivered |
@@ -829,6 +839,7 @@ message = "render entry points must not mutate model state"
 | v0.2.1 | `EFF109` and `EFF110`: a non-reentrant lock taken again while it is held, and an object allowing one operation at a time used by tasks started together |
 | v0.2.4 | `EFF112`: the iteration order of a set of strings reaching an output across a call |
 | v0.2.4 | `EFF114`: a `RecursionError` a broad `except` around a recursion turns into a value |
+| v0.2.5 | `EFF115`: an `async def` handed to a library call that never awaits what it returns |
 
 ### Gates for every release (from Stage 0-B)
 1. **Semantic consistency**: zero disagreements with the CPython `symtable` on scopes and bindings.

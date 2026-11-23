@@ -8,6 +8,7 @@ use crate::{InspectArgs, OutputFormat, ReportFormat};
 use anyhow::Result;
 use heki_diagnostics::{Diagnostic, RatchetBaseline, path_text};
 use heki_effect::{FuncKey, ProjectDecls};
+use heki_env::{Docs, Problem};
 use heki_rules::inspect::{
     InspectInputs, InspectQuery, MAX_CANDIDATES, Resolution, Symbol, inspect, render_text,
     resolve_line, resolve_name,
@@ -26,6 +27,33 @@ struct Failure {
     listed: Option<(&'static str, Vec<FuncKey>)>,
 }
 
+impl Failure {
+    /// The failure as the command line reports it, with what to do about it.
+    fn problem(&self) -> Problem {
+        let problem = Problem::new(self.message.clone()).docs(Docs::Inspect);
+        let names = || {
+            self.listed
+                .iter()
+                .flat_map(|(_, keys)| keys)
+                .map(FuncKey::fqn)
+                .collect()
+        };
+        match self.kind {
+            "invalid" => problem.help(SYMBOL_FORMS),
+            "outside_project" => problem.help(
+                "name a Python file `heki check` checks, relative to the working directory, or pass its directory as a path",
+            ),
+            "unknown" => problem
+                .did_you_mean(names())
+                .help(SYMBOL_FORMS)
+                .help("`heki inspect` takes a function of the checked files: add their directory to the paths if it is elsewhere"),
+            _ => problem.help("inspect one of the functions listed below by its full name"),
+        }
+    }
+}
+
+const SYMBOL_FORMS: &str = "name a function as `module.function`, `module.Class.method`, `path.py::NAME`, or `path.py:LINE`";
+
 pub(crate) fn run(args: &InspectArgs) -> Result<ExitCode> {
     let json = args.output_format == ReportFormat::Json;
     let symbol = match Symbol::parse(&args.symbol) {
@@ -36,7 +64,7 @@ pub(crate) fn run(args: &InspectArgs) -> Result<ExitCode> {
                 message: e.to_string(),
                 listed: None,
             };
-            return fail(args, json, &failure, None, &[]);
+            return fail(args, json, &failure, None, &[], &[]);
         }
     };
     let indexed = load_and_index(
@@ -47,10 +75,11 @@ pub(crate) fn run(args: &InspectArgs) -> Result<ExitCode> {
         Facts::Inspect,
     )?;
     let errors = shown_errors(&indexed.project.errors);
+    let problems = crate::failure::of_files(&indexed.project.errors);
     let decls = indexed.index.project_decls();
     let resolution = match resolve(&indexed, &decls, &symbol) {
         Ok(r) => r,
-        Err(failure) => return fail(args, json, &failure, Some(&indexed), &errors),
+        Err(failure) => return fail(args, json, &failure, Some(&indexed), &errors, &problems),
     };
     let failure = match resolution {
         Resolution::Function { key, from } => {
@@ -60,7 +89,7 @@ pub(crate) fn run(args: &InspectArgs) -> Result<ExitCode> {
             } else {
                 print!("{}", render_text(&report));
             }
-            return crate::check::finish(OutputFormat::Full, &errors, ExitCode::SUCCESS);
+            return crate::check::finish(OutputFormat::Full, &problems, ExitCode::SUCCESS);
         }
         Resolution::Ambiguous(c) => Failure {
             kind: "ambiguous",
@@ -87,7 +116,7 @@ pub(crate) fn run(args: &InspectArgs) -> Result<ExitCode> {
             listed: Some(("suggestions", suggestions)),
         },
     };
-    fail(args, json, &failure, Some(&indexed), &errors)
+    fail(args, json, &failure, Some(&indexed), &errors, &problems)
 }
 
 /// The file of the project `path` names (as given, relative to the working directory).
@@ -140,6 +169,7 @@ fn fail(
     failure: &Failure,
     indexed: Option<&Indexed>,
     errors: &[String],
+    problems: &[Problem],
 ) -> Result<ExitCode> {
     let listed: Vec<serde_json::Value> = failure
         .listed
@@ -147,8 +177,14 @@ fn fail(
         .flat_map(|(_, keys)| keys.iter().take(MAX_CANDIDATES))
         .map(|k| candidate(indexed, k))
         .collect();
+    let problem = failure.problem();
     if json {
-        let mut error = json!({ "kind": failure.kind, "message": failure.message });
+        let mut error = json!({
+            "kind": failure.kind,
+            "message": failure.message,
+            "help": problem.help,
+            "docs": problem.docs,
+        });
         if let Some((name, keys)) = &failure.listed {
             error[*name] = json!(listed);
             error["truncated"] = json!(keys.len() > MAX_CANDIDATES);
@@ -159,7 +195,7 @@ fn fail(
         let out = json!({ "version": heki_rules::inspect::INSPECT_VERSION, "query": args.symbol, "error": error });
         println!("{}", serde_json::to_string_pretty(&out)?);
     }
-    eprintln!("heki: {}", failure.message);
+    crate::failure::print(OutputFormat::Full, &problem);
     for c in &listed {
         eprintln!(
             "  {}  {}:{}",
@@ -168,10 +204,7 @@ fn fail(
             c["line"]
         );
     }
-    for e in errors {
-        eprintln!("error: {e}");
-    }
-    Ok(ExitCode::from(2))
+    crate::check::finish(OutputFormat::Full, problems, ExitCode::from(2))
 }
 
 /// A function to choose from: its name, where it is defined, and its kind.

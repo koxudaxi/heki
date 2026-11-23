@@ -25,5 +25,6 @@ rustc-hash.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+strsim.workspace = true
 thiserror.workspace = true
 toml.workspace = true

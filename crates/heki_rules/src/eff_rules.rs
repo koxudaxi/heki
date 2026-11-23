@@ -1,5 +1,6 @@
 //! Family 2 execution-effect rules: `EFF101`, `EFF105`, `EFF102`, `EFF103`, `EFF106`,
-//! `EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
+//! `EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF201`
+//! (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::mut_rules::{
     CallTargets, ContractTarget, FunctionMatcher, FunctionMatchers, References, SiteId, Subclasses,
@@ -346,18 +347,8 @@ fn unblocking_help(e: ExecEffectKind) -> &'static str {
     }
 }
 
-pub(crate) fn effect_name(e: ExecEffectKind) -> &'static str {
-    match e {
-        ExecEffectKind::BlockingNet => "blocking_net",
-        ExecEffectKind::BlockingDb => "blocking_db",
-        ExecEffectKind::BlockingSubprocess => "blocking_subprocess",
-        ExecEffectKind::BlockingSync => "blocking_sync",
-        ExecEffectKind::Sleep => "sleep",
-        ExecEffectKind::BlockingFs => "blocking_fs",
-        ExecEffectKind::UnpooledClientAlloc => "unpooled_client_alloc",
-        ExecEffectKind::DbQuery => "db_query",
-        ExecEffectKind::QuadraticRealloc => "quadratic_realloc",
-    }
+pub(crate) const fn effect_name(e: ExecEffectKind) -> &'static str {
+    e.name()
 }
 
 /// The call with the effect, in parentheses, when the call a loop makes reaches it through
@@ -516,7 +507,8 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                             repeats.every()
                         ),
                         Some(format!(
-                            "create one client or session before the {} and reuse it",
+                            "create one client or session before the {} and reuse it (a reused \
+                             client keeps state such as cookies from call to call)",
                             repeats.ahead_of()
                         )),
                         chain,
@@ -945,6 +937,7 @@ mod held_across_io;
 mod lock_retaken;
 mod recursion_handlers;
 mod set_order_output;
+mod unawaited_callables;
 mod unretained_task;
 
 /// `EFF106` (opt-in): `await` / blocking network I/O while a sync lock or DB transaction is
@@ -980,6 +973,12 @@ pub(crate) fn eff114(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
     recursion_handlers::run(cx, unit, out);
 }
 
+/// `EFF115` (opt-in): an `async def` handed to a library call that calls it without awaiting
+/// what it returns.
+pub(crate) fn eff115(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
+    unawaited_callables::run(cx, unit, out);
+}
+
 /// `forbid` tokens of `[[tool.heki.effect-boundaries]]` and the execution effects each one
 /// forbids (`mutates-params`, `writes-targets`, `reads-targets`, `calls`, and
 /// `reads-environment` forbid facts of another kind instead).
@@ -1009,6 +1008,7 @@ pub(crate) fn forbidden_effects(
                 boundary: boundary.name.clone(),
                 token: token.clone(),
                 expected: FORBID_EXPECTED.as_str(),
+                values: FORBID_NAMES.as_slice(),
             });
         };
         effects.extend(kinds.iter().copied());
@@ -1016,12 +1016,13 @@ pub(crate) fn forbidden_effects(
     Ok(effects)
 }
 
+/// The tokens of [`FORBID_TOKENS`].
+static FORBID_NAMES: LazyLock<Vec<&'static str>> =
+    LazyLock::new(|| FORBID_TOKENS.iter().map(|(t, _)| *t).collect());
+
 /// `UnknownForbid::expected`, built from [`FORBID_TOKENS`].
 static FORBID_EXPECTED: LazyLock<String> = LazyLock::new(|| {
-    let tokens: Vec<String> = FORBID_TOKENS
-        .iter()
-        .map(|(t, _)| format!("`{t}`"))
-        .collect();
+    let tokens: Vec<String> = FORBID_NAMES.iter().map(|t| format!("`{t}`")).collect();
     format!("one of {}", tokens.join(", "))
 });
 

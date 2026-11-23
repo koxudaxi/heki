@@ -56,10 +56,26 @@ The file's name decides, as Ruff reads `pyproject.toml` and `ruff.toml`:
 
 heki never ignores a setting. These are configuration errors (exit code 2):
 
-- an unknown key in any of heki's tables (the message names it: ``unknown field `bogus` ``);
+- an unknown key in any of heki's tables;
 - a `[tool.heki]` table in a file that is not named `pyproject.toml`;
 - a heki setting at the top level of a `pyproject.toml` (`[[ecosystem]]` instead of
-  `[[tool.heki.ecosystem]]`).
+  `[[tool.heki.ecosystem]]`);
+- a value of the wrong type, or one the key does not take.
+
+The error shows the line, says what to write instead, and links the section of this page about
+the key: the key a misspelled one looks like, the table a key belongs in, or the type a value
+takes, with a line to copy. With `--output-format json`, the same error is the object
+`{"error": {"message", "path", "line", "column", "help", "docs", "candidates"}}` on stdout.
+
+```text
+error: pyproject.toml:5:1: unknown key `select` in [tool.heki]
+  |
+5 | select = ["MUT"]
+  | ^
+  = help: `select` is a key of [tool.heki.lint]: move it there
+  = help: for example: `select = ["EFF", "MUT101"]`
+  = docs: https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint
+```
 
 ### Module names follow the source roots
 
@@ -192,8 +208,8 @@ supported version that every clause admits:
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   says how many.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
-  `EFF110`, `EFF112`, `EFF114`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`,
-  `MUT113`, `MUT115`): they need their exact code or name. In `ignore`, a prefix covers every
+  `EFF110`, `EFF112`, `EFF114`, `EFF115`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`,
+  `MUT112`, `MUT113`, `MUT115`): they need their exact code or name. In `ignore`, a prefix covers every
   rule it matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.

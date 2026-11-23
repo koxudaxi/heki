@@ -1,7 +1,7 @@
 //! The Agent Skill in `skills/heki/` against the binary and the documentation: its frontmatter
-//! follows the Agent Skills format, every command and option it and the Coding Agents page name
-//! exists, its tables of output fields are the page's, and the skill, the page, and the Claude
-//! Code marketplace point at each other.
+//! follows the Agent Skills format, its body stays within a byte budget, every command and option
+//! it and the Coding Agents page name exists, its tables of output fields are the page's, and the
+//! skill, the page, and the Claude Code marketplace point at each other.
 
 mod common;
 
@@ -67,16 +67,10 @@ fn the_skill_follows_the_agent_skills_format() {
         (1..=1024).contains(&description.chars().count()),
         "{description}"
     );
-    for words in [
-        "heki inspect",
-        "heki check --output-format json",
-        "related",
-        "heki rule <CODE>",
-        "heuristic",
-        "heki check --generate-prompt",
-    ] {
-        assert!(description.contains(words), "{words}: {description}");
-    }
+    assert!(
+        description.contains("heki check --output-format json"),
+        "{description}"
+    );
     // Every top-level key is one the format defines.
     for line in lines.iter().filter(|l| !l.starts_with(' ')) {
         let key = line.split(':').next().unwrap();
@@ -93,7 +87,9 @@ fn the_skill_follows_the_agent_skills_format() {
             "{line}"
         );
     }
-    assert!(body.lines().count() < 500, "a SKILL.md body stays short");
+    // An agent reads the body each time the skill runs: it holds the routine after an edit, and
+    // the rest is in `references/`.
+    assert!(body.len() <= 2_300, "{} bytes", body.len());
 }
 
 /// The commands of `text`: each inline code span, and each line of a fenced block.
@@ -113,8 +109,9 @@ fn code_segments(text: &str) -> Vec<String> {
 }
 
 /// `(command, option)` for each `--option` of a `heki` command in `segment`: `heki` is its first
-/// word, or follows `$`, `uvx`, or `run` (`uv run heki`); the command is `""` for an option of
-/// `heki` itself. A pipe or `&&` ends the command.
+/// word, or follows `$`, `uvx`, or `run` (`uv run heki`); the command is the words before the
+/// first option (`skill install`, or `check src`, whose `--help` is `check`'s), `""` for an option
+/// of `heki` itself. A pipe or `&&` ends the command.
 fn named_options(segment: &str) -> Vec<(String, String)> {
     let words: Vec<&str> = segment.split_whitespace().collect();
     let Some(at) = words
@@ -126,10 +123,11 @@ fn named_options(segment: &str) -> Vec<(String, String)> {
     };
     let rest = &words[at + 1..];
     let command = rest
-        .first()
-        .filter(|w| !w.starts_with('-'))
+        .iter()
+        .take_while(|w| !w.starts_with('-') && !["|", "&&", ";"].contains(w))
         .copied()
-        .unwrap_or("");
+        .collect::<Vec<_>>()
+        .join(" ");
     rest.iter()
         .take_while(|w| !["|", "&&", ";"].contains(w))
         .filter(|w| w.starts_with("--") && w.len() > 2)
@@ -149,10 +147,7 @@ fn every_command_and_option_the_skill_and_the_page_name_exists() {
         for segment in code_segments(&repo_file(&file)) {
             for (command, option) in named_options(&segment) {
                 let text = help.entry(command.clone()).or_insert_with(|| {
-                    let args: Vec<&str> = [command.as_str(), "--help"]
-                        .into_iter()
-                        .filter(|a| !a.is_empty())
-                        .collect();
+                    let args: Vec<&str> = command.split_whitespace().chain(["--help"]).collect();
                     let (code, out, err) = p.heki(&args);
                     assert_eq!(code, 0, "{file}: `heki {command}` is no command: {err}");
                     out
@@ -166,7 +161,7 @@ fn every_command_and_option_the_skill_and_the_page_name_exists() {
         }
     }
     assert!(checked > 20, "{checked}");
-    assert!(help.contains_key("check") && help.contains_key("inspect"));
+    assert!(help.contains_key("check") && help.contains_key("skill install"));
 }
 
 /// The rows of the first table after `marker` in `text`, with each link's target dropped
@@ -202,7 +197,7 @@ fn the_skill_lists_the_output_fields_the_page_lists() {
         table_after(&output, "## `heki check --output-format json`"),
         check
     );
-    let inspect = table_after(&page, "## Before an edit: `heki inspect`");
+    let inspect = table_after(&page, "## What a function does: `heki inspect`");
     assert!(inspect.len() > 8, "{inspect:?}");
     assert_eq!(
         table_after(&output, "## `heki inspect --output-format json`"),
@@ -300,4 +295,138 @@ fn the_skill_the_page_and_the_marketplace_point_at_each_other() {
             &serde_json::json!(format!("./{SKILL_DIR}"))
         )
     );
+}
+
+/// Every file below `dir`, relative to it, with its bytes.
+fn tree(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    fn walk(dir: &Path, rel: &str, out: &mut BTreeMap<String, Vec<u8>>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_str().unwrap();
+            let rel = if rel.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{rel}/{name}")
+            };
+            if path.is_dir() {
+                walk(&path, &rel, out);
+            } else {
+                out.insert(rel, std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(dir, "", &mut out);
+    out
+}
+
+/// `heki skill install` writes the skill of `skills/heki/`, all of it, where the agent reads
+/// skills, and replaces an installed one only when asked.
+#[test]
+fn the_installer_writes_the_repository_skill_where_the_agent_reads_it() {
+    let p = Project::new("skill_install");
+    let source = tree(&repo_root().join(SKILL_DIR));
+    let (code, _, stderr) = p.heki(&["skill", "install", "--agent", "claude-code"]);
+    assert_eq!(code, 0, "{stderr}");
+    let installed = p.dir.join(".claude/skills/heki");
+    // Paths are written with `/` on every platform, as in reports.
+    let shown = ".claude/skills/heki";
+    assert_eq!(
+        stderr,
+        format!("Installed the heki Agent Skill (experimental) at {shown}\n")
+    );
+    assert_eq!(tree(&installed), source);
+
+    let (code, _, stderr) = p.heki(&["skill", "install", "--agent", "claude-code"]);
+    assert_eq!(code, 2);
+    assert_eq!(
+        stderr,
+        format!(
+            "error: {shown}: the skill is already installed\n  = help: pass `--overwrite` to replace it with the skill of this heki\n  = docs: https://heki.koxudaxi.dev/coding-agents/#install-the-skill\n"
+        )
+    );
+    std::fs::write(installed.join("SKILL.md"), "edited").unwrap();
+    std::fs::write(installed.join("extra.md"), "mine").unwrap();
+    let (code, _, stderr) = p.heki(&["skill", "install", "--agent", "claude-code", "--overwrite"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(tree(&installed), source);
+    // Nothing of the staging is left next to the skill.
+    let left: Vec<_> = std::fs::read_dir(p.dir.join(".claude/skills"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(left, ["heki"]);
+
+    // Codex, for every project: under the home directory.
+    let home = p.dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let out = common::heki_command()
+        .args(["skill", "install", "--agent", "codex", "--scope", "user"])
+        .current_dir(&p.dir)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(tree(&home.join(".agents/skills/heki")), source);
+}
+
+#[test]
+fn the_installer_leaves_what_is_not_a_skill_directory() {
+    let p = Project::new("skill_install_errors");
+    p.write(".agents/skills/heki", "a file");
+    let (code, _, stderr) = p.heki(&["skill", "install", "--agent", "codex", "--overwrite"]);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.starts_with(
+            "error: .agents/skills/heki: a file or a link is where the skill goes\n  = help: remove it, or install the skill with the other `--scope`\n"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(p.read(".agents/skills/heki"), "a file");
+    // The skills directory cannot be made: `.claude` is a file.
+    p.write(".claude", "a file");
+    let (code, _, stderr) = p.heki(&["skill", "install", "--agent", "claude-code"]);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.starts_with("error: .claude/skills/heki: cannot write the skill: "),
+        "{stderr}"
+    );
+}
+
+/// `--help` links the documentation and says the exit codes, examples, and the output for
+/// programs; `-h` stays short.
+#[test]
+fn the_long_help_links_the_documentation() {
+    let p = Project::new("long_help");
+    let (_, long, _) = p.heki(&["--help"]);
+    for line in [
+        "  Documentation    https://heki.koxudaxi.dev/",
+        "  llms.txt         https://heki.koxudaxi.dev/llms.txt",
+        "  Agent Skill      https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental",
+        "Exit codes:",
+        "  heki check --output-format json",
+    ] {
+        assert!(long.contains(&format!("{line}\n")), "{line}: {long}");
+    }
+    let (_, short, _) = p.heki(&["-h"]);
+    assert!(!short.contains("Exit codes:"), "{short}");
+    for (command, reference) in [
+        ("check", "heki-check"),
+        ("server", "heki-server"),
+        ("rule", "heki-rule"),
+        ("snapshot", "heki-snapshot"),
+        ("assumptions", "heki-assumptions"),
+        ("inspect", "heki-inspect"),
+        ("recommend", "heki-recommend"),
+        ("skill install", "heki-skill-install"),
+    ] {
+        let args: Vec<&str> = command.split(' ').chain(["--help"]).collect();
+        let (code, help, _) = p.heki(&args);
+        assert_eq!(code, 0);
+        let line =
+            format!("  This command     https://heki.koxudaxi.dev/cli-reference/#{reference}\n");
+        assert!(help.contains(&line), "{command}: {help}");
+        assert!(help.contains("\nExit codes:\n  0  "), "{command}: {help}");
+    }
 }

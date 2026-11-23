@@ -1894,12 +1894,17 @@ fn assumptions_lists_a1_hazards_as_text_and_json() {
     assert_eq!(records[0]["column"], 5);
     assert!(stderr.is_empty(), "{stderr}");
 
-    // A path that does not exist is an input error, before anything is listed.
+    // A path that does not exist is an input error, before anything is listed; `--json` writes
+    // it as the error object.
     let (code, stdout, stderr) = p.heki(&["assumptions", "pkg/tour.py", "missing.py", "--json"]);
     assert_eq!(code, 2);
-    assert!(stdout.is_empty(), "{stdout}");
+    let error: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        error["error"]["message"],
+        "path `missing.py` does not exist"
+    );
     assert!(
-        stderr.contains("heki error: path `missing.py` does not exist"),
+        stderr.starts_with("error: path `missing.py` does not exist\n"),
         "{stderr}"
     );
 
@@ -1943,7 +1948,7 @@ fn assumptions_lists_a1_hazards_as_text_and_json() {
     let (code, _, stderr) = p.heki(&["assumptions", "pkg/tour.py"]);
     assert_eq!(code, 2);
     assert!(
-        stderr.starts_with("heki error: failed to parse TOML"),
+        stderr.starts_with("error: pkg/heki.toml:2:1: the configuration file is not valid TOML: "),
         "{stderr}"
     );
     p.write("pkg/heki.toml", "target-version = \"py311\"\n");
@@ -1958,7 +1963,7 @@ fn rule_and_explain_commands() {
     let (code, all, _) = heki(&["rule", "--all"]);
     assert_eq!(code, 0);
     let lines: Vec<&str> = all.lines().collect();
-    assert_eq!(lines.len(), 44, "{all}");
+    assert_eq!(lines.len(), 46, "{all}");
     assert!(lines[0].starts_with("MUT101   cached-property-stale-mutation "));
     // Each rule's certainty and when it runs with no configuration.
     for (code, state) in [
@@ -1992,13 +1997,16 @@ fn rule_and_explain_commands() {
     let (code, stdout, stderr) = heki(&["explain", "NOPE999"]);
     assert_eq!(code, 2);
     assert!(stdout.is_empty());
-    assert_eq!(stderr, "unknown rule: NOPE999\n");
+    assert!(
+        stderr.starts_with("error: unknown rule `NOPE999`\n"),
+        "{stderr}"
+    );
 
     // JSON: the catalog the documentation site is generated from.
     let (code, stdout, _) = heki(&["rule", "--all", "--output-format", "json"]);
     assert_eq!(code, 0);
     let rules: Vec<Value> = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(rules.len(), 44);
+    assert_eq!(rules.len(), 46);
     for r in &rules {
         let doc = r["doc"].as_str().unwrap();
         // Every page has Ruff's sections, in order.
@@ -2091,7 +2099,10 @@ fn dump_commands_report_read_and_syntax_errors() {
         let (code, stdout, stderr) = p.heki(&[cmd, "missing.py"]);
         assert_eq!(code, 2);
         assert!(stdout.is_empty());
-        assert!(stderr.starts_with("heki error: "), "{stderr}");
+        assert!(
+            stderr.starts_with("error: missing.py: cannot read the file: "),
+            "{stderr}"
+        );
         let (code, _, stderr) = p.heki(&[cmd, "latin1.py"]);
         assert_eq!(code, 2);
         assert!(stderr.contains("valid UTF-8"), "{stderr}");
@@ -2101,7 +2112,10 @@ fn dump_commands_report_read_and_syntax_errors() {
         assert!(stdout.contains("\"\u{e9}\""), "{stdout}");
         let (code, _, stderr) = p.heki(&[cmd, "broken.py"]);
         assert_eq!(code, 2);
-        assert!(stderr.starts_with("heki error: parse errors: "), "{stderr}");
+        assert!(
+            stderr.starts_with("error: broken.py:1:7: syntax error: "),
+            "{stderr}"
+        );
 
         // The default and unknown target versions mean Python 3.15.
         let (_, default, _) = p.heki(&[cmd, "ok.py"]);

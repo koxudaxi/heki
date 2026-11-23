@@ -3,19 +3,37 @@
 This page says what heki checks, what it leaves to other tools, where its knowledge comes from,
 and what it does when it cannot tell.
 
+## What heki covers
+
+1. The core is what a program does across functions and modules: effects, changes to state,
+   aliasing, purity, and async and resource behavior. One file or one type cannot decide these.
+2. Walls are contracts you write, or that [`heki recommend`](recommend.md) proposes, on who may
+   write, read, call, reach an effect, and import what. Which modules may import which, and
+   import cycles, are walls
+   ([ADR-022](https://github.com/koxudaxi/heki/blob/main/docs/DESIGN_HISTORY_AND_ADR.md#adr-022)).
+   heki's import rules are not released yet; until they are, tach or import-linter check imports.
+3. Patterns and style that one file decides belong to linters such as Ruff and isort, and type
+   correctness to type checkers.
+4. An idea from another language's tools is taken when it fits the core or the walls and passes
+   the evidence gate: counts on a corpus, real harm, and no false exact claim
+   ([How a rule gets into heki](#how-a-rule-gets-into-heki)).
+5. Framework knowledge enters as catalog data
+   ([`[[tool.heki.ecosystem]]`](configuration.md#ecosystem-knowledge-toolhekiecosystem)). heki has
+   no rules written for one framework.
+
 ## Where heki fits
 
 | Tool | Looks at | Example |
 | ---- | -------- | ------- |
 | A linter such as [Ruff](https://docs.astral.sh/ruff/) | Syntax and style, one file at a time | `time.sleep()` written directly in an `async def`; a discarded `asyncio.create_task(...)` |
 | A type checker such as [ty](https://github.com/astral-sh/ty) | Whether values match their declared types | a `str` passed where an `int` is expected |
-| An import-graph checker such as [tach](https://github.com/gauge-sh/tach) or [import-linter](https://github.com/seddonym/import-linter) | Which modules may import which | `app.api` importing `app.db` when the declared layers forbid it |
+| An import-graph checker such as [tach](https://github.com/gauge-sh/tach) or [import-linter](https://github.com/seddonym/import-linter) | Which modules may import which | `app.api` importing `app.db` when the declared layers forbid it; planned in heki: these tools' contracts read as heki contracts, and which imports run while a module loads |
 | heki | What code does, not what types it has: effects and aliases, through any number of calls | an `async def` that reaches `requests.get` three helpers away; a model field written outside the store that owns it; an attribute `__hash__` reads changing after the object went into a `set` |
 
-The difference is the model, not reaching across files: heki models effects and aliases, and
-leaves syntax, types, and imports to the tools that model them, also as they grow. Where another
-tool covers part of a case, heki keeps the rest: Ruff's `RUF006` reports discarded tasks, so
-`EFF107` reports only the tasks bound to a variable.
+heki differs from these tools in what it models: effects and aliases. It leaves syntax and types
+to the tools that model them, also as they grow. Where another tool covers part of a case, heki
+keeps the rest: Ruff's `RUF006` reports discarded tasks, so `EFF107` reports only the tasks bound
+to a variable.
 
 ### Clean for Ruff, ty, and tach; broken all the same
 
@@ -111,7 +129,7 @@ checker cover most of what matters, and heki reports little.
 | ----- | ----------- |
 | Style, formatting, and syntax | a linter such as Ruff |
 | Type errors | a type checker such as ty |
-| Import layering and import cycles | [tach](https://github.com/gauge-sh/tach) or [import-linter](https://github.com/seddonym/import-linter), and Python 3.15's `lazy import` |
+| Import order, required imports, import conventions, relative-import style, and the `lazy` policy of one file | a linter such as Ruff (`I`, `ICN`, `TID252`, `TID254`, `TID255`), or isort for the order |
 | Dead code and duplicated code | Ruff or [vulture](https://github.com/jendrikseipp/vulture) |
 | Constant-factor micro-optimizations, such as hoisting `re.compile` | no heki rule |
 
@@ -434,18 +452,21 @@ in order:
 1. **Can the syntax of one file decide it?** Then it belongs in a linter such as Ruff.
 2. **Is it a type error, or can an annotation express it?** Then it belongs in a type checker
    such as ty.
-3. **Is it about which modules may import which?** Then it belongs in tach or import-linter.
+3. **Can one import statement decide it?** Its order, its form, or a banned name: then it
+   belongs in a linter such as Ruff.
 4. **Does it need at least one of the proofs below?** Only then is it a heki rule.
 
 A heki rule is measured on a corpus and reviewed by hand before it is enabled by default. Where
-another tool covers part of it, heki keeps only the rest (`EFF107` and Ruff's `RUF006`).
+another tool covers part of it, heki keeps only the rest (`EFF107` and Ruff's `RUF006`). An idea
+from another language's tools goes through the same questions, and joins with counts on a corpus,
+real harm in the reports, and no false exact claim.
 
 The proofs heki can make, on five axes:
 
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
 | Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT109`, `MUT113`, `EFF102`, `EFF103`, `EFF106`, `EFF109`, `EFF110`, `EFF114`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT112`, `MUT113`, `MUT201`–`MUT204` |
-| Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `MUT112`, `EFF107`, `EFF109`, `EFF110`, `EFF112`, `OPT101`–`OPT130` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT112`, `MUT113`, `MUT119`, `MUT201`–`MUT204` |
+| Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `MUT112`, `MUT119`, `EFF107`, `EFF109`, `EFF110`, `EFF112`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
 | State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT201`–`MUT204` |

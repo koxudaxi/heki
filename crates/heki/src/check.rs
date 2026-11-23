@@ -4,15 +4,16 @@
 //! are reported), a baseline update refused, or pending `--diff` changes, 2 configuration / I/O /
 //! unknown rule / syntax errors.
 
+use crate::failure;
 use crate::{AnalysisArgs, CheckArgs, ColorChoice, OutputFormat, SnapshotArgs};
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use heki_ast::LineIndex;
 use heki_diagnostics::{
     BASELINE_VERSION, CountUnit, Diagnostic, FileFailure, RatchetBaseline, Stylesheet,
     baseline_counts, fix_python_source, github_escape, path_text, render, unified_diff,
 };
 use heki_effect::{ProjectIndex, func_qualname};
-use heki_env::{LintConfig, Severity};
+use heki_env::{Docs, LintConfig, Problem, Severity};
 use heki_profile::{HotFunctions, ProfileData, ProfiledFunction};
 use heki_rules::project::{
     Facts, FileError, IndexFacts, Indexed, ParsedFile, Project, ProjectEnv, ProjectOptions,
@@ -38,17 +39,12 @@ pub(crate) fn selectors(args: &AnalysisArgs) -> Selectors {
     }
 }
 
-/// Rule selection of a run (the command line over the config), with `lint.severity` keys
-/// validated.
+/// Rule selection of a run (the command line over the config).
 pub(crate) fn selection(args: &AnalysisArgs, project: &Project) -> Result<RuleSelection> {
-    let cfg = &project.env.cfg;
-    let selection = RuleSelection::resolve(&cfg.lint, &selectors(args))?;
-    for key in cfg.lint.severity.keys() {
-        if find_rule(key).is_none() {
-            bail!("unknown rule `{key}` in lint.severity");
-        }
-    }
-    Ok(selection)
+    Ok(RuleSelection::resolve(
+        &project.env.cfg.lint,
+        &selectors(args),
+    )?)
 }
 
 /// `--fail-on` over `lint.fail-on`: the least severity whose reports make the run fail.
@@ -378,8 +374,7 @@ pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
     heki_ir::walk::record_steps();
     let code = run_check(args)?;
     let steps = serde_json::to_string_pretty(&heki_ir::walk::recorded_steps())?;
-    std::fs::write(path, steps + "\n")
-        .with_context(|| format!("cannot write `{}`", path.display()))?;
+    std::fs::write(path, steps + "\n").map_err(|e| failure::unwritable(path, &e))?;
     Ok(code)
 }
 
@@ -411,8 +406,8 @@ fn run_check(args: &CheckArgs) -> Result<ExitCode> {
         } else {
             ExitCode::from(1)
         };
-        let mut errors = shown_errors(&run.errors);
-        errors.extend(run.refused);
+        let mut errors = failure::of_files(&run.errors);
+        errors.extend(run.refused.iter().map(Problem::new));
         return finish(args.output_format, &errors, code);
     }
     let mut refused = Vec::new();
@@ -433,6 +428,7 @@ fn run_check(args: &CheckArgs) -> Result<ExitCode> {
     // would only cost time.
     std::mem::forget(index);
     std::mem::forget(project);
+    let refused: Vec<Problem> = refused.iter().map(Problem::new).collect();
     finish(args.output_format, &refused, code)
 }
 
@@ -444,15 +440,10 @@ fn write_fixed(files: &[FixedFile]) -> Result<(usize, usize, Vec<FileError>)> {
     let (mut fixes, mut written, mut conflicts) = (0, 0, Vec::new());
     for f in files {
         if heki_ast::read_source(&f.path).ok().as_ref() != Some(&f.original) {
-            conflicts.push(FileError {
-                path: f.path.clone(),
-                position: None,
-                message: "changed on disk while heki was fixing it; its fixes were not written (run `heki check --fix` again)".to_owned(),
-            });
+            conflicts.push(FileError::changed_while_fixing(&f.path));
             continue;
         }
-        heki_ast::write_source(&f.path, &f.fixed)
-            .with_context(|| format!("failed to write `{}`", shown_text(&f.path)))?;
+        heki_ast::write_source(&f.path, &f.fixed).map_err(|e| failure::unwritable(&f.path, &e))?;
         fixes += f.fixes;
         written += 1;
     }
@@ -490,7 +481,10 @@ fn report(
     let baseline_path = baseline_path(&args.analysis, &project.env);
     let fmt = args.output_format;
     if args.update_baseline && baseline_path.is_none() {
-        bail!("`--update-baseline` needs `--baseline <path>` or `baseline` in the configuration");
+        return Err(Problem::new("`--update-baseline` needs a baseline file")
+            .help("name it with `--baseline <path>`, or set `baseline` in the configuration")
+            .docs(Docs::Baselines)
+            .into());
     }
     // `--update-baseline` records the current findings into a missing baseline, and otherwise
     // only lets it shrink: it compares like a check first.
@@ -559,15 +553,17 @@ fn report(
     }
     if let Some(bp) = baseline_path.as_ref().filter(|_| args.update_baseline) {
         if !project.errors.is_empty() {
-            log!(fmt, "{}", not_written("baseline", bp, project.errors.len()));
-            return finish(fmt, &shown_errors(&project.errors), ExitCode::SUCCESS);
+            failure::print(fmt, &not_written("baseline", bp, project.errors.len()));
+            return finish(fmt, &failure::of_files(&project.errors), ExitCode::SUCCESS);
         }
         if regressions > 0 {
-            log!(
-                fmt,
-                "error: baseline {} not updated: {regressions} entry(ies) grew, and a Ratchet baseline only shrinks (delete it to record the current findings)",
+            let refused = Problem::new(format!(
+                "baseline `{}` not updated: {regressions} entry(ies) grew",
                 bp.display()
-            );
+            ))
+            .help("a Ratchet baseline only shrinks: fix the regressions reported above, or delete the baseline to record the current findings")
+            .docs(Docs::Baselines);
+            failure::print(fmt, &refused);
             refused_update = true;
         } else {
             let baseline = RatchetBaseline::from_counts(current);
@@ -578,7 +574,7 @@ fn report(
                 bp.display(),
                 baseline.counts.len(),
             );
-            return finish(fmt, &shown_errors(&project.errors), ExitCode::SUCCESS);
+            return finish(fmt, &failure::of_files(&project.errors), ExitCode::SUCCESS);
         }
     }
 
@@ -594,12 +590,7 @@ fn report(
     // A file that did not parse is read again for the line of its syntax error.
     let source_line = |p: &Path, line: u32| match by_shown.get(p) {
         Some((f, lines)) => lines.line_text(&f.source, line).map(str::to_owned),
-        None => {
-            let text = heki_ast::read_source(p).ok()?;
-            LineIndex::from_source(&text)
-                .line_text(&text, line)
-                .map(str::to_owned)
-        }
+        None => heki_diagnostics::file_line(p, line),
     };
     let failures = shown_failures(&project.errors);
     print!(
@@ -619,6 +610,9 @@ fn report(
         summary(&diags, project.files.len(), baseline_path.is_some());
         heuristic_hint(analyzed.heuristic_off, analyzed.withheld.len());
     }
+    if matches!(args.output_format, OutputFormat::Full) {
+        rule_pages(&diags);
+    }
     let code = if refused_update
         || unused_entries
         || any_failing(&diags, fail_on(args, &project.env.cfg.lint))
@@ -627,7 +621,11 @@ fn report(
     } else {
         ExitCode::SUCCESS
     };
-    finish(args.output_format, &shown_errors(&project.errors), code)
+    finish(
+        args.output_format,
+        &failure::of_files(&project.errors),
+        code,
+    )
 }
 
 /// `heki snapshot [PATHS...] [--write]`: print or save the normalized summaries (`MUT103`).
@@ -654,13 +652,13 @@ pub(crate) fn run_snapshot(args: &SnapshotArgs) -> Result<ExitCode> {
     if args.write {
         let path = project.env.root.join(SNAPSHOT_FILE);
         if !project.errors.is_empty() {
-            eprintln!(
-                "{}",
-                not_written("summary snapshot", &path, project.errors.len())
+            failure::print(
+                OutputFormat::Full,
+                &not_written("summary snapshot", &path, project.errors.len()),
             );
             return finish(
                 OutputFormat::Full,
-                &shown_errors(&project.errors),
+                &failure::of_files(&project.errors),
                 ExitCode::SUCCESS,
             );
         }
@@ -675,7 +673,7 @@ pub(crate) fn run_snapshot(args: &SnapshotArgs) -> Result<ExitCode> {
     }
     finish(
         OutputFormat::Full,
-        &shown_errors(&project.errors),
+        &failure::of_files(&project.errors),
         ExitCode::SUCCESS,
     )
 }
@@ -683,11 +681,18 @@ pub(crate) fn run_snapshot(args: &SnapshotArgs) -> Result<ExitCode> {
 /// Why a run that could not analyze every file keeps the `what` at `path` as it is: written
 /// from the other files, it would drop the entries of the failed ones, and a later run would
 /// compare them against nothing.
-fn not_written(what: &str, path: &Path, failed: usize) -> String {
-    format!(
-        "error: {what} {} not written: {failed} file(s) could not be analyzed",
+fn not_written(what: &str, path: &Path, failed: usize) -> Problem {
+    let docs = if what == "baseline" {
+        Docs::Baselines
+    } else {
+        Docs::Snapshots
+    };
+    Problem::new(format!(
+        "{what} `{}` not written: {failed} file(s) could not be analyzed",
         path.display()
-    )
+    ))
+    .help("fix the files listed below, or exclude them with `extend-exclude`, then run again")
+    .docs(docs)
 }
 
 fn summary(diags: &[Diagnostic], files: usize, baseline: bool) {
@@ -700,6 +705,18 @@ fn summary(diags: &[Diagnostic], files: usize, baseline: bool) {
         eprintln!("All checks passed ({files} file(s)).");
     } else {
         eprintln!("Found {} {what} in {files} file(s).", diags.len());
+    }
+}
+
+/// After the summary of the full text format: where each reported rule is explained.
+pub(crate) fn rule_pages(diags: &[Diagnostic]) {
+    let rules: BTreeMap<&str, &str> = diags
+        .iter()
+        .map(|d| (d.rule_code.as_str(), d.rule_slug.as_str()))
+        .collect();
+    for (code, slug) in rules {
+        let page = heki_env::problem::rule_page(slug);
+        eprintln!("{code} ({slug}): `heki rule {code}`, {page}");
     }
 }
 
@@ -723,9 +740,9 @@ pub(crate) fn log_line(format: OutputFormat, line: &str) {
 }
 
 /// Syntax / read errors make the run fail with exit code 2 after the report.
-pub(crate) fn finish(format: OutputFormat, errors: &[String], code: ExitCode) -> Result<ExitCode> {
+pub(crate) fn finish(format: OutputFormat, errors: &[Problem], code: ExitCode) -> Result<ExitCode> {
     for e in errors {
-        log!(format, "error: {e}");
+        failure::print(format, e);
     }
     Ok(if errors.is_empty() {
         code
@@ -795,10 +812,12 @@ mod tests {
         assert_eq!((fixes, written), (1, 1));
         assert_eq!(conflicts.len(), 1, "{conflicts:?}");
         assert_eq!(conflicts[0].path, kept);
+        let problem = heki_env::Explain::explain(&conflicts[0]);
         assert!(
-            conflicts[0].message.starts_with("changed on disk"),
-            "{conflicts:?}"
+            problem.message.starts_with("changed on disk"),
+            "{problem:?}"
         );
+        assert_eq!(problem.help, ["run `heki check --fix` again"]);
         assert_eq!(
             std::fs::read_to_string(&kept).unwrap(),
             "x = x + [i]  # saved\n"

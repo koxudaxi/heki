@@ -131,10 +131,18 @@ fn a_text_run_says_how_many_heuristic_rules_it_left_off() {
             "note: {n} heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`\n"
         )
     };
-    for format in ["full", "concise"] {
+    // The full output then names the pages of the reported rules.
+    for (format, after) in [
+        (
+            "full",
+            "MUT201 (write-owner-violation): `heki rule MUT201`, https://heki.koxudaxi.dev/rules/write-owner-violation/\n",
+        ),
+        ("concise", ""),
+    ] {
         let (code, stdout, stderr) = p.heki(&["check", "--output-format", format]);
         assert_eq!(code, 1, "{stdout}{stderr}");
-        assert!(stderr.ends_with(&note(every)), "{format}: {stderr}");
+        let tail = format!("{}{after}", note(every));
+        assert!(stderr.ends_with(&tail), "{format}: {stderr}");
     }
     // Only the rules a selection would run with `lint.heuristic` count, not the ignored ones.
     let (_, _, stderr) = p.heki(&["check", "--select", "EFF"]);

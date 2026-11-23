@@ -6,13 +6,17 @@
 //!   to `Unknown` during materialization.
 //! - `EffectiveEcosystemKB` (Layer 2) holds all Execution Effect sources, `async_safe`,
 //!   `offloads_blocking_arg`, `excluded` (logging), `copy_sanitizer` (MUT202), and
-//!   `opaque_to_layer3 = true` (preventing Layer 3 from descending into stdlib/Layer 2).
+//!   `opaque_to_layer3 = true` (preventing Layer 3 from descending into stdlib/Layer 2), and the
+//!   tables beside the entries: `[[invokes]]`, `[[cached_properties]]`, and `[[calls_unawaited]]`
+//!   (EFF115).
 //!
 //! The built-in TOML files under `kb/` are embedded with `include_str!`; every struct they
 //! deserialize into uses `#[serde(deny_unknown_fields)]`, so an advisory field written into
 //! a Layer 1 file (or a Layer 1 field written into a Layer 2 file) fails to load.
 
-use heki_env::{CopySanitizerSetting, EcosystemOverride, PythonVersion};
+use heki_env::{
+    CopySanitizerSetting, Docs, EcosystemOverride, Explain, Problem, PythonVersion, Setting,
+};
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -55,6 +59,40 @@ pub enum KbError {
         "`attribute-type` in the user ecosystem override of `{0}` takes no other key: it describes reading an attribute, not calling it"
     )]
     AttributeTypeWithCallKeys(String),
+}
+
+impl Explain for KbError {
+    fn explain(&self) -> Problem {
+        let problem = Problem::new(self.to_string()).docs(Docs::Ecosystem);
+        let entry = |key: &str, value: &str| Setting {
+            table: "ecosystem".to_owned(),
+            key: Some(key.to_owned()),
+            value: Some(value.to_owned()),
+            ..Setting::default()
+        };
+        match self {
+            Self::Toml { .. } => Problem::new(self.to_string()).help(format!(
+                "heki's own catalog did not load: this is a bug of heki, please report it at {}",
+                heki_env::problem::ISSUES
+            )),
+            Self::InvalidEffect(name) => {
+                let names: Vec<&'static str> =
+                    ExecEffectKind::ALL.iter().map(|e| e.name()).collect();
+                problem
+                    .one_of(name, &names)
+                    .setting(entry("effects", name))
+            }
+            Self::InvalidCopyDepth(depth) => problem
+                .one_of(depth, &["shallow", "deep"])
+                .setting(entry("copy-sanitizer", depth)),
+            Self::InvalidOneAtATime(value) => problem
+                .one_of(value, &["always", "when_unbound", "unbinds"])
+                .setting(entry("one-at-a-time", value)),
+            Self::AttributeTypeWithCallKeys(symbol) => problem
+                .help("describe reading the attribute and calling what it gives in two entries: one with `attribute-type`, one with the call's keys for the class it names")
+                .setting(entry("symbol", symbol)),
+        }
+    }
 }
 
 /// Layer 1 parameter effect (Soundness lane ONLY — no advisory I/O effects).
@@ -171,6 +209,33 @@ impl ExecEffectKind {
         Self::Sleep,
         Self::BlockingFs,
     ];
+
+    pub const ALL: &[Self] = &[
+        Self::BlockingNet,
+        Self::BlockingDb,
+        Self::BlockingSubprocess,
+        Self::BlockingSync,
+        Self::Sleep,
+        Self::BlockingFs,
+        Self::UnpooledClientAlloc,
+        Self::DbQuery,
+        Self::QuadraticRealloc,
+    ];
+
+    /// The effect's name in the catalogs and in `[[tool.heki.ecosystem]]` (`blocking_net`).
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::BlockingNet => "blocking_net",
+            Self::BlockingDb => "blocking_db",
+            Self::BlockingSubprocess => "blocking_subprocess",
+            Self::BlockingSync => "blocking_sync",
+            Self::Sleep => "sleep",
+            Self::BlockingFs => "blocking_fs",
+            Self::UnpooledClientAlloc => "unpooled_client_alloc",
+            Self::DbQuery => "db_query",
+            Self::QuadraticRealloc => "quadratic_realloc",
+        }
+    }
 
     /// Whether the effect is one of [`Self::BLOCKING`].
     pub fn blocks(self) -> bool {
@@ -397,6 +462,22 @@ pub struct FieldValues {
     pub arg: Option<u8>,
     pub param: Option<String>,
     pub only_from_dict: bool,
+}
+
+/// `EFF115` (`[[calls_unawaited]]`): the callable argument the call of `symbol` calls as a plain
+/// function, now or later, on this thread or another, and never awaits what it returns
+/// (`threading.Thread(target=f)`, `atexit.register(f)`, `filter(f, xs)`): the one at position
+/// `arg` (the receiver not counted), or passed by the keyword `param`. A table beside the
+/// entries, so that the entries without one, nearly all, keep no word for it; the call has an
+/// entry too ([`EffectiveEcosystemKb::unawaited_callable`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UnawaitedCall {
+    pub symbol: String,
+    pub arg: Option<u8>,
+    pub param: Option<String>,
+    /// The call tests what the callable returns for truth (`filter`, `itertools.takewhile`).
+    pub tests_result: bool,
 }
 
 /// What a call writes in the order of its elements (`EcosystemEntry::writes_in_order`): a
@@ -836,6 +917,8 @@ struct EcosystemKbFile {
     invokes: Vec<Invokes>,
     #[serde(default)]
     cached_properties: Vec<CachedPropertyDecorator>,
+    #[serde(default)]
+    calls_unawaited: Vec<UnawaitedCall>,
 }
 
 fn parse_ecosystem_file(file: &'static str, text: &str) -> Result<EcosystemKbFile, KbError> {
@@ -859,6 +942,8 @@ pub struct EffectiveEcosystemKb {
     /// The cached-property decorators known to keep the value in the instance `__dict__`
     /// ([`CachedPropertyDecorator`]).
     pub cached_properties: BTreeMap<String, CachedPropertyDecorator>,
+    /// The callable each listed library call calls without awaiting it ([`UnawaitedCall`]).
+    pub calls_unawaited: BTreeMap<String, UnawaitedCall>,
     /// `Class.attribute` -> the class of what reading it on an instance gives
     /// ([`AttributeType`]), the built-in rows and the users' `attribute-type`.
     pub attributes: BTreeMap<String, String>,
@@ -890,6 +975,7 @@ impl EffectiveEcosystemKb {
             user_symbols: BTreeSet::new(),
             invokes: BTreeMap::new(),
             cached_properties: BTreeMap::new(),
+            calls_unawaited: BTreeMap::new(),
             attributes: BTreeMap::new(),
             distributions: Vec::new(),
             digest,
@@ -904,6 +990,7 @@ impl EffectiveEcosystemKb {
         let mut opaque_packages = Vec::new();
         let mut invokes = BTreeMap::new();
         let mut cached_properties = BTreeMap::new();
+        let mut calls_unawaited = BTreeMap::new();
         let mut attributes = BTreeMap::new();
         let mut distributions = Vec::new();
         for &(file, text) in ECOSYSTEM_KB_FILES {
@@ -916,6 +1003,12 @@ impl EffectiveEcosystemKb {
             cached_properties.extend(
                 parsed
                     .cached_properties
+                    .into_iter()
+                    .map(|c| (c.symbol.clone(), c)),
+            );
+            calls_unawaited.extend(
+                parsed
+                    .calls_unawaited
                     .into_iter()
                     .map(|c| (c.symbol.clone(), c)),
             );
@@ -940,12 +1033,15 @@ impl EffectiveEcosystemKb {
         let mut kb = Self::materialize(raw.into_values().collect(), opaque_packages);
         let listed = serde_json::to_string(&invokes).unwrap_or_default();
         let caches = serde_json::to_string(&cached_properties).unwrap_or_default();
+        let unawaited = serde_json::to_string(&calls_unawaited).unwrap_or_default();
         let read = serde_json::to_string(&attributes).unwrap_or_default();
-        kb.digest = blake3::hash(format!("{}|{listed}|{caches}|{read}", kb.digest).as_bytes())
-            .to_hex()
-            .to_string();
+        kb.digest =
+            blake3::hash(format!("{}|{listed}|{caches}|{unawaited}|{read}", kb.digest).as_bytes())
+                .to_hex()
+                .to_string();
         kb.invokes = invokes;
         kb.cached_properties = cached_properties;
+        kb.calls_unawaited = calls_unawaited;
         kb.attributes = attributes;
         kb.distributions = distributions;
         kb.user_symbols = overrides
@@ -989,6 +1085,22 @@ impl EffectiveEcosystemKb {
     /// keeping the value in the instance `__dict__` ([`CachedPropertyDecorator`]).
     pub fn cached_property(&self, symbol: &str) -> Option<&CachedPropertyDecorator> {
         self.cached_properties.get(symbol)
+    }
+
+    /// The callable argument the call of `entry` calls without awaiting what it returns
+    /// (`EFF115`): the one `[[calls_unawaited]]` lists for it, or an offloading API's, which a
+    /// worker thread calls and whose result the call hands back as it is.
+    pub fn unawaited_callable(&self, entry: &EcosystemEntry) -> Option<UnawaitedCall> {
+        self.calls_unawaited
+            .get(&entry.symbol)
+            .cloned()
+            .or_else(|| {
+                entry.offloads_blocking_arg.map(|k| UnawaitedCall {
+                    symbol: entry.symbol.clone(),
+                    arg: Some(k),
+                    ..UnawaitedCall::default()
+                })
+            })
     }
 
     /// Whether a row of the catalog types an attribute named `attr`, on any class.
@@ -1636,6 +1748,7 @@ mod tests {
             lazy_iterators(),
             environment_reads(),
             ordered_outputs(),
+            unawaited_calls(),
             pydantic_models(),
             llm_requests(),
         ]
@@ -2053,6 +2166,11 @@ mod tests {
                     "collections.deque",
                 ]),
                 copy_sanitizer(CopyDepth::Shallow),
+            ),
+            // `MUT119`: `os.environ.copy()` is `dict(os.environ)`, a new dict.
+            (
+                s(&["os.environ.copy", "os.environb.copy"]),
+                returning("builtins.dict", copy_sanitizer(CopyDepth::Shallow)),
             ),
             (
                 with_prefix(
@@ -3269,6 +3387,9 @@ mod tests {
         "concurrent",
         "dataclasses",
         "queue",
+        "atexit",
+        "signal",
+        "weakref",
         "requests",
         "httpx",
         "aiohttp",
@@ -3395,6 +3516,91 @@ mod tests {
             ],
         ),
     ];
+
+    /// One row of [`UNAWAITED_CALLS`]: `(arg, param, tests_result, symbols)`.
+    type UnawaitedCallRow = (
+        Option<u8>,
+        Option<&'static str>,
+        bool,
+        &'static [&'static str],
+    );
+
+    /// `EFF115`: the callable argument each call calls without awaiting what it returns.
+    const UNAWAITED_CALLS: &[UnawaitedCallRow] = &[
+        (
+            Some(1),
+            Some("target"),
+            false,
+            &["threading.Thread", "multiprocessing.Process"],
+        ),
+        (Some(1), Some("function"), false, &["threading.Timer"]),
+        (
+            Some(0),
+            None,
+            false,
+            &[
+                "concurrent.futures.Executor.submit",
+                "concurrent.futures.ThreadPoolExecutor.submit",
+                "concurrent.futures.ProcessPoolExecutor.submit",
+                "asyncio.AbstractEventLoop.call_soon",
+                "asyncio.BaseEventLoop.call_soon",
+                "asyncio.AbstractEventLoop.call_soon_threadsafe",
+                "asyncio.BaseEventLoop.call_soon_threadsafe",
+                "atexit.register",
+                "contextlib.ExitStack.callback",
+                "contextlib.AsyncExitStack.callback",
+            ],
+        ),
+        (
+            Some(0),
+            Some("fn"),
+            false,
+            &[
+                "concurrent.futures.Executor.map",
+                "concurrent.futures.ThreadPoolExecutor.map",
+                "concurrent.futures.ProcessPoolExecutor.map",
+            ],
+        ),
+        (
+            Some(1),
+            None,
+            false,
+            &[
+                "asyncio.AbstractEventLoop.call_later",
+                "asyncio.BaseEventLoop.call_later",
+                "asyncio.AbstractEventLoop.call_at",
+                "asyncio.BaseEventLoop.call_at",
+                "signal.signal",
+                "weakref.finalize",
+            ],
+        ),
+        (
+            Some(0),
+            None,
+            true,
+            &[
+                "builtins.filter",
+                "itertools.filterfalse",
+                "itertools.takewhile",
+                "itertools.dropwhile",
+            ],
+        ),
+    ];
+
+    /// `EFF115`: the calls of [`UNAWAITED_CALLS`] with no other fact.
+    fn unawaited_calls() -> Vec<(Vec<String>, EcosystemEntry)> {
+        let others = [
+            "concurrent.futures.ThreadPoolExecutor.submit",
+            "concurrent.futures.ProcessPoolExecutor.submit",
+        ];
+        let symbols = UNAWAITED_CALLS
+            .iter()
+            .flat_map(|(.., symbols)| symbols.iter())
+            .filter(|symbol| !others.contains(symbol))
+            .map(|symbol| (*symbol).to_owned())
+            .collect();
+        vec![(symbols, entry(&[]))]
+    }
 
     /// One row of [`ORDERED_OUTPUTS`]: `(arg, param, sorted_by, sorted_by_default, symbols)`.
     type OrderedOutputRow = (
@@ -3822,6 +4028,61 @@ mod tests {
         ] {
             assert_eq!(kb.lookup(symbol), None, "{symbol}");
         }
+    }
+
+    #[test]
+    fn layer2_calls_unawaited_are_exactly_the_required_ones_each_with_an_entry() {
+        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        let required: BTreeMap<String, UnawaitedCall> = UNAWAITED_CALLS
+            .iter()
+            .flat_map(|(arg, param, tests_result, symbols)| {
+                symbols.iter().map(move |symbol| UnawaitedCall {
+                    symbol: (*symbol).to_owned(),
+                    arg: *arg,
+                    param: param.map(Into::into),
+                    tests_result: *tests_result,
+                })
+            })
+            .map(|call| (call.symbol.clone(), call))
+            .collect();
+        assert_eq!(kb.calls_unawaited, required);
+        for symbol in kb.calls_unawaited.keys() {
+            assert!(kb.lookup(symbol).is_some(), "{symbol}");
+        }
+    }
+
+    #[test]
+    fn an_offloading_api_calls_its_callable_without_awaiting_it() {
+        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        let unawaited = |symbol: &str| {
+            kb.lookup(symbol)
+                .and_then(|entry| kb.unawaited_callable(entry))
+        };
+        for (symbol, arg) in [
+            ("asyncio.to_thread", 0),
+            ("asyncio.AbstractEventLoop.run_in_executor", 1),
+            ("anyio.to_thread.run_sync", 0),
+        ] {
+            assert_eq!(
+                unawaited(symbol),
+                Some(UnawaitedCall {
+                    symbol: symbol.to_owned(),
+                    arg: Some(arg),
+                    ..UnawaitedCall::default()
+                }),
+                "{symbol}"
+            );
+        }
+        assert_eq!(
+            unawaited("threading.Thread"),
+            Some(UnawaitedCall {
+                symbol: "threading.Thread".into(),
+                arg: Some(1),
+                param: Some("target".into()),
+                tests_result: false,
+            })
+        );
+        assert_eq!(unawaited("builtins.map"), None);
     }
 
     #[test]
@@ -4453,6 +4714,28 @@ mod tests {
                 matches!(&result, Err(KbError::InvalidEffect(name)) if name == bad),
                 "{bad}: {result:?}"
             );
+        }
+    }
+
+    /// heki's own catalogs not loading is a bug of heki: the help says where to report it.
+    #[test]
+    fn a_catalog_that_does_not_parse_asks_for_a_report() {
+        let error = KbError::Toml {
+            file: "kb/x.toml",
+            cause: toml::from_str::<toml::Table>("x").unwrap_err(),
+        };
+        let problem = error.explain();
+        assert_eq!(problem.docs, None);
+        assert!(
+            problem.help[0].ends_with(heki_env::problem::ISSUES),
+            "{problem:?}"
+        );
+    }
+
+    #[test]
+    fn every_effect_name_parses_back() {
+        for kind in ExecEffectKind::ALL {
+            assert_eq!(ExecEffectKind::from_kb_name(kind.name()).ok(), Some(*kind));
         }
     }
 }

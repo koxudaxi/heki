@@ -5,6 +5,267 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
+## [0.2.5] - 2026-11-23
+
+### Breaking changes
+
+- In GitHub Actions (`GITHUB_ACTIONS=true`), `heki check` without `--output-format` now writes
+  `github` annotations instead of the `full` text output. Scripts that parse the text output in
+  a workflow break. `HEKI_OUTPUT_FORMAT=full` in a job's
+  `env` keeps the text output, and the variable sets the format whenever the option is not given.
+  Exit codes are unchanged.
+- Consuming a pymongo or Motor cursor (`Cursor.__iter__`, `to_list`, and their async forms)
+  counts as a query only while the cursor still has results to load: an
+  exhausted cursor returns without sending a statement. A loop that consumes a cursor is
+  therefore a heuristic `EFF113` report instead of an exact `EFF103`, and a sync cursor read in
+  `async def` a heuristic `EFF111` instead of an exact `EFF101`.
+- `MUT119` is on by default (see Added), so a default run can show new reports, and its exact
+  reports fail the run like any exact bug report.
+- Errors of every command start with `error:` instead of `heki error:` and are laid out like a
+  report (see Changed). A script that matches the old prefix must change.
+- The full text output ends with one line per reported rule (see Added), and the help text of
+  `EFF102` is longer (see Changed).
+
+### Added
+
+- `MUT119` (`change-lost-on-new-object`, a default exact rule; a report is heuristic where a
+  premise is open): an in-place change of a builtin container (`list`, `dict`, `set`,
+  `bytearray`, `collections.deque`) applied to a new object that nothing else holds and no name
+  keeps: `list(xs).sort()`, `env = os.environ.copy().update(HOME=home)`,
+  `options[key] = list(current).extend(new)`, or `task.environment["KEY"] = value` when the getter
+  returns a new dict. Nothing can read the object after the statement, so the change is lost. The
+  object is built there (a display, a comprehension, `list` / `dict` / `set` / `bytearray` /
+  `deque` / `sorted`), a copy the catalog describes or a slice, or what project functions or a
+  property return when every return of each is a new container they keep nowhere. A method
+  returning `None` is reported when its result is unused, bound, or stored; `pop`, `popitem`,
+  `popleft`, and `setdefault` only when the result is unused. A project class's method of the same
+  name, an object bound to a name first, and a result the code reads are no report. A test that
+  changes a returned copy on purpose to check that it is a copy is reported; suppress it there.
+  The default output can show new reports. The run-time oracle in `tests/oracle` checks its
+  claims.
+- `EFF101` reports the synchronous requests of the LLM SDKs made through their clients'
+  attributes: openai's `client.chat.completions.create`, `client.responses.create`, and
+  `client.embeddings.create` (also on `AzureOpenAI` and after `with_options()`), anthropic's
+  `client.messages.create`, and google-genai's `client.models.generate_content` and
+  `embed_content`. The async clients (`AsyncOpenAI`, `AsyncAzureOpenAI`, `AsyncAnthropic`, and
+  google-genai's `client.aio`) are never reported. The catalog rows were checked against openai
+  1.66 to 3.57, anthropic 0.50 to 2.12, and google-genai 1.0 to 3.6.
+- `EFF115` (`async-def-as-sync-callback`, opt-in, heuristic, experimental): an `async def` handed
+  to a library call that calls it as a plain function and never awaits what it returns, so the
+  call only creates a coroutine and the body does not run: `threading.Thread(target=f)`,
+  `threading.Timer`, `multiprocessing.Process`, an executor's `submit` / `map`,
+  `loop.run_in_executor`, `asyncio.to_thread` and the other offloading APIs, `loop.call_soon` /
+  `call_soon_threadsafe` / `call_later` / `call_at`, `atexit.register`, `signal.signal`, an exit
+  stack's `callback`, `weakref.finalize`, and the predicates of `filter`,
+  `itertools.filterfalse`, `takewhile`, and `dropwhile` (a coroutine is always true). The
+  function is found directly, as a bound method, or through `functools.partial`, also in another
+  module; a report is worded as possible when a decorator replaces it or another implementation
+  of the method is a plain function. `map`, sort keys, and project functions taking a callable
+  are not reported.
+- `report-unused-suppressions = true` in `[tool.heki.lint]` reports each code of a
+  `# heki: ignore[...]` or `# noqa: ...` comment that suppressed no report in the run
+  (`unused-suppression`, an error), as Ruff's `RUF100` and basedpyright's
+  `reportUnnecessaryTypeIgnoreComment` do. Only codes of rules that ran on the file are judged (a
+  heuristic rule left off, an opt-in rule not selected, or a rule `per-file-ignores` turns off is
+  never judged); in `# noqa:` lists only heki's codes are, and a bare `# noqa` is never touched.
+  `heki check --fix` removes the unused codes (the comment when none is left), and the language
+  server offers the same quick fix. With a baseline, an entry that matched no report of a rule
+  that ran on its checked file is an error too.
+- `require-suppression-codes = true` in `[tool.heki.lint]` reports a `# heki: ignore` that names
+  no rule (`suppression-without-code`, an error), as basedpyright's
+  `reportIgnoreCommentWithoutRule` does. The comment still suppresses every rule on its line.
+- `HEKI_OUTPUT_FORMAT` chooses `heki check`'s output format when `--output-format` is not given.
+- `MUT101` and `MUT111` (opt-in, experimental) make exact reports when every premise of their
+  claim holds: the cached property's decorator is one the catalog lists as keeping its value on
+  the instance (`functools.cached_property`, Django's, Werkzeug's, propcache's, kombu's), its
+  getter reads the written attribute on every path, the write is a plain store or an in-place
+  change of a builtin container, and nothing between the write and the method's return can
+  remove or replace the cached value. Such a point is a store or deletion of the property's name
+  through any reference heki cannot tell apart from the instance (another parameter, a global, a
+  closure, `setattr`, `vars()`), and any code of your project that may run there, also
+  implicitly: an operator, comparison, conversion, subscript, unpacking, truth test, `with`, or
+  attribute access whose special methods heki cannot establish as Python's own on every class
+  the value may be. Other reports stay heuristic, and so do writes in setup steps: a `__del__`, a
+  method `__init__` calls, and lazy setup through another cached property. If you select either
+  rule, a run can now fail where it passed before, because exact reports count like any exact bug
+  report. Both rules stay off by default: their exact reports are right, but only a few of them
+  show real harm (1 of 26 for `MUT101` and at most 2 of 60 for `MUT111` on our corpus), below the
+  10% a default rule needs.
+- `heki recommend` (experimental) says what keeps the heuristic reports of exact claims
+  heuristic: the reports are counted by the premise of the claim each leaves open and why (or by
+  the condition of the exact tier that is no premise, "Trip count open"), with what the cause
+  states, how many reports leave nothing else open, and what closes it: an annotation, a change
+  of the code, heki's catalog (with where to report the case), or nothing the user can apply.
+  Nothing of it enters the block; a report whose rule records no cause is counted as not
+  recorded. The JSON object's `open_premises` lists the rows and examples.
+- `heki recommend` (experimental) says what heki cannot see, where no count of reports applies:
+  the calls of library names the catalog has no entry for, by package and name, with what
+  `heki check` would print if each waited on the network or sent a database query (a trial run
+  with a hypothetical entry for each of the 64 names with the most reach; never in the block);
+  the names heki's catalog lacks in packages it covers, when heki would report through them,
+  with where to report them; the calls heki does not resolve, by function and reason; the
+  functions with an A1 hazard; and the directories, other than regular packages, that resolve
+  imports once they are source roots. Such a directory enters the block's `src` only after a
+  trial over every Python file below the project root (those the paths given leave out
+  included) shows the imports it was tried for name its own files, no two files of one kind
+  share a module name that did not before, every import that resolves, and every import a
+  directory taken before was taken for, still names the same module of the same file, every
+  contract and baseline entry still names what it names now (by the matchers the rules use), and
+  no other import would resolve into one of its files from outside it. The JSON object's
+  `blind_spots` lists them.
+- `heki recommend` (experimental) lists contract candidates: the `write-owners`, `read-owners`,
+  and `effect-boundaries` contracts the code already keeps, drawn from what it does (an attribute
+  written after construction by functions of one module and read in at least two others, or
+  written only while its objects are constructed; a private attribute read only in its class's
+  module, the class used in at least two modules; a module, or a package whose every module
+  qualifies, whose functions reach no blocking call). A trial run declares every candidate with
+  `unresolved = "report"` and runs its rules as `heki check` would; a candidate they report for
+  is listed as rejected, with the report. Each candidate kept has a confidence from measurable
+  conditions (high, or medium when accesses on objects of unknown class, files the paths leave
+  out, or code heki does not see leave it open; a medium ownership entry sets
+  `unresolved = "ignore"`), its evidence, and the trial's counts. The block declares them, and a
+  run with the whole block applied confirms them and gives the counts of the block's rules. What
+  the configuration already declares is not proposed, nor anything when the block sets `src`.
+  The JSON object gains `contracts`, `rejected_contracts`, and `contracts_not_tried`, and `runs`
+  lists `contract-trial` and `verification`.
+- The ecosystem catalog covers asyncpg's queries (`execute` / `fetch` / `fetchrow` / `fetchval`
+  on a connection and on a pool, `EFF103`), its connections and pools in loops (`connect`,
+  `create_pool`: `EFF102`), and the rows of `fetch()` as a loop origin; motor's asyncio client,
+  databases, collections, and cursors; 50 more redis commands for `redis` and `redis.asyncio`, and
+  their connection pools; and DuckDB's `connect` and `execute` (a statement in a loop, `EFF103`).
+- The ecosystem catalog covers the client constructors of openai, anthropic, and google-genai
+  (an HTTP connection pool each, `EFF102` in a loop), Celery's `send_task` / `Task.delay` /
+  `Task.apply_async` (they publish to the broker unless the app is configured otherwise, such as
+  `task_always_eager` or an in-memory transport, so only the heuristic `EFF111` follows),
+  polars's readers (`EFF105`; an `http(s)://` source is downloaded, `EFF101`), `read_database` /
+  `read_database_uri` (a query), and `DataFrame.write_database`, and torch's `load` / `save`
+  (`EFF105`) and `cat` and its relatives (`DATA101`).
+- The ecosystem catalog can type the attributes of library classes (`[[attributes]]`): reading
+  `client.chat` on an instance of a catalogued client class gives the class the row names, so a
+  chain of reads reaches a catalogued call. A read is typed only where nothing in the project may
+  change it: no project subclass of the class binds the name, defines `__getattribute__`, or has
+  a metaclass heki does not know, and no base heki knows nothing of comes before the library
+  class. Anywhere else the read stays untyped and neither tier reports the call. Projects add
+  rows with `attribute-type` in `[[tool.heki.ecosystem]]`, and `return-type = "Self"` types a
+  builder method's result as its receiver (`with_options`).
+- Ecosystem catalog: `calls_unawaited = { arg, param, tests_result }`, the callable argument a
+  call calls without awaiting what it returns; every `offloads_blocking_arg` API counts as one.
+  The catalog describes `os.environ.copy()` and `os.environb.copy()` as shallow copies returning
+  a dict.
+
+- `heki skill install --agent {claude-code,codex} --scope {project,user} [--overwrite]`
+  (experimental): installs the Agent Skill the binary was built with into `.claude/skills/heki`
+  or `.agents/skills/heki`, under the working directory or the home directory. An installed
+  skill is replaced only with `--overwrite`.
+- `--help` (not `-h`) of `heki` and of every command ends with the documentation links (the
+  command's section of the CLI reference, the site, getting started, configuration, rules,
+  coding agents, `llms.txt`, the Agent Skill), the exit codes, examples, and the output for
+  programs.
+- The full text output ends with one line per reported rule: `heki rule <CODE>` and the rule's
+  page. SARIF rules carry the page as `helpUri`.
+
+### Changed
+
+- Analysis time no longer grows with the square of a function's size where heki repeated a pass
+  over the whole function: once per link of a chain of aliases laid against the order of the
+  blocks, once per nested scope (a class statement or `def` inside a large function), once per
+  block holding a call (calls each under their own `if`), and once per write of an `invalidation`
+  target before a chain of calls. Reports do not change.
+- The data flows over a function's blocks (objects under construction, the calls that announce
+  an `invalidation` change, and the liveness `OPT` rewrites read) count toward the function's walk
+  budget like its other walks. Past it, the function's objects are not known to be new, its
+  writes of `invalidation` targets are taken as announced, and it gets no `OPT` rewrite. Reports
+  on the corpus do not change.
+
+- Every error of a command says what failed, where (the path relative to the working directory,
+  the line and column with the source line), what to do (`= help:`), and the section of the
+  documentation that explains it (`= docs:`), in the layout of a report. An unknown
+  configuration key gets the nearest key of its table, or the table it belongs in (`select` in
+  `[tool.heki]` belongs in `[tool.heki.lint]`); a value of the wrong type names the type with a
+  line to copy; an unknown rule selector gets the nearest code, or the code of a misspelled rule
+  name; `heki inspect` offers the functions whose names look like the one given. With
+  `--output-format json`, an error in the configuration or a path is also `{"error": {"message",
+  "path", "line", "column", "help", "docs", "candidates"}}` on stdout; an unknown or invalid
+  option stays plain text on stderr. The language server logs the same text for a
+  configuration it cannot load. Exit codes are unchanged; the `heki error:` prefix is now
+  `error:`.
+- The Agent Skill (experimental) is the routine after an edit, about 2 KB instead of 7.7 KB: run
+  `heki check --output-format json` on the project, act on the reports the edit caused, follow
+  `related` and `heki rule <CODE>`, confirm heuristic reports, never suppress, and rewrite only
+  with `--fix`. `heki inspect` is run when a report or a question is about a function, not before
+  every edit. The skill and the Coding Agents page no longer tell agents to filter the JSON by
+  `path`, which dropped the reports in callers' files: they keep the reports whose `path` or a
+  `related[].path` is an edited file, or compare with a baseline recorded before the edit. The
+  page's inspect section is now "What a function does" (new anchor, also in the inspect errors'
+  `docs` link).
+- `EFF102`'s help adds that a reused client keeps state such as cookies from call to call, and
+  its rule page says what a `requests.Session` and an `httpx.Client` keep (cookies, auth, default
+  headers) and to clear that state or keep one client per party when the loop serves unrelated
+  ones.
+- `docs/scope.md` states heki's scope in five points, and ADR-022 records that imports are
+  walls and no longer a non-goal.
+
+### Fixed
+
+- Module globals and instance attributes are
+  typed from every store of them, not from the first one. A global's type joins the module body's
+  stores, those of every function declaring it `global`, and those of other modules through any
+  receiver heki types as the module (`cfg.client = ...`, `import cfg` in a function,
+  `setattr(cfg, "client", v)`, `vars(cfg)["client"] = v`). An attribute's type joins the stores
+  into the instances of its class, its subclasses, and their bases, through `self`, a closure,
+  `super().__setattr__`, `setattr` and `object.__setattr__` (also through an alias or
+  `builtins.setattr`, and with a `Final` name), the instance's namespace, or another receiver of
+  the class (`inst = cls()` in a class method, a parameter `obj: Helper`, an instance the storing
+  module keeps in an attribute or a global, as in `self.base.client = ...`). A store of another
+  class makes a call on the receiver unresolved, so `client.get(...)` is no longer an exact
+  `EFF101` for `httpx.Client.get` when `configure()` rebinds `client = httpx.AsyncClient()`, or
+  when another method or module stores an `httpx.AsyncClient()` in `self.client`. A store reading
+  another such name (`self.active = self.client`) binds what every store of that name gives. A
+  store of a value of unknown type, `globals()` / `exec`, a module-body store before a star import
+  of a module whose `__all__` heki does not read or on only some of the paths after it
+  (`if flag: from m import *` / `else: client = ...`, an `except` clause), and a store of an
+  attribute heki cannot name (`setattr(self, name, v)`, `self.__dict__ = state`, also
+  `object.__setattr__(self, "__dict__", state)`) leave the name untyped, except what
+  `__setstate__` restores from the state pickle or copy took (not when project code calls, reads,
+  or names `__setstate__`). A star import under `if TYPE_CHECKING:` rebinds nothing, and a string
+  constant bound on one branch of a star import is no constant. Annotations still type every
+  store, a store of `None` changes nothing, and `self.items += [x]` keeps a list's type. A store
+  through a receiver whose type heki does not know (`def configure(obj): obj.client = ...`), or
+  one read from an attribute or a global of another module (`app.state.client = ...`), is still
+  not joined (docs/scope.md, "Known limitations").
+- Owner contracts (`write-owners`, `read-owners`, `call-owners`) and `invalidation`: a
+  comprehension, generator expression, lambda, or nested `def` that uses a parameter of the
+  function enclosing it, such as a method's `self`, now reaches that parameter's object, as a
+  helper the function hands it does. A comprehension in `__init__` writing `self.imports` is part
+  of the class's own initialization, and `own-receiver = "allow"` allows
+  `[self._fmt(x) for x in xs]`, with either `attribution`. Another parameter, a `self` that the
+  method or a nested scope rebinds, a closure called away from the method (by the call graph),
+  and a public nested `def` (like a public helper) stay reported.
+- An augmented assignment that changes a built-in container in place (`+=` on a list, `|=` on a
+  dict, `|=`, `&=`, `-=`, `^=` on a set) keeps the name an alias of the container: a write
+  through it afterwards (`extras |= {}; extras["init"] = 1`) is a write of the guarded attribute
+  for `write-owners`, and the name keeps the container's type, with the items `+=` and `|=` add
+  to a local list, set, or dict. On any other value heki still takes `x += 1` as binding a new object, also where the
+  value's own `__iadd__` changes it in place and returns it.
+- `OPT120` / `OPT121`: the `collections.deque` fix is no longer offered when a variable the list
+  reaches is also bound to another object (`s = [...]` before `s = q`, a later `q = [...]` the
+  loop never sees, a `for` target, a parameter): a type checker gives the variable one type, so
+  the fixed file did not type check. The report stays, without the fix; like every report whose
+  rewrite is not proven safe, it is heuristic, so a default run counts it among the heuristic
+  reports not shown.
+- `from pkg import parse` is what `pkg/__init__.py` binds to
+  `parse`, not the submodule `pkg.parse`, when the package binds the name through that module
+  (`from .parse import parse`, `from pkg.parse import parse`, or `parse = parse.parse` after
+  `from . import parse`). Python takes the package's attribute and imports the submodule only
+  when there is none, so the name is the function and calls through it are resolved; the same
+  holds for `import pkg.parse as p` and `pkg.parse` after `import pkg`. A package that binds the
+  name another way (`def parse`, `from .core import parse`) holds that binding only until
+  something first imports the submodule, so heki leaves the name unresolved. A module-level name
+  bound by imports that one later statement always rebinds is that statement's object
+  (`FastCode = FastCode` after `from .main import FastCode`). `MUT101` and `MUT111` count
+  `from pkg import name` as running the package's code whatever the package binds `name` to, so
+  such an import between the write and the return now keeps a report heuristic.
+
 ## [0.2.4] - 2026-11-23
 
 ### Added
@@ -1232,6 +1493,7 @@ The first public preview.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
+[0.2.5]: https://github.com/koxudaxi/heki/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/koxudaxi/heki/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/koxudaxi/heki/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/koxudaxi/heki/compare/v0.2.1...v0.2.2

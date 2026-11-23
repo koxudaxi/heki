@@ -1,5 +1,6 @@
 //! Family 1 rules: `MUT101`, `MUT106`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT112`,
-//! `MUT113`, `MUT201`, `MUT202`, `MUT203`, `MUT204` (docs/ANALYSIS_AND_KB_SPEC.md section 2.3).
+//! `MUT113`, `MUT119`, `MUT201`, `MUT202`, `MUT203`, `MUT204` (docs/ANALYSIS_AND_KB_SPEC.md
+//! section 2.3).
 
 use crate::premises::{self, OpenCause, Told};
 use crate::{
@@ -843,10 +844,12 @@ fn private_methods_called_from_init(
 }
 
 mod kept_values;
+mod lost_changes;
 mod sentinel_copies;
 mod stale_reads;
 
 pub use kept_values::{kept_removals_in, lazy_setup_files};
+pub(crate) use lost_changes::mut119;
 pub(crate) use sentinel_copies::mut118;
 pub use sentinel_copies::{SentinelTestKey, deep_copy_files, sentinel_tests_in};
 
@@ -2412,6 +2415,7 @@ fn mode(
             key,
             value: value.to_owned(),
             expected,
+            values,
         })
 }
 

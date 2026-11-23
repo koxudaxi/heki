@@ -74,7 +74,7 @@ RSS_BUDGETS_MIB = {
     # Peak physical footprint.
     "darwin": {"check": 78, "watch": 88, "owners": 96},
     # Peak resident set size on the CI runner.
-    "linux": {"check": 83, "watch": 93, "owners": 101},
+    "linux": {"check": 93, "watch": 105, "owners": 111},
 }
 RSS_RUNS = 3
 

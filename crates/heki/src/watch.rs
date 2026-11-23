@@ -9,10 +9,9 @@
 
 use crate::{CheckArgs, OutputFormat};
 use anyhow::Result;
-use heki_ast::LineIndex;
 use heki_diagnostics::{Diagnostic, Stylesheet, render, sort_diagnostics};
 use heki_effect::ModuleLayout;
-use heki_env::LintConfig;
+use heki_env::{LintConfig, Problem};
 use heki_lsp::{CONFIG_FILES, EditOutcome, Source, Workspace};
 use heki_profile::{ProfileData, ProfiledFunction};
 use heki_rules::project::{
@@ -239,12 +238,6 @@ impl Watcher<'_> {
         sort_diagnostics(&mut all);
         // As `heki check` prints them: across every file.
         heki_rules::fold_root_causes(&mut all);
-        let source_line = |p: &Path, line: u32| {
-            let text = heki_ast::read_source(p).ok()?;
-            LineIndex::from_source(&text)
-                .line_text(&text, line)
-                .map(str::to_owned)
-        };
         let failures = crate::check::shown_failures(report.errors.values());
         print!(
             "{}",
@@ -253,12 +246,12 @@ impl Watcher<'_> {
                 &failures,
                 crate::check::format_of(self.args.output_format),
                 self.styles,
-                &source_line
+                &heki_diagnostics::file_line
             )
         );
-        let errors = crate::check::shown_errors(report.errors.values());
+        let errors = crate::failure::of_files(report.errors.values());
         for e in report.failure.iter().chain(&errors) {
-            log!(self.args.output_format, "error: {e}");
+            crate::failure::print(self.args.output_format, e);
         }
         if matches!(
             self.args.output_format,
@@ -277,6 +270,9 @@ impl Watcher<'_> {
             });
             crate::check::heuristic_hint(rules_off, withheld);
         }
+        if matches!(self.args.output_format, OutputFormat::Full) {
+            crate::check::rule_pages(&all);
+        }
         let no_config = LintConfig::default();
         let lint = ws.map_or(&no_config, |ws| &ws.env.cfg.lint);
         crate::check::any_failing(&all, crate::check::fail_on(self.args, lint))
@@ -294,7 +290,7 @@ struct Report {
     errors: Errors,
     /// Why nothing is checked: the configuration became invalid, or the files could not be
     /// listed. Reported until a change fixes it.
-    failure: Option<String>,
+    failure: Option<Problem>,
 }
 
 impl Report {
@@ -312,9 +308,9 @@ impl Report {
         }
     }
 
-    fn failed(error: &anyhow::Error) -> Self {
+    fn failed(error: &anyhow::Error, config_file: Option<&Path>) -> Self {
         Self {
-            failure: Some(format!("{error:#}")),
+            failure: Some(crate::failure::explain(error).locate(config_file)),
             ..Self::default()
         }
     }
@@ -443,14 +439,14 @@ pub(crate) fn run(
                 }
                 Err(e) => {
                     ws = None;
-                    report = Report::failed(&e);
+                    report = Report::failed(&e, w.opts().config_file().as_deref());
                 }
             }
         } else if let Some(ws) = ws.as_mut() {
             let now_files = match w.scan(&ws.env, &files) {
                 Ok(now_files) => now_files,
                 Err(e) => {
-                    let failure = Some(format!("{e:#}"));
+                    let failure = Some(crate::failure::explain(&e));
                     if report.failure != failure {
                         report.failure = failure;
                         runs += 1;

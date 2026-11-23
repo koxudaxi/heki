@@ -526,9 +526,12 @@ fn github_output_never_lets_project_text_start_a_log_line() {
     let (code, stdout, stderr) = p.heki(&["--baseline", "b.toml", "--output-format", "github"]);
     assert_eq!(code, 2, "{stderr}");
     assert!(stdout.is_empty(), "{stdout}");
-    // The stale entry's note and the syntax error both stay on one line each.
-    assert_eq!(stderr.lines().count(), 2, "{stderr}");
+    // The stale entry's note and the syntax error's header both stay on one line each.
     assert!(stderr.lines().all(|l| !l.starts_with("::")), "{stderr}");
+    assert!(
+        stderr.contains("\nerror: bad%0A::error file=a.py::forged.py:1:7: syntax error"),
+        "{stderr}"
+    );
     assert!(
         stderr.contains("`x%0A::error file=a.py,line=1::forged` can shrink"),
         "{stderr}"
@@ -556,7 +559,7 @@ fn ratchet_baselines_listing_one_key_twice_are_rejected() {
     assert_eq!(code, 2, "{stdout}{stderr}");
     assert!(
         stderr.contains(
-            "baseline b.toml lists a.py::handler EFF101 `time.sleep` more than once; keep one entry"
+            "error: b.toml: the baseline lists a.py::handler EFF101 `time.sleep` more than once\n  = help: keep one of the entries\n"
         ),
         "{stderr}"
     );
@@ -576,7 +579,7 @@ fn update_baseline_only_shrinks_an_existing_baseline() {
     assert_eq!(stdout.lines().count(), 2, "{stdout}");
     assert!(
         stderr.contains("allows 1 site(s), found 2")
-            && stderr.contains("error: baseline b.toml not updated: 1 entry(ies) grew"),
+            && stderr.contains("error: baseline `b.toml` not updated: 1 entry(ies) grew"),
         "{stderr}"
     );
     assert_eq!(
@@ -618,7 +621,7 @@ fn baselines_and_snapshots_are_kept_when_a_file_fails_to_parse() {
     let (code, _, stderr) = p.heki(&update);
     assert_eq!(code, 2);
     assert!(
-        stderr.contains("error: baseline b.toml not written: 2 file(s) could not be analyzed"),
+        stderr.contains("error: baseline `b.toml` not written: 2 file(s) could not be analyzed"),
         "{stderr}"
     );
     let out = snapshot(&["--write"]);
@@ -700,13 +703,36 @@ fn walk_steps_are_written_as_json_and_hidden_from_help() {
     let (code, _, stderr) = p.heki(&["--walk-steps", "missing/steps.json", "."]);
     assert_eq!(code, 2);
     assert!(
-        stderr.contains("cannot write `missing/steps.json`"),
+        stderr.contains("error: missing/steps.json: cannot write the file: "),
         "{stderr}"
     );
 
     let (code, help, _) = p.heki(&["--help"]);
     assert_eq!(code, 0);
     assert!(!help.contains("walk-steps"), "{help}");
+}
+
+/// The full text output ends with where each reported rule is explained; the other formats
+/// are for programs, and SARIF holds each rule's page in its `helpUri`.
+#[test]
+fn full_output_ends_with_the_pages_of_the_reported_rules() {
+    let p = Project::new("rule_pages");
+    p.write("a.py", BLOCKING);
+    let (_, _, full) = p.heki(&[]);
+    assert!(
+        full.ends_with(
+            "\nEFF101 (async-blocking-call): `heki rule EFF101`, https://heki.koxudaxi.dev/rules/async-blocking-call/\n"
+        ),
+        "{full}"
+    );
+    let (_, _, concise) = p.heki(&["--output-format", "concise"]);
+    assert!(!concise.contains("heki rule"), "{concise}");
+    let (_, sarif, _) = p.heki(&["--output-format", "sarif"]);
+    let sarif: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+    assert_eq!(
+        sarif["runs"][0]["tool"]["driver"]["rules"][0]["helpUri"],
+        "https://heki.koxudaxi.dev/rules/async-blocking-call/"
+    );
 }
 
 /// The escape codes of the colored text output, as Ruff writes them.

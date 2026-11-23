@@ -10,30 +10,35 @@ macro_rules! log {
 mod check;
 mod dump_facts;
 mod dump_recommend_facts;
+mod failure;
+mod help;
 mod inspect;
 mod open_premises;
 mod prompt;
 mod recommend;
+mod skill;
 mod watch;
 
 use anyhow::Result;
 use clap::parser::ValueSource;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use heki_ast::LineIndex;
+use heki_env::{Docs, Problem};
 use heki_rules::experimental::{
     EXPERIMENTAL_FEATURES, EXPERIMENTAL_POLICY, ExperimentalFeature, experimental_rule,
 };
 use heki_rules::precision::{self, Certification, Measurement};
-use heki_rules::project::{Project, ProjectOptions};
+use heki_rules::project::{FileError, Project, ProjectOptions};
 use heki_rules::{Activation, CORE_RULES, RuleMeta, find_rule};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[derive(Debug, Parser)]
 #[command(
     name = "heki",
     version,
-    about = "Experimental static checker for Python that tracks side effects and mutations across function calls"
+    about = "Experimental static checker for Python that tracks side effects and mutations across function calls",
+    after_long_help = help::HEKI.render()
 )]
 struct Cli {
     #[command(subcommand)]
@@ -82,24 +87,31 @@ impl From<FailOn> for heki_env::Severity {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Run semantic checks across Python files or directories (Ruff-aligned).
+    #[command(after_long_help = help::CHECK.render())]
     Check(CheckArgs),
     /// Start the incremental Language Server Protocol (LSP) server.
-    #[command(visible_alias = "lsp")]
+    #[command(visible_alias = "lsp", after_long_help = help::SERVER.render())]
     Server(ServerArgs),
     /// Explain a rule, its Proof Obligations, and counterexamples (`ruff rule` style).
-    #[command(visible_alias = "explain")]
+    #[command(visible_alias = "explain", after_long_help = help::RULE.render())]
     Rule(RuleArgs),
     /// Manage interprocedural effect summary snapshots (`MUT103`).
+    #[command(after_long_help = help::SNAPSHOT.render())]
     Snapshot(SnapshotArgs),
     /// List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection, functions too
     /// large to model) in a project.
+    #[command(after_long_help = help::ASSUMPTIONS.render())]
     Assumptions(AssumptionsArgs),
     /// Experimental: what heki knows about one function (its effects, what it changes, keeps, and
     /// returns, whether it is pure, its callers, reports, and contracts).
+    #[command(after_long_help = help::INSPECT.render())]
     Inspect(InspectArgs),
     /// Experimental: advice on the configuration of a project, with counts from its analysis, and
     /// the keys to add (it writes no file).
+    #[command(after_long_help = help::RECOMMEND.render())]
     Recommend(RecommendArgs),
+    /// Experimental: install heki's Agent Skill where a coding agent reads skills.
+    Skill(SkillArgs),
     /// Internal/testing: dump `heki_semantic` scope tree as JSON for CPython `symtable` verification.
     #[command(hide = true)]
     DumpSemantic(DumpSemanticArgs),
@@ -400,6 +412,45 @@ struct DumpSemanticArgs {
 }
 
 #[derive(Debug, Args)]
+struct SkillArgs {
+    #[command(subcommand)]
+    command: SkillCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum SkillCommand {
+    /// Copy the Agent Skill this heki was built with into the coding agent's skills directory.
+    #[command(after_long_help = help::SKILL_INSTALL.render())]
+    Install(SkillInstallArgs),
+}
+
+#[derive(Debug, Args)]
+struct SkillInstallArgs {
+    /// The coding agent: Claude Code reads `.claude/skills/`, Codex `.agents/skills/`.
+    #[arg(long, value_enum)]
+    agent: SkillAgent,
+    /// `project`: under the working directory; `user`: under the home directory, for every
+    /// project.
+    #[arg(long, value_enum, default_value_t = SkillScope::Project)]
+    scope: SkillScope,
+    /// Replace the skill already installed there.
+    #[arg(long)]
+    overwrite: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SkillAgent {
+    ClaudeCode,
+    Codex,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SkillScope {
+    Project,
+    User,
+}
+
+#[derive(Debug, Args)]
 struct DumpOpenPremisesArgs {
     /// The project to analyze, as for `heki check`.
     #[arg(default_value = ".")]
@@ -444,8 +495,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             };
             let Some(r) = find_rule(q) else {
-                eprintln!("unknown rule: {q}");
-                return Ok(ExitCode::from(2));
+                let problem = Problem::new(format!("unknown rule `{q}`")).docs(Docs::Rules);
+                return Err(heki_rules::selection::unknown_rule(problem, q, false).into());
             };
             if json {
                 println!("{}", serde_json::to_string_pretty(&RuleRecord::new(r))?);
@@ -475,10 +526,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Assumptions(args) => run_assumptions(args),
         Commands::Inspect(args) => inspect::run(&args),
         Commands::Recommend(args) => recommend::run(&args),
+        Commands::Skill(SkillArgs {
+            command: SkillCommand::Install(args),
+        }) => skill::install(&args),
         Commands::DumpSemantic(args) => {
-            let src = heki_ast::read_source(&args.file)?;
-            let parsed = heki_ast::parse_module(&src)
-                .map_err(|errs| anyhow::anyhow!("parse errors: {errs:?}"))?;
+            let (src, parsed) = parse_file(&args.file)?;
             let ver = heki_env::PythonVersion::parse_tag(&args.target_version)
                 .unwrap_or(heki_env::PythonVersion::PY315);
             let model =
@@ -487,9 +539,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Commands::DumpIr(args) => {
-            let src = heki_ast::read_source(&args.file)?;
-            let parsed = heki_ast::parse_module(&src)
-                .map_err(|errs| anyhow::anyhow!("parse errors: {errs:?}"))?;
+            let (src, parsed) = parse_file(&args.file)?;
             let ver = heki_env::PythonVersion::parse_tag(&args.target_version)
                 .unwrap_or(heki_env::PythonVersion::PY315);
             let profile = heki_env::RuntimeProfile::from(ver);
@@ -499,9 +549,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Commands::DumpFacts(args) => {
-            let src = heki_ast::read_source(&args.file)?;
-            let parsed = heki_ast::parse_module(&src)
-                .map_err(|errs| anyhow::anyhow!("parse errors: {errs:?}"))?;
+            let (src, parsed) = parse_file(&args.file)?;
             let ver = heki_env::PythonVersion::parse_tag(&args.target_version)
                 .unwrap_or(heki_env::PythonVersion::PY315);
             let profile = heki_env::RuntimeProfile::from(ver);
@@ -543,6 +591,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+/// The source and syntax tree of `file`, for the `dump-*` commands.
+fn parse_file(file: &Path) -> Result<(String, heki_ast::ParsedModule)> {
+    let src = heki_ast::read_source(file).map_err(|e| FileError::unreadable(file, &e))?;
+    let parsed =
+        heki_ast::parse_module(&src).map_err(|errs| FileError::syntax(file, &src, &errs))?;
+    Ok((src, parsed))
 }
 
 #[derive(serde::Serialize)]
@@ -605,7 +661,7 @@ fn run_assumptions(args: AssumptionsArgs) -> Result<ExitCode> {
     }
     check::finish(
         OutputFormat::Full,
-        &check::shown_errors(&project.errors),
+        &failure::of_files(&project.errors),
         ExitCode::SUCCESS,
     )
 }
@@ -642,14 +698,11 @@ fn main() -> ExitCode {
         .build_global()
         .expect("the global thread pool is built before any parallel work");
     let cli = parse_cli();
-    let format = match &cli.command {
-        Commands::Check(args) => args.output_format,
-        _ => OutputFormat::Full,
-    };
+    let failures = failure::Failures::of(&cli.command);
     let code = match run(cli) {
         Ok(code) => code,
         Err(err) => {
-            log!(format, "heki error: {err:#}");
+            failures.fail(&err);
             ExitCode::from(2)
         }
     };

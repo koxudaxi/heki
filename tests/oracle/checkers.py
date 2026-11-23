@@ -27,6 +27,9 @@ The claims, as the rule pages state them:
   returned.
 - `MUT118`: whenever the deep copy receives an instance of the class that holds an `object()`
   sentinel in the attribute, the copy holds another object there.
+- `MUT119`: the object the change runs on is held by nothing when the statement ends, the change
+  is the changing method of its builtin type or an item assignment or deletion of it, and a
+  target the change's result is assigned to holds `None`.
 - `OPT101` ... `OPT130` (the proven tier): the accumulator is of the builtin type the rule names
   when the statement runs; the rewrite keeps the program's behaviour (`compare_outcomes`).
 - `OPT113` (the exact tier): an inner item whose key differs runs only the loads of the two keys
@@ -632,6 +635,83 @@ def check_mut118(claim, runs, sources=None):
 
 
 # ---------------------------------------------------------------------------------------------
+# MUT119
+# ---------------------------------------------------------------------------------------------
+def check_mut119(claim, runs, sources=None):
+    result = Result(claim)
+    for run in valid_runs(runs):
+        for event in _of(run["events"], "lost", claim["line_id"]):
+            if event[5] != "ok":
+                continue
+            facts = event[6]
+            if not _changed_by_the_builtin(claim, facts, result, run):
+                continue
+            if facts["held"] is None and not _made_by_a_builtin(claim, facts["made"]):
+                continue
+            result.checked += 1
+            if facts["held"]:
+                result.refute(
+                    "still-held",
+                    "Unnamed: the statement binds the changed object to a name"
+                    if facts["named"]
+                    else "New object: the changed object is still held when the statement ends",
+                    run,
+                    {"held": facts["held"], "holders": facts["holders"], "type": facts["type"], "made": facts["made"]},
+                )
+                continue
+            for expr, held in facts["results"].items():
+                if held is not None and not held[0]:
+                    result.refute(
+                        "result-not-none",
+                        f"Changed in place: `{expr}` holds a `{held[1]}`, not the `None` the change returns",
+                        run,
+                        {"target": expr, "type": held[1]},
+                    )
+    return result
+
+
+def _made_by_a_builtin(claim, made):
+    """Whether an object the line did not see is new and held by nothing but the change: a
+    display, what a builtin maker called at the object's expression returned, or the slice of a
+    list or bytearray there (neither the maker nor the change keeps it)."""
+    if made is None:
+        return claim["base"] == "display"
+    return made[0] in ("call", "slice") and made[2]
+
+
+def _changed_by_the_builtin(claim, facts, result, run):
+    """Whether the change ran as its builtin type makes it: the changing method of the receiver's
+    builtin type, or an item assignment or deletion that ran no `__setitem__` / `__delitem__` of
+    the program. A method call that did not run is no instance of the claim."""
+    if claim["form"] == "method":
+        if facts["method"] is None:
+            return False
+        name, builtin, program_method = facts["method"]
+        if builtin:
+            return True
+        what = f"the program's `{program_method}`" if program_method else f"`{name}`, no changing method of it"
+        result.checked += 1
+        result.refute(
+            "not-changed-in-place",
+            f"Changed in place: the change ran {what}",
+            run,
+            {"method": facts["method"], "type": facts.get("type")},
+        )
+        return False
+    if facts["store"] is None:
+        return True
+    result.checked += 1
+    result.refute(
+        "not-changed-in-place",
+        f"Changed in place: the item {'assignment' if claim['form'] == 'store' else 'deletion'} ran the "
+        f"program's `{facts['store']}`",
+        run,
+        {"store": facts["store"], "type": facts.get("type")},
+    )
+    return False
+
+
+# ---------------------------------------------------------------------------------------------
 # OPT proven tier: the accumulator's type when the statement runs
 # ---------------------------------------------------------------------------------------------
 def check_opt_type(claim, runs, sources=None):
@@ -759,6 +839,7 @@ CHECKERS = {
     "MUT114": check_mut114,
     "MUT115": check_mut115,
     "MUT118": check_mut118,
+    "MUT119": check_mut119,
     "OPT101": check_opt_type,
     "OPT102": check_opt_type,
     "OPT103": check_opt_type,

@@ -82,6 +82,15 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         tracking: None,
     },
     ExperimentalFeature {
+        id: "command.skill",
+        kind: ExperimentalKind::Command,
+        target: "heki skill",
+        since: "0.2.6",
+        reason: "Where coding agents read skills, and so where `heki skill install` writes, can \
+            change as the agents evolve; the skill's wording changes with heki's commands.",
+        tracking: None,
+    },
+    ExperimentalFeature {
         id: "command.recommend",
         kind: ExperimentalKind::Command,
         target: "heki recommend",
@@ -131,6 +140,15 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         since: "0.2.4",
         reason: "Its precision is measured on a sample of reports of one corpus only, and its \
             premises are not yet certified.",
+        tracking: None,
+    },
+    ExperimentalFeature {
+        id: "rule.EFF115",
+        kind: ExperimentalKind::Rule,
+        target: "EFF115",
+        since: "0.2.5",
+        reason: "The development corpus has no report of it, so its precision is not measured, \
+            and its premises are not yet certified.",
         tracking: None,
     },
     ExperimentalFeature {
