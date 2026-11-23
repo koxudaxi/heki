@@ -25,6 +25,16 @@ It takes the options of `heki check` that decide what is analyzed: `--select`,
   reports (reports sharing a root cause count once, as `heki check` folds them), the heuristic
   reports of exact rules that `lint.heuristic = false` withholds, and the heuristic rules it
   leaves off. With a baseline, the reports it allows and the regressions.
+- **What keeps reports heuristic**: the heuristic reports of exact claims (the heuristic reports
+  of exact rules, and those of `EFF111` and `EFF113`, which report the claims of `EFF101` and
+  `EFF103` with a premise open), counted by the premise of the claim each leaves open and why
+  ([Rule Precision](precision.md)), or by the condition of the exact tier that is no premise
+  ("Trip count open": the claim holds, and the change pays off only over a loop the data
+  sizes). Each row says what the cause states, how many reports leave it open, how many leave
+  nothing else open, and what closes it: an annotation, which must be true; a change of the
+  code; heki's catalog, which no configuration sets (the row says where to report the case);
+  or nothing you can apply. None of it enters the block. A report whose rule records no cause
+  is counted as "not recorded", never given a guessed one.
 - **Rules worth enabling here**: every rule the configuration leaves off, and every exact rule
   whose heuristic reports it withholds, with the reports naming it in `extend-select` would add
   (exact and heuristic, and with a baseline the regressions among them), its consequence, and
@@ -61,6 +71,8 @@ listed with the reason they stay out:
   applied, `heki check` prints the reports it promises.
 - How often a rule's reports are right is quoted only from published measurements, with their
   sample, interval, and date; a rule without one is "not measured". No score is computed.
+- What keeps a report heuristic comes from the report itself, as the analysis decided its
+  tier; a cause the analysis does not record is shown as not recorded, never guessed.
 - The same input, configuration, and heki version give the same report, on any machine and
   with any number of threads.
 - It writes nothing and keeps every value the configuration sets.
@@ -122,6 +134,17 @@ heki recommend (experimental) on .: 3 file(s), 9 function(s)
 
 Reports now  1 shown (1 exact, 0 heuristic), 1 heuristic withheld, 5 heuristic rule(s) off
 
+What keeps reports heuristic
+  1 heuristic report(s) of exact claims: OPT110 1
+  premise: cause                                 reports  only open  closed by
+  Rewrite proven safe: zero-trip-exception-safe        1          0  code
+    the `set(...)` the rewrite builds before the loop may raise even when the loop runs no time: an element that may be unhashable, or a name that may be unbound there
+    e.g. app/users.py:14 OPT110
+  Rewrite proven safe: hash-consistent-probe           1          0  code
+    the value looked up may compare otherwise through `hash` than through `==`: a custom `__eq__` / `__hash__`, or an unhashable value
+    e.g. app/users.py:14 OPT110
+  Nothing here enters the block: an annotation or a change of the code is an edit of the program.
+
 Rules worth enabling here
   rule    reports  exact  consequence  right about the code (published)  real harm  block
   MUT106        1      -  bug          not measured                      -          yes
@@ -154,6 +177,7 @@ changes meaning.
 | `analyzed` | the files and functions analyzed, the files that could not be read or parsed, the paths given, and the Python files below the root they leave out |
 | `runs` | the analyses the report was computed from |
 | `reports_now` | the counts of "Reports now" |
+| `open_premises` | the counts of "What keeps reports heuristic": by code; by premise or condition and cause, with what the cause states, what closes it, the reports, the reports it is the only open cause of, and the first 50 reports; the sets of causes that reports leave open together |
 | `rules` | each rule of "Rules worth enabling here": its metadata, the reports it would add, its published measurement, whether the block enables it, and why |
 | `notes` | the notes |
 | `config`, `config_toml` | the keys to add or change, as keys and values and as TOML |

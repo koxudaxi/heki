@@ -109,8 +109,13 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
     let p = shop("recommend_now");
     let (code, out, err) = p.heki(&["recommend"]);
     assert_eq!((code, err.as_str()), (0, ""));
+    // "What keeps reports heuristic" has tests of its own.
+    let (before, section) = out
+        .split_once("\nWhat keeps reports heuristic\n")
+        .unwrap_or_else(|| panic!("{out}"));
+    let after = section.split_once("\n\n").unwrap().1;
     assert_eq!(
-        out,
+        format!("{before}\n{after}"),
         "heki recommend (experimental) on .: 8 file(s), 20 function(s)\n\
          \n\
          Reports now  2 shown (2 exact, 0 heuristic), 2 heuristic withheld, 5 heuristic rule(s) \
@@ -845,5 +850,228 @@ fn paths_are_written_as_heki_check_writes_them() {
         left_out.contains(&"api.py")
             && left_out.contains(&format!("{root}/tests/test_a.py").as_str()),
         "{left_out:?}"
+    );
+}
+
+/// Heuristic reports of exact claims, one per closer: `EFF111` (a branch skips the wait: code),
+/// `EFF113` (a loop over a library result the catalog does not size: heki's catalog), `OPT113`
+/// (items of unknown type: two annotations), and `OPT110` (a loop the code counts: a condition of
+/// the exact tier, nothing to apply). `handle_quietly`'s report is suppressed.
+const HEURISTIC_CLAIMS: [(&str, &str); 4] = [
+    (
+        "app/waits.py",
+        "import time\n\n\ndef pause(flag):\n    if flag:\n        return None\n    time.sleep(1)\n\n\n\
+         async def handle(flag):\n    pause(flag)\n\n\nasync def handle_quietly(flag):\n    \
+         pause(flag)  # heki: ignore[EFF111]\n",
+    ),
+    (
+        "app/queries.py",
+        "import json\nimport sqlite3\n\nSQL = \"SELECT * FROM t WHERE id = ?\"\n\n\n\
+         def process(db: sqlite3.Cursor, text: str):\n    for x in json.loads(text):\n        \
+         db.execute(SQL, (x,))\n",
+    ),
+    (
+        "app/joins.py",
+        "from dataclasses import dataclass\n\n\n@dataclass\nclass Left:\n    key: int\n    \
+         other: int = 0\n\n\n@dataclass\nclass Right:\n    key: int\n    payload: int = 0\n\n\n\
+         def join(lefts, rights):\n    out = []\n    for a in lefts:\n        for b in rights:\n\
+         \x20           if a.key == b.key:\n                out.append((a.other, b.payload))\n    \
+         return out\n",
+    ),
+    (
+        "app/counts.py",
+        "def count(probes):\n    allowed = list(range(0, 50, 3))\n    hits = []\n    for p in \
+         range(40):\n        if p in allowed:\n            hits.append(p)\n    return hits\n",
+    ),
+];
+
+fn heuristic_claims(name: &str) -> Project {
+    let p = Project::new(name);
+    p.write("app/__init__.py", "");
+    for (path, text) in HEURISTIC_CLAIMS {
+        p.write(path, text);
+    }
+    p
+}
+
+/// The rows of "What keeps reports heuristic" as `(name, cause, closer, reports, only open)`.
+fn cause_rows(report: &Value) -> Vec<(String, String, String, u64, u64)> {
+    report["open_premises"]["by_cause"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["name"].as_str().unwrap().to_owned(),
+                r["cause"].as_str().unwrap().to_owned(),
+                r["closer"].as_str().unwrap().to_owned(),
+                r["reports"].as_u64().unwrap(),
+                r["only_open"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn heuristic_reports_are_counted_by_the_premise_they_leave_open_and_why() {
+    let p = heuristic_claims("recommend_open_premises");
+    let (code, report, _) = recommend_json(&p, &[]);
+    assert_eq!(code, 0);
+    let section = &report["open_premises"];
+    assert_eq!(section["reports"], json!(4), "{section:#}");
+    assert_eq!(
+        section["by_rule"],
+        json!([{"rule": "EFF111", "reports": 1}, {"rule": "EFF113", "reports": 1},
+               {"rule": "OPT110", "reports": 1}, {"rule": "OPT113", "reports": 1}])
+    );
+    let row = |name: &str, cause: &str, closer: &str, reports: u64, only: u64| {
+        (
+            name.to_owned(),
+            cause.to_owned(),
+            closer.to_owned(),
+            reports,
+            only,
+        )
+    };
+    // The causes left open alone first; the two that one report leaves open together after.
+    assert_eq!(
+        cause_rows(&report),
+        vec![
+            row("Every return", "not-made-on-every-return", "code", 1, 1),
+            row("Origin", "library-call-without-items", "heki-catalog", 1, 1),
+            row("Trip count open", "trip-count-fixed", "none", 1, 1),
+            row("Equality of keys", "item-type-unknown", "annotation", 1, 0),
+            row(
+                "Idle on a mismatch",
+                "iterable-type-unknown",
+                "annotation",
+                1,
+                0
+            ),
+        ]
+    );
+    let by_cause = section["by_cause"].as_array().unwrap();
+    assert_eq!(
+        (&by_cause[0]["kind"], &by_cause[2]["kind"]),
+        (&json!("premise"), &json!("condition"))
+    );
+    // A heuristic side's reports count under the claim of its exact rule.
+    assert_eq!(
+        by_cause[0]["rules"],
+        json!([{"rule": "EFF101", "reported_as": "EFF111", "reports": 1, "only_open": 1}])
+    );
+    assert_eq!(
+        by_cause[0]["examples"],
+        json!([{"path": "app/waits.py", "line": 11, "column": 5, "rule": "EFF111",
+                "at": {"path": "app/waits.py", "line": 7, "column": 5}, "detail": null}])
+    );
+    assert_eq!(
+        by_cause[2]["examples"][0]["detail"],
+        json!("the loop runs at most 40 times")
+    );
+    assert_eq!(
+        section["combinations"],
+        json!([{"reports": 1, "open": [
+            {"kind": "premise", "name": "Equality of keys", "cause": "item-type-unknown"},
+            {"kind": "premise", "name": "Idle on a mismatch", "cause": "iterable-type-unknown"}]}])
+    );
+    assert_eq!(
+        (&section["not_recorded"], &section["truncated"]),
+        (&json!([]), &json!(false))
+    );
+    // Nothing of this section enters the block.
+    assert_eq!(report["config"], json!({}));
+    assert_follows_the_schema(&report);
+    let (_, out, _) = p.heki(&["recommend"]);
+    let text = out
+        .split("\nWhat keeps reports heuristic\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n\n").next())
+        .unwrap_or_else(|| panic!("{out}"));
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines[..3],
+        [
+            "  4 heuristic report(s) of exact claims: EFF111 1, EFF113 1, OPT110 1, OPT113 1",
+            "  premise: cause                                 reports  only open  closed by",
+            "  Every return: not-made-on-every-return               1          1  code",
+        ],
+        "{text}"
+    );
+    assert_eq!(lines[4], "    e.g. app/waits.py:11 EFF111", "{text}");
+    for line in [
+        "  Origin: library-call-without-items                   1          1  heki's catalog",
+        "  Trip count open (condition): trip-count-fixed        1          1  none",
+        "  Idle on a mismatch: iterable-type-unknown            1          0  annotation",
+        "  Nothing here enters the block: an annotation or a change of the code is an edit of \
+         the program.",
+        "  heki's catalog takes no configuration for the causes it closes: report a case at \
+         https://github.com/koxudaxi/heki/issues.",
+    ] {
+        assert!(lines.contains(&line), "{line}\n{text}");
+    }
+}
+
+#[test]
+fn closing_the_cause_in_the_code_makes_the_report_exact() {
+    let p = heuristic_claims("recommend_open_premises_closed");
+    let closed = [
+        // The branch that skips the wait.
+        ("app/waits.py", "    if flag:\n        return None\n", ""),
+        // The two annotations.
+        (
+            "app/joins.py",
+            "def join(lefts, rights):",
+            "def join(lefts: list[Left], rights: list[Right]):",
+        ),
+        // A loop over the data, whose items the probe turns into ints.
+        (
+            "app/counts.py",
+            "range(40):\n        if p in allowed:",
+            "probes:\n        if int(p) in allowed:",
+        ),
+    ];
+    for (path, open, close) in closed {
+        let (_, text) = HEURISTIC_CLAIMS.iter().find(|(p, _)| *p == path).unwrap();
+        p.write(path, &text.replace(open, close));
+    }
+    let shown = checked(&p, &["--select", "EFF101,OPT110,OPT113"]);
+    let exact: Vec<(&str, &str)> = shown
+        .iter()
+        .filter(|d| d["certainty"] == "exact")
+        .map(|d| {
+            (
+                d["rule_code"].as_str().unwrap(),
+                d["path"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    for (rule, path) in [
+        ("EFF101", "app/waits.py"),
+        ("OPT113", "app/joins.py"),
+        ("OPT110", "app/counts.py"),
+    ] {
+        assert!(exact.contains(&(rule, path)), "{rule} {path}: {shown:#?}");
+    }
+    // What stays heuristic is the cause only heki's catalog closes.
+    let (_, report, _) = recommend_json(&p, &[]);
+    assert_eq!(
+        cause_rows(&report),
+        vec![(
+            "Origin".to_owned(),
+            "library-call-without-items".to_owned(),
+            "heki-catalog".to_owned(),
+            1,
+            1
+        )]
+    );
+    // Without heuristic reports of exact claims, the section says so.
+    p.write("app/queries.py", "");
+    let (_, out, _) = p.heki(&["recommend"]);
+    assert!(
+        out.contains(
+            "\nWhat keeps reports heuristic\n  No heuristic reports of exact claims here.\n"
+        ),
+        "{out}"
     );
 }
