@@ -3883,7 +3883,9 @@ $ python3 scripts/check_memory.py --heki target/release/heki
 - Each budget is the peak on CI's Linux runner when it was set, plus 5 %, except those of
   `heki recommend`, an experimental command that runs several analyses and that no editor waits
   on: the owner set them to 100 MiB. Another machine reads a few hundred bytes more or less,
-  from the length of the generated project's path.
+  from the length of the generated project's path. The `check`, `watch`, and `owners` budgets
+  were last set from main at d67c902a (56.65, 52.81, and 69.91 MiB on the runner), after the
+  0.2.5 catalog rows and the opt-in fact tables had left `check` 0.05 MiB under the old budget.
 - A budget changes, down or up, only with the owner's decision. A change that would exceed one
   first finds what grew (below) and removes it where it lives; when the growth is the cost of
   facts a default rule needs, the measurements go to the owner.
