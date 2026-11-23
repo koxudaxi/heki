@@ -1772,7 +1772,11 @@ impl<'e, 'a> Engine<'e, 'a> {
     }
 
     fn subscript(&self, span: Span, obj: VarId, index: VarId, is_slice: bool) -> Step {
-        let Some(o) = self.need(obj)?.and_then(Ty::obj) else {
+        let container = self.need(obj)?;
+        if !is_slice && let Some(item) = self.table_item(obj, index) {
+            return Ok(item);
+        }
+        let Some(o) = container.and_then(Ty::obj) else {
             return Ok(None);
         };
         let item = match (&o.args, is_slice) {
@@ -1791,6 +1795,21 @@ impl<'e, 'a> Engine<'e, 'a> {
             (Args::Tuple(es), false) => self.position(span, obj, index, es),
         };
         item_ty(item)
+    }
+
+    /// What `obj[index]` gives when `obj` reads a module's table of functions and `index` is
+    /// one of its keys (`HANDLERS["create"]`, [`TypeCtx::table_item`]).
+    fn table_item(&self, obj: VarId, index: VarId) -> Option<Option<Ty>> {
+        let inst = self.shape.inst(self.shape.copy_root(obj))?;
+        let module_of = |v: VarId| match self.fact(v) {
+            Fact::Known(Ty::Ref(m)) => Some(m),
+            _ => None,
+        };
+        let read = self.cx.global_read(inst, &module_of)?;
+        let key = self
+            .cx
+            .str_constant_in(self.shape, index, &FxHashMap::default())?;
+        self.cx.table_item(read, &key)
     }
 
     /// The item at constant position `index` of a tuple, or any of its items. An unpacking

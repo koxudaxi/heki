@@ -877,6 +877,13 @@ pub struct ModuleDecls {
     /// Module global `name -> type` of the instance it holds (`client = httpx.Client()`): the
     /// join of every store of the module (`stores::record`).
     pub global_types: BTreeMap<String, Ty>,
+    /// Module globals bound once, by the module body, to a dict display whose keys are string
+    /// literals and some of whose values are functions or classes, that nothing changes in
+    /// place (`HANDLERS = {"create": create, "drop": drop}`): each key with its value's type
+    /// (`None`: unknown), in order (`stores::record`). `HANDLERS["create"]` is that value
+    /// ([`ProjectDecls::table`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tables: BTreeMap<String, Box<[(Box<str>, Option<Ty>)]>>,
     /// Module-level names bound once to another object by name (`_set = object.__setattr__`,
     /// `run = helpers.run`), or so after imports of the name that binding always replaces, by
     /// the fqn of that object ([`module_aliases`]): as a value or in
@@ -1073,6 +1080,7 @@ impl ModuleDecls {
             function.state_of_self = false;
         }
         out.global_types.clear();
+        out.tables.clear();
         out.stores_elsewhere = None;
         out.store_fallbacks = None;
         out.global_capacities.clear();
@@ -4050,9 +4058,32 @@ impl ProjectDecls {
         }
         declared.obj().is_some_and(|d| {
             of_any_class(&d.class)
-                || t.obj()
-                    .is_some_and(|i| i.class != d.class && self.is_subclass(&i.class, &d.class))
+                || is_any_callable(&d.class) && t.obj().is_none()
+                || t.obj().is_some_and(|i| {
+                    (i.class != d.class && self.is_subclass(&i.class, &d.class))
+                        || (i.class == d.class && self.narrower_items(&i.args, &d.args))
+                })
         })
+    }
+
+    /// Whether the items `t` tracks are narrower than the declared `declared` in one slot and
+    /// the same or narrower in every other (`dict[str, Callable]` declared, a display of
+    /// functions stored).
+    fn narrower_items(&self, t: &Args, declared: &Args) -> bool {
+        let slots: Vec<(&Elem, &Elem)> = match (t, declared) {
+            (Args::Items(a), Args::Items(b)) => vec![(a, b)],
+            (Args::Map(ka, va), Args::Map(kb, vb)) => vec![(ka, kb), (va, vb)],
+            _ => return false,
+        };
+        let mut narrower = false;
+        for (a, b) in slots {
+            match (a, b) {
+                (Elem::Of(x), Elem::Of(y)) if x == y => {}
+                (Elem::Of(x), Elem::Of(y)) if self.narrower(x, y) => narrower = true,
+                _ => return false,
+            }
+        }
+        narrower
     }
 
     /// The project functions `name` names on an instance of the canonical project class
@@ -7221,6 +7252,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     classes: BTreeMap::new(),
     functions: BTreeMap::new(),
     global_types: BTreeMap::new(),
+    tables: BTreeMap::new(),
     aliases: BTreeMap::new(),
     type_vars: BTreeMap::new(),
     unknown_globals: BTreeSet::new(),
@@ -8032,6 +8064,22 @@ impl<'a> TypeCtx<'a> {
         types: &FxHashMap<VarId, Val>,
     ) -> Option<String> {
         self.str_constant_with(var, &|v| shape.inst(v), types)
+    }
+
+    /// The value the item `key` of the table `read` reads gives ([`ProjectDecls::table`]):
+    /// `Some(None)` for an entry of unknown value, `None` when `read` reads no table or the
+    /// table has no such key (reading it raises `KeyError`).
+    pub(crate) fn table_item(&self, read: GlobalRead<'_>, key: &str) -> Option<Option<Ty>> {
+        let fqn = match read {
+            GlobalRead::Own(name) => match self.module.imports.get(name) {
+                Some(_) => self.module.fixed_import(name)?.clone(),
+                None => format!("{}.{name}", self.module_name),
+            },
+            GlobalRead::Other(fqn) => fqn,
+        };
+        let entries = self.project.table(&fqn)?;
+        let (_, value) = entries.iter().find(|(k, _)| &**k == key)?;
+        Some(value.as_ref().and_then(|t| self.project.declared_ty(t)))
     }
 
     /// [`ProjectDecls::catalog`] of this module's project.

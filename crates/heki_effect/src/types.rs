@@ -277,6 +277,18 @@ impl Ty {
         }
     }
 
+    /// The type with the items of every instance unknown: what a container holds once code
+    /// heki does not follow item by item adds to it.
+    pub(crate) fn without_items(&self) -> Ty {
+        self.map_members(|o| {
+            Some(Obj {
+                class: o.class.clone(),
+                args: Args::None,
+            })
+        })
+        .unwrap_or_else(|| self.clone())
+    }
+
     /// The declared type with `Self` bound to the receiver type `recv`, or `None` when it
     /// mentions `Self` without a receiver; an item mentioning it is then unknown.
     pub(crate) fn bind_self(&self, recv: Option<&Ty>) -> Option<Ty> {
