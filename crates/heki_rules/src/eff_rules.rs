@@ -6,7 +6,7 @@ use crate::mut_rules::{
     CallTargets, ContractTarget, FunctionMatcher, FunctionMatchers, References, SiteId, Subclasses,
     allows_fresh, call_verb, contract_places, counts_references, group_texts, helper_changes_field,
     initializes_itself, parse_call_targets, parse_read_targets, parse_targets, patterns,
-    project_classes, reports_import_probes, site_callee, write_hits,
+    project_classes, reports_import_probes, reports_unresolved, site_callee, write_hits,
 };
 use crate::opt_rules::{Creators, Sizes};
 use crate::premises::{self, OpenCause};
@@ -21,7 +21,7 @@ use heki_effect::with_paths;
 use heki_effect::{
     AccessKind, BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget,
     Construction, EffectSummary, ExternalAccess, Facts, FuncKey, HopGap, MustGap, PerItem, Runner,
-    SiteEffect, SiteMust, TypeCtx, WriteKind, anchors_call_site, boundary_reports_in,
+    SiteEffect, SiteMust, TypeCtx, Unresolved, WriteKind, anchors_call_site, boundary_reports_in,
 };
 use heki_env::EffectBoundaryRule;
 pub(crate) use heki_ir::ItemOrigins;
@@ -1054,6 +1054,8 @@ struct Boundary<'r> {
     reads_environment: bool,
     /// `import-probes = "report"`: `reads-environment` also forbids import probes.
     import_probes: bool,
+    /// `unresolved = "report"`: what the boundary cannot judge in the reach is reported.
+    report_unresolved: bool,
 }
 
 /// Whether a pattern names `key`, its qualname, or a module / class / function containing it.
@@ -1254,6 +1256,11 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
             allow_fresh: allows_fresh(b.fresh_objects.as_deref(), "effect-boundaries", &b.name)?,
             reads_environment: forbids("reads-environment"),
             import_probes,
+            report_unresolved: reports_unresolved(
+                b.unresolved.as_deref(),
+                "effect-boundaries",
+                &b.name,
+            )?,
         });
     }
     Ok(out)
@@ -1290,7 +1297,7 @@ pub(crate) fn eff201(
             let key = CheckContext::key(unit, f);
             for (bi, b) in boundaries.iter().enumerate() {
                 if b.in_scope(&key) && done.insert((key.clone(), bi)) {
-                    let reach = Reach::search(cx, (&sites, &references), b, &key);
+                    let reach = Reach::search(cx, (&sites, &references), b, (&key, f.span));
                     let reported = out.len();
                     reach.report(cx, b, unit, f, &key, out);
                     for d in &mut out[reported..] {
@@ -1408,6 +1415,20 @@ struct Reach<'a> {
     /// By the `call-targets` indices a call matches ([`called_targets`]).
     calls: BTreeMap<Vec<usize>, Found>,
     environment: EnvironmentFound,
+    /// What the boundary cannot judge (`unresolved = "report"`), by kind.
+    unjudged: BTreeMap<Unjudged, Found>,
+    /// The scope function's definition.
+    start_span: Span,
+}
+
+/// What an effect boundary cannot judge in its reach.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Unjudged {
+    /// A call heki cannot resolve, a function it does not model, or a body only a stub declares.
+    Calls,
+    /// A write, on an object of unknown class, of an attribute the boundary names (by name;
+    /// `None`: a name computed at run time).
+    Writes(Option<String>),
 }
 
 impl<'a> Reach<'a> {
@@ -1417,7 +1438,7 @@ impl<'a> Reach<'a> {
         cx: &CheckContext<'_>,
         sites: (&SitesByCaller<'a>, &SitesByCaller<'_>),
         b: &Boundary<'_>,
-        start: &FuncKey,
+        (start, start_span): (&FuncKey, Span),
     ) -> Self {
         let (sites, references) = sites;
         let start_facts = cx
@@ -1432,6 +1453,8 @@ impl<'a> Reach<'a> {
             reads: BTreeMap::new(),
             calls: BTreeMap::new(),
             environment: None,
+            unjudged: BTreeMap::new(),
+            start_span,
         };
         let mut index_of: FxHashMap<(FuncKey, Facts), usize> = FxHashMap::default();
         index_of.insert((start.clone(), start_facts), 0);
@@ -1458,6 +1481,9 @@ impl<'a> Reach<'a> {
             }
             if runs_body {
                 reach.collect_external(cx, b, i, &func);
+            }
+            if b.report_unresolved && runs_body {
+                reach.collect_unjudged(cx, b, i, &func);
             }
             for &(path, site) in own {
                 let hop = |caller: &FuncKey, callee: String| CallHop {
@@ -1654,6 +1680,105 @@ impl<'a> Reach<'a> {
                     (chain_to(nodes, i), r.span, r.kind.describe())
                 });
             }
+        }
+    }
+
+    /// What the boundary cannot judge in node `i`'s own body (`unresolved = "report"`): the
+    /// calls heki resolves to no function (the blind spots of `heki recommend`), a body it does
+    /// not model or that only a stub declares (`EffectSummary::unknown_calls` without such a
+    /// call, as `heki inspect`'s `purity.unknown_reach` lists it), and the writes it cannot tie
+    /// to a class of an attribute `write-targets` or `write-universe` names
+    /// (`EffectSummary::unresolved_write_sites`, as `MUT205` reads them).
+    fn collect_unjudged(
+        &mut self,
+        cx: &CheckContext<'_>,
+        b: &Boundary<'_>,
+        i: usize,
+        func: &FuncKey,
+    ) {
+        let Some(path) = cx.index.file_of(func) else {
+            return;
+        };
+        let summary = cx.index.summary(func);
+        let blind = cx.index.files[path]
+            .blind_calls()
+            .find(|(f, _)| *f == func)
+            .map_or(&[][..], |(_, calls)| calls);
+        let mut unresolved = false;
+        for call in blind {
+            let heki_effect::Blind::Unresolved { name, .. } = &call.blind else {
+                continue;
+            };
+            unresolved = true;
+            let nodes = &self.nodes;
+            note(
+                &mut self.unjudged,
+                Unjudged::Calls,
+                (func.fqn(), call.span),
+                || {
+                    let mut chain = chain_to(nodes, i);
+                    chain.push(CallHop {
+                        caller: func.clone(),
+                        callee: name
+                            .clone()
+                            .unwrap_or_else(|| "a value computed in place".to_owned()),
+                        span: call.span,
+                        path: path.to_path_buf(),
+                    });
+                    (chain, call.span, "")
+                },
+            );
+        }
+        let stub = heki_effect::is_stub(path);
+        let unmodeled = summary.is_some_and(|s| s.unknown_calls) && !unresolved;
+        if stub || unmodeled {
+            let nodes = &self.nodes;
+            // At the call reaching the function, or at the scope function itself.
+            let span = nodes[i]
+                .2
+                .as_ref()
+                .and_then(|(_, h)| h.last())
+                .map_or(self.start_span, |h| h.span);
+            note(
+                &mut self.unjudged,
+                Unjudged::Calls,
+                (func.fqn(), span),
+                || {
+                    let what = if stub {
+                        "a body only a stub declares"
+                    } else {
+                        "a body heki does not model"
+                    };
+                    (chain_to(nodes, i), span, what)
+                },
+            );
+        }
+        let writes = summary.into_iter().flat_map(|s| &s.unresolved_write_sites);
+        for w in writes {
+            let named = b
+                .write_targets
+                .iter()
+                .filter(|_| b.writes_targets)
+                .chain(&b.write_universe)
+                .any(|t| match &w.what {
+                    Unresolved::Receiver(attr) => t.matches_attr(attr),
+                    Unresolved::Name(class) => t.classes.contains(class),
+                    Unresolved::Anything => true,
+                });
+            if !named || b.allow_fresh && w.construction == Construction::Yes {
+                continue;
+            }
+            let attr = match &w.what {
+                Unresolved::Receiver(attr) => Some(attr.clone()),
+                Unresolved::Name(_) | Unresolved::Anything => None,
+            };
+            let nodes = &self.nodes;
+            note(
+                &mut self.unjudged,
+                Unjudged::Writes(attr),
+                (func.fqn(), w.span),
+                || (chain_to(nodes, i), w.span, w.kind.describe()),
+            );
         }
     }
 
@@ -1940,6 +2065,44 @@ impl<'a> Reach<'a> {
                 key.qualname
             ));
             emit(found, "reads-environment".to_owned(), message);
+        }
+        for (kind, found) in &self.unjudged {
+            let via = via_first(found);
+            let cannot = format!("{} cannot tell what it does there", b.label);
+            let (target, message) = match kind {
+                Unjudged::Calls => {
+                    let what = match found.kind {
+                        "" => {
+                            let callee = found.chain.last().map_or("", |h| h.callee.as_str());
+                            format!("a call heki cannot resolve (`{callee}`{via})")
+                        }
+                        body => format!(
+                            "{body}{}",
+                            via.replacen(" via", " (via", 1)
+                                + if via.is_empty() { "" } else { ")" }
+                        ),
+                    };
+                    (
+                        "unresolved-calls".to_owned(),
+                        format!("`{}` reaches {what}, so {cannot}", key.qualname),
+                    )
+                }
+                Unjudged::Writes(attr) => {
+                    let name = attr
+                        .as_deref()
+                        .map_or("an attribute named at run time".to_owned(), |a| {
+                            format!("`{a}`")
+                        });
+                    (
+                        format!("unresolved-writes:{}", attr.as_deref().unwrap_or("*")),
+                        format!(
+                            "`{}` writes {name} on an object of unknown class ({}{via}), so {cannot}",
+                            key.qualname, found.kind
+                        ),
+                    )
+                }
+            };
+            emit(found, target, message);
         }
         if b.mutates_params {
             let (bits, sites) = self.mutated_params(cx, f.params.len());
