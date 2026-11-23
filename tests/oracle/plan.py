@@ -343,11 +343,14 @@ def _rebinds(source, line, attr):
     return False
 
 
-def _loaded_target(source, target):
+def _loaded_target(source, target, rebound=frozenset()):
     """An assignment target as an expression `monitor.static_eval` loads without running code
-    (`env`, `self.env`, `opts[k]`), or `None`."""
+    (`env`, `self.env`, `opts[k]`), or `None`. A target whose base or key the statement binds
+    again is `None`: the store used the earlier value, the readback would use the new one."""
     if isinstance(target, ast.Name):
         return target.id
+    if any(isinstance(n, ast.Name) and n.id in rebound for n in ast.walk(target)):
+        return None
     if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
         return ast.get_source_segment(source.text, target)
     if (
@@ -372,6 +375,11 @@ def _alone_on_its_line(source, statement):
         ancestors.add(id(node))
         node = getattr(node, "parent", None)
     for other in ast.walk(source.tree):
+        if isinstance(other, ast.ExceptHandler):
+            # Its match runs on that line, its body only when the match succeeds.
+            if other.lineno == line:
+                return False
+            continue
         if not isinstance(other, ast.stmt) or other is statement:
             continue
         if other.lineno == line or (other.end_lineno == line and id(other) not in ancestors):
@@ -649,13 +657,16 @@ class Planner:
             return False
         if not _alone_on_its_line(source, statement):
             return False
-        loaded = [_loaded_target(source, t) for t in targets]
+        rebound = frozenset(
+            n.id for n in ast.walk(statement) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+        )
+        loaded = [_loaded_target(source, t, rebound) for t in targets]
         results = [r for r in loaded if r is not None]
         lost = {"change": _node_pos(change), "base": _node_pos(base), "results": results}
         if isinstance(base, ast.Subscript) and isinstance(base.slice, ast.Slice):
             bounds = [base.slice.lower, base.slice.upper, base.slice.step]
             if all(b is None or isinstance(b, ast.Constant) for b in bounds):
-                lost["sliced"] = _loaded_target(source, base.value)
+                lost["sliced"] = _loaded_target(source, base.value, rebound)
         self._line(claim, statement.lineno, lost=lost)
         kind, _, member = (report.get("target") or "").partition(".")
         claim.update(
