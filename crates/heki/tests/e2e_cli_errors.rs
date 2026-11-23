@@ -448,6 +448,18 @@ fn file_errors_say_what_to_do_with_the_file() {
             &snapshots,
         ],
     );
+    p.write(
+        ".heki-summary-snapshot.json",
+        "{\"version\": 999, \"functions\": {}}",
+    );
+    fails_with(
+        &p,
+        &["check", "--extend-select", "MUT103"],
+        &[
+            "error: .heki-summary-snapshot.json: the summary snapshot has version 999; this heki writes version 1",
+            &snapshots,
+        ],
+    );
     std::fs::remove_file(p.dir.join(".heki-summary-snapshot.json")).unwrap();
     let profiles = docs("fixes/#profiles");
     p.write("p.txt", "junk\n");
