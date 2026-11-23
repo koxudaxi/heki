@@ -490,3 +490,132 @@ class Lazy:
         ]
     );
 }
+
+/// A private method that leaves a cached property stale is found by the name its class holds it
+/// under: `Doc.__grow` (`_Doc__grow`) runs on instances of `Doc` and of `Kept`, whose own
+/// `__grow` is another member, so `MUT101` is exact and the reads through both are `MUT111`;
+/// `Replaced` defines `_Doc__grow` itself, so its instances never run the stale write: the read
+/// of a `Replaced` is not reported, and the read of a `Doc`, which may be one, stays heuristic.
+#[test]
+fn a_private_writer_leaves_its_cached_property_stale() {
+    let p = Project::new("private_names_stale_writer");
+    p.write("src/pkg/__init__.py", "").write(
+        "src/pkg/doc.py",
+        r#"from functools import cached_property
+
+
+class Doc:
+    def __init__(self) -> None:
+        self.size = 0
+
+    @cached_property
+    def total(self) -> int:
+        return self.size + 1
+
+    def __grow(self) -> None:
+        self.size = 1
+
+    def grow(self) -> None:
+        self.__grow()
+
+
+class Kept(Doc):
+    def __grow(self) -> None:
+        pass
+
+
+class Replaced(Doc):
+    def _Doc__grow(self) -> None:
+        pass
+
+
+def show(doc: Doc) -> int:
+    return doc.total
+
+
+def show_kept(doc: Kept) -> int:
+    return doc.total
+
+
+def show_replaced(doc: Replaced) -> int:
+    return doc.total
+"#,
+    );
+    let (code, stdout, stderr) = p.check(&[
+        "--select",
+        "MUT101,MUT111",
+        "--output-format",
+        "json",
+        "src",
+    ]);
+    assert!(code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let mut reports: Vec<_> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap(),
+                d["qualname"].as_str().unwrap(),
+                d["certainty"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    reports.sort();
+    assert_eq!(
+        reports,
+        vec![
+            (13, "MUT101", "Doc.__grow", "exact"),
+            (30, "MUT111", "show", "heuristic"),
+            (34, "MUT111", "show_kept", "exact"),
+        ]
+    );
+}
+
+/// A `readonly-returns` producer without a module part names a private attribute as written in
+/// its class (`Box.__items`) or as the class holds it (`Box._Box__items`): a method returning
+/// `self.__items` hands the protected value on. The private attribute of another class
+/// (`Crate.__items`, the member `_Crate__items`) is not the producer.
+#[test]
+fn a_producer_names_a_private_attribute_without_a_module() {
+    let source = r#"class Box:
+    def __init__(self) -> None:
+        self.__items: list[str] = []
+
+    def items(self) -> list[str]:
+        return self.__items
+
+
+class Crate:
+    def __init__(self) -> None:
+        self.__items: list[str] = []
+
+    def items(self) -> list[str]:
+        return self.__items
+
+
+def fill(box: Box) -> None:
+    box.items().append("x")
+
+
+def fill_crate(crate: Crate) -> None:
+    crate.items().append("x")
+"#;
+    for (name, producer) in [
+        ("private_names_producer_written", "Box.__items"),
+        ("private_names_producer_member", "Box._Box__items"),
+    ] {
+        let p = Project::new(name);
+        p.write("src/pkg/__init__.py", "")
+            .write("src/pkg/box.py", source)
+            .write(
+                "heki.toml",
+                &format!("[[readonly-returns]]\nname = \"items\"\nproducers = [\"{producer}\"]\n"),
+            );
+        assert_eq!(
+            selected(&p, "MUT202"),
+            vec![(18, "MUT202".to_owned(), "fill".to_owned())],
+            "{producer}"
+        );
+    }
+}

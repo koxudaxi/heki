@@ -1936,8 +1936,8 @@ holds for `invalidation` too:
 - **The help names the allowed code that does it today.** After the contract's `message`, the
   help of a report names up to three public functions and methods whose own body does what the
   report shows from a place the contract allows (an `allowed-*` pattern names them, or the
-  `forbidden-*` patterns leave them out; for `invalidation`, the writes announced on every path
-  and the `exempt-writers`), by fully qualified name:
+  `forbidden-*` patterns leave them out; for `invalidation`, the functions announcing every
+  write of the target on every path and the `exempt-writers`), by fully qualified name:
   ``add entries through `Store`; allowed writers of `Registry.entries`: `pkg.store.Store.add` ``.
   Private functions (`_name`), special methods (`__init__`), and the exempt methods are not named.
   JSON output gives them with their files as `allowed_examples` (`fqn`, `path`).
@@ -10833,7 +10833,8 @@ It does not report:
 
 The help starts with the contract's `message` and then names up to three announcing writers of
 the target the report names: public functions and methods that write it themselves and announce
-the change on every path, and `exempt-writers` that write it themselves, by fully qualified name
+every write of it, their own and their helpers', on every path, and `exempt-writers` that write it
+themselves, by fully qualified name
 (``announcing writers of `DataModel.fields`: `pkg.passes.narrow` ``). Private functions (`_name`)
 and special methods do not count. JSON output gives them with their files as `allowed_examples`
 (`fqn`, `path`).
