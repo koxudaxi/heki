@@ -5336,8 +5336,10 @@ The object is the value of the expression the change is applied to, and it is ne
 - what a call of a project function, or a read of a property, returns, when every return of each
   function the call can run is such an object and the function keeps it nowhere: not stored,
   captured, yielded, raised, handed to a call that may keep it (a builtin that only inspects its
-  argument, such as `len`, keeps nothing), or read through an attribute (a bound method holds
-  its object). A function returning the result of another such function qualifies too.
+  argument, such as `len`, keeps nothing), handed to a method whose result may hold it (a view
+  such as `d.values()` or an iterator holds it, unless only a loop or a test reads it), or read
+  through an attribute (a bound method holds its object). A function returning the result of
+  another such function qualifies too.
 
 The change is a changing method of the object's own type (`append`, `extend`, `insert`, `sort`,
 `reverse`, `update`, `pop`, `clear`, `setdefault`, `add`, `discard`, `remove`, ...), an item

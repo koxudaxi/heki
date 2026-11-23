@@ -4362,9 +4362,7 @@ impl<'a> Extractor<'a> {
         let inspects = |b: BlockId, i: u32| {
             matches!(
                 self.callees.get(&(b, i as usize)),
-                Some(Callee::External(s)) if s
-                    .strip_prefix("builtins.")
-                    .is_some_and(|n| INSPECTING_BUILTINS.contains(&n))
+                Some(Callee::External(s)) if inspecting_builtin(s, true)
             )
         };
         fresh::fresh_return(shape, &self.live, source_of, inspects)
@@ -7598,12 +7596,7 @@ impl<'a> Extractor<'a> {
             }
             // A project class without a project `__init__`: its fields keep the arguments.
             _ if constructs => (Some(NewKind::Own), true, 0),
-            _ if symbol
-                .strip_prefix("builtins.")
-                .is_some_and(|n| INSPECTING_BUILTINS.contains(&n)) =>
-            {
-                (None, true, usize::MAX)
-            }
+            _ if inspecting_builtin(symbol, false) => (None, true, usize::MAX),
             "builtins.setattr" | "builtins.object.__setattr__" | "builtins.delattr" => {
                 (None, true, 2)
             }
@@ -8247,7 +8240,8 @@ fn role_site(
     }
 }
 
-/// Builtins that only inspect their arguments: calling one keeps none of them.
+/// Builtins that only inspect their arguments: calling one keeps none of them, and what it
+/// returns holds none of them.
 const INSPECTING_BUILTINS: &[&str] = &[
     "len",
     "isinstance",
@@ -8255,8 +8249,6 @@ const INSPECTING_BUILTINS: &[&str] = &[
     "id",
     "type",
     "hasattr",
-    "getattr",
-    "object.__getattribute__",
     "vars",
     "callable",
     "repr",
@@ -8266,6 +8258,20 @@ const INSPECTING_BUILTINS: &[&str] = &[
     "print",
     "format",
 ];
+
+/// Builtins that read an attribute of their first argument: calling one keeps none of its
+/// arguments, but what it returns may hold one (a bound method holds its object, and `getattr`
+/// returns its default as it is).
+const ATTRIBUTE_READING_BUILTINS: &[&str] = &["getattr", "object.__getattribute__"];
+
+/// Whether calling the builtin `symbol` keeps none of its arguments ([`INSPECTING_BUILTINS`],
+/// [`ATTRIBUTE_READING_BUILTINS`]); with `detached`, also whether what it returns holds none of
+/// them.
+fn inspecting_builtin(symbol: &str, detached: bool) -> bool {
+    symbol.strip_prefix("builtins.").is_some_and(|n| {
+        INSPECTING_BUILTINS.contains(&n) || !detached && ATTRIBUTE_READING_BUILTINS.contains(&n)
+    })
+}
 
 /// Calls that only name what they are handed: typing forms, `super`, and the call form of an
 /// `except` clause.
@@ -8281,15 +8287,12 @@ const NAMING_CALLS: &[&str] = &[
 ];
 
 /// Whether calling `callee` hands none of its arguments on: a builtin that only inspects them
-/// ([`INSPECTING_BUILTINS`]), or a call of [`NAMING_CALLS`].
+/// ([`inspecting_builtin`]), or a call of [`NAMING_CALLS`].
 fn names_only(callee: &Callee) -> bool {
     let Callee::External(symbol) = callee else {
         return false;
     };
-    NAMING_CALLS.contains(&symbol.as_str())
-        || symbol
-            .strip_prefix("builtins.")
-            .is_some_and(|n| INSPECTING_BUILTINS.contains(&n))
+    NAMING_CALLS.contains(&symbol.as_str()) || inspecting_builtin(symbol, false)
 }
 
 /// The construction of a write (`rebinds`: it rebinds an attribute) of an object the answer
