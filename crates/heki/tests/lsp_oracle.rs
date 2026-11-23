@@ -5837,6 +5837,61 @@ fn lsp_diagnostics_equal_a_full_check_through_bound_values_across_modules() {
     run_steps(s, &steps);
 }
 
+// ---------------------------------------------- what contracts cannot attribute across modules
+
+// What a strict contract reports from another module's facts: an effect boundary the call
+// heki cannot resolve in a helper of another file (`OptInTables::blind_spots`), and a call
+// owner a helper another file hands on as a value (`FileSummary::reference_sites`).
+const STRICT_CONFIG: &str = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\", \"MUT204\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"checks\"\nscopes = [\"pkg.checks.*\"]\nwrite-universe = [\"Field.required\"]\nallow-writes = []\nunresolved = \"report\"\n\n[[tool.heki.call-owners]]\nname = \"settles\"\ntargets = [\"Store.require\"]\nallowed-callers = [\"pkg.passes.settle\"]\nunresolved = \"report\"\n";
+const STRICT_MODEL: &str = "class Field:\n    def __init__(self):\n        self.required = False\n\n\nclass Store:\n    def require(self, field: Field):\n        field.required = True\n";
+const STRICT_HELPER: &str =
+    "from pkg.model import Field\n\n\ndef call(run, field: Field):\n    pass\n";
+const STRICT_CHECKS: &str = "from pkg import helper\nfrom pkg.model import Field\n\n\ndef check(run, field: Field):\n    helper.call(run, field)\n";
+const STRICT_PASSES: &str = "from pkg.model import Field, Store\n\n\ndef _require(store: Store, field: Field):\n    store.require(field)\n\n\ndef settle(store: Store, field: Field):\n    _require(store, field)\n";
+
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_what_contracts_cannot_attribute() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/model.py", STRICT_MODEL.to_owned()),
+        ("pkg/helper.py", STRICT_HELPER.to_owned()),
+        ("pkg/checks.py", STRICT_CHECKS.to_owned()),
+        ("pkg/passes.py", STRICT_PASSES.to_owned()),
+    ];
+    let s = Session::start_with("lsp_oracle_strict", STRICT_CONFIG, files, false);
+    let steps = [
+        Step::new("initial index", Vec::new())
+            .absent(&[("pkg/checks.py", "EFF201"), ("pkg/passes.py", "MUT204")]),
+        Step::new(
+            "the helper calls what it is handed",
+            vec![save(
+                "pkg/helper.py",
+                &STRICT_HELPER.replace("    pass", "    run(field)"),
+            )],
+        )
+        .present(&[("pkg/checks.py", "EFF201")]),
+        Step::new(
+            "the helper calls nothing again",
+            vec![save("pkg/helper.py", STRICT_HELPER)],
+        )
+        .absent(&[("pkg/checks.py", "EFF201")]),
+        Step::new(
+            "another module keeps the private helper in a list",
+            vec![Action::Create(
+                "pkg/registry.py",
+                "from pkg.passes import _require\n\nHANDLERS = [_require]\n".to_owned(),
+            )],
+        )
+        .present(&[("pkg/passes.py", "MUT204")]),
+        Step::new(
+            "that module is deleted",
+            vec![Action::Delete("pkg/registry.py")],
+        )
+        .absent(&[("pkg/passes.py", "MUT204")]),
+    ];
+    run_steps(s, &steps);
+}
+
 // ------------------------------------------------- argument lists across modules (session 4)
 
 // A call target with an argument list, passed a number constant of another module by keyword:
