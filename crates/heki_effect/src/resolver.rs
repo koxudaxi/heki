@@ -28,6 +28,7 @@ use heki_kb::{
     ArgFact, CopyDepth, EcosystemEntry, EffectiveEcosystemKb, ExecEffectKind, LiteralValue,
 };
 use heki_semantic::{ModuleImport, ScopeKind, SemanticModel};
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -4467,21 +4468,27 @@ pub(crate) fn project_decls_for(
             .chain(structural.iter().cloned())
             .collect(),
     ));
-    let own: Vec<(Arc<ModuleDecls>, DeclKeys)> = modules
-        .iter()
-        .zip(&structural)
-        .map(|(m, (_, d))| {
-            let (completed, reads) = if track {
-                complete_against(m, ModuleDecls::clone(d), &pass1, kb)
-            } else {
-                (
-                    complete_decls(m, ModuleDecls::clone(d), &pass1, kb),
-                    DeclKeys::default(),
-                )
-            };
-            (Arc::new(completed), reads)
-        })
-        .collect();
+    let own: Vec<(Arc<ModuleDecls>, DeclKeys)> = if track {
+        // Every module's reads go to the one recorder of `pass1`: one module at a time.
+        modules
+            .iter()
+            .zip(&structural)
+            .map(|(m, (_, d))| {
+                let (completed, reads) = complete_against(m, ModuleDecls::clone(d), &pass1, kb);
+                (Arc::new(completed), reads)
+            })
+            .collect()
+    } else {
+        // A module's completion depends on it and pass 1 only (indexed collect: input order).
+        modules
+            .par_iter()
+            .zip(&structural)
+            .map(|(m, (_, d))| {
+                let completed = complete_decls(m, ModuleDecls::clone(d), &pass1, kb);
+                (Arc::new(completed), DeclKeys::default())
+            })
+            .collect()
+    };
     let completed = structural
         .iter()
         .zip(&own)
