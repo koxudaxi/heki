@@ -368,6 +368,18 @@ def careless(node: Node, kid: int) -> None:
 
 def through(node: Node, kid: int) -> None:
     _quiet(node, kid)
+
+
+def twice(index: Index, node: Node, kid: int) -> None:
+    node.kids.append(kid)
+    index.refresh()
+    node.kids.append(kid)
+
+
+def relayed(index: Index, node: Node, kid: int) -> None:
+    node.kids.append(kid)
+    index.refresh()
+    _quiet(node, kid)
 "#;
 
 #[test]
@@ -376,12 +388,14 @@ fn invalidation_reports_name_the_writers_that_announce_the_change() {
     p.write("pkg/tree.py", TREE);
     let diags = diagnostics(&p, "MUT109");
     // An exempt writer and a function announcing its write on every path; the writes no path
-    // announces (`careless`, the private `_quiet`) are not named.
+    // announces (`careless`, the private `_quiet`) are not named, nor the functions that announce
+    // one write of the target and leave another, their own (`twice`) or a helper's (`relayed`),
+    // unannounced: calling them leaves the change unannounced.
     let named = json!([
         example("pkg.tree.Builder.graft", "pkg/tree.py"),
         example("pkg.tree.attach", "pkg/tree.py"),
     ]);
-    for qualname in ["careless", "through"] {
+    for qualname in ["careless", "through", "twice", "relayed"] {
         let d = of(&diags, "MUT109", qualname);
         assert_eq!(d["allowed_examples"], named, "{d:#}");
     }

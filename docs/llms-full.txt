@@ -1946,8 +1946,8 @@ holds for `invalidation` too:
 - **The help names the allowed code that does it today.** After the contract's `message`, the
   help of a report names up to three public functions and methods whose own body does what the
   report shows from a place the contract allows (an `allowed-*` pattern names them, or the
-  `forbidden-*` patterns leave them out; for `invalidation`, the writes announced on every path
-  and the `exempt-writers`), by fully qualified name:
+  `forbidden-*` patterns leave them out; for `invalidation`, the functions announcing every
+  write of the target on every path and the `exempt-writers`), by fully qualified name:
   ``add entries through `Store`; allowed writers of `Registry.entries`: `pkg.store.Store.add` ``.
   Private functions (`_name`), special methods (`__init__`), and the exempt methods are not named.
   JSON output gives them with their files as `allowed_examples` (`fqn`, `path`).
@@ -6742,7 +6742,9 @@ heki resolves to no function (`HANDLERS[kind](https://heki.koxudaxi.dev/rules/..
 called), a function it does not model (`eval`, a body too large) or whose body only a stub
 declares, and a write of an attribute `write-targets` or `write-universe` names on an object of
 unknown class or under a name computed at run time (`thing.required = True` of an unannotated
-`thing`, `setattr(thing, name, v)`). Each kind is reported once per scope function, at the call
+`thing`, `setattr(thing, name, v)`); a class's own initialization is none, so constructing an
+object whose initializer runs `setattr(self, name, v)`, itself or in a helper it hands `self` to,
+is not reported. Each kind is reported once per scope function, at the call
 in the scope function starting the shortest chain to the first one, with the chain; calls and
 writes inside `allowed-callees` are not followed. Without it, the boundary is silent where heki
 cannot see, so no report does not mean the scope stays inside the boundary.
@@ -11069,7 +11071,8 @@ It does not report:
 
 The help starts with the contract's `message` and then names up to three announcing writers of
 the target the report names: public functions and methods that write it themselves and announce
-the change on every path, and `exempt-writers` that write it themselves, by fully qualified name
+every write of it, their own and their helpers', on every path, and `exempt-writers` that write it
+themselves, by fully qualified name
 (``announcing writers of `DataModel.fields`: `pkg.passes.narrow` ``). Private functions (`_name`)
 and special methods do not count. JSON output gives them with their files as `allowed_examples`
 (`fqn`, `path`).

@@ -86,6 +86,11 @@ pub const DISPATCH_CLASS_LIMIT: usize = 64;
 /// Upper bound on re-export alias chasing (`pkg.__init__` re-exporting `pkg.sub.Foo`).
 const MAX_ALIAS_CHASE: usize = 8;
 
+/// The most star imports nested in one another that deciding the name they bind follows
+/// ([`ProjectDecls::star_binding`]): each is a level of the native stack, and past it the name
+/// may be bound below, so it stays open. Packages nest a few.
+const MAX_STAR_IMPORT_DEPTH: usize = 128;
+
 /// A base heki names no class for, in [`ClassDecl::bases`]: an expression, a module variable,
 /// or a value its class statement's scope binds (`def factory(Base): class Derived(Base)`). The
 /// MRO keeps it as a base outside the project that heki knows nothing of, which may define
@@ -2771,23 +2776,25 @@ impl ProjectDecls {
         self.kept(&self.star_bindings, key, || {
             let mut held = FxHashMap::default();
             held.insert(m.module_name.clone(), Holds::No);
-            self.stars_bind(m, name, &mut held)
+            self.stars_bind(m, name, &mut held, 0)
         })
     }
 
-    /// [`Self::star_binding`] for the star imports of `m`; `held` keeps what
-    /// [`Self::module_holds`] answered so far, and `No` for the modules it is still answering,
-    /// so a star import back into one of them binds nothing more: each module is read once.
+    /// [`Self::star_binding`] for the star imports of `m`, which `depth` star imports nest;
+    /// `held` keeps what [`Self::module_holds`] answered so far, and `No` for the modules it is
+    /// still answering, so a star import back into one of them binds nothing more: each module
+    /// is read once.
     fn stars_bind(
         &self,
         m: &ModuleDecls,
         name: &str,
         held: &mut FxHashMap<String, Holds>,
+        depth: usize,
     ) -> StarBinding {
         let mut outside = false;
         let mut binding = StarBinding::Unbound;
         for source in m.star_imports.as_deref().unwrap_or_default() {
-            match self.star_import_binds(source, name, held) {
+            match self.star_import_binds(source, name, held, depth + 1) {
                 StarSource::Nothing => {}
                 StarSource::Anything => outside = true,
                 StarSource::Binds(Some((target, origin))) => match &binding {
@@ -2805,12 +2812,14 @@ impl ProjectDecls {
         }
     }
 
-    /// What `from source import *` binds `name` to ([`Self::stars_bind`]).
+    /// What `from source import *` binds `name` to ([`Self::stars_bind`]), `source` nested
+    /// `depth` star imports deep.
     fn star_import_binds(
         &self,
         source: &str,
         name: &str,
         held: &mut FxHashMap<String, Holds>,
+        depth: usize,
     ) -> StarSource {
         let Some(s) = self.module(source) else {
             return StarSource::Anything;
@@ -2823,7 +2832,7 @@ impl ProjectDecls {
             Some(names) if names.iter().any(|n| n == name) => true,
             Some(_) => return StarSource::Nothing,
             None if s.binds("__all__") => {
-                return match self.module_holds(s, name, held) {
+                return match self.module_holds(s, name, held, depth) {
                     Holds::No => StarSource::Nothing,
                     Holds::Yes(_) | Holds::Maybe => StarSource::Binds(None),
                 };
@@ -2831,7 +2840,7 @@ impl ProjectDecls {
             None if name.starts_with('_') => return StarSource::Nothing,
             None => false,
         };
-        match self.module_holds(s, name, held) {
+        match self.module_holds(s, name, held, depth) {
             Holds::Yes(origin) => StarSource::Binds(Some((read_there(), origin))),
             // A listed name the module does not bind is the submodule the import loads.
             Holds::No if listed => StarSource::Binds(Some((read_there(), read_there()))),
@@ -2840,13 +2849,14 @@ impl ProjectDecls {
         }
     }
 
-    /// Whether the namespace of the module `s` holds `name` once its body has run
-    /// ([`Self::stars_bind`]).
+    /// Whether the namespace of the module `s`, nested `depth` star imports deep, holds `name`
+    /// once its body has run ([`Self::stars_bind`]).
     fn module_holds(
         &self,
         s: &ModuleDecls,
         name: &str,
         held: &mut FxHashMap<String, Holds>,
+        depth: usize,
     ) -> Holds {
         if s.binds(name) {
             // An import the module does not bind again holds the object it imports.
@@ -2859,8 +2869,11 @@ impl ProjectDecls {
         if let Some(holds) = held.get(&s.module_name) {
             return holds.clone();
         }
+        if depth == MAX_STAR_IMPORT_DEPTH {
+            return Holds::Maybe;
+        }
         held.insert(s.module_name.clone(), Holds::No);
-        let holds = match self.stars_bind(s, name, held) {
+        let holds = match self.stars_bind(s, name, held, depth) {
             StarBinding::Unbound => Holds::No,
             StarBinding::Bound { origin, .. } => Holds::Yes(origin),
             StarBinding::Open => Holds::Maybe,
@@ -8619,10 +8632,32 @@ impl<'a> TypeCtx<'a> {
     }
 
     /// What reading `attr` on an instance of `class` gives when the class body defining it binds
-    /// it to a name ([`ProjectDecls::class_alias`]): the named object, unless it is a function
-    /// outside `staticmethod`, which the read binds to the instance (`Some(None)`, a bound
-    /// method); `None` for no such attribute.
+    /// it to a name ([`ProjectDecls::class_alias`]), on every class the instance may be: the
+    /// class and its project subclasses, as for a call ([`Self::alias_call_targets`]). The join
+    /// of what each gives ([`Self::exact_instance_alias`]); unknown (`Some(None)`) when one gives
+    /// a bound method, when a subclass finds another object (its own `def`, an attribute stored),
+    /// and past [`DISPATCH_CLASS_LIMIT`] classes. `None` when `class` binds no such name.
     pub(crate) fn instance_alias(&self, class: &str, attr: &str) -> Option<Option<Ty>> {
+        let mut value = self.exact_instance_alias(class, attr)?;
+        let subclasses = self.project.subclasses_of(class);
+        if subclasses.len() >= DISPATCH_CLASS_LIMIT {
+            return Some(None);
+        }
+        for sub in &subclasses {
+            let read = self.exact_instance_alias(sub, attr).flatten();
+            value = value.zip(read).and_then(|(a, b)| a.join(&b));
+            if value.is_none() {
+                break;
+            }
+        }
+        Some(value)
+    }
+
+    /// What reading `attr` on an instance of exactly `class` gives when the class body defining
+    /// it binds it to a name ([`ProjectDecls::class_alias`]): the named object, unless it is a
+    /// function outside `staticmethod`, which the read binds to the instance (`Some(None)`, a
+    /// bound method); `None` for no such attribute.
+    fn exact_instance_alias(&self, class: &str, attr: &str) -> Option<Option<Ty>> {
         let (named, is_static) = self.project.class_alias(class, attr)?;
         let named = self.project.object_named(named);
         let binds = !is_static
