@@ -285,9 +285,9 @@ resolution (`heki_semantic`); then an SSA-CFG IR is built for every function.
 - **Original byte spans**: fixes are produced as minimal `TextEdit`s, never by regenerating code
   from the IR, so formatting and comments survive.
 - **Bounded walks in one home** (`heki_ir::walk`): the engines every analysis walk goes through
-  (`Memo`, `Closure`, `reach`, `fixpoint`, and `SharedMemo` over the declarations), a step
-  `Budget` per owner, the tables of one function (`FnShape`), and `Answer` (`Known | Open`),
-  heki's one type for an answer that is established or unknown. Their memos live in their owner
+  (`Memo`, `Closure`, `reach` and `reach_breadth_first`, `fixpoint`, and `SharedMemo` over the
+  declarations), a step `Budget` per owner, the tables of one function (`FnShape`), and `Answer`
+  (`Known | Open`), heki's one type for an answer that is established or unknown. Their memos live in their owner
   for one analysis, never in `ProjectIndex`, which stays `Sync` (ADR-017).
 
 ### 4.2 Advisory / Effect lane (`heki_effect`): families 1 and 2

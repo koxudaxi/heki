@@ -3993,7 +3993,8 @@ The engines of `heki_ir::walk` apply these rules by construction, and every walk
 the call graph, or the class hierarchy goes through them:
 
 - `Memo` keeps one answer per key, a value and a question. `Closure` joins the facts of every
-  node a node reaches, the members of a cycle sharing one. `reach` walks with a visited set.
+  node a node reaches, the members of a cycle sharing one. `reach` walks with a visited set,
+  depth first, and `reach_breadth_first` nearest first (a shortest call chain to each node).
   `fixpoint` joins the facts of nodes that read each other, and visits a node again only when a
   fact it reads grows, up to a visit limit.
 - A `Budget` per owner (a rule run on one function, the summary of one function, the store
