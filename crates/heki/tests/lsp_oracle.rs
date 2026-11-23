@@ -4457,6 +4457,45 @@ fn steps_contracts() -> Vec<Step> {
     ]
 }
 
+// The allowed functions the help of a contract report names, in other files.
+const STORE_WRITING: &str = "from pkg.model import Registry, Vault\n\n\nclass Store:\n    def put(self, r: Registry, x):\n        r.entries.append(x)\n";
+const STORE_WRITING_MOVED: &str = "from pkg.model import Registry, Vault\n\n\n# The store.\nclass Store:\n    def put(self, r: Registry, x):\n        r.entries.append(x)\n";
+const STORE_MORE: &str = "from pkg.ledger import Ledger\nfrom pkg.model import Registry, Vault\n\n\nclass Store:\n    def add(self, r: Registry):\n        r.entries.append(1)\n\n    def look(self, v: Vault):\n        return v.secret\n\n    def pay(self, l: Ledger):\n        return l.post(1)\n";
+
+/// The help of a contract report names the allowed functions of other files that do what it
+/// shows: a function starts and stops writing the target, a module with another one comes and
+/// goes, and a line added above one changes nothing the help names.
+fn steps_allowed_examples() -> Vec<Step> {
+    vec![
+        Step::new(
+            "an allowed writer starts writing the target itself",
+            vec![save("pkg/store.py", STORE_WRITING)],
+        )
+        .present(&[("pkg/ops.py", "MUT201")]),
+        Step::new(
+            "a comment above the allowed writer",
+            vec![save("pkg/store.py", STORE_WRITING_MOVED)],
+        )
+        .present(&[("pkg/ops.py", "MUT201")])
+        .cutoff(),
+        Step::new(
+            "a new module defines another allowed writer, reader, and caller",
+            vec![Action::Create("pkg/store_more.py", STORE_MORE.to_owned())],
+        )
+        .present(&[("pkg/ops.py", "MUT201")]),
+        Step::new(
+            "the new module is deleted",
+            vec![Action::Delete("pkg/store_more.py")],
+        )
+        .present(&[("pkg/ops.py", "MUT201")]),
+        Step::new(
+            "the allowed writer stops writing the target",
+            vec![save("pkg/store.py", STORE)],
+        )
+        .present(&[("pkg/ops.py", "MUT201")]),
+    ]
+}
+
 /// Files: a module created and deleted, a stub next to a module, and a package over the
 /// module of the same name.
 fn steps_files() -> Vec<Step> {
@@ -5253,6 +5292,7 @@ sessions!(editing, Session::start, {
     method_lookups: steps_method_lookups,
     private_names: steps_private_names,
     contracts: steps_contracts,
+    allowed_examples: steps_allowed_examples,
     contract_extensions: steps_contract_extensions,
     references: steps_references,
     class_bodies: steps_class_bodies,

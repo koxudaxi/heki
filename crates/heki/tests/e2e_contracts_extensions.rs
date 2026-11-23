@@ -281,12 +281,19 @@ fn mut204_calls_constructions_and_delegation() {
         "{diags:#?}"
     );
     assert_eq!(sites(&diags), [1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1]);
-    // The contract's `message` is the help of each report, not part of its message.
+    // The contract's `message` starts the help of each report, not part of its message, and
+    // the allowed callers making the same call follow it.
+    let note = "use a GenerationStore operation instead";
+    let store = "`pkg.store.GenerationStore.replace_data_type_ref`";
     for d in &diags {
-        assert_eq!(
-            d["help"], "use a GenerationStore operation instead",
-            "{d:#}"
-        );
+        let help = match d["target"].as_str().unwrap() {
+            "DataType.replace_reference" => format!("{note}; allowed callers of `{t}`: {store}"),
+            "pkg.util.reset_cache" => {
+                format!("{note}; allowed callers of `pkg.util.reset_cache`: {store}")
+            }
+            _ => note.to_owned(),
+        };
+        assert_eq!(d["help"], help, "{d:#}");
     }
     assert_eq!(
         diags[0]["message"],

@@ -9,8 +9,8 @@
 use super::{
     AccessGroups, Allowance, AllowanceKeys, DelegatedReport, FunctionMatcher, InsideAllowed,
     MemberPattern, MergedReports, Named, References, allows_own_receiver, attribution,
-    binds_receiver, counts_references, delegated_reports, named_protocols, project_classes,
-    reports_unresolved,
+    binds_receiver, counts_references, delegated_reports, named_protocols, place_functions,
+    project_classes, reports_unresolved,
 };
 use crate::{
     CheckContext, DottedPattern, NamePart, RuleConfigError, SitesByCaller, def_spellings,
@@ -92,7 +92,7 @@ impl CallTargets {
 
     /// What `site` calls of target `i`: the method the protocol typing the receiver declares
     /// ([`CallSite::declared`]), the class it constructs, or every candidate the target names.
-    fn called_at(&self, i: usize, site: &CallSite) -> Vec<String> {
+    pub(crate) fn called_at(&self, i: usize, site: &CallSite) -> Vec<String> {
         if let Some(declared) = site.declared() {
             return vec![declared.fqn()];
         }
@@ -962,7 +962,29 @@ pub(crate) fn mut204<'c>(
             }
         }
     }
-    reports.emit(cx, "MUT204", out);
+    reports.emit(cx, ("MUT204", "allowed callers"), out, |examples| {
+        let owners = |k: &FuncKey| rules.iter().any(|r| r.allowance.names_place(k));
+        for (key, path, _) in place_functions(cx, owners) {
+            for &(_, site) in sites.get(key).into_iter().flatten() {
+                for (c, groups) in contracts.called(site) {
+                    let rule = &rules[c];
+                    if !rule.allowance.names_place(key) {
+                        continue;
+                    }
+                    for group in groups {
+                        let (target, called) = group_texts(&rule.targets, &group, Some(site));
+                        let name = Named {
+                            target: &target,
+                            named: &called,
+                            rank: group[0],
+                            contract: c,
+                        };
+                        examples.add((&c, name), key, path);
+                    }
+                }
+            }
+        }
+    });
     Ok(())
 }
 

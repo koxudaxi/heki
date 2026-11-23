@@ -1058,7 +1058,14 @@ fn mut109_requires_an_invalidator_on_every_path_after_a_write() {
         narrow["message"],
         "`narrow` writes `DataType.data_types` (by attribute) and returns on some path without calling an invalidator of `graph-index`"
     );
-    assert_eq!(narrow["help"], "tell the store which models changed");
+    // The contract's `message`, then the first three writers that announce the change or need
+    // not (the exempt store operation), by fully qualified name.
+    assert_eq!(
+        narrow["help"],
+        "tell the store which models changed; announcing writers of `DataType.data_types`: \
+         `pkg.generation.GenerationStore.set_types`, `pkg.passes.branches_ok`, \
+         `pkg.passes.compare_flag_ok`"
+    );
     // A helper write is reported at the call, with the hops down to the write.
     let two = by_name("two_level_helper");
     assert!(
