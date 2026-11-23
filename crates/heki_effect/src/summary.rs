@@ -1970,7 +1970,7 @@ impl<'a> Extractor<'a> {
                         resolver::Symbol::Function(_, decl) if decl.returns_param_attr.is_some()
                     ),
                     Val::Inst(_) | Val::Union(_) => project.may_return_param_attr("__call__"),
-                    Val::Class(_) | Val::Super(_) => false,
+                    Val::Class(_) | Val::Super(_) | Val::OneOf(_) => false,
                 };
                 if !returns_attr {
                     return None;
@@ -2333,7 +2333,7 @@ impl<'a> Extractor<'a> {
                 recv, method, args, ..
             } => match self.val(*recv)? {
                 Val::Ref(owner) => {
-                    let fqn = project.canonical(&format!("{owner}.{method}"));
+                    let fqn = project.object_named(&format!("{owner}.{method}"));
                     if fqn == "builtins.object.__new__"
                         || method == "__new__"
                             && project.is_project_class(owner)
@@ -2354,6 +2354,13 @@ impl<'a> Extractor<'a> {
                         && project.new_is_object_new(owner, true, self.cx.kb) =>
                 {
                     self.bare_allocation(args)
+                }
+                // `self.factory(...)` of a class body binding `factory` to a class.
+                Val::Inst(class) | Val::Class(class)
+                    if let Some((named, _)) = project.class_alias(class, method) =>
+                {
+                    let fqn = project.object_named(named);
+                    project.is_project_class(&fqn).then_some(fqn)
                 }
                 recv => self
                     .cx
@@ -6221,6 +6228,7 @@ impl<'a> Extractor<'a> {
             // `super()` is that of a project class, which says what it has.
             Val::Inst(class) | Val::Class(class) | Val::Super(class) => of_class(class),
             Val::Union(classes) => classes.iter().find_map(of_class),
+            Val::OneOf(_) => None,
         }
     }
 

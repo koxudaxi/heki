@@ -32,6 +32,11 @@ the allowed callers and resolves to a target:
 - what a property returns, called (`self.data_type(is_dict=True)` with a property `data_type`
   returning `type[DataType]` constructs `DataType`): the value the getter's return annotation
   names is called, and the getter runs as reading the property does;
+- what a name bound to the target holds, called: a class attribute bound once to it
+  (`factory = FinalFacts` or `run = staticmethod(reset_cache)`, then `self.factory()`,
+  `cls.factory()`, or `Parser.factory()`), an entry of a module-level table of functions
+  (`HANDLERS["reset"]()`), and a module a function returns (`_ops().reset_cache()` of a function
+  returning the module it imports);
 - a private method by the name Python's name mangling gives it (`parser._Parser__run()` with
   `parser: Parser`, `Parser._Parser__run(p)`, `self._Parser__run()` in a subclass): a target
   names it `Parser.__run` or `Parser._Parser__run`. A subclass's own `__run` is another method

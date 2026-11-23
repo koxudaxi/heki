@@ -244,7 +244,7 @@ impl<'a> Extractor<'a> {
         let fields = self.cx.catalog(symbol)?.builds_receiver.as_ref()?;
         let class = match self.val(call.recv_var?)? {
             Val::Ref(class) | Val::Class(class) | Val::Inst(class) => class,
-            Val::Super(_) | Val::Union(_) => return None,
+            Val::Super(_) | Val::Union(_) | Val::OneOf(_) => return None,
         };
         if !self.cx.project.is_project_class(class) {
             return None;

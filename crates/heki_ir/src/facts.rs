@@ -1368,7 +1368,6 @@ impl<'a> FnIndex<'a> {
     /// alias (copies and phis), for loads of several globals or attributes at once.
     pub fn grown_vars(&self) -> FxHashSet<VarId> {
         let f = self.f;
-        let mut grown: FxHashSet<VarId> = FxHashSet::default();
         let mut ops = Vec::new();
         for bb in &f.blocks {
             for inst in &bb.insts {
@@ -1384,8 +1383,38 @@ impl<'a> FnIndex<'a> {
                 ops.push(VarId(i as u32));
             }
         }
-        // An alias's growth is its source's.
         let budget = Budget::of_function("heki_ir::facts::FnIndex::grown_vars", f);
+        self.alias_sources(&budget, ops)
+    }
+
+    /// The variables whose object this function itself may add items to or replace items of,
+    /// directly or through an alias (copies and phis): an item store (`xs[k] = v`) or a method
+    /// call that may add items (`append`, `update`, `setdefault`). An in-place operator
+    /// (`xs += ys`) binds its result again, where the store says what it binds. What code the
+    /// object is handed to or returned to does is not followed.
+    pub fn changed_vars(&self) -> FxHashSet<VarId> {
+        let mut ops = Vec::new();
+        for inst in self.f.blocks.iter().flat_map(|b| &b.insts) {
+            match &inst.kind {
+                InstKind::SubscriptStore { obj, .. } => ops.push(*obj),
+                InstKind::MethodCall { recv, method, .. }
+                    if !NON_GROWING_METHODS.contains(&method.as_str()) =>
+                {
+                    ops.push(*recv);
+                }
+                _ => {}
+            }
+        }
+        let budget = Budget::of_function("heki_ir::facts::FnIndex::changed_vars", self.f);
+        self.alias_sources(&budget, ops)
+    }
+
+    /// `ops` and the variables they alias (the sources of copies and phis, transitively): every
+    /// variable when the walk runs past `budget`.
+    fn alias_sources(&self, budget: &Budget, ops: Vec<VarId>) -> FxHashSet<VarId> {
+        let f = self.f;
+        let mut grown: FxHashSet<VarId> = FxHashSet::default();
+        // An alias's growth is its source's.
         let sources = |v: VarId, out: &mut Vec<VarId>| match self.shape.def(v) {
             Def::Phi(b, k) => {
                 out.extend(f.block(b).phis[k as usize].incoming.iter().map(|(_, x)| *x));
@@ -1397,7 +1426,7 @@ impl<'a> FnIndex<'a> {
             }
             Def::Param | Def::None => {}
         };
-        let walked = reach(&budget, ops, sources, |v| {
+        let walked = reach(budget, ops, sources, |v| {
             grown.insert(v);
             Visit::<()>::Expand
         });
@@ -2790,8 +2819,9 @@ impl<'a> GlobalStores<'a> {
     }
 }
 
-/// Where the module body binds a name for good: what a star import before the store binds is
-/// then not what the name holds once the module is loaded ([`Self::overrides`]).
+/// Where a module or class body binds a name for good: what a star import before the store binds
+/// is then not what the name holds once the module is loaded ([`Self::overrides`]), and an
+/// earlier binding is not what the name holds once the body has run ([`Self::last_of`]).
 #[derive(Debug, Clone, Copy)]
 pub struct LastBindings {
     /// The nearest block dominating every return of the body that runs (`None`: none does).
@@ -2799,7 +2829,7 @@ pub struct LastBindings {
 }
 
 impl LastBindings {
-    /// Of the module body `shape`.
+    /// Of the module or class body `shape`.
     pub fn of(shape: &FnShape<'_>) -> Self {
         let tree = shape.dominators();
         let end = shape
@@ -2812,10 +2842,9 @@ impl LastBindings {
         Self { end }
     }
 
-    /// Whether every path to the end of the module body `shape` runs `block` once: outside a
-    /// loop, in a block that dominates the end. A store on one branch (`if flag: name = ...`,
-    /// or in an `except` clause) leaves the name unbound, or bound by something else, on the
-    /// others.
+    /// Whether every path to the end of the body `shape` runs `block` once: outside a loop, in a
+    /// block that dominates the end. A store on one branch (`if flag: name = ...`, or in an
+    /// `except` clause) leaves the name unbound, or bound by something else, on the others.
     pub fn always_runs(&self, shape: &FnShape<'_>, block: BlockId) -> bool {
         shape.loop_depth(block) == 0
             && self
@@ -2836,6 +2865,26 @@ impl LastBindings {
         star_end: u32,
     ) -> bool {
         store.span.start >= star_end && self.always_runs(shape, block)
+    }
+
+    /// Of the bindings of one name in the body `shape` (a module or class body), each by its
+    /// block and the start of its statement, the indexes of those the name may hold once the body
+    /// has run, and whether one of them runs on every path. The last one every path runs
+    /// ([`Self::always_runs`]) replaces those before it, and the reachable ones after it run on
+    /// some paths only (`if flag: name = other`); outside a loop, a statement starting later runs
+    /// later. When none runs on every path, each reachable one may be the last, and the name may
+    /// also be unbound.
+    pub fn last_of(&self, shape: &FnShape<'_>, bindings: &[(BlockId, u32)]) -> (Vec<usize>, bool) {
+        let last = bindings
+            .iter()
+            .filter(|(block, _)| self.always_runs(shape, *block))
+            .map(|&(_, start)| start)
+            .max();
+        let reaching = (0..bindings.len())
+            .filter(|&i| last.is_none_or(|last| bindings[i].1 >= last))
+            .filter(|&i| shape.reachable(bindings[i].0))
+            .collect();
+        (reaching, last.is_some())
     }
 }
 

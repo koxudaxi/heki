@@ -603,8 +603,13 @@ Missed findings close as heki learns more:
   [`MUT207`](https://heki.koxudaxi.dev/rules/unresolved-guarded-call/).
 - A write in an unannotated helper is still found where a caller passes it an object of a known
   class. A read is not.
-- Not typed: values declared `Any`, generics substituted through `TypeVar`s, and calls of
-  `type[C]` attributes.
+- Not typed: values declared `Any` or `types.ModuleType`, generics substituted through
+  unbounded `TypeVar`s (a bounded or constrained one gives its bound or constraints), and calls
+  of `type[C]` attributes.
+- A module-level table of functions (`HANDLERS = {"create": create}`) gives the value of a key
+  a string constant gives, and one of its values for any other key, only while no code changes
+  it in place; a change through a call it is handed to (`register(HANDLERS)`) is not seen.
+  Changing a dict or list a global or an attribute holds in place leaves its items untyped.
 - The type of a module global or an instance attribute joins every store of it through a
   receiver whose type heki knows: `self`, an instance of the class (a parameter `obj: Helper`,
   `cls()` in a class method, one the storing module keeps in its own attribute or global, as
@@ -5029,12 +5034,13 @@ Each step of the chain is established, not assumed:
   decorator other than `staticmethod`, `classmethod`, `property`, `abstractmethod`, or
   `override` may not run the body, and is not followed; a function defined twice is not
   followed, and neither is a function, class, or method whose name the project binds to another
-  object (assumption R1): another store or a `del` of the name in its module (also on a branch,
-  after `global`, or by `globals()` or `exec`), in its class body, or on its class object; a
-  store or `del` from another module, also through `setattr` with a string literal, and any
-  name of a module that `setattr` stores into under a name heki cannot read; a store of the
-  function's `__code__`; and, for a method, a store of the name on a class the lookup passes, of
-  `__bases__` on a class along the MRO, or of `self.__class__` in a method;
+  object (assumption R1; a name its module body or class body binds last to one named object on
+  every path is that object): another store or a `del` of the name in its module (also on a
+  branch, after `global`, or by `globals()` or `exec`), in its class body, or on its class
+  object; a store or `del` from another module, also through `setattr` with a string literal,
+  and any name of a module that `setattr` stores into under a name heki cannot read; a store of
+  the function's `__code__`; and, for a method, a store of the name on a class the lookup
+  passes, of `__bases__` on a class along the MRO, or of `self.__class__` in a method;
 - the waiting call is in the ecosystem catalog, waits on every call (a database call that may be
   answered by a session's identity map, a cache, an open connection, or that sends only pending
   changes does not), and no argument that may come from the caller can make it return at once
@@ -5956,6 +5962,11 @@ the allowed callers and resolves to a target:
 - what a property returns, called (`self.data_type(is_dict=True)` with a property `data_type`
   returning `type[DataType]` constructs `DataType`): the value the getter's return annotation
   names is called, and the getter runs as reading the property does;
+- what a name bound to the target holds, called: a class attribute bound once to it
+  (`factory = FinalFacts` or `run = staticmethod(reset_cache)`, then `self.factory()`,
+  `cls.factory()`, or `Parser.factory()`), an entry of a module-level table of functions
+  (`HANDLERS["reset"]()`), and a module a function returns (`_ops().reset_cache()` of a function
+  returning the module it imports);
 - a private method by the name Python's name mangling gives it (`parser._Parser__run()` with
   `parser: Parser`, `Parser._Parser__run(p)`, `self._Parser__run()` in a subclass): a target
   names it `Parser.__run` or `Parser._Parser__run`. A subclass's own `__run` is another method

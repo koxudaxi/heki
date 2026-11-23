@@ -1027,7 +1027,8 @@ fn calls_on_values_whose_type_says_nothing_are_unresolved() {
     assert_eq!(report(&p, "known")["purity"]["verdict"], "pure");
 }
 
-/// A dispatch through a table heki does not resolve, in functions that also write.
+/// A dispatch through a table heki does not resolve (another function adds to it), in functions
+/// that also write.
 const DISPATCH: &str = r#"from typing import Callable
 
 
@@ -1041,6 +1042,10 @@ def _flag(field: Field) -> None:
 
 
 TABLE: dict[str, Callable[[Field], None]] = {"flag": _flag}
+
+
+def register(name: str, run: Callable[[Field], None]) -> None:
+    TABLE[name] = run
 
 
 def only_dispatches(field: Field) -> None:
@@ -1094,7 +1099,7 @@ fn unresolved_calls_in_reach_are_named_whatever_the_verdict() {
     assert_eq!(calls["unknown_at"]["fqn"], "m.only_dispatches");
     assert_eq!(
         hops(&calls["unknown_at"]["chain"]),
-        [(27, "m.only_dispatches".to_owned())]
+        [(31, "m.only_dispatches".to_owned())]
     );
     // Every one reached, nearest first; `unknown_at` is the first.
     let both = &report(&p, "through_both")["purity"];
@@ -1104,8 +1109,8 @@ fn unresolved_calls_in_reach_are_named_whatever_the_verdict() {
     assert_eq!(
         hops(&both["unknown_reach"]["entries"][1]["chain"]),
         [
-            (35, "m.calls_one_that_dispatches".to_owned()),
-            (27, "m.only_dispatches".to_owned())
+            (39, "m.calls_one_that_dispatches".to_owned()),
+            (31, "m.only_dispatches".to_owned())
         ]
     );
     assert_eq!(both["unknown_reach"]["truncated"], false);
@@ -1117,7 +1122,7 @@ fn unresolved_calls_in_reach_are_named_whatever_the_verdict() {
     assert_eq!(code, 0, "{err}");
     assert!(
         out.contains(
-            "  impure: changes_params\n  cannot follow\n    vague            m.py:36 m.vague\n    only_dispatches  m.py:35 m.calls_one_that_dispatches -> m.py:27 m.only_dispatches\n"
+            "  impure: changes_params\n  cannot follow\n    vague            m.py:40 m.vague\n    only_dispatches  m.py:39 m.calls_one_that_dispatches -> m.py:31 m.only_dispatches\n"
         ),
         "{out}"
     );

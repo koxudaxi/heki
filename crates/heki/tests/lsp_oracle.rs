@@ -682,10 +682,21 @@ const EXACT_SUB_OVERRIDING: &str = "from pkg.exact_base import Base\n\n\nclass Q
 const EXACT_SUB_BLOCKING: &str = "import requests\n\nfrom pkg.exact_base import Base\n\n\nclass Quiet(Base):\n    def fetch(self, url):\n        return requests.post(url)\n";
 const EXACT_USE: &str =
     "from pkg.exact_base import Base\n\n\nasync def serve(b: Base):\n    b.fetch(\"u\")\n";
-// The third module binds the base's method to another function, and the base's class body
-// binds it again: the call may run that function instead.
+// The third module binds the base's method to another function: the call may run that
+// function instead. The base's class body binds it to another function on every path: the call
+// runs that function.
 const EXACT_SUB_REBINDING: &str = "from pkg import exact_base\n\n\ndef quiet(self, url):\n    return url\n\n\nsetattr(exact_base.Base, \"fetch\", quiet)\n";
 const EXACT_BASE_REBOUND: &str = "import requests\n\n\ndef _quiet(self, url):\n    return url\n\n\nclass Base:\n    def fetch(self, url):\n        return requests.get(url)\n\n    fetch = _quiet\n";
+// The base's class body binds the method to another function on some paths: the call may run
+// either, so the report is not exact.
+const EXACT_BASE_QUIET_ON_A_PATH: &str = "import os\n\nimport requests\n\n\ndef _quiet(self, url):\n    return url\n\n\nclass Base:\n    def fetch(self, url):\n        return requests.get(url)\n\n    if os.environ.get(\"QUIET\"):\n        fetch = _quiet\n";
+// A module binds a blocking function's name to another function on some paths, then on every
+// path, read from another module.
+const EXACT_FETCH: &str = "import requests\n\n\ndef fetch(url):\n    return requests.get(url)\n";
+const EXACT_FETCH_ON_A_PATH: &str = "import os\n\nimport requests\n\n\ndef _quiet(url):\n    return url\n\n\ndef fetch(url):\n    return requests.get(url)\n\n\nif os.environ.get(\"QUIET\"):\n    fetch = _quiet\n";
+const EXACT_FETCH_REBOUND: &str = "import requests\n\n\ndef _quiet(url):\n    return url\n\n\ndef fetch(url):\n    return requests.get(url)\n\n\nfetch = _quiet\n";
+const EXACT_FETCH_USE: &str =
+    "from pkg import exact_fetch\n\n\nasync def serve():\n    exact_fetch.fetch(\"u\")\n";
 
 // Store types (`ModuleDecls::global_types`, `ClassDecl::attr_stores`): an `async def` calls a
 // method on a module global, in its module and through an import, and on an instance attribute;
@@ -1296,7 +1307,8 @@ fn steps_kept_values() -> Vec<Step> {
 
 /// Exact effect reports follow every implementation of a call across modules (the targets of
 /// `CallSite::complete` read the subclasses of another file) and the must-facts of the callees
-/// (`EffectSummary::must_exec`, compared by Early Cutoff).
+/// (`EffectSummary::must_exec`, compared by Early Cutoff), and every binding of the name called
+/// that may be its last in the module or class body of another file.
 fn steps_exact_effects() -> Vec<Step> {
     vec![
         Step::new(
@@ -1326,9 +1338,9 @@ fn steps_exact_effects() -> Vec<Step> {
         )
         .present(&[("pkg/exact_use.py", "EFF101")])
         .absent(&[("pkg/exact_use.py", "EFF111")]),
-        // `ModuleDecls::rebound_globals` of another module and `ModuleDecls::rebound_definitions`
-        // of the base's: a name bound again leaves the call's targets incomplete
-        // (`ProjectDecls::lookup_rebound`).
+        // `ModuleDecls::rebound_globals` of another module: a name bound again leaves the call's
+        // targets incomplete (`ProjectDecls::lookup_rebound`). Bound again on every path of the
+        // base's class body, the name holds the other function (`NamedAttr::body`).
         Step::new(
             "the third module binds the base's method to another function",
             vec![save("pkg/exact_sub.py", EXACT_SUB_REBINDING)],
@@ -1342,17 +1354,51 @@ fn steps_exact_effects() -> Vec<Step> {
         .present(&[("pkg/exact_use.py", "EFF101")])
         .absent(&[("pkg/exact_use.py", "EFF111")]),
         Step::new(
-            "the base's class body binds the method again",
+            "the base's class body binds the method to another function",
             vec![save("pkg/exact_base.py", EXACT_BASE_REBOUND)],
         )
-        .present(&[("pkg/exact_use.py", "EFF111")])
-        .absent(&[("pkg/exact_use.py", "EFF101")]),
+        .absent(&[
+            ("pkg/exact_use.py", "EFF101"),
+            ("pkg/exact_use.py", "EFF111"),
+        ]),
         Step::new(
             "the base binds it once again",
             vec![save("pkg/exact_base.py", EXACT_BASE)],
         )
         .present(&[("pkg/exact_use.py", "EFF101")])
         .absent(&[("pkg/exact_use.py", "EFF111")]),
+        Step::new(
+            "the base's class body binds the method to another function on some paths",
+            vec![save("pkg/exact_base.py", EXACT_BASE_QUIET_ON_A_PATH)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF111")])
+        .absent(&[("pkg/exact_use.py", "EFF101")]),
+        Step::new(
+            "the base defines the method once again, and a module calls a blocking function",
+            vec![
+                save("pkg/exact_base.py", EXACT_BASE),
+                Action::Create("pkg/exact_fetch.py", EXACT_FETCH.to_owned()),
+                Action::Create("pkg/exact_fetch_use.py", EXACT_FETCH_USE.to_owned()),
+            ],
+        )
+        .present(&[
+            ("pkg/exact_use.py", "EFF101"),
+            ("pkg/exact_fetch_use.py", "EFF101"),
+        ]),
+        Step::new(
+            "the function's module binds its name to another function on some paths",
+            vec![save("pkg/exact_fetch.py", EXACT_FETCH_ON_A_PATH)],
+        )
+        .present(&[("pkg/exact_fetch_use.py", "EFF111")])
+        .absent(&[("pkg/exact_fetch_use.py", "EFF101")]),
+        Step::new(
+            "the module binds the name to the other function on every path",
+            vec![save("pkg/exact_fetch.py", EXACT_FETCH_REBOUND)],
+        )
+        .absent(&[
+            ("pkg/exact_fetch_use.py", "EFF101"),
+            ("pkg/exact_fetch_use.py", "EFF111"),
+        ]),
     ]
 }
 
@@ -5998,6 +6044,147 @@ fn lsp_diagnostics_equal_a_full_check_below_a_git_working_tree() {
             vec![Action::Delete("src/__init__.py")],
         )
         .absent(&[("b_func.py", "OPT113")]),
+    ];
+    run_steps(s, &steps);
+}
+
+// ------------------------------------------------ calls through bound values across modules
+
+// What a call through a value one module binds runs, decided from that module's declarations:
+// a table of functions (`ModuleDecls::tables`, what other modules change in place in
+// `ModuleDecls::stores_elsewhere`), a class attribute bound to a `staticmethod`
+// (`ClassDecl::named_attrs`, a subclass binding the name to a method), a function returning a
+// module it imports (`FunctionDecl::returned_import`), and a `TypeVar`'s bound
+// (`ModuleDecls::type_vars`).
+const BOUND_CONFIG: &str = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"uses\"\nscopes = [\"pkg.use_*.*\"]\nwrite-universe = [\"Field.required\"]\nallow-writes = []\n";
+const BOUND_MODEL: &str = "class Field:\n    def __init__(self):\n        self.required = False\n";
+const BOUND_HELPERS: &str = "from pkg.model import Field\n\n\ndef require(field: Field):\n    field.required = True\n\n\ndef skip(field: Field):\n    pass\n";
+const BOUND_DEFS: &str = "from typing import Protocol, TypeVar\n\nfrom pkg.helpers import require, skip\nfrom pkg.model import Field\n\nTABLE = {\"run\": require, \"skip\": skip}\n\n\nclass Holder:\n    RUN = staticmethod(require)\n\n\ndef ops():\n    from pkg import helpers\n\n    return helpers\n\n\nclass View(Protocol):\n    @property\n    def fields(self) -> list[Field]: ...\n\n\nclass Other:\n    pass\n\n\nV = TypeVar(\"V\", bound=View)\n";
+const BOUND_TABLE_USE: &str =
+    "from pkg.defs import TABLE\n\n\ndef use(field):\n    TABLE[\"run\"](field)\n";
+const BOUND_ALIAS_USE: &str =
+    "from pkg.defs import Holder\n\n\ndef use(holder: Holder, field):\n    holder.RUN(field)\n";
+const BOUND_ALIAS_READ_USE: &str = "from pkg.defs import Holder\n\n\ndef use(holder: Holder, field):\n    run = holder.RUN\n    run(field)\n";
+const BOUND_DEFS_PATCHING: &str =
+    "\n\ndef patch(run):\n    from pkg import defs\n\n    defs.TABLE[\"run\"] = run\n";
+const BOUND_MODULE_USE: &str =
+    "from pkg.defs import ops\n\n\ndef use(field):\n    ops().require(field)\n";
+const BOUND_TYPE_VAR_USE: &str = "from pkg.defs import V\n\n\ndef use(view: V):\n    for field in view.fields:\n        field.required = True\n";
+
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_bound_values_across_modules() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/model.py", BOUND_MODEL.to_owned()),
+        ("pkg/helpers.py", BOUND_HELPERS.to_owned()),
+        ("pkg/defs.py", BOUND_DEFS.to_owned()),
+        ("pkg/use_table.py", BOUND_TABLE_USE.to_owned()),
+        ("pkg/use_alias.py", BOUND_ALIAS_USE.to_owned()),
+        ("pkg/use_module.py", BOUND_MODULE_USE.to_owned()),
+        ("pkg/use_type_var.py", BOUND_TYPE_VAR_USE.to_owned()),
+    ];
+    let s = Session::start_with("lsp_oracle_bound_values", BOUND_CONFIG, files, false);
+    let all: &[(&str, &str)] = &[
+        ("pkg/use_table.py", "EFF201"),
+        ("pkg/use_alias.py", "EFF201"),
+        ("pkg/use_module.py", "EFF201"),
+        ("pkg/use_type_var.py", "EFF201"),
+    ];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(all),
+        Step::new(
+            "the table binds the key to the function that writes nothing",
+            vec![save(
+                "pkg/defs.py",
+                &BOUND_DEFS.replace("{\"run\": require, \"skip\": skip}", "{\"run\": skip}"),
+            )],
+        )
+        .absent(&[("pkg/use_table.py", "EFF201")]),
+        Step::new("the table binds it to the writer again", vec![save("pkg/defs.py", BOUND_DEFS)])
+            .present(&[("pkg/use_table.py", "EFF201")]),
+        Step::new(
+            "another module changes the table in place",
+            vec![Action::Create(
+                "pkg/register.py",
+                "from pkg.defs import TABLE\n\n\ndef register(name, run):\n    TABLE[name] = run\n"
+                    .to_owned(),
+            )],
+        )
+        .absent(&[("pkg/use_table.py", "EFF201")]),
+        Step::new(
+            "the module changing it is deleted",
+            vec![Action::Delete("pkg/register.py")],
+        )
+        .present(&[("pkg/use_table.py", "EFF201")]),
+        Step::new(
+            "a subclass binds the attribute to a method of its own",
+            vec![Action::Create(
+                "pkg/sub.py",
+                "from pkg.defs import Holder\n\n\nclass Sub(Holder):\n    def RUN(self, field):\n        pass\n"
+                    .to_owned(),
+            )],
+        )
+        .absent(&[("pkg/use_alias.py", "EFF201")]),
+        Step::new("the subclass is deleted", vec![Action::Delete("pkg/sub.py")])
+            .present(&[("pkg/use_alias.py", "EFF201")]),
+        Step::new(
+            "the function returns another module",
+            vec![save(
+                "pkg/defs.py",
+                &BOUND_DEFS.replace("    from pkg import helpers\n\n    return helpers", "    from pkg import model\n\n    return model"),
+            )],
+        )
+        .absent(&[("pkg/use_module.py", "EFF201")]),
+        Step::new(
+            "the type variable's bound is a class without the fields",
+            vec![save("pkg/defs.py", &BOUND_DEFS.replace("bound=View", "bound=Other"))],
+        )
+        .present(&[("pkg/use_module.py", "EFF201")])
+        .absent(&[("pkg/use_type_var.py", "EFF201")]),
+        Step::new("the bound is the view again", vec![save("pkg/defs.py", BOUND_DEFS)])
+            .present(all),
+        Step::new(
+            "the table's module changes it through its own module object",
+            vec![save("pkg/defs.py", &format!("{BOUND_DEFS}{BOUND_DEFS_PATCHING}"))],
+        )
+        .absent(&[("pkg/use_table.py", "EFF201")]),
+        Step::new("it no longer changes the table", vec![save("pkg/defs.py", BOUND_DEFS)])
+            .present(all),
+        Step::new(
+            "a module calls the attribute it reads, which binds the function that writes nothing",
+            vec![
+                Action::Create("pkg/use_alias_read.py", BOUND_ALIAS_READ_USE.to_owned()),
+                save(
+                    "pkg/defs.py",
+                    &BOUND_DEFS.replace("RUN = staticmethod(require)", "RUN = staticmethod(skip)"),
+                ),
+            ],
+        )
+        .absent(&[
+            ("pkg/use_alias.py", "EFF201"),
+            ("pkg/use_alias_read.py", "EFF201"),
+        ]),
+        Step::new(
+            "a subclass binds the attribute to the writer",
+            vec![Action::Create(
+                "pkg/sub.py",
+                "from pkg.defs import Holder\nfrom pkg.helpers import require\n\n\nclass Sub(Holder):\n    RUN = staticmethod(require)\n"
+                    .to_owned(),
+            )],
+        )
+        .present(&[
+            ("pkg/use_alias.py", "EFF201"),
+            ("pkg/use_alias_read.py", "EFF201"),
+        ]),
+        Step::new("the subclass is deleted", vec![Action::Delete("pkg/sub.py")]).absent(&[
+            ("pkg/use_alias.py", "EFF201"),
+            ("pkg/use_alias_read.py", "EFF201"),
+        ]),
+        Step::new("the class binds the writer again", vec![save("pkg/defs.py", BOUND_DEFS)])
+            .present(&[
+                ("pkg/use_alias.py", "EFF201"),
+                ("pkg/use_alias_read.py", "EFF201"),
+            ]),
     ];
     run_steps(s, &steps);
 }
