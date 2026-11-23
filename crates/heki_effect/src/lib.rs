@@ -1819,6 +1819,19 @@ impl BoundCallee {
     pub fn caller_params_of(&self, mask: u64) -> u64 {
         callgraph::bound_params(mask, self)
     }
+
+    /// The key the call passes for parameter `p` of the callee: a string constant, the
+    /// caller's own parameter, or a value heki cannot tell.
+    pub fn passed_key(&self, p: u8) -> (Option<String>, EntryKey) {
+        let arg = self.params.get(usize::from(p));
+        if let Some(text) = arg.and_then(|a| a.binding.as_ref()?.text.as_deref()) {
+            return (Some(text.to_owned()), EntryKey::Written);
+        }
+        match arg.and_then(|a| a.param.as_ref()) {
+            Some((q, None)) => (None, EntryKey::Param(*q)),
+            _ => (None, EntryKey::Unknown),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -3043,18 +3056,6 @@ impl ProjectIndex {
     /// Defining file of a summarized function.
     pub fn file_of(&self, func: &FuncKey) -> Option<&Path> {
         self.func_files.get(func).map(PathBuf::as_path)
-    }
-
-    /// The project function whose dotted name is `fqn` (`FuncKey::fqn`), which splits into its
-    /// module and qualname at one of its dots.
-    pub fn function_named(&self, fqn: &str) -> Option<FuncKey> {
-        fqn.match_indices('.').find_map(|(at, _)| {
-            let key = FuncKey {
-                module: fqn[..at].to_owned(),
-                qualname: fqn[at + 1..].to_owned(),
-            };
-            self.func_files.contains_key(&key).then_some(key)
-        })
     }
 
     /// Drop a deleted file: its functions disappear and their callers are re-propagated (the

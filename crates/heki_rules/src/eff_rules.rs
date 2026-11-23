@@ -1146,35 +1146,6 @@ impl Boundary<'_> {
         (!(own_body && self.in_scope(callee))).then_some(d)
     }
 
-    /// Whether the search follows the calls `chain` makes from the own call sites `own` of a
-    /// function down to the function that writes: the first at a site the search enters, and
-    /// none below it allowed (`allowed-callees`) or of the scopes.
-    fn follows_chain(
-        &self,
-        cx: &CheckContext<'_>,
-        own: &[(&Path, &CallSite)],
-        chain: &[Arc<CallHop>],
-    ) -> bool {
-        let [first, rest @ ..] = chain else {
-            return false;
-        };
-        let followed = own.iter().any(|(_, site)| {
-            site.span == first.span
-                && site.project_callees().iter().any(|bc| {
-                    bc.callee.fqn() == first.callee
-                        && self.follows(cx, site, &bc.callee, Facts::Body).is_some()
-                })
-        });
-        let writer = chain
-            .last()
-            .and_then(|h| cx.index.function_named(&h.callee));
-        let below = rest.iter().map(|h| Some(h.caller.clone())).chain([writer]);
-        followed
-            && below.into_iter().all(|k| {
-                k.is_some_and(|k| !names_function(&self.allowed_callees, &k) && !self.in_scope(&k))
-            })
-    }
-
     /// The container `Class.attr` of the entry targets (`Class.attr["key"]`) the boundary judges
     /// the item write `w` by, when it names some for the written attribute and allows no write of
     /// the whole container: `writes-targets` entries, or `write-universe` ones. `own_init` leaves
@@ -1358,6 +1329,103 @@ pub(crate) fn eff201(
 /// its facts, and the parent node with the hops from it.
 type Nodes = Vec<(FuncKey, Facts, Option<(usize, Vec<CallHop>)>)>;
 
+/// The hops of a call at `span` of `caller` (in `path`) to `callee`: through `via` first when
+/// the callee's facts run inside the function iterating its result.
+fn call_hops(
+    caller: &FuncKey,
+    (path, span): (&Path, Span),
+    via: Option<&FuncKey>,
+    callee: &FuncKey,
+) -> Vec<CallHop> {
+    let hop = |caller: &FuncKey, callee: String| CallHop {
+        caller: caller.clone(),
+        callee,
+        span,
+        path: path.to_path_buf(),
+    };
+    match via {
+        None => vec![hop(caller, callee.fqn())],
+        Some(p) => vec![hop(caller, p.fqn()), hop(p, callee.fqn())],
+    }
+}
+
+/// By node and parameter, the keys the followed calls pass it, each with the hops of a route
+/// passing it ([`Reach::passed_keys`]).
+type PassedKeys = FxHashMap<(usize, u8), Vec<(Option<String>, Vec<CallHop>)>>;
+
+/// How [`Reach::passed_keys`] first reached a `(node, parameter, key)`.
+#[derive(Clone, Copy)]
+enum KeyStep {
+    /// A parameter of the scope function, whose key is open.
+    ScopeParam,
+    /// The followed call (by index) passes the key.
+    Passed(usize),
+    /// The followed call (by index) hands on the parameter of the state above, its caller's.
+    HandedOn((usize, u8, usize), usize),
+}
+
+/// Record in `writes` the write `w` of `func` under each bucket the boundary `b` forbids it by,
+/// reached through the hops `chain` builds. An item write whose key heki cannot tell
+/// ([`EntryKey::Unknown`]) may write an entry the boundary names.
+fn judge_write(
+    writes: &mut BTreeMap<WriteBucket, Found>,
+    cx: &CheckContext<'_>,
+    b: &Boundary<'_>,
+    func: &FuncKey,
+    w: &TypedFieldWriteSite,
+    chain: &dyn Fn() -> Vec<CallHop>,
+) {
+    if b.allow_writes.iter().any(|a| a.matches_write(w))
+        || b.allow_fresh && w.construction == Construction::Yes
+    {
+        return;
+    }
+    // A class's own initialization (constructing a fresh object) is not a write.
+    let own_init = |t: &ContractTarget| initializes_itself(cx, func, &t.classes, w.obj_params);
+    let mut buckets: Vec<WriteBucket> = Vec::new();
+    if b.writes_targets {
+        buckets.extend(
+            write_hits(&b.write_targets, w)
+                .into_iter()
+                .filter(|(_, t)| !own_init(t))
+                .map(|(ti, _)| WriteBucket::Target(ti)),
+        );
+    }
+    if buckets.is_empty()
+        && let Some((_, t)) = write_hits(&b.write_universe, w)
+            .into_iter()
+            .find(|(_, t)| !own_init(t))
+    {
+        let text = match &t.key {
+            Some(_) => t.text.clone(),
+            None => undeclared_text(&t.text, &w.attr),
+        };
+        buckets.push(WriteBucket::Undeclared(text));
+    }
+    if buckets.is_empty()
+        && w.key_from == EntryKey::Unknown
+        && let Some(container) = b.names_entries_of(w, &own_init)
+    {
+        buckets.push(WriteBucket::UnresolvedKey(container));
+    }
+    for bucket in buckets {
+        note(writes, bucket, (func.fqn(), w.span), || {
+            (chain(), w.span, w.kind.describe())
+        });
+    }
+}
+
+/// A call the search followed: from node `from` to node `to`, at `span` of `from`'s function
+/// in `path`, through `via` (as in [`call_hops`]).
+struct Followed<'a> {
+    from: usize,
+    to: usize,
+    bc: &'a BoundCallee,
+    path: &'a Path,
+    span: Span,
+    via: Option<&'a FuncKey>,
+}
+
 /// Hops from the scope function down to node `i`.
 fn chain_to(nodes: &Nodes, mut i: usize) -> Vec<CallHop> {
     let mut chain = Vec::new();
@@ -1453,10 +1521,14 @@ enum WriteBucket {
 /// a generator hands out the generator's body, which runs where the object is iterated).
 struct Reach<'a> {
     nodes: Nodes,
-    /// Followed call edges `(caller node, callee node, binding)`.
-    edges: Vec<(usize, usize, &'a BoundCallee)>,
+    /// Followed call edges.
+    edges: Vec<Followed<'a>>,
     exec: BTreeMap<ExecEffectKind, Found>,
     writes: BTreeMap<WriteBucket, Found>,
+    /// The item writes keyed by a parameter of the function writing (`field.extras[key] = v`),
+    /// by node and parameter: their keys are the ones the followed calls pass
+    /// ([`Self::passed_keys`]).
+    keyed_writes: Vec<(usize, u8, TypedFieldWriteSite)>,
     /// By `read-targets` index.
     reads: BTreeMap<usize, Found>,
     /// By the `call-targets` indices a call matches ([`called_targets`]).
@@ -1483,6 +1555,7 @@ impl<'a> Reach<'a> {
             edges: Vec::new(),
             exec: BTreeMap::new(),
             writes: BTreeMap::new(),
+            keyed_writes: Vec::new(),
             reads: BTreeMap::new(),
             calls: BTreeMap::new(),
             environment: None,
@@ -1549,18 +1622,22 @@ impl<'a> Reach<'a> {
                             let Some(d) = b.follows(cx, site, &bc.callee, into) else {
                                 continue;
                             };
-                            let hops = match d.via {
-                                None => vec![hop(&func, bc.callee.fqn())],
-                                Some(p) => vec![hop(&func, p.fqn()), hop(p, bc.callee.fqn())],
-                            };
                             let node = (bc.callee.clone(), d.from);
                             let j = *index_of.entry(node).or_insert_with(|| {
+                                let hops = call_hops(&func, (path, site.span), d.via, &bc.callee);
                                 reach
                                     .nodes
                                     .push((bc.callee.clone(), d.from, Some((i, hops))));
                                 reach.nodes.len() - 1
                             });
-                            reach.edges.push((i, j, bc));
+                            reach.edges.push(Followed {
+                                from: i,
+                                to: j,
+                                bc,
+                                path,
+                                span: site.span,
+                                via: d.via,
+                            });
                         }
                     }
                 }
@@ -1576,6 +1653,7 @@ impl<'a> Reach<'a> {
             }
             i += 1;
         }
+        reach.judge_keyed_writes(cx, b);
         reach
     }
 
@@ -1606,9 +1684,10 @@ impl<'a> Reach<'a> {
 
     /// Writes node `i` performs: its own writes, and `IndirectHelper` writes created at its own
     /// call sites (a helper whose effects count mutating the field it is handed). Writes
-    /// propagated from callees are left to the callees' own nodes. A write is forbidden when it
-    /// matches `write-targets` (with `writes-targets`) or `write-universe`, and `allow-writes`
-    /// does not name it.
+    /// propagated from callees are left to the callees' own nodes, and an item write keyed by a
+    /// parameter to the calls the search follows ([`Self::judge_keyed_writes`]). A write is
+    /// forbidden when it matches `write-targets` (with `writes-targets`) or `write-universe`,
+    /// and `allow-writes` does not name it.
     fn collect_writes(
         &mut self,
         cx: &CheckContext<'_>,
@@ -1628,13 +1707,17 @@ impl<'a> Reach<'a> {
             .into_iter()
             .flat_map(|s| &s.typed_field_write_sites);
         for w in writes {
-            // A copy passed a parameter of this function as the key is decided by the calls
-            // above it, unless the search starts here.
-            if w.passed && matches!(w.key_from, EntryKey::Param(_)) && i != 0 {
-                continue;
-            }
             let extra = match (w.via_chain.as_slice(), w.kind) {
-                ([], _) => Vec::new(),
+                // A copy of a callee's item write with the key a call passes stands for routes
+                // the search follows itself, through allowed callees too.
+                _ if w.passed => continue,
+                ([], _) => {
+                    if let EntryKey::Param(p) = w.key_from {
+                        self.keyed_writes.push((i, p, w.clone()));
+                        continue;
+                    }
+                    Vec::new()
+                }
                 // A helper of the scopes counts too: it cannot see the type of the field it
                 // is handed, so the function handing it over reports the write. The helper's
                 // summary also holds what its callees change, so the write counts only when the
@@ -1653,61 +1736,160 @@ impl<'a> Reach<'a> {
                 {
                     vec![CallHop::clone(hop)]
                 }
-                // A callee's item write with the key a call here passes.
-                (chain, _) if w.passed && b.follows_chain(cx, own, chain) => {
-                    heki_effect::owned_chain(chain)
-                }
                 _ => continue,
             };
-            if b.allow_writes.iter().any(|a| a.matches_write(w))
-                || b.allow_fresh && w.construction == Construction::Yes
-            {
-                continue;
-            }
-            // A class's own initialization (constructing a fresh object) is not a write.
-            let own_init =
-                |t: &ContractTarget| initializes_itself(cx, func, &t.classes, w.obj_params);
-            let mut buckets: Vec<WriteBucket> = Vec::new();
-            if b.writes_targets {
-                buckets.extend(
-                    write_hits(&b.write_targets, w)
-                        .into_iter()
-                        .filter(|(_, t)| !own_init(t))
-                        .map(|(ti, _)| WriteBucket::Target(ti)),
-                );
-            }
-            if buckets.is_empty()
-                && let Some((_, t)) = write_hits(&b.write_universe, w)
-                    .into_iter()
-                    .find(|(_, t)| !own_init(t))
-            {
-                let text = match &t.key {
-                    Some(_) => t.text.clone(),
-                    None => undeclared_text(&t.text, &w.attr),
+            let nodes = &self.nodes;
+            judge_write(&mut self.writes, cx, b, func, w, &|| {
+                let mut chain = chain_to(nodes, i);
+                chain.extend(extra.iter().cloned());
+                chain
+            });
+        }
+    }
+
+    /// Judge the item writes keyed by a parameter ([`Self::keyed_writes`]) under each key the
+    /// followed calls pass ([`Self::passed_keys`]), each reached through a route passing it.
+    fn judge_keyed_writes(&mut self, cx: &CheckContext<'_>, b: &Boundary<'_>) {
+        if self.keyed_writes.is_empty() {
+            return;
+        }
+        let wanted: Vec<(usize, u8)> = self.keyed_writes.iter().map(|(i, p, _)| (*i, *p)).collect();
+        let keys = self.passed_keys(&wanted);
+        for (i, p, w) in std::mem::take(&mut self.keyed_writes) {
+            let func = self.nodes[i].0.clone();
+            for (key, chain) in keys.get(&(i, p)).into_iter().flatten() {
+                let site = TypedFieldWriteSite {
+                    key: key.clone(),
+                    key_from: if key.is_some() {
+                        EntryKey::Written
+                    } else {
+                        EntryKey::Unknown
+                    },
+                    ..w.clone()
                 };
-                buckets.push(WriteBucket::Undeclared(text));
-            }
-            // An item write whose key heki cannot tell may write an entry the boundary names.
-            let key_open = match w.key_from {
-                EntryKey::Written => false,
-                EntryKey::Param(_) => i == 0,
-                EntryKey::Unknown => true,
-            };
-            if buckets.is_empty()
-                && key_open
-                && let Some(container) = b.names_entries_of(w, &own_init)
-            {
-                buckets.push(WriteBucket::UnresolvedKey(container));
-            }
-            for bucket in buckets {
-                let nodes = &self.nodes;
-                note(&mut self.writes, bucket, (func.fqn(), w.span), || {
-                    let mut chain = chain_to(nodes, i);
-                    chain.extend(extra.iter().cloned());
-                    (chain, w.span, w.kind.describe())
-                });
+                judge_write(&mut self.writes, cx, b, &func, &site, &|| chain.clone());
             }
         }
+    }
+
+    /// The keys the followed calls pass to parameter `p` of node `j`, for each `(j, p)` of
+    /// `wanted`: a string constant, or `None` for a key heki cannot tell (an argument that is
+    /// neither a constant nor a parameter of its caller, or a parameter of the scope function).
+    /// Each comes with the hops of a followed route from the scope function passing it on to
+    /// `j`, one of the fewest calls handing it on.
+    fn passed_keys(&self, wanted: &[(usize, u8)]) -> PassedKeys {
+        let mut into: Vec<Vec<usize>> = vec![Vec::new(); self.nodes.len()];
+        let mut out_of: Vec<Vec<usize>> = vec![Vec::new(); self.nodes.len()];
+        for (e, edge) in self.edges.iter().enumerate() {
+            into[edge.to].push(e);
+            out_of[edge.from].push(e);
+        }
+        // The parameters a call hands on as the key of one of `wanted`, up to where a constant
+        // or a value heki cannot tell is passed.
+        let budget = Budget::unmetered("eff_rules::Reach::passed_keys");
+        let mut handing: FxHashSet<(usize, u8)> = FxHashSet::default();
+        let handed_up = |(j, p): (usize, u8), out: &mut Vec<(usize, u8)>| {
+            for &e in &into[j] {
+                if let (None, EntryKey::Param(q)) = self.edges[e].bc.passed_key(p) {
+                    out.push((self.edges[e].from, q));
+                }
+            }
+        };
+        // The budget is unmetered, so neither walk is open; open, it would have found less.
+        let _ = walk::reach(&budget, wanted.iter().copied(), handed_up, |state| {
+            handing.insert(state);
+            walk::Visit::<()>::Expand
+        })
+        .open_means(None);
+        let mut handing: Vec<(usize, u8)> = handing.into_iter().collect();
+        handing.sort_unstable();
+        // Then each key from where it is passed down the calls handing it on, breadth first,
+        // keeping how each `(node, parameter, key)` was first reached.
+        let mut keys: Vec<Option<String>> = vec![None];
+        let mut key_ids: FxHashMap<String, usize> = FxHashMap::default();
+        let mut from: FxHashMap<(usize, u8, usize), KeyStep> = FxHashMap::default();
+        for &(j, p) in &handing {
+            if j == 0 {
+                from.entry((j, p, 0)).or_insert(KeyStep::ScopeParam);
+            }
+            for &e in &into[j] {
+                let key = match self.edges[e].bc.passed_key(p) {
+                    (Some(text), _) => *key_ids.entry(text).or_insert_with_key(|text| {
+                        keys.push(Some(text.clone()));
+                        keys.len() - 1
+                    }),
+                    (None, EntryKey::Param(_)) => continue,
+                    (None, _) => 0,
+                };
+                from.entry((j, p, key)).or_insert(KeyStep::Passed(e));
+            }
+        }
+        let mut starts: Vec<(usize, u8, usize)> = from.keys().copied().collect();
+        starts.sort_unstable();
+        let handing: FxHashSet<(usize, u8)> = handing.into_iter().collect();
+        let mut down = |(j, p, key): (usize, u8, usize), out: &mut Vec<(usize, u8, usize)>| {
+            for &e in &out_of[j] {
+                let edge = &self.edges[e];
+                for r in 0..u8::try_from(edge.bc.params.len()).unwrap_or(u8::MAX) {
+                    let state = (edge.to, r, key);
+                    if edge.bc.passed_key(r) == (None, EntryKey::Param(p))
+                        && handing.contains(&(edge.to, r))
+                    {
+                        from.entry(state)
+                            .or_insert(KeyStep::HandedOn((j, p, key), e));
+                        out.push(state);
+                    }
+                }
+            }
+        };
+        let mut reached: Vec<(usize, u8, usize)> = Vec::new();
+        let _ = walk::reach_breadth_first(&budget, starts, &mut down, |state| {
+            reached.push(state);
+            walk::Visit::<()>::Expand
+        })
+        .open_means(None);
+        let wanted: FxHashSet<(usize, u8)> = wanted.iter().copied().collect();
+        let mut out = PassedKeys::default();
+        for (j, p, key) in reached
+            .into_iter()
+            .filter(|(j, p, _)| wanted.contains(&(*j, *p)))
+        {
+            let chain = self.key_route(&from, (j, p, key));
+            out.entry((j, p))
+                .or_default()
+                .push((keys[key].clone(), chain));
+        }
+        out
+    }
+
+    /// The hops of the route [`Self::passed_keys`] first reached `state` by.
+    fn key_route(
+        &self,
+        from: &FxHashMap<(usize, u8, usize), KeyStep>,
+        mut state: (usize, u8, usize),
+    ) -> Vec<CallHop> {
+        let mut calls = Vec::new();
+        let top = loop {
+            match from[&state] {
+                KeyStep::ScopeParam => break 0,
+                KeyStep::Passed(e) => {
+                    calls.push(e);
+                    break self.edges[e].from;
+                }
+                KeyStep::HandedOn(above, e) => {
+                    calls.push(e);
+                    state = above;
+                }
+            }
+        };
+        let mut chain = chain_to(&self.nodes, top);
+        for e in calls.into_iter().rev() {
+            let edge = &self.edges[e];
+            let caller = &self.nodes[edge.from].0;
+            let callee = &self.nodes[edge.to].0;
+            chain.extend(call_hops(caller, (edge.path, edge.span), edge.via, callee));
+        }
+        chain
     }
 
     /// Reads of `read-targets` node `i` performs (read sites are local facts of every
@@ -1806,9 +1988,9 @@ impl<'a> Reach<'a> {
         type Held = JoinMap<usize, (Or, Or)>;
         let mut into: Vec<Vec<(usize, &BoundCallee)>> = vec![Vec::new(); self.nodes.len()];
         let mut out_of: Vec<Vec<usize>> = vec![Vec::new(); self.nodes.len()];
-        for &(from, to, bc) in &self.edges {
-            into[to].push((from, bc));
-            out_of[from].push(to);
+        for e in &self.edges {
+            into[e.to].push((e.from, e.bc));
+            out_of[e.from].push(e.to);
         }
         let readers = |i: usize, out: &mut Vec<usize>| out.extend(&out_of[i]);
         let transfer = |node: usize, known: &walk::Facts<Held>| -> Option<Held> {
