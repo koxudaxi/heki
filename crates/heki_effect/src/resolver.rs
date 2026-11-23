@@ -6021,10 +6021,11 @@ fn class_properties(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
             }
             continue;
         }
-        // A method defined directly in its class (`C.m`, not `C.m.<locals>.f`).
+        // A method defined directly in its class (`C.m`, not `C.m.<locals>.f`), by the name the
+        // class holds it under (`_C__key` of `def __key`), as the IR spells the attribute.
         let method = f.owner_class_qualname.as_deref().and_then(|owner| {
             let name = f.qualname.strip_prefix(owner)?.strip_prefix('.')?;
-            (!name.contains('.')).then_some((owner, name))
+            (!name.contains('.')).then(|| (owner, mangling::member_name(&f.qualname)))
         });
         let Some((owner, name)) = method else {
             continue;
@@ -6037,7 +6038,7 @@ fn class_properties(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
                     .is_some_and(|(_, a)| matches!(a, "setter" | "deleter" | "getter"))
         });
         if is_property {
-            found.push((owner.to_owned(), name.to_owned()));
+            found.push((owner.to_owned(), name.into_owned()));
         }
     }
     for (class, name) in found {

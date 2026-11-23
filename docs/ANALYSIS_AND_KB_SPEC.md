@@ -50,8 +50,11 @@ with two is recorded as the member it is (`self.__run` is `AttrLoad { attr: "_Pa
 class `Parser`), and so is every name of a class body (`def __run` binds `_Parser__run`). A
 function's own variables keep their spelling: they are no members. A definition keeps its
 written name in its qualname (`Parser.__run`), so the declarations find a method reached by its
-member name through that spelling (`ModuleDecls::definition_path`), and the contract patterns match a definition under both spellings
-(`def_spellings`), an attribute target `C.__x` the member `_C__x` of the classes it names.
+member name through that spelling (`ModuleDecls::definition_path`), and record what a class
+holds by name (its members, properties, and cached properties) under the member name
+(`mangling::member_name`). The contract patterns match a definition under both spellings
+(`def_spellings`), an attribute target `C.__x` the member `_C__x` of the classes it names, and
+a target without a class `__x` the member of any class.
 
 ```text
 IrFunction {

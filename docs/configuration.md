@@ -269,7 +269,9 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   subclass's `self`, or `type[Parser]` reaches it as `_Parser__run`. A subclass's own private
   name (`self.__run` in `JsonParser`, the member `_JsonParser__run`) is another member, and
   overrides nothing of its base. With `unresolved = "report"`, the last name of such a target
-  counts in both spellings (`__run`, and `_Parser__run` for a class the target names).
+  counts in both spellings (`__run`, and `_Parser__run` for a class the target names); a
+  target without a class (`__run`) names the member of any class (`other.__run()` in class
+  `Driver` calls `_Driver__run`).
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, a name with more than one colon or an empty module or qualified name, call
   targets whose globs are too many to match together (tens of thousands of complex ones), an

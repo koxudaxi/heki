@@ -10,9 +10,9 @@
 use crate::eff_rules::{forbidden_effects, names_function};
 use crate::inspect::ContractRole;
 use crate::mut_rules::{
-    Allowance, AllowanceKeys, ContractTarget, FunctionMatcher, FunctionMatchers, ReadOnlyProducers,
-    References, parse_read_targets, parse_targets, patterns, project_classes, split_arguments,
-    split_item,
+    Allowance, AllowanceKeys, ContractTarget, FunctionMatcher, FunctionMatchers, MemberPattern,
+    ReadOnlyProducers, References, parse_read_targets, parse_targets, patterns, project_classes,
+    split_arguments, split_item,
 };
 use crate::{
     CheckContext, DottedPattern, RuleConfigError, RuleSelection, last_name, split_last_dot,
@@ -22,7 +22,6 @@ use heki_env::HekiConfig;
 use heki_kb::{EffectiveEcosystemKb, EnvironmentAccess};
 use heki_semantic::mangling;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::borrow::Cow;
 use std::sync::{Arc, Mutex, PoisonError};
 
 /// The most `invalidation` contracts a configuration may declare (one bit each).
@@ -92,9 +91,9 @@ pub(crate) struct ConfigContracts {
     /// The masks of [`Contracts::writer_contexts`] by name.
     writer_contexts: NameMasks,
     /// The attribute patterns of the `read-owners` targets with `unresolved = "report"`.
-    unresolved_reads: Vec<DottedPattern>,
+    unresolved_reads: Vec<MemberPattern>,
     /// The last names of the `call-owners` targets with `unresolved = "report"`.
-    unresolved_calls: Vec<DottedPattern>,
+    unresolved_calls: Vec<MemberPattern>,
     /// [`Contracts::references`] and [`Contracts::reference_bases`].
     references: References,
     /// [`Contracts::marked_params`].
@@ -270,10 +269,7 @@ impl ConfigContracts {
             invalidators: NameMasks::default(),
             writers,
             writer_contexts: NameMasks::default(),
-            unresolved_reads: last_names(
-                reads.flat_map(|r| &r.targets).map(String::as_str),
-                "read-owners.targets",
-            )?,
+            unresolved_reads: last_names(reads.flat_map(|r| &r.targets), "read-owners.targets")?,
             unresolved_calls: call_last_names(calls.flat_map(|r| &r.targets))?,
             references: counts_references(config),
             marked_params: marked_params(config),
@@ -293,7 +289,7 @@ impl ConfigContracts {
 /// [`last_names`] of call targets, whose argument lists name no function.
 fn call_last_names<'t>(
     targets: impl Iterator<Item = &'t String>,
-) -> Result<Vec<DottedPattern>, RuleConfigError> {
+) -> Result<Vec<MemberPattern>, RuleConfigError> {
     let context = "call-owners.targets";
     let names: Vec<&str> = targets
         .map(|t| Ok(split_arguments(t, context)?.0))
@@ -318,22 +314,15 @@ fn marked_params(config: &HekiConfig) -> FxHashSet<String> {
         .collect()
 }
 
-/// The patterns of the last dotted names of `targets` (`children` of `pkg.Reference.children`).
-/// A private name (`__cache`) is also held mangled with a class (`_Model__cache`): it matches
-/// that spelling with any class, as an object of unknown class may be of any.
-fn last_names<'t>(
-    targets: impl Iterator<Item = &'t str>,
+/// The patterns of the last dotted names of `targets` (`children` of `pkg.Reference.children`),
+/// as members of any class: an object of unknown class may be of any.
+fn last_names(
+    targets: impl Iterator<Item = impl AsRef<str>>,
     context: &'static str,
-) -> Result<Vec<DottedPattern>, RuleConfigError> {
-    let mut out = Vec::new();
-    for t in targets {
-        let name = last_name(t);
-        out.push(DottedPattern::new(name, context)?);
-        if let Cow::Owned(held) = mangling::mangle("*", name) {
-            out.push(DottedPattern::new(&held, context)?);
-        }
-    }
-    Ok(out)
+) -> Result<Vec<MemberPattern>, RuleConfigError> {
+    targets
+        .map(|t| MemberPattern::new(last_name(t.as_ref()), None, &[], context))
+        .collect()
 }
 
 impl Contracts for ConfigContracts {
