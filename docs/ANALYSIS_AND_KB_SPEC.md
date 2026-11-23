@@ -557,7 +557,8 @@ iterating its values, give one of its values.
 A function every `return` of which gives what one import binds, an import in the function (`from
 pkg import ops`, then `return ops`, which breaks an import cycle) or one of its module, with no
 decorator but those keeping calls as defined and a `functools` cache, returns that object
-(`FunctionDecl::returned_import`) whatever its annotation says (`-> ModuleType`). A value of
+(`FunctionDecl::returned_import`) when it is a project module or the function has no return
+annotation of a class of its own (none, `-> ModuleType`). A value of
 `types.ModuleType` says nothing of the names the module binds: a call of one is unresolved, as on
 `Any`.
 
