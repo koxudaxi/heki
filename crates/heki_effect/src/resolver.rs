@@ -849,6 +849,11 @@ pub struct ModuleDecls {
     pub classes: BTreeMap<String, Box<ClassDecl>>,
     /// Function qualname -> declaration (module body excluded).
     pub functions: BTreeMap<String, Box<FunctionDecl>>,
+    /// Whether a class or function here is a member written with a private name (`def __run`
+    /// in class `Parser`, held as `_Parser__run`): only then may a path name a definition by
+    /// another spelling ([`Self::definition_path`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub private_members: bool,
     /// Module global `name -> type` of the instance it holds (`client = httpx.Client()`): the
     /// join of every store of the module (`stores::record`).
     pub global_types: BTreeMap<String, Ty>,
@@ -1014,6 +1019,10 @@ impl ModuleDecls {
     /// class member reached by the mangled name its class holds it under (`Parser._Parser__run`)
     /// is the definition written with the private name (`def __run`, qualname `Parser.__run`).
     fn definition_path<'p>(&self, path: &'p str) -> Cow<'p, str> {
+        // Every lookup of a definition comes here, and few modules define a private member.
+        if !self.private_members {
+            return Cow::Borrowed(path);
+        }
         let defines = |q: &str| self.functions.contains_key(q) || self.classes.contains_key(q);
         if defines(path) {
             return Cow::Borrowed(path);
@@ -3846,7 +3855,10 @@ impl ProjectDecls {
     fn own_method(&self, class: &str, name: &str) -> Option<FuncKey> {
         let (m, rest) = self.split_module(class)?;
         let member = format!("{rest}.{name}");
-        let qualname = m.definition_path(&member).into_owned();
+        let qualname = match m.definition_path(&member) {
+            Cow::Owned(written) => written,
+            Cow::Borrowed(_) => member,
+        };
         m.functions.contains_key(&qualname).then(|| FuncKey {
             module: m.module_name.clone(),
             qualname,
@@ -4840,6 +4852,9 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             decls.functions.insert(f.qualname.clone(), Box::default());
         }
     }
+    decls.private_members = (decls.classes.keys())
+        .chain(decls.functions.keys())
+        .any(|qualname| mangling::member_path(qualname).is_some());
     decls.aliases = module_aliases(input, &decls);
     let stores = GlobalStores::of(&input.ir.functions);
     decls.unknown_globals = unknown_globals(&stores, &decls);
@@ -7146,6 +7161,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     type_checking_imports: BTreeMap::new(),
     classes: BTreeMap::new(),
     functions: BTreeMap::new(),
+    private_members: false,
     global_types: BTreeMap::new(),
     aliases: BTreeMap::new(),
     unknown_globals: BTreeSet::new(),
