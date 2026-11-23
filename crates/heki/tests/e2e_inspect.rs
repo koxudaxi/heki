@@ -213,7 +213,7 @@ fn a_symbol_naming_no_single_function_exits_2_with_an_error_object() {
     );
     assert_eq!(
         v["error"]["docs"],
-        "https://heki.koxudaxi.dev/coding-agents/#before-an-edit-heki-inspect-experimental"
+        "https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental"
     );
     let (_, v, _) = inspect(&p, &["nothing.load"]);
     assert_eq!(v["error"]["suggestions"].as_array().unwrap().len(), 2);

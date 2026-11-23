@@ -59,7 +59,7 @@ Examples:
 
 Output for programs:
   heki check --output-format json
-      the diagnostics; on exit code 2, {"error": {"message", "help", "docs", ...}}
+      the diagnostics; when the configuration or a path stops the run, {"error": {"message", "help", "docs", ...}}
   heki rule <CODE> --output-format json
       one rule's metadata
   heki inspect <SYMBOL> --output-format json
@@ -176,7 +176,7 @@ Examples:
 
 Output for programs:
   heki check --output-format json
-      the diagnostics; on exit code 2, {"error": {"message", "help", "docs", ...}}
+      the diagnostics; when the configuration or a path stops the run, {"error": {"message", "help", "docs", ...}}
   heki check --output-format sarif
       SARIF 2.1.0, with each rule's page as `helpUri`
   heki check --generate-prompt "<question>" --output-format json

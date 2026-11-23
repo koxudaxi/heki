@@ -207,7 +207,7 @@ once you declare a contract: see [Rules](rules/index.md) and [Rule precision](pr
   effect, which a diff does not show.
 - [Coding agents](coding-agents.md) get the same checks as JSON, and an
   [Agent Skill](coding-agents.md#agent-skill-experimental) teaches them the workflow.
-- [`heki inspect`](coding-agents.md#before-an-edit-heki-inspect-experimental) (experimental)
+- [`heki inspect`](coding-agents.md#what-a-function-does-heki-inspect-experimental) (experimental)
   says what one function does, so an agent does not read its callees to find out.
 
 ### Fast, quiet, and easy to adopt

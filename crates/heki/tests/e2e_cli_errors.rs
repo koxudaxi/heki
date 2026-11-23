@@ -540,7 +540,7 @@ fn json_output_writes_the_error_object() {
 #[test]
 fn inspect_offers_the_nearest_functions() {
     let p = project("inspect_shapes", "");
-    let section = docs("coding-agents/#before-an-edit-heki-inspect-experimental");
+    let section = docs("coding-agents/#what-a-function-does-heki-inspect-experimental");
     let (code, _, stderr) = p.heki(&["inspect", "a.handlr"]);
     assert_eq!(code, 2);
     for line in [

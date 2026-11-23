@@ -205,7 +205,7 @@ see [Rules](https://heki.koxudaxi.dev/rules/) and
   effect, which a diff does not show.
 - Coding agents get the same checks as JSON, and an
   [Agent Skill](https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental) teaches them the workflow.
-- [`heki inspect`](https://heki.koxudaxi.dev/coding-agents/#before-an-edit-heki-inspect-experimental)
+- [`heki inspect`](https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental)
   (experimental) says what one function does, so an agent does not read its callees to find out.
 
 ### Fast, quiet, and easy to adopt
@@ -306,7 +306,7 @@ $ heki inspect app.users.load_user              # what one function does (experi
 $ heki recommend                                # configuration advice (experimental)
 ```
 
-See [Coding agents](https://heki.koxudaxi.dev/coding-agents/#before-an-edit-heki-inspect-experimental)
+See [Coding agents](https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental)
 for `heki inspect` and [Configuration advice](https://heki.koxudaxi.dev/recommend/) for
 `heki recommend`.
 

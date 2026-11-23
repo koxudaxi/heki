@@ -42,7 +42,7 @@ const CHECK_EXITS: &[(u8, &str)] = &[
 
 const JSON_CHECK: (&str, &str) = (
     "heki check --output-format json",
-    "the diagnostics; on exit code 2, {\"error\": {\"message\", \"help\", \"docs\", ...}}",
+    "the diagnostics; when the configuration or a path stops the run, {\"error\": {\"message\", \"help\", \"docs\", ...}}",
 );
 
 pub(crate) const HEKI: LongHelp = LongHelp {

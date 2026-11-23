@@ -3,14 +3,98 @@
 heki gives coding agents (Claude Code, Codex, Cursor, and similar) the checks it gives people:
 every diagnostic says what was proven, where the evidence is, and what blocks a fix. `heki
 inspect` says what one function does, so an agent does not read its callees to find out. The
-[Agent Skill](#agent-skill-experimental) teaches an agent the workflow of this page.
+[Agent Skill](#agent-skill-experimental) teaches an agent the routine of this page after an edit.
 
 ## Analyze the project, not one file
 
 heki follows calls across files. `heki check app/api.py` analyzes that file alone and misses what
-its callees do: run heki on the project (the default `.`) and filter the JSON by path.
+its callees do: run heki on the project (the default `.`).
 
-## Before an edit: `heki inspect` (experimental)
+A diagnostic sits where the problem shows, which is often not the file that was edited. In the
+[first example](index.md#a-blocking-call-two-helpers-below-an-async-def) of the overview, adding
+`requests.get` to `app/users.py` makes `EFF101` report at `app/api.py`, in the `async def` that
+reaches it through two helpers. To find the diagnostics an edit caused, keep those whose `path`
+or any `related[].path` is an edited file: a filter on `path` alone drops the ones in callers'
+files. Or compare with the run before the edit: record the findings once in a baseline outside
+the project, and each check with it reports only the new ones.
+
+```console
+$ heki check --baseline /tmp/heki-before.toml --update-baseline   # before the first edit
+$ heki check --baseline /tmp/heki-before.toml --output-format json   # after each edit
+```
+
+## After an edit: `heki check`
+
+A typical instruction for the agent:
+
+> After changing Python files, run `heki check --output-format json` on the project. Act on the
+> diagnostics whose `path` or a `related[].path` is a file you changed. For each, read its `help`
+> and `heki rule <rule_code>`, follow `related` to the root cause, and fix it there. A
+> diagnostic whose `certainty` is `heuristic` can be wrong about the code: confirm what its
+> message says before changing anything. Apply `heki check --fix` for the safe rewrites. Never
+> silence a diagnostic with `# heki: ignore` unless the rule's documentation describes the case
+> as intended. When unsure, run `heki check --generate-prompt "<question>"`.
+
+```console
+$ heki check --output-format json
+```
+
+The configuration decides which rules run; `--heuristic` also runs the heuristic rules that are
+off by default, whose reports can be wrong about the code.
+
+Each diagnostic has:
+
+| Field | Content |
+| ----- | ------- |
+| `path`, `line`, `column`, `span` | location (byte span in the file) |
+| `rule_code`, `rule_slug`, `severity`, `message` | the finding: `message` is one sentence saying what happens |
+| `certainty` | `exact`, or `heuristic` when a premise of the report's claim can be open, so that it can be wrong about the code ([Rule Precision](precision.md)) |
+| `help` | what to do about it (`null` when the rule has no advice for the report) |
+| `qualname`, `target` | the function and the object involved |
+| `related` | every hop of the call chain behind the finding |
+| `evidence` | what was established (for `OPT` rules: the proof obligations) |
+| `blocker` | the obligation that blocks an automatic fix, if any |
+| `fix` | byte-span edits for proven-safe rewrites |
+| `sites` | the violation sites a contract report stands for, when more than one |
+
+A text run ends with one line per reported rule: `heki rule <CODE>` and the rule's page.
+
+When the run cannot check (exit code 2: a configuration, path, or file error), the error says
+where the cause is, what to write instead, and which section of the documentation explains it.
+With `--output-format json`, an error that stops the run (the configuration or a path) is an
+object on stdout; a file that cannot be read or parsed is named on stderr, and stdout keeps the
+diagnostics of the other files:
+
+```json
+{
+  "error": {
+    "message": "unknown key `select` in [tool.heki]",
+    "path": "pyproject.toml",
+    "line": 5,
+    "column": 1,
+    "help": [
+      "`select` is a key of [tool.heki.lint]: move it there",
+      "for example: `select = [\"EFF\", \"MUT101\"]`"
+    ],
+    "docs": "https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint",
+    "candidates": []
+  }
+}
+```
+
+Apply what `help` says; `candidates` holds the names a misspelled one may have meant, the closest
+first.
+
+`heki rule <CODE>` prints a rule's documentation: what it does, why it matters, and what to do
+instead, which makes a good prompt for the fix. `heki rule --all --output-format json` gives
+every rule's metadata and documentation, the premises of its exact claim, and its published
+precision: its certification and its latest measurement ([Rule Precision](precision.md)).
+
+## What a function does: `heki inspect` (experimental)
+
+When a diagnostic or a question is about one function, `heki inspect` says what it reaches,
+changes, keeps, and returns, with the call chains, without reading its callees. Run it when a
+function's effects are in question, not before every edit.
 
 ```console
 $ heki inspect app.users.load_user --output-format json
@@ -41,73 +125,9 @@ $ heki inspect app/users.py::load_user --callers --depth 3
 - Exit code 0 when the function was inspected, 2 otherwise or when a file could not be analyzed
   (the report is still printed, with `complete: false`).
 
-Inspect the edited function again after the edit and compare `effects`, `changes`, `retains`, and
-`returns` with the run before it: a new entry is new behavior. Fact keys carry no line numbers, so
-a diff of the two JSON objects shows only what changed.
-
-## After an edit: `heki check`
-
-A typical instruction for the agent:
-
-> After changing Python files, run `heki check --output-format json` on the project. For each
-> diagnostic, read its `help` and `heki rule <rule_code>`, follow `related` to the root cause,
-> and fix it there. A diagnostic whose `certainty` is `heuristic` can be wrong about the code:
-> confirm what its message says before changing anything. Apply `heki check --fix` for the safe
-> rewrites. Never silence a diagnostic with `# heki: ignore` unless the rule's documentation
-> describes the case as intended. When unsure, run `heki check --generate-prompt "<question>"`.
-
-```console
-$ heki check --output-format json
-```
-
-The configuration decides which rules run; `--heuristic` also runs the heuristic rules that are
-off by default, whose reports can be wrong about the code.
-
-Each diagnostic has:
-
-| Field | Content |
-| ----- | ------- |
-| `path`, `line`, `column`, `span` | location (byte span in the file) |
-| `rule_code`, `rule_slug`, `severity`, `message` | the finding: `message` is one sentence saying what happens |
-| `certainty` | `exact`, or `heuristic` when a premise of the report's claim can be open, so that it can be wrong about the code ([Rule Precision](precision.md)) |
-| `help` | what to do about it (`null` when the rule has no advice for the report) |
-| `qualname`, `target` | the function and the object involved |
-| `related` | every hop of the call chain behind the finding |
-| `evidence` | what was established (for `OPT` rules: the proof obligations) |
-| `blocker` | the obligation that blocks an automatic fix, if any |
-| `fix` | byte-span edits for proven-safe rewrites |
-| `sites` | the violation sites a contract report stands for, when more than one |
-
-A text run ends with one line per reported rule: `heki rule <CODE>` and the rule's page.
-
-When the run cannot check (exit code 2: a configuration, path, or file error), the error says
-where the cause is, what to write instead, and which section of the documentation explains it.
-With `--output-format json` it is an object on stdout:
-
-```json
-{
-  "error": {
-    "message": "unknown key `select` in [tool.heki]",
-    "path": "pyproject.toml",
-    "line": 5,
-    "column": 1,
-    "help": [
-      "`select` is a key of [tool.heki.lint]: move it there",
-      "for example: `select = [\"EFF\", \"MUT101\"]`"
-    ],
-    "docs": "https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint",
-    "candidates": []
-  }
-}
-```
-
-Apply what `help` says; `candidates` holds the names a misspelled one may have meant, the closest
-first.
-
-`heki rule <CODE>` prints a rule's documentation: what it does, why it matters, and what to do
-instead, which makes a good prompt for the fix. `heki rule --all --output-format json` gives
-every rule's metadata and documentation, the premises of its exact claim, and its published
-precision: its certification and its latest measurement ([Rule Precision](precision.md)).
+To see what an edit changed in a function, inspect it before and after the edit and compare
+`effects`, `changes`, `retains`, and `returns`: a new entry is new behavior. Fact keys carry no line
+numbers, so a diff of the two JSON objects shows only what changed.
 
 ## Ask a model: `heki check --generate-prompt` (experimental)
 
@@ -147,11 +167,13 @@ $ heki check --output-format-json-schema generate-prompt
 
 The repository publishes an [Agent Skill](https://agentskills.io/specification) at
 [`skills/heki/`](https://github.com/koxudaxi/heki/tree/main/skills/heki) for skills-compatible
-coding agents. It teaches the workflow of this page: `heki inspect` before editing a function,
-`heki check --output-format json` after the edit, `related` and `heki rule <CODE>` to find the
-root cause, `heuristic` reports confirmed before acting on them, only the fixes heki proves
-safe, and `heki check --generate-prompt` when unsure. Its `SKILL.md` links this page, and its
-`references/` hold the output fields and what to do when a command does not behave as expected.
+coding agents. It is the routine of this page after an edit, short enough to read each time it
+runs: `heki check --output-format json` on the project, the diagnostics the edit caused,
+`related` and `heki rule <CODE>` to find the root cause, `heuristic` reports confirmed before
+acting on them, and only the fixes heki proves safe. `heki inspect` and
+`heki check --generate-prompt` are for when a function or a diagnostic is in question. Its
+`SKILL.md` links this page, and its `references/` hold the output fields and what to do when a
+command does not behave as expected.
 
 The skill is experimental: its wording, when agents load it, and the install commands can change
 as the agents evolve.
