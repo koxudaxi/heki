@@ -8,8 +8,9 @@ use super::{
 };
 use crate::ModuleInput;
 
+use crate::types::MAX_NAMED;
 use heki_ir::walk::FnShape;
-use heki_ir::{FunctionId, GlobalStores, InstKind, IrFunction, VarId};
+use heki_ir::{BlockId, FunctionId, GlobalStores, InstKind, IrFunction, LastBindings, VarId};
 use heki_semantic::{NameResolution, ScopeKind};
 use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
@@ -80,17 +81,24 @@ fn calls_object(shape: &FnShape<'_>, value: VarId) -> bool {
 /// The fqn of the module-level name that may be an `object()` sentinel which `value` holds: one
 /// of the module's own sentinels, a name an import binds (and nothing in the module binds again),
 /// or an attribute of such a name (`sentinels.MISSING`). Whether it is a sentinel is for its own
-/// module to say.
-fn named_value(shape: &FnShape<'_>, value: VarId, decls: &ModuleDecls) -> Option<String> {
+/// module to say. A class or function the module binds again (`stores`) is none: what the name
+/// holds depends on when it is read.
+fn named_value(
+    shape: &FnShape<'_>,
+    value: VarId,
+    decls: &ModuleDecls,
+    stores: &GlobalStores<'_>,
+) -> Option<String> {
     let global = |var: VarId| match shape.inst(shape.copy_root(var)).map(|i| &i.kind) {
         Some(InstKind::LoadGlobal { name, .. }) => Some(name.as_str()),
         _ => None,
     };
     if let Some(name) = global(value) {
-        let own = decls.object_sentinels.contains(name)
-            || decls.classes.contains_key(name)
-            || decls.functions.contains_key(name)
-            || decls.aliases.contains_key(name);
+        let own = if decls.classes.contains_key(name) || decls.functions.contains_key(name) {
+            stores.once(name)
+        } else {
+            decls.object_sentinels.contains(name) || decls.aliases.contains_key(name)
+        };
         if own && !decls.imports.contains_key(name) {
             return Some(format!("{}.{name}", decls.module_name));
         }
@@ -112,9 +120,10 @@ pub(super) fn named_attrs(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
     let mut defaults: FxHashMap<FunctionId, Vec<(VarId, String)>> = FxHashMap::default();
     let constants = &input.ir.constants;
     let staticmethod_trusted = !constants.dynamic && !constants.shadowed.contains("staticmethod");
+    let stores = GlobalStores::of(&input.ir.functions);
     for body in input.ir.functions.iter().filter(|f| f.is_class_body) {
-        class_body_names(body, decls, staticmethod_trusted, &mut found);
-        method_defaults(input, body, decls, &mut defaults);
+        class_body_names(body, decls, &stores, staticmethod_trusted, &mut found);
+        method_defaults(input, body, decls, &stores, &mut defaults);
     }
     // The methods of the module's classes that run on an instance, with their receiver.
     let methods = input.ir.functions.iter().filter_map(|f| {
@@ -128,7 +137,7 @@ pub(super) fn named_attrs(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
     for (f, owner, receiver) in methods {
         let shape = FnShape::new(f);
         let defaulted = defaults.get(&f.id).map_or(&[][..], Vec::as_slice);
-        let stores = f
+        let attr_stores = f
             .blocks
             .iter()
             .flat_map(|b| &b.insts)
@@ -138,9 +147,9 @@ pub(super) fn named_attrs(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
                 }
                 _ => None,
             });
-        for (attr, value) in stores {
+        for (attr, value) in attr_stores {
             let root = shape.copy_root(value);
-            let name = named_value(&shape, value, decls).or_else(|| {
+            let name = named_value(&shape, value, decls, &stores).or_else(|| {
                 defaulted
                     .iter()
                     .find_map(|(param, name)| (*param == root).then(|| name.clone()))
@@ -162,6 +171,10 @@ pub(super) fn named_attrs(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
                 entry.body_static = named.body_static;
             }
             entry.body = entry.body.take().or(named.body);
+            if entry.body_paths.is_empty() {
+                entry.body_paths = named.body_paths;
+                entry.body_defined = named.body_defined;
+            }
             entry.annotated |= named.annotated;
             entry.validates_default |= named.validates_default;
             entry.held.extend(named.held);
@@ -177,6 +190,7 @@ fn method_defaults(
     input: &ModuleInput<'_>,
     body: &IrFunction,
     decls: &ModuleDecls,
+    stores: &GlobalStores<'_>,
     out: &mut FxHashMap<FunctionId, Vec<(VarId, String)>>,
 ) {
     let mut shape = None;
@@ -198,7 +212,7 @@ fn method_defaults(
         let named: Vec<(VarId, String)> = defaulted
             .zip(captured)
             .filter(|(p, _)| p.default.is_none())
-            .filter_map(|(p, value)| Some((p.var, named_value(shape, *value, decls)?)))
+            .filter_map(|(p, value)| Some((p.var, named_value(shape, *value, decls, stores)?)))
             .collect();
         if !named.is_empty() {
             out.insert(*id, named);
@@ -206,28 +220,73 @@ fn method_defaults(
     }
 }
 
-/// The names one class body binds once to a name that may be a sentinel, with the defaults of
-/// the fields that the `__init__` a stdlib `@dataclass` generates stores.
+/// How a class body binds a name ([`class_body_names`]).
+#[derive(Clone, Copy)]
+enum Binding {
+    /// A named copy of the value (`name = value`).
+    Copy(VarId),
+    /// The class's own `def name(...)`.
+    Def,
+    /// Anything else: an import, an augmented assignment, an `except` clause, a nested class.
+    Other,
+}
+
+/// The names one class body binds last to a name that may be a sentinel, with the defaults of
+/// the fields that the `__init__` a stdlib `@dataclass` generates stores; and the names it binds
+/// last to different names, or to its own `def`, on different paths (`def fetch(...)`, then
+/// `if flag: fetch = _quiet`).
 fn class_body_names(
     body: &IrFunction,
     decls: &ModuleDecls,
+    stores: &GlobalStores<'_>,
     staticmethod_trusted: bool,
     found: &mut Vec<(String, String, NamedAttr)>,
 ) {
     let resolve = |name: &str| decls.resolve_dotted(name, true);
     let shape = FnShape::new(body);
-    // A class body binds a name as a named copy; `del name` unbinds it.
-    let mut bindings: FxHashMap<&str, Vec<VarId>> = FxHashMap::default();
+    // Every binding of a name, by block and statement start: a named copy, or a value the
+    // statement makes under the name. A read names its value too and binds nothing; `del name`
+    // unbinds it.
+    let mut bindings: FxHashMap<&str, Vec<(BlockId, u32, Binding)>> = FxHashMap::default();
     let mut deleted: Vec<&str> = Vec::new();
-    for inst in body.blocks.iter().flat_map(|b| &b.insts) {
-        match &inst.kind {
-            InstKind::Copy { dst, src } => {
-                if let Some(name) = body.var_name(*dst).filter(|n| !n.starts_with('.')) {
-                    bindings.entry(name).or_default().push(*src);
+    for bb in &body.blocks {
+        for inst in &bb.insts {
+            let binding = match &inst.kind {
+                InstKind::Delete { name, .. } => {
+                    deleted.push(name);
+                    continue;
                 }
-            }
-            InstKind::Delete { name, .. } => deleted.push(name),
-            _ => {}
+                InstKind::LoadGlobal { .. }
+                | InstKind::LoadName { .. }
+                | InstKind::LoadDeref { .. } => {
+                    continue;
+                }
+                InstKind::Copy { src, .. } => Binding::Copy(*src),
+                InstKind::MakeClosure { .. } => Binding::Def,
+                _ => Binding::Other,
+            };
+            let Some(name) = inst
+                .kind
+                .dst()
+                .and_then(|d| body.var_name(d))
+                .filter(|n| !n.starts_with('.'))
+            else {
+                continue;
+            };
+            let binding = match binding {
+                Binding::Def
+                    if !decls
+                        .functions
+                        .contains_key(&format!("{}.{name}", body.qualname)) =>
+                {
+                    Binding::Other
+                }
+                b => b,
+            };
+            bindings
+                .entry(name)
+                .or_default()
+                .push((bb.id, inst.span.start, binding));
         }
     }
     let dataclass = body
@@ -253,39 +312,105 @@ fn class_body_names(
             (a.target.as_str(), (field, validates))
         })
         .collect();
-    for (name, values) in bindings {
-        let [value] = values[..] else { continue };
+    let last = LastBindings::of(&shape);
+    for (name, binds) in bindings {
         if deleted.contains(&name) {
             continue;
         }
+        let at: Vec<(BlockId, u32)> = binds.iter().map(|&(b, start, _)| (b, start)).collect();
+        // A name some paths leave unbound is what the bases give there.
+        let (reaching, bound) = last.last_of(&shape, &at);
+        if !bound {
+            continue;
+        }
         let (field, validates_default) = fields.get(name).copied().unwrap_or((false, false));
-        // `attr: T = field(default=NAME)`: a stdlib dataclass makes `NAME` the class attribute,
-        // and `init=False` leaves the field out of `__init__`.
-        let (named, init, body_static) = match field_default(&shape, value, &resolve) {
-            Some((default, init)) if dataclass.is_some() => {
-                (named_value(&shape, default, decls), init, false)
+        let attr = match reaching[..] {
+            [i] => {
+                let Binding::Copy(value) = binds[i].2 else {
+                    continue;
+                };
+                // `attr: T = field(default=NAME)`: a stdlib dataclass makes `NAME` the class
+                // attribute, and `init=False` leaves the field out of `__init__`.
+                let (named, init, body_static) = match field_default(&shape, value, &resolve) {
+                    Some((default, init)) if dataclass.is_some() => {
+                        (named_value(&shape, default, decls, stores), init, false)
+                    }
+                    Some(_) => continue,
+                    None => match static_method_of(&shape, value, staticmethod_trusted) {
+                        Some(wrapped) => (named_value(&shape, wrapped, decls, stores), true, true),
+                        None => (named_value(&shape, value, decls, stores), true, false),
+                    },
+                };
+                let Some(named) = named else { continue };
+                let held = if field && init && generated_init {
+                    BTreeSet::from([named.clone()])
+                } else {
+                    BTreeSet::new()
+                };
+                NamedAttr {
+                    body: Some(named),
+                    body_static,
+                    held,
+                    ..NamedAttr::default()
+                }
             }
-            Some(_) => continue,
-            None => match static_method_of(&shape, value, staticmethod_trusted) {
-                Some(wrapped) => (named_value(&shape, wrapped, decls), true, true),
-                None => (named_value(&shape, value, decls), true, false),
-            },
-        };
-        let Some(named) = named else { continue };
-        let held = if field && init && generated_init {
-            BTreeSet::from([named.clone()])
-        } else {
-            BTreeSet::new()
+            _ => {
+                let bound = reaching.iter().map(|&i| binds[i].2);
+                let Some((paths, defined)) =
+                    bound_on_paths(&shape, decls, stores, staticmethod_trusted, bound)
+                else {
+                    continue;
+                };
+                NamedAttr {
+                    body_paths: paths,
+                    body_defined: defined,
+                    ..NamedAttr::default()
+                }
+            }
         };
         let attr = NamedAttr {
-            body: Some(named),
-            body_static,
             annotated: field,
             validates_default,
-            held,
+            ..attr
         };
         found.push((body.qualname.clone(), name.to_owned(), attr));
     }
+}
+
+/// [`NamedAttr::body_paths`] and [`NamedAttr::body_defined`] of the bindings of one name that
+/// may each be its last (`bound`): each binds a name, wrapped in `staticmethod` or not, or is
+/// the class's own `def`. `None` when one binds anything else, or one name binds it on every
+/// path.
+fn bound_on_paths(
+    shape: &FnShape<'_>,
+    decls: &ModuleDecls,
+    stores: &GlobalStores<'_>,
+    staticmethod_trusted: bool,
+    bound: impl Iterator<Item = Binding>,
+) -> Option<(Vec<(String, bool)>, bool)> {
+    let mut paths: Vec<(String, bool)> = Vec::new();
+    let mut defined = false;
+    for binding in bound {
+        let value = match binding {
+            Binding::Def => {
+                defined = true;
+                continue;
+            }
+            Binding::Copy(value) => value,
+            Binding::Other => return None,
+        };
+        let (value, is_static) = match static_method_of(shape, value, staticmethod_trusted) {
+            Some(wrapped) => (wrapped, true),
+            None => (value, false),
+        };
+        let named = (named_value(shape, value, decls, stores)?, is_static);
+        if !paths.contains(&named) {
+            paths.push(named);
+        }
+    }
+    let one_name = paths.len() == 1 && !defined;
+    (!paths.is_empty() && !one_name && paths.len() + usize::from(defined) <= MAX_NAMED)
+        .then_some((paths, defined))
 }
 
 /// The value `staticmethod(value)` wraps, when `value` holds such a call of the builtin

@@ -22,7 +22,7 @@ use heki_env::HekiConfig;
 use heki_ir::walk::{Answer, Budget, FnShape, ReadLog, SharedMemo, Visit, reach};
 use heki_ir::{
     BinOpKind, BlockId, ConstLiteral, FnIndex, FunctionKind, GlobalStores, Inst, InstKind,
-    IrFunction, ModuleIr, SmallDisplay, Terminator, VarId,
+    IrFunction, LastBindings, ModuleIr, SmallDisplay, Terminator, VarId,
 };
 use heki_kb::{
     ArgFact, CopyDepth, EcosystemEntry, EffectiveEcosystemKb, ExecEffectKind, LiteralValue,
@@ -608,14 +608,24 @@ pub struct ClassDecl {
 /// ([`ClassDecl::named_attrs`]), each name by the fqn its module gives it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamedAttr {
-    /// The class body binds the attribute once, to this name (`attr = NAME`, `attr: T = NAME`,
-    /// and `attr: T = field(default=NAME)` in a stdlib dataclass): the class attribute.
+    /// The class body binds the attribute last to this name on every path through it
+    /// (`attr = NAME`, `attr: T = NAME`, and `attr: T = field(default=NAME)` in a stdlib
+    /// dataclass; a binding every path runs replaces the ones before it): the class attribute.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     /// The class body binds it to `staticmethod(NAME)` (`body` names `NAME`): reading the
     /// attribute on an instance gives the object `NAME` names, never a bound method.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub body_static: bool,
+    /// The class body binds the attribute last to different objects on different paths
+    /// (`def fetch(...)`, then `if flag: fetch = _quiet`): the names among them, each with
+    /// whether `staticmethod` wraps it. `body` is then `None`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub body_paths: Vec<(String, bool)>,
+    /// With `body_paths`: the class's own `def` of the attribute is what it holds on the other
+    /// paths.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub body_defined: bool,
     /// The class body annotates the attribute outside `ClassVar` and `InitVar`: a field, where
     /// a base the project does not define may build an `__init__` that stores the default.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -629,6 +639,17 @@ pub struct NamedAttr {
     /// `__init__` in the class body), and the names its methods store with `self.attr = NAME`.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub held: BTreeSet<String>,
+}
+
+/// What reading a class attribute finds when its class body binds it to module-level names
+/// ([`ProjectDecls::class_aliases`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClassAlias<'d> {
+    /// The names it may hold, each with whether `staticmethod` wraps it.
+    pub names: Vec<(&'d str, bool)>,
+    /// On the other paths it holds what the class's own `def` of it makes: that function, by
+    /// fqn.
+    pub defined: Option<String>,
 }
 
 /// An `object()` sentinel an instance of a class may hold in an attribute
@@ -913,6 +934,13 @@ pub struct ModuleDecls {
     /// another module rebinds it ([`ProjectDecls::object_named`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub aliases: BTreeMap<String, String>,
+    /// Module-level classes and functions the module body binds last to different objects on
+    /// different paths (`def fetch(...)`, then `if flag: fetch = _quiet`), with the fqn of each
+    /// object the name may hold once the module has run, the definition's own among them
+    /// ([`module_aliases`]). A definition the body binds last to one other object on every path
+    /// is an alias ([`Self::aliases`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub alias_paths: BTreeMap<String, Vec<String>>,
     /// Module-level `TypeVar`s with a bound or constraints (`C = TypeVar("C", bound=View)`), by
     /// name, with the type an annotation naming them gives: the bound, or the union of the
     /// constraints ([`type_vars`]). A value of the variable's type is one of those classes, in
@@ -2166,7 +2194,7 @@ impl ProjectDecls {
             for (qualname, class) in &m.classes {
                 let fqn = format!("{}.{qualname}", m.module_name);
                 for (attr, named) in &class.named_attrs {
-                    if named.body.is_some() && !named.annotated {
+                    if (named.body.is_some() || !named.body_paths.is_empty()) && !named.annotated {
                         alias_names.insert(attr.clone());
                     }
                 }
@@ -2662,19 +2690,24 @@ impl ProjectDecls {
     /// `None` when a module on the way binds the name it re-exports again
     /// ([`ModuleDecls::fixed_import`]).
     pub fn canonical_value(&self, fqn: &str) -> Option<String> {
-        self.follow(fqn, false, true)
+        self.follow(fqn, false, true).map(|(found, _)| found)
     }
 
     /// `fqn` through re-exports and, with `aliases`, the module aliases it names (at most
     /// `MAX_ALIAS_CHASE` steps).
     fn chase(&self, fqn: &str, aliases: bool) -> String {
         self.follow(fqn, aliases, false)
-            .unwrap_or_else(|| fqn.to_owned())
+            .map_or_else(|| fqn.to_owned(), |(found, _)| found)
     }
 
-    /// [`Self::chase`]; with `values`, `None` past a re-export its module binds again.
-    fn follow(&self, fqn: &str, aliases: bool, values: bool) -> Option<String> {
+    /// [`Self::chase`]; with `values`, `None` past a re-export its module binds again. With the
+    /// name found, whether it is the object a class or function statement made rather than
+    /// what the name holds once its module has run: a module alias names the object it bound
+    /// (`_orig = fetch`, then `fetch = _patched`), so a definition the module binds again stays
+    /// that definition past it.
+    fn follow(&self, fqn: &str, aliases: bool, values: bool) -> Option<(String, bool)> {
         let mut cur = fqn.to_owned();
+        let mut aliased_in: Option<String> = None;
         for _ in 0..MAX_ALIAS_CHASE {
             let Some((m, rest)) = self.split_module(&cur) else {
                 break;
@@ -2691,11 +2724,25 @@ impl ProjectDecls {
             // it.
             let target = match m.imports.get(first) {
                 Some(_) if values && m.fixed_import(first).is_none() => return None,
-                Some(target) => target,
-                None if aliases => match m.aliases.get(first) {
-                    Some(target) if !self.alias_rebound(&m.module_name, first) => target,
-                    _ => break,
-                },
+                Some(target) => {
+                    aliased_in = None;
+                    target
+                }
+                None if aliases => {
+                    let rebound_definition = (m.aliases.contains_key(first)
+                        || m.alias_paths.contains_key(first))
+                        && (m.classes.contains_key(first) || m.functions.contains_key(first));
+                    if rebound_definition && aliased_in.as_deref() == Some(m.module_name.as_str()) {
+                        return Some((cur, true));
+                    }
+                    match m.aliases.get(first) {
+                        Some(target) if !self.alias_rebound(&m.module_name, first) => {
+                            aliased_in = Some(m.module_name.clone());
+                            target
+                        }
+                        _ => break,
+                    }
+                }
                 None => break,
             };
             let next = match tail {
@@ -2707,7 +2754,7 @@ impl ProjectDecls {
             }
             cur = next;
         }
-        Some(cur)
+        Some((cur, false))
     }
 
     /// Whether another module rebinds or deletes the module alias `name` of `module`
@@ -2727,24 +2774,63 @@ impl ProjectDecls {
             .map_or(named, |target| self.chase(&target, true))
     }
 
-    /// The name `Class.attr` stands for when the class body defining `attr` binds it to one
-    /// (`Holder.REQUIRE` of `REQUIRE = staticmethod(require)`, [`Self::class_alias`]).
+    /// The name `Class.attr` stands for when the class body defining `attr` binds it last to one
+    /// (`Holder.REQUIRE` of `REQUIRE = staticmethod(require)`, [`Self::class_alias`]); a `def`
+    /// of the name before that binding no longer holds it.
     fn class_aliased(&self, fqn: &str) -> Option<String> {
         let (class, attr) = fqn.rsplit_once('.')?;
         let (m, qualname) = self.split_module(class)?;
-        // A function the class body defines is a method, no alias.
-        if !m.classes.contains_key(qualname)
-            || m.functions.contains_key(&format!("{qualname}.{attr}"))
-        {
+        if !m.classes.contains_key(qualname) {
             return None;
         }
         self.class_alias(class, attr)
             .map(|(named, _)| named.to_owned())
     }
 
+    /// The value the name `fqn` gives when its module or class body binds it last to different
+    /// objects on different paths ([`ModuleDecls::alias_paths`], [`Self::class_aliases`]): one
+    /// of them, each through [`Self::object_named`], a definition of the module or class as the
+    /// object its statement made.
+    pub(crate) fn named_on_paths(&self, fqn: &str) -> Option<Ty> {
+        let (named, definition) = self.follow(fqn, true, false)?;
+        if definition {
+            return None;
+        }
+        let (m, rest) = self.split_module(&named)?;
+        if let Some(objects) = m.alias_paths.get(rest) {
+            let objects = objects.iter().map(|o| {
+                let definition = o
+                    .strip_prefix(m.module_name.as_str())
+                    .and_then(|o| o.strip_prefix('.'))
+                    .is_some_and(|q| m.classes.contains_key(q) || m.functions.contains_key(q));
+                if definition {
+                    o.clone()
+                } else {
+                    self.object_named(o)
+                }
+            });
+            // Another module storing the name may leave anything there.
+            return Ty::one_of(objects).filter(|_| !self.alias_rebound(&m.module_name, rest));
+        }
+        let (class, attr) = named.rsplit_once('.')?;
+        if !self.is_project_class(class) {
+            return None;
+        }
+        let alias = self.class_aliases(class, attr)?;
+        if alias.defined.is_none() && alias.names.len() == 1 {
+            return None;
+        }
+        let names = alias.names.iter().map(|(name, _)| self.object_named(name));
+        Ty::one_of(names.chain(alias.defined))
+    }
+
     /// The value the name `fqn` gives: a project global holding an instance is that instance,
-    /// a module alias the object it names, anything else the object of that name.
+    /// a module alias the object it names, a name bound to different objects on different paths
+    /// one of them ([`Self::named_on_paths`]), anything else the object of that name.
     pub(crate) fn named_ty(&self, fqn: &str) -> Ty {
+        if let Some(t) = self.named_on_paths(fqn) {
+            return t;
+        }
         let fqn = self.object_named(fqn);
         match self.symbol(&fqn) {
             Symbol::Global(t) => self.declared_ty(&t).unwrap_or(Ty::Ref(fqn)),
@@ -4431,14 +4517,27 @@ impl ProjectDecls {
     }
 
     /// The name reading `attr` on the class `class` or on one of its instances finds, when the
-    /// first class along the MRO defining it binds it in its body once, to a module-level name
+    /// first class along the MRO defining it binds it last to one module-level name
+    /// ([`Self::class_aliases`]), with whether the body wraps it in `staticmethod`.
+    pub(crate) fn class_alias(&self, class: &str, attr: &str) -> Option<(&str, bool)> {
+        match self.class_aliases(class, attr)? {
+            ClassAlias {
+                names,
+                defined: None,
+            } if names.len() == 1 => names.first().copied(),
+            _ => None,
+        }
+    }
+
+    /// What reading `attr` on the class `class` or on one of its instances finds, when the first
+    /// class along the MRO defining it binds it in its body to a module-level name
     /// (`ClassDecl::named_attrs`: `factory = Scope`, `REQUIRE: ClassVar[...] =
-    /// staticmethod(require)`), with whether the body wraps it in `staticmethod`. None of the
-    /// module's code may store the attribute on the class or an instance (`rebound_attrs`,
+    /// staticmethod(require)`), or to different names, or its own `def`, on different paths. None
+    /// of the module's code may store the attribute on the class or an instance (`rebound_attrs`,
     /// what `stores::record` decides, attributes stored under names heki cannot read), another
     /// module may rebind it, or a hook run on the read (`__getattribute__`, a metaclass heki
     /// does not know); a field the class body annotates is the instance's own.
-    pub(crate) fn class_alias(&self, class: &str, attr: &str) -> Option<(&str, bool)> {
+    pub(crate) fn class_aliases(&self, class: &str, attr: &str) -> Option<ClassAlias<'_>> {
         self.read(|k| note(&mut k.alias_names, attr));
         if !self.alias_names.contains(attr) {
             return None;
@@ -4454,7 +4553,18 @@ impl ProjectDecls {
                 continue;
             }
             let named = decl.named_attrs.get(attr)?;
-            let body = named.body.as_deref()?;
+            let names: Vec<(&str, bool)> = match &named.body {
+                Some(body) => vec![(body.as_str(), named.body_static)],
+                None => named
+                    .body_paths
+                    .iter()
+                    .map(|(name, is_static)| (name.as_str(), *is_static))
+                    .collect(),
+            };
+            let alias = (!names.is_empty()).then(|| ClassAlias {
+                names,
+                defined: named.body_defined.then(|| format!("{c}.{attr}")),
+            })?;
             let stored =
                 self.attr_store(&c, decl, attr).is_some() || self.stores_any_attr(&c, decl);
             if named.annotated || !named.held.is_empty() || stored {
@@ -4465,7 +4575,7 @@ impl ProjectDecls {
             {
                 return None;
             }
-            return Some((body, named.body_static));
+            return Some(alias);
         }
         None
     }
@@ -5047,7 +5157,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             decls.functions.insert(f.qualname.clone(), Box::default());
         }
     }
-    decls.aliases = module_aliases(input, &decls);
+    (decls.aliases, decls.alias_paths) = module_aliases(input, &decls);
     decls.type_vars = type_vars(input, &decls);
     let stores = GlobalStores::of(&input.ir.functions);
     decls.unknown_globals = unknown_globals(&stores, &decls);
@@ -6138,7 +6248,14 @@ fn rebound_imports(
 /// name bound by an import that stays (also one under `if TYPE_CHECKING:`), bound in two
 /// other places, or deleted is none, and neither is one bound to anything else (a call's
 /// result, a decorated function, a choice between two objects).
-fn module_aliases(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<String, String> {
+///
+/// A class or function the module body binds again ([`definitions_bound_again`]) is an alias of
+/// what binds it last on every path, and [`ModuleDecls::alias_paths`] when that differs by
+/// path.
+fn module_aliases(
+    input: &ModuleInput<'_>,
+    decls: &ModuleDecls,
+) -> (BTreeMap<String, String>, BTreeMap<String, Vec<String>>) {
     let module = module_scope(input.semantic);
     let module_imports = || {
         input
@@ -6212,6 +6329,82 @@ fn module_aliases(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Stri
             out.insert(name.clone(), target);
         }
     }
+    let mut paths = BTreeMap::new();
+    for (name, objects) in definitions_bound_again(input, decls, &stores, &named, &mut known) {
+        match <[String; 1]>::try_from(objects) {
+            Ok([target]) => {
+                if target != format!("{}.{name}", decls.module_name) {
+                    out.insert(name.to_owned(), target);
+                }
+            }
+            Err(objects) => {
+                paths.insert(name.to_owned(), objects);
+            }
+        }
+    }
+    (out, paths)
+}
+
+/// The module-level classes and functions the module body binds again (`def fetch(...)`, then
+/// `fetch = _quiet`), each with the objects it may hold once the module has run (sorted, the
+/// definition as its own fqn): what the bindings that may be the last one bind
+/// ([`LastBindings::last_of`]; a path leaving the name unbound raises where it is called). A
+/// name another function stores or deletes, an import binds, or one of those bindings binds to
+/// anything but a named object is none, and so is every name where a star import, `exec`, or
+/// `globals()` may bind any. A definition of the module among the objects is the object its
+/// statement made, whatever its name holds later ([`ProjectDecls::named_on_paths`]).
+fn definitions_bound_again<'i>(
+    input: &'i ModuleInput<'_>,
+    decls: &ModuleDecls,
+    stores: &GlobalStores<'_>,
+    named: &Named<'_>,
+    known: &mut FxHashMap<VarId, Option<String>>,
+) -> Vec<(&'i str, Vec<String>)> {
+    let mut out = Vec::new();
+    if input.ir.constants.dynamic || input.ir.has_star_import {
+        return out;
+    }
+    let body = input.ir.function(input.ir.module_fn);
+    let defines =
+        |name: &str| decls.classes.contains_key(name) || decls.functions.contains_key(name);
+    let mut bindings: FxHashMap<&str, Vec<(BlockId, u32, VarId)>> = FxHashMap::default();
+    for bb in &body.blocks {
+        for inst in &bb.insts {
+            if let InstKind::StoreGlobal { name, value } = &inst.kind
+                && defines(name)
+            {
+                bindings
+                    .entry(name)
+                    .or_default()
+                    .push((bb.id, inst.span.start, *value));
+            }
+        }
+    }
+    bindings.retain(|name, binds| {
+        binds.len() > 1
+            && stores.exactly(name, binds.len() as u32)
+            && !decls.imports.contains_key(*name)
+    });
+    if bindings.is_empty() {
+        return out;
+    }
+    let shape = FnShape::new(body);
+    let last = LastBindings::of(&shape);
+    for (name, binds) in bindings {
+        let at: Vec<(BlockId, u32)> = binds.iter().map(|&(b, start, _)| (b, start)).collect();
+        let (reaching, _) = last.last_of(&shape, &at);
+        let objects: Option<Vec<String>> = reaching
+            .iter()
+            .map(|&i| named.object(binds[i].2, known))
+            .collect();
+        let Some(mut objects) = objects else { continue };
+        objects.sort();
+        objects.dedup();
+        if (1..=crate::types::MAX_NAMED).contains(&objects.len()) {
+            out.push((name, objects));
+        }
+    }
+    out.sort();
     out
 }
 
@@ -7570,6 +7763,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     tables: BTreeMap::new(),
     declared_items: BTreeMap::new(),
     aliases: BTreeMap::new(),
+    alias_paths: BTreeMap::new(),
     type_vars: BTreeMap::new(),
     unknown_globals: BTreeSet::new(),
     rebound_imports: None,
@@ -7740,7 +7934,13 @@ impl<'a> TypeCtx<'a> {
             return self.named(t);
         }
         if self.module.classes.contains_key(name) || self.module.functions.contains_key(name) {
-            return Ty::Ref(format!("{}.{name}", self.module_name()));
+            // A definition the module body binds again holds what binds it last.
+            let fqn = format!("{}.{name}", self.module_name());
+            if self.module.aliases.contains_key(name) || self.module.alias_paths.contains_key(name)
+            {
+                return self.named(&fqn);
+            }
+            return Ty::Ref(fqn);
         }
         if let Some(t) = self
             .project
@@ -7749,10 +7949,12 @@ impl<'a> TypeCtx<'a> {
         {
             return t;
         }
-        if let Some(target) = self.module.aliases.get(name)
+        // Through the name, not its target: past an alias naming a definition the module binds
+        // again, the target is that definition ([`ProjectDecls::object_named`]).
+        if self.module.aliases.contains_key(name)
             && !self.project.alias_rebound(self.module_name(), name)
         {
-            return self.named(target);
+            return self.named(&format!("{}.{name}", self.module_name()));
         }
         // A global the module binds is its own, of no known value ([`Symbol::Unknown`]).
         if self.module.unknown_globals.contains(name) {
@@ -8064,7 +8266,11 @@ impl<'a> TypeCtx<'a> {
                 }
                 // A module alias called through its module (`aliased.nap(1)`) is the object it
                 // names, as the name imported from the module is.
-                let target = self.project.object_named(&format!("{fqn}.{method}"));
+                let name = format!("{fqn}.{method}");
+                if let Some(Ty::OneOf(objects)) = self.project.named_on_paths(&name) {
+                    return named_targets(&objects, |f| self.call_targets(Some(Recv::Ref(f))));
+                }
+                let target = self.project.object_named(&name);
                 self.call_targets(Some(Recv::Ref(&target)))
             }
             Some(Recv::Class(class)) => {
@@ -8086,13 +8292,14 @@ impl<'a> TypeCtx<'a> {
     }
 
     /// The targets of `recv.method(...)` when the class body defining `method` binds it to a
-    /// name ([`ProjectDecls::class_alias`]), on every class the receiver may be: a class object
+    /// name ([`ProjectDecls::class_aliases`]), on every class the receiver may be: a class object
     /// is exactly its class, an instance or `cls` also a project subclass. Calling the named
     /// object calls it as it is, except a function read on an instance outside `staticmethod`,
     /// a bound method, which binds the instance first. A class finding a method of the name, or
-    /// none, runs what the methods give ([`Self::defined_method_targets`]). `None` when no class
-    /// binds the name to a name; unresolved when the targets bind differently; too many past
-    /// [`DISPATCH_CLASS_LIMIT`] classes.
+    /// none, or binding the name to its own `def` on some paths, runs what the methods give
+    /// ([`Self::defined_method_targets`]). `None` when no class binds the name to a name;
+    /// unresolved when the targets bind differently; too many past [`DISPATCH_CLASS_LIMIT`]
+    /// classes.
     fn alias_call_targets(&self, recv: Recv<'_>, method: &str) -> Option<Callee> {
         let (class, on_instance, family) = match recv {
             Recv::Ref(class) if self.project.is_project_class(class) => (class, false, false),
@@ -8104,9 +8311,9 @@ impl<'a> TypeCtx<'a> {
         if family {
             classes.extend(self.project.subclasses_of(class));
         }
-        let found: Vec<Option<(&str, bool)>> = classes
+        let found: Vec<Option<ClassAlias<'_>>> = classes
             .iter()
-            .map(|c| self.project.class_alias(c, method))
+            .map(|c| self.project.class_aliases(c, method))
             .collect();
         if found.iter().all(Option::is_none) {
             return None;
@@ -8117,9 +8324,10 @@ impl<'a> TypeCtx<'a> {
         }
         let mut out: Option<Callee> = found
             .iter()
-            .any(Option::is_none)
+            .any(|alias| alias.as_ref().is_none_or(|a| a.defined.is_some()))
             .then(|| self.defined_method_targets(Some(recv), method));
-        for (named, is_static) in found.into_iter().flatten() {
+        let names = found.into_iter().flatten().flat_map(|alias| alias.names);
+        for (named, is_static) in names {
             let named = self.project.object_named(named);
             let callee = match self.called_symbol(&named) {
                 Symbol::Function(key, _) if on_instance && !is_static => {
