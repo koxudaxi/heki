@@ -414,8 +414,10 @@ the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores
   add items such as `append`, `update`, or `setdefault`; `heki_ir::FnIndex::changed_vars`,
   through copies and phis), is a store of the object's class with its items unknown (of an
   annotated global's declaration): a name holding `{"noop": noop}` keeps `dict` and no item
-  type the code may replace. Another module's change marks the name (`StoredElsewhere::changed`), whose type
-  then keeps no items where it is read. What a call the object is handed to does is not
+  type the code may replace. A change through the module's own object (a module importing
+  itself, `tables.HANDLERS[kind] = run`), whose read types the global by its name alone, leaves
+  the global its declaration or no type. Another module's change marks the name
+  (`StoredElsewhere::changed`), whose type then keeps no items where it is read. What a call the object is handed to does is not
   followed (the assumption on objects of unknown origin).
 - **Annotations.** An annotation types every store of the name it declares (Priority 2): an
   annotated global holds its declaration, refined by what the value says beyond it
@@ -567,7 +569,8 @@ last one every path runs and each later one that runs on some paths only
 (`NamedAttr::body_paths`), a call through it running both. Read through the class object
 (`Holder.REQUIRE`, also inherited) it is the object itself; read on an instance, a function
 outside `staticmethod` is a bound method, which binds the instance first, and anything else is
-the object. A call through `cls` or an instance runs the object of every class the receiver may
+the object, joined over every class the instance may be as for a call below (a subclass finding
+the name as anything else, or a bound method, leaves the value unknown). A call through `cls` or an instance runs the object of every class the receiver may
 be (the class and its project subclasses, at most `DISPATCH_CLASS_LIMIT`); a class among them
 finding the name as anything else leaves the call unresolved, and so do objects that bind a
 receiver differently. A call of a class bound so constructs it (`self.factory(...)`).
@@ -582,11 +585,12 @@ A value bound to one of several named objects (a branch `f = a if c else b`, the
 table) is one of them (`Ty::OneOf`, at most `MAX_NAMED`, eight): a call runs every one, which must
 bind a receiver alike. A module global bound once, by the module body outside a loop, to a dict
 display with string-literal keys and no `**` entry, some value of which is a function, a class,
-or a partial object, and that no code changes in place or rebinds, is a table
-(`ModuleDecls::tables`, at most 256 entries): reading it with a key a string constant gives
-(`HANDLERS["create"]`, `HANDLERS[KEY]`, in its module, imported, or through the module) gives
-that entry's value, a later entry of the key replacing an earlier one; any other key, and
-iterating its values, give one of its values.
+or a partial object, and that no code changes in place (through its name or a module object,
+the module's own included) or rebinds, is a table (`ModuleDecls::tables`, at most 256
+entries): reading it with a key a string constant gives (`HANDLERS["create"]`,
+`HANDLERS[KEY]`, in its module, imported, or through the module) gives that entry's value, a
+later entry of the key replacing an earlier one; any other key, and iterating its values, give
+one of its values.
 
 A function every `return` of which gives what one import binds, an import in the function (`from
 pkg import ops`, then `return ops`, which breaks an import cycle) or one of its module, with no
@@ -687,7 +691,9 @@ EffectSummary(f) = {
                                                            // an item write keyed by a parameter (`EntryKey`)
                                                            // is copied to every caller with the key the call
                                                            // passes (`passed`: a constant, the caller's
-                                                           // parameter, or a key heki cannot tell)
+                                                           // parameter, or a key heki cannot tell) for MUT201
+                                                           // and `heki inspect`; EFF201 resolves the key along
+                                                           // the calls its search follows, route by route
     typed_field_writes:       Set<(Class, Attr)>,          // every typed write reached through any callee
     typed_params:             Bitset,                      // parameters the function types itself (its sites
                                                            // cover their changes)
