@@ -4933,6 +4933,69 @@ fn steps_package_names() -> Vec<Step> {
     ]
 }
 
+const STAR_IMPL: &str = "import time\n\n__all__ = [\"fetch\"]\n\n\ndef fetch(url):\n    time.sleep(1)\n    return url\n";
+const STAR_USER: &str =
+    "from pkg.star import fetch\n\n\nasync def handle(url):\n    return fetch(url)\n";
+
+/// `from pkg.star import fetch` where `pkg/star/__init__.py` re-exports with a star import: the
+/// function while the module the import names, or one it star-imports in turn, exports it.
+fn steps_star_imports() -> Vec<Step> {
+    let unlisted = STAR_IMPL.replace("__all__ = [\"fetch\"]\n", "");
+    vec![
+        Step::new(
+            "a package re-exports a module's `__all__` with a star import",
+            vec![
+                Action::Create("pkg/star/__init__.py", "from ._impl import *\n".to_owned()),
+                Action::Create("pkg/star/_impl.py", STAR_IMPL.to_owned()),
+                Action::Create("pkg/star_user.py", STAR_USER.to_owned()),
+            ],
+        )
+        .present(&[("pkg/star_user.py", "EFF101")]),
+        Step::new(
+            "the module's `__all__` no longer lists the function",
+            vec![save(
+                "pkg/star/_impl.py",
+                &STAR_IMPL.replace("[\"fetch\"]", "[]"),
+            )],
+        )
+        .absent(&[("pkg/star_user.py", "EFF101")]),
+        Step::new(
+            "without `__all__`, the module's public names are re-exported",
+            vec![save("pkg/star/_impl.py", &unlisted)],
+        )
+        .present(&[("pkg/star_user.py", "EFF101")]),
+        Step::new(
+            "the package star-imports another module, which star-imports the first",
+            vec![
+                Action::Create("pkg/star/_api.py", "from ._impl import *\n".to_owned()),
+                save("pkg/star/__init__.py", "from ._api import *\n"),
+            ],
+        )
+        .present(&[("pkg/star_user.py", "EFF101")]),
+        Step::new(
+            "the first module makes the function private",
+            vec![save(
+                "pkg/star/_impl.py",
+                &unlisted.replace("def fetch", "def _fetch"),
+            )],
+        )
+        .absent(&[("pkg/star_user.py", "EFF101")]),
+        Step::new(
+            "the module the package star-imports defines the function itself",
+            vec![save(
+                "pkg/star/_api.py",
+                "import time\n\nfrom ._impl import *\n\n\ndef fetch(url):\n    time.sleep(1)\n    return url\n",
+            )],
+        )
+        .present(&[("pkg/star_user.py", "EFF101")]),
+        Step::new(
+            "the package no longer star-imports",
+            vec![save("pkg/star/__init__.py", "")],
+        )
+        .absent(&[("pkg/star_user.py", "EFF101")]),
+    ]
+}
+
 // ---------------------------------------------------------------------------------- the oracle
 
 /// One diagnostic in LSP coordinates: `(file, (line, UTF-16 column) start, end)`.
@@ -5391,6 +5454,7 @@ sessions!(editing, Session::start, {
     declarations: steps_declarations,
     re_exports: steps_re_exports,
     package_names: steps_package_names,
+    star_imports: steps_star_imports,
 });
 
 // ------------------------------------------------------- files, layout, and buffers (session 2)
