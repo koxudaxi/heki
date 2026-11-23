@@ -85,10 +85,6 @@ pub struct FreshReturns {
 }
 
 impl FreshReturns {
-    pub fn is_empty(&self) -> bool {
-        self.local.is_empty() && self.resolved.is_empty()
-    }
-
     /// Join the local fact of another definition of `func` (conditional definitions) into the
     /// first one's. A must-fact: it holds only when both return new containers, of one kind.
     pub(crate) fn join_definition(&mut self, func: &FuncKey, fact: Option<FreshReturn>) {

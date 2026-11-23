@@ -2171,7 +2171,7 @@ pub struct OptInTables {
     /// `MUT119`: the functions whose every returned value is a builtin container of one kind
     /// that the call made and that nothing else holds, local and final facts
     /// ([`OptInFacts::fresh_returns`]). Read through [`ProjectIndex::fresh_return`].
-    #[serde(default, skip_serializing_if = "fresh::FreshReturns::is_empty")]
+    #[serde(default)]
     pub fresh_returns: fresh::FreshReturns,
 }
 

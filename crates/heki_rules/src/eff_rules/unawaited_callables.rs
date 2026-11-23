@@ -22,10 +22,8 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
         cx.index.opt_in_facts().unawaited_handoffs,
         "`opt_in_facts` decides for EFF115"
     );
-    let Some(file) = cx.index.files.get(&unit.input.path) else {
-        return;
-    };
-    for (func, handoffs) in file.unawaited_handoffs() {
+    let file = cx.index.files.get(&unit.input.path);
+    for (func, handoffs) in file.into_iter().flat_map(|f| f.unawaited_handoffs()) {
         for handoff in handoffs {
             report(cx, unit, func, handoff, out);
         }
