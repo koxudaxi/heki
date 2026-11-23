@@ -29,16 +29,16 @@ use crate::resolver::{
     is_generator_function, self_aliases,
 };
 use crate::{
-    Access, ArgBinding, ArgOrigin, ArgTargets, ArgValue, ArgumentValues, AttrKeyPath, BoundCallee,
-    CallHop, CallSite, CallTarget, CellChange, ConstArg, Construction, ContractClass, Contracts,
-    Dispatch, EffectSummary, FileSummary, FuncKey, GuardSubject, HandedState, Implementers, Items,
-    KeptFacts, ListedCache, ModuleInput, MustExec, NewArg, NewCond, NewKind, OnEveryReturn,
-    OptInFacts, PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SharedState,
-    SharedStateFacts, SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, UnawaitedHandoff,
-    Unresolved, UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
+    Access, ArgBinding, ArgOrigin, ArgTargets, ArgValue, AttrKeyPath, BoundCallee, CallHop,
+    CallSite, CallTarget, CellChange, ConstArg, Construction, ContractClass, Contracts, Dispatch,
+    EffectSummary, FileSummary, FuncKey, GuardSubject, HandedState, Implementers, Items, KeptFacts,
+    ListedCache, ModuleInput, MustExec, NewArg, NewCond, NewKind, OnEveryReturn, OptInFacts,
+    PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SharedState, SharedStateFacts,
+    SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, UnawaitedHandoff, Unresolved,
+    UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
-use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, KeySet, Memo, Use, Visit, reach};
+use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, KeySet, Use};
 use heki_ir::{
     BasicBlock, BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry,
     FunctionId, FunctionKind, Inst, InstKind, IrFunction, ModuleIr, Must, NaturalLoop, PhiNode,
@@ -50,13 +50,15 @@ use std::borrow::Cow;
 use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::rc::Rc;
 use std::sync::Arc;
 
 mod imports;
+mod keywords;
 mod references;
 mod sentinels;
 mod statements;
+
+use keywords::agreed_marks;
 
 /// The (value, place) pairs the store walk of `return_origins` may take per byte of a function's
 /// source, above a floor: a function past it returns objects of unknown origin.
@@ -780,12 +782,12 @@ struct Extractor<'a> {
     /// The module globals and closure cells each value may be reached from
     /// ([`Self::global_roots`]), on the function's tables and budget.
     roots: Closure<VarId, KeySet<Root<'a>>>,
-    /// The constant entries of each dict display `**` unpacks, by the display
-    /// ([`Self::constant_display`]).
-    displays: Memo<VarId, Option<DisplayEntries>>,
+    /// The ways each mapping a call reads the entries of may be built, by its copy root
+    /// ([`Self::mapping`]).
+    mappings: RefCell<FxHashMap<VarId, keywords::Ways>>,
     /// The budget of the walks over the function's values ([`Self::global_roots`],
-    /// [`Self::constant_display`], [`Self::element_paths`]) and of the display entries calls
-    /// bind ([`Self::passed_keywords`]).
+    /// [`Self::mapping`], [`Self::element_paths`]) and of the mapping entries calls bind
+    /// ([`Self::keyword_ways`]).
     walk_budget: Budget,
     /// What the function may rebind (set by `build_aliases`).
     rebound: OnceCell<Rebound<'a>>,
@@ -1180,7 +1182,7 @@ impl<'a> Extractor<'a> {
             exempt: None,
             reach: FxHashMap::default(),
             roots: Closure::new(),
-            displays: Memo::new(),
+            mappings: RefCell::default(),
             walk_budget: Budget::of_function("summary::walks", f),
             rebound: OnceCell::new(),
             items_changed: OnceCell::new(),
@@ -4782,6 +4784,47 @@ impl<'a> Extractor<'a> {
                 {
                     self.child_iteration(bb, FunctionId(id), *iterable, span);
                 }
+                // `make = functools.partial(f, ...); make(...)` calls `f` here.
+                let passed = Passed {
+                    args,
+                    kwargs,
+                    star_from: *star_from,
+                    recv: None,
+                };
+                if let Some(v) = callee_var.filter(|v| self.val(*v).is_none())
+                    && let Some(partial) = self.partial(v).and_then(|p| p.called_with(&passed))
+                {
+                    let (target, recv_var) = self.callable_callee(partial.callable);
+                    let (recv, recv_is_self) = match recv_var {
+                        Some(r) => {
+                            let (origin, is_self) = self.receiver(r, bb);
+                            (Some(origin), is_self)
+                        }
+                        None => (None, false),
+                    };
+                    if self.references {
+                        // The callable the object holds is called here: its use there is a
+                        // call, not a reference.
+                        self.handed.extend(partial.calls.iter().copied());
+                    }
+                    let call = Call {
+                        dst: Some(*dst),
+                        value: Some(partial.callable),
+                        recv,
+                        recv_var,
+                        args: &partial.args,
+                        kwargs: &partial.kwargs,
+                        star_from: partial.star_from,
+                        args_at: None,
+                        is_awaited: *is_awaited,
+                        recv_is_self,
+                        constructs: self.class_called(partial.callable),
+                        per_item: None,
+                        span,
+                    };
+                    self.call_inst((bb, index), callee, target, &call);
+                    return;
+                }
                 let callee_val = callee_var.and_then(|v| self.val(v));
                 // `m = obj.method; m(...)` and `getattr(obj, "method")(...)` call a method of
                 // the receiver, as `obj.method(...)` does.
@@ -5986,189 +6029,6 @@ impl<'a> Extractor<'a> {
         false
     }
 
-    /// [`Contracts::marked_params`], when `call` may pass them: a builtin calling the callees
-    /// per item passes them no constant of the caller.
-    fn marked_params(&self, call: &Call<'_>) -> Option<&'a FxHashSet<String>> {
-        let marked = self.contracts?.marked_params();
-        (!marked.is_empty() && call.per_item.is_none()).then_some(marked)
-    }
-
-    /// [`CallSite::arguments`] of a class without a project `__init__` (a dataclass, a pydantic
-    /// model): only a keyword names a parameter there.
-    fn keyword_marks(&self, call: &Call<'_>) -> Option<Box<ArgumentValues>> {
-        let marked = self.marked_params(call)?;
-        let passed = self.passed_keywords(call);
-        if passed.repeated {
-            return None;
-        }
-        let values = passed
-            .named
-            .iter()
-            .filter(|(name, _)| marked.contains(name.as_ref()))
-            .filter_map(|(name, v)| Some((name.to_string(), self.arg_value(*v)?)));
-        agreed_marks(vec![Some(values.collect())])
-    }
-
-    /// The constants `call` passes to `decl` (whose first positional argument binds parameter
-    /// `offset`) for its parameters an argument list names (`marked`), as `bindings` binds them,
-    /// with the name of a keyword landing in `**kwargs` as a parameter of its own. `None` when
-    /// the call raises `TypeError` instead of running `decl` ([`Bindings::raises`]).
-    fn callee_marks(
-        &self,
-        call: &Call<'_>,
-        decl: &FunctionDecl,
-        offset: usize,
-        bindings: &Bindings<'_>,
-        marked: &FxHashSet<String>,
-    ) -> Option<Vec<(String, ArgValue)>> {
-        if bindings.raises(decl, offset) {
-            return None;
-        }
-        let name_of = |p: usize| decl.param_names.get(p).filter(|n| marked.contains(*n));
-        let mut out = Vec::new();
-        for (name, v, p) in &bindings.keywords {
-            // In `**kwargs`, the keyword passes nothing to a parameter of its name (a
-            // positional-only one, or `*args` / `**kwargs` itself).
-            if !marked.contains(name.as_ref())
-                || (p.is_none() && decl.param_names.iter().any(|n| n == name))
-            {
-                continue;
-            }
-            out.extend(self.arg_value(*v).map(|value| (name.to_string(), value)));
-        }
-        for &(slot, a) in &bindings.slots {
-            if let Some(name) = decl.positional_param(slot).and_then(name_of) {
-                out.extend(self.arg_value(a).map(|value| (name.clone(), value)));
-            }
-        }
-        for (p, c) in bindings.defaults(call, decl, offset) {
-            if let Some(name) = name_of(p) {
-                out.extend(ArgValue::decided(c).map(|value| (name.clone(), value)));
-            }
-        }
-        Some(out)
-    }
-
-    /// How `call` binds the parameters of `decl`, whose first positional argument binds
-    /// parameter `offset` (a bound receiver binds those before it).
-    fn bindings<'c>(&self, call: &Call<'c>, decl: &FunctionDecl, offset: usize) -> Bindings<'c> {
-        let passed = self.passed_keywords(call);
-        let keywords = passed.named.into_iter().map(|(name, v)| {
-            let p = decl.keyword_param(&name);
-            (name, v, p)
-        });
-        Bindings {
-            slots: self.positional_slots(call, offset),
-            keywords: keywords.collect(),
-            unpacks: call.star_from.is_some() || passed.open,
-            repeated: passed.repeated,
-        }
-    }
-
-    /// The keywords `call` passes by name: each one written, and the entries of each `**`
-    /// operand that is a constant dict display ([`Self::constant_display`]), which Python passes
-    /// as written keywords; any other `**` operand may pass any keyword. Every call binds each
-    /// entry of the displays it unpacks, which the source does not repeat: the entries are taken
-    /// from the function's budget, so that a wide display unpacked by many calls costs work
-    /// linear in the function, and past the budget a display may pass any keyword.
-    fn passed_keywords<'c>(&self, call: &Call<'c>) -> Keywords<'c> {
-        let mut named: Vec<(Cow<'c, str>, VarId)> = Vec::new();
-        let (mut open, mut unpacked) = (false, false);
-        for (name, v) in call.kwargs {
-            let display = || {
-                self.constant_display(*v)
-                    .filter(|entries| self.walk_budget.take(entries.len()))
-            };
-            match name {
-                Some(name) => named.push((Cow::Borrowed(name.as_str()), *v)),
-                None => match display() {
-                    Some(entries) => {
-                        unpacked = true;
-                        named.extend(entries.iter().map(|(k, v)| (Cow::Owned(k.clone()), *v)));
-                    }
-                    None => open = true,
-                },
-            }
-        }
-        // Written keywords never share a name; an unpacked display may repeat one.
-        let mut seen = FxHashSet::default();
-        let repeated = unpacked && !named.iter().all(|(n, _)| seen.insert(n.as_ref()));
-        Keywords {
-            named,
-            open,
-            repeated,
-        }
-    }
-
-    /// The entries of the dict display `var` holds through copies, by key, when every key is a
-    /// string constant ([`Self::resolved_str`]) and nothing changes the display
-    /// ([`Self::only_unpacked`]; a call unpacking it with `**` takes its entries without keeping
-    /// it). A later entry of a key replaces an earlier one.
-    fn constant_display(&self, var: VarId) -> Option<DisplayEntries> {
-        let root = self.shape.copy_root(var);
-        let Some(InstKind::DictLiteral { entries, .. }) = self.shape.inst(root).map(|i| &i.kind)
-        else {
-            return None;
-        };
-        let decide = || {
-            let mut out: Vec<(String, VarId)> = Vec::new();
-            let mut at: FxHashMap<String, usize> = FxHashMap::default();
-            for entry in entries {
-                let DictEntry::KeyValue { key, value } = entry else {
-                    return None;
-                };
-                let key = self.resolved_str(*key)?;
-                match at.get(&key) {
-                    Some(&i) => out[i].1 = *value,
-                    None => {
-                        at.insert(key.clone(), out.len());
-                        out.push((key, *value));
-                    }
-                }
-            }
-            self.only_unpacked(root).then(|| out.into())
-        };
-        self.displays
-            .ask(&self.walk_budget, root, decide)
-            .open_means(None)
-    }
-
-    /// Whether no use of `root` can change the object it makes: each value holding it (`root`,
-    /// its copies, and the phis merging them) is only copied, merged, unpacked with `**` into a
-    /// call, tested, returned, or raised.
-    fn only_unpacked(&self, root: VarId) -> bool {
-        let shape = self.shape;
-        let f = self.f;
-        let keeps_entries = |v: VarId, u: &Use| match *u {
-            Use::Inst(b, i) => match &f.block(b).insts[i as usize].kind {
-                InstKind::Copy { .. } => true,
-                kind @ (InstKind::Call { kwargs, .. } | InstKind::MethodCall { kwargs, .. }) => {
-                    let unpacking = kwargs.iter().filter(|(k, x)| k.is_none() && *x == v);
-                    kind.operands().iter().filter(|x| **x == v).count() == unpacking.count()
-                }
-                _ => false,
-            },
-            Use::Phi(..) | Use::Terminator(_) => true,
-        };
-        let holders = |v: VarId, out: &mut Vec<VarId>| {
-            out.extend(shape.readers(v).iter().filter_map(|u| match *u {
-                Use::Inst(b, i) => match &f.block(b).insts[i as usize].kind {
-                    InstKind::Copy { dst, .. } => Some(*dst),
-                    _ => None,
-                },
-                Use::Phi(b, i) => Some(f.block(b).phis[i as usize].dst),
-                Use::Terminator(_) => None,
-            }));
-        };
-        let walked = reach(&self.walk_budget, [root], holders, |v| {
-            match shape.readers(v).iter().all(|u| keeps_entries(v, u)) {
-                true => Visit::Expand,
-                false => Visit::Stop(()),
-            }
-        });
-        walked == Answer::Known(None)
-    }
-
     /// The constant `var` holds ([`ArgValue`]): a literal through copies, a string constant
     /// bound to a name ([`TypeCtx::str_constant_with`]), or a module's number or boolean
     /// constant ([`TypeCtx::global_literal`]).
@@ -6413,10 +6273,17 @@ impl<'a> Extractor<'a> {
                     self.iteration(bb, iterable, false, call.span);
                 }
                 self.note_returned_realloc(symbol, call);
-                // A project class without a project `__init__` (a dataclass, a pydantic model):
-                // its construction is still a call site, with no project callees.
-                if let Some(class) = &call.constructs {
-                    let arguments = self.keyword_marks(call);
+                // A project class without a project `__init__` (a dataclass, a pydantic model),
+                // and a library API building an instance of its receiver's class
+                // (`Model.model_construct(...)`): the construction is still a call site, with no
+                // project callees.
+                let built = match &call.constructs {
+                    Some(class) => Some((class.clone(), self.keyword_marks(call))),
+                    None => self
+                        .built_receiver(symbol, call)
+                        .map(|(class, fields)| (class, self.field_marks(call, fields))),
+                };
+                if let Some((class, arguments)) = built {
                     self.sites.push(CallSite {
                         caller: self.key.clone(),
                         target: CallTarget::Project(Vec::new()),
@@ -6425,7 +6292,7 @@ impl<'a> Extractor<'a> {
                         loop_depth,
                         recv_is_self: call.recv_is_self,
                         drives_coroutine_manually: false,
-                        constructs: Some(class.clone()),
+                        constructs: Some(class),
                         role: SiteRole::Call,
                         returned: None,
                         flow: None,
@@ -6476,8 +6343,13 @@ impl<'a> Extractor<'a> {
                 // `(callee, its index, what it is handed)` for `Self::hand_over`.
                 let mut handovers = Vec::new();
                 // What each callee running here is passed for the marked parameters, for
-                // `agreed_marks`.
+                // `agreed_marks`, on each way the mappings the call unpacks may be built when
+                // there are several.
                 let mut marks = Vec::new();
+                let keyword_ways = self
+                    .marked_params(call)
+                    .map(|_| self.keyword_ways(call))
+                    .filter(|ways| ways.len() > 1);
                 let mut handed_state: Vec<HandedState> = Vec::new();
                 // A constructor call binds the object it creates, unless the class may return
                 // an existing instance.
@@ -6617,7 +6489,19 @@ impl<'a> Extractor<'a> {
                         handovers.push((decl, callees.len(), handed_args));
                     }
                     if !offloaded && let Some(marked) = self.marked_params(call) {
-                        marks.push(self.callee_marks(call, decl, offset, &passing, marked));
+                        match &keyword_ways {
+                            None => {
+                                marks.push(self.callee_marks(call, decl, offset, &passing, marked));
+                            }
+                            Some(ways) => {
+                                for way in ways {
+                                    let passing = self.bind(call, decl, offset, way.clone());
+                                    marks.push(
+                                        self.callee_marks(call, decl, offset, &passing, marked),
+                                    );
+                                }
+                            }
+                        }
                     }
                     if !offloaded && self.opt_in.shared_state {
                         handed_state.extend(self.handed(
@@ -7110,13 +6994,14 @@ impl<'a> Extractor<'a> {
             p.args.splice(0..0, held.iter().copied());
             // An outer partial's `**` unpacking may override any keyword this one holds.
             let overridden = p.kwargs.iter().any(|(k, _)| k.is_none());
-            p.kwargs.splice(
-                0..0,
-                kwargs
-                    .iter()
-                    .filter(|(k, _)| !overridden || k.is_none())
-                    .cloned(),
-            );
+            // A keyword an outer partial writes again replaces this one's.
+            let replaced: Vec<_> = kwargs
+                .iter()
+                .filter(|(k, _)| !overridden || k.is_none())
+                .filter(|(k, _)| k.is_none() || !p.kwargs.iter().any(|(o, _)| o == k))
+                .cloned()
+                .collect();
+            p.kwargs.splice(0..0, replaced);
             p.open |= open;
             cur = inner;
         }
@@ -7296,28 +7181,12 @@ impl<'a> Extractor<'a> {
     /// [`Self::targets_complete`] of the call at `(bb, index)`, with the types its block narrows
     /// (those its callee was resolved with).
     fn targets_complete_at(&self, (bb, index): Position) -> bool {
-        match self.f.block(bb).insts.get(index).map(|i| &i.kind) {
-            Some(InstKind::MethodCall { recv, method, .. }) => {
-                let recv = self.val_in(bb, *recv);
-                let callee = self.cx.resolve_method(recv, method);
-                self.cx.method_targets_complete(recv, method, &callee)
-            }
-            Some(InstKind::Call { callee_var, .. }) => {
-                let value = callee_var.and_then(|v| self.val_in(bb, v));
-                let callee = self.cx.resolve_call(value);
-                self.cx.call_targets_complete(value, &callee)
-            }
-            // A read that runs property getters ([`Self::property_read`]): the getter each class
-            // the object may be finds for the name (more than CHA follows are none).
-            Some(InstKind::AttrLoad { obj, attr, .. }) => {
-                let recv = self.val_in(bb, *obj);
-                matches!(
-                    self.cx.resolve_attr_load(recv, attr),
-                    Some(Callee::Project(keys, _)) if self.cx.getter_targets_complete(recv, attr, &keys)
-                )
-            }
-            _ => false,
-        }
+        // A read that runs property getters ([`Self::property_read`]) runs the getter each class
+        // the object may be finds for the name (more than CHA follows are none).
+        self.f.block(bb).insts.get(index).is_some_and(|i| {
+            self.cx
+                .inst_targets_complete(&i.kind, |v| self.val_in(bb, v))
+        })
     }
 
     /// Whether `v` is a phi, with its inputs pushed on `next`.
@@ -8063,39 +7932,6 @@ impl Bindings<'_> {
     }
 }
 
-/// The entries of a dict display with constant keys, by key ([`Extractor::constant_display`]).
-type DisplayEntries = Rc<[(String, VarId)]>;
-
-/// The keywords a call passes by name ([`Extractor::passed_keywords`]).
-struct Keywords<'c> {
-    /// Each keyword written, and each entry of a `**` operand that is a constant dict display.
-    named: Vec<(Cow<'c, str>, VarId)>,
-    /// Another `**` operand may pass any keyword.
-    open: bool,
-    /// Two of `named` share a name: the call raises `TypeError`.
-    repeated: bool,
-}
-
-/// [`CallSite::arguments`] from what each callee a call may run is passed for the marked
-/// parameters (`None`: one the call cannot run): the constants every callee agrees on.
-fn agreed_marks(each: Vec<Option<Vec<(String, ArgValue)>>>) -> Option<Box<ArgumentValues>> {
-    let mut each = each.into_iter().map(|marks| {
-        let mut marks = marks?;
-        marks.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        Some(marks)
-    });
-    let mut values = each.next()??;
-    for other in each {
-        let other = other?;
-        values.retain(|(name, value)| {
-            other
-                .binary_search_by(|(n, _)| n.as_str().cmp(name))
-                .is_ok_and(|i| &other[i].1 == value)
-        });
-    }
-    (!values.is_empty()).then(|| Box::new(ArgumentValues(values)))
-}
-
 /// What calling a `functools.partial` object calls ([`Extractor::partial`]).
 struct Partial {
     callable: VarId,
@@ -8107,6 +7943,58 @@ struct Partial {
     kwargs: Vec<(Option<String>, VarId)>,
     /// It unpacks positional arguments with `*`: the positions after `args` are not known.
     open: bool,
+}
+
+impl Partial {
+    /// What a call passing `passed` to the object passes the callable it holds: the positional
+    /// arguments it holds, then the call's up to the first one `*` unpacks; its keywords, which
+    /// a keyword the call writes replaces, then the call's. `None` when the call unpacks a
+    /// mapping with `**` while the object holds keywords: the mapping may replace any of them.
+    fn called_with(self, passed: &Passed<'_>) -> Option<PartialCall> {
+        let unpacks_mapping = passed.kwargs.iter().any(|(k, _)| k.is_none());
+        if unpacks_mapping && !self.kwargs.is_empty() {
+            return None;
+        }
+        let written = |k: &Option<String>| passed.kwargs.iter().any(|(w, _)| w == k);
+        let kwargs = self
+            .kwargs
+            .iter()
+            .filter(|(k, _)| k.is_none() || !written(k))
+            .chain(passed.kwargs)
+            .cloned()
+            .collect();
+        let known = passed
+            .star_from
+            .map_or(passed.args.len(), |s| usize::from(s).min(passed.args.len()));
+        let held = self.args.len();
+        let (args, star_from) = match self.open {
+            true => (self.args, Some(held)),
+            false => {
+                let after = passed.args[..known].iter().copied();
+                let star_from = passed.star_from.map(|_| held + known);
+                (self.args.into_iter().chain(after).collect(), star_from)
+            }
+        };
+        Some(PartialCall {
+            callable: self.callable,
+            calls: self.calls,
+            args,
+            kwargs,
+            star_from: star_from.map(|s| u8::try_from(s).unwrap_or(u8::MAX)),
+        })
+    }
+}
+
+/// A call of a `functools.partial` object, as a call of the callable it holds
+/// ([`Partial::called_with`]).
+struct PartialCall {
+    callable: VarId,
+    /// [`Partial::calls`].
+    calls: Vec<(VarId, VarId)>,
+    args: Vec<VarId>,
+    kwargs: Vec<(Option<String>, VarId)>,
+    /// Where `*` unpacking starts among `args`.
+    star_from: Option<u8>,
 }
 
 /// What a builtin calling a callable once per item passes it ([`Extractor::passed_items`]).
