@@ -314,10 +314,10 @@ fn extract_module(
             }
         }
     }
-    if opt_in.imports {
-        if let Some(imports) = module_imports(input, imported_by_name) {
-            file.opt_in_tables_mut().imports = Some(Box::new(imports));
-        }
+    if opt_in.imports
+        && let Some(imports) = module_imports(input, imported_by_name)
+    {
+        file.opt_in_tables_mut().imports = Some(Box::new(imports));
     }
     release_spare_capacity(&mut file);
     file
