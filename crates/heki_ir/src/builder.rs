@@ -3934,6 +3934,11 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.str_heads.clear();
         self.statement_uses.clear();
         self.annotations.clear();
+        if self.is_module_body {
+            // The blocks the star imports were lowered in are gone; a star import runs only in
+            // the module body.
+            self.module.star_imports.clear();
+        }
         self.a1_hazards.push(A1Hazard {
             kind: crate::UNMODELED.to_owned(),
             span: self.span,

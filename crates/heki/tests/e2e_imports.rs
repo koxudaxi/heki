@@ -208,10 +208,11 @@ fn import_sites_say_what_they_load_and_when_they_run() {
     assert_eq!(util["imports"][0]["group"], "stdlib");
     assert_eq!(util["imports"][5]["group"], "third-party");
     assert_eq!(util["imports"][20]["group"], "project");
-    // What loading a module loads: its unguarded `body` imports, whichever branch they are
-    // in, with the parent packages of what they load, through the project's modules. Neither
-    // `yaml` (guarded), `collections` (never runs), `csv` (in a function), nor `decimal` (in a
-    // class guarded around its statement) is one.
+    // What loading a module loads: its `body` imports that run on every path through it with
+    // no `ImportError` handler, with the parent packages of what they load, through the
+    // project's modules. Neither `yaml` (guarded), `winreg` (on one branch), `collections`
+    // (never runs), `csv` (in a function), `decimal` (in a class guarded around its statement),
+    // nor `string` (in a class body, where heki does not tell the paths) is one.
     let app_loads = (
         strings(&["app.helpers", "app.parse", "app.util"]),
         strings(&[
@@ -221,9 +222,7 @@ fn import_sites_say_what_they_load_and_when_they_run() {
             "os",
             "os.path",
             "shlex",
-            "string",
             "typing",
-            "winreg",
         ]),
     );
     assert_eq!(loads(&report, "app"), app_loads);
@@ -289,7 +288,7 @@ app.cyc_a (app/cyc_a.py, package code)
     1:15  from-import of `cyc_b`: app.cyc_b (project)  [body, unconditional]
   loads while it loads, at least:
     project modules: app, app.cyc_b, app.helpers, app.parse, app.util
-    other modules: fractions, importlib, json, os, os.path, shlex, string, typing, winreg
+    other modules: fractions, importlib, json, os, os.path, shlex, typing
 
 app.cyc_b (app/cyc_b.py, package code)
   imports:
@@ -297,7 +296,7 @@ app.cyc_b (app/cyc_b.py, package code)
     2:8  import: app.parse (project)  [body, unconditional]
   loads while it loads, at least:
     project modules: app, app.cyc_a, app.helpers, app.parse, app.util
-    other modules: fractions, importlib, json, os, os.path, shlex, string, typing, winreg
+    other modules: fractions, importlib, json, os, os.path, shlex, typing
 
 app.helpers (app/helpers.py, package code)
   imports: none
@@ -377,6 +376,136 @@ finally:
             "6 import body always -> textwrap",
             "13 import body always -> fractions",
         ])
+    );
+}
+
+/// A read of a lazily imported name loads the module of the binding it sees: of a name bound
+/// twice, the later one; of a name bound on each branch, or rebound in a `try` body or by a
+/// star import, maybe the lazy one; of a name rebound before any read, none. A read heki cannot
+/// place among several bindings (in a class body) leaves them open.
+#[test]
+fn a_lazy_read_loads_the_import_whose_binding_it_sees() {
+    let p = Project::new("imports_lazy_bindings");
+    p.write(
+        "lazy_names.py",
+        "\
+import sys
+lazy import fractions as dep
+lazy import decimal as dep
+NUMBER = dep.Decimal
+if sys.version_info >= (3, 15):
+    lazy import tomllib as toml
+else:
+    lazy import plistlib as toml
+LOADS = toml.loads
+lazy import shlex
+shlex = None
+SPLIT = shlex
+lazy import json
+lazy import csv as json
+class Table:
+    dumps = json.dumps
+lazy import heapq
+class Queue:
+    push = heapq.heappush
+lazy import pickle as serializer
+try:
+    serializer = make_serializer()
+except Exception:
+    pass
+DUMP = serializer.dumps
+",
+    )
+    .write(
+        "lazy_star.py",
+        "lazy import string as join\nfrom os.path import *\nJOINED = join\n",
+    );
+    let (code, report, err) = imports(&p, "lazy_names", &["--target-version", "py315"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        sites(&report, "lazy_names"),
+        strings(&[
+            "1 import body always -> sys",
+            "2 import lazy always -> fractions",
+            "3 import body always -> decimal",
+            "6 import body -> tomllib",
+            "8 import body -> plistlib",
+            "10 import lazy always -> shlex",
+            "13 import open always -> json",
+            "14 import open always -> csv",
+            "17 import body -> heapq",
+            "20 import body -> pickle",
+        ])
+    );
+    assert_eq!(
+        loads(&report, "lazy_names"),
+        (vec![], strings(&["decimal", "sys"]))
+    );
+    let (_, report, _) = imports(&p, "lazy_star", &["--target-version", "py315"]);
+    assert_eq!(
+        sites(&report, "lazy_star"),
+        strings(&["1 import body -> string", "2 star body always -> os.path"])
+    );
+}
+
+/// A lazy import loads at the first read of its binding, so an `ImportError` handler around
+/// that read takes its failure: it is guarded when every read that may load it is.
+#[test]
+fn a_lazy_import_is_guarded_by_the_handler_around_the_read_loading_it() {
+    let p = Project::new("imports_lazy_guarded");
+    p.write(
+        "optional.py",
+        "\
+lazy import zipfile
+lazy import tarfile
+try:
+    zipfile.ZipFile
+except ImportError:
+    pass
+try:
+    tarfile.open
+except ImportError:
+    pass
+ARCHIVE = tarfile.TarFile
+",
+    );
+    let (code, report, err) = imports(&p, "optional", &["--target-version", "py315"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        sites(&report, "optional"),
+        strings(&[
+            "1 import body guarded always -> zipfile",
+            "2 import body always -> tarfile",
+        ])
+    );
+    assert_eq!(loads(&report, "optional"), (vec![], strings(&["tarfile"])));
+}
+
+/// A module body past its IR budget is left unmodeled, star imports on a branch included.
+#[test]
+fn a_star_import_in_a_module_body_past_its_budget_is_not_placed() {
+    let names: Vec<String> = (0..200).map(|i| format!("a{i}")).collect();
+    let mut lines = vec![
+        "import os".to_owned(),
+        "if os.name:".to_owned(),
+        "    from os.path import *".to_owned(),
+    ];
+    let small = lines.join("\n") + "\n";
+    lines.push(format!("{} = 0", names.join(" = ")));
+    lines.extend(std::iter::repeat_n(
+        "if os.name:\n    pass".to_owned(),
+        1000,
+    ));
+    lines.push(format!("print({})", names.join(", ")));
+    let p = Project::new("imports_star_past_budget");
+    p.write("large.py", &(lines.join("\n") + "\n"))
+        .write("small.py", &small);
+    let (code, report, err) = imports(&p, "*", &[]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(module(&report, "large")["imports"], json!([]));
+    assert_eq!(
+        sites(&report, "small"),
+        strings(&["1 import body always -> os", "3 star body -> os.path"])
     );
 }
 

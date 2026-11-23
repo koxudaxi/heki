@@ -10,8 +10,8 @@ use crate::resolver::{FromImport, ProjectDecls, resolve_relative_module};
 use crate::{FileSummary, ModuleInput, environment, is_stub};
 use heki_ast::Span;
 use heki_ir::walk::{Answer, BitSet, Budget, Closure, FnShape, Visit, reach};
-use heki_ir::{BlockId, FunctionId, InstKind, IrFunction, LastBindings, ModuleIr};
-use rustc_hash::FxHashMap;
+use heki_ir::{BlockId, FunctionId, Inst, InstKind, IrFunction, LastBindings, ModuleIr};
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::cell::OnceCell;
 use std::collections::BTreeSet;
@@ -22,7 +22,7 @@ use std::rc::Rc;
 #[serde(rename_all = "kebab-case")]
 pub enum Timing {
     /// While its module loads: in the module body or a class body the module body runs, or a
-    /// lazy import whose name the module body reads.
+    /// lazy import whose binding a read of the module body may reach ([`lazy_loads`]).
     Body,
     /// When the name it binds is first used (PEP 810), which the module body does not do.
     Lazy,
@@ -93,6 +93,13 @@ pub struct ImportSite {
 }
 
 impl ImportSite {
+    /// Whether the site imports whenever its module loads: in the body, on every path through
+    /// it, and with no `ImportError` handler taking a failure. A site on one branch (`if
+    /// sys.platform == "win32": import winreg`) is not one.
+    pub fn loads_while_its_module_loads(&self) -> bool {
+        self.timing == Answer::Known(Timing::Body) && self.unconditional && !self.guarded
+    }
+
     /// The site with its positions zeroed: what Early Cutoff compares.
     fn unplaced(&self) -> Self {
         Self {
@@ -186,9 +193,11 @@ struct Placements<'m> {
     /// By the span of the imported name: one entry for the copies of a statement in a
     /// `finally` body, guarded or unconditional when one copy is.
     placed: FxHashMap<Span, Placed>,
-    /// The names the module body reads that a lazy import binds, which the read loads there,
-    /// and whether one such read runs on every path through the body.
-    lazy_reads: FxHashMap<&'m str, bool>,
+    /// The reads of names a lazy import binds in the module body and the class bodies it runs.
+    lazy_reads: Vec<LazyRead<'m>>,
+    /// By the span of the imported name, what the module body's reads load of a lazy import
+    /// ([`lazy_loads`]).
+    lazy_loads: FxHashMap<Span, LazyLoad>,
     /// The class bodies an `ImportError` handler guards around their class statement.
     guarded_classes: Vec<Span>,
 }
@@ -200,11 +209,15 @@ impl<'m> Placements<'m> {
         let mut out = Self {
             runners: Vec::new(),
             placed: FxHashMap::default(),
-            lazy_reads: FxHashMap::default(),
+            lazy_reads: Vec::new(),
+            lazy_loads: FxHashMap::default(),
             guarded_classes: Vec::new(),
         };
         for (runner, f) in runners.iter().enumerate() {
             out.place(ir, runner, f);
+        }
+        if !out.lazy_reads.is_empty() {
+            out.lazy_loads = lazy_loads(ir, &out.lazy_reads);
         }
         out.runners = runners;
         out
@@ -226,7 +239,7 @@ impl<'m> Placements<'m> {
             .chain(bodies.iter().map(|c| (c.body, true, c.guarded)));
         for (g, in_class, outer) in holders {
             for bb in &g.blocks {
-                for inst in &bb.insts {
+                for (index, inst) in bb.insts.iter().enumerate() {
                     match &inst.kind {
                         InstKind::Import { .. } => {
                             let guarded =
@@ -238,10 +251,12 @@ impl<'m> Placements<'m> {
                             name,
                             is_lazy_import: true,
                             ..
-                        } if f.is_module_body => {
-                            let unconditional = !in_class && always(bb.id);
-                            *self.lazy_reads.entry(name.as_str()).or_default() |= unconditional;
-                        }
+                        } if f.is_module_body => self.lazy_reads.push(LazyRead {
+                            name,
+                            at: (!in_class).then_some((bb.id, index)),
+                            unconditional: !in_class && always(bb.id),
+                            guarded: outer || environment::guarded_against_import_errors(g, bb.id),
+                        }),
                         _ => {}
                     }
                 }
@@ -265,6 +280,244 @@ impl<'m> Placements<'m> {
         at.guarded |= guarded;
         at.unconditional |= always;
     }
+}
+
+/// A read of a name a lazy import binds, in the module body or a class body it runs.
+struct LazyRead<'m> {
+    name: &'m str,
+    /// The block of the module body and the instruction; `None` in a class body.
+    at: Option<(BlockId, usize)>,
+    unconditional: bool,
+    guarded: bool,
+}
+
+/// What the module body's reads load of one lazy import. An entry without `read` comes from a
+/// read whose binding heki cannot tell, which may load it.
+#[derive(Default)]
+struct LazyLoad {
+    /// A read its binding may reach: the first such read loads the module there.
+    read: bool,
+    /// A read only its binding reaches runs on every path through the body.
+    unconditional: bool,
+    /// A read that may load it is outside every `ImportError` handler.
+    unguarded: bool,
+}
+
+/// What the module body's `reads` of lazily imported names load (PEP 810): a read loads the
+/// module of the lazy import whose binding reaches it, so a name bound twice
+/// (`lazy import fractions as dep`, then `lazy import decimal as dep`) loads by the binding a
+/// read sees. A read whose binding heki cannot tell (in a class body, of a name the module
+/// binds more than once, or past the budget) may load any lazy import of its name.
+fn lazy_loads(ir: &ModuleIr, reads: &[LazyRead<'_>]) -> FxHashMap<Span, LazyLoad> {
+    let body = ir.function(ir.module_fn);
+    let shape = FnShape::new(body);
+    let names: FxHashSet<&str> = reads.iter().map(|r| r.name).collect();
+    let bindings = module_bindings(ir, &shape, &names);
+    let budget = Budget::of_function("lazy_imports", body);
+    let reaching = Closure::new();
+    let mut out: FxHashMap<Span, LazyLoad> = FxHashMap::default();
+    for read in reads {
+        let name = &bindings[read.name];
+        match name.reaching(&shape, &budget, &reaching, read.at) {
+            Answer::Known(reached) => {
+                let only = reached.len() == 1;
+                for import in reached.into_iter().filter_map(|b| name.import(b)) {
+                    let load = out.entry(import).or_default();
+                    load.read = true;
+                    load.unconditional |= only && read.unconditional;
+                    load.unguarded |= !read.guarded;
+                }
+            }
+            Answer::Open => {
+                for import in (0..name.all.len()).filter_map(|b| name.import(b)) {
+                    out.entry(import).or_default().unguarded |= !read.guarded;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The bindings of `names` in the module body of `ir`, by name: its stores (`StoreGlobal`: an
+/// assignment, a definition, an import) and its star imports.
+fn module_bindings<'n>(
+    ir: &ModuleIr,
+    shape: &FnShape<'_>,
+    names: &FxHashSet<&'n str>,
+) -> FxHashMap<&'n str, NameBindings> {
+    let mut out: FxHashMap<&str, NameBindings> = (names.iter().enumerate())
+        .map(|(id, &name)| (name, NameBindings::new(id as u32)))
+        .collect();
+    let body = shape.f;
+    for bb in &body.blocks {
+        for (index, inst) in bb.insts.iter().enumerate() {
+            if let InstKind::StoreGlobal { name, value } = &inst.kind
+                && let Some(bindings) = out.get_mut(name.as_str())
+            {
+                let binding = match shape.inst(shape.copy_root(*value)) {
+                    Some(
+                        i @ Inst {
+                            kind: InstKind::Import { is_lazy: true, .. },
+                            ..
+                        },
+                    ) => Binding::Lazy(i.span),
+                    _ => Binding::Store,
+                };
+                bindings.add(bb.id, index + 1, binding);
+            }
+        }
+    }
+    for &(bb, span) in &ir.star_imports {
+        let insts = &body.block(bb).insts;
+        let after = (insts.iter())
+            .position(|i| i.span.start >= span.end)
+            .unwrap_or(insts.len());
+        for bindings in out.values_mut() {
+            bindings.add(bb, after, Binding::Star);
+        }
+    }
+    for bindings in out.values_mut() {
+        for list in bindings.by_block.values_mut() {
+            list.sort_unstable();
+        }
+    }
+    out
+}
+
+/// A binding of a name in the module body.
+#[derive(Clone, Copy)]
+enum Binding {
+    /// A lazy import, by its imported name.
+    Lazy(Span),
+    /// Any other store.
+    Store,
+    /// A star import, which may bind the name or leave the binding before it.
+    Star,
+}
+
+/// The bindings of one name in the module body.
+struct NameBindings {
+    /// For the [`Closure`] keys.
+    id: u32,
+    /// Each binding, by its index.
+    all: Vec<Binding>,
+    /// Per block, its bindings in order: the first instruction that sees it (the one after a
+    /// store, the first after a star import) and the binding's index.
+    by_block: FxHashMap<BlockId, Vec<(usize, usize)>>,
+}
+
+impl NameBindings {
+    fn new(id: u32) -> Self {
+        Self {
+            id,
+            all: Vec::new(),
+            by_block: FxHashMap::default(),
+        }
+    }
+
+    fn add(&mut self, bb: BlockId, from: usize, binding: Binding) {
+        (self.by_block.entry(bb).or_default()).push((from, self.all.len()));
+        self.all.push(binding);
+    }
+
+    /// The lazy import binding `binding` binds.
+    fn import(&self, binding: usize) -> Option<Span> {
+        match self.all[binding] {
+            Binding::Lazy(span) => Some(span),
+            Binding::Store | Binding::Star => None,
+        }
+    }
+
+    /// Into `out`, the bindings of `bb` an instruction from `upto` on may see: back to its last
+    /// store before it, star imports after the store included. Whether there is such a store,
+    /// which hides what reaches the block.
+    fn seen_in(&self, bb: BlockId, upto: usize, out: &mut Vec<usize>) -> bool {
+        let here = self.by_block.get(&bb).into_iter().flatten().rev();
+        for &(_, binding) in here.filter(|&&(from, _)| from <= upto) {
+            out.push(binding);
+            if !matches!(self.all[binding], Binding::Star) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The bindings (by index) that may reach a read of the name `at` an instruction of the
+    /// module body: those its block sees before it and, past no store, those reaching the
+    /// block. Open in a class body (`at` is `None`) unless the name has one binding, and past
+    /// the budget.
+    fn reaching(
+        &self,
+        shape: &FnShape<'_>,
+        budget: &Budget,
+        reaching: &Closure<(u32, BlockId), BitSet>,
+        at: Option<(BlockId, usize)>,
+    ) -> Answer<Vec<usize>> {
+        if self.all.len() == 1 {
+            return Answer::Known(vec![0]);
+        }
+        let Some((bb, index)) = at else {
+            return Answer::Open;
+        };
+        let mut seen = Vec::new();
+        if self.seen_in(bb, index, &mut seen) {
+            return Answer::Known(seen);
+        }
+        let entering = reaching.ask(
+            budget,
+            (self.id, bb),
+            |(_, to)| self.entering(shape, to),
+            |(_, to), out| {
+                out.extend(
+                    (shape.preds(to).iter())
+                        .filter(|&&from| self.passes_through(shape.f, from, to))
+                        .map(|&from| (self.id, from)),
+                )
+            },
+        );
+        entering.map(|set| {
+            seen.extend(set.iter());
+            seen.sort_unstable();
+            seen.dedup();
+            seen
+        })
+    }
+
+    /// The bindings the blocks before `to` hand it in one step: those the end of a block
+    /// jumping to it sees, and every one of a block whose exceptions `to` handles (the
+    /// exception may come after any).
+    fn entering(&self, shape: &FnShape<'_>, to: BlockId) -> BitSet {
+        let mut out = BitSet::new();
+        let mut seen = Vec::new();
+        for &from in shape.preds(to) {
+            if handles(shape.f, from, to) {
+                for &(_, binding) in self.by_block.get(&from).into_iter().flatten() {
+                    out.insert(binding);
+                }
+            }
+            if shape.f.block(from).terminator.successors().contains(&to) {
+                seen.clear();
+                self.seen_in(from, usize::MAX, &mut seen);
+                for &binding in &seen {
+                    out.insert(binding);
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether what reaches the start of `from` may reach `to` through it: `from` stores the
+    /// name nowhere, or `to` handles its exceptions.
+    fn passes_through(&self, f: &IrFunction, from: BlockId, to: BlockId) -> bool {
+        let stores = (self.by_block.get(&from).into_iter().flatten())
+            .any(|&(_, binding)| !matches!(self.all[binding], Binding::Star));
+        !stores || handles(f, from, to)
+    }
+}
+
+/// Whether `to` handles the exceptions raised in `from`.
+fn handles(f: &IrFunction, from: BlockId, to: BlockId) -> bool {
+    f.block(from).exc_target == Some(to)
 }
 
 /// The import facts of `input`: its import statements, read from the semantic model and placed
@@ -326,20 +579,22 @@ fn statement_site(
         ),
     };
     let mut unconditional = at.unconditional && !at.in_class;
+    let mut guarded = at.guarded;
+    let is_lazy = matches!(statement, Statement::Import(imp) if imp.is_lazy);
     let timing = match statement {
         _ if in_type_checking => Answer::Known(Timing::TypeChecking),
         _ if !runner.is_module_body => Answer::Known(Timing::Function),
         Statement::Import(imp) if imp.lazy_open => Answer::Open,
-        // A lazy import loads where the module body first reads its name.
-        Statement::Import(imp) if imp.is_lazy => {
-            match placements.lazy_reads.get(imp.bound_name.as_str()) {
-                Some(&read_on_every_path) => {
-                    unconditional = read_on_every_path;
-                    Answer::Known(Timing::Body)
-                }
-                None => Answer::Known(Timing::Lazy),
+        // A lazy import loads where the module body first reads its binding.
+        Statement::Import(_) if is_lazy => match placements.lazy_loads.get(&span) {
+            Some(load) if load.read => {
+                unconditional = load.unconditional;
+                guarded = !load.unguarded;
+                Answer::Known(Timing::Body)
             }
-        }
+            Some(_) => Answer::Open,
+            None => Answer::Known(Timing::Lazy),
+        },
         _ => Answer::Known(Timing::Body),
     };
     let modules = match resolve_relative_module(
@@ -360,7 +615,7 @@ fn statement_site(
         form,
         modules,
         timing,
-        guarded: at.guarded,
+        guarded,
         unconditional,
     }
 }
@@ -473,7 +728,7 @@ impl<'i> ImportGraph<'i> {
             });
             let mut loads: BTreeSet<ModuleRef> = BTreeSet::new();
             for (site, target) in resolved.iter().flatten() {
-                if site.timing != Answer::Known(Timing::Body) || site.guarded {
+                if !site.loads_while_its_module_loads() {
                     continue;
                 }
                 if let Some(m) = target.certain() {
@@ -608,11 +863,11 @@ impl<'i> ImportGraph<'i> {
         Budget::of_graph(owner, self.size)
     }
 
-    /// What loading the project module `m` loads in one step: the module each of its `body`
-    /// sites loads ([`Target::certain`]), wherever the site is written (a claim from it says
-    /// where the import is, never that a branch is taken), with the parent packages it loads
-    /// first. A site an `ImportError` handler guards, and one whose timing or module heki
-    /// cannot tell, adds nothing: loading `m` loads at least these.
+    /// What loading the project module `m` loads in one step: the module each of its sites
+    /// that certainly runs while it loads loads ([`ImportSite::loads_while_its_module_loads`],
+    /// [`Target::certain`]), with the parent packages it loads first. A site on one branch, one
+    /// an `ImportError` handler guards, and one whose timing or module heki cannot tell, add
+    /// nothing: loading `m` loads at least these.
     pub fn loads(&self, m: u32) -> &[ModuleRef] {
         &self.loads[m as usize]
     }

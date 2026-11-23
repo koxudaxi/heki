@@ -14,8 +14,8 @@ For each fixture project, compares `heki inspect --imports '*' --output-format j
 - Timing classes the interpreter does not show: an `ast` reader classifies each import alias
   as inside a function, under `if TYPE_CHECKING:`, written `lazy`, or neither, and heki's
   timing of the same alias must agree (`function`, `type-checking`, `lazy` or `body` for a lazy
-  import the body loads, and `body`, `lazy` or open for the others, which `__lazy_modules__`
-  may make lazy).
+  import the body loads, or open when heki cannot tell which binding a read sees, and `body`,
+  `lazy` or open for the others, which `__lazy_modules__` may make lazy).
 
 Fixtures under a directory named `py315` need CPython 3.15 (`lazy import`). A run that
 compares no fixture fails.
@@ -204,7 +204,7 @@ class Classes(ast.NodeVisitor):
 ACCEPTED = {
     "function": {"function"},
     "type-checking": {"type-checking"},
-    "lazy": {"lazy", "body"},
+    "lazy": {"lazy", "body", None},
     "plain": {"body", "lazy", None},
 }
 

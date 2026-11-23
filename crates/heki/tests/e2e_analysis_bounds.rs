@@ -6314,3 +6314,103 @@ fn a_package_loading_thousands_of_submodules_joins_each_once() {
     assert_eq!(loads["project"].as_array().unwrap().len(), 2_000);
     assert_eq!(loads["external"], json!(["json"]));
 }
+
+/// A Python 3.15 project of one module `m`, `source`.
+fn lazy_module(source: &str) -> Project {
+    let p = Project::new("bounds_lazy_imports");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"m\"\nrequires-python = \">=3.15\"\n",
+    )
+    .write("m.py", source);
+    p
+}
+
+/// A lazy name bound on each branch of an `if`, read after each of `reads` more branches.
+fn lazy_name_read_after_branches(reads: usize) -> Project {
+    let mut src = "\
+import sys
+if sys.version_info >= (3, 15):
+    lazy import tomllib as toml
+else:
+    lazy import tomli as toml
+"
+    .to_owned();
+    for i in 0..reads {
+        src += &format!("if sys.argv:\n    pass\nV{i} = toml.loads\n");
+    }
+    lazy_module(&src)
+}
+
+/// The reads of a lazy name bound more than once share the walk back to its bindings.
+#[test]
+fn the_reads_of_a_lazy_name_share_the_walk_to_its_bindings() {
+    let report = past_budgets(2_000, &[], lazy_name_read_after_branches, |p| {
+        imports_counted(p, "m")
+    });
+    let sites = report["modules"][0]["imports"].as_array().unwrap();
+    let timings: Vec<&Value> = sites.iter().map(|s| &s["timing"]).collect();
+    assert_eq!(timings, [&json!("body"); 3]);
+}
+
+/// `names` lazy names each bound on two branches, read after `names` more branches: each
+/// name's walk passes every branch, so the walks share one budget, past which the bindings of
+/// the rest are open.
+fn lazy_names_read_after_branches(names: usize) -> Project {
+    let mut src = "import sys\n".to_owned();
+    for i in 0..names {
+        src += &format!(
+            "if sys.argv:\n    lazy import json as n{i}\nelse:\n    lazy import csv as n{i}\n"
+        );
+    }
+    for _ in 0..names {
+        src += "if sys.argv:\n    pass\n";
+    }
+    for i in 0..names {
+        src += &format!("V{i} = n{i}\n");
+    }
+    lazy_module(&src)
+}
+
+#[test]
+fn the_walks_to_the_bindings_of_many_lazy_names_share_one_budget() {
+    let report = past_budgets(
+        500,
+        &["lazy_imports"],
+        lazy_names_read_after_branches,
+        |p| imports_counted(p, "m"),
+    );
+    let sites = report["modules"][0]["imports"].as_array().unwrap();
+    assert_eq!(sites[1]["timing"], "body");
+    assert_eq!(sites.last().unwrap()["timing"], Value::Null);
+}
+
+/// PEP 735 groups including each other along many paths: `layers` layers of two groups, each
+/// including both groups of the next layer, the last one naming a requirement.
+fn layered_dependency_groups(layers: usize) -> Project {
+    let mut toml = "[project]\nname = \"acme\"\n[dependency-groups]\n".to_owned();
+    for layer in 0..layers {
+        for side in ["a", "b"] {
+            let includes = if layer + 1 < layers {
+                format!(
+                    "{{include-group = \"a{0}\"}}, {{include-group = \"b{0}\"}}",
+                    layer + 1
+                )
+            } else {
+                "\"pytest\"".to_owned()
+            };
+            toml += &format!("{side}{layer} = [{includes}]\n");
+        }
+    }
+    let p = Project::new("bounds_dependency_groups");
+    p.write("pyproject.toml", &toml)
+        .write("acme/__init__.py", "");
+    p
+}
+
+/// Reading the groups expands each group once per group asked, not once per path to it: 40
+/// layers have 2^40 paths.
+#[test]
+fn dependency_groups_included_along_many_paths_are_read_once_each() {
+    check(&layered_dependency_groups(40));
+}

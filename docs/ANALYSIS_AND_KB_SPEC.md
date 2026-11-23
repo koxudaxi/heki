@@ -2053,11 +2053,18 @@ an import itself.
   whether it runs on every path to a normal return of its function, outside loops (never
   established in a class body).
 - **Timing** (`imports::Timing`): `type-checking` under `if TYPE_CHECKING:` (the semantic
-  model's guards); `function` in a function body; `lazy` for a lazy import (1.1) whose name the
-  module body never reads, `body` when it does (the read loads the module there, which the
-  site's `unconditional` then follows); `body` for any other import of the module body or of a
-  class body it runs. An import `__lazy_modules__` may make lazy has an open timing. A site's
-  timing says where the import is written and its class, never that a branch is taken.
+  model's guards); `function` in a function body; `lazy` for a lazy import (1.1) whose binding
+  no read of the module body (or of a class body it runs) reaches, `body` when one may (the
+  first such read loads the module there: the site is `unconditional` when a read only its
+  binding reaches runs on every path, and guarded when an `ImportError` handler takes every
+  such read). A read sees the bindings of its name (stores and star imports, which may bind any
+  name) that reach it through the module body's blocks, an exception edge passing on every
+  binding of the block it leaves (`walk::Closure` per name and block, one budget of
+  `Budget::STEPS_PER_UNIT` per IR unit of the module body); a read heki cannot place, in a class
+  body or past that budget, of a name bound more than once leaves the lazy imports of the name
+  open. `body` for any other import of the module body or of a class body it runs. An import
+  `__lazy_modules__` may make lazy has an open timing. A site's timing says where the import is
+  written and its class, never that a branch is taken.
 - **The graph** (`ImportGraph`, built per check from the summaries and the declarations, never
   kept in the index): what each site loads (`Target`). `import a.b.c` loads `a.b.c`, after its
   parent packages. `from p import n` loads `p.n` when the project has that module and
@@ -2067,10 +2074,13 @@ an import itself.
   open. A module below a project package that the project does not have is `Missing`; one the
   project has but an import may find elsewhere first (`ProjectDecls::holds_module`), or a name the
   code does not fix, is open. The lookups are declaration reads (`DeclKeys::modules`).
-- **Loads while it loads** (`ImportGraph::loads`): a module's `body` sites that no
-  `ImportError` handler guards load what they certainly load (`Target::certain`: the module, or
-  the package of a `from` import) with its parent packages; a site whose timing or module is open
-  adds nothing, so what follows is what loading a module loads at least.
+- **Loads while it loads** (`ImportGraph::loads`): a module's `body` sites that run on every
+  path through the body (`unconditional`) and that no `ImportError` handler guards
+  (`ImportSite::loads_while_its_module_loads`) load what they certainly load
+  (`Target::certain`: the module, or the package of a `from` import) with its parent packages;
+  a site on one branch (`if sys.platform == "win32": import winreg`), in a class body, or whose
+  timing or module is open adds nothing, so what follows is what loading a module loads at
+  least.
   `ImportGraph::loaded_while_loading` walks it from one module (`walk::reach`), and
   `ImportGraph::import_time` (`walk::Closure`, the members of an import cycle sharing one fact)
   gives every module the modules outside the project it loads that way. Both spend one budget of
