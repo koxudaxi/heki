@@ -380,16 +380,18 @@ comprehensions or generator expressions, each over a value the function creating
 before, through `heki dump-recommend-facts`, the calls heki is blind to in a chain of
 thousands of helpers below as many `async def`s and the census of the attributes of thousands of
 classes, through `heki recommend`, thousands of library names without a catalog entry (its
-hypothetical-catalog run tries 64) and thousands of directories that would each resolve an import
-as a source root (its source-root trial tries 8), for the set orders `EFF112` follows, a chain of
-thousands of functions returning a value in a set's order up to the one writing it, a value handed
-down thousands of helpers to the one writing it, hundreds of comprehensions over one set appended
-to one written list, a value chosen among a set and hundreds of sorted lists by a chain of
-branches, and a thousand stores of a set's element as a key, each after reads of other mappings by
-the same key, and, for the call cycles `EFF114` follows, thousands of `try` statements in one
-function calling into one recursion, a call cycle through thousands of functions each calling the
-next inside a `try`, a lattice of calls thirty levels deep with a `try` at each level above a
-recursion, and a ladder of thousands of helpers above a recursion with a `try` calling each.
+hypothetical-catalog run tries 64), thousands of directories that would each resolve an import
+as a source root (its source-root trial tries 8), and the contract candidates of thousands of
+classes and of thousands of modules (its contract trial tries 32 of each kind), for the set
+orders `EFF112` follows, a chain of thousands of functions returning a value in a set's order up
+to the one writing it, a value handed down thousands of helpers to the one writing it, hundreds
+of comprehensions over one set appended to one written list, a value chosen among a set and
+hundreds of sorted lists by a chain of branches, and a thousand stores of a set's element as a
+key, each after reads of other mappings by the same key, and, for the call cycles `EFF114`
+follows, thousands of `try` statements in one function calling into one recursion, a call cycle
+through thousands of functions each calling the next inside a `try`, a lattice of calls thirty
+levels deep with a `try` at each level above a recursion, and a ladder of thousands of helpers
+above a recursion with a `try` calling each.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No

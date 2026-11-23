@@ -1945,14 +1945,16 @@ impl<K> Default for MergedReports<'_, K> {
 }
 
 /// What one report of [`MergedReports`] names: the configured `target` text, the member it
-/// matched as the message quotes it (`named`, [`matched_name`] in backticks), and the target's
+/// matched as the message quotes it (`named`, [`matched_name`] in backticks), the target's
 /// place in its contract's configuration (`rank`), which decides the target that names the
-/// report of an access matching several.
+/// report of an access matching several, and the contract's place in the configuration's array
+/// of its kind (`contract`, [`Diagnostic::contracts`]).
 #[derive(Clone, Copy)]
 pub(crate) struct Named<'a> {
     pub target: &'a str,
     pub named: &'a str,
     pub rank: usize,
+    pub contract: usize,
 }
 
 /// A group of sites of [`MergedReports`].
@@ -1999,6 +2001,8 @@ struct MergedReport<'u> {
     chain: Vec<CallHop>,
     sites: BTreeSet<SiteId>,
     groups: BTreeSet<SiteGroup>,
+    /// The contracts reporting the accesses ([`Named::contract`]).
+    contracts: BTreeSet<usize>,
 }
 
 impl<'u, K: Ord> MergedReports<'u, K> {
@@ -2041,10 +2045,12 @@ impl<'u, K: Ord> MergedReports<'u, K> {
                 chain: chain(),
                 sites: BTreeSet::new(),
                 groups: BTreeSet::new(),
+                contracts: BTreeSet::new(),
             });
         if report.named != name.named {
             report.also.insert(name.named.to_owned());
         }
+        report.contracts.insert(name.contract);
         match sites.into() {
             Sites::One(site) => {
                 report.sites.insert(site);
@@ -2127,6 +2133,11 @@ impl<'u, K: Ord> MergedReports<'u, K> {
             if !also.is_empty() {
                 message.push_str(&format!(" (also {})", also.join(", ")));
             }
+            let contracts: BTreeSet<usize> = members
+                .iter()
+                .flat_map(|&i| &reports[i].1.contracts)
+                .copied()
+                .collect();
             if let Some(d) = cx.emit(
                 out,
                 code,
@@ -2139,9 +2150,18 @@ impl<'u, K: Ord> MergedReports<'u, K> {
                 &r.chain,
             ) {
                 d.sites = sites;
+                d.contracts = contract_places(contracts);
             }
         }
     }
+}
+
+/// [`Diagnostic::contracts`] of the contracts at `places` in their kind's configuration.
+pub(crate) fn contract_places(places: impl IntoIterator<Item = usize>) -> Vec<u32> {
+    places
+        .into_iter()
+        .map(|p| u32::try_from(p).unwrap_or(u32::MAX))
+        .collect()
 }
 
 /// `unresolved` values; the first is the default (writes heki cannot tie to a class are not
@@ -2708,6 +2728,7 @@ pub(crate) fn mut201(
                             target: &text,
                             named: &quoted,
                             rank: ti,
+                            contract: r,
                         };
                         reports.add(
                             unit,
@@ -2756,8 +2777,9 @@ pub(crate) fn mut201(
                 continue;
             }
             let class = format!("{}.{owner}", unit.input.module_name);
-            for rule in rules.iter().filter(|r| r.forbid_cached.contains(&class)) {
-                cx.emit(
+            let forbidding = rules.iter().enumerate();
+            for (r, rule) in forbidding.filter(|(_, r)| r.forbid_cached.contains(&class)) {
+                if let Some(d) = cx.emit(
                     out,
                     "MUT201",
                     unit,
@@ -2770,7 +2792,9 @@ pub(crate) fn mut201(
                     ),
                     rule.note.map(str::to_owned),
                     &[],
-                );
+                ) {
+                    d.contracts = contract_places([r]);
+                }
             }
         }
     }
@@ -4266,6 +4290,7 @@ pub(crate) fn mut203<'c>(
                             target: &t.text,
                             named: &quoted,
                             rank: k,
+                            contract,
                         };
                         reports.add(
                             unit,

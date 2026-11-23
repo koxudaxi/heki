@@ -145,7 +145,19 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
          \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then \
          select it.\n\
          \n\
-         pyproject.toml: nothing to add\n"
+         Contract candidates\n\
+         \x20 effect-boundaries  app.lists  medium\n\
+         \x20   3 function(s) in 1 module(s) reach no blocking call heki sees; 1 reach code heki \
+         does not see (app.lists.logged_names)\n\
+         \x20   trial: EFF201 0\n\
+         \x20 For every candidate, accesses inside code heki cannot follow (unresolved calls, \
+         libraries without a catalog) are not seen.\n\
+         \n\
+         pyproject.toml: keys to add or change\n\
+         \x20 [[tool.heki.effect-boundaries]]\n\
+         \x20 name = \"app.lists without blocking calls\"\n\
+         \x20 scopes = [\"app.lists:*\"]\n\
+         \x20 forbid = [\"blocking\"]\n"
     );
     let (_, _, note) = p.heki(&["check"]);
     assert!(
@@ -228,13 +240,39 @@ fn the_json_object_names_the_project_and_its_run() {
         json!({"files": 8, "functions": 20, "errors": [], "paths": ["."],
                "left_out": {"python_files": 0, "files": [], "truncated": false}})
     );
-    assert_eq!(report["runs"], json!([{"label": "discovery"}]));
+    // The contract trial and the verification run with the block: `app/lists.py` keeps an
+    // effect boundary.
+    assert_eq!(
+        report["runs"],
+        json!([{"label": "discovery"}, {"label": "contract-trial"},
+               {"label": "verification"}])
+    );
     assert_eq!(
         (&report["notes"], &report["config"], &report["config_toml"]),
-        (&json!([]), &json!({}), &json!(""))
+        (
+            &json!([]),
+            &json!({"effect-boundaries": [{"name": "app.lists without blocking calls",
+                                           "scopes": ["app.lists:*"], "forbid": ["blocking"]}]}),
+            &json!(
+                "[[tool.heki.effect-boundaries]]\nname = \"app.lists without blocking calls\"\n\
+                 scopes = [\"app.lists:*\"]\nforbid = [\"blocking\"]\n"
+            )
+        )
     );
     let (_, text, _) = p.heki(&["recommend"]);
     assert_eq!(report["content"], json!(text));
+    // Without a contract or rule to add, the discovery run is the only one.
+    let (_, ignoring, _) = recommend_json(&p, &["--ignore", "EFF201"]);
+    assert_eq!(ignoring["runs"], json!([{"label": "discovery"}]));
+    assert_eq!(
+        (&ignoring["config"], &ignoring["notes"]),
+        (
+            &json!({}),
+            &json!([
+                "the configuration ignores EFF201, so no effect-boundaries contract is proposed"
+            ])
+        )
+    );
 }
 
 #[test]
@@ -353,7 +391,13 @@ fn the_configuration_file_decides_where_the_keys_go() {
         (&json!("heki.toml"), &json!(""))
     );
     let (_, out, _) = p.heki(&["recommend"]);
-    assert!(out.ends_with("\nheki.toml: nothing to add\n"), "{out}");
+    assert!(
+        out.ends_with(
+            "\nheki.toml: keys to add or change\n  [[effect-boundaries]]\n  name = \"app.lists \
+             without blocking calls\"\n  scopes = [\"app.lists:*\"]\n  forbid = [\"blocking\"]\n"
+        ),
+        "{out}"
+    );
     p.write("other.toml", "[lint]\n");
     let (_, other, _) = recommend_json(&p, &["--config", "other.toml"]);
     assert_eq!(
@@ -368,10 +412,9 @@ fn the_configuration_file_decides_where_the_keys_go() {
         (&Value::Null, &json!("tool.heki"))
     );
     assert!(
-        none["content"]
-            .as_str()
-            .unwrap()
-            .ends_with("\npyproject.toml: nothing to add\n"),
+        none["content"].as_str().unwrap().contains(
+            "\npyproject.toml: keys to add or change\n  [[tool.heki.effect-boundaries]]\n"
+        ),
         "{none}"
     );
     assert_follows_the_schema(&none);
@@ -616,7 +659,7 @@ fn rules_worth_enabling_follow_the_policy() {
         \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it."
     );
     assert!(
-        out.ends_with(
+        out.contains(
             "\npyproject.toml: keys to add or change\n  [tool.heki.lint]\n  extend-select = \
              [\"EFF107\", \"MUT106\"]  # adds EFF107, MUT106\n"
         ),
@@ -649,8 +692,8 @@ fn rules_worth_enabling_follow_the_policy() {
     );
     assert_eq!(rule(&report, "MUT103")["reports"], Value::Null);
     assert_eq!(
-        report["config"],
-        json!({"lint": {"extend-select": ["EFF107", "MUT106"]}})
+        report["config"]["lint"],
+        json!({"extend-select": ["EFF107", "MUT106"]})
     );
     // Rules the current selection runs in full, and contract rules, are not listed.
     for code in ["EFF101", "OPT101", "MUT201", "EFF201"] {
@@ -672,8 +715,8 @@ fn rules_worth_enabling_follow_the_policy() {
         (&json!(false), &json!("the configuration ignores it"))
     );
     assert_eq!(
-        ignoring["config"],
-        json!({"lint": {"extend-select": ["EFF107"]}})
+        ignoring["config"]["lint"],
+        json!({"extend-select": ["EFF107"]})
     );
     // A selected `MUT103` is not advice.
     let (_, selected, _) = recommend_json(&p, &["--extend-select", "MUT103"]);
@@ -1195,12 +1238,15 @@ fn library_names_without_a_catalog_entry_are_listed_with_what_heki_would_report(
         (&blind["totals"]["tried"], &blind["totals"]["not_tried"]),
         (&json!(4), &json!(0))
     );
+    // The module also keeps an effect boundary (contract candidates), tried after the catalog.
     assert_eq!(
         report["runs"],
-        json!([{"label": "discovery"}, {"label": "hypothetical-catalog"}])
+        json!([{"label": "discovery"}, {"label": "hypothetical-catalog"},
+               {"label": "contract-trial"}, {"label": "verification"}])
     );
     // No catalog entry enters the block, and no count of reports takes the trial's.
-    assert_eq!(report["config"], json!({}));
+    let keys: Vec<&String> = report["config"].as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["effect-boundaries"]);
     assert_eq!(report["reports_now"]["shown"], json!(0));
     assert_eq!(rule(&report, "EFF111")["reports"], json!(0));
     assert!(
@@ -1304,6 +1350,34 @@ fn subdirectory_app(name: &str) -> Project {
     // An import that names a project module now, and still does with the source root.
     .write("backend/config/settings.py", "from . import env\n");
     p
+}
+
+#[test]
+fn a_block_setting_src_is_not_verified_on_the_files_as_they_are_named_now() {
+    let p = subdirectory_app("recommend_source_root_unverified");
+    p.write(
+        "backend/tasks.py",
+        "import asyncio\n\n\nasync def work():\n    await asyncio.sleep(1)\n\n\n\
+         async def start():\n    task = asyncio.create_task(work())\n    await asyncio.sleep(0)\n",
+    );
+    let (_, report, _) = recommend_json(&p, &[]);
+    assert_eq!(
+        report["config"],
+        json!({"lint": {"extend-select": ["EFF107"]}, "src": ["backend"]})
+    );
+    assert_eq!(
+        report["runs"],
+        json!([{"label": "discovery"}, {"label": "source-roots"}])
+    );
+    assert!(
+        report["notes"].as_array().unwrap().contains(&json!(
+            "the block sets src, which renames modules and resolves imports heki does not resolve \
+             now: the counts of the block's rules are of the files as they are named now; run \
+             heki recommend again with it for the counts under it"
+        )),
+        "{report:#}"
+    );
+    assert_follows_the_schema(&report);
 }
 
 /// The paths of the `EFF101` reports `heki check` prints, sorted.

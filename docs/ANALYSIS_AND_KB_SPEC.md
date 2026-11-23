@@ -785,6 +785,14 @@ stub, in their own body or in what their calls hand on, as `blind_spot_reach` wa
 `Closure` over those states). Without an ownership contract the summaries keep no write into an entry of an attribute's
 container and do not answer whether a write constructs its object, so a contract trial sees more.
 
+A report of a contract rule records the contracts it is of (`Diagnostic::contracts`: their places
+in the configuration's array of the rule's kind; written by no output format). `heki recommend`
+declares its candidates together in one trial and counts each report for each contract it is of.
+One access several contracts report is one report standing for all of them: the strict rules
+(`MUT205`, `MUT206`, `MUT207`) key their reports by the name accessed, and `check_project` keeps
+one report per access, rule, and target. `MUT202` records none: the summaries keep its producers
+without their contract.
+
 **Guards.** An effect inside a branch of a test of the function's own inputs (`if cache:`,
 `if x is None:`, `isinstance(x, T)`, `hasattr(x, "write")`, also through `and` / `or` / `not`,
 early returns, and conditional expressions; on a parameter, or an attribute of one the function

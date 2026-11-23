@@ -137,6 +137,14 @@ pub struct Diagnostic {
     /// by no output format.
     #[serde(skip)]
     pub open_records: Vec<OpenRecord>,
+    /// The contracts the report is of, by their place in the configuration's array of its
+    /// rule's contract kind (`write-owners` for `MUT201` and `MUT205`, `read-owners` for
+    /// `MUT203` and `MUT206`, `call-owners` for `MUT204` and `MUT207`, `effect-boundaries` for
+    /// `EFF201`, `invalidation` for `MUT109`), sorted: one report at an access several
+    /// contracts find stands for each of them. Empty for the other rules and for `MUT202`, whose
+    /// producers the summaries keep without their contract; written by no output format.
+    #[serde(skip)]
+    pub contracts: Vec<u32>,
 }
 
 /// Why a heuristic report of an exact rule is not exact.
@@ -876,6 +884,7 @@ mod tests {
             sites: 1,
             fold_key: None,
             open_records: Vec::new(),
+            contracts: Vec::new(),
         }
     }
 

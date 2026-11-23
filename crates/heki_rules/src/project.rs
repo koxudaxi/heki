@@ -771,6 +771,54 @@ impl Indexed {
         units: &[ModuleUnit<'_>],
         open_premises: bool,
     ) -> Result<(Vec<Diagnostic>, Vec<Diagnostic>), RuleConfigError> {
+        let mut diags = self.reports(units, open_premises)?;
+        self.retain_unsuppressed_in(units, &mut diags);
+        let withheld = self.selection.take_heuristic(&mut diags);
+        Ok((diags, withheld))
+    }
+
+    /// [`Self::diagnose`], with the reports inline suppressions drop apart, as
+    /// `(kept, suppressed)`.
+    pub fn diagnose_with_suppressed(
+        &self,
+    ) -> Result<(Vec<Diagnostic>, Vec<Diagnostic>), RuleConfigError> {
+        let units = self.project.units();
+        let mut diags = self.reports(&units, false)?;
+        let mut kept = diags.clone();
+        self.retain_unsuppressed_in(&units, &mut kept);
+        // Both are in the same order, so one pass pairs them up; the reports on suppression
+        // comments are not among `diags`.
+        let mut next = kept
+            .iter()
+            .filter(|k| !is_suppression_report(&k.rule_code))
+            .peekable();
+        diags.retain(|d| next.next_if(|k| *k == d).is_none());
+        let mut suppressed = diags;
+        self.selection.take_heuristic(&mut kept);
+        self.selection.take_heuristic(&mut suppressed);
+        Ok((kept, suppressed))
+    }
+
+    /// Drop the reports on `units` that inline suppressions suppress, and add the reports on
+    /// suppression comments the configuration asks for.
+    fn retain_unsuppressed_in(&self, units: &[ModuleUnit<'_>], diags: &mut Vec<Diagnostic>) {
+        // The reports of a unit are on its own file.
+        let checked: FxHashSet<&Path> = units.iter().map(|u| u.input.path.as_path()).collect();
+        let files = self.project.files.iter();
+        retain_unsuppressed(
+            diags,
+            files.filter(|f| checked.contains(f.path.as_path())),
+            &self.rules_run(),
+        );
+    }
+
+    /// Every report of the selected rules in `units`, before inline suppressions and the
+    /// heuristic reports the selection withholds.
+    fn reports(
+        &self,
+        units: &[ModuleUnit<'_>],
+        open_premises: bool,
+    ) -> Result<Vec<Diagnostic>, RuleConfigError> {
         let env = &self.project.env;
         let decls = self.index.project_decls();
         let sources: FxHashMap<&Path, &str> = self
@@ -790,24 +838,14 @@ impl Indexed {
             text_of: Some(&text_of),
             open_premises,
         };
-        let mut diags = check_project(
+        check_project(
             units,
             &env.cfg,
             &env.kb,
             &self.index,
             &self.selection,
             &extras,
-        )?;
-        // The reports of a unit are on its own file.
-        let checked: FxHashSet<&Path> = units.iter().map(|u| u.input.path.as_path()).collect();
-        let files = self.project.files.iter();
-        retain_unsuppressed(
-            &mut diags,
-            files.filter(|f| checked.contains(f.path.as_path())),
-            &self.rules_run(),
-        );
-        let withheld = self.selection.take_heuristic(&mut diags);
-        Ok((diags, withheld))
+        )
     }
 }
 
@@ -1027,6 +1065,7 @@ fn suppression_report(
         sites: 1,
         fold_key: None,
         open_records: Vec::new(),
+        contracts: Vec::new(),
     })
 }
 

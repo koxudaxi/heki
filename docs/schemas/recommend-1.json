@@ -301,6 +301,20 @@
       ],
       "type": "object"
     },
+    "Confidence": {
+      "oneOf": [
+        {
+          "const": "high",
+          "description": "The trial found nothing the contract cannot see: no access it cannot tie to a class (an\neffect boundary: no scope function reaching code heki does not see), and every Python file\nbelow the project root was analyzed.",
+          "type": "string"
+        },
+        {
+          "const": "medium",
+          "description": "The trial reports no violation, but heki may not see all the contract is about: accesses\non objects of unknown class, Python files below the project root left out, or scope\nfunctions reaching code heki does not see. The caveats say which. An ownership entry then\nsets `unresolved = \"ignore\"`.",
+          "type": "string"
+        }
+      ]
+    },
     "Consequence": {
       "description": "What happens in the code a rule reports, which sets its default severity.",
       "oneOf": [
@@ -320,6 +334,60 @@
           "type": "string"
         }
       ]
+    },
+    "ContractAdvice": {
+      "additionalProperties": false,
+      "description": "A candidate the trial kept: the block declares it.",
+      "properties": {
+        "caveats": {
+          "description": "What the confidence does not cover.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "confidence": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "entry": {
+          "additionalProperties": true,
+          "description": "The entry the block declares, as the keys it sets.",
+          "type": "object"
+        },
+        "evidence": {
+          "$ref": "#/$defs/Evidence"
+        },
+        "kind": {
+          "$ref": "#/$defs/ContractKind"
+        },
+        "target": {
+          "description": "What the entry is about: the attribute (`module:Class.attr`), or the package or module its\nscopes cover.",
+          "type": "string"
+        },
+        "trial": {
+          "$ref": "#/$defs/Trial",
+          "description": "What the contract trial reported for it."
+        }
+      },
+      "required": [
+        "kind",
+        "target",
+        "entry",
+        "confidence",
+        "evidence",
+        "trial",
+        "caveats"
+      ],
+      "type": "object"
+    },
+    "ContractKind": {
+      "description": "The kinds of contract `heki recommend` proposes, by their key in the configuration.",
+      "enum": [
+        "write-owners",
+        "read-owners",
+        "effect-boundaries"
+      ],
+      "type": "string"
     },
     "Counts": {
       "additionalProperties": false,
@@ -354,6 +422,40 @@
         "awaited",
         "on_event_loop",
         "in_loops"
+      ],
+      "type": "object"
+    },
+    "Evidence": {
+      "additionalProperties": false,
+      "description": "What a candidate rests on, from the discovery run.",
+      "properties": {
+        "audience": {
+          "$ref": "#/$defs/Listed",
+          "description": "The other modules reading the attribute (`write-owners`), using its class\n(`read-owners`), or calling into the scopes (`effect-boundaries`)."
+        },
+        "functions": {
+          "$ref": "#/$defs/Listed",
+          "description": "The functions the entry allows (`write-owners`: those writing the attribute after its\nobject is constructed; `read-owners`: those reading it) or holds (`effect-boundaries`:\nthe functions its scopes' modules define, without the comprehensions and lambdas inside\nthem), fully qualified."
+        },
+        "in_place": {
+          "description": "`write-owners`: a writer changes the attribute's object in place (a container).",
+          "type": "boolean"
+        },
+        "modules": {
+          "$ref": "#/$defs/Listed",
+          "description": "The modules of those functions; for an attribute written only while its objects are\nconstructed, the module of its class."
+        },
+        "unseen": {
+          "$ref": "#/$defs/Listed",
+          "description": "`effect-boundaries`: the functions of the scopes reaching code heki does not see (a call\nit does not resolve, a library name without a catalog entry, an A1 hazard, a body known\nonly from a stub)."
+        }
+      },
+      "required": [
+        "functions",
+        "modules",
+        "audience",
+        "in_place",
+        "unseen"
       ],
       "type": "object"
     },
@@ -449,6 +551,34 @@
       ],
       "type": "object"
     },
+    "Listed": {
+      "additionalProperties": false,
+      "description": "A list of names, the first [`MAX_LISTED`] of them.",
+      "properties": {
+        "count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "items": {
+          "description": "Sorted.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "description": "Whether `items` holds fewer than `count`.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "count",
+        "items",
+        "truncated"
+      ],
+      "type": "object"
+    },
     "Location": {
       "additionalProperties": false,
       "properties": {
@@ -470,6 +600,33 @@
         "path",
         "line",
         "column"
+      ],
+      "type": "object"
+    },
+    "NotTried": {
+      "additionalProperties": false,
+      "description": "The candidates of one kind past the first [`MAX_CANDIDATES`] (for `write-owners`, less the\nconfiguration's own), which no trial declared.",
+      "properties": {
+        "candidates": {
+          "description": "The candidates past them.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/ContractKind"
+        },
+        "tried": {
+          "description": "The candidates the trial declared.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "tried",
+        "candidates"
       ],
       "type": "object"
     },
@@ -685,6 +842,39 @@
         "right_percent",
         "interval_percent",
         "real_harm_percent"
+      ],
+      "type": "object"
+    },
+    "RejectedContract": {
+      "additionalProperties": false,
+      "description": "A candidate a run with it declared reported for.",
+      "properties": {
+        "entry": {
+          "additionalProperties": true,
+          "description": "The entry the block would declare.",
+          "type": "object"
+        },
+        "kind": {
+          "$ref": "#/$defs/ContractKind"
+        },
+        "run": {
+          "$ref": "#/$defs/RunLabel",
+          "description": "The run that reported it: the contract trial, or the verification run with the whole\nblock."
+        },
+        "target": {
+          "description": "What the entry is about, as for a candidate kept.",
+          "type": "string"
+        },
+        "trial": {
+          "$ref": "#/$defs/Trial"
+        }
+      },
+      "required": [
+        "kind",
+        "target",
+        "entry",
+        "run",
+        "trial"
       ],
       "type": "object"
     },
@@ -943,6 +1133,16 @@
           "const": "hypothetical-catalog",
           "description": "The configuration with a catalog entry that waits and sends a query for each library\nname tried, and the rules those effects make report.",
           "type": "string"
+        },
+        {
+          "const": "contract-trial",
+          "description": "The configuration with every contract candidate declared, the contract rules selected.",
+          "type": "string"
+        },
+        {
+          "const": "verification",
+          "description": "The configuration with the whole block applied, the block's rules and contracts selected.",
+          "type": "string"
         }
       ]
     },
@@ -1173,6 +1373,68 @@
       ],
       "type": "object"
     },
+    "Trial": {
+      "additionalProperties": false,
+      "description": "What a run with the contract declared reported for it.",
+      "properties": {
+        "examples": {
+          "description": "The reports after inline suppressions, the first 50 in the order `heki check` prints\nthem.",
+          "items": {
+            "$ref": "#/$defs/TrialReport"
+          },
+          "type": "array"
+        },
+        "reports": {
+          "additionalProperties": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "The reports after inline suppressions, by rule: the contract's rule, and for an ownership\ncontract the rule of the accesses it cannot tie to a class.",
+          "type": "object"
+        },
+        "suppressed": {
+          "description": "The reports inline suppressions drop.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "reports",
+        "suppressed",
+        "examples"
+      ],
+      "type": "object"
+    },
+    "TrialReport": {
+      "additionalProperties": false,
+      "description": "One report of a trial.",
+      "properties": {
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "path": {
+          "description": "As `heki check` writes it.",
+          "type": "string"
+        },
+        "rule": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule",
+        "path",
+        "line",
+        "message"
+      ],
+      "type": "object"
+    },
     "UnresolvedCalls": {
       "additionalProperties": false,
       "description": "The calls one function makes that heki resolves to no function, for one reason.",
@@ -1282,6 +1544,20 @@
       "description": "The report as the text output prints it.",
       "type": "string"
     },
+    "contracts": {
+      "description": "The contracts the code keeps, which the block declares: each kept by the contract trial,\nthen applied with the whole block by the verification run. By kind, then by rank within\nit.",
+      "items": {
+        "$ref": "#/$defs/ContractAdvice"
+      },
+      "type": "array"
+    },
+    "contracts_not_tried": {
+      "description": "The candidates past the cap of their kind, which no trial declared.",
+      "items": {
+        "$ref": "#/$defs/NotTried"
+      },
+      "type": "array"
+    },
     "heki": {
       "description": "The version of heki that wrote the report.",
       "type": "string"
@@ -1299,6 +1575,13 @@
     "open_premises": {
       "$ref": "#/$defs/OpenPremises",
       "description": "What keeps the heuristic reports of exact claims heuristic."
+    },
+    "rejected_contracts": {
+      "description": "The candidates a run with them declared reported for: not in the block.",
+      "items": {
+        "$ref": "#/$defs/RejectedContract"
+      },
+      "type": "array"
     },
     "reports_now": {
       "$ref": "#/$defs/ReportsNow"
@@ -1346,6 +1629,9 @@
     "open_premises",
     "blind_spots",
     "rules",
+    "contracts",
+    "rejected_contracts",
+    "contracts_not_tried",
     "notes",
     "config",
     "config_toml",
