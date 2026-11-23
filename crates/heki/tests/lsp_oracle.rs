@@ -677,6 +677,16 @@ const EXACT_SUB_OVERRIDING: &str = "from pkg.exact_base import Base\n\n\nclass Q
 const EXACT_SUB_BLOCKING: &str = "import requests\n\nfrom pkg.exact_base import Base\n\n\nclass Quiet(Base):\n    def fetch(self, url):\n        return requests.post(url)\n";
 const EXACT_USE: &str =
     "from pkg.exact_base import Base\n\n\nasync def serve(b: Base):\n    b.fetch(\"u\")\n";
+// The base's class body binds the method to another function on some paths: the call may run
+// either, so the report is not exact.
+const EXACT_BASE_QUIET_ON_A_PATH: &str = "import os\n\nimport requests\n\n\ndef _quiet(self, url):\n    return url\n\n\nclass Base:\n    def fetch(self, url):\n        return requests.get(url)\n\n    if os.environ.get(\"QUIET\"):\n        fetch = _quiet\n";
+// A module binds a blocking function's name to another function on some paths, then on every
+// path, read from another module.
+const EXACT_FETCH: &str = "import requests\n\n\ndef fetch(url):\n    return requests.get(url)\n";
+const EXACT_FETCH_ON_A_PATH: &str = "import os\n\nimport requests\n\n\ndef _quiet(url):\n    return url\n\n\ndef fetch(url):\n    return requests.get(url)\n\n\nif os.environ.get(\"QUIET\"):\n    fetch = _quiet\n";
+const EXACT_FETCH_REBOUND: &str = "import requests\n\n\ndef _quiet(url):\n    return url\n\n\ndef fetch(url):\n    return requests.get(url)\n\n\nfetch = _quiet\n";
+const EXACT_FETCH_USE: &str =
+    "from pkg import exact_fetch\n\n\nasync def serve():\n    exact_fetch.fetch(\"u\")\n";
 
 // Store types (`ModuleDecls::global_types`, `ClassDecl::attr_stores`): an `async def` calls a
 // method on a module global, in its module and through an import, and on an instance attribute;
@@ -1287,7 +1297,8 @@ fn steps_kept_values() -> Vec<Step> {
 
 /// Exact effect reports follow every implementation of a call across modules (the targets of
 /// `CallSite::complete` read the subclasses of another file) and the must-facts of the callees
-/// (`EffectSummary::must_exec`, compared by Early Cutoff).
+/// (`EffectSummary::must_exec`, compared by Early Cutoff), and every binding of the name called
+/// that may be its last in the module or class body of another file.
 fn steps_exact_effects() -> Vec<Step> {
     vec![
         Step::new(
@@ -1317,6 +1328,38 @@ fn steps_exact_effects() -> Vec<Step> {
         )
         .present(&[("pkg/exact_use.py", "EFF101")])
         .absent(&[("pkg/exact_use.py", "EFF111")]),
+        Step::new(
+            "the base's class body binds the method to another function on some paths",
+            vec![save("pkg/exact_base.py", EXACT_BASE_QUIET_ON_A_PATH)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF111")])
+        .absent(&[("pkg/exact_use.py", "EFF101")]),
+        Step::new(
+            "the base defines the method once again, and a module calls a blocking function",
+            vec![
+                save("pkg/exact_base.py", EXACT_BASE),
+                Action::Create("pkg/exact_fetch.py", EXACT_FETCH.to_owned()),
+                Action::Create("pkg/exact_fetch_use.py", EXACT_FETCH_USE.to_owned()),
+            ],
+        )
+        .present(&[
+            ("pkg/exact_use.py", "EFF101"),
+            ("pkg/exact_fetch_use.py", "EFF101"),
+        ]),
+        Step::new(
+            "the function's module binds its name to another function on some paths",
+            vec![save("pkg/exact_fetch.py", EXACT_FETCH_ON_A_PATH)],
+        )
+        .present(&[("pkg/exact_fetch_use.py", "EFF111")])
+        .absent(&[("pkg/exact_fetch_use.py", "EFF101")]),
+        Step::new(
+            "the module binds the name to the other function on every path",
+            vec![save("pkg/exact_fetch.py", EXACT_FETCH_REBOUND)],
+        )
+        .absent(&[
+            ("pkg/exact_fetch_use.py", "EFF101"),
+            ("pkg/exact_fetch_use.py", "EFF111"),
+        ]),
     ]
 }
 
