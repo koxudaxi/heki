@@ -12,6 +12,7 @@
 mod builder;
 mod dominators;
 mod facts;
+mod special_methods;
 pub mod walk;
 
 pub use builder::build_module_ir;
@@ -21,6 +22,7 @@ pub use facts::{
     ModuleBindings, ModuleConstants, Must, PathReader, Paths, Progress, SMALL_MAX, SmallDisplay,
     Trips, comprehension_id, is_builtin_name,
 };
+pub use special_methods::SpecialMethods;
 
 use heki_ast::Span;
 use heki_semantic::{ClassId, ScopeId};

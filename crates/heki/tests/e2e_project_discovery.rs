@@ -6,7 +6,6 @@ mod common;
 use common::Project;
 use serde_json::{Value, json};
 use std::path::Path;
-use std::process::Command;
 
 /// `import time` + a blocking helper.
 const BLOCKING_WAIT: &str = "import time\n\n\ndef wait():\n    time.sleep(1)\n";
@@ -69,7 +68,7 @@ fn src_directories_are_source_roots_unless_they_are_packages() {
 /// `heki check --heuristic --fail-on warning --output-format concise <args>` run from `dir`, as
 /// `Project::check` runs it: `(exit code, stdout)`.
 fn concise_in(dir: &Path, args: &[&str]) -> (i32, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_heki"))
+    let out = common::heki_command()
         .args([
             "check",
             "--heuristic",

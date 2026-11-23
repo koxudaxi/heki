@@ -213,6 +213,8 @@ struct StaleWrite<'m, 'a> {
     writer: &'m Method<'a>,
     attr: &'a str,
     span: Span,
+    /// The write establishes every premise of `MUT101`'s exact claim ([`kept_values`]).
+    exact: bool,
 }
 
 /// The writes of `family` that leave a `@cached_property` of the class (`methods`) stale, in
@@ -285,6 +287,9 @@ fn stale_writes<'m, 'a>(
                 continue;
             }
             let receiver = receiver_class(decls, m, p);
+            let calls = std::cell::OnceCell::new();
+            let mut kept: Vec<Option<kept_values::KeptAfterWrites<'_>>> =
+                flows.iter().map(|_| None).collect();
             for (&attr, read_keys) in &reads {
                 let writes: Vec<&AttrKeyPath> = local
                     .mutates_self_attrs
@@ -295,29 +300,31 @@ fn stale_writes<'m, 'a>(
                 if writes.is_empty() || decls.attr_write_runs_code(&receiver, attr) {
                     continue;
                 }
-                let first = flows.iter().zip(&invalidations).find_map(|(flow, points)| {
-                    // Filter 2: memo / cache dictionaries.
-                    let mut own: Vec<&SelfAttrWrite> = flow
-                        .writes_of(attr)
-                        .filter(|w| !w.fills_memo(attr))
-                        .collect();
-                    // Computing the cached value initialized the attribute (the property reads
-                    // it only where it is initialized lazily), so a lazy initialization cannot
-                    // find it unset after.
-                    if ps.lazily_read_self_attrs.contains(attr) {
-                        own.retain(|w| !w.lazy_init);
-                    }
-                    // The cached value holds the attribute's object itself: it sees the
-                    // changes made in place, and only rebinding the attribute leaves it behind.
-                    if ps.returns_self_attrs.contains(attr) {
-                        own.retain(|w| w.rebinds);
-                    }
-                    if let Some(points) = points {
-                        own.retain(|w| !points.cover(flow, w.block, w.index));
-                    }
-                    own.first().map(|w| w.span)
-                });
-                let Some(span) = first else {
+                let first = flows.iter().zip(&invalidations).enumerate().find_map(
+                    |(fi, (flow, points))| {
+                        // Filter 2: memo / cache dictionaries.
+                        let mut own: Vec<&SelfAttrWrite> = flow
+                            .writes_of(attr)
+                            .filter(|w| !w.fills_memo(attr))
+                            .collect();
+                        // Computing the cached value initialized the attribute (the property reads
+                        // it only where it is initialized lazily), so a lazy initialization cannot
+                        // find it unset after.
+                        if ps.lazily_read_self_attrs.contains(attr) {
+                            own.retain(|w| !w.lazy_init);
+                        }
+                        // The cached value holds the attribute's object itself: it sees the
+                        // changes made in place, and only rebinding the attribute leaves it behind.
+                        if ps.returns_self_attrs.contains(attr) {
+                            own.retain(|w| w.rebinds);
+                        }
+                        if let Some(points) = points {
+                            own.retain(|w| !points.cover(flow, w.block, w.index));
+                        }
+                        own.first().map(|w| (fi, *w))
+                    },
+                );
+                let Some((fi, write)) = first else {
                     continue;
                 };
                 // Filter 3: disjoint constant dict keys.
@@ -327,11 +334,18 @@ fn stale_writes<'m, 'a>(
                 ) {
                     continue;
                 }
+                let kept = kept[fi].get_or_insert_with(|| {
+                    let calls = calls.get_or_init(|| kept_values::calls_by_span(index, m));
+                    kept_values::KeptAfterWrites::of(index, calls, &flows[fi], p_name)
+                });
+                let exact =
+                    kept_values::established(index, decls, &m.key, p_name, attr, write, kept);
                 found(StaleWrite {
                     prop: p,
                     writer: m,
                     attr,
-                    span,
+                    span: write.span,
+                    exact,
                 });
             }
         }
@@ -384,7 +398,7 @@ pub(crate) fn mut101_mut111(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                         .summary(&w.prop.key)
                         .and_then(|ps| ps.owner_class_qualname.as_deref())
                         .unwrap_or_default();
-                    cx.emit(
+                    if let Some(d) = cx.emit(
                     out,
                     "MUT101",
                     unit,
@@ -399,7 +413,9 @@ pub(crate) fn mut101_mut111(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                         "invalidate it after the change with `del self.{p_name}`, or `self.__dict__.pop(\"{p_name}\", None)` when it may not be computed yet"
                     )),
                     &[],
-                );
+                ) {
+                        d.certainty = crate::premises::tier("MUT101", w.exact).at_most(d.certainty);
+                    }
                 }
                 if read {
                     stale.entry(&w.prop.key).or_default().push(w);
@@ -422,6 +438,8 @@ pub struct StaleWriteKey {
     pub attr: String,
     pub span: Span,
     pub running: BTreeSet<String>,
+    /// The write's `MUT101` report is exact (a reader's `MUT111` tier reads it).
+    pub exact: bool,
 }
 
 /// The writes `MUT101` finds in the methods of the files `wanted` admits, by file, whatever is
@@ -455,6 +473,7 @@ pub fn stale_writes_by_file(
                         &w.writer.key,
                         w.prop.name(),
                     ),
+                    exact: w.exact,
                 });
         });
     }
@@ -823,9 +842,11 @@ fn private_methods_called_from_init(
     out
 }
 
+mod kept_values;
 mod sentinel_copies;
 mod stale_reads;
 
+pub use kept_values::{kept_removals_in, lazy_setup_files};
 pub(crate) use sentinel_copies::mut118;
 pub use sentinel_copies::{SentinelTestKey, deep_copy_files, sentinel_tests_in};
 
@@ -1311,15 +1332,23 @@ impl Allowance {
 
     /// [`Self::judged`] for an access in `func` to an object that may be its parameters `obj`
     /// (one mask, or several), with the parameters of the judged function the object may be: the
-    /// parameters of a scope a function holds are none of the function's.
-    pub(crate) fn judged_access<'k, M: Default>(
+    /// parameters of a scope a function holds are none of the function's, while the function's
+    /// own parameters the scope reads through closure cells are
+    /// ([`heki_effect::CapturedParams`]).
+    pub(crate) fn judged_access<'k, M: ParamMasks>(
         &self,
         decls: &ProjectDecls,
         func: &'k FuncKey,
         obj: M,
     ) -> (std::borrow::Cow<'k, FuncKey>, M) {
         let judged = self.judged(decls, func);
-        let obj = if *judged == *func { obj } else { M::default() };
+        if *judged == *func {
+            return (judged, obj);
+        }
+        let captured = decls
+            .function_decl(func)
+            .and_then(|d| d.captured_params.as_deref());
+        let obj = obj.map(|mask| captured.map_or(0, |c| c.owner_params(&judged.qualname, mask)));
         (judged, obj)
     }
 
@@ -1486,6 +1515,24 @@ fn callers_of<'a>(
         }
     }
     out
+}
+
+/// One mask of the parameters an object may be, or several ([`Allowance::judged_access`]).
+pub(crate) trait ParamMasks {
+    /// Each mask through `f`.
+    fn map(self, f: impl Fn(u64) -> u64) -> Self;
+}
+
+impl ParamMasks for u64 {
+    fn map(self, f: impl Fn(u64) -> u64) -> Self {
+        f(self)
+    }
+}
+
+impl ParamMasks for (u64, u64) {
+    fn map(self, f: impl Fn(u64) -> u64) -> Self {
+        (f(self.0), f(self.1))
+    }
 }
 
 /// Whether a function binds a receiver to its first parameter: a method (an instance method's
