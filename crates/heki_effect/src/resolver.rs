@@ -3239,6 +3239,14 @@ impl ProjectDecls {
         owner
     }
 
+    /// Whether no class a value of the class `class` may be (R2) binds one of the special
+    /// methods `names` in the project or through a metaclass heki does not know.
+    pub fn special_methods_not_in_project(&self, class: &str, names: &[&str]) -> bool {
+        names
+            .iter()
+            .all(|n| self.special_method_owner(class, n) != MethodOwner::Project)
+    }
+
     /// Whether a property getter of the project (`@property`, a cached property) is named
     /// `attr`: a cached property keeps its value in the instance `__dict__` under its getter's
     /// name, so no other name holds a value a getter of the project computed.
