@@ -261,6 +261,15 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   contract: it names the target configured first among them, and lists the others (`(also
   `A.items`)`).
 - A `Class.attr` target covers the subclasses of the class too.
+- A private name of a class (`__cache`, `__run`: two leading underscores and not two trailing)
+  is the member Python's name mangling makes of it (`_Parser__cache` in class `Parser`), and a
+  name may spell it either way: `pkg.Parser.__run` and `pkg.Parser._Parser__run` (or
+  `pkg.Parser._Parser__*`) name the same method. An access is matched as Python runs it: inside
+  `Parser`, `self.__run` reaches `_Parser__run`; outside, a receiver typed `Parser`, a
+  subclass's `self`, or `type[Parser]` reaches it as `_Parser__run`. A subclass's own private
+  name (`self.__run` in `JsonParser`, the member `_JsonParser__run`) is another member, and
+  overrides nothing of its base. With `unresolved = "report"`, the last name of such a target
+  counts in both spellings (`__run`, and `_Parser__run` for a class the target names).
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, a name with more than one colon or an empty module or qualified name, call
   targets whose globs are too many to match together (tens of thousands of complex ones), an
@@ -748,8 +757,9 @@ holds for `invalidation` too:
 - **`attribution = "lexical"` judges the code where it is written.** The two rules above do not
   apply: an access is judged in the function whose code holds it, whoever calls that function.
   A lambda, comprehension, or generator expression is part of the function it is written in, a
-  class body's code part of the function running the class statement, and a nested `def` a
-  function of its own; the parameters of the function a lambda, comprehension, or generator
+  class body's code (a class attribute's value, a decorator, a default argument) part of the
+  function running the class statement (`<module>` for a class at module level), and a nested
+  `def` a function of its own; the parameters of the function a lambda, comprehension, or generator
   expression reads are the function's, wherever it runs. For `write-owners`, a call handing a
   typed object to a helper that changes it without knowing its class is the caller's write.
   With `unresolved = "report"`, the callers binding a parameter only tell its object's class,

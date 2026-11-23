@@ -20,7 +20,9 @@ use crate::{
 use heki_effect::{BLOCKING_EFFECTS, ContractClass, Contracts, FuncKey, OptInFacts, TypedWrites};
 use heki_env::HekiConfig;
 use heki_kb::{EffectiveEcosystemKb, EnvironmentAccess};
+use heki_semantic::mangling;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::borrow::Cow;
 use std::sync::{Arc, Mutex, PoisonError};
 
 /// The most `invalidation` contracts a configuration may declare (one bit each).
@@ -50,12 +52,28 @@ impl InvalidationNames {
 
     /// The first target naming attribute `attr` of an object of class `classes[0]` (`classes`:
     /// the class and its project bases), as configured.
+    ///
+    /// A private name of the class a target names is held mangled with it: `C.__cache` names
+    /// `_C__cache`.
     pub(crate) fn target(&self, classes: &[ContractClass], attr: &str) -> Option<&str> {
         self.targets
             .iter()
-            .find(|(_, class, a)| a.matches(attr) && classes.iter().any(|c| class.matches_class(c)))
+            .find(|(_, class, a)| {
+                classes.iter().any(|c| {
+                    class.matches_class(c)
+                        && (a.matches(attr)
+                            || mangling::unmangle(written_name(c), attr)
+                                .is_some_and(|written| a.matches(written)))
+                })
+            })
             .map(|(text, _, _)| text.as_str())
     }
+}
+
+/// The name class `c` is written with in its class statement.
+fn written_name(c: &ContractClass) -> &str {
+    let qualname = c.qualname.as_deref().unwrap_or(&c.fqn);
+    qualname.rsplit('.').next().unwrap_or(qualname)
 }
 
 /// [`Contracts`] over a configuration's `readonly-returns` and `invalidation` entries.
@@ -252,7 +270,10 @@ impl ConfigContracts {
             invalidators: NameMasks::default(),
             writers,
             writer_contexts: NameMasks::default(),
-            unresolved_reads: last_names(reads.flat_map(|r| &r.targets), "read-owners.targets")?,
+            unresolved_reads: last_names(
+                reads.flat_map(|r| &r.targets).map(String::as_str),
+                "read-owners.targets",
+            )?,
             unresolved_calls: call_last_names(calls.flat_map(|r| &r.targets))?,
             references: counts_references(config),
             marked_params: marked_params(config),
@@ -274,9 +295,10 @@ fn call_last_names<'t>(
     targets: impl Iterator<Item = &'t String>,
 ) -> Result<Vec<DottedPattern>, RuleConfigError> {
     let context = "call-owners.targets";
-    targets
-        .map(|t| DottedPattern::new(last_name(split_arguments(t, context)?.0), context))
-        .collect()
+    let names: Vec<&str> = targets
+        .map(|t| Ok(split_arguments(t, context)?.0))
+        .collect::<Result<_, RuleConfigError>>()?;
+    last_names(names.into_iter(), context)
 }
 
 /// [`Contracts::marked_params`] of `config`. A bad argument list is left out: it is a
@@ -297,13 +319,21 @@ fn marked_params(config: &HekiConfig) -> FxHashSet<String> {
 }
 
 /// The patterns of the last dotted names of `targets` (`children` of `pkg.Reference.children`).
+/// A private name (`__cache`) is also held mangled with a class (`_Model__cache`): it matches
+/// that spelling with any class, as an object of unknown class may be of any.
 fn last_names<'t>(
-    targets: impl Iterator<Item = &'t String>,
+    targets: impl Iterator<Item = &'t str>,
     context: &'static str,
 ) -> Result<Vec<DottedPattern>, RuleConfigError> {
-    targets
-        .map(|t| DottedPattern::new(last_name(t), context))
-        .collect()
+    let mut out = Vec::new();
+    for t in targets {
+        let name = last_name(t);
+        out.push(DottedPattern::new(name, context)?);
+        if let Cow::Owned(held) = mangling::mangle("*", name) {
+            out.push(DottedPattern::new(&held, context)?);
+        }
+    }
+    Ok(out)
 }
 
 impl Contracts for ConfigContracts {

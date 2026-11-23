@@ -24,7 +24,10 @@ the allowed readers:
 - through `ref.__dict__["children"]` or `ref.__dict__.get("children")` (also on `vars(ref)`),
   also with a string constant for the key.
 
-A target names a class and an attribute; it covers the class's subclasses too. A container
+A target names a class and an attribute; it covers the class's subclasses too. A private
+attribute (`self.__secret` in class `Vault`) is the member `_Vault__secret`, which a target names
+`Vault.__secret` or `Vault._Vault__secret`, read inside the class as `self.__secret` and outside
+as `vault._Vault__secret`. A container
 entry (`Class.attr["key"]`) is a write target only: reading an entry reads the attribute, so a
 read target names `Class.attr` (an entry is a configuration error).
 

@@ -48,6 +48,7 @@ use heki_effect::{
 use heki_env::{Docs, Explain, HekiConfig, Problem, Setting, Severity};
 use heki_ir::{IrFunction, ModuleConstants};
 use heki_kb::{EffectiveEcosystemKb, EffectiveSoundnessKb};
+use heki_semantic::mangling;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -1526,14 +1527,17 @@ impl DottedPattern {
     /// Whether the pattern names a project function or class (`fqn` is `module.qualname`), or an
     /// external symbol (`fqn` and `qualname` both the symbol). Without a module part, the
     /// dotted suffixes of `fqn` include the qualname.
+    ///
+    /// A class member is named either way it is spelled ([`def_spellings`]): as written in its
+    /// class (`Parser.__run`) or as the class holds it (`Parser._Parser__run`).
     pub fn matches_def(&self, fqn: &str, qualname: &str) -> bool {
-        match &self.module {
-            None => self.name.matches_suffix(fqn),
+        def_spellings(fqn, qualname).any(|(fqn, qualname)| match &self.module {
+            None => self.name.matches_suffix(&fqn),
             Some(module) => {
-                module_of(fqn, qualname).is_some_and(|m| module.is_match(m))
-                    && self.name.is_match(qualname)
+                module_of(&fqn, &qualname).is_some_and(|m| module.is_match(m))
+                    && self.name.is_match(&qualname)
             }
-        }
+        })
     }
 
     /// [`Self::matches_def`] of a class (by its fqn alone without its qualname).
@@ -1544,14 +1548,33 @@ impl DottedPattern {
     /// Whether the pattern names the definition ([`Self::matches_def`]) or a module, class, or
     /// function containing it.
     pub fn names_within(&self, fqn: &str, qualname: &str) -> bool {
-        match &self.module {
-            None => with_prefixes(fqn).any(|n| self.name.matches_suffix(n)),
+        def_spellings(fqn, qualname).any(|(fqn, qualname)| match &self.module {
+            None => with_prefixes(&fqn).any(|n| self.name.matches_suffix(n)),
             Some(module) => {
-                module_of(fqn, qualname).is_some_and(|m| module.is_match(m))
-                    && with_prefixes(qualname).any(|q| self.name.is_match(q))
+                module_of(&fqn, &qualname).is_some_and(|m| module.is_match(m))
+                    && with_prefixes(&qualname).any(|q| self.name.is_match(q))
             }
-        }
+        })
     }
+}
+
+/// `(fqn, qualname)` of a project definition or attribute, then the same path with its class
+/// members spelled the other way ([`mangling::member_path`] of a qualname, which writes them
+/// as in the class, [`mangling::source_path`] of an attribute path, which has them as the class
+/// holds them), when that differs. An external symbol (`fqn` is `qualname`) has one spelling.
+pub(crate) fn def_spellings<'n>(
+    fqn: &'n str,
+    qualname: &'n str,
+) -> impl Iterator<Item = (Cow<'n, str>, Cow<'n, str>)> {
+    let other = module_of(fqn, qualname).and_then(|module| {
+        let respelled =
+            mangling::member_path(qualname).or_else(|| mangling::source_path(qualname))?;
+        Some((
+            Cow::Owned(format!("{module}.{respelled}")),
+            Cow::Owned(respelled),
+        ))
+    });
+    std::iter::once((Cow::Borrowed(fqn), Cow::Borrowed(qualname))).chain(other)
 }
 
 /// The module of a project definition (`fqn` is `module.qualname`); `None` for an external

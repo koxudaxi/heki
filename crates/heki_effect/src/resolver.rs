@@ -27,10 +27,11 @@ use heki_ir::{
 use heki_kb::{
     ArgFact, CopyDepth, EcosystemEntry, EffectiveEcosystemKb, ExecEffectKind, LiteralValue,
 };
-use heki_semantic::{ModuleImport, ScopeKind, SemanticModel};
+use heki_semantic::{ModuleImport, ScopeKind, SemanticModel, mangling};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
@@ -1053,6 +1054,20 @@ pub enum StrValue {
 }
 
 impl ModuleDecls {
+    /// `path`, a qualname in this module, as the qualname of the class or function it names: a
+    /// class member reached by the mangled name its class holds it under (`Parser._Parser__run`)
+    /// is the definition written with the private name (`def __run`, qualname `Parser.__run`).
+    fn definition_path<'p>(&self, path: &'p str) -> Cow<'p, str> {
+        let defines = |q: &str| self.functions.contains_key(q) || self.classes.contains_key(q);
+        if defines(path) {
+            return Cow::Borrowed(path);
+        }
+        match mangling::source_path(path) {
+            Some(written) if defines(&written) => Cow::Owned(written),
+            _ => Cow::Borrowed(path),
+        }
+    }
+
     /// The fqn the runtime import of `name` binds, when nothing else in the module binds the
     /// name ([`Self::rebound_imports`]): reading it gives what the import bound.
     pub fn fixed_import(&self, name: &str) -> Option<&String> {
@@ -2143,12 +2158,14 @@ impl ProjectDecls {
                 }
             }
             for (qualname, f) in &m.functions {
-                let name = qualname.rsplit('.').next().unwrap_or(qualname);
+                // A method is read by the name its class holds it under (`_Parser__run` of
+                // `def __run`).
+                let name = mangling::member_name(qualname);
                 if f.reads_as_property() {
-                    property_names.insert(name.to_owned());
+                    property_names.insert(name.clone().into_owned());
                 }
                 if f.returns_param_attr.is_some() {
-                    returning_names.insert(name.to_owned());
+                    returning_names.insert(name.into_owned());
                 }
             }
         }
@@ -2932,13 +2949,14 @@ impl ProjectDecls {
         if m.unread {
             return Symbol::Unread;
         }
-        if let Some(c) = m.classes.get(rest) {
+        let definition = m.definition_path(rest);
+        if let Some(c) = m.classes.get(definition.as_ref()) {
             return Symbol::Class(c);
         }
-        if let Some(f) = m.functions.get(rest) {
+        if let Some(f) = m.functions.get(definition.as_ref()) {
             let key = FuncKey {
                 module: m.module_name.clone(),
-                qualname: rest.to_owned(),
+                qualname: definition.into_owned(),
             };
             return Symbol::Function(key, f);
         }
@@ -3854,7 +3872,8 @@ impl ProjectDecls {
     /// The method `name` defined directly in project class `class`.
     fn own_method(&self, class: &str, name: &str) -> Option<FuncKey> {
         let (m, rest) = self.split_module(class)?;
-        let qualname = format!("{rest}.{name}");
+        let member = format!("{rest}.{name}");
+        let qualname = m.definition_path(&member).into_owned();
         m.functions.contains_key(&qualname).then(|| FuncKey {
             module: m.module_name.clone(),
             qualname,
