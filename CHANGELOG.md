@@ -184,8 +184,9 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `[tool.heki]` belongs in `[tool.heki.lint]`); a value of the wrong type names the type with a
   line to copy; an unknown rule selector gets the nearest code, or the code of a misspelled rule
   name; `heki inspect` offers the functions whose names look like the one given. With
-  `--output-format json` the error is also `{"error": {"message", "path", "line", "column",
-  "help", "docs", "candidates"}}` on stdout. The language server logs the same text for a
+  `--output-format json`, an error in the configuration or a path is also `{"error": {"message",
+  "path", "line", "column", "help", "docs", "candidates"}}` on stdout; an unknown or invalid
+  option stays plain text on stderr. The language server logs the same text for a
   configuration it cannot load. Exit codes are unchanged; the `heki error:` prefix is now
   `error:`.
 - The Agent Skill (experimental) is the routine after an edit, about 2 KB instead of 7.7 KB: run
@@ -244,7 +245,8 @@ release can change rules, configuration keys, diagnostics, and output formats.
   dict, `|=`, `&=`, `-=`, `^=` on a set) keeps the name an alias of the container: a write
   through it afterwards (`extras |= {}; extras["init"] = 1`) is a write of the guarded attribute
   for `write-owners`, and the name keeps the container's type, with the items `+=` and `|=` add
-  to a local list, set, or dict. `x += 1` on any other value still binds a new object.
+  to a local list, set, or dict. On any other value heki still takes `x += 1` as binding a new object, also where the
+  value's own `__iadd__` changes it in place and returns it.
 - `OPT120` / `OPT121`: the `collections.deque` fix is no longer offered when a variable the list
   reaches is also bound to another object (`s = [...]` before `s = q`, a later `q = [...]` the
   loop never sees, a `for` target, a parameter): a type checker gives the variable one type, so
