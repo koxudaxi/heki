@@ -135,7 +135,9 @@ It does not report:
   `if clear:`, leaves the other path stale and is reported;
 - private helpers whose every caller invalidates the property;
 - lazy initialization: a write where a `None` / falsy test of the attribute found it unset
-  (`if self._conn is None: self._conn = connect()`, also in a `@property` getter), when the
+  (`if self._conn is None: self._conn = connect()`, also in a `@property` getter; the test may
+  be of `getattr(self, "_conn", None)` or `hasattr(self, "_conn")`, or the write in the
+  `except AttributeError:` clause of a `try` that reads it), when the
   cached property reads the attribute only through such initializations
   (`return self._connect().db`): computing the cached value set the attribute, so the test
   cannot find it unset again. A cached property that reads it directly
