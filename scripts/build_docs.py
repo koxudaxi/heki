@@ -117,6 +117,7 @@ CLI_COMMANDS = [
     (["inspect"], "heki inspect"),
     (["recommend"], "heki recommend"),
     (["skill", "install"], "heki skill install"),
+    (["version"], "heki version"),
 ]
 
 

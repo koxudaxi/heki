@@ -47,6 +47,7 @@ fn show(v: &Val) -> String {
         Val::Inst(c) => c.clone(),
         Val::Super(c) => format!("super {c}"),
         Val::Union(cs) => cs.join(" | "),
+        Val::OneOf(fs) => format!("one of {}", fs.join(", ")),
     }
 }
 

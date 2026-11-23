@@ -6,8 +6,8 @@
 //! an instance, the size of the Soundness lane's proof state, the values `EFF107` follows from a
 //! task factory, the walk to the callable a builtin calls once per item, contracts with many call
 //! targets and argument lists, the walk to the uses handing a reference to a call target on, the
-//! locks `EFF109` follows, the values class statements pass as bases, and the bindings the deque
-//! rewrite's candidates check.
+//! locks `EFF109` follows, the values class statements pass as bases, the bindings the deque
+//! rewrite's candidates check, and the star imports a name is bound through.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -2556,6 +2556,71 @@ fn accesses_of_a_helper_only_initialization_runs_ask_its_callers_once() {
         });
         assert!(found.is_empty(), "{attribution}: {found:#?}");
     }
+}
+
+/// A boundary's scope constructing a thousand classes whose initializers hand their `self` and
+/// another node to a chain of a thousand helpers, half of them in each order, the last helper
+/// writing its first parameter: a helper has at most two nodes in the scope's reach, one binding
+/// no initializer's `self` and one binding the parameters of the first path that binds some, so
+/// the chain is walked twice, not once per initializer or order. The write of the node handed
+/// over stays reported.
+#[test]
+fn initializers_handing_self_down_a_helper_chain_reach_each_helper_at_most_twice() {
+    let module = |size: usize| {
+        let mut lines = vec![
+            "class Node:".to_owned(),
+            "    def __init__(self):".to_owned(),
+            "        self.optional = False".to_owned(),
+        ];
+        for c in 0..size {
+            let args = if c % 2 == 0 {
+                "self, other"
+            } else {
+                "other, self"
+            };
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("class C{c}(Node):"),
+                "    def __init__(self, other: Node):".to_owned(),
+                "        super().__init__()".to_owned(),
+                format!("        _h0({args})"),
+            ]);
+        }
+        for h in 0..size {
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("def _h{h}(a: Node, b: Node):"),
+                format!("    _h{}(a, b)", h + 1),
+            ]);
+        }
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def _h{size}(a: Node, b: Node):"),
+            "    a.optional = True".to_owned(),
+            String::new(),
+            String::new(),
+            "def build(other: Node):".to_owned(),
+        ]);
+        lines.extend((0..size).map(|c| format!("    C{c}(other)")));
+        lines.join("\n") + "\n"
+    };
+    let found = check_linear(1_000, |size| {
+        let p = Project::new(&format!("bounds_initializing_helpers_{size}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"build\"\nscopes = [\"m.build\"]\nwrite-universe = [\"Node.*\"]\n",
+        )
+        .write("m.py", &module(size));
+        p
+    });
+    let found: Vec<(&Value, &Value)> = found
+        .iter()
+        .map(|d| (&d["qualname"], &d["target"]))
+        .collect();
+    assert_eq!(found, [(&json!("build"), &json!("build:Node.optional"))]);
 }
 
 /// Modules binding twelve thousand names, each to an attribute of the one before
@@ -6197,4 +6262,152 @@ fn open_premises_of_rewrite_candidates_over_shared_iterables_are_explained() {
         assert_eq!(r["certainty"], "heuristic", "{r:#?}");
         assert!(!r["open_premises"].as_array().unwrap().is_empty(), "{r:#?}");
     }
+}
+
+/// `levels` levels of two modules each, every module star-importing both modules of the next
+/// level and the last level's second module importing the first module back, with a blocking
+/// `near` two levels down and a blocking `far` on the last level, which a function calls each
+/// through the first module.
+fn star_import_lattice(levels: usize) -> Project {
+    let p = Project::new(&format!("bounds_star_lattice_{levels}"));
+    p.write("pkg/__init__.py", "");
+    let blocking = |name: &str| format!("import time\n\n\ndef {name}(url):\n    time.sleep(1)\n");
+    for level in 0..levels {
+        let next = level + 1;
+        for side in ["a", "b"] {
+            let mut text = if next < levels {
+                format!("from pkg.l{next}a import *\nfrom pkg.l{next}b import *\n")
+            } else if side == "b" {
+                "from pkg.l0a import *\n".to_owned()
+            } else {
+                String::new()
+            };
+            if side == "a" && (level == 2 || next == levels) {
+                let name = if level == 2 { "near" } else { "far" };
+                text.push_str(&blocking(name));
+            }
+            p.write(&format!("pkg/l{level}{side}.py"), &text);
+        }
+    }
+    p.write(
+        "pkg/users.py",
+        "from pkg.l0a import far, near\n\n\nasync def use_near(url):\n    near(url)\n\n\nasync def use_far(url):\n    far(url)\n",
+    );
+    p
+}
+
+/// Deciding the name a star import binds reads each module once, however many paths of star
+/// imports reach it and around the cycle back to the first module; a call through it is
+/// followed at most `MAX_ALIAS_CHASE` star imports deep, past which the name is open.
+#[test]
+fn star_imports_are_followed_a_bounded_depth() {
+    let blocking = |found: &[Value]| -> Vec<String> {
+        found
+            .iter()
+            .filter(|d| d["rule_code"] == "EFF101")
+            .map(|d| d["qualname"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        blocking(&check(&star_import_lattice(6))),
+        ["use_near", "use_far"]
+    );
+    assert_eq!(
+        blocking(&check_linear(8 * SCALE, star_import_lattice)),
+        ["use_near"]
+    );
+}
+
+/// A module of `n` functions, the first of which blocks, a table binding a key to each, and an
+/// `async def` calling the first through its key.
+fn table_of(n: usize) -> String {
+    let mut out = vec!["import time".to_owned(), String::new()];
+    for k in 0..n {
+        let body = if k == 0 { "time.sleep(1)" } else { "pass" };
+        out.push(format!("\ndef f{k}():\n    {body}\n"));
+    }
+    let entries: Vec<String> = (0..n).map(|k| format!("\"k{k}\": f{k}")).collect();
+    out.push(format!("\nTABLE = {{{}}}\n", entries.join(", ")));
+    out.push("\nasync def handle():\n    TABLE[\"k0\"]()\n".to_owned());
+    out.join("\n")
+}
+
+/// A table keeps at most 256 entries (`resolver::stores::TABLE_ENTRIES`): past them a key gives
+/// no value, and the values of more than eight functions are no value either.
+#[test]
+fn a_table_past_its_entry_bound_gives_no_item() {
+    let shape = |n: usize| {
+        let p = Project::new(&format!("bounds_table_{n}"));
+        p.write("m.py", &table_of(n));
+        p
+    };
+    let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();
+    assert_eq!(blocking(check(&shape(256))), 1);
+    assert_eq!(blocking(check_linear(2048, shape)), 0);
+}
+
+/// A class binding `RUN` to a blocking function, `n` subclasses binding it again, and an
+/// `async def` calling it on an instance of the class.
+fn aliased_family(n: usize) -> String {
+    let mut out = vec![
+        "import time".to_owned(),
+        String::new(),
+        "\ndef run():\n    time.sleep(1)\n".to_owned(),
+        "\nclass Base:\n    RUN = staticmethod(run)\n".to_owned(),
+    ];
+    for k in 0..n {
+        out.push(format!(
+            "\nclass Sub{k}(Base):\n    RUN = staticmethod(run)\n"
+        ));
+    }
+    out.push("\nasync def handle(base: Base):\n    base.RUN()\n".to_owned());
+    out.join("\n")
+}
+
+/// A call through a class attribute bound to a function follows at most 64 classes the receiver
+/// may be (`resolver::DISPATCH_CLASS_LIMIT`), as the implementations of a method do.
+#[test]
+fn class_aliases_past_the_dispatch_limit_run_unknown_code() {
+    let shape = |n: usize| {
+        let p = Project::new(&format!("bounds_class_aliases_{n}"));
+        p.write("m.py", &aliased_family(n));
+        p
+    };
+    let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();
+    assert_eq!(blocking(check(&shape(63))), 1);
+    assert_eq!(blocking(check_linear(512, shape)), 0);
+}
+
+/// A memo-shaped store whose key is a tuple of thousands of values, built once for the test and
+/// once for the store (`if (a, a, ...) not in p.items: p.items[(a, a, ...)] = 0`): the two keys
+/// are compared value by value, each pair once.
+#[test]
+fn memo_keys_of_many_values_are_compared_once() {
+    let found = check_linear(3000, |values| {
+        let key = vec!["a"; values].join(", ");
+        let lines = [
+            "from functools import lru_cache".to_owned(),
+            String::new(),
+            String::new(),
+            "@lru_cache(maxsize=None)".to_owned(),
+            "def config(name):".to_owned(),
+            "    return object()".to_owned(),
+            String::new(),
+            String::new(),
+            "def fill(p, a):".to_owned(),
+            format!("    if ({key}) not in p.items:"),
+            format!("        p.items[({key})] = 0"),
+            String::new(),
+            String::new(),
+            "def use(name):".to_owned(),
+            "    fill(config(name), 1)".to_owned(),
+        ];
+        let p = Project::new(&format!("bounds_memo_tuple_keys_{values}"));
+        p.write("m.py", &(lines.join("\n") + "\n"));
+        p
+    });
+    assert!(
+        found.iter().all(|d| d["rule_code"] != "MUT114"),
+        "{found:#?}"
+    );
 }

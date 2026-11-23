@@ -12,16 +12,23 @@
 
 use super::call_owners::CallOwnerRule;
 use super::{
-    Allowance, ContractTarget, MergedReports, Named, OwnerRule, ReadOwnerRule, runs_inside_allowed,
+    Allowance, AllowedExamples, ContractTarget, MergedReports, Named, NamedDictKeys, OwnerRule,
+    ReadOwnerRule, place_functions, runs_inside_allowed, write_hits,
 };
 use crate::{CheckContext, SitesByCaller};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
-use heki_effect::{Access, Construction, FuncKey, Unresolved};
+use heki_effect::{Access, Construction, FuncKey, Unresolved, WriteKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
+use std::path::Path;
 
-pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut Vec<Diagnostic>) {
+pub(super) fn mut205(
+    cx: &CheckContext<'_>,
+    rules: &[OwnerRule<'_>],
+    named: &NamedDictKeys<'_>,
+    out: &mut Vec<Diagnostic>,
+) {
     if !cx.selection.is_enabled("MUT205") {
         return;
     }
@@ -36,6 +43,10 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
     // The classes of every target of each rule, the family of a computed name on an object of
     // unknown class, built once per rule.
     let mut every_family: Vec<Option<FxHashSet<String>>> = vec![None; strict.len()];
+    // The classes each rule's `__dict__` keys no target names may be new keys of, by rule and
+    // key, found once rather than once per write.
+    let mut unlisted_by_key: FxHashMap<(usize, &str), Option<FxHashSet<String>>> =
+        FxHashMap::default();
     let mut reports = MergedReports::default();
     for (key, s) in cx.defined_functions() {
         for w in &s.unresolved_write_sites {
@@ -49,10 +60,26 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
                         Unresolved::Anything => true,
                     })
                     .collect();
-                if hits.is_empty() || rule.allow_fresh && w.construction == Construction::Yes {
+                let unlisted = match &w.what {
+                    Unresolved::Receiver(attr)
+                        if hits.is_empty()
+                            && rule.report_unlisted_keys
+                            && w.kind == WriteKind::DictDirect =>
+                    {
+                        unlisted_by_key
+                            .entry((r, attr.as_str()))
+                            .or_insert_with(|| unlisted_key_classes(rule, named, attr))
+                            .as_ref()
+                    }
+                    _ => None,
+                };
+                if hits.is_empty() && unlisted.is_none()
+                    || rule.allow_fresh && w.construction == Construction::Yes
+                {
                     continue;
                 }
                 let writes_target = |class: &str| hits.iter().any(|t| t.classes.contains(class));
+                let may_get_key = |class: &str| unlisted.is_some_and(|u| u.contains(class));
                 // A computed name may be a class's own initialization (`setattr(self, name, v)`
                 // in `__init__`, also through a helper it hands `self` to), as for `MUT201`: of
                 // a class of the targets it may write, every target for an object of unknown
@@ -60,15 +87,20 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
                 // callers bind, which `MUT201` reports at those callers. A computed name on an
                 // object of unknown class is tied to the other classes its callers bind;
                 // `MUT201` sees no name at a caller binding a target class, so such a caller
-                // leaves the write to this rule.
+                // leaves the write to this rule. A `__dict__` key no target names is new to the
+                // classes `unlisted` holds, and `MUT201` sees no `__dict__` write at a caller
+                // handing one of them to a helper that never sees its class: such a caller
+                // leaves the write to this rule too, and a class's own initialization through
+                // the helper stays allowed.
                 let name_family;
-                let (family, callers): (&FxHashSet<String>, _) = match &w.what {
-                    Unresolved::Name(_) => {
+                let (family, callers): (&FxHashSet<String>, _) = match (&w.what, unlisted) {
+                    (_, Some(classes)) => (classes, Callers::LeaveTargetClasses(&may_get_key)),
+                    (Unresolved::Name(_), None) => {
                         name_family = families(&hits);
                         (&name_family, Callers::Ignored)
                     }
-                    Unresolved::Receiver(_) => (&no_class, Callers::TieEveryClass),
-                    Unresolved::Anything => (
+                    (Unresolved::Receiver(_), None) => (&no_class, Callers::TieEveryClass),
+                    (Unresolved::Anything, None) => (
                         every_family[r].get_or_insert_with(|| families(&hits)),
                         Callers::LeaveTargetClasses(&writes_target),
                     ),
@@ -90,8 +122,20 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
                     }
                     Unresolved::Anything => "*".to_owned(),
                 };
-                let guarded = listed(hits.iter().map(|t| t.text.as_str()));
+                let guarded = match unlisted {
+                    Some(classes) => listed(
+                        new_key_targets(cx, classes, &target)
+                            .iter()
+                            .map(String::as_str),
+                    ),
+                    None => listed(hits.iter().map(|t| t.text.as_str())),
+                };
                 let what = match &w.what {
+                    Unresolved::Receiver(attr) if unlisted.is_some() => format!(
+                        "writes `{attr}` ({}), a `__dict__` key no target names, on an object of \
+                         unknown class",
+                        w.kind.describe()
+                    ),
                     Unresolved::Receiver(attr) => format!(
                         "writes `{attr}` ({}) on an object of unknown class",
                         w.kind.describe()
@@ -128,7 +172,54 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
             }
         }
     }
-    reports.emit(cx, "MUT205", out);
+    reports.emit(cx, ("MUT205", "allowed writers"), out, |examples| {
+        let owners = |k: &FuncKey| strict.iter().any(|(_, r)| r.allowance.names_place(k));
+        for (key, path, s) in place_functions(cx, owners) {
+            for w in s
+                .typed_field_write_sites
+                .iter()
+                .filter(|w| w.via_chain.is_empty())
+            {
+                for &(contract, rule) in &strict {
+                    if rule.allowance.names_place(key)
+                        && !(rule.allow_fresh && w.construction == Construction::Yes)
+                        && !write_hits(&rule.targets, w).is_empty()
+                    {
+                        add_example(examples, contract, &w.attr, (key, path));
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// The classes of `rule`'s targets that the constant `__dict__` key `key`, written on an object
+/// of unknown class, would be a new key of (`unlisted-dict-keys = "report"`): those no
+/// `write-owners` target covering them names it for (`named`), as `MUT201` judges a typed
+/// object. `None` when every class has a target naming the key.
+fn unlisted_key_classes(
+    rule: &OwnerRule<'_>,
+    named: &NamedDictKeys<'_>,
+    key: &str,
+) -> Option<FxHashSet<String>> {
+    let classes: FxHashSet<String> = (rule.targets.iter())
+        .flat_map(|t| &t.classes)
+        .filter(|c| !named.names(c, key))
+        .cloned()
+        .collect();
+    (!classes.is_empty()).then_some(classes)
+}
+
+/// `Class.key` for each of `classes` that inherits from none of the others (a subclass's key is
+/// one of its base's too), sorted: what a write of the new key `key` may be, as `MUT201` names
+/// it on a typed object.
+fn new_key_targets(cx: &CheckContext<'_>, classes: &FxHashSet<String>, key: &str) -> Vec<String> {
+    let mut out: Vec<String> = (classes.iter())
+        .filter(|c| (cx.decls.ancestors_of(c).iter()).all(|base| !classes.contains(base.as_str())))
+        .map(|c| format!("{c}.{key}"))
+        .collect();
+    out.sort();
+    out
 }
 
 /// The classes `targets` cover: their class families together.
@@ -226,7 +317,20 @@ pub(super) fn mut206(
             }
         }
     }
-    reports.emit(cx, "MUT206", out);
+    reports.emit(cx, ("MUT206", "allowed readers"), out, |examples| {
+        let owners = |k: &FuncKey| strict.iter().any(|(_, r)| r.allowance.names_place(k));
+        for (key, path, s) in place_functions(cx, owners) {
+            let own = s.typed_field_read_sites.iter();
+            for read in own.filter(|r| r.counts_for_contracts()) {
+                for &(contract, rule) in &strict {
+                    let hits = |t: &ContractTarget| t.matches(&read.class_qualname, &read.attr);
+                    if rule.allowance.names_place(key) && rule.targets.iter().any(hits) {
+                        add_example(examples, contract, &read.attr, (key, path));
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// `MUT207`: calls of a method named like a target of a strict `call-owners` contract on an
@@ -298,7 +402,23 @@ pub(super) fn mut207(
             }
         }
     }
-    reports.emit(cx, "MUT207", out);
+    reports.emit(cx, ("MUT207", "allowed callers"), out, |examples| {
+        let owners = |k: &FuncKey| strict.iter().any(|(_, r)| r.allowance.names_place(k));
+        for (key, path, _) in place_functions(cx, owners) {
+            for &(_, site) in sites.get(key).into_iter().flatten() {
+                for &(contract, rule) in &strict {
+                    if !rule.allowance.names_place(key) {
+                        continue;
+                    }
+                    let called = rule.targets.called(site).into_iter().flatten();
+                    for callee in called.flat_map(|i| rule.targets.called_at(i, site)) {
+                        let method = callee.rsplit('.').next().unwrap_or(&callee);
+                        add_example(examples, contract, method, (key, path));
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// The rules of `rules` that `strict` holds for, each with its contract's place in the
@@ -342,6 +462,24 @@ fn add<'u>(
         message,
         Vec::new,
     );
+}
+
+/// Record that `func`, defined in `path`, accesses `name` from a place `contract` allows: a
+/// function a report of an access of `name` on an object of unknown class names ([`add`]).
+fn add_example<'a>(
+    examples: &mut AllowedExamples<'a, String>,
+    contract: usize,
+    name: &str,
+    (func, path): (&'a FuncKey, &'a Path),
+) {
+    let quoted = format!("`{name}`");
+    let named = Named {
+        target: name,
+        named: &quoted,
+        rank: 0,
+        contract,
+    };
+    examples.add((&name.to_owned(), named), func, path);
 }
 
 /// `a`, `a` and `b`, `a`, `b` and 3 more.

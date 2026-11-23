@@ -11,8 +11,10 @@ use crate::readonly::ContainerKind;
 use crate::resolver::namespace_load;
 use crate::{CallSite, FuncKey, TypeCtx, Val, aliases_of, container_mutator, guards, self_aliases};
 use heki_ast::Span;
-use heki_ir::walk::FnShape;
-use heki_ir::{BlockId, CompareOpKind, InstKind, IrFunction, Terminator, VarId};
+use heki_ir::walk::{self, Answer, Budget, FnShape, Visit};
+use heki_ir::{
+    BlockId, BuiltinKind, CompareOpKind, ConstLiteral, InstKind, IrFunction, Terminator, VarId,
+};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -257,14 +259,14 @@ pub(crate) fn cache_flow(
     if f.is_class_body || f.is_module_body || f.owner_class_qualname.is_none() {
         return None;
     }
-    let writes = attr_write_ops(shape, &self_objects(f));
+    let writes = attr_write_ops(shape, &self_objects(f), &[]);
     if writes.is_empty() {
         return None;
     }
     let mut names = Names::default();
     let mut writes: Vec<SelfAttrWrite> = writes
         .into_iter()
-        .map(|(attr, w, op, key)| SelfAttrWrite {
+        .map(|((_, attr), w, op, key)| SelfAttrWrite {
             attr: names.index(attr),
             kept: kept.and_then(|_| KeptWrite::of(key, op, types)),
             ..w
@@ -357,7 +359,7 @@ fn self_objects(f: &IrFunction) -> FxHashMap<VarId, u32> {
 }
 
 /// An attribute of one of the objects [`attr_writes`] reads: the object's number and the name.
-type Held<'f> = (u32, &'f str);
+pub type Held<'f> = (u32, &'f str);
 
 /// [`self_attr_writes`] of several objects at once (`self`, parameters, shared values): the
 /// writes of `<obj>.<attr>` in `f`'s own body, where `objects` gives each variable holding one
@@ -367,9 +369,19 @@ pub fn attr_writes<'f>(
     shape: &FnShape<'f>,
     objects: &FxHashMap<VarId, u32>,
 ) -> Vec<(&'f str, SelfAttrWrite)> {
-    attr_write_ops(shape, objects)
+    container_writes(shape, objects, &[])
+}
+
+/// [`attr_writes`], and the changes of the containers `containers` holds itself, each as the
+/// attribute it is given (a parameter's default container).
+pub fn container_writes<'f>(
+    shape: &FnShape<'f>,
+    objects: &FxHashMap<VarId, u32>,
+    containers: &[(VarId, Held<'f>)],
+) -> Vec<(&'f str, SelfAttrWrite)> {
+    attr_write_ops(shape, objects, containers)
         .into_iter()
-        .map(|(attr, w, _, _)| (attr, w))
+        .map(|((_, attr), w, _, _)| (attr, w))
         .collect()
 }
 
@@ -378,87 +390,122 @@ pub fn attr_writes<'f>(
 /// delete), and whether the method is called by its name.
 type InPlaceOp<'f> = (VarId, &'f str, bool);
 
-/// [`attr_writes`], with the [`InPlaceOp`] of each write that does not rebind the attribute and
-/// the literal key of an item store or delete ([`KeptWrite::key`]).
-#[allow(clippy::type_complexity)]
-fn attr_write_ops<'f>(
-    shape: &FnShape<'f>,
-    objects: &FxHashMap<VarId, u32>,
-) -> Vec<(
-    &'f str,
+/// One write [`attr_write_ops`] finds: the attribute written, the write, the [`InPlaceOp`] of a
+/// write that does not rebind the attribute, and the literal key of an item store or delete
+/// ([`KeptWrite::key`]).
+type WriteOp<'f> = (
+    Held<'f>,
     SelfAttrWrite,
     Option<InPlaceOp<'f>>,
     Option<String>,
-)> {
+);
+
+/// The variables holding `<obj>.<attr>` for the objects `objects` holds, and the containers
+/// `containers` holds itself, through copies (their copy roots, [`FnShape::copy_root`]).
+struct Holders<'s, 'f> {
+    shape: &'s FnShape<'f>,
+    roots: FxHashMap<VarId, Held<'f>>,
+}
+
+impl<'f> Holders<'_, 'f> {
+    fn get(&self, v: &VarId) -> Option<&Held<'f>> {
+        self.roots.get(&self.shape.copy_root(*v))
+    }
+}
+
+fn holders<'s, 'f>(
+    shape: &'s FnShape<'f>,
+    objects: &FxHashMap<VarId, u32>,
+    containers: &[(VarId, Held<'f>)],
+) -> Holders<'s, 'f> {
+    let mut roots: FxHashMap<VarId, Held<'f>> = containers.iter().copied().collect();
+    for inst in shape.f.blocks.iter().flat_map(|b| &b.insts) {
+        if let InstKind::AttrLoad { dst, obj, attr } = &inst.kind
+            && let Some(&o) = objects.get(obj)
+            && attr != "__dict__"
+        {
+            roots.insert(*dst, (o, attr));
+        }
+    }
+    Holders { shape, roots }
+}
+
+/// [`attr_writes`], each as a [`WriteOp`].
+fn attr_write_ops<'f>(
+    shape: &FnShape<'f>,
+    objects: &FxHashMap<VarId, u32>,
+    containers: &[(VarId, Held<'f>)],
+) -> Vec<WriteOp<'f>> {
+    write_ops(shape, objects, &holders(shape, objects, containers))
+}
+
+/// [`attr_write_ops`] with the holders ([`holders`]) found.
+fn write_ops<'f>(
+    shape: &FnShape<'f>,
+    objects: &FxHashMap<VarId, u32>,
+    alias: &Holders<'_, 'f>,
+) -> Vec<WriteOp<'f>> {
     let f = shape.f;
-    // `var -> (object, attr)`: the variables holding `<obj>.<attr>`, through copies.
-    let mut alias: FxHashMap<VarId, (u32, &str)> = FxHashMap::default();
     let mut defs: FxHashMap<VarId, &InstKind> = FxHashMap::default();
     for inst in f.blocks.iter().flat_map(|b| &b.insts) {
         if let Some(d) = inst.kind.dst() {
             defs.insert(d, &inst.kind);
         }
-        if let InstKind::AttrLoad { dst, obj, attr } = &inst.kind
-            && let Some(&o) = objects.get(obj)
-            && attr != "__dict__"
-        {
-            alias.insert(*dst, (o, attr));
-        }
     }
-    loop {
-        let before = alias.len();
-        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
-            if let InstKind::Copy { dst, src } = &inst.kind
-                && let Some(&a) = alias.get(src)
-            {
-                alias.insert(*dst, a);
-            }
-        }
-        if alias.len() == before {
-            break;
-        }
-    }
-    // The `if k not in <obj>.<attr>:` branches, by the block they lead into, with the key tested.
+    // The branches finding a key of `<obj>.<attr>` missing, by the block they lead into, with
+    // the key tested: `if k not in <obj>.<attr>:`, the `else` of `if k in <obj>.<attr>:`, and a
+    // `None` or falsy test of `<obj>.<attr>.get(k)`.
     let mut membership: FxHashMap<BlockId, Vec<(Held<'_>, VarId)>> = FxHashMap::default();
     for p in &f.blocks {
-        if let Terminator::Branch { cond, then_bb, .. } = &p.terminator
-            && let Some(InstKind::Compare {
-                op: CompareOpKind::NotIn,
-                lhs,
-                rhs,
-                ..
-            }) = defs.get(cond)
+        if let Terminator::Branch {
+            cond,
+            then_bb,
+            else_bb,
+        } = &p.terminator
+            && let Some(InstKind::Compare { op, lhs, rhs, .. }) = defs.get(cond)
+            && matches!(op, CompareOpKind::In | CompareOpKind::NotIn)
             && let Some(&held) = alias.get(rhs)
         {
-            membership.entry(*then_bb).or_default().push((held, *lhs));
+            let missing = if *op == CompareOpKind::NotIn {
+                *then_bb
+            } else {
+                *else_bb
+            };
+            membership.entry(missing).or_default().push((held, *lhs));
         }
     }
-    // The store fills the key the branch found missing: the same value, or an equal constant.
-    let literal = |v: &VarId| match defs.get(v) {
-        Some(InstKind::Const { literal, .. }) => Some(literal),
+    let def = |v: &VarId| defs.get(v).copied();
+    let looked_up = |v: &VarId| match def(&shape.copy_root(*v))? {
+        InstKind::MethodCall {
+            recv, method, args, ..
+        } if method == "get" && args.len() == 1 => Some((*alias.get(recv)?, args[0])),
         _ => None,
     };
-    let same_key = |tested: &VarId, index: &VarId| {
-        tested == index || literal(tested).is_some_and(|t| literal(index) == Some(t))
-    };
+    for t in guards::unset_branches(shape, &def, looked_up) {
+        membership.entry(t.init).or_default().push(t.subject);
+    }
+    let budget = Budget::of_function("cache_flow::same_key", f);
     let guarded = |bb: BlockId, held: (u32, &str), index: &VarId| {
-        membership
-            .get(&bb)
-            .is_some_and(|tests| tests.iter().any(|(h, k)| *h == held && same_key(k, index)))
+        membership.get(&bb).is_some_and(|tests| {
+            tests
+                .iter()
+                .any(|(h, k)| *h == held && same_key(shape, &budget, *k, *index))
+        })
     };
     // `(block, index, span, (object, attr), memo_shaped, in_place, key)` of each write (no
     // `in_place` op: it rebinds or deletes the attribute).
     let mut found = Vec::new();
     for bb in &f.blocks {
         for (index, inst) in bb.insts.iter().enumerate() {
+            let rebound = match &inst.kind {
+                InstKind::AttrDelete { obj, attr } => Some((*obj, attr.as_str())),
+                kind => guards::stored_attr(shape, kind),
+            }
+            .filter(|(_, attr)| *attr != "__dict__");
             let w = match &inst.kind {
-                InstKind::AttrStore { obj, attr, .. } | InstKind::AttrDelete { obj, attr }
-                    if attr != "__dict__" =>
-                {
-                    objects
-                        .get(obj)
-                        .map(|&o| ((o, attr.as_str()), false, None, None))
-                }
+                _ if rebound.is_some() => rebound.and_then(|(obj, attr)| {
+                    objects.get(&obj).map(|&o| ((o, attr), false, None, None))
+                }),
                 InstKind::SubscriptStore {
                     obj,
                     index,
@@ -498,7 +545,7 @@ fn attr_write_ops<'f>(
         written.entry(attr).or_default().insert(*o);
     }
     let lazy = lazy_init_blocks(shape, objects, &written);
-    let mut out: Vec<(&str, SelfAttrWrite, Option<InPlaceOp<'f>>, Option<String>)> = found
+    let mut out: Vec<WriteOp<'f>> = found
         .into_iter()
         .map(|(block, index, span, held, memo_shaped, in_place, key)| {
             let write = SelfAttrWrite {
@@ -513,11 +560,98 @@ fn attr_write_ops<'f>(
                     .any(|(h, blocks)| *h == held && blocks[block.0 as usize]),
                 kept: None,
             };
-            (held.1, write, in_place, key)
+            (held, write, in_place, key)
         })
         .collect();
     out.sort_by_key(|(_, w, _, _)| w.span);
     out
+}
+
+/// Whether the keys `tested` and `stored` are the same: one value, equal constants, or the same
+/// expression of the same values (`id(raw)` or `name.lower()` evaluated twice, `(a, b)` built
+/// twice, `obj.name` read twice). Each pair of values is compared once; past `budget` the keys
+/// are not the same.
+fn same_key(shape: &FnShape<'_>, budget: &Budget, tested: VarId, stored: VarId) -> bool {
+    let root = |v: VarId| shape.copy_root(v);
+    let found = walk::reach(
+        budget,
+        [(root(tested), root(stored))],
+        |(a, b), next| {
+            let operands = |v: VarId| shape.inst(v).map(|i| i.kind.operands()).unwrap_or_default();
+            let pairs = operands(a).into_iter().zip(operands(b));
+            next.extend(pairs.map(|(a, b)| (root(a), root(b))));
+        },
+        |(a, b)| {
+            if a == b {
+                return Visit::Prune;
+            }
+            match (shape.inst(a), shape.inst(b)) {
+                (Some(x), Some(y)) if same_head(&x.kind, &y.kind) => Visit::Expand,
+                _ => Visit::Stop(()),
+            }
+        },
+    );
+    found == Answer::Known(None)
+}
+
+/// Whether two instructions compute the same from operands taken in the same order: equal
+/// constants, the same global, the same attribute, a call of the same arity without keywords, a
+/// method of the same name, or a tuple of the same length.
+fn same_head(x: &InstKind, y: &InstKind) -> bool {
+    let plain =
+        |kwargs: &[(Option<String>, VarId)], star: &Option<u8>| kwargs.is_empty() && star.is_none();
+    match (x, y) {
+        (InstKind::Const { literal: l, .. }, InstKind::Const { literal: r, .. }) => {
+            l == r && !matches!(l, ConstLiteral::Other | ConstLiteral::Bytes)
+        }
+        (InstKind::LoadGlobal { name: l, .. }, InstKind::LoadGlobal { name: r, .. }) => l == r,
+        (InstKind::AttrLoad { attr: l, .. }, InstKind::AttrLoad { attr: r, .. }) => l == r,
+        (
+            InstKind::Call {
+                callee_var: Some(_),
+                args: a1,
+                kwargs: k1,
+                star_from: s1,
+                ..
+            },
+            InstKind::Call {
+                callee_var: Some(_),
+                args: a2,
+                kwargs: k2,
+                star_from: s2,
+                ..
+            },
+        ) => a1.len() == a2.len() && plain(k1, s1) && plain(k2, s2),
+        (
+            InstKind::MethodCall {
+                method: m1,
+                args: a1,
+                kwargs: k1,
+                star_from: s1,
+                ..
+            },
+            InstKind::MethodCall {
+                method: m2,
+                args: a2,
+                kwargs: k2,
+                star_from: s2,
+                ..
+            },
+        ) => m1 == m2 && a1.len() == a2.len() && plain(k1, s1) && plain(k2, s2),
+        (
+            InstKind::AllocBuiltin {
+                kind: BuiltinKind::Tuple,
+                elems: e1,
+                ..
+            },
+            InstKind::AllocBuiltin {
+                kind: BuiltinKind::Tuple,
+                elems: e2,
+                ..
+            },
+        ) => e1.len() == e2.len(),
+        _ => false,
+    }
 }
 
 /// The attributes of the objects `objects` holds that `f` initializes lazily, among the

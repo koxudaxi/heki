@@ -42,10 +42,14 @@ value.
 
 Filling a memo of the shared object, directly or in a method or helper it is handed to, is no
 mutation: an in-place change of an attribute named as a cache or memo (`self._style_cache[k] =
-v`, also through the methods of a cache object held there), a store under
-`if k not in self._decoders:` or through `setdefault`, and a lazy
-initialization (`if self._runtime is None: self._runtime = load()`) leave what the object
-computes as it was.
+v`, also through the methods of a cache object held there), a store under a test finding the
+key missing (`if k not in self._decoders:`, the `else` of `if k in ...:`, a `None` or falsy
+`self._index.get(k)`, the key computed again by the same expression, `id(raw)`) or through
+`setdefault`, a fill of a container a helper has as its default (`def fill(key, _seen={})`), and
+a lazy initialization leave what the object computes as it was. A lazy initialization stores
+an attribute (`self._x = v`, `setattr`, `object.__setattr__`) where a test found it unset: `if
+self._runtime is None:`, `if not hasattr(self, "_runtime"):`, a `None` test of `getattr(self,
+"_runtime", None)`, or the `except AttributeError:` clause of a `try` that reads it.
 
 ## What a report states
 

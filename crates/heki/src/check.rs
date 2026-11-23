@@ -13,15 +13,15 @@ use heki_diagnostics::{
     baseline_counts, fix_python_source, github_escape, path_text, render, unified_diff,
 };
 use heki_effect::{ProjectIndex, func_qualname};
-use heki_env::{Docs, LintConfig, Problem, Severity};
+use heki_env::{Docs, LintConfig, Problem, Severity, UnmatchedEntries};
 use heki_profile::{HotFunctions, ProfileData, ProfiledFunction};
 use heki_rules::project::{
     Facts, FileError, IndexFacts, Indexed, ParsedFile, Project, ProjectEnv, ProjectOptions,
-    RulesRun, baseline_key, canonical,
+    RulesRun, baseline_key, canonical, paths_leave_out,
 };
 use heki_rules::{
     RuleSelection, SNAPSHOT_FILE, Selectors, SummarySnapshot, find_rule, fixes_unconditionally,
-    fold_root_causes,
+    fold_root_causes, recommend,
 };
 use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
@@ -578,6 +578,7 @@ fn report(
         }
     }
 
+    let unmatched_entries = report_unmatched_entries(args, analyzed)?;
     // Suppressions and the baseline saw every report; only output folds them.
     fold_root_causes(&mut diags);
     // Every format prints the paths `--diff` prints.
@@ -615,6 +616,7 @@ fn report(
     }
     let code = if refused_update
         || unused_entries
+        || unmatched_entries
         || any_failing(&diags, fail_on(args, &project.env.cfg.lint))
     {
         ExitCode::from(1)
@@ -626,6 +628,41 @@ fn report(
         &failure::of_files(&project.errors),
         code,
     )
+}
+
+/// Print the contract entries that match nothing in the analyzed files, as
+/// `lint.unmatched-contract-entries` says; whether they make the run fail (as errors).
+fn report_unmatched_entries(args: &CheckArgs, analyzed: &Analyzed) -> Result<bool> {
+    let env = &analyzed.project.env;
+    let configured = env.cfg.lint.unmatched_contract_entries;
+    let severity = match configured.unwrap_or_default() {
+        UnmatchedEntries::Ignore => return Ok(false),
+        UnmatchedEntries::Warning => Severity::Warning,
+        UnmatchedEntries::Error => Severity::Error,
+    };
+    // Without the key, only a run over the whole project judges: an entry naming code in a file
+    // the paths leave out would look unmatched.
+    if configured.is_none() {
+        let (left_out, _) = paths_leave_out(
+            &analyzed.project,
+            &args.paths,
+            1,
+            recommend::MAX_CENSUS_ENTRIES,
+        )?;
+        if !left_out.is_empty() {
+            return Ok(false);
+        }
+    }
+    let entries = heki_rules::unmatched_entries(env, &analyzed.index, &analyzed.selection)?;
+    for entry in &entries {
+        log!(
+            args.output_format,
+            "{}: {}",
+            severity.word(),
+            entry.message()
+        );
+    }
+    Ok(severity == Severity::Error && !entries.is_empty())
 }
 
 /// `heki snapshot [PATHS...] [--write]`: print or save the normalized summaries (`MUT103`).
