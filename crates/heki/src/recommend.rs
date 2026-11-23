@@ -22,6 +22,7 @@ pub(crate) fn run(args: &RecommendArgs) -> Result<ExitCode> {
         None => None,
     };
     let errors = shown_errors(&project.errors);
+    let problems = crate::failure::of_files(&project.errors);
     let root = shown_dir(&project.env.root);
     let report = recommend(Request {
         root,
@@ -37,5 +38,5 @@ pub(crate) fn run(args: &RecommendArgs) -> Result<ExitCode> {
         ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
         ReportFormat::Text => print!("{}", report.content),
     }
-    finish(OutputFormat::Full, &errors, ExitCode::SUCCESS)
+    finish(OutputFormat::Full, &problems, ExitCode::SUCCESS)
 }

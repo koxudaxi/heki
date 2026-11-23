@@ -106,15 +106,12 @@ pub fn render_text(r: &InspectReport) -> String {
         f.path, f.line, f.end_line, f.kind
     );
     let reasons = r.purity.because.join(", ");
-    let _ = match &r.purity.unknown_at {
-        Some(u) => writeln!(
-            out,
-            "  {}: {reasons} (first at {})",
-            r.purity.verdict, u.fqn
-        ),
-        None if reasons.is_empty() => writeln!(out, "  {}", r.purity.verdict),
-        None => writeln!(out, "  {}: {reasons}", r.purity.verdict),
+    let _ = if reasons.is_empty() {
+        writeln!(out, "  {}", r.purity.verdict)
+    } else {
+        writeln!(out, "  {}: {reasons}", r.purity.verdict)
     };
+    unknown_reach_text(&mut out, r);
     let _ = writeln!(out, "  assumes: {}", r.purity.assumes.join("; "));
     if r.effects.is_empty() {
         out.push_str("effects   none\n");
@@ -242,6 +239,34 @@ pub fn render_text(r: &InspectReport) -> String {
         let _ = writeln!(out, "error: {e}");
     }
     out
+}
+
+/// The functions heki cannot follow, one line each with the chain to it.
+fn unknown_reach_text(out: &mut String, r: &InspectReport) {
+    let reach = &r.purity.unknown_reach;
+    if reach.entries.is_empty() {
+        return;
+    }
+    let more = if reach.truncated {
+        format!(" (the first {})", reach.entries.len())
+    } else {
+        String::new()
+    };
+    let _ = writeln!(out, "  cannot follow{more}");
+    let names: Vec<String> = reach
+        .entries
+        .iter()
+        .map(|u| short(&u.fqn, &r.function.module))
+        .collect();
+    let width = names.iter().map(String::len).max().unwrap_or(0).min(40);
+    for (name, u) in names.iter().zip(&reach.entries) {
+        let how = if u.chain.is_empty() {
+            "itself".to_owned()
+        } else {
+            inline_chain(&u.chain, None)
+        };
+        let _ = writeln!(out, "    {name:<width$}  {how}");
+    }
 }
 
 fn guards_text(e: &super::EffectInfo) -> String {

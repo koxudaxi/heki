@@ -8,7 +8,8 @@
 //! - [`Closure`] joins the facts of every node a node reaches (the members of a cycle share one
 //!   fact), and [`fixpoint`] joins the facts of nodes that read each other, visiting a node again
 //!   only when a fact it reads grows, up to a visit limit. Neither ever replaces a fact.
-//! - [`reach`] walks with a visited set, so it ends on every cycle.
+//! - [`reach`] walks with a visited set, so it ends on every cycle, depth first, and
+//!   [`reach_breadth_first`] nearest first.
 //! - A [`Budget`] per owner (a rule run on one function, the summary of one function) bounds
 //!   the steps of all the owner's walks, and the facts they keep.
 //! - [`FnShape`] holds the tables of one function that walks read in place of linear scans:
@@ -39,7 +40,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, VecDeque};
 use std::hash::Hash;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -150,16 +151,25 @@ impl Budget {
 
     /// [`Self::STEPS_PER_UNIT`] per IR unit of `f`, at least [`Self::MIN_STEPS`].
     pub fn of_function(owner: &'static str, f: &IrFunction) -> Self {
-        let units: usize = f
-            .blocks
-            .iter()
+        Self::new(owner, Some(Self::steps_of([f])), Some(f))
+    }
+
+    /// [`Self::of_function`] of the functions `fs` together, for a walk whose nodes are
+    /// functions of one module.
+    pub fn of_functions<'f>(
+        owner: &'static str,
+        fs: impl IntoIterator<Item = &'f IrFunction>,
+    ) -> Self {
+        Self::new(owner, Some(Self::steps_of(fs)), None)
+    }
+
+    fn steps_of<'f>(fs: impl IntoIterator<Item = &'f IrFunction>) -> usize {
+        let units: usize = fs
+            .into_iter()
+            .flat_map(|f| &f.blocks)
             .map(|b| 1 + b.phis.len() + b.insts.len())
             .sum();
-        Self::new(
-            owner,
-            Some((units * Self::STEPS_PER_UNIT).max(Self::MIN_STEPS)),
-            Some(f),
-        )
+        (units * Self::STEPS_PER_UNIT).max(Self::MIN_STEPS)
     }
 
     /// `per_byte` steps per byte of `f`'s source, clamped to `min..=max`: the budgets some walks
@@ -598,6 +608,38 @@ pub fn reach<K: Copy + Eq + Hash, T>(
                 successors.clear();
                 next(k, &mut successors);
                 stack.extend(successors.iter().rev().filter(|w| !seen.contains(w)));
+            }
+        }
+    }
+    Answer::Known(None)
+}
+
+/// [`reach`] breadth first: the nodes in the order of their distance from `starts`, each visited
+/// once (one step). A node is first listed by `next` of the nearest node visited before it, so a
+/// walk keeping that node's parent keeps a shortest path to it.
+pub fn reach_breadth_first<K: Copy + Eq + Hash, T>(
+    budget: &Budget,
+    starts: impl IntoIterator<Item = K>,
+    mut next: impl FnMut(K, &mut Vec<K>),
+    mut visit: impl FnMut(K) -> Visit<T>,
+) -> Answer<Option<T>> {
+    if budget.spent() {
+        return Answer::Open;
+    }
+    let mut seen: FxHashSet<K> = FxHashSet::default();
+    let mut queue: VecDeque<K> = starts.into_iter().filter(|k| seen.insert(*k)).collect();
+    let mut successors = Vec::new();
+    while let Some(k) = queue.pop_front() {
+        if !budget.take(1) {
+            return Answer::Open;
+        }
+        match visit(k) {
+            Visit::Stop(t) => return Answer::Known(Some(t)),
+            Visit::Prune => {}
+            Visit::Expand => {
+                successors.clear();
+                next(k, &mut successors);
+                queue.extend(successors.iter().filter(|w| seen.insert(**w)));
             }
         }
     }

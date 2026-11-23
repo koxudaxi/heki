@@ -66,6 +66,16 @@ pub enum RecommendError {
     Project(#[from] ProjectError),
 }
 
+impl heki_env::Explain for RecommendError {
+    fn explain(&self) -> heki_env::Problem {
+        match self {
+            Self::Selection(e) => e.explain(),
+            Self::Rules(e) => e.explain(),
+            Self::Project(e) => e.explain(),
+        }
+    }
+}
+
 /// What `heki recommend` analyzes, and how it writes paths.
 pub struct Request<'a> {
     pub project: Project,

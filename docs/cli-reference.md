@@ -21,11 +21,49 @@ Commands:
   assumptions  List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection, functions too large to model) in a project
   inspect      Experimental: what heki knows about one function (its effects, what it changes, keeps, and returns, whether it is pure, its callers, reports, and contracts)
   recommend    Experimental: advice on the configuration of a project, with counts from its analysis, and the keys to add (it writes no file)
+  skill        Experimental: install heki's Agent Skill where a coding agent reads skills
   help         Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help     Print help
-  -V, --version  Print version
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+Documentation:
+  Documentation    https://heki.koxudaxi.dev/
+  Getting started  https://heki.koxudaxi.dev/getting-started/
+  Configuration    https://heki.koxudaxi.dev/configuration/
+  Rules            https://heki.koxudaxi.dev/rules/
+  Coding agents    https://heki.koxudaxi.dev/coding-agents/
+  llms.txt         https://heki.koxudaxi.dev/llms.txt
+  Agent Skill      https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental
+
+Exit codes:
+  0  no diagnostic fails the run
+  1  a diagnostic at the `fail-on` severity (an `error` by default), a refused `--update-baseline`, or pending `--diff` changes
+  2  a configuration, path, read, or syntax error; the error says what to do and links the documentation
+
+Examples:
+  heki check
+      check the project in the working directory
+  heki check src tests --select EFF,MUT
+      check two directories with two rule families
+  heki check --fix
+      apply the fixes heki proves safe
+  heki rule EFF101
+      the documentation of one rule
+  heki skill install --agent claude-code
+      install the Agent Skill for Claude Code (experimental)
+
+Output for programs:
+  heki check --output-format json
+      the diagnostics; when the configuration or a path stops the run, {"error": {"message", "help", "docs", ...}}
+  heki rule <CODE> --output-format json
+      one rule's metadata
+  heki inspect <SYMBOL> --output-format json
+      what heki knows about one function (experimental)
 ```
 
 ## `heki check`
@@ -36,49 +74,113 @@ Run semantic checks across Python files or directories (Ruff-aligned)
 Usage: heki check [OPTIONS] [PATHS]...
 
 Arguments:
-  [PATHS]...  Files or directories to check [default: .]
+  [PATHS]...
+          Files or directories to check
+          
+          [default: .]
 
 Options:
       --fix
           Apply `safe` + `unconditional` fixes (`OPT101`/`OPT102`)
+
       --include-size-dependent
           Also apply the proven-safe `size-dependent` fixes, in every function
+
       --diff
           Preview fixes as a unified diff without writing files
+
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
+
       --extend-select <EXTEND_SELECT>
           Additional rules to enable on top of defaults/config
+
       --ignore <IGNORE>
           Comma-separated rule codes or slugs to ignore
+
       --heuristic
           Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL` (`lint.heuristic = true`)
+
       --no-heuristic
           Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`)
+
       --config <CONFIG>
           Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file with the keys at its top level, like `heki.toml`
+
       --target-version <TARGET_VERSION>
           Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`)
+
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
+
       --fail-on <FAIL_ON>
-          Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`) [possible values: error, warning]
+          Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`)
+          
+          [possible values: error, warning]
+
       --output-format <OUTPUT_FORMAT>
-          Output format: `full`, or `github` in GitHub Actions (`GITHUB_ACTIONS=true`); `HEKI_OUTPUT_FORMAT` sets it when the option is not given [possible values: full, concise, json, github, sarif]
+          Output format: `full`, or `github` in GitHub Actions (`GITHUB_ACTIONS=true`); `HEKI_OUTPUT_FORMAT` sets it when the option is not given
+          
+          [possible values: full, concise, json, github, sarif]
+
       --color <WHEN>
-          When to color the `full` and `concise` output and `--diff`, as Ruff does: `auto` colors them on a terminal unless `NO_COLOR` is set (`FORCE_COLOR` or `CLICOLOR_FORCE` color them anywhere), `always`, or `never` [default: auto] [possible values: auto, always, never]
+          When to color the `full` and `concise` output and `--diff`, as Ruff does: `auto` colors them on a terminal unless `NO_COLOR` is set (`FORCE_COLOR` or `CLICOLOR_FORCE` color them anywhere), `always`, or `never`
+          
+          [default: auto]
+          [possible values: auto, always, never]
+
       --update-baseline
           Generate or shrink-update the Ratchet baseline file
+
       --profile <PROFILE>
           Experimental: offline profile dump (collapsed stacks of CPython 3.15's profiler or py-spy, or `--gecko` JSON): apply the `size-dependent` fixes in its hot functions (in every function with `--include-size-dependent`)
+
       --watch
           Watch for file changes and re-run incrementally
+
       --generate-prompt [<QUESTION>]
           Experimental: print a prompt for consulting a language model about this run instead of the report: the configuration, the rules that apply, the diagnostics, how to answer, and QUESTION when given (put PATHS before the option). `--output-format json` prints it as JSON. Writes no file and exits with 0
+
       --output-format-json-schema <TARGET>
-          Print the JSON Schema of a JSON output and exit: `generate-prompt`, the object of `--generate-prompt --output-format json` [possible values: generate-prompt]
+          Print the JSON Schema of a JSON output and exit: `generate-prompt`, the object of `--generate-prompt --output-format json`
+          
+          [possible values: generate-prompt]
+
   -h, --help
-          Print help
+          Print help (see a summary with '-h')
+
+Documentation:
+  This command     https://heki.koxudaxi.dev/cli-reference/#heki-check
+  Documentation    https://heki.koxudaxi.dev/
+  Getting started  https://heki.koxudaxi.dev/getting-started/
+  Configuration    https://heki.koxudaxi.dev/configuration/
+  Rules            https://heki.koxudaxi.dev/rules/
+  Coding agents    https://heki.koxudaxi.dev/coding-agents/
+  llms.txt         https://heki.koxudaxi.dev/llms.txt
+  Agent Skill      https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental
+
+Exit codes:
+  0  no diagnostic fails the run
+  1  a diagnostic at the `fail-on` severity (an `error` by default), a refused `--update-baseline`, or pending `--diff` changes
+  2  a configuration, path, read, or syntax error; the error says what to do and links the documentation
+
+Examples:
+  heki check src tests
+      check two directories
+  heki check --select EFF,MUT101 --ignore OPT110
+      choose the rules for one run
+  heki check --diff
+      show the fixes heki proves safe; `--fix` applies them
+  heki check --baseline heki-baseline.toml --update-baseline
+      record the current diagnostics; later runs report only new ones
+
+Output for programs:
+  heki check --output-format json
+      the diagnostics; when the configuration or a path stops the run, {"error": {"message", "help", "docs", ...}}
+  heki check --output-format sarif
+      SARIF 2.1.0, with each rule's page as `helpUri`
+  heki check --generate-prompt "<question>" --output-format json
+      the project's diagnostics and configuration for a model (experimental)
 ```
 
 ## `heki server`
@@ -89,10 +191,35 @@ Start the incremental Language Server Protocol (LSP) server
 Usage: heki server [OPTIONS]
 
 Options:
-      --stdio         Use stdio transport (default LSP mode)
-      --heuristic     Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL` (`lint.heuristic = true`)
-      --no-heuristic  Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`)
-  -h, --help          Print help
+      --stdio
+          Use stdio transport (default LSP mode)
+
+      --heuristic
+          Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL` (`lint.heuristic = true`)
+
+      --no-heuristic
+          Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`)
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Documentation:
+  This command     https://heki.koxudaxi.dev/cli-reference/#heki-server
+  Documentation    https://heki.koxudaxi.dev/
+  Getting started  https://heki.koxudaxi.dev/getting-started/
+  Configuration    https://heki.koxudaxi.dev/configuration/
+  Rules            https://heki.koxudaxi.dev/rules/
+  Coding agents    https://heki.koxudaxi.dev/coding-agents/
+  llms.txt         https://heki.koxudaxi.dev/llms.txt
+  Agent Skill      https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental
+
+Exit codes:
+  0  the client ended the session with `shutdown`, then `exit`
+  1  the session ended without `shutdown`
+
+Examples:
+  heki server
+      serve LSP over stdin and stdout
 ```
 
 ## `heki rule`
@@ -103,12 +230,47 @@ Explain a rule, its Proof Obligations, and counterexamples (`ruff rule` style)
 Usage: heki rule [OPTIONS] [RULE]
 
 Arguments:
-  [RULE]  Rule code (`EFF101`) or slug (`async-blocking-call`), or `--all` to list all rules
+  [RULE]
+          Rule code (`EFF101`) or slug (`async-blocking-call`), or `--all` to list all rules
 
 Options:
-      --all                            
-      --output-format <OUTPUT_FORMAT>  `text`, or `json` with each rule's metadata and documentation [default: text] [possible values: text, json]
-  -h, --help                           Print help
+      --all
+          
+
+      --output-format <OUTPUT_FORMAT>
+          `text`, or `json` with each rule's metadata and documentation
+          
+          [default: text]
+          [possible values: text, json]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Documentation:
+  This command     https://heki.koxudaxi.dev/cli-reference/#heki-rule
+  Documentation    https://heki.koxudaxi.dev/
+  Getting started  https://heki.koxudaxi.dev/getting-started/
+  Configuration    https://heki.koxudaxi.dev/configuration/
+  Rules            https://heki.koxudaxi.dev/rules/
+  Coding agents    https://heki.koxudaxi.dev/coding-agents/
+  llms.txt         https://heki.koxudaxi.dev/llms.txt
+  Agent Skill      https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental
+
+Exit codes:
+  0  the rule's documentation is printed
+  2  no rule has that code or name
+
+Examples:
+  heki rule EFF101
+      a rule by its code
+  heki rule async-blocking-call
+      a rule by its name
+  heki rule --all
+      every rule, with its code and name
+
+Output for programs:
+  heki rule --all --output-format json
+      every rule's metadata
 ```
 
 ## `heki snapshot`
@@ -119,17 +281,45 @@ Manage interprocedural effect summary snapshots (`MUT103`)
 Usage: heki snapshot [OPTIONS] [PATHS]...
 
 Arguments:
-  [PATHS]...  Files or directories to summarize [default: .]
+  [PATHS]...
+          Files or directories to summarize
+          
+          [default: .]
 
 Options:
       --write
           Write `.heki-summary-snapshot.json` at the project root (default: print it)
+
       --config <CONFIG>
           Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file with the keys at its top level, like `heki.toml`
+
       --target-version <TARGET_VERSION>
           Target Python version (`py311`..`py315`)
+
   -h, --help
-          Print help
+          Print help (see a summary with '-h')
+
+Documentation:
+  This command     https://heki.koxudaxi.dev/cli-reference/#heki-snapshot
+  Documentation    https://heki.koxudaxi.dev/
+  Getting started  https://heki.koxudaxi.dev/getting-started/
+  Configuration    https://heki.koxudaxi.dev/configuration/
+  Rules            https://heki.koxudaxi.dev/rules/
+  Coding agents    https://heki.koxudaxi.dev/coding-agents/
+  llms.txt         https://heki.koxudaxi.dev/llms.txt
+  Agent Skill      https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental
+
+Exit codes:
+  0  the snapshot is printed or written
+  2  a configuration, path, read, or syntax error; the error says what to do and links the documentation
+
+Examples:
+  heki snapshot --write
+      save the summaries `MUT103` compares with
+
+Output for programs:
+  heki snapshot
+      the summaries as JSON
 ```
 
 ## `heki assumptions`
@@ -140,15 +330,40 @@ List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection, fun
 Usage: heki assumptions [OPTIONS] [PATHS]...
 
 Arguments:
-  [PATHS]...  [default: .]
+  [PATHS]...
+          [default: .]
 
 Options:
       --target-version <TARGET_VERSION>
           Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`)
+
       --json
           Output machine-readable JSON
+
   -h, --help
-          Print help
+          Print help (see a summary with '-h')
+
+Documentation:
+  This command     https://heki.koxudaxi.dev/cli-reference/#heki-assumptions
+  Documentation    https://heki.koxudaxi.dev/
+  Getting started  https://heki.koxudaxi.dev/getting-started/
+  Configuration    https://heki.koxudaxi.dev/configuration/
+  Rules            https://heki.koxudaxi.dev/rules/
+  Coding agents    https://heki.koxudaxi.dev/coding-agents/
+  llms.txt         https://heki.koxudaxi.dev/llms.txt
+  Agent Skill      https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental
+
+Exit codes:
+  0  the hazards are listed
+  2  a configuration, path, read, or syntax error; the error says what to do and links the documentation
+
+Examples:
+  heki assumptions src
+      the hazards of one directory
+
+Output for programs:
+  heki assumptions --json
+      the hazards as a JSON array
 ```
 
 ## `heki inspect`
@@ -159,36 +374,82 @@ Experimental: what heki knows about one function (its effects, what it changes, 
 Usage: heki inspect [OPTIONS] <SYMBOL> [PATHS]...
 
 Arguments:
-  <SYMBOL>    A dotted name (`pkg.mod.Class.method`, a dotted suffix such as `Class.method`, or a glob), `path.py:LINE`, or `path.py::NAME`
-  [PATHS]...  The project to analyze, as for `heki check` [default: .]
+  <SYMBOL>
+          A dotted name (`pkg.mod.Class.method`, a dotted suffix such as `Class.method`, or a glob), `path.py:LINE`, or `path.py::NAME`
+
+  [PATHS]...
+          The project to analyze, as for `heki check`
+          
+          [default: .]
 
 Options:
       --output-format <OUTPUT_FORMAT>
-          `text`, or `json` [default: text] [possible values: text, json]
+          `text`, or `json`
+          
+          [default: text]
+          [possible values: text, json]
+
       --callers
           List the callers transitively, and the reports above the function
+
       --depth <DEPTH>
-          How many caller levels `--callers` lists [default: 3]
+          How many caller levels `--callers` lists
+          
+          [default: 3]
+
       --imports
           Show the imports of the project modules SYMBOL names (a module name or a glob over module names): each import with when it runs and what it loads, and what loading the module loads while it loads
+
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
+
       --extend-select <EXTEND_SELECT>
           Additional rules to enable on top of defaults/config
+
       --ignore <IGNORE>
           Comma-separated rule codes or slugs to ignore
+
       --heuristic
           Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL` (`lint.heuristic = true`)
+
       --no-heuristic
           Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`)
+
       --config <CONFIG>
           Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file with the keys at its top level, like `heki.toml`
+
       --target-version <TARGET_VERSION>
           Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`)
+
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
+
   -h, --help
-          Print help
+          Print help (see a summary with '-h')
+
+Documentation:
+  This command     https://heki.koxudaxi.dev/cli-reference/#heki-inspect
+  Documentation    https://heki.koxudaxi.dev/
+  Getting started  https://heki.koxudaxi.dev/getting-started/
+  Configuration    https://heki.koxudaxi.dev/configuration/
+  Rules            https://heki.koxudaxi.dev/rules/
+  Coding agents    https://heki.koxudaxi.dev/coding-agents/
+  llms.txt         https://heki.koxudaxi.dev/llms.txt
+  Agent Skill      https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental
+
+Exit codes:
+  0  the function's report is printed
+  2  the symbol names no single function (the error lists the candidates), or a file could not be analyzed
+
+Examples:
+  heki inspect pkg.users.fetch
+      a function by its full name
+  heki inspect src/pkg/users.py:42 --callers
+      the function at a line, with its callers
+
+Output for programs:
+  heki inspect <SYMBOL> --output-format json
+      the report as one object; on exit code 2, `error` with the candidates
 ```
 
 ## `heki recommend`
@@ -199,29 +460,117 @@ Experimental: advice on the configuration of a project, with counts from its ana
 Usage: heki recommend [OPTIONS] [PATHS]...
 
 Arguments:
-  [PATHS]...  The project to analyze, as for `heki check` [default: .]
+  [PATHS]...
+          The project to analyze, as for `heki check`
+          
+          [default: .]
 
 Options:
       --output-format <OUTPUT_FORMAT>
-          `text`, or `json` (one object, described by the JSON Schema its `$schema` names) [default: text] [possible values: text, json]
+          `text`, or `json` (one object, described by the JSON Schema its `$schema` names)
+          
+          [default: text]
+          [possible values: text, json]
+
       --output-format-json-schema
           Print the JSON Schema of the object of `--output-format json` and exit
+
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
+
       --extend-select <EXTEND_SELECT>
           Additional rules to enable on top of defaults/config
+
       --ignore <IGNORE>
           Comma-separated rule codes or slugs to ignore
+
       --heuristic
           Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL` (`lint.heuristic = true`)
+
       --no-heuristic
           Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`)
+
       --config <CONFIG>
           Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file with the keys at its top level, like `heki.toml`
+
       --target-version <TARGET_VERSION>
           Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`)
+
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
+
   -h, --help
-          Print help
+          Print help (see a summary with '-h')
+
+Documentation:
+  This command     https://heki.koxudaxi.dev/cli-reference/#heki-recommend
+  Documentation    https://heki.koxudaxi.dev/
+  Getting started  https://heki.koxudaxi.dev/getting-started/
+  Configuration    https://heki.koxudaxi.dev/configuration/
+  Rules            https://heki.koxudaxi.dev/rules/
+  Coding agents    https://heki.koxudaxi.dev/coding-agents/
+  llms.txt         https://heki.koxudaxi.dev/llms.txt
+  Agent Skill      https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental
+
+Exit codes:
+  0  the advice is printed
+  2  a configuration, path, read, or syntax error; the error says what to do and links the documentation
+
+Examples:
+  heki recommend
+      advice for the project in the working directory
+
+Output for programs:
+  heki recommend --output-format json
+      the advice as one object
+  heki recommend --output-format-json-schema
+      the JSON Schema of that object
+```
+
+## `heki skill install`
+
+```text
+Copy the Agent Skill this heki was built with into the coding agent's skills directory
+
+Usage: heki skill install [OPTIONS] --agent <AGENT>
+
+Options:
+      --agent <AGENT>
+          The coding agent: Claude Code reads `.claude/skills/`, Codex `.agents/skills/`
+          
+          [possible values: claude-code, codex]
+
+      --scope <SCOPE>
+          `project`: under the working directory; `user`: under the home directory, for every project
+          
+          [default: project]
+          [possible values: project, user]
+
+      --overwrite
+          Replace the skill already installed there
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Documentation:
+  This command     https://heki.koxudaxi.dev/cli-reference/#heki-skill-install
+  Documentation    https://heki.koxudaxi.dev/
+  Getting started  https://heki.koxudaxi.dev/getting-started/
+  Configuration    https://heki.koxudaxi.dev/configuration/
+  Rules            https://heki.koxudaxi.dev/rules/
+  Coding agents    https://heki.koxudaxi.dev/coding-agents/
+  llms.txt         https://heki.koxudaxi.dev/llms.txt
+  Agent Skill      https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental
+
+Exit codes:
+  0  the skill is installed
+  2  the skill is already there (pass `--overwrite`), or its directory cannot be written
+
+Examples:
+  heki skill install --agent claude-code
+      into .claude/skills/heki of the working directory
+  heki skill install --agent codex --scope user
+      into ~/.agents/skills/heki, for every project
+  heki skill install --agent claude-code --overwrite
+      replace an installed skill with this heki's
 ```

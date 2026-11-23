@@ -43,11 +43,22 @@ Events (lists, so that the trace is compact JSON):
   normally; `kept_id` is the identity of what its first argument's `__dict__` holds under the
   property's name then (`None`: nothing). A line of such a writer carries the same facts at its
   start and end as a last element of its `line` event (`kept_facts`, after `attrs_after`);
+- `["lost", line, act, seq_start, seq_end, outcome, facts]`: for a line plan's change of an
+  object the code never names (`MUT119`), when the line ran without an exception: `made` (what
+  made the object at its expression: `["call", qualname, builtin maker]`, `["slice", qualname
+  of the sliced value's class, builtin slice]`, or `["return", qualname, False]`), `method` (at
+  a method's call: `[name, a changing method of the receiver's builtin type, qualname of the
+  program's method or None]`), `store` (the qualname of a program's `__setitem__` or
+  `__delitem__` the change ran), and, when the line saw the object, `held` (how many references
+  the program keeps to it when the line ends), `holders`, `named` (the names of the line's frame
+  the line bound to it), and `type`; `results` maps each assignment target to the type's name of
+  what it holds then (`None` when loading it would run code);
 - `["fake", seq, api, kind, waits, detail, stack, input_ids, output_id]`.
 """
 
 from __future__ import annotations
 
+import bisect
 import collections
 import dis
 import functools
@@ -144,6 +155,7 @@ class CodeInfo:
         "body_offs",
         "load_offs",
         "kept_rets",
+        "offsets",
         "_instructions",
     )
 
@@ -169,8 +181,15 @@ class CodeInfo:
                 self.pos_of[ins.offset] = (pos.lineno, pos.col_offset, pos.end_lineno, pos.end_col_offset)
             if i + 1 < len(instructions):
                 self.next_off[ins.offset] = instructions[i + 1].offset
+        self.offsets = [ins.offset for ins in instructions]
         self.watched = False
         self._instructions = instructions
+
+    def position(self, lasti):
+        """The position of the instruction a frame runs: on CPython 3.12 a frame that called out
+        reports the offset of one of its instruction's inline cache entries."""
+        i = bisect.bisect_right(self.offsets, lasti) - 1
+        return self.pos_of.get(self.offsets[i]) if i >= 0 else None
 
     def attach(self, plan_sites, plan_loops, plan_lines, plan_returns, kept_attrs=frozenset()):
         """Index the plan entries in this code object; returns whether any is here."""
@@ -375,6 +394,61 @@ class Iteration:
         self.lines = set()
 
 
+class LostChange:
+    """A line plan's change of an object the code never names (`MUT119`): the object the change
+    ran on, once the line has seen it, and how the line made it and changed it."""
+
+    __slots__ = ("id", "change", "base", "results", "sliced", "held", "made", "method", "store")
+
+    def __init__(self, plan_id, spec):
+        self.id = plan_id
+        self.change = tuple(spec["change"])
+        self.base = tuple(spec["base"])
+        self.results = spec.get("results", ())
+        # The value a slice at the object's expression slices (`xs` of `xs[:]`), when loading it
+        # runs no code.
+        self.sliced = spec.get("sliced")
+        # The recorder's one reference to the object besides `Recorder.keep`.
+        self.held = []
+        self.made = None
+        self.method = None
+        self.store = None
+
+
+# What calling one of these makes: a new builtin container that nothing else holds.
+_MAKERS = (list, dict, set, bytearray, collections.deque, sorted)
+
+
+def builtin_maker(callable_, receiver):
+    """Whether a call of `callable_` (on `receiver`, for a method) makes a new builtin container
+    that nothing else holds: a builtin container type or `sorted` itself, or the builtin `copy`
+    of a builtin container."""
+    if any(callable_ is maker for maker in _MAKERS):
+        return True
+    return (
+        isinstance(callable_, (types.MethodDescriptorType, types.BuiltinMethodType))
+        and callable_.__name__ == "copy"
+        and type(receiver) in _MUTATORS
+    )
+
+
+def builtin_slice(value):
+    """What slicing `value` makes, when it is new and nothing else holds it: the slice of a list
+    or a bytearray whose class keeps the builtin `__getitem__`."""
+    for kind in (list, bytearray):
+        if isinstance(value, kind):
+            return ["slice", type(value).__qualname__, type(value).__getitem__ is kind.__getitem__]
+    return None
+
+
+def _receiver(callable_, arg0):
+    """The object a method call runs on: a bound method's `__self__`, else the first argument."""
+    receiver = getattr(callable_, "__self__", None)
+    if receiver is None or isinstance(receiver, types.ModuleType):
+        return arg0
+    return receiver
+
+
 class LineExec:
     __slots__ = (
         "plan",
@@ -392,11 +466,16 @@ class LineExec:
         "attrs_before",
         "kept",
         "kept_self",
+        "lost",
+        "names_at_start",
     )
 
     def __init__(self, plan, start):
         self.plan = plan
         self.start = start
+        self.lost = [LostChange(entry["id"], entry["lost"]) for entry in plan if "lost" in entry]
+        # With a lost change: the identity of what each local holds when the line starts.
+        self.names_at_start = {}
         self.names = {}
         self.evals = []
         self.evals_before = {}
@@ -635,6 +714,7 @@ class Recorder:
             caller_act = cfs.act if cfs is not None and cfs.frame is caller else -1
             caller_line = caller.f_lineno
         self.events.append(["start", seq, fs.act, code.co_qualname, info.path, caller_act, caller_line])
+        self._lost_store(frame, code)
         return None
 
     def _on_resume(self, code, offset):
@@ -664,6 +744,7 @@ class Recorder:
         if not self.active:
             return None
         frame = sys._getframe(_PROGRAM_FRAME)
+        self._lost_return(frame, code, value)
         fs = self.frames.pop(id(frame), None)
         seq = self._tick()
         if fs is not None and fs.frame is frame:
@@ -722,17 +803,133 @@ class Recorder:
         fs = self.frames.get(id(frame))
         if fs is None or fs.open_line is None:
             return None
+        if fs.open_line.lost:
+            self._lost_call(fs, offset, callable_, arg0)
         if isinstance(callable_, (types.FunctionType, types.MethodType)):
             # A method a program class defines (an override of `append`) is not the builtin one.
             return None
         name = getattr(callable_, "__name__", None)
-        receiver = getattr(callable_, "__self__", None)
-        if receiver is None or isinstance(receiver, types.ModuleType):
-            receiver = arg0
+        receiver = _receiver(callable_, arg0)
         if name is not None and mutating_method(receiver, name):
             self.keep.append(receiver)
             fs.open_line.muts.append([id(receiver), name, type(receiver).__name__])
         return None
+
+    # -- changes of unnamed objects (`MUT119`) ---------------------------------------------------
+    def _lost_call(self, fs, offset, callable_, arg0):
+        """A call on a line with a lost change: at the change, the method and its receiver; at the
+        changed object's expression, what makes the object."""
+        pos = fs.info.pos_of.get(offset)
+        python = isinstance(callable_, (types.FunctionType, types.MethodType))
+        name = getattr(callable_, "__name__", None)
+        for watch in fs.open_line.lost:
+            if pos == watch.change:
+                watch.held[:] = [_receiver(callable_, arg0)]
+                builtin = not python and name is not None and mutating_method(watch.held[0], name)
+                watch.method = [name, builtin, getattr(callable_, "__qualname__", None) if python else None]
+            elif pos == watch.base:
+                qualname = getattr(callable_, "__qualname__", type(callable_).__name__)
+                watch.made = ["call", qualname, builtin_maker(callable_, _receiver(callable_, arg0))]
+
+    def _lost_watches(self, frame):
+        """The caller of `frame` when it runs a line with a lost change, with the position of the
+        instruction that is running there."""
+        caller = frame.f_back
+        fs = self.frames.get(id(caller)) if caller is not None else None
+        if fs is None or fs.frame is not caller or fs.open_line is None or not fs.open_line.lost:
+            return None, None
+        return fs.open_line.lost, fs.info.position(caller.f_lasti)
+
+    def _lost_return(self, frame, code, value):
+        """Project code returning to a line with a lost change, from the changed object's
+        expression (a function, a property's getter, a `__getitem__`): the value is the object.
+        A class's `__init__` returns `None` to the call that makes the instance. A builtin
+        constructor that runs project code (`list(Items())` calls `Items.__iter__`) is that call's
+        result, not what the callback returns at the same position."""
+        watches, pos = self._lost_watches(frame)
+        for watch in watches or ():
+            made_by_builtin = watch.made is not None and watch.made[0] == "call" and watch.made[2]
+            if pos == watch.base and code.co_name != "__init__" and not made_by_builtin:
+                watch.held[:] = [value]
+                watch.made = ["return", code.co_qualname, False]
+
+    def _lost_store(self, frame, code):
+        """Project code an item assignment or deletion with a lost change runs: the object's own
+        `__setitem__` or `__delitem__`, which is not its builtin type's."""
+        watches, pos = self._lost_watches(frame)
+        for watch in watches or ():
+            if pos == watch.change and code.co_name in ("__setitem__", "__delitem__"):
+                watch.store = code.co_qualname
+
+    def _program_refs(self, ex, watch):
+        """How many references to the object `watch` holds the program keeps: its reference count
+        less the recorder's own and less the count of a new object held and passed the same way.
+        It counts what `gc` cannot see: the locals of running frames."""
+        own = sum(1 for v in self.keep if v is watch.held[0])
+        own += sum(1 for v in ex.watched if v is watch.held[0])
+        own += sum(1 for call in self.open_calls for v in call.objects if v is watch.held[0])
+        own += sum(1 for w in ex.lost if w is not watch and w.held and w.held[0] is watch.held[0])
+        own += ex.kept_self is watch.held[0]
+        probe = [object()]
+        return sys.getrefcount(watch.held[0]) - sys.getrefcount(probe[0]) - own
+
+    def _holders(self, ex, watch, frame):
+        """What holds the object: the types of the containers `gc` finds, then the names of the
+        running frames' locals (read last: on CPython 3.12 reading them stores a copy); and the
+        names of the line's frame that the line bound to it."""
+        import gc
+
+        recorder = [self.keep, ex.watched, *(w.held for w in ex.lost), *(c.objects for c in self.open_calls)]
+        found = sorted(
+            {
+                type(r).__name__
+                for r in gc.get_referrers(watch.held[0])
+                if not any(r is mine for mine in recorder) and not isinstance(r, types.FrameType)
+            }
+        )
+        named = []
+        line_frame = frame
+        while frame is not None:
+            if self._is_project(frame.f_code):
+                for name, value in frame.f_locals.items():
+                    if value is watch.held[0]:
+                        found.append(f"{frame.f_code.co_qualname}:{name}")
+                        if frame is line_frame and ex.names_at_start.get(name) != id(value):
+                            named.append(name)
+            frame = frame.f_back
+        return found, named
+
+    def _lost_facts(self, fs, ex):
+        """What each lost change of the ending line ran on and whether anything holds it now;
+        counted before the line's locals are read."""
+        out = []
+        for watch in ex.lost:
+            facts = {"made": watch.made, "method": watch.method, "store": watch.store, "held": None}
+            if watch.held:
+                held = self._program_refs(ex, watch)
+                if held > 0:
+                    # An object only a garbage cycle holds is unreachable.
+                    import gc
+
+                    gc.collect()
+                    held = self._program_refs(ex, watch)
+                facts["held"] = held
+                facts["holders"], facts["named"] = self._holders(ex, watch, fs.frame) if held > 0 else ([], [])
+                kind = type(watch.held[0])
+                facts["type"] = [kind.__module__, kind.__qualname__]
+            out.append((watch, facts))
+        return out
+
+    def _lost_results(self, fs, lost):
+        """What each assignment target of a lost change holds when the line ends: `None`, the
+        type's name, or `None` in place of the dict when loading it would run code."""
+        for watch, facts in lost:
+            local = fs.frame.f_locals if watch.results else {}
+            loaded = {}
+            for expr in watch.results:
+                value = static_eval(expr, local)
+                loaded[expr] = None if value is UNKNOWN else [value is None, type(value).__name__]
+            facts["results"] = loaded
 
     def _on_instruction(self, code, offset):
         if not self.active:
@@ -856,6 +1053,11 @@ class Recorder:
         ex.evals = sorted(set(merged["evals"]))
         ex.evals_before = self._eval_objects(local, ex.evals)
         ex.attrs_before = self._attr_facts(local, ex.attrs)
+        if ex.lost:
+            ex.names_at_start = {name: id(value) for name, value in local.items()}
+            for watch in ex.lost:
+                if watch.sliced:
+                    watch.made = builtin_slice(static_eval(watch.sliced, local))
         watched = []
         for name in merged["capture"]:
             value = local.get(name, MISSING)
@@ -945,6 +1147,7 @@ class Recorder:
     def _end_line(self, fs, seq, outcome):
         ex = fs.open_line
         fs.open_line = None
+        lost = self._lost_facts(fs, ex) if ex.lost and outcome == "ok" else ()
         after = [[id(v), type(v).__name__, snapshot(v)] for v in ex.watched]
         evals_after = self._eval_objects(fs.frame.f_locals, ex.evals) if ex.evals else {}
         local = fs.frame.f_locals if ex.names or ex.attrs else {}
@@ -1003,6 +1206,11 @@ class Recorder:
                     attrs_after,
                 ]
             )
+        self._lost_results(fs, lost)
+        for watch, facts in lost:
+            self.events.append(["lost", watch.id, fs.act, ex.start, seq, outcome, facts])
+        for watch in ex.lost:
+            watch.held.clear()
 
     def _close_frame(self, fs, seq, outcome):
         calls, fs.open_call = fs.open_call, []
@@ -1032,7 +1240,9 @@ _PLAIN = (int, str, bytes, float, bool, type(None))
 
 
 def _is_plain_key(value):
-    if isinstance(value, _PLAIN):
+    """Whether hashing and comparing `value` runs no program code: an exact builtin type (a
+    subclass may define `__hash__`, `__eq__`, or `__index__`), tuples of them included."""
+    if type(value) in _PLAIN:
         return True
     if type(value) is tuple:
         return all(_is_plain_key(v) for v in value)
@@ -1068,7 +1278,8 @@ def static_getattr(obj, name):
 
 
 def static_eval(expr, local):
-    """Evaluate a key expression (`a`, `a.k`, `a.x.y`, `a["k"]`, `a[0]`) without running code."""
+    """Evaluate a key expression (`a`, `a.k`, `a.x.y`, `a["k"]`, `a[0]`, `a[k]` of a name holding a
+    plain key) without running code."""
     import ast
 
     try:
@@ -1088,11 +1299,15 @@ def _static_eval(node, local):
         if base is UNKNOWN:
             return UNKNOWN
         return static_getattr(base, node.attr)
-    if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
+    if isinstance(node, ast.Subscript) and isinstance(node.slice, (ast.Constant, ast.Name)):
         base = _static_eval(node.value, local)
-        if type(base) in (dict, list, tuple):
+        key = _static_eval(node.slice, local)
+        if type(base) in (dict, list, tuple) and key is not UNKNOWN and _is_plain_key(key):
+            if type(base) is dict and not all(_is_plain_key(k) for k in base):
+                # A stored key of the program's class may run its `__eq__` on a hash collision.
+                return UNKNOWN
             try:
-                return base[node.slice.value]
+                return base[key]
             except (KeyError, IndexError, TypeError):
                 return UNKNOWN
         return UNKNOWN

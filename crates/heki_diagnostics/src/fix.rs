@@ -81,10 +81,11 @@ pub fn fix_python_source(shown_path: &str, source: &str, groups: &[&[TextEdit]])
             text: source.to_owned(),
             applied: Vec::new(),
             refused: Some(format!(
-                "{shown_path}: the fixes would make the file invalid Python ({}); it was left unchanged. This is a heki bug: please report it",
+                "{shown_path}: the fixes would make the file invalid Python ({}); it was left unchanged. This is a heki bug: please report it at {}",
                 errors
                     .first()
-                    .map_or("syntax error", |e| e.message.as_str())
+                    .map_or("syntax error", |e| e.message.as_str()),
+                heki_env::problem::ISSUES
             )),
         },
     }

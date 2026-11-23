@@ -8,7 +8,7 @@ opaque_packages = [
     "pathlib", "shutil", "sqlite3", "urllib", "http", "logging", "copy", "functools",
     "itertools", "collections", "threading", "multiprocessing", "concurrent", "dataclasses",
     "queue", "contextlib", "importlib", "platform", "sys", "sysconfig", "html", "json",
-    "pprint",
+    "pprint", "atexit", "signal", "weakref",
 ]
 
 # --- Sleep ---
@@ -655,6 +655,105 @@ offloads_blocking_arg = 1
 return_type = "asyncio.Future"
 opaque_to_layer3 = true
 
+# --- Calls a callable without awaiting it (EFF115, opt-in) ---
+# What each of these calls calls without awaiting it is listed under `[[calls_unawaited]]`.
+
+[[entries]]
+symbol = "threading.Thread"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "threading.Timer"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "multiprocessing.Process"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "concurrent.futures.Executor.submit"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "concurrent.futures.Executor.map"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "concurrent.futures.ThreadPoolExecutor.map"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "concurrent.futures.ProcessPoolExecutor.map"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.AbstractEventLoop.call_soon"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.BaseEventLoop.call_soon"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.AbstractEventLoop.call_soon_threadsafe"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.BaseEventLoop.call_soon_threadsafe"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.AbstractEventLoop.call_later"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.BaseEventLoop.call_later"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.AbstractEventLoop.call_at"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.BaseEventLoop.call_at"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "atexit.register"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "signal.signal"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "contextlib.ExitStack.callback"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "contextlib.AsyncExitStack.callback"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "weakref.finalize"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "builtins.filter"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "itertools.filterfalse"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "itertools.takewhile"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "itertools.dropwhile"
+opaque_to_layer3 = true
+
 # --- Written in order (EFF112, opt-in) ---
 # The call writes an argument, or serializes it into text, in the order of its elements: a
 # mapping's keys and a sequence's items in their iteration order. `sorted_by` names the keyword
@@ -799,6 +898,19 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "builtins.set.copy"
 copy_sanitizer = "shallow"
+opaque_to_layer3 = true
+
+# `os.environ.copy()` is `dict(os.environ)`: a new dict of the environment's strings.
+[[entries]]
+symbol = "os.environ.copy"
+copy_sanitizer = "shallow"
+return_type = "builtins.dict"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.environb.copy"
+copy_sanitizer = "shallow"
+return_type = "builtins.dict"
 opaque_to_layer3 = true
 
 # The builtin container constructors make a new container of their argument's elements, which
@@ -1851,3 +1963,128 @@ symbol = "functools.cached_property"
 versions = "CPython 3.11, 3.15"
 keeps = "a non-data descriptor whose __get__ stores the getter's value in instance.__dict__[attrname], which later reads find before the descriptor"
 invalidation = "del obj.<name> and obj.__dict__.pop(<name>) remove the entry (the descriptor defines no __delete__); an instance without a __dict__ raises TypeError and keeps nothing"
+
+# --- Calls a callable without awaiting it (`[[calls_unawaited]]`, EFF115, opt-in) ---
+# Each entry names the callable argument (position `arg`, the receiver not counted, or the
+# keyword `param`) that the call calls as a plain function, now or later, on this thread or
+# another, without awaiting what it returns: an `async def` handed there only makes a coroutine,
+# and its body does not run. `tests_result` says that the call tests the result for truth, which
+# a coroutine always passes. The offloading APIs above (`offloads_blocking_arg`) count as such
+# calls too. `map`, `itertools.starmap`, and `functools.reduce` hand the coroutines on, which
+# may be awaited (`asyncio.gather(*map(fetch, urls))`); a sort key's coroutines are no
+# comparable values, which the type checkers report. `loop.call_soon` and the scheduling
+# methods next to it raise `TypeError` for a coroutine function only in debug mode.
+
+[[calls_unawaited]]
+symbol = "concurrent.futures.ThreadPoolExecutor.submit"
+arg = 0
+
+[[calls_unawaited]]
+symbol = "concurrent.futures.ProcessPoolExecutor.submit"
+arg = 0
+
+[[calls_unawaited]]
+symbol = "threading.Thread"
+arg = 1
+param = "target"
+
+[[calls_unawaited]]
+symbol = "threading.Timer"
+arg = 1
+param = "function"
+
+[[calls_unawaited]]
+symbol = "multiprocessing.Process"
+arg = 1
+param = "target"
+
+[[calls_unawaited]]
+symbol = "concurrent.futures.Executor.submit"
+arg = 0
+
+[[calls_unawaited]]
+symbol = "concurrent.futures.Executor.map"
+arg = 0
+param = "fn"
+
+[[calls_unawaited]]
+symbol = "concurrent.futures.ThreadPoolExecutor.map"
+arg = 0
+param = "fn"
+
+[[calls_unawaited]]
+symbol = "concurrent.futures.ProcessPoolExecutor.map"
+arg = 0
+param = "fn"
+
+[[calls_unawaited]]
+symbol = "asyncio.AbstractEventLoop.call_soon"
+arg = 0
+
+[[calls_unawaited]]
+symbol = "asyncio.BaseEventLoop.call_soon"
+arg = 0
+
+[[calls_unawaited]]
+symbol = "asyncio.AbstractEventLoop.call_soon_threadsafe"
+arg = 0
+
+[[calls_unawaited]]
+symbol = "asyncio.BaseEventLoop.call_soon_threadsafe"
+arg = 0
+
+[[calls_unawaited]]
+symbol = "asyncio.AbstractEventLoop.call_later"
+arg = 1
+
+[[calls_unawaited]]
+symbol = "asyncio.BaseEventLoop.call_later"
+arg = 1
+
+[[calls_unawaited]]
+symbol = "asyncio.AbstractEventLoop.call_at"
+arg = 1
+
+[[calls_unawaited]]
+symbol = "asyncio.BaseEventLoop.call_at"
+arg = 1
+
+[[calls_unawaited]]
+symbol = "atexit.register"
+arg = 0
+
+[[calls_unawaited]]
+symbol = "signal.signal"
+arg = 1
+
+[[calls_unawaited]]
+symbol = "contextlib.ExitStack.callback"
+arg = 0
+
+[[calls_unawaited]]
+symbol = "contextlib.AsyncExitStack.callback"
+arg = 0
+
+[[calls_unawaited]]
+symbol = "weakref.finalize"
+arg = 1
+
+[[calls_unawaited]]
+symbol = "builtins.filter"
+arg = 0
+tests_result = true
+
+[[calls_unawaited]]
+symbol = "itertools.filterfalse"
+arg = 0
+tests_result = true
+
+[[calls_unawaited]]
+symbol = "itertools.takewhile"
+arg = 0
+tests_result = true
+
+[[calls_unawaited]]
+symbol = "itertools.dropwhile"
+arg = 0
+tests_result = true

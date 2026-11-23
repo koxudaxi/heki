@@ -117,7 +117,8 @@ a rule becomes exact](precision.md#how-a-rule-becomes-exact):
    (`fakes.py`: `time.sleep`, `requests`, `sqlite3`, `socket`, `subprocess`, `urllib`, queues,
    `numpy`, `pandas`), so the program runs offline. `monitor.py` records with `sys.monitoring`
    which call was running, which iteration of a loop, and which line, when each fake was called,
-   what each line changed, and what the objects a line plan names hold in an attribute.
+   what each line changed, what the objects a line plan names hold in an attribute, and how
+   many references the program keeps to the object a change ran on when its line ends.
 4. `checkers.py` refutes a claim from the runs: an `EFF101` call that returned without a waiting
    call during it, an `EFF103` iteration that completed without a statement, a `DATA101`
    iteration whose new value was not built from the previous one, a `MUT110` or `MUT114` line
@@ -125,7 +126,9 @@ a rule becomes exact](precision.md#how-a-rule-becomes-exact):
    object than the copied value held at the access path when the copy line ran (or left it as it
    was, or whose copy held another object there; `monitor.py` loads each path at those lines
    without running code of the program), a `MUT118` deep copy whose copy kept the `object()` the
-   original held in the attribute, an `OPT` accumulator of another type,
+   original held in the attribute, a `MUT119` change whose object the program still holds when
+   the statement ends (or that ran a method of the program, or whose assigned result is not
+   `None`), an `OPT` accumulator of another type,
    or an `OPT113` inner item with a different key that ran more than the comparison. For the
    `OPT` rewrites, the driver applies `heki check --fix --include-size-dependent` to a copy and
    compares results, exceptions, arguments, output, and library calls on the same inputs.
@@ -139,7 +142,8 @@ by construction on an input the program runs. With a premise stripped, an exact 
 rule is a refutation whatever the runs show (step 1 of the certification, premise stripping); a
 base program heki does not report is counted, not refuted. A premise of the table the generator
 cannot strip stops the run, so the generator grows with the table. `--table-heki` takes the
-table from another build, to check a release older than the table with it.
+table from another build, to check a release older than the table with it, and `--table-rules`
+keeps only the rules it names, for the oracle run of one rule's certification.
 
 For the rules whose heuristic reports record the premises they leave open (`OPEN_PREMISE_CODES`
 in `premise_generator.py`: `EFF101` through `EFF111`, `EFF103` through `EFF113`, and the `OPT`
@@ -256,13 +260,14 @@ The engines of `heki_ir::walk` apply these rules by construction, and every walk
 the call graph, or the class hierarchy goes through them:
 
 - `Memo` keeps one answer per key, a value and a question. `Closure` joins the facts of every
-  node a node reaches, the members of a cycle sharing one. `reach` walks with a visited set.
+  node a node reaches, the members of a cycle sharing one. `reach` walks with a visited set,
+  depth first, and `reach_breadth_first` nearest first (a shortest call chain to each node).
   `fixpoint` joins the facts of nodes that read each other, and visits a node again only when a
   fact it reads grows, up to a visit limit.
-- A `Budget` per owner (a rule run on one function, the summary of one function) counts the
-  steps of all the owner's walks, and the weight of every fact they join, which bounds both the
-  work of joining and the memory of the facts kept: 64 per IR unit, at least 4,096. Past it every
-  walk of the owner answers open.
+- A `Budget` per owner (a rule run on one function, the summary of one function, the store
+  types of one module) counts the steps of all the owner's walks, and the weight of every fact
+  they join, which bounds both the work of joining and the memory of the facts kept: 64 per IR
+  unit, at least 4,096. Past it every walk of the owner answers open.
 - `FnShape` holds the tables of one function that walks read instead of scanning it:
   definitions, readers, copy roots, predecessors, reverse postorder, dominators, and loops.
 - `SharedMemo` keeps answers over the project declarations across functions, and replays what
@@ -379,7 +384,7 @@ parameter at as many calls, and thousands of references to a `call-owners` targe
 a long chain of phis carries to one `return`, an argument handed down through thousands of functions
 of one module to the one that changes it, thousands of reports whose call chains enter one module,
 the callers of the bottom of a lattice of calls thirty levels deep, the chains `heki inspect` walks
-down thousands of calls of one module, a value chosen among a thousand module globals before it is
+down thousands of calls of one module and past thousands of functions it cannot follow, a value chosen among a thousand module globals before it is
 changed, thousands of calls handing a global to a helper that changes it, thousands of
 comprehensions or generator expressions, each over a value the function creating them binds just
 before, through `heki dump-recommend-facts`, the calls heki is blind to in a chain of

@@ -981,7 +981,7 @@ fn baselines_count_violation_sites() {
     let (code, _, stderr) = p.check(&update);
     assert_eq!(code, 1, "{stderr}");
     assert!(
-        stderr.contains("error: baseline heki-baseline.toml not updated: 6 entry(ies) grew"),
+        stderr.contains("error: baseline `heki-baseline.toml` not updated: 6 entry(ies) grew"),
         "{stderr}"
     );
     assert_eq!(p.read("heki-baseline.toml"), recorded);
@@ -1037,7 +1037,7 @@ fn baselines_without_a_version_keep_counting_diagnostics() {
     let (code, _, stderr) = p.check(&update);
     assert_eq!(code, 1, "{stderr}");
     assert!(
-        stderr.contains("error: baseline heki-baseline.toml not updated: 2 entry(ies) grew"),
+        stderr.contains("error: baseline `heki-baseline.toml` not updated: 2 entry(ies) grew"),
         "{stderr}"
     );
     assert_eq!(p.read("heki-baseline.toml"), old);
@@ -1051,7 +1051,7 @@ fn baselines_without_a_version_keep_counting_diagnostics() {
     assert_eq!(code, 2);
     assert!(
         stderr.contains(
-            "baseline heki-baseline.toml has version 3; this heki reads versions 1 and 2"
+            "error: heki-baseline.toml: the baseline has version 3; this heki reads versions 1 and 2"
         ),
         "{stderr}"
     );

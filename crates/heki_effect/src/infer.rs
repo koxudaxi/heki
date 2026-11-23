@@ -588,6 +588,16 @@ impl<'a> TypeCtx<'a> {
         inferred
     }
 
+    /// Whether [`Self::infer_types`] of `f` now runs `f` and its child scopes and nothing else:
+    /// `f` reads no enclosing scope's types (no iterable handed to it, no closure cell), and no
+    /// earlier inference ran it. Another inference runs `f` only for a scope nested in it, which
+    /// reads its types, so it kept them.
+    pub(crate) fn infers_alone(&self, f: &IrFunction) -> bool {
+        f.passed_from.is_none()
+            && self.nesting().read_by(f.id).next().is_none()
+            && !self.scopes.enclosing.borrow().contains_key(&f.id)
+    }
+
     fn nesting(&self) -> &Nesting {
         self.scopes.nesting.get_or_init(|| Nesting::of(self.ir()))
     }

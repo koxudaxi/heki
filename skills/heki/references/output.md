@@ -30,16 +30,21 @@ One versioned object about one function:
 | `changes` | the parameters, `self` attributes, other objects' attributes, module globals, and closure cells it changes, directly or through calls, with the call chain to the change |
 | `retains` | the parameters it stores where they outlive the call |
 | `returns` | whether its result is a new object, a parameter, or state that outlives the call |
-| `purity` | `pure`, `impure` with the reasons, or `unknown` with the first function whose calls heki cannot resolve, and what the verdict assumes |
+| `purity` | `pure`, `impure` with the reasons, or `unknown` with the reasons; whatever the verdict, the functions below it whose calls heki cannot resolve, nearest first, each with the call chain to it; and what the verdict assumes |
 | `callers` | who calls it, whether in a loop; with `--callers`, transitively |
 | `reports` | what `heki check` reports in it; with `--callers`, also above it |
 | `contracts` | the contracts that name it |
 
 - `pure` means heki found no effect and no change of an input or of shared state, and resolved
   every call below. Libraries heki's catalog does not list count as having no effects.
+- `purity.unknown_reach.entries` lists the functions heki cannot follow among the function and
+  its callees (a call it cannot resolve, or a body only a stub declares), nearest first, at most
+  100; `truncated` says there are more. `purity.unknown_at` is the first of them. Both are given
+  for an `impure` function too: what it changes may then be incomplete.
 - A field the configuration does not compute is `null`, with the setting that computes it.
 - Fact keys carry no line numbers, so a diff of the objects before and after an edit shows only
-  what changed.
+  what changed: a new entry in `effects`, `changes`, `retains`, or `returns` is new behavior.
+  Tell the user about it unless they asked for it.
 
 ## `heki check --generate-prompt --output-format json` (experimental)
 
@@ -47,4 +52,5 @@ One versioned object: `question`, `configuration` (root, configuration file, tar
 source roots, rule selection, baseline, contracts), `rules` (code, name, certainty, activation,
 and what a report states), `heuristic_rules_off`, `diagnostics` (the concise fields of the
 diagnostics that fit, with `omitted` counting the rest), and `guidance`.
-`heki check --output-format-json-schema generate-prompt` prints its JSON Schema.
+`heki check --output-format-json-schema generate-prompt` prints its JSON Schema. A word after
+`--generate-prompt` is the question, so paths go before it.

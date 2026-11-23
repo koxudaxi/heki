@@ -553,6 +553,54 @@ fn a_package_name_over_a_submodule_is_what_the_package_binds_last() {
     );
 }
 
+/// `from pkg.unread import parse` where the package's `__init__.py` does not parse: what it
+/// binds is not known, so the call is taken neither as the submodule's function nor as an
+/// attribute of the package.
+#[test]
+fn a_package_name_over_a_submodule_is_open_when_the_init_is_unread() {
+    let p = Project::new("package_name_unread_init");
+    p.write("pyproject.toml", CONFIG);
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/unread/__init__.py", "from .parse import parse\n");
+    p.write("pkg/unread/parse.py", PARSE_MODULE);
+    p.write(
+        "pkg/users.py",
+        "from pkg.unread import parse\n\n\nasync def go(x):\n    return parse(x)\n",
+    );
+    let (code, stdout, stderr) = p.check(&["--output-format", "concise"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stdout.contains("pkg/users.py:5:12: EFF101 "), "{stdout}");
+    p.write("pkg/unread/__init__.py", "print \"done\"\n");
+    let (code, stdout, stderr) = p.check(&["--output-format", "concise"]);
+    assert_eq!(code, 2, "{stdout}");
+    assert!(
+        stderr.contains("error: pkg/unread/__init__.py:1:7: syntax error: "),
+        "{stderr}"
+    );
+    assert!(!stdout.contains("EFF101"), "{stdout}");
+}
+
+#[test]
+fn a_package_import_bound_again_is_open() {
+    let p = Project::new("package_import_bound_again");
+    p.write("pyproject.toml", CONFIG);
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/rebound/parse.py", PARSE_MODULE);
+    p.write(
+        "pkg/users.py",
+        "from pkg.rebound import parse\n\n\nasync def go(x):\n    return parse(x)\n",
+    );
+    for init in [
+        "from .parse import parse\n\nif FAST:\n    parse = lambda x: x\n",
+        "try:\n    from ._speedups import parse\nexcept ImportError:\n    from .parse import parse\n",
+    ] {
+        p.write("pkg/rebound/__init__.py", init);
+        let (code, stdout, stderr) = p.check(&["--output-format", "concise"]);
+        assert_eq!(code, 0, "{init}\n{stdout}{stderr}");
+        assert!(!stdout.contains("EFF101"), "{init}\n{stdout}");
+    }
+}
+
 /// An argument unpacked with `*` binds the items of a display of known length one by one; past
 /// one of unknown length (also one unpacked inside the display), the parameter an argument binds
 /// is not known.

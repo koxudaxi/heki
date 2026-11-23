@@ -22,6 +22,31 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  changes:
+    name: changed files
+    # A pull request that changes CHANGELOG.md alone builds and tests nothing: no job below reads
+    # the file but the release scripts' tests, and the docs workflow builds the changelog page.
+    runs-on: ubuntu-24.04
+    outputs:
+      code: ${{ steps.files.outputs.code }}
+    steps:
+      # A pull request's checkout is its merge commit: the first parent is the base branch.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - id: files
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          code=true
+          if [ "$EVENT" = pull_request ]; then
+            files=$(git diff --name-only HEAD^1 HEAD)
+            echo "$files"
+            if [ -n "$files" ] && ! echo "$files" | grep -qvxF CHANGELOG.md; then code=false; fi
+          fi
+          echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+
   fmt:
     name: rustfmt
     runs-on: ubuntu-24.04
@@ -38,10 +63,12 @@ jobs:
     name: clippy
     # A pull request in the middle of a stack is covered by the stack's bottom and top: GitHub
     # merges a stack from its top, and the bottom is the next one to land on main.
+    needs: changes
     if: &full-run >-
-      github.event.pull_request.stack == null
+      needs.changes.outputs.code == 'true'
+      && (github.event.pull_request.stack == null
       || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
-      || github.event.pull_request.stack.position == github.event.pull_request.stack.size
+      || github.event.pull_request.stack.position == github.event.pull_request.stack.size)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -86,6 +113,7 @@ jobs:
   # The other platforms build the checkout.
   test-build-linux:
     name: build tests (${{ matrix.os }})
+    needs: changes
     if: *full-run
     strategy:
       matrix:
@@ -141,6 +169,7 @@ jobs:
 
   test-build-macos:
     name: build tests (${{ matrix.os }})
+    needs: changes
     if: *full-run
     strategy:
       matrix:
@@ -150,6 +179,7 @@ jobs:
 
   test-build-windows:
     name: build tests (${{ matrix.os }})
+    needs: changes
     if: *full-run
     strategy:
       matrix:
@@ -163,7 +193,7 @@ jobs:
   # unpacks) the same tree at the same path and extracts the binaries back into it.
   test-linux:
     name: test (${{ matrix.os }}, ${{ matrix.shard }}/${{ matrix.shards }})
-    needs: test-build-linux
+    needs: [changes, test-build-linux]
     if: *full-run
     strategy:
       fail-fast: false
@@ -204,7 +234,7 @@ jobs:
   test-macos:
     # The account runs at most 5 macOS jobs at once: the build, then these 4.
     name: test (${{ matrix.os }}, ${{ matrix.shard }}/${{ matrix.shards }})
-    needs: test-build-macos
+    needs: [changes, test-build-macos]
     if: *full-run
     strategy:
       fail-fast: false
@@ -217,7 +247,7 @@ jobs:
 
   test-windows:
     name: test (${{ matrix.os }}, ${{ matrix.shard }}/${{ matrix.shards }})
-    needs: test-build-windows
+    needs: [changes, test-build-windows]
     if: *full-run
     strategy:
       fail-fast: false
@@ -233,6 +263,7 @@ jobs:
     # into `coverage/target`, a directory named `target`, so the shards can extract the archive
     # back to the path the binaries were built at.
     name: build coverage tests
+    needs: changes
     if: *full-run
     runs-on: ubuntu-24.04
     env:
@@ -266,7 +297,7 @@ jobs:
     # A shard of the instrumented tests, as in `test`. Every process writes its counters into
     # its own raw profile (cargo-llvm-cov's file pattern); the shard merges them into one.
     name: coverage tests (${{ matrix.shard }}/${{ matrix.shards }})
-    needs: coverage-build
+    needs: [changes, coverage-build]
     if: *full-run
     strategy:
       fail-fast: false
@@ -316,7 +347,7 @@ jobs:
 
   coverage:
     name: coverage (100% lines)
-    needs: coverage-test
+    needs: [changes, coverage-test]
     if: *full-run
     runs-on: ubuntu-24.04
     env:
@@ -362,6 +393,7 @@ jobs:
 
   cpython:
     name: CPython ${{ matrix.python }} (symtable / sentinel / counterexamples)
+    needs: changes
     if: *full-run
     strategy:
       fail-fast: false
@@ -405,6 +437,7 @@ jobs:
     # Shard 1 measures the peak memory; both shards run half of the generated shapes of the
     # analysis-cost gate (`--shard`), each after its own calibration.
     name: peak memory and analysis cost (${{ matrix.shard }}/2)
+    needs: changes
     if: *full-run
     strategy:
       fail-fast: false
@@ -432,20 +465,23 @@ jobs:
         env:
           SHARD: ${{ matrix.shard }}/2
         run: python3 scripts/check_walk_shapes.py --heki target/release/heki --shard "$SHARD"
-      # At release time (release.yml calls this workflow), and on a manual run: the peak RSS of
-      # a release build, which also holds the allocator's fragmentation and mappings, under a
-      # coarse budget.
-      - if: matrix.shard == 1 && (github.event_name == 'release' || github.event_name == 'workflow_dispatch')
+      # On every push to main, at release time (release.yml calls this workflow), and on a manual
+      # run: the peak RSS of a release build, which also holds the allocator's fragmentation and
+      # mappings, under a coarse budget. Main runs it so that growth shows before a release does.
+      - if: matrix.shard == 1 && (github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'workflow_dispatch')
         run: cargo build --release -p heki
       - name: Peak RSS within budget
-        if: matrix.shard == 1 && (github.event_name == 'release' || github.event_name == 'workflow_dispatch')
+        if: matrix.shard == 1 && (github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'workflow_dispatch')
         run: python3 scripts/check_memory.py --heki target/release/heki --measure rss
 
   release-scripts:
     # The release workflows run only on main or for a release, so their scripts are tested here,
     # on every pull request.
     name: release scripts
-    if: *full-run
+    if: >-
+      github.event.pull_request.stack == null
+      || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
+      || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -461,6 +497,7 @@ jobs:
     # `.pre-commit-hooks.yaml` as a project's configuration uses it: pre-commit builds heki from
     # this checkout and runs the hook on a project with one report.
     name: pre-commit hook
+    needs: changes
     if: *full-run
     runs-on: ubuntu-24.04
     # A cold release build, without a cache: pre-commit builds in its own directory.
@@ -496,10 +533,12 @@ jobs:
 
   gate:
     name: CI gate
-    # The one required check: every job passed, or, in the middle of a stack, every job but the
-    # always-on ones was skipped.
+    # The one required check: every job passed, or, in the middle of a stack or for a change of
+    # CHANGELOG.md alone, every job but the always-on ones was skipped (the release scripts run
+    # for every change at a full stack position).
     if: always()
     needs:
+      - changes
       - fmt
       - clippy
       - architecture
@@ -521,11 +560,13 @@ jobs:
       - name: Every job passed or was skipped as the stack position allows
         env:
           NEEDS: ${{ toJSON(needs) }}
-          FULL_RUN: >-
+          STACK_FULL: >-
             ${{ github.event.pull_request.stack == null
             || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
             || github.event.pull_request.stack.position == github.event.pull_request.stack.size }}
-          ALWAYS_ON: fmt architecture
+          CODE: ${{ needs.changes.outputs.code }}
+          ALWAYS_ON: changes fmt architecture
+          STACK_ONLY: release-scripts
         shell: python
         run: |
           import json
@@ -534,12 +575,17 @@ jobs:
 
           results = {name: job["result"] for name, job in json.loads(os.environ["NEEDS"]).items()}
           print(json.dumps(results, sort_keys=True))
-          expected = "success" if os.environ["FULL_RUN"] == "true" else "skipped"
+          stack_full = os.environ["STACK_FULL"] == "true"
+          full = stack_full and os.environ["CODE"] == "true"
           always_on = set(os.environ["ALWAYS_ON"].split())
-          wrong = {
-              name: result
-              for name, result in results.items()
-              if result != ("success" if name in always_on else expected)
-          }
+          stack_only = set(os.environ["STACK_ONLY"].split())
+
+          def expected(name):
+              if name in always_on:
+                  return "success"
+              ran = stack_full if name in stack_only else full
+              return "success" if ran else "skipped"
+
+          wrong = {name: result for name, result in results.items() if result != expected(name)}
           print("unexpected:", json.dumps(wrong, sort_keys=True))
           sys.exit(1 if wrong or not results else 0)

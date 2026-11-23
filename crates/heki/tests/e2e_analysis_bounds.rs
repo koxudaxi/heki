@@ -357,6 +357,51 @@ fn attributes_past_the_store_join_rounds_are_unknown() {
     assert_eq!(blocking(check_linear(30, shape)), 0);
 }
 
+/// `classes` classes whose `__init__` binds an attribute to a client and another to the first,
+/// and whose `reset` stores both again, one from what the other holds: each method reads names
+/// being decided, so each is a function of the fixpoint. Each class's `async def` calls the
+/// client's blocking method through the second attribute.
+fn classes_storing_what_they_read(classes: usize) -> String {
+    let mut out = vec!["import httpx".to_owned(), String::new()];
+    for c in 0..classes {
+        out.extend([
+            format!("class Holder{c}:"),
+            "    def __init__(self):".to_owned(),
+            "        self.client = httpx.Client()".to_owned(),
+            "        self.active = self.client".to_owned(),
+            String::new(),
+            "    def reset(self):".to_owned(),
+            "        self.items = [self.active]".to_owned(),
+            "        self.active = self.client".to_owned(),
+            String::new(),
+            "    async def handle(self):".to_owned(),
+            "        self.active.get(\"https://example.com\")".to_owned(),
+            String::new(),
+        ]);
+    }
+    out.join("\n") + "\n"
+}
+
+/// The fixpoint over a module's storing functions takes steps in proportion to them: a visit
+/// asks the reads of the function's last inference again, and infers it again only when one
+/// gives something else.
+#[test]
+fn store_types_take_steps_linear_in_the_storing_functions() {
+    let shape = |classes: usize| {
+        let p = Project::new(&format!("bounds_store_fixpoint_{classes}"));
+        p.write("m.py", &classes_storing_what_they_read(classes));
+        p
+    };
+    let found = check_linear(400, shape);
+    let blocking: Vec<&Value> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF101")
+        .collect();
+    assert_eq!(blocking.len(), 1);
+    let message = blocking[0]["message"].as_str().unwrap();
+    assert!(message.contains("(+399 more async call sites"), "{message}");
+}
+
 /// A class whose `__init__` binds an attribute to a client and makes `stores` stores of other
 /// attributes, each one `store(k)` writes, and an `async def` calling the client's blocking
 /// method.
@@ -2210,6 +2255,39 @@ fn class_constant_reads_on_a_class_with_many_subclasses_decide_it_once() {
     assert_eq!(reported[0]["qualname"], "write");
 }
 
+/// `MUT119` selected (it reads the new containers functions return).
+const MUT119_CONFIG: &str =
+    "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"MUT119\"]\n";
+
+/// A function returning the last of a long chain of copies of a new dict, each copy rebound on a
+/// branch and read by a builtin that only inspects it, and a caller changing what it returns
+/// (`MUT119`): the walk back to where the dict is made and the walk forward over its uses visit
+/// each value once.
+#[test]
+fn a_new_dict_returned_through_a_long_chain_of_copies_is_walked_once() {
+    // The largest chain whose function the IR budget still models.
+    let found = check_linear(2_000, |links| {
+        let mut lines = vec!["def make(flag):".to_owned(), "    d0 = {}".to_owned()];
+        for i in 1..=links {
+            lines.push(format!("    d{i} = d{}", i - 1));
+            lines.push("    if flag:".to_owned());
+            lines.push(format!("        d{i} = d{}", i - 1));
+            lines.push(format!("    len(d{i})"));
+        }
+        lines.push(format!("    return d{links}"));
+        lines.push(String::new());
+        lines.push(String::new());
+        lines.push("def use():".to_owned());
+        lines.push("    make(True).update(a=1)".to_owned());
+        let p = Project::new(&format!("bounds_fresh_return_chain_{links}"));
+        p.write("pyproject.toml", MUT119_CONFIG)
+            .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    });
+    let reported = found.iter().filter(|d| d["rule_code"] == "MUT119").count();
+    assert_eq!(reported, 1, "{found:#?}");
+}
+
 /// A library class with a catalogued attribute, thousands of project subclasses, and as many
 /// functions reading the attribute on an instance of it: whether every class the instance may be
 /// takes the row is decided once per class and name, over at most `DISPATCH_CLASS_LIMIT`
@@ -3616,8 +3694,9 @@ fn callers_of_a_diamond_lattice_are_walked_once_each() {
 }
 
 /// Five thousand methods of one class, each calling the next on `self`, the last changing a
-/// `self` attribute; the call chain of the change, and the walks to an unresolved call and to
-/// a changed module global through as many functions, are walked once.
+/// `self` attribute; the call chain of the change, the walks to an unresolved call and to a
+/// changed module global through as many functions, and the walk past thousands of functions
+/// that each make an unresolved call, are walked once, and the last lists only the first ones.
 #[test]
 fn chains_down_thousands_of_calls_of_one_module_are_walked_once() {
     // The last function of each chain is named apart, so that every size has it.
@@ -3665,6 +3744,21 @@ fn chains_down_thousands_of_calls_of_one_module_are_walked_once() {
             "    G = 1".to_owned(),
             "    return x.anything()".to_owned(),
         ]);
+        for i in 0..n - 1 {
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("def g{i}(x):"),
+                "    x.anything()".to_owned(),
+                format!("    return {}(x)", next(i, "g")),
+            ]);
+        }
+        lines.extend([
+            String::new(),
+            String::new(),
+            "def g_end(x):".to_owned(),
+            "    return x.anything()".to_owned(),
+        ]);
         let p = Project::new(&format!("bounds_inspect_chains_{n}"));
         p.write("m.py", &(lines.join("\n") + "\n"));
         p
@@ -3683,8 +3777,21 @@ fn chains_down_thousands_of_calls_of_one_module_are_walked_once() {
             .len(),
         n - 1
     );
-    // Impure: the unknown call does not decide the verdict, but `--callers` walks the module.
+    // Impure: the unknown call does not decide the verdict, but it is named.
     assert_eq!(f["purity"]["verdict"], "impure");
+    assert_eq!(f["purity"]["unknown_at"]["fqn"], "m.f_end");
+    assert_eq!(
+        f["purity"]["unknown_at"]["chain"].as_array().unwrap().len(),
+        n - 1
+    );
+    assert_eq!(f["purity"]["unknown_reach"]["truncated"], false);
+    let g = inspect(&p, &["m.g0"]);
+    let unknown = &g["purity"]["unknown_reach"];
+    let entries = unknown["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 100);
+    assert_eq!(entries[99]["fqn"], "m.g99");
+    assert_eq!(entries[99]["chain"].as_array().unwrap().len(), 99);
+    assert_eq!(unknown["truncated"], true);
     let last = inspect(&p, &["m.f_end", "--callers", "--depth", "100"]);
     assert_eq!(last["callers"]["count"], 100);
 }

@@ -64,6 +64,30 @@ pub enum SnapshotError {
     Version { path: PathBuf, found: u32 },
 }
 
+impl heki_env::Explain for SnapshotError {
+    fn explain(&self) -> heki_env::Problem {
+        let (path, message) = match self {
+            Self::Read { path, cause } => {
+                (path, format!("cannot read the summary snapshot: {cause}"))
+            }
+            Self::Write { path, cause } => {
+                (path, format!("cannot write the summary snapshot: {cause}"))
+            }
+            Self::Parse { path, cause } => (path, format!("invalid summary snapshot: {cause}")),
+            Self::Version { path, found } => (
+                path,
+                format!(
+                    "the summary snapshot has version {found}; this heki writes version {SNAPSHOT_VERSION}"
+                ),
+            ),
+        };
+        heki_env::Problem::new(message)
+            .at_file(path)
+            .help("`heki snapshot --write` writes the summary snapshot of the project again (`MUT103` compares with it)")
+            .docs(heki_env::Docs::Snapshots)
+    }
+}
+
 fn param_names(bits: u64, f: &IrFunction) -> Vec<String> {
     (0..64u32)
         .filter(|i| bits & (1u64 << i) != 0)

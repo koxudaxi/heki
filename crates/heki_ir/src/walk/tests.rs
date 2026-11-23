@@ -428,6 +428,67 @@ fn reach_past_its_budget_is_open() {
     );
 }
 
+#[test]
+fn reach_breadth_first_visits_nearer_nodes_first() {
+    // 0 -> 1, 2; 1 -> 3; 2 -> 3; 3 -> 0.
+    let graph: &[&[u32]] = &[&[1, 2], &[3], &[3], &[0]];
+    let b = budget(100);
+    let mut order = Vec::new();
+    let found = reach_breadth_first(&b, [0], edges(graph), |n| {
+        order.push(n);
+        Visit::<()>::Expand
+    });
+    assert_eq!(found, Answer::Known(None));
+    assert_eq!(order, [0, 1, 2, 3]);
+    assert_eq!(b.taken(), 4);
+
+    // A chain 0 -> 1 -> 2 -> 3 and a shortcut 0 -> 3: 3 is visited at distance 1.
+    let shortcut: &[&[u32]] = &[&[1, 3], &[2], &[3], &[]];
+    let mut order = Vec::new();
+    let found = reach_breadth_first(&budget(100), [0], edges(shortcut), |n| {
+        order.push(n);
+        Visit::<()>::Expand
+    });
+    assert_eq!(found, Answer::Known(None));
+    assert_eq!(order, [0, 1, 3, 2]);
+
+    let found = reach_breadth_first(&budget(100), [0], edges(graph), |n| match n {
+        1 => Visit::Prune,
+        3 => Visit::Stop(n),
+        _ => Visit::Expand,
+    });
+    assert_eq!(found, Answer::Known(Some(3)));
+
+    // Starts listed twice are visited once, in their order.
+    let mut order = Vec::new();
+    let found = reach_breadth_first(&budget(100), [2, 1, 2], edges(graph), |n| {
+        order.push(n);
+        Visit::<()>::Prune
+    });
+    assert_eq!(found, Answer::Known(None));
+    assert_eq!(order, [2, 1]);
+}
+
+#[test]
+fn reach_breadth_first_past_its_budget_is_open() {
+    let graph: &[&[u32]] = &[&[1], &[]];
+    let spent = budget(1);
+    spent.spend();
+    let expand = |_| Visit::<()>::Expand;
+    assert_eq!(
+        reach_breadth_first(&spent, [0], edges(graph), expand),
+        Answer::Open
+    );
+    assert_eq!(
+        reach_breadth_first(&budget(1), [0], edges(graph), expand),
+        Answer::Open
+    );
+    assert_eq!(
+        reach_breadth_first(&budget(2), [0], edges(graph), expand),
+        Answer::Known(None)
+    );
+}
+
 // --------------------------------------------------------------------------------- fixpoint
 
 /// Node `i` is read by node `i + 1`, and node 3 by node 0: a loop of four nodes.

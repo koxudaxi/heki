@@ -465,7 +465,7 @@ impl<'i> ImportGraph<'i> {
             size: 0,
         };
         for i in 0..graph.modules.len() {
-            let facts = owners[graph.modules[i].as_str()].imports.as_deref();
+            let facts = owners[graph.modules[i].as_str()].imports();
             let resolved: Option<Vec<(&'i ImportSite, Target)>> = facts.map(|facts| {
                 (facts.sites.iter())
                     .map(|site| (site, graph.target(site, decls)))

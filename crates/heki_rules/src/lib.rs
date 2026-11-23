@@ -1,10 +1,10 @@
 //! Rule registry spanning all 3 families derived from the single Effect & Alias theory.
 //!
 //! - Family 1 (`MUT`): Mutation & State Effect (`MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`,
-//!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT114`, `MUT115`, `MUT118`, `MUT201`,
-//!   `MUT202`, `MUT203`, `MUT204`, `MUT205`, `MUT206`, `MUT207`)
+//!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT114`, `MUT115`, `MUT118`, `MUT119`,
+//!   `MUT201`, `MUT202`, `MUT203`, `MUT204`, `MUT205`, `MUT206`, `MUT207`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
-//!   `EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF201`, `DATA101`)
+//!   `EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF201`, `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
 //!   `OPT112`, `OPT113`, `OPT120`, `OPT121`, `OPT130`); `OPT112` / `OPT113` are Advisory-lane
 //!   reports without a rewrite.
@@ -46,7 +46,7 @@ use heki_effect::{
     CallHop, CallSite, ContractClass, EffectSummary, FileSummary, FuncKey, ModuleInput,
     ProjectDecls, ProjectIndex,
 };
-use heki_env::{HekiConfig, Severity};
+use heki_env::{Docs, Explain, HekiConfig, Problem, Setting, Severity};
 use heki_ir::{IrFunction, ModuleConstants};
 use heki_kb::{EffectiveEcosystemKb, EffectiveSoundnessKb};
 use rayon::prelude::*;
@@ -170,7 +170,7 @@ impl RuleMeta {
 
     /// The rule's published page.
     pub fn page_url(&self) -> String {
-        format!("{RULE_PAGES}{}/", self.slug)
+        heki_env::problem::rule_page(self.slug)
     }
 
     /// The severity of the rule's diagnostics unless `lint.severity` names the rule: `error` for
@@ -182,9 +182,6 @@ impl RuleMeta {
         }
     }
 }
-
-/// Where the rule pages are published: the documentation's `site_url` (`zensical.toml`).
-pub const RULE_PAGES: &str = "https://heki.koxudaxi.dev/rules/";
 
 /// The certainty of the eight Soundness-lane `OPT` rules (`OPT101`-`OPT103`, `OPT110`, `OPT111`,
 /// `OPT120`, `OPT121`, `OPT130`). Their exact tier is the reports whose rewrite is proven safe,
@@ -349,6 +346,18 @@ pub const CORE_RULES: &[RuleMeta] = &[
         auto_fix_default: false,
         summary: "`copy.deepcopy` of an instance holding an `object()` sentinel in an attribute that a function tests against the sentinel by identity (the copy holds a new object, which the test does not match).",
         doc: include_str!("../rule-docs/MUT118.md"),
+    },
+    RuleMeta {
+        code: "MUT119",
+        slug: "change-lost-on-new-object",
+        family: RuleFamily::Mut,
+        certainty: Certainty::Exact,
+        activation: Activation::Default,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "An in-place change of a builtin container applied to a new object that nothing else holds and no name keeps (`list(xs).sort()`, `env = os.environ.copy().update(...)`, `obj.settings[k] = v` with a getter returning a new dict): the change is lost when the statement ends.",
+        doc: include_str!("../rule-docs/MUT119.md"),
     },
     RuleMeta {
         code: "MUT201",
@@ -579,6 +588,18 @@ pub const CORE_RULES: &[RuleMeta] = &[
         doc: include_str!("../rule-docs/EFF114.md"),
     },
     RuleMeta {
+        code: "EFF115",
+        slug: "async-def-as-sync-callback",
+        family: RuleFamily::Eff,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Opt-in: an `async def` handed to a library call that calls it without awaiting what it returns (a thread's target, an executor's function, an `atexit` or signal handler, a `filter` predicate), so the call only creates a coroutine and the body does not run.",
+        doc: include_str!("../rule-docs/EFF115.md"),
+    },
+    RuleMeta {
         code: "EFF201",
         slug: "effect-boundary-violation",
         family: RuleFamily::Eff,
@@ -765,6 +786,7 @@ pub enum RuleConfigError {
         boundary: String,
         token: String,
         expected: &'static str,
+        values: &'static [&'static str],
     },
     /// A `forbid` token of an effect boundary without the targets it needs.
     #[error("effect-boundaries `{boundary}` forbids `{token}` but sets no `{key}`")]
@@ -787,6 +809,7 @@ pub enum RuleConfigError {
         key: &'static str,
         value: String,
         expected: &'static str,
+        values: &'static [&'static str],
     },
     #[error("invalid glob `{pattern}` in {context}: {cause}")]
     Glob {
@@ -818,6 +841,79 @@ pub enum RuleConfigError {
     },
     #[error("{0} `invalidation` contracts declared; at most {MAX_INVALIDATIONS} are supported")]
     TooManyInvalidations(usize),
+}
+
+impl Explain for RuleConfigError {
+    fn explain(&self) -> Problem {
+        let problem = Problem::new(self.to_string());
+        let in_table = |table: &str, entry: &str, key: Option<&str>, value: Option<&str>| Setting {
+            table: table.to_owned(),
+            entry: (!entry.is_empty()).then(|| entry.to_owned()),
+            key: key.map(str::to_owned),
+            value: value.map(str::to_owned),
+        };
+        let near = |word: &str, values: &'static [&'static str]| {
+            heki_env::problem::nearest(word, values.iter().copied())
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        };
+        let boundary = |name: &str, key: &str, value: Option<&str>| {
+            in_table("effect-boundaries", name, Some(key), value)
+        };
+        let (problem, setting) = match self {
+            Self::InvalidTarget { section, target } => (
+                problem.help("write a target as a class and its attribute: `\"pkg.model.DataModel.fields\"`, `\"DataModel.*\"`"),
+                in_table(section, "", None, Some(target)),
+            ),
+            Self::ItemTarget { section, target } => (
+                problem.help("a read target is `Class.attr`: drop the `[\"key\"]`, or make the entry a `write-owners` target"),
+                in_table(section, "", None, Some(target)),
+            ),
+            Self::UnknownForbid { boundary: name, token, values, .. } => (
+                problem.did_you_mean(near(token, values)),
+                boundary(name, "forbid", Some(token)),
+            ),
+            Self::MissingTargets { boundary: name, token, key } => (
+                problem.help(format!("add `{key}` to the boundary, or take `{token}` out of `forbid`")),
+                boundary(name, "forbid", Some(token)),
+            ),
+            Self::AllowWritesWithoutUniverse(name) => (
+                problem.help("add `write-universe`, the attributes whose writes the boundary judges; `allow-writes` lists the ones of them it allows"),
+                boundary(name, "allow-writes", None),
+            ),
+            Self::ImportProbesWithoutEnvironment(name) => (
+                problem.help("add `reads-environment` to `forbid`, or remove `import-probes`"),
+                boundary(name, "import-probes", None),
+            ),
+            Self::UnknownMode { section, contract, key, value, values, .. } => (
+                problem.did_you_mean(near(value, values)),
+                in_table(section, contract, Some(key), Some(value)),
+            ),
+            Self::Glob { pattern, context, .. } => (
+                problem.help("a pattern is a dotted name with `*`, `?`, or `[...]`: `\"pkg.parser.*\"`, `\"*.render\"`"),
+                Setting::of_context(context, Some(pattern)),
+            ),
+            Self::ModulePattern { pattern, context } => (
+                problem.help("write the module, one colon, and the name in it: `\"pkg.db:Session.commit\"`"),
+                Setting::of_context(context, Some(pattern)),
+            ),
+            Self::InvalidArguments { target, context, .. } => (
+                problem.help("write the arguments as `name(parameter=value)`: `\"DataType(is_dict=True)\"`"),
+                Setting::of_context(context, Some(target)),
+            ),
+            Self::GlobSet { context, .. } => (
+                problem.help("write fewer patterns: a pattern with `*` covers many names"),
+                Setting::of_context(context, None),
+            ),
+            Self::TooManyInvalidations(_) => (
+                problem.help("merge the contracts whose targets the same functions invalidate"),
+                in_table("invalidation", "", Some("name"), None),
+            ),
+        };
+        let docs = Docs::of_table(&setting.table);
+        problem.docs(docs).setting(setting)
+    }
 }
 
 /// Inputs beyond the Advisory lane: the Layer 1 KB for `OPT` (Soundness lane) and the saved
@@ -994,6 +1090,7 @@ pub fn check_project(
             let mut d = Vec::new();
             mut_rules::mut106(&cx, u, &mut d);
             mut_rules::mut202(&cx, u, &readonly, &mut d);
+            mut_rules::mut119(&cx, u, &mut d);
             eff_rules::eff102_103(&cx, u, &mut d);
             eff_rules::eff106(&cx, u, &mut d);
             eff_rules::eff107(&cx, u, &mut d);
@@ -1001,6 +1098,7 @@ pub fn check_project(
             eff_rules::eff110(&cx, u, &mut d);
             eff_rules::eff112(&cx, u, &mut d);
             eff_rules::eff114(&cx, u, &mut d);
+            eff_rules::eff115(&cx, u, &mut d);
             data_rules::data101(&cx, u, &mut d);
             opt_rules::opt(&cx, u, &opt_opts, &mut d);
             opt_rules::opt112(&cx, u, &mut d);
@@ -1670,5 +1768,109 @@ mod registry_tests {
             assert_eq!(experimental_rule(rule.code), Some(f));
         }
         assert_eq!(experimental_rule("MUT107"), None);
+    }
+}
+
+#[cfg(test)]
+mod docs_links {
+    use super::CORE_RULES;
+    use heki_env::Docs;
+    use heki_env::problem::SITE;
+    use std::path::{Path, PathBuf};
+
+    /// The anchor the documentation site gives a heading (Python-Markdown's `toc` slug: word
+    /// characters, spaces, and hyphens kept, lowercased, runs of spaces and hyphens joined into
+    /// one hyphen).
+    fn anchor(heading: &str) -> String {
+        let kept: String = heading
+            .chars()
+            .filter(|c| c.is_alphanumeric() || matches!(c, '_' | '-') || c.is_whitespace())
+            .collect();
+        let mut out = String::new();
+        for (i, word) in kept
+            .trim()
+            .to_lowercase()
+            .split(|c: char| c == '-' || c.is_whitespace())
+            .filter(|w| !w.is_empty())
+            .enumerate()
+        {
+            if i > 0 {
+                out.push('-');
+            }
+            out.push_str(word);
+        }
+        out
+    }
+
+    /// The file of the page at `path` below the site root: the Markdown of `configuration/`, or
+    /// a file the site serves as it is (`llms.txt`).
+    fn page_file(docs: &Path, path: &str) -> PathBuf {
+        if !path.is_empty() && !path.ends_with('/') {
+            return docs.join(path);
+        }
+        let page = path.trim_end_matches('/');
+        let index = docs.join(page).join("index.md");
+        if index.exists() {
+            index
+        } else {
+            docs.join(format!("{page}.md"))
+        }
+    }
+
+    /// Every page and section heki prints a link to is a page of `docs/` with that heading.
+    #[test]
+    fn every_printed_link_names_a_page_and_a_heading() {
+        let docs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs");
+        let rule_pages = CORE_RULES.iter().map(|r| r.page_url());
+        let docs_pages = Docs::ALL.iter().map(|d| d.url());
+        for url in docs_pages.chain(rule_pages) {
+            let below = url.strip_prefix(SITE).expect("a link of the site");
+            let (path, fragment) = below.split_once('#').unwrap_or((below, ""));
+            let file = page_file(&docs, path);
+            let text = std::fs::read_to_string(&file)
+                .unwrap_or_else(|e| panic!("{url}: no page {}: {e}", file.display()));
+            if !fragment.is_empty() {
+                let anchors: Vec<String> = text
+                    .lines()
+                    .filter_map(|l| l.strip_prefix('#'))
+                    .map(|h| anchor(h.trim_start_matches('#')))
+                    .collect();
+                assert!(
+                    anchors.iter().any(|a| a == fragment),
+                    "{url}: no heading of `{path}` has the anchor `{fragment}`"
+                );
+            }
+        }
+        assert_eq!(
+            anchor("Rule selection: `[tool.heki.lint]`"),
+            "rule-selection-toolhekilint"
+        );
+        assert_eq!(anchor("How `--fix` applies fixes"), "how-fix-applies-fixes");
+    }
+}
+
+#[cfg(test)]
+mod explain_tests {
+    use crate::project::ProjectError;
+    use crate::recommend::RecommendError;
+    use crate::{RuleConfigError, SelectionError};
+    use heki_env::Explain as _;
+
+    #[test]
+    fn recommend_errors_explain_as_their_causes() {
+        let selector = || SelectionError::UnknownRule {
+            selector: "NOPE1".to_owned(),
+            origin: "--select",
+        };
+        let rules = || RuleConfigError::TooManyInvalidations(99);
+        let version = || ProjectError::TargetVersion("py39".to_owned());
+        let cases = [
+            (RecommendError::Selection(selector()), selector().explain()),
+            (RecommendError::Rules(rules()), rules().explain()),
+            (RecommendError::Project(version()), version().explain()),
+        ];
+        for (error, cause) in cases {
+            assert_eq!(error.explain(), cause);
+        }
     }
 }

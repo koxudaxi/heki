@@ -6,7 +6,7 @@
 > Wave 1/2 corpora of 19 million lines, counterexample experiments, a study of
 > datamodel-code-generator's 196,000 lines and its 20,000 lines of in-house checkers, and checks
 > of CPython 3.15 PEP 810 and `ruff_python_parser` 0.17.5), the reasons for every revision from
-> v1.0 to v4.1, and every major decision (ADR-001 to ADR-020). The project's working name was
+> v1.0 to v4.1, and every major decision (ADR-001 to ADR-022). The project's working name was
 > `pyopt`; crate names below use the current `heki_*` names.
 
 ---
@@ -22,7 +22,7 @@ Lean 4.
 ### 1.2 The goal and framing that discussion and measurement settled on
 - Rust ownership and Lean 4 are **means, not ends**.
 - **No ad-hoc fixes and no deferring**: one complete architecture based on one theory, a tool of
-  industry-standard quality that runs in CI without overlapping Ruff, ty, or tach.
+  industry-standard quality that runs in CI without overlapping Ruff or ty.
 - After large corpus measurements (more than 37 million lines in total) and a deep study of
   datamodel-code-generator (196,000 lines plus 20,000 lines of in-house defensive
   infrastructure), the framing converged on: **an Effect (execution and state change) and Alias
@@ -111,7 +111,7 @@ Lean 4.
      on macOS. Profile integration is limited to reading recorded dumps (optional).
    - **PEP 810 (`lazy import json` / `lazy from pathlib import Path` → `is_lazy=1`) is in CPython
      3.15.0, checked on the real interpreter**. Lazy imports and import cycles are left to tach
-     and Python 3.15+ PEP 810, and heki stays with effects and aliases.
+     and Python 3.15+ PEP 810, and heki stays with effects and aliases (until ADR-022).
 
 ---
 
@@ -137,10 +137,12 @@ Lean 4.
 |---|---|---|---|---|
 | **Stage 0-A rule decisions** | `MUT101` / `102`, `EFF101`–`103`, `DATA101` / `102` to be measured | In 339 repositories and 171 samples, `EFF101`–`103` / `DATA101` are dense and harmful, `MUT102` is sparse and noisy, `DATA102` duplicates Ruff | Adopt `EFF101`–`103`, `DATA101` (SSA `LoopCarried` required), and `MUT101` (strict); **formally reject `MUT102` / `DATA102`**; list the next candidates (`MUT104`–`107`, `EFF106`–`108`, `OPT112`–`113`, `OPT131`) | [ADR-014](#adr-014) |
 | **Protecting state in mature code (declared boundaries)** | Inference only (`MUT101` / `102` / `103`) | datamodel-code-generator protects "write boundaries" and "immutability of shared objects" with 20,000 lines of in-house checkers and run-time monitoring, and hits the limits of the AST (13 misses) | Adopt **`MUT201` (write ownership)**, **`MUT202` (read-only returns)**, the **line-number-independent Ratchet baseline**, and the **`symtable` comparison** | [ADR-015](#adr-015) |
-| **Import boundaries and Python 3.15 PEP 810** | Not specified | tach / import-linter exist, and CPython 3.15.0 ships **PEP 810 (`lazy import`, `is_lazy=1`)**, checked on the real interpreter | General import-layer and import-cycle checks are **non-goals left to other tools**; heki stays with effects and aliases; `heki_ast` / `heki_semantic` support the PEP 810 syntax and lazy-evaluation semantics | [ADR-016](#adr-016) |
+| **Import boundaries and Python 3.15 PEP 810** | Not specified | tach / import-linter exist, and CPython 3.15.0 ships **PEP 810 (`lazy import`, `is_lazy=1`)**, checked on the real interpreter | General import-layer and import-cycle checks are **non-goals left to other tools**; heki stays with effects and aliases; `heki_ast` / `heki_semantic` support the PEP 810 syntax and lazy-evaluation semantics | [ADR-016](#adr-016), [ADR-022](#adr-022) |
 
 Baseline v4.1 (ADR-017) fixed the name `heki`, the interface shared with Ruff and `t-linter`, the
-incremental LSP design, and the Stage 0-A Wave 2 decisions.
+incremental LSP design, and the Stage 0-A Wave 2 decisions. ADR-022 wrote heki's scope as five
+points and took imports into it as walls: import facts with the time each import runs, rules
+that need no configuration, the import contracts of other tools, and heki's own import contracts.
 
 ---
 
@@ -289,7 +291,7 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
      CPython `symtable`** (CPython 3.11–3.15 in CI).
 
 <a id="adr-016"></a>
-### ADR-016: No import-boundary or import-cycle checks (left to tach); semantic support for Python 3.15 PEP 810 (`lazy import`)
+### ADR-016: No import-boundary or import-cycle checks (left to tach); semantic support for Python 3.15 PEP 810 (`lazy import`) (decision 1 superseded by ADR-022)
 - **Background**: datamodel-code-generator has `_import_cycles.py` (117 lines),
   `check_architecture_boundaries.py` (1,977 lines), and `redundant-local-import`, while tach /
   import-linter already exist, and CPython 3.15.0 was confirmed to ship **PEP 810 (`lazy import`
@@ -300,6 +302,8 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
   2. `heki_ast` and `heki_semantic` **fully support the syntax of Python 3.15 PEP 810
      (`is_lazy=1`) and its semantics of materializing on first use** (a requirement for the pinned
      `ruff_python_parser` version).
+- **Superseded in part by [ADR-022](#adr-022)**: decision 1 gives way to import checks in heki
+  (the `IMP` family); decision 2 stands.
 
 <a id="adr-017"></a>
 ### ADR-017: The name `heki`, one interface with Ruff and `t-linter`, the incremental LSP design, and the Stage 0-A Wave 2 decisions
@@ -563,6 +567,68 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
   version facts in the engine from lock files and specifiers (a later step, if the verified
   ranges prove too narrow); reading the installed packages or their stubs (ADR-005, and output
   that would depend on the environment).
+
+<a id="adr-022"></a>
+### ADR-022: heki's scope, and imports as walls: import facts, rules without configuration, other tools' contracts, and heki contracts (supersedes ADR-016 decision 1)
+- **Background**: heki's scope was written as non-goals and gate questions, and one of them
+  named a tool's domain instead of a kind of check: import layering and import cycles were left
+  to tach and import-linter (ADR-016). The production project of §2.3 still keeps its own layer
+  check and cycle script, because those tools count every import alike: they do not know which
+  imports run while a module loads, which run later or lazily (PEP 810), which never run
+  (`TYPE_CHECKING`), or which modules a constant name given to `importlib.import_module` loads.
+  Whether a cycle fails depends on the order of statements in module bodies, which needs control
+  flow. A second tool also means a second configuration, baseline, suppression syntax, and
+  language server.
+- **Decision**:
+  1. heki's scope has five points, written in `docs/scope.md` ("What heki covers") and
+     summarized in `AGENTS.md`:
+     - the core: what a program does across functions and modules (effects, changes, aliasing,
+       purity, async and resource behavior), which one file or one type cannot decide;
+     - walls: contracts the user writes or heki proposes on who may write, read, call, reach an
+       effect, and import what;
+     - out of scope: single-file patterns and style (Ruff, isort) and type correctness (type
+       checkers);
+     - ideas from other languages are taken when they fit the core or the walls and pass the
+       evidence gate: counts on a corpus, real harm, and no false exact claim;
+     - framework knowledge enters as catalog data; rules written for one framework stay a
+       non-goal.
+
+     Of the non-goals in `AGENTS.md` 2.4, only the import one changes: which modules may import
+     which, and import cycles, are walls.
+  2. heki checks imports in a new family `IMP`. Decision 1 of ADR-016 is superseded; its
+     decision 2 (PEP 810 support) stands.
+  3. Without configuration, heki checks what the project itself declares: circular imports that
+     fail, package code importing test or development code, and dependencies declared only for
+     development or in an extra that a package or entry module loads while it loads. Each runs
+     opt-in until a corpus review finds no false claim among its reports.
+  4. Contracts the project already declared for import-linter, tach, or Ruff's import bans are
+     read as heki contracts when present (`import-contracts-from`; `[]` turns it off). Each
+     field heki does not support is named once in a note. From Ruff's bans heki reports only
+     what Ruff cannot see.
+  5. Import facts have one home, `heki_effect::imports`: which module each import site loads,
+     its timing class (`body`, `lazy`, `function`, `type-checking`), and whether an
+     `ImportError` handler takes its failure. The choice between a submodule and an attribute
+     lives in `ProjectDecls` and serves name resolution too. No rule resolves an import itself.
+  6. The facts are local and IR-free, in `FileSummary`, and take part in Early Cutoff. The
+     import graph is built per check and not kept in `ProjectIndex`.
+  7. A report states where an import is written, its timing class, and the module it loads; it
+     does not claim that a branch is taken. An open target stops an exact report; a contract's
+     strict sibling (`IMP202`) reports it with `unresolved = "report"`.
+  8. A cycle is reported once per strongly connected group. Parent-package loads are no edges.
+  9. Definitions are not import targets: `call-owners` and `read-owners` keep them.
+  10. Ruff and isort keep what one import statement decides: order (`I001`), required imports
+      (`I002`), import conventions (`ICN`), relative style (`TID252`), and the `lazy` policy of
+      one file. heki's groups follow the project's Ruff or isort classification (known lists,
+      sections), and a disagreement with heki's own detection is a configuration note.
+  11. Import facts are compared with CPython both ways, and imported contracts with the tools
+      they come from.
+- *Rejected*: leaving imports to tach and import-linter; a resolver inside the rules; one report
+  per elementary cycle (their number can be exponential); parent packages as edges (every
+  submodule would close a cycle with its `__init__`); a rule for unused declared dependencies
+  (plugins, entry points, and tools are used without an import); reporting the sites Ruff's own
+  bans report; translating other tools' files into `[tool.heki]` tables (two declarations of one
+  contract).
+
 ---
 
 ## 5. Open items
