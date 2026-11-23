@@ -454,7 +454,7 @@ pub fn lazy_init_branches(shape: &FnShape<'_>) -> Vec<LazyInitBranch> {
     branches(shape, &|v| defs.get(v).copied())
 }
 
-type DefOf<'d, 'a> = &'d dyn Fn(&VarId) -> Option<&'a InstKind>;
+pub(crate) type DefOf<'d, 'a> = &'d dyn Fn(&VarId) -> Option<&'a InstKind>;
 
 /// [`lazy_init_branches`] with the defining instruction of every variable.
 fn branches(shape: &FnShape<'_>, def: DefOf<'_, '_>) -> Vec<LazyInitBranch> {
@@ -469,16 +469,126 @@ fn branches(shape: &FnShape<'_>, def: DefOf<'_, '_>) -> Vec<LazyInitBranch> {
         .collect()
 }
 
-/// The branches that find an attribute unset (`obj`, `attr`).
+/// The branches that find an attribute unset (`obj`, `attr`): a `None` or falsy test of
+/// `obj.attr`, of `getattr(obj, "attr", ...)`, or of `hasattr(obj, "attr")`, and the
+/// `except AttributeError:` clause of a `try` whose body reads `obj.attr`.
 fn attr_tests(shape: &FnShape<'_>, def: DefOf<'_, '_>) -> Vec<StateTest<(VarId, String)>> {
-    let loads_attr = |v: &VarId| match def(&shape.copy_root(*v)) {
-        Some(InstKind::AttrLoad { obj, attr, .. }) => Some((*obj, attr.clone())),
+    let tested_attr = |v: &VarId| match def(&shape.copy_root(*v))? {
+        InstKind::AttrLoad { obj, attr, .. } => Some((*obj, attr.clone())),
+        InstKind::Call {
+            callee,
+            args,
+            kwargs,
+            star_from: None,
+            ..
+        } if kwargs.is_empty()
+            && matches!(
+                (callee.as_str(), args.len()),
+                ("hasattr", 2) | ("getattr", 2 | 3)
+            ) =>
+        {
+            Some((args[0], shape.str_const(args[1])?.to_owned()))
+        }
         _ => None,
     };
-    state_tests(shape, def, loads_attr)
-        .into_iter()
-        .filter(|t| t.found.unset())
-        .collect()
+    let mut tests = unset_branches(shape, def, tested_attr);
+    tests.extend(attribute_error_clauses(shape));
+    tests
+}
+
+/// The `except AttributeError:` clauses: the first of each `try` that takes an
+/// `AttributeError`, finding unset each attribute its body reads (`try: return self._x`).
+/// Each `try`'s clauses are walked once, from the block its body raises into.
+fn attribute_error_clauses(shape: &FnShape<'_>) -> Vec<StateTest<(VarId, String)>> {
+    let f = shape.f;
+    let catches = |b: BlockId| match f.block(b).insts.first().map(|i| &i.kind) {
+        Some(InstKind::CatchException { exc_types, .. }) => Some(exc_types),
+        _ => None,
+    };
+    let mut bodies: FxHashMap<BlockId, Vec<BlockId>> = FxHashMap::default();
+    for b in &f.blocks {
+        if let Some(t) = b.exc_target {
+            bodies.entry(t).or_default().push(b.id);
+        }
+    }
+    let mut found = Vec::new();
+    for (dispatch, body) in &bodies {
+        let Some((clause, init)) = attribute_error_clause(f, *dispatch, catches) else {
+            continue;
+        };
+        for inst in body.iter().flat_map(|b| &f.block(*b).insts) {
+            if let InstKind::AttrLoad { obj, attr, .. } = &inst.kind {
+                found.push(StateTest {
+                    test: clause,
+                    init,
+                    subject: (*obj, attr.clone()),
+                    found: Found::None,
+                });
+            }
+        }
+    }
+    found.sort_by_key(|t| (t.test, t.init));
+    found
+}
+
+/// The first clause of the `try` whose body raises into `dispatch` that takes an
+/// `AttributeError`: the block ending in its test, and its handler. Each clause tests its types
+/// and falls through to the next one's test.
+fn attribute_error_clause<'f>(
+    f: &'f IrFunction,
+    dispatch: BlockId,
+    catches: impl Fn(BlockId) -> Option<&'f Vec<String>>,
+) -> Option<(BlockId, BlockId)> {
+    let mut clause = dispatch;
+    while let Terminator::Branch {
+        then_bb, else_bb, ..
+    } = f.block(clause).terminator
+    {
+        if catches(then_bb)?.iter().any(|t| names_attribute_error(t)) {
+            return Some((clause, then_bb));
+        }
+        clause = else_bb;
+    }
+    None
+}
+
+/// Whether the text of an `except` clause's type names `AttributeError` (alone or in a tuple).
+fn names_attribute_error(text: &str) -> bool {
+    text.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+        .any(|w| w == "AttributeError" || w == "builtins.AttributeError")
+}
+
+/// The attribute an instruction binds by a constant name: `obj.attr = v`,
+/// `setattr(obj, "attr", v)`, `object.__setattr__(obj, "attr", v)`, or
+/// `obj.__setattr__("attr", v)`.
+pub(crate) fn stored_attr<'f>(shape: &FnShape<'f>, kind: &'f InstKind) -> Option<(VarId, &'f str)> {
+    let (obj, name) = match kind {
+        InstKind::AttrStore { obj, attr, .. } => return Some((*obj, attr.as_str())),
+        InstKind::Call {
+            callee,
+            args,
+            kwargs,
+            star_from: None,
+            ..
+        } if kwargs.is_empty() && callee == "setattr" && args.len() == 3 => (args[0], args[1]),
+        InstKind::MethodCall {
+            recv,
+            method,
+            args,
+            kwargs,
+            star_from: None,
+            ..
+        } if kwargs.is_empty() && method == "__setattr__" && matches!(args.len(), 2 | 3) => {
+            // Unbound (`object.__setattr__(obj, name, v)`) or bound (`obj.__setattr__(name, v)`).
+            let bound = args.len() == 2;
+            (
+                if bound { *recv } else { args[0] },
+                args[usize::from(!bound)],
+            )
+        }
+        _ => return None,
+    };
+    Some((obj, shape.str_const(name)?))
 }
 
 /// What a branch of a `None` or truthiness test finds the tested value to be.
@@ -519,13 +629,24 @@ impl Found {
 }
 
 /// One branch of a `None` or truthiness test of what `subject` takes from the tested value.
-struct StateTest<S> {
+pub(crate) struct StateTest<S> {
     /// The block ending in the test.
-    test: BlockId,
+    pub(crate) test: BlockId,
     /// A block only this branch of the test leads to.
-    init: BlockId,
-    subject: S,
+    pub(crate) init: BlockId,
+    pub(crate) subject: S,
     found: Found,
+}
+
+/// The branches of [`state_tests`] that find the tested value unset (`None` or falsy).
+pub(crate) fn unset_branches<S: Clone>(
+    shape: &FnShape<'_>,
+    def: DefOf<'_, '_>,
+    subject: impl Fn(&VarId) -> Option<S>,
+) -> Vec<StateTest<S>> {
+    let mut found = state_tests(shape, def, subject);
+    found.retain(|t| t.found.unset());
+    found
 }
 
 /// The branches of the `None` and truthiness tests of what `subject` takes from the tested
@@ -1125,7 +1246,7 @@ fn initializes(
         t.test,
         t.init,
         true,
-        |i| matches!(&i.kind, InstKind::AttrStore { obj, attr: a, .. } if a == attr && same(obj)),
+        |i| matches!(stored_attr(cx.shape, &i.kind), Some((obj, a)) if a == attr && same(&obj)),
         cells,
     )
 }
@@ -1133,12 +1254,12 @@ fn initializes(
 /// Every path from `init` back to `test`, and also every path to a normal return when
 /// `by_return` (for what outlives the call), runs an instruction where `sets` holds: such a
 /// block ends the path, and exceptions leave without a return.
-fn sets_on_every_way(
-    f: &IrFunction,
+fn sets_on_every_way<'f>(
+    f: &'f IrFunction,
     test: BlockId,
     init: BlockId,
     by_return: bool,
-    sets: impl Fn(&Inst) -> bool,
+    sets: impl Fn(&'f Inst) -> bool,
     cells: &mut Cells,
 ) -> bool {
     let mut seen = FxHashSet::default();
@@ -1179,10 +1300,7 @@ fn global_regions(
         Some(InstKind::LoadGlobal { name, .. }) => Some(name.clone()),
         _ => None,
     };
-    let tests: Vec<StateTest<String>> = state_tests(cx.shape, &def, loads_global)
-        .into_iter()
-        .filter(|t| t.found.unset())
-        .collect();
+    let tests = unset_branches(cx.shape, &def, loads_global);
     if tests.is_empty() {
         return Vec::new();
     }
