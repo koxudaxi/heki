@@ -3,7 +3,8 @@
 //! any of its values), a class attribute bound once to a function, a `staticmethod` or a class
 //! (through the class, `cls`, or an instance), a function returning a module it imports (a
 //! local import breaking a cycle, with a `functools` cache), and a value typed by a `TypeVar`
-//! with a bound or constraints. A dict or list something changes in place keeps no items.
+//! with a bound or constraints. A dict or list something changes in place keeps no items. A
+//! module-level function or a method its body binds again on some paths may be either object.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# EFF201`); every other line must not be.
@@ -781,4 +782,288 @@ fn a_list_something_changes_in_place_stays_a_list() {
         .map(|(i, _)| i as u64 + 1)
         .collect();
     assert_eq!(lines, marked);
+}
+
+/// A module body or a class body binding a function's name again on some paths
+/// (`if flag: fetch = _quiet`, or a `def` on one branch and another function on the other): a
+/// call through the name may run either function, so a report through it is not exact,
+/// whichever of them waits. Bound again on every path, the name holds only what binds it last; a
+/// definition after that binding holds it again. An alias of a definition bound before the
+/// definition's name is bound again keeps the definition. A class body binding a name on some
+/// paths only, or to an import on one, says nothing of it (`Optional.extra`, `Client.parse`).
+const REBOUND_FETCHERS: &str = r#"import os
+
+import requests
+
+
+def _quiet(url):
+    return url
+
+
+def _blocking(url):
+    return requests.get(url)
+
+
+def fetch(url):
+    return requests.get(url)
+
+
+if os.environ.get("QUIET"):
+    fetch = _quiet
+
+
+def load(url):
+    return url
+
+
+if os.environ.get("SLOW"):
+    load = _blocking
+
+
+def get(url):
+    return requests.get(url)
+
+
+_original_get = get
+get = _quiet
+
+
+def read(url):
+    return url
+
+
+read = _blocking
+
+
+def late(url):
+    return url
+
+
+late = _blocking
+
+
+def late(url):
+    return url
+
+
+if os.environ.get("FAST"):
+
+    def pick(url):
+        return requests.get(url)
+
+else:
+    pick = _quiet
+
+
+def first(url):
+    return requests.get(url)
+
+
+def second(url):
+    return url
+
+
+first = second
+second = _blocking
+
+
+async def in_module():
+    fetch("u")  # EFF111
+    read("u")  # EFF101
+    get("u")
+"#;
+
+const REBOUND_CLIENT: &str = r#"import os
+
+import requests
+
+
+def _quiet(self, url):
+    return url
+
+
+def _blocking(self, url):
+    return requests.get(url)
+
+
+def _blocking_url(url):
+    return requests.get(url)
+
+
+class Client:
+    def fetch(self, url):
+        return requests.get(url)
+
+    if os.environ.get("QUIET"):
+        fetch = _quiet
+
+    def load(self, url):
+        return url
+
+    if os.environ.get("SLOW"):
+        load = _blocking
+
+    def get(self, url):
+        return requests.get(url)
+
+    get = _quiet
+
+    late = _blocking
+
+    def late(self, url):
+        return url
+
+    def check(self, url):
+        return url
+
+    if os.environ.get("SLOW"):
+        check = staticmethod(_blocking_url)
+
+    def parse(self, url):
+        return url
+
+    if os.environ.get("FAST"):
+        from json import loads as parse
+
+
+class Base:
+    def extra(self, url):
+        return requests.get(url)
+
+
+class Optional(Base):
+    if os.environ.get("QUIET"):
+        extra = _quiet
+"#;
+
+const REBOUND_CALLS: &str = r#"from pkg import fetchers
+from pkg.client import Client
+from pkg.fetchers import fetch
+
+
+async def module_on_a_path():
+    fetchers.fetch("u")  # EFF111
+
+
+async def imported_on_a_path():
+    fetch("u")  # EFF111
+
+
+async def module_blocking_on_a_path():
+    fetchers.load("u")  # EFF111
+
+
+async def module_on_every_path():
+    fetchers.get("u")
+
+
+async def module_alias_before():
+    fetchers._original_get("u")  # EFF101
+
+
+async def module_blocking_on_every_path():
+    fetchers.read("u")  # EFF101
+
+
+async def module_defined_last():
+    fetchers.late("u")
+
+
+async def module_on_either_branch():
+    fetchers.pick("u")  # EFF111
+
+
+async def module_alias_of_a_definition_bound_again():
+    fetchers.first("u")
+
+
+async def module_definition_bound_again():
+    fetchers.second("u")  # EFF101
+
+
+async def class_on_a_path(c: Client):
+    c.fetch("u")  # EFF111
+
+
+async def class_object_on_a_path():
+    Client.fetch(Client(), "u")  # EFF111
+
+
+async def class_object_static_on_a_path():
+    Client.check(Client(), "u")  # EFF111
+
+
+async def class_attribute_held(c: Client):
+    run = Client.fetch
+    run(c, "u")  # EFF111
+
+
+async def class_blocking_on_a_path(c: Client):
+    c.load("u")  # EFF111
+
+
+async def class_on_every_path(c: Client):
+    c.get("u")
+
+
+async def class_defined_last(c: Client):
+    c.late("u")
+"#;
+
+/// `(path, line, code)` of every report of `codes`.
+fn reported_codes(p: &Project, codes: &[&str]) -> Vec<(String, u64, String)> {
+    let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let mut out: Vec<(String, u64, String)> = diags
+        .iter()
+        .filter_map(|d| {
+            let rule = d["rule_code"].as_str()?;
+            codes.contains(&rule).then(|| {
+                (
+                    d["path"].as_str().unwrap().to_owned(),
+                    d["line"].as_u64().unwrap(),
+                    rule.to_owned(),
+                )
+            })
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// The `(path, line, code)` of every line of `files` ending in `# CODE` for one of `codes`.
+fn marked_codes(files: &[(&str, &str)], codes: &[&str]) -> Vec<(String, u64, String)> {
+    let mut out = Vec::new();
+    for (path, text) in files {
+        for (i, line) in text.lines().enumerate() {
+            for code in codes {
+                if line.trim_end().ends_with(&format!("# {code}")) {
+                    out.push(((*path).to_owned(), i as u64 + 1, (*code).to_owned()));
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn a_name_bound_again_on_some_paths_is_each_binding() {
+    const CODES: &[&str] = &["EFF101", "EFF111"];
+    let files = [
+        ("pkg/fetchers.py", REBOUND_FETCHERS),
+        ("pkg/client.py", REBOUND_CLIENT),
+        ("pkg/serve.py", REBOUND_CALLS),
+    ];
+    let p = Project::new("dispatch_rebound_names");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF101\", \"EFF111\"]\n",
+    );
+    p.write("pkg/__init__.py", "");
+    for (path, text) in files {
+        p.write(path, text);
+    }
+    assert_eq!(reported_codes(&p, CODES), marked_codes(&files, CODES));
 }
