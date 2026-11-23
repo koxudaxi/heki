@@ -172,7 +172,10 @@ No automatic fix.
     like `allowed-readers`.
   - `message`: the help of every report of the contract.
   - `unresolved`: `"ignore"` (default) or `"report"`: also report the reads the contract cannot
-    tie to a class, under `MUT206`.
+    tie to a class, under `MUT206`. A function some code hands
+    on as a value (a display, a class attribute, an argument, a return: `HANDLERS = [helper]`,
+    `REQUIRE = staticmethod(helper)`) has callers heki does not see: with `"report"`, it judges
+    its reads itself, as if it had no callers.
   - `attribution`: `"call-graph"` (default) or `"lexical"`: whether a private helper hands its
     reads to its callers and a function that only runs inside allowed readers is allowed, or
     each read is judged in the function holding it.

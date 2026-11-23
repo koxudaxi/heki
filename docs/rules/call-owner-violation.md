@@ -144,7 +144,8 @@ parameter, `Any`) is not seen; with `unresolved = "report"`,
 `MUT207` reports it.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with project
-callers hands its calls to its callers: the call is reported at the call sites of the first
+callers hands its calls to its callers (with `unresolved = "report"`, not one that some code also
+hands on as a value, which has callers heki does not see): the call is reported at the call sites of the first
 non-private callers, with the chain of calls down to the call as related information. A call runs
 where the body holding it runs, as for `MUT201`: a generator's calls where it is iterated (a
 generator an allowed caller creates and returns calls outside it when its caller iterates it), a
@@ -297,7 +298,10 @@ No automatic fix.
     `allowed-callers`.
   - `message`: the help of every report of the contract.
   - `unresolved`: `"ignore"` (default) or `"report"`: also report the calls the contract cannot
-    tie to a class, under `MUT207`.
+    tie to a class, under `MUT207`. A function some code hands
+    on as a value (a display, a class attribute, an argument, a return: `HANDLERS = [helper]`,
+    `REQUIRE = staticmethod(helper)`) has callers heki does not see: with `"report"`, it judges
+    its calls itself, as if it had no callers.
   - `references`: `"ignore"` (default), `"calls"`, `"calls-and-bases"`, or `"reads"`: a
     reference handing a target on to be called later counts as a call of it, with
     `"calls-and-bases"` a class statement naming a class target among its bases too, and with

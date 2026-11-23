@@ -9,8 +9,8 @@
 use super::{
     AccessGroups, Allowance, AllowanceKeys, DelegatedReport, FunctionMatcher, InsideAllowed,
     MemberPattern, MergedReports, Named, References, allows_own_receiver, attribution,
-    binds_receiver, counts_references, delegated_reports, named_protocols, place_functions,
-    project_classes, reports_unresolved,
+    binds_receiver, counts_references, delegated_reports, escaping_for, named_protocols,
+    place_functions, project_classes, reports_unresolved,
 };
 use crate::{
     CheckContext, DottedPattern, NamePart, RuleConfigError, SitesByCaller, def_spellings,
@@ -818,7 +818,10 @@ pub(crate) fn mut204<'c>(
     }
     let all_classes = project_classes(cx);
     let mut rules = Vec::new();
+    let escaping = std::cell::OnceCell::new();
     for (index, rule) in cx.config.call_owners.iter().enumerate() {
+        let report_unresolved =
+            reports_unresolved(rule.unresolved.as_deref(), "call-owners", &rule.name)?;
         let context = "call-owners.targets";
         let subclasses = Subclasses::of(rule.subclasses);
         let targets = parse_call_targets(cx, &all_classes, &rule.targets, context, subclasses)?;
@@ -849,13 +852,10 @@ pub(crate) fn mut204<'c>(
                 &all_classes,
                 (&rule.allowed_protocols, rule.protocol_subclasses),
                 "call-owners.allowed-protocols",
-            )?),
+            )?)
+            .with_escaping(escaping_for(cx, report_unresolved, &escaping)),
             note: rule.message.as_deref(),
-            report_unresolved: reports_unresolved(
-                rule.unresolved.as_deref(),
-                "call-owners",
-                &rule.name,
-            )?,
+            report_unresolved,
             references: counts_references(rule.references.as_deref(), "call-owners", &rule.name)?,
         });
     }

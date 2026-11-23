@@ -1104,6 +1104,10 @@ pub(crate) struct Allowance {
     /// The project protocols `allowed-protocols` names, with their subclasses unless
     /// `protocol-subclasses = false` ([`Self::allows_protocol`]).
     protocols: FxHashSet<String>,
+    /// With `unresolved = "report"`: the functions some code hands on as values
+    /// ([`CheckContext::escaping_functions`]), which have callers heki does not see. Each judges
+    /// its accesses itself, as if it had no callers ([`delegated_reports`]).
+    escaping: Option<std::sync::Arc<FxHashSet<FuncKey>>>,
 }
 
 /// Project functions a `call-owners` / `call-targets` entry names: the whole text by fqn or
@@ -1254,6 +1258,7 @@ impl Allowance {
             attribution: Attribution::CallGraph,
             own_receiver: false,
             protocols: FxHashSet::default(),
+            escaping: None,
         };
         for e in keys.exempt.0 {
             if e.contains(['.', ':']) || has_glob_syntax(e) {
@@ -1310,6 +1315,21 @@ impl Allowance {
     /// The same allowance, allowing the accesses through values typed with `protocols`.
     pub(crate) fn with_protocols(self, protocols: FxHashSet<String>) -> Self {
         Self { protocols, ..self }
+    }
+
+    /// The same allowance, judging the accesses of the functions some code hands on as values
+    /// (`escaping`, with `unresolved = "report"`) in those functions.
+    pub(crate) fn with_escaping(
+        self,
+        escaping: Option<std::sync::Arc<FxHashSet<FuncKey>>>,
+    ) -> Self {
+        Self { escaping, ..self }
+    }
+
+    /// Whether `func` judges its accesses itself because code hands it on as a value
+    /// ([`Self::with_escaping`]).
+    fn escapes(&self, func: &FuncKey) -> bool {
+        self.escaping.as_ref().is_some_and(|e| e.contains(func))
     }
 
     /// Whether `allowed-protocols` names a project class.
@@ -2275,6 +2295,17 @@ const UNLISTED_DICT_KEYS: &[&str] = &["ignore", "report"];
 /// The values of `import-probes`, the default first.
 const IMPORT_PROBES: &[&str] = &["allow", "report"];
 
+/// The functions some code hands on as values ([`CheckContext::escaping_functions`]), for a
+/// contract reporting what it cannot tie (`strict`), computed at most once per check
+/// (`known`).
+pub(crate) fn escaping_for(
+    cx: &CheckContext<'_>,
+    strict: bool,
+    known: &std::cell::OnceCell<std::sync::Arc<FxHashSet<FuncKey>>>,
+) -> Option<std::sync::Arc<FxHashSet<FuncKey>>> {
+    strict.then(|| std::sync::Arc::clone(known.get_or_init(|| cx.escaping_functions().into())))
+}
+
 /// Whether a contract reports the accesses heki cannot tie to a class (`unresolved`).
 pub(crate) fn reports_unresolved(
     value: Option<&str>,
@@ -2635,7 +2666,10 @@ pub(crate) fn mut201(
     );
     let all_classes = project_classes(cx);
     let mut rules = Vec::new();
+    let escaping = std::cell::OnceCell::new();
     for (index, rule) in cx.config.write_owners.iter().enumerate() {
+        let report_unresolved =
+            reports_unresolved(rule.unresolved.as_deref(), "write-owners", &rule.name)?;
         let targets = parse_targets(
             cx,
             &all_classes,
@@ -2663,7 +2697,8 @@ pub(crate) fn mut201(
             &all_classes,
             (&rule.allowed_protocols, rule.protocol_subclasses),
             "write-owners.allowed-protocols",
-        )?);
+        )?)
+        .with_escaping(escaping_for(cx, report_unresolved, &escaping));
         let mut forbid_cached = FxHashSet::default();
         for p in &rule.forbid_cached_property_on {
             let p = DottedPattern::new(p, "write-owners.forbid-cached-property-on")?;
@@ -2676,11 +2711,7 @@ pub(crate) fn mut201(
             forbid_cached,
             note: rule.message.as_deref(),
             allow_fresh: allows_fresh(rule.fresh_objects.as_deref(), "write-owners", &rule.name)?,
-            report_unresolved: reports_unresolved(
-                rule.unresolved.as_deref(),
-                "write-owners",
-                &rule.name,
-            )?,
+            report_unresolved,
             report_unlisted_keys: mode(
                 rule.unlisted_dict_keys.as_deref(),
                 UNLISTED_DICT_KEYS,
@@ -2780,12 +2811,17 @@ pub(crate) fn mut201(
                         // No initializer name is private, so on a reported chain only the
                         // outermost function can be the initializer of the written object.
                         let sites = sites.get_or_insert_with(|| cx.sites_by_caller());
-                        let kept_below = || {
-                            chain[1..=origin].iter().any(|k| {
-                                is_private(&k.qualname) && !delegates(cx, sites, k, Handover::Every)
-                            })
+                        // A function handed on as a value keeps its accesses, as a function
+                        // without callers does (`Allowance::escapes`).
+                        let keeps = |k: &FuncKey| {
+                            rule.allowance.escapes(k) || !delegates(cx, sites, k, Handover::Every)
                         };
-                        if !lexical && (kept_below() || delegates(cx, sites, key, Handover::Every))
+                        let kept_below = || {
+                            chain[1..=origin]
+                                .iter()
+                                .any(|k| is_private(&k.qualname) && keeps(k))
+                        };
+                        if !lexical && (kept_below() || !keeps(key))
                             || rule
                                 .allowance
                                 .owns(cx, &judged, family, (obj_params, obj_params))
@@ -2803,14 +2839,16 @@ pub(crate) fn mut201(
                         }
                         // A function that only runs inside the owner's operations (every caller
                         // path starts in an allowed context) writes inside them.
-                        if judged_inside_allowed(
-                            cx,
-                            sites,
-                            &rule.allowance,
-                            family,
-                            (key, site.obj_params),
-                            &mut inside[r][ti],
-                        ) {
+                        if !rule.allowance.escapes(key)
+                            && judged_inside_allowed(
+                                cx,
+                                sites,
+                                &rule.allowance,
+                                family,
+                                (key, site.obj_params),
+                                &mut inside[r][ti],
+                            )
+                        {
                             continue;
                         }
                         let span = site.via_chain.first().map_or(site.span, |h| h.span);
@@ -4332,7 +4370,10 @@ pub(crate) fn mut203<'c>(
     }
     let all_classes = project_classes(cx);
     let mut rules = Vec::new();
+    let escaping = std::cell::OnceCell::new();
     for (index, rule) in cx.config.read_owners.iter().enumerate() {
+        let report_unresolved =
+            reports_unresolved(rule.unresolved.as_deref(), "read-owners", &rule.name)?;
         rules.push(ReadOwnerRule {
             label: heki_env::contract_label("read-owners", index, &rule.name),
             targets: parse_read_targets(
@@ -4362,13 +4403,10 @@ pub(crate) fn mut203<'c>(
                 &all_classes,
                 (&rule.allowed_protocols, rule.protocol_subclasses),
                 "read-owners.allowed-protocols",
-            )?),
+            )?)
+            .with_escaping(escaping_for(cx, report_unresolved, &escaping)),
             note: rule.message.as_deref(),
-            report_unresolved: reports_unresolved(
-                rule.unresolved.as_deref(),
-                "read-owners",
-                &rule.name,
-            )?,
+            report_unresolved,
         });
     }
     unresolved::mut206(cx, &rules, out);
@@ -4554,10 +4592,13 @@ pub(crate) fn delegated_reports<'k>(
             && !allowance.owns(cx, func, family, objs)
             && !runs_inside_allowed_through(cx, sites, allowance, family, func, objs.0, first)
     };
-    if !delegates(cx, sites, func, Handover::ByImplementation) {
+    // A function handed on as a value has callers heki does not see: it keeps the accesses it
+    // runs, as a function without callers does.
+    let escapes = allowance.escapes(func);
+    if escapes || !delegates(cx, sites, func, Handover::ByImplementation) {
         if !in_scope
             || allowance.owns(cx, func, family, (obj, looked_up))
-            || judged_inside_allowed(cx, sites, allowance, family, (func, obj), inside)
+            || !escapes && judged_inside_allowed(cx, sites, allowance, family, (func, obj), inside)
         {
             return Vec::new();
         }
@@ -4610,6 +4651,7 @@ pub(crate) fn delegated_reports<'k>(
             callers_of(cx, sites, &callee, facts)
                 .into_iter()
                 .partition(|c| Handover::ByImplementation.hands_over(c));
+
         // Callers through a protocol declaring the method leave the accesses with the function
         // running them, also when its other callers take them over.
         if states[i].runs_access
@@ -4656,10 +4698,16 @@ pub(crate) fn delegated_reports<'k>(
             let in_scope = below_in_scope
                 || allowance.in_scope(c.caller)
                 || c.via.is_some_and(|p| allowance.in_scope(p));
-            let delegating = *delegating
-                .entry(c.caller)
-                .or_insert_with(|| delegates(cx, sites, c.caller, Handover::ByImplementation));
-            if delegating {
+            let escapes = allowance.escapes(c.caller);
+            let delegating = !escapes
+                && *delegating
+                    .entry(c.caller)
+                    .or_insert_with(|| delegates(cx, sites, c.caller, Handover::ByImplementation));
+            if escapes {
+                if in_scope && !allowance.owns(cx, c.caller, family, caller_objs) {
+                    out.push(report_at(&states, i, c.caller, hops));
+                }
+            } else if delegating {
                 if visited.insert((c.caller.clone(), c.into, caller_objs, in_scope)) {
                     states.push(WalkState {
                         func: c.caller.clone(),

@@ -804,11 +804,17 @@ impl IndexFacts {
         kb: &EffectiveEcosystemKb,
         selection: &RuleSelection,
     ) -> Result<Self, RuleConfigError> {
-        let opt_in = match facts {
+        let mut opt_in = match facts {
             Facts::Check => crate::opt_in_facts(selection),
             Facts::Inspect => crate::inspect_facts(selection),
             Facts::Recommend => crate::recommend_facts(selection),
         };
+        // The calls an effect boundary reporting what it cannot judge names (`EFF201`).
+        opt_in.blind_spots |= selection.is_enabled("EFF201")
+            && config
+                .effect_boundaries
+                .iter()
+                .any(|b| b.unresolved.as_deref() == Some("report"));
         Ok(Self {
             contracts: crate::summary_contracts(config, kb)?,
             typed_writes: crate::typed_writes(config, selection),
