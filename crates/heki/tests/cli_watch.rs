@@ -262,7 +262,8 @@ fn watch_notices_replacements_that_keep_the_modification_time() {
     assert!(
         lines
             .iter()
-            .any(|l| l == "error: pkg/api.py: stream did not contain valid UTF-8"),
+            .any(|l| l
+                == "error: pkg/api.py: cannot read the file: stream did not contain valid UTF-8"),
         "{lines:#?}"
     );
     replace_keeping_mtime(&p.dir.join("pkg/api2.py"), b"def handler(:\n");
@@ -318,7 +319,8 @@ fn watch_follows_stubs_deleted_callees_and_files_that_stop_being_utf8() {
     assert!(
         lines
             .iter()
-            .any(|l| l == "error: pkg/api.py: stream did not contain valid UTF-8"),
+            .any(|l| l
+                == "error: pkg/api.py: cannot read the file: stream did not contain valid UTF-8"),
         "{lines:#?}"
     );
     let out = child.wait_with_output().unwrap();
@@ -352,7 +354,7 @@ fn watch_fails_like_check_on_invalid_rule_options() {
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stderr.contains("heki error: invalid write-owners target `fields`"),
+        stderr.contains("error: heki.toml:3:12: invalid write-owners target `fields`"),
         "{stderr}"
     );
     assert_eq!(p.check(&[]).0, 2);
@@ -397,7 +399,10 @@ fn watch_validates_severities_and_loads_the_summary_snapshot() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown rule `NOPE1` in lint.severity"));
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("error: heki.toml:2:1: unknown rule selector `NOPE1` in `lint.severity`")
+    );
 }
 
 #[test]

@@ -243,7 +243,9 @@ fn src_entries_name_directories_inside_the_project() {
         let (code, _, stderr) = p.check(&[]);
         assert_eq!(code, 2, "{entry}");
         assert!(
-            stderr.contains(&format!("`src` entry `{entry}` in ")) && stderr.contains(reason),
+            stderr.contains(&format!(
+                "error: pyproject.toml:5:8: invalid `src` entry `{entry}`: {reason}\n"
+            )),
             "{stderr}"
         );
     }
@@ -450,7 +452,9 @@ fn a_file_that_does_not_parse_is_reported_and_the_others_are_checked() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("error: pkg/bytes.py: stream did not contain valid UTF-8"),
+        stderr.contains(
+            "error: pkg/bytes.py: cannot read the file: stream did not contain valid UTF-8"
+        ),
         "{stderr}"
     );
     // JSON holds the diagnostics only; SARIF also carries the file, as an error notification

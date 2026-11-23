@@ -198,9 +198,19 @@ pub fn resolve_name(
         return Resolution::Module(text.to_owned(), functions);
     }
     let last = text.rsplit(['.', ':']).next().unwrap_or(text);
-    let suggestions = keys
+    let name_of = |k: &FuncKey| k.qualname.rsplit('.').next().unwrap_or_default().to_owned();
+    let mut names: Vec<String> = keys.iter().map(|k| name_of(k)).collect();
+    names.sort_unstable();
+    names.dedup();
+    // The functions named `last` in other modules, else those whose names look like it.
+    let wanted: Vec<&str> = if names.iter().any(|n| n == last) {
+        vec![last]
+    } else {
+        heki_env::problem::nearest(last, names.iter().map(String::as_str))
+    };
+    let suggestions = wanted
         .iter()
-        .filter(|k| k.qualname.rsplit('.').next() == Some(last))
+        .flat_map(|name| keys.iter().filter(move |k| name_of(k) == *name))
         .take(MAX_SUGGESTIONS)
         .map(|k| (*k).clone())
         .collect();

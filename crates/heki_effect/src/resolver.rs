@@ -852,7 +852,8 @@ pub struct ModuleDecls {
     /// join of every store of the module (`stores::record`).
     pub global_types: BTreeMap<String, Ty>,
     /// Module-level names bound once to another object by name (`_set = object.__setattr__`,
-    /// `run = helpers.run`), by the fqn of that object ([`module_aliases`]): as a value or in
+    /// `run = helpers.run`), or so after imports of the name that binding always replaces, by
+    /// the fqn of that object ([`module_aliases`]): as a value or in
     /// an annotation, in the module or imported from it, the name is that object, unless
     /// another module rebinds it ([`ProjectDecls::object_named`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1841,6 +1842,21 @@ enum Search {
     Anywhere,
 }
 
+/// What the name `n` of a project package `p` holds once `p/__init__.py` has run, when the
+/// project also has the module `p.n` ([`ProjectDecls::from_import`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FromImport {
+    /// The submodule `p.n`.
+    Submodule,
+    /// What the body of `p` binds `n` to after loading `p.n` (`from .n import n`).
+    Attribute,
+    /// What the body of `p` binds `n` to (`def n`, `from .other import n`) when no statement
+    /// binding it loads `p.n` first: the first import of `p.n` anywhere replaces it, so it
+    /// depends on the order modules are imported in. Also any name of a package heki could not
+    /// read.
+    Open,
+}
+
 /// `a`, `a.b`, and `a.b.c` of `a.b.c`.
 fn dotted_prefixes(name: &str) -> impl Iterator<Item = &str> {
     name.match_indices('.')
@@ -2376,14 +2392,75 @@ impl ProjectDecls {
         search
     }
 
-    /// Longest project-module prefix of `fqn` and the remaining dotted part.
+    /// Longest project-module prefix of `fqn` and the remaining dotted part. A whole name that
+    /// is a module is its package's attribute when the package binds it to something else
+    /// ([`FromImport::Attribute`]): `pkg.parse` after `from pkg import parse` is the function
+    /// `pkg/__init__.py` imports with `from .parse import parse`. A longer name keeps the
+    /// module (`pkg.parse.parse` is what `from pkg.parse import parse` binds, which takes the
+    /// module `pkg.parse` itself).
     fn split_module<'s>(&self, fqn: &'s str) -> Option<(&ModuleDecls, &'s str)> {
         let mut found = None;
         let module = module_prefix(fqn, |prefix| {
             found = self.module(prefix);
             found.is_some()
         })?;
+        if module.len() == fqn.len()
+            && let Some((package, name)) = fqn.rsplit_once('.')
+            && self.from_import(package, name) == FromImport::Attribute
+            && let Some(package) = self.module(package)
+        {
+            return Some((package, name));
+        }
         Some((found?, fqn.get(module.len() + 1..).unwrap_or("")))
+    }
+
+    /// What `from package import name` binds, and `name` read on the module `package`, when
+    /// the project has the module `package.name`. Python takes the attribute `name` of
+    /// `package` once its `__init__.py` has run and imports the submodule only when there is
+    /// none; the first import of a submodule binds it on its package, and a later binding in
+    /// the package's body replaces it. So the package's last binding of `name` decides: none,
+    /// or an import of the submodule itself, leaves the submodule; an import or alias whose
+    /// object is read through the submodule (`from .parse import parse`, `parse =
+    /// parse.parse` after `from . import parse`) is bound after the submodule was loaded, for
+    /// good; any other binding holds only until something first imports the submodule.
+    pub fn from_import(&self, package: &str, name: &str) -> FromImport {
+        let Some(decls) = self.module(package) else {
+            return FromImport::Submodule;
+        };
+        if decls.unread {
+            return FromImport::Open;
+        }
+        // An import the package's body binds again (`try: from ._speedups import parse` with a
+        // fallback, or a later assignment) holds whichever binding ran last.
+        if !decls.aliases.contains_key(name)
+            && decls.imports.contains_key(name)
+            && decls.fixed_import(name).is_none()
+        {
+            return FromImport::Open;
+        }
+        // The name of the object bound past the submodule's: `""` for the submodule itself.
+        let past_submodule = decls
+            .imports
+            .get(name)
+            .or_else(|| decls.aliases.get(name))
+            .map(|target| {
+                target
+                    .strip_prefix(package)
+                    .and_then(|t| t.strip_prefix('.'))
+                    .and_then(|t| t.strip_prefix(name))
+            });
+        match past_submodule {
+            Some(Some("")) => FromImport::Submodule,
+            Some(Some(rest)) if rest.starts_with('.') => FromImport::Attribute,
+            Some(_) => FromImport::Open,
+            None if decls.classes.contains_key(name)
+                || decls.functions.contains_key(name)
+                || decls.unknown_globals.contains(name) =>
+            {
+                FromImport::Open
+            }
+            None => FromImport::Submodule,
+        }
     }
 
     /// The direct project subclasses of the canonical class `class`.
@@ -2740,7 +2817,12 @@ impl ProjectDecls {
             return Symbol::External;
         };
         if rest.is_empty() {
-            return Symbol::Module;
+            return match fqn.rsplit_once('.') {
+                Some((package, name)) if self.from_import(package, name) == FromImport::Open => {
+                    Symbol::Unknown
+                }
+                _ => Symbol::Module,
+            };
         }
         if m.unread {
             return Symbol::Unread;
@@ -3432,6 +3514,14 @@ impl ProjectDecls {
             }
         }
         owner
+    }
+
+    /// Whether no class a value of the class `class` may be (R2) binds one of the special
+    /// methods `names` in the project or through a metaclass heki does not know.
+    pub fn special_methods_not_in_project(&self, class: &str, names: &[&str]) -> bool {
+        names
+            .iter()
+            .all(|n| self.special_method_owner(class, n) != MethodOwner::Project)
     }
 
     /// Whether a property getter of the project (`@property`, a cached property) is named
@@ -5485,12 +5575,13 @@ fn rebound_imports(
         .collect()
 }
 
-/// [`ModuleDecls::aliases`]: the module-level names bound exactly once, not by an import
-/// statement (also none under `if TYPE_CHECKING:`), to a name the module reads as another
-/// object at run time (an import, a builtin, a class or function the module defines) or to an
-/// attribute of one (`object.__setattr__`, `helpers.run`). A name bound in two places or
-/// deleted is none, and neither is one bound to anything else (a call's result, a decorated
-/// function, a choice between two objects).
+/// [`ModuleDecls::aliases`]: the module-level names bound exactly once besides the imports
+/// that binding always replaces (`from . import parse`, then `parse = parse.parse`), to a name
+/// the module reads as another object at run time (an import, a builtin, a class or function
+/// the module defines) or to an attribute of one (`object.__setattr__`, `helpers.run`). A
+/// name bound by an import that stays (also one under `if TYPE_CHECKING:`), bound in two
+/// other places, or deleted is none, and neither is one bound to anything else (a call's
+/// result, a decorated function, a choice between two objects).
 fn module_aliases(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<String, String> {
     let module = module_scope(input.semantic);
     let module_imports = || {
@@ -5505,9 +5596,15 @@ fn module_aliases(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Stri
         .filter(|imp| !imp.in_type_checking)
         .filter_map(|imp| Some((imp.span, import_target(imp, input)?)))
         .collect();
-    let imported: FxHashSet<&str> = module_imports()
-        .map(|imp| imp.bound_name.as_str())
-        .collect();
+    // The number of imports binding each name, when a later statement always rebinds every one
+    // of them at run time (`ModuleImport::rebound_at`).
+    let mut replaced: FxHashMap<&str, Option<u32>> = FxHashMap::default();
+    for imp in module_imports() {
+        let count = replaced.entry(imp.bound_name.as_str()).or_insert(Some(0));
+        *count = count
+            .filter(|_| imp.rebound_at.is_some() && !imp.in_type_checking)
+            .map(|n| n + 1);
+    }
     // A star import may bind any name the module reads: then none is known to be a builtin.
     let builtins: FxHashSet<&str> = input
         .semantic
@@ -5541,7 +5638,14 @@ fn module_aliases(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Stri
         let InstKind::StoreGlobal { name, value } = &inst.kind else {
             continue;
         };
-        if !stores.once(name) || imported.contains(name.as_str()) {
+        // An import's own store is no alias; the store replacing every import is.
+        if imports.contains_key(&inst.span) {
+            continue;
+        }
+        let Some(imports_replaced) = replaced.get(name.as_str()).copied().unwrap_or(Some(0)) else {
+            continue;
+        };
+        if !stores.exactly(name, imports_replaced + 1) {
             continue;
         }
         let Some(target) = named.object(*value, &mut known) else {

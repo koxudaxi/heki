@@ -1,4 +1,4 @@
-//! The calls heki is blind to (`FileSummary::blind_spots`): a call it resolves to no function,
+//! The calls heki is blind to (`OptInTables::blind_spots`): a call it resolves to no function,
 //! so nothing the callee does reaches the caller and no rule reports through it, and a call of a
 //! library function or class the ecosystem catalog has no entry for, which heki takes to have no
 //! effect (docs/scope.md, "When heki cannot tell"). Only `heki recommend` reads them, so they

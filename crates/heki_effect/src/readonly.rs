@@ -291,13 +291,17 @@ pub fn deep_copy_requested(
         .all(|(k, _)| k.as_deref().is_some_and(|k| k != "update"))
 }
 
-/// The builtin container a cached function hands out on every live return (`MUT114`).
+/// A builtin container whose methods change it in place: the one a cached function hands out on
+/// every live return (`MUT114`, which knows `list`, `dict`, and `set`), or the new object a
+/// change is applied to (`MUT119`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContainerKind {
     List,
     Dict,
     Set,
+    Bytearray,
+    Deque,
 }
 
 impl ContainerKind {
@@ -307,7 +311,14 @@ impl ContainerKind {
             Self::List => "builtins.list",
             Self::Dict => "builtins.dict",
             Self::Set => "builtins.set",
+            Self::Bytearray => "builtins.bytearray",
+            Self::Deque => "collections.deque",
         }
+    }
+
+    /// The kind whose class is `class`, among every kind.
+    pub fn of_class(class: &str) -> Option<Self> {
+        Self::EVERY.into_iter().find(|k| k.class() == class)
     }
 
     pub fn as_str(self) -> &'static str {
@@ -315,10 +326,22 @@ impl ContainerKind {
             Self::List => "list",
             Self::Dict => "dict",
             Self::Set => "set",
+            Self::Bytearray => "bytearray",
+            Self::Deque => "deque",
         }
     }
 
+    /// The kinds a receiver of unknown kind is read as ([`container_mutator`]) and a cached
+    /// result can be.
     pub const ALL: [Self; 3] = [Self::List, Self::Dict, Self::Set];
+
+    pub const EVERY: [Self; 5] = [
+        Self::List,
+        Self::Dict,
+        Self::Set,
+        Self::Bytearray,
+        Self::Deque,
+    ];
 
     /// The methods that change a container of this kind in place: the one table of the builtin
     /// containers' changing methods ([`container_mutator`] reads it too).
@@ -339,7 +362,29 @@ impl ContainerKind {
                 "intersection_update",
                 "symmetric_difference_update",
             ],
+            Self::Bytearray => &[
+                "append", "extend", "insert", "pop", "remove", "clear", "reverse",
+            ],
+            Self::Deque => &[
+                "append",
+                "appendleft",
+                "extend",
+                "extendleft",
+                "insert",
+                "pop",
+                "popleft",
+                "remove",
+                "clear",
+                "reverse",
+                "rotate",
+            ],
         }
+    }
+
+    /// Whether the changing method `method` returns a value the call is for (`pop`), not
+    /// `None`.
+    pub fn returns_value(method: &str) -> bool {
+        matches!(method, "pop" | "popitem" | "popleft" | "setdefault")
     }
 
     /// Whether `method` changes a container of this kind in place.
@@ -349,14 +394,14 @@ impl ContainerKind {
 
     /// Whether an item store or delete (`x[k] = v`, `del x[k]`) changes a container of this kind.
     pub fn takes_item_stores(self) -> bool {
-        matches!(self, Self::List | Self::Dict)
+        !matches!(self, Self::Set)
     }
 
     /// Whether the augmented assignment `x <op>= y` changes a container of this kind in place.
     pub fn in_place_op(self, op: heki_ir::BinOpKind) -> bool {
         use heki_ir::BinOpKind::{Add, BitAnd, BitOr, BitXor, Mult, Sub};
         match self {
-            Self::List => matches!(op, Add | Mult),
+            Self::List | Self::Bytearray | Self::Deque => matches!(op, Add | Mult),
             Self::Dict => matches!(op, BitOr),
             Self::Set => matches!(op, BitOr | BitAnd | Sub | BitXor),
         }
@@ -369,6 +414,55 @@ impl ContainerKind {
 pub fn container_mutator(method: &str) -> bool {
     ContainerKind::ALL.iter().any(|k| k.mutator(method))
         || matches!(method, "__setitem__" | "__delitem__")
+}
+
+/// The methods of the builtin containers, besides the changing ones, whose result holds none of
+/// their receiver: a count, a test, an item, text, `None`, or a new object. What `keys`,
+/// `values`, `items`, `__iter__`, and `__reversed__` return holds the container (a view or an
+/// iterator), and so does an in-place operator's result (`__iadd__` returns it).
+const DETACHED_RESULT_METHODS: &[&str] = &[
+    "__contains__",
+    "__copy__",
+    "__delitem__",
+    "__getitem__",
+    "__len__",
+    "__setitem__",
+    "copy",
+    "count",
+    "decode",
+    "difference",
+    "endswith",
+    "find",
+    "fromkeys",
+    "get",
+    "hex",
+    "index",
+    "intersection",
+    "isdisjoint",
+    "issubset",
+    "issuperset",
+    "rfind",
+    "rindex",
+    "startswith",
+    "symmetric_difference",
+    "union",
+];
+
+/// Whether what `method` returns holds none of its receiver, on every builtin container kind that
+/// has the method: a changing method ([`ContainerKind::mutators`], which returns `None` or an
+/// item) or one of [`DETACHED_RESULT_METHODS`].
+pub fn result_detached_from_container(method: &str) -> bool {
+    ContainerKind::EVERY.iter().any(|k| k.mutator(method))
+        || DETACHED_RESULT_METHODS.contains(&method)
+}
+
+/// Whether what `method` returns, on every builtin container kind that has the method, is a view
+/// of its receiver or an iterator over it, which holds nothing else.
+pub fn returns_container_view(method: &str) -> bool {
+    matches!(
+        method,
+        "__iter__" | "__reversed__" | "items" | "keys" | "values"
+    )
 }
 
 /// A function whose results a `functools` cache keeps and hands to every later call with the

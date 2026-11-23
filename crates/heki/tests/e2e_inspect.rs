@@ -201,8 +201,20 @@ fn a_symbol_naming_no_single_function_exits_2_with_an_error_object() {
     assert!(err.contains("ambiguous symbol `load`"), "{err}");
     let (code, v, _) = inspect(&p, &["pkg.users.fech"]);
     assert_eq!((code, v["error"]["kind"].as_str()), (2, Some("unknown")));
-    let (_, v, _) = inspect(&p, &["mod.Loader._remembers"]);
-    assert_eq!(v["error"]["suggestions"], serde_json::json!([]));
+    // No function has the name: the ones whose names look like it.
+    let (_, v, err) = inspect(&p, &["mod.Loader._remembers"]);
+    assert_eq!(
+        v["error"]["suggestions"][0]["fqn"],
+        "pkg.users.Loader._remember"
+    );
+    assert!(
+        err.contains("= help: did you mean `pkg.users.Loader._remember`?"),
+        "{err}"
+    );
+    assert_eq!(
+        v["error"]["docs"],
+        "https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental"
+    );
     let (_, v, _) = inspect(&p, &["nothing.load"]);
     assert_eq!(v["error"]["suggestions"].as_array().unwrap().len(), 2);
     let (code, v, _) = inspect(&p, &["pkg.users.Loader"]);

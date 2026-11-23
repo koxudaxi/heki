@@ -167,7 +167,7 @@ impl ProjectIndex {
     }
 
     /// The functions whose own body runs, itself or through what its calls hand on, a call heki
-    /// is blind to (`FileSummary::blind_spots`), a call it cannot resolve or an A1 hazard
+    /// is blind to (`OptInTables::blind_spots`), a call it cannot resolve or an A1 hazard
     /// (`EffectSummary::unknown_calls`), or a function whose body it does not know (defined only
     /// in a stub): what they do is not all seen. One closure over the facts calls hand on, as
     /// [`Self::blind_spot_reach`] walks them, each state expanded once.
@@ -181,7 +181,8 @@ impl ProjectIndex {
                 && (self.summary(func).is_some_and(|s| s.unknown_calls)
                     || path.is_some_and(crate::is_stub)
                     || path.is_some_and(|p| {
-                        (self.files[p].blind_spots.as_ref()).is_some_and(|b| b.contains_key(func))
+                        (self.files[p].opt_in_tables.as_ref())
+                            .is_some_and(|t| t.blind_spots.contains_key(func))
                     }))
         };
         let mut out = FxHashSet::default();

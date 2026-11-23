@@ -18,8 +18,8 @@ use heki_rules::project::{
 use heki_rules::{
     CHAIN_RULES, ChainFacts, CheckExtras, RuleSelection, SNAPSHOT_FILE, SelectionError,
     SentinelTestKey, SnapshotError, StaleWriteKey, SummarySnapshot, chain_facts, check_project,
-    deep_copy_files, family_readers, find_rule, kept_removals_in, lazy_setup_files,
-    sentinel_tests_in, stale_writes_by_file,
+    deep_copy_files, family_readers, kept_removals_in, lazy_setup_files, sentinel_tests_in,
+    stale_writes_by_file,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
@@ -35,12 +35,22 @@ pub enum EngineError {
     Selection(SelectionError),
     #[error(transparent)]
     Snapshot(SnapshotError),
-    #[error("unknown rule `{0}` in lint.severity")]
-    UnknownSeverityRule(String),
     #[error(transparent)]
     Rules(heki_rules::RuleConfigError),
     #[error(transparent)]
     Baseline(Box<heki_diagnostics::BaselineError>),
+}
+
+impl heki_env::Explain for EngineError {
+    fn explain(&self) -> heki_env::Problem {
+        match self {
+            Self::Project(e) => e.explain(),
+            Self::Selection(e) => e.explain(),
+            Self::Snapshot(e) => e.explain(),
+            Self::Rules(e) => e.explain(),
+            Self::Baseline(e) => e.explain(),
+        }
+    }
 }
 
 /// The files of a project root whose change reloads the whole workspace: the configuration, the
@@ -417,14 +427,6 @@ impl Workspace {
         let env_cfg = &project.env.cfg;
         let selection =
             RuleSelection::resolve(&env_cfg.lint, selectors).map_err(EngineError::Selection)?;
-        if let Some(k) = env_cfg
-            .lint
-            .severity
-            .keys()
-            .find(|k| find_rule(k).is_none())
-        {
-            return Err(EngineError::UnknownSeverityRule(k.clone()));
-        }
         let snapshot_path = project.env.root.join(SNAPSHOT_FILE);
         let snapshot = if selection.is_enabled("MUT103") && snapshot_path.exists() {
             Some(SummarySnapshot::load(&snapshot_path).map_err(EngineError::Snapshot)?)
@@ -1306,6 +1308,39 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use heki_env::Explain as _;
+
+    /// The server explains a workspace that does not load as `heki check` explains its error.
+    #[test]
+    fn engine_errors_explain_as_their_causes() {
+        let missing = || ProjectError::MissingPath(PathBuf::from("m.py"));
+        let selector = || SelectionError::UnknownRule {
+            selector: "NOPE1".to_owned(),
+            origin: "--select",
+        };
+        let snapshot = || SnapshotError::Version {
+            path: PathBuf::from("s.json"),
+            found: 9,
+        };
+        let rules = || heki_rules::RuleConfigError::TooManyInvalidations(99);
+        let baseline = || heki_diagnostics::BaselineError::Version {
+            path: PathBuf::from("b.toml"),
+            version: 9,
+        };
+        let cases = [
+            (EngineError::Project(missing()), missing().explain()),
+            (EngineError::Selection(selector()), selector().explain()),
+            (EngineError::Snapshot(snapshot()), snapshot().explain()),
+            (EngineError::Rules(rules()), rules().explain()),
+            (
+                EngineError::Baseline(Box::new(baseline())),
+                baseline().explain(),
+            ),
+        ];
+        for (error, cause) in cases {
+            assert_eq!(error.explain(), cause);
+        }
+    }
 
     #[test]
     fn key_sets_hold_exactly_their_ids_in_either_form() {

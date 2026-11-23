@@ -43,7 +43,8 @@ One versioned object about one function:
   for an `impure` function too: what it changes may then be incomplete.
 - A field the configuration does not compute is `null`, with the setting that computes it.
 - Fact keys carry no line numbers, so a diff of the objects before and after an edit shows only
-  what changed.
+  what changed: a new entry in `effects`, `changes`, `retains`, or `returns` is new behavior.
+  Tell the user about it unless they asked for it.
 
 ## `heki check --generate-prompt --output-format json` (experimental)
 
@@ -51,4 +52,5 @@ One versioned object: `question`, `configuration` (root, configuration file, tar
 source roots, rule selection, baseline, contracts), `rules` (code, name, certainty, activation,
 and what a report states), `heuristic_rules_off`, `diagnostics` (the concise fields of the
 diagnostics that fit, with `omitted` counting the rest), and `guidance`.
-`heki check --output-format-json-schema generate-prompt` prints its JSON Schema.
+`heki check --output-format-json-schema generate-prompt` prints its JSON Schema. A word after
+`--generate-prompt` is the question, so paths go before it.

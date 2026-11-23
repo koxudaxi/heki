@@ -64,6 +64,7 @@ app/api.py:5:12: EFF101 (async-blocking-call) [warning] `app.users.load_user` al
 
 Found 1 diagnostic(s) in 2 file(s).
 note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+EFF101 (async-blocking-call): `heki rule EFF101`, https://heki.koxudaxi.dev/rules/async-blocking-call/
 ```
 
 ### A query one helper below a loop
@@ -95,6 +96,7 @@ app/orders.py:11:37: EFF103 (loop-db-query) [warning] every iteration over param
 
 Found 1 diagnostic(s) in 1 file(s).
 note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+EFF103 (loop-db-query): `heki rule EFF103`, https://heki.koxudaxi.dev/rules/loop-db-query/
 ```
 
 Ruff, ty, Pyrefly, pyright, and mypy report nothing for either example with their default settings.
@@ -178,6 +180,7 @@ These rules are exact and run by default. Each report shows the chain of calls t
 | A database statement on every iteration of a loop over data | `EFF103` |
 | A `Sequence` / `Mapping` argument changed in place by a helper | `MUT110` |
 | A list, dict, or set that an `lru_cache` / `cache` function returned, changed in place | `MUT114` |
+| A change of a builtin container that is lost because the object is new and nothing holds it (`list(xs).sort()`) | `MUT119` |
 | A DataFrame or array concatenated with itself on every loop iteration | `DATA101` |
 | A quadratic list, dict, set, bytes, or queue pattern | `OPT101`-`OPT103`, `OPT110`, `OPT111`, `OPT113`, `OPT120`, `OPT121`, `OPT130` |
 
@@ -202,7 +205,7 @@ see [Rules](https://heki.koxudaxi.dev/rules/) and
   effect, which a diff does not show.
 - Coding agents get the same checks as JSON, and an
   [Agent Skill](https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental) teaches them the workflow.
-- [`heki inspect`](https://heki.koxudaxi.dev/coding-agents/#before-an-edit-heki-inspect-experimental)
+- [`heki inspect`](https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental)
   (experimental) says what one function does, so an agent does not read its callees to find out.
 
 ### Fast, quiet, and easy to adopt
@@ -223,9 +226,10 @@ through helpers, effects behind a call, stale shared state, and quadratic patter
 
 ## 🔍 How heki differs
 
-Ruff models syntax, type checkers model declared types, and tach and import-linter model imports.
-heki models effects and aliases, what code does, so use it next to them: the second example
-passes `mypy --strict` and pyright's strict mode, yet sends one query per order. See the
+Ruff models syntax, and type checkers model declared types. heki models effects and aliases,
+what code does, so use it next to them: the second example passes `mypy --strict` and pyright's
+strict mode, yet sends one query per order. Import rules that know when each import runs, and
+read the contracts of tach and import-linter, are planned. See the
 [comparison](https://heki.koxudaxi.dev/#how-heki-differs).
 
 ## 🔧 Rewrites proven under CPython's semantics
@@ -302,7 +306,7 @@ $ heki inspect app.users.load_user              # what one function does (experi
 $ heki recommend                                # configuration advice (experimental)
 ```
 
-See [Coding agents](https://heki.koxudaxi.dev/coding-agents/#before-an-edit-heki-inspect-experimental)
+See [Coding agents](https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental)
 for `heki inspect` and [Configuration advice](https://heki.koxudaxi.dev/recommend/) for
 `heki recommend`.
 
@@ -375,7 +379,7 @@ step keeps findings as alerts and fails only on a configuration, read, or syntax
 - 🚀 [Getting started](https://heki.koxudaxi.dev/getting-started/) - run heki on a project, read a diagnostic, apply a fix
 - 🎯 [Scope and limitations](https://heki.koxudaxi.dev/scope/) - what heki checks and what it leaves to other tools
 - ⚙️ [Configuration](https://heki.koxudaxi.dev/configuration/) - rule selection, contracts, the Python version
-- 📏 [Rules](https://heki.koxudaxi.dev/rules/) - all 44 rules
+- 📏 [Rules](https://heki.koxudaxi.dev/rules/) - all 46 rules
 - 📐 [Rule precision](https://heki.koxudaxi.dev/precision/) - exact and heuristic rules, and how they are measured
 - 🔧 [Fixes and safety](https://heki.koxudaxi.dev/fixes/) - how rewrites are proven safe
 - 🪜 [Adopting heki](https://heki.koxudaxi.dev/adoption/) - Ratchet baselines, pre-commit, CI

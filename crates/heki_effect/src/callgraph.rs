@@ -6,6 +6,7 @@
 //! `ProjectIndex::build` runs it over every function; `ProjectIndex::update_file` over the
 //! edited file's SCC closure and then over the affected callers only.
 
+use crate::fresh::FreshReturn;
 use crate::guards;
 use crate::iterations;
 use crate::scc::tarjan_scc;
@@ -99,6 +100,9 @@ pub(crate) fn reset_to_local(index: &mut ProjectIndex, region: &FxHashSet<FuncKe
             Arc::make_mut(&mut local).sync_driven_only = true;
         }
         file.functions.insert(func.clone(), local);
+        if let Some(tables) = &mut file.opt_in_tables {
+            tables.fresh_returns.reset(func);
+        }
     }
 }
 
@@ -201,8 +205,20 @@ pub(crate) fn propagate_with_budget(
             }
             let in_scc = |k: &FuncKey| pos.get(k).is_some_and(|j| members.contains(j));
             let new = recompute(index, &out, &nodes[i], &in_scc, on_cycle[i]);
-            if index.summary(&nodes[i]) != Some(&new) {
+            let fresh = Resolver {
+                index,
+                in_scc: &in_scc,
+            }
+            .resolve_fresh_return(&nodes[i]);
+            let fresh_changed = index.fresh_return(&nodes[i]) != fresh.as_ref();
+            if fresh_changed {
+                store_fresh_return(index, &nodes[i], fresh);
+            }
+            let summary_changed = index.summary(&nodes[i]) != Some(&new);
+            if summary_changed {
                 store(index, &nodes[i], new);
+            }
+            if summary_changed || fresh_changed {
                 for &p in &preds[i] {
                     if members.contains(&p) && queued.insert(p) {
                         queue.push_back(p);
@@ -233,6 +249,24 @@ fn store(index: &mut ProjectIndex, func: &FuncKey, summary: EffectSummary) {
         _ => Arc::new(summary),
     };
     file.functions.insert(func.clone(), summary);
+}
+
+/// Store the final `MUT119` fact of `func`, a propagation node like [`store`]'s.
+fn store_fresh_return(index: &mut ProjectIndex, func: &FuncKey, fact: Option<FreshReturn>) {
+    let file = index
+        .files
+        .get_mut(&index.func_files[func])
+        .expect("a propagation node belongs to an indexed file");
+    match fact {
+        Some(fact) => {
+            (file.opt_in_tables_mut().fresh_returns.resolved).insert(func.clone(), fact);
+        }
+        None => {
+            if let Some(tables) = &mut file.opt_in_tables {
+                tables.fresh_returns.resolved.remove(func);
+            }
+        }
+    }
 }
 
 /// The propagation nodes on a call cycle ([`CallCycle`]): the members of the components, over
@@ -940,6 +974,26 @@ impl Resolver<'_> {
             }
             _ => Construction::No,
         }
+    }
+
+    /// The final fact of `func` ([`crate::fresh::FreshReturns::resolved`]): its local fact when
+    /// each project function it names returns a new container of the same kind on every return
+    /// (by its final fact, outside the SCC being computed).
+    fn resolve_fresh_return(&self, func: &FuncKey) -> Option<FreshReturn> {
+        let file = &self.index.files[&self.index.func_files[func]];
+        let local = file.opt_in_tables.as_ref()?.fresh_returns.local.get(func)?;
+        let mut fact = FreshReturn {
+            calls: Vec::new(),
+            ..*local
+        };
+        local
+            .calls
+            .iter()
+            .all(|k| {
+                let callee = self.index.fresh_return(k).filter(|_| !(self.in_scc)(k));
+                fact.join_callee(callee)
+            })
+            .then_some(fact)
     }
 
     /// Resolve the conditions of the function's own writes and of its returned object.

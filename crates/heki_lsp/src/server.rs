@@ -28,6 +28,7 @@ use crate::convert;
 use crate::engine::{CONFIG_FILES, Selectors, Source, Workspace};
 use heki_diagnostics::Diagnostic;
 use heki_effect::ModuleLayout;
+use heki_env::Explain as _;
 use heki_rules::project::{Facts, IGNORE_FILES, ProjectOptions, canonical, find_root};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
@@ -256,18 +257,14 @@ impl State {
             .cloned()
             .collect();
         let paths = [root];
-        let loaded = Workspace::load(
-            &ProjectOptions {
-                paths: &paths,
-                working_dir: Some(&paths[0]),
-                overrides: Some(&texts),
-                removed: Some(&removed),
-                ..ProjectOptions::default()
-            },
-            &self.selectors,
-            None,
-            Facts::Inspect,
-        );
+        let opts = ProjectOptions {
+            paths: &paths,
+            working_dir: Some(&paths[0]),
+            overrides: Some(&texts),
+            removed: Some(&removed),
+            ..ProjectOptions::default()
+        };
+        let loaded = Workspace::load(&opts, &self.selectors, None, Facts::Inspect);
         self.pending.clear();
         let mut files: BTreeSet<PathBuf> =
             self.docs.keys().chain(self.diags.keys()).cloned().collect();
@@ -280,7 +277,14 @@ impl State {
             Err(e) => {
                 self.workspace = None;
                 let pubs = files.iter().filter_map(|p| self.clear(p)).collect();
-                return (pubs, vec![e.to_string()], None);
+                // What `heki check` prints for the same configuration.
+                let problem = e.explain().locate(opts.config_file().as_deref());
+                let text = heki_diagnostics::render_problem(
+                    &problem,
+                    &heki_diagnostics::Stylesheet::plain(),
+                    &heki_diagnostics::file_line,
+                );
+                return (pubs, vec![text.trim_end().to_owned()], None);
             }
         };
         let n = ws.stats().indexed_files;
