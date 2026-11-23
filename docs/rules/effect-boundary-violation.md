@@ -37,15 +37,18 @@ count for a read.
     subclasses), or to one entry of the container an attribute holds (`Class.attr["key"]`), in
     every form `MUT201` follows, through the receivers whose class `MUT201` sees (the items of
     annotated containers included); a class's own initialization is no write (constructing a
-    fresh object runs its `__init__`), and neither is a write that constructs the object it
-    writes (`fresh-objects = "allow"`, the default; a write the reached function makes to an
+    fresh object runs its `__init__`): what an initializer writes on its own `self`, itself or
+    through the helpers it passes `self` to (`_link(self)`, `self._init_fields()`,
+    `super().__init__()`), while the same helper writing another object, or called after
+    `__init__` returned, writes an existing one; neither is a write that constructs the object
+    it writes (`fresh-objects = "allow"`, the default; a write the reached function makes to an
     object it allocated), as for `MUT201`;
   - `reads-targets`: reads of the `Class.attr` entries of `read-targets` (and their
     subclasses), in every form `MUT203` follows (`obj.attr`, `getattr(obj, "attr")`,
-    `obj.__dict__["attr"]` or `vars(obj)["attr"]`, a property getter that reads it); an
-    initializer reading its own instance is no read. An entry also names an attribute of a module
-    outside the project by its full dotted name (`sys.platform`), read as `sys.platform` or
-    through `from sys import platform`;
+    `obj.__dict__["attr"]` or `vars(obj)["attr"]`, a property getter that reads it); a class's
+    own initialization reading its instance, itself or through such a helper, is no read. An
+    entry also names an attribute of a module outside the project by its full dotted name
+    (`sys.platform`), read as `sys.platform` or through `from sys import platform`;
   - `calls`: calls of the `call-targets` entries, matched as the targets of `MUT204`: a function,
     a method (with its overrides in subclasses, through bound-method aliases and `getattr` with a
     constant name), or a class (constructing it); a call is one only when every function it may

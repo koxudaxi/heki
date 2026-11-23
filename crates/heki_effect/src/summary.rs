@@ -186,7 +186,7 @@ fn extract_module(
                     &cell_aliases,
                 )
                 .run();
-                absorb_class_body(&mut summary, facts.summary);
+                absorb_class_body(&mut summary, facts.summary, &key);
                 external.extend(facts.external);
                 blind.extend(facts.blind);
                 unawaited.extend(facts.unawaited);
@@ -299,7 +299,7 @@ fn extract_module(
         }
         // Same qualname defined twice (conditional definitions): keep the union of facts.
         match file.local_functions.get_mut(&key) {
-            Some(existing) => merge_duplicate(Arc::make_mut(existing), summary),
+            Some(existing) => merge_duplicate(Arc::make_mut(existing), summary, &key),
             None => {
                 file.local_functions.insert(key, Arc::new(summary));
             }
@@ -342,7 +342,7 @@ where
 
 /// Add the facts of a class body the function runs (`body`) to the function's own: its
 /// execution effects and the project attributes it writes and reads.
-fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary) {
+fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary, func: &FuncKey) {
     for e in &body.direct_exec_effects {
         let had = into.direct_exec_effects.contains(e);
         let occ = body.exec_guards.get(e).cloned().unwrap_or_default();
@@ -366,7 +366,7 @@ fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary) {
     into.capacity_waits.extend(body.capacity_waits);
     into.absorb_lock_facts(body.locks);
     into.absorb_exclusive_uses(body.exclusive.into_iter().flat_map(|uses| *uses));
-    into.refresh_typed_field_writes();
+    into.refresh_typed_field_writes(func);
 }
 
 /// Add the changes of shared state of another body of the function (`other`'s changed state,
@@ -432,7 +432,7 @@ fn rebase_origin_nodes(summary: &mut EffectSummary, sites: &mut [CallSite], offs
     }
 }
 
-fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
+fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary, func: &FuncKey) {
     // `returns_self_attrs` holds for every definition: an attribute that either one reads for
     // more than its object is left out.
     let read_otherwise = |s: &EffectSummary| -> BTreeSet<String> {
@@ -556,7 +556,7 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     into.capacity_waits.extend(other.capacity_waits);
     into.absorb_lock_facts(other.locks);
     into.absorb_exclusive_uses(other.exclusive.into_iter().flat_map(|uses| *uses));
-    into.refresh_typed_field_writes();
+    into.refresh_typed_field_writes(func);
 }
 
 /// Who owns an object being written: the method's `self`, a parameter path, or a typed object.
@@ -2697,7 +2697,7 @@ impl<'a> Extractor<'a> {
             let hashed = self.hashed_whole_self_attrs();
             self.summary.hashed_whole_self_attrs = (!hashed.is_empty()).then(|| Box::new(hashed));
         }
-        self.summary.refresh_typed_field_writes();
+        self.summary.refresh_typed_field_writes(self.key);
         if let Some(state) = &mut self.summary.shared_state {
             Arc::make_mut(state).normalize();
         }

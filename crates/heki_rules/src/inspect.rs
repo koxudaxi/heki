@@ -957,7 +957,9 @@ fn changes(
         .map(|a| self_attr(b, key, local, a))
         .collect();
     let class_attrs = index.propagates_typed_writes().then(|| {
-        s.typed_field_writes
+        // The facts of one attribute differ in the objects written too, which are not shown.
+        let mut writes: Vec<ClassAttrWrite> = s
+            .typed_field_writes
             .iter()
             .map(|w| ClassAttrWrite {
                 class: w.class_qualname.clone(),
@@ -965,7 +967,11 @@ fn changes(
                 kind: w.kind.as_str(),
                 fresh: w.fresh,
             })
-            .collect()
+            .collect();
+        writes.dedup_by(|a, b| {
+            (&a.class, &a.attr, a.kind, a.fresh) == (&b.class, &b.attr, b.kind, b.fresh)
+        });
+        writes
     });
     Changes {
         params: param_changes,

@@ -2558,6 +2558,71 @@ fn accesses_of_a_helper_only_initialization_runs_ask_its_callers_once() {
     }
 }
 
+/// A boundary's scope constructing a thousand classes whose initializers hand their `self` and
+/// another node to a chain of a thousand helpers, half of them in each order, the last helper
+/// writing its first parameter: a helper has at most two nodes in the scope's reach, one binding
+/// no initializer's `self` and one binding the parameters of the first path that binds some, so
+/// the chain is walked twice, not once per initializer or order. The write of the node handed
+/// over stays reported.
+#[test]
+fn initializers_handing_self_down_a_helper_chain_reach_each_helper_at_most_twice() {
+    let module = |size: usize| {
+        let mut lines = vec![
+            "class Node:".to_owned(),
+            "    def __init__(self):".to_owned(),
+            "        self.optional = False".to_owned(),
+        ];
+        for c in 0..size {
+            let args = if c % 2 == 0 {
+                "self, other"
+            } else {
+                "other, self"
+            };
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("class C{c}(Node):"),
+                "    def __init__(self, other: Node):".to_owned(),
+                "        super().__init__()".to_owned(),
+                format!("        _h0({args})"),
+            ]);
+        }
+        for h in 0..size {
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("def _h{h}(a: Node, b: Node):"),
+                format!("    _h{}(a, b)", h + 1),
+            ]);
+        }
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def _h{size}(a: Node, b: Node):"),
+            "    a.optional = True".to_owned(),
+            String::new(),
+            String::new(),
+            "def build(other: Node):".to_owned(),
+        ]);
+        lines.extend((0..size).map(|c| format!("    C{c}(other)")));
+        lines.join("\n") + "\n"
+    };
+    let found = check_linear(1_000, |size| {
+        let p = Project::new(&format!("bounds_initializing_helpers_{size}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"build\"\nscopes = [\"m.build\"]\nwrite-universe = [\"Node.*\"]\n",
+        )
+        .write("m.py", &module(size));
+        p
+    });
+    let found: Vec<(&Value, &Value)> = found
+        .iter()
+        .map(|d| (&d["qualname"], &d["target"]))
+        .collect();
+    assert_eq!(found, [(&json!("build"), &json!("build:Node.optional"))]);
+}
+
 /// Modules binding twelve thousand names, each to an attribute of the one before
 /// (`a1 = a0.x`, `a2 = a1.x`, ...), about as many as a module body's IR budget models: whether
 /// a binding is a string constant takes a bounded walk of copies and attribute loads, past

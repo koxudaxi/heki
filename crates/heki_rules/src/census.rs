@@ -13,7 +13,7 @@
 //! object; a contract trial, which declares the contracts, sees those.
 
 use heki_ast::Span;
-use heki_effect::{BLOCKING_EFFECTS, EffectSummary, FuncKey, INITIALIZERS, ProjectIndex};
+use heki_effect::{BLOCKING_EFFECTS, EffectSummary, FuncKey, ProjectIndex, initializes_own_self};
 use rustc_hash::FxHashSet;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -289,20 +289,15 @@ fn gather<'i>(
 
 /// Whether a write by `function` (its own summary `local`) of an object that may be its
 /// parameters `obj_params`, an instance of `class`, initializes its own instance: an initializer
-/// of `class` writing its `self`, which the ownership contracts allow anyway.
+/// of `class` writing its `self` ([`initializes_own_self`]), which the ownership contracts allow
+/// anyway.
 fn initializes_own_instance(
     function: &FuncKey,
     local: &EffectSummary,
     class: &str,
     obj_params: u64,
 ) -> bool {
-    let name = function
-        .qualname
-        .rsplit('.')
-        .next()
-        .unwrap_or(&function.qualname);
-    obj_params & 1 != 0
-        && INITIALIZERS.contains(&name)
+    initializes_own_self(function, local, obj_params)
         && local.owner_class_qualname.as_deref().is_some_and(|owner| {
             class
                 .strip_prefix(function.module.as_str())

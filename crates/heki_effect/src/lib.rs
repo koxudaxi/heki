@@ -58,7 +58,8 @@ pub use contracts::{ContractClass, Contracts};
 pub use environment::{AccessKind, ExternalAccess};
 pub use invalidation::{
     CoveredAfter, FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
-    builds_written_object, delegates_to_callers, is_initializer, reach_across,
+    builds_written_object, delegates_to_callers, initializes_own_self, is_initializer,
+    reach_across,
 };
 pub use iterations::{
     BetweenSteps, ContainerChange, ContainerIteration, IteratedContainer, IteratedResult,
@@ -114,16 +115,20 @@ pub struct AttrKeyPath {
 }
 
 /// A project-class attribute write a function reaches through any number of calls: the facts
-/// of a typed write site without its position, chain, and object (`EffectSummary::
-/// typed_field_writes`). A caller asks it whether a callee already sees the type of what it
-/// writes.
+/// of a typed write site without its position and chain (`EffectSummary::typed_field_writes`).
+/// A caller asks it whether a callee already sees the type of what it writes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TypedFieldWrite {
     pub class_qualname: String,
     pub attr: String,
     pub kind: WriteKind,
-    /// `TypedFieldWriteSite::fresh`.
+    /// The written object is under construction: `TypedFieldWriteSite::fresh`, or the object
+    /// a class's own initialization builds ([`initializes_own_self`]), written by the
+    /// initializer or by a helper it passes `self` to.
     pub fresh: bool,
+    /// `TypedFieldWriteSite::obj_params`, mapped through every call as for the sites: a
+    /// helper's write reaches the initializer handing it `self` as a write of its own `self`.
+    pub obj_params: u64,
 }
 
 /// One hop in an interprocedural call chain (for Boundary-Only & LSP RelatedLocation).
@@ -1533,20 +1538,30 @@ impl EffectSummary {
             .unwrap_or(&ownership::NO_RETURN_ORIGINS)
     }
 
-    /// Add the facts of the typed write sites to `typed_field_writes` (propagation adds those
-    /// of the callees).
-    pub(crate) fn refresh_typed_field_writes(&mut self) {
+    /// Add the facts of the typed write sites of `func` (this summary's function) to
+    /// `typed_field_writes`, also for what iterating its result runs (propagation adds those of
+    /// the callees).
+    pub(crate) fn refresh_typed_field_writes(&mut self, func: &FuncKey) {
+        // `initializes_own_self` of an object that may be `self`.
+        let initializes = initializes_own_self(func, self, 1);
+        self.add_site_facts(initializes);
+        if let Some(i) = &mut self.iterated {
+            i.add_site_facts(initializes);
+        }
+    }
+
+    /// Add the facts of this summary's typed write sites to `typed_field_writes`; `initializes`:
+    /// the function is an initializer, whose writes of what may be its `self` are fresh.
+    fn add_site_facts(&mut self, initializes: bool) {
         for s in &self.typed_field_write_sites {
             let fact = TypedFieldWrite {
                 class_qualname: s.class_qualname.clone(),
                 attr: s.attr.clone(),
                 kind: s.kind,
-                fresh: s.fresh,
+                fresh: s.fresh || initializes && s.obj_params & 1 != 0,
+                obj_params: s.obj_params,
             };
             self.typed_field_writes.insert(fact);
-        }
-        if let Some(i) = &mut self.iterated {
-            i.refresh_typed_field_writes();
         }
     }
 

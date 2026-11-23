@@ -14,7 +14,8 @@ use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallCycle, CallHop, CallSite, CallTarget, CellChange,
     Construction, Delivery, EffectSummary, Facts, FuncKey, LocalOrigins, NewArg, NewCond, NewKind,
     Origins, ProjectIndex, ProtectedReturn, ReturnsNew, Runner, Shared, SharedChain, SharedLine,
-    SharedState, SiteRole, Slot, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind, cache_flow,
+    SharedState, SiteRole, Slot, TypedFieldWrite, TypedFieldWriteSite, UnresolvedWriteSite,
+    WriteKind, cache_flow,
 };
 use heki_ast::Span;
 use heki_kb::ExecEffectKind;
@@ -414,7 +415,7 @@ fn recompute(
         let sites = out.get(func).map(Vec::as_slice).unwrap_or(&[]);
         crate::invalidation::propagate_facts(index, c, func, sites, &mut s);
     }
-    s.refresh_typed_field_writes();
+    s.refresh_typed_field_writes(func);
     s
 }
 
@@ -1688,12 +1689,23 @@ fn transfer_typed_writes(
             },
         );
     }
-    // Typed writes: every callee's facts reach the caller. A private callee hands its write
-    // sites to its callers too, a public one reports its own; what iterating a plain function's
-    // result runs (`rewrite`) runs nowhere in the function, so its sites go to whoever iterates.
+    // Typed writes: every callee's facts reach the caller, on the caller's objects. A private
+    // callee hands its write sites to its callers too, a public one reports its own; what
+    // iterating a plain function's result runs (`rewrite`) runs nowhere in the function, so its
+    // sites go to whoever iterates.
     for w in &facts.typed_field_writes {
-        if !t.typed_field_writes.contains(w) {
-            t.typed_field_writes.insert(w.clone());
+        let obj_params = bound_params(w.obj_params, bc);
+        let fresh = w.fresh || crate::initializes_own_self(caller, t, obj_params);
+        if fresh == w.fresh && obj_params == w.obj_params {
+            if !t.typed_field_writes.contains(w) {
+                t.typed_field_writes.insert(w.clone());
+            }
+        } else {
+            t.typed_field_writes.insert(TypedFieldWrite {
+                fresh,
+                obj_params,
+                ..w.clone()
+            });
         }
     }
     if !rewrite && !crate::delegates_to_callers(&bc.callee.qualname) {

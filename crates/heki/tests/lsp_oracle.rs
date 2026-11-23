@@ -2057,6 +2057,17 @@ fn steps_contract_extensions() -> Vec<Step> {
     let constructing = ACCT_OPS.replace("    return None\n", "    return Receipt(1)\n");
     let helper = |body: &str| PURE_OPS.replace("    return None\n", body);
     let two_reads = LAYER_OPS.replace("    return 0\n", "    return l.balance + l.balance\n");
+    // A pass helper constructs a ledger whose initializer hands a private helper its own `self`,
+    // then the ledger the pass was handed.
+    let opening = |handed: &str| {
+        format!(
+            "{}\n\nclass Opened(Ledger):\n    def __init__(self, other: Ledger):\n        super().__init__()\n        _open({handed})\n\n\ndef _open(l: Ledger):\n    l.balance = 0\n",
+            PURE_OPS.replace(
+                "    l.rows.append(1)\n",
+                "    l.rows.append(1)\n    Opened(l)\n"
+            )
+        )
+    };
     // The function exists before: only its calls change, not the declarations.
     let outside = CHAIN_TOP.replace(
         "def outside(r, v, l):\n    return None\n",
@@ -2110,6 +2121,21 @@ fn steps_contract_extensions() -> Vec<Step> {
         .present(&[("pkg/pure.py", "EFF201")]),
         Step::new(
             "the helpers are pure again",
+            vec![save("pkg/pure_ops.py", PURE_OPS)],
+        )
+        .absent(&[("pkg/pure.py", "EFF201")]),
+        Step::new(
+            "a pass helper constructs a ledger whose initializer hands its `self` to a helper writing it",
+            vec![Action::Save("pkg/pure_ops.py", opening("self"))],
+        )
+        .absent(&[("pkg/pure.py", "EFF201")]),
+        Step::new(
+            "the initializer hands the helper the pass's ledger instead",
+            vec![Action::Save("pkg/pure_ops.py", opening("other"))],
+        )
+        .present(&[("pkg/pure.py", "EFF201")]),
+        Step::new(
+            "the helpers are pure once more",
             vec![save("pkg/pure_ops.py", PURE_OPS)],
         )
         .absent(&[("pkg/pure.py", "EFF201")]),
