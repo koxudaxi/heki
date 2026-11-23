@@ -63,10 +63,9 @@ impl Declared {
             declared.read_poetry(poetry);
         }
         if let Some(groups) = table.get("dependency-groups").and_then(Value::as_table) {
-            for name in groups.keys() {
-                let mut members = BTreeSet::new();
-                dependency_group(groups, name, &mut Vec::new(), &mut members);
-                declared.add_group(name, members);
+            let groups = DependencyGroups::of(groups);
+            for name in groups.entries.keys() {
+                declared.add_group(name, groups.members(name));
             }
         }
         let tool_table = |name: &str| tool.and_then(|t| t.get(name)).and_then(Value::as_table);
@@ -207,34 +206,44 @@ fn entry_point_module(reference: &str) -> Option<String> {
     (!module.is_empty()).then(|| module.to_owned())
 }
 
-/// The members of the PEP 735 group `name` of `groups`, the groups it includes taken in
-/// (`stack`: the groups being read, where an include cycle stops).
-fn dependency_group(
-    groups: &Table,
-    name: &str,
-    stack: &mut Vec<String>,
-    out: &mut BTreeSet<String>,
-) {
-    let key = normalize_distribution(name);
-    if stack.contains(&key) {
-        return;
+/// PEP 735 `[dependency-groups]`: the entries of each group, by its normalized name (the
+/// tables of names normalizing alike are one group).
+struct DependencyGroups<'t> {
+    entries: BTreeMap<String, Vec<&'t Value>>,
+}
+
+impl<'t> DependencyGroups<'t> {
+    fn of(groups: &'t Table) -> Self {
+        let mut entries: BTreeMap<String, Vec<&'t Value>> = BTreeMap::new();
+        for (name, list) in groups {
+            (entries.entry(normalize_distribution(name)).or_default())
+                .extend(list.as_array().into_iter().flatten());
+        }
+        Self { entries }
     }
-    stack.push(key.clone());
-    let entries = groups
-        .iter()
-        .filter(|(group, _)| normalize_distribution(group) == key)
-        .flat_map(|(_, list)| list.as_array().into_iter().flatten());
-    for entry in entries {
-        match entry {
-            Value::String(requirement) => out.extend(requirement_name(requirement)),
-            other => {
-                if let Some(included) = other.get("include-group").and_then(Value::as_str) {
-                    dependency_group(groups, included, stack, out);
+
+    /// The members of the group `name` and of the groups it includes. Each group is read once,
+    /// so an include cycle ends and groups included along several paths cost nothing more.
+    fn members(&self, name: &str) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut pending = vec![normalize_distribution(name)];
+        while let Some(group) = pending.pop() {
+            if !seen.insert(group.clone()) {
+                continue;
+            }
+            for entry in self.entries.get(&group).into_iter().flatten() {
+                match entry {
+                    Value::String(requirement) => out.extend(requirement_name(requirement)),
+                    other => pending.extend(
+                        (other.get("include-group").and_then(Value::as_str))
+                            .map(normalize_distribution),
+                    ),
                 }
             }
         }
+        out
     }
-    stack.pop();
 }
 
 /// The distributions an array of PEP 508 requirements names.
@@ -330,6 +339,7 @@ broken = 1
 [dependency-groups]
 test = ["pytest", {include-group = "lint"}, {include-group = "test"}, 1]
 lint = ["ruff"]
+all = [{include-group = "test"}, {include-group = "Lint"}, {include-group = "missing"}]
 [tool.uv]
 dev-dependencies = ["ipython"]
 build-backend = { module-name = "acme" }
@@ -350,6 +360,7 @@ packages = ["src/acme_hatch/", "plain"]
         assert_eq!(
             declared.groups,
             BTreeMap::from([
+                ("all".to_owned(), set(&["pytest", "ruff"])),
                 ("dev".to_owned(), set(&["ipython"])),
                 ("docs".to_owned(), set(&["mkdocs"])),
                 ("lint".to_owned(), set(&["ruff"])),
