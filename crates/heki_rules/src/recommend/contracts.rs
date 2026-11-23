@@ -5,14 +5,16 @@
 //! Generation may propose too much; the trial decides. It declares every candidate at once, the
 //! ownership contracts with `unresolved = "report"`, and runs their rules as `heki check` would
 //! (inline suppressions and `per-file-ignores` apply); each report counts for the contracts it is
-//! of ([`Diagnostic::contracts`]). A candidate its rule reports is rejected, and so is one that
-//! hides a report of the configuration's own contracts ([`judge`]). The verification run
-//! applies the whole block; a contract that reports there is dropped, and the run repeats once.
+//! of ([`Diagnostic::contracts`]). A candidate the rule of its contract reports is rejected, and
+//! so is one that hides a report of the configuration's own contracts ([`judge`]); reports of
+//! accesses on objects of unknown class make it medium instead. The verification run then
+//! applies the whole block.
 
 use super::block::set_keys;
-use super::{MAX_EXAMPLES, MAX_LISTED, RunLabel};
+use super::{LeftOut, MAX_EXAMPLES, MAX_LISTED, RunLabel};
 use crate::census::{AttributeUse, Census, ModuleUse};
 use crate::contracts::Declared;
+use crate::names_module_literally;
 use crate::selection::RuleSelection;
 use heki_diagnostics::Diagnostic;
 use heki_effect::{FuncKey, ProjectDecls, ProjectIndex};
@@ -333,16 +335,18 @@ struct Candidate {
     /// An ownership candidate's class and attribute, and the project classes the class derives
     /// from: a candidate of a base class covers its subclasses.
     attribute: Option<(String, String, Vec<String>)>,
+    /// An ownership candidate's `Class.attr` names, as a report of a `__dict__` key no target
+    /// names gives them: its class's and each project subclass's, which its target covers.
+    members: Vec<String>,
     /// The order within the kind: the least first.
     rank: (bool, Reverse<usize>, Reverse<usize>),
 }
 
 impl Candidate {
-    /// Whether an ownership candidate's target is `member` (`Class.attr`, as a report of a
+    /// Whether an ownership candidate's target covers `member` (`Class.attr`, as a report of a
     /// `__dict__` key no target names gives it).
     fn names_member(&self, member: &str) -> bool {
-        self.attribute.is_some()
-            && (self.shown.split_once(':')).is_some_and(|(_, target)| target == member)
+        self.members.iter().any(|m| m == member)
     }
 }
 
@@ -354,6 +358,9 @@ pub(super) struct Generated {
     not_tried: Vec<NotTried>,
     /// The kinds whose rule the configuration ignores: no candidate of theirs is proposed.
     ignored: Vec<ContractKind>,
+    /// The kinds whose rule of the accesses on objects of unknown class the configuration
+    /// ignores: their entries set `unresolved = "ignore"`, as `heki check` keeps that rule off.
+    strict_ignored: Vec<ContractKind>,
 }
 
 impl Generated {
@@ -415,9 +422,11 @@ pub fn allowed_pattern(
 }
 
 /// The candidates of the project `index` analyzes, the census's, ranked and capped: what `cfg`
-/// and the rules `current` ignores leave to propose. `tests`: the files of test code
-/// ([`crate::eff_rules::is_test_code`]), which no effect boundary covers: a boundary is about
-/// the program's layers.
+/// and the rules `current` ignores leave to propose. `tests`: the files holding test code
+/// ([`crate::eff_rules::is_test_code`]: a test file, or one defining a test function), which no
+/// contract is drawn from and no effect boundary covers: a boundary is about the program's
+/// layers. A module whose name a pattern cannot spell ([`names_module_literally`]) gets no
+/// candidate either.
 pub(super) fn generate(
     index: &ProjectIndex,
     cfg: &HekiConfig,
@@ -430,6 +439,10 @@ pub(super) fn generate(
         .filter(|k| current.is_ignored(k.rule()))
         .collect();
     let proposes = |kind| !ignored.contains(&kind);
+    let strict_ignored: Vec<ContractKind> = ContractKind::ALL
+        .into_iter()
+        .filter(|k| proposes(*k) && k.strict_rule().is_some_and(|r| current.is_ignored(r)))
+        .collect();
     let decls = index.project_decls();
     let census = Census::of(index);
     let class_modules: FxHashMap<&str, &[&str]> = (census.classes.iter())
@@ -448,7 +461,7 @@ pub(super) fn generate(
     for (attribute, qualname) in attributes {
         let (class, attr) = (attribute.class, attribute.attr);
         let module = &class[..class.len() - qualname.len() - 1];
-        if test_modules.contains(module) {
+        if test_modules.contains(module) || !names_module_literally(module) {
             continue;
         }
         let site = (&decls, module, qualname);
@@ -479,6 +492,7 @@ pub(super) fn generate(
     }
     let mut out = Generated {
         ignored,
+        strict_ignored,
         ..Generated::default()
     };
     for (kind, mut candidates) in by_kind {
@@ -501,8 +515,12 @@ pub(super) fn generate(
         for mut candidate in candidates {
             let name = unique_name(&mut taken, &candidate.name, &candidate.full_name);
             candidate.entry.set_name(name);
-            if let Some((class, _, ancestors)) = &mut candidate.attribute {
+            if let Some((class, attr, ancestors)) = &mut candidate.attribute {
                 *ancestors = decls.ancestors_of(class);
+                candidate.members = std::iter::once(class.clone())
+                    .chain(decls.subclasses_of(class))
+                    .filter_map(|c| Some(format!("{}.{attr}", decls.class_qualname(&c)?)))
+                    .collect();
             }
             out.candidates.push(candidate);
         }
@@ -550,7 +568,7 @@ fn write_owner(
         return None;
     }
     let owner = writers.first().map_or(module, |w| w.module.as_str());
-    if writers.iter().any(|w| w.module != owner) {
+    if writers.iter().any(|w| w.module != owner) || !names_module_literally(owner) {
         return None;
     }
     let audience: BTreeSet<&str> = (attribute.readers.iter())
@@ -586,6 +604,7 @@ fn write_owner(
             unseen: Listed::default(),
         },
         attribute: Some((attribute.class.to_owned(), attr.to_owned(), Vec::new())),
+        members: Vec::new(),
         rank: (!in_place, Reverse(audience.len()), Reverse(0)),
         shown: target,
     })
@@ -627,6 +646,7 @@ fn read_owner(
             unseen: Listed::default(),
         },
         attribute: Some((attribute.class.to_owned(), attr.to_owned(), Vec::new())),
+        members: Vec::new(),
         rank: (false, Reverse(audience.len()), Reverse(0)),
         shown: target,
     })
@@ -634,8 +654,9 @@ fn read_owner(
 
 /// The `effect-boundaries` candidates: each module whose functions reach no blocking effect,
 /// a package whose every module does as one scope, with at least [`MIN_SCOPE_FUNCTIONS`]
-/// functions; none for the modules a declared boundary forbidding every blocking effect covers.
-/// `modules` leave out the modules of test code, `test_modules`.
+/// functions; none for the modules a declared boundary forbidding every blocking effect covers,
+/// nor for one whose name a pattern cannot spell. `modules` leave out the modules holding test
+/// code, `test_modules`.
 fn effect_boundaries(
     index: &ProjectIndex,
     modules: &[&ModuleUse<'_>],
@@ -643,7 +664,9 @@ fn effect_boundaries(
     declared: &Declared,
 ) -> Vec<Candidate> {
     let qualifies = |m: &ModuleUse<'_>| {
-        m.blocking.is_empty() && !m.functions.iter().any(|f| declared.bounds(f))
+        m.blocking.is_empty()
+            && !m.functions.iter().any(|f| declared.bounds(f))
+            && names_module_literally(m.module)
     };
     // Per dotted prefix of a module name (the name itself included): the modules at or below
     // it, and how many of them qualify.
@@ -730,6 +753,7 @@ fn effect_boundaries(
                     audience,
                 },
                 attribute: None,
+                members: Vec::new(),
                 rank: (
                     false,
                     Reverse(functions.len() * callers.len()),
@@ -887,25 +911,27 @@ fn tally(
 /// Judge every candidate of `generated` by what the contract trial, a run of `cfg` with them
 /// all declared ([`trial_config`]), reported (`kept` after inline suppressions, `suppressed`
 /// dropped by them). `configured_now`: the reports of `cfg`'s own contracts on the code as it is
-/// ([`configured_reports`]). `unanalyzed`: whether Python files below the project root were left
-/// out, and how many heki could not read or parse.
+/// ([`configured_reports`]). `unanalyzed`: the Python files below the project root left out, and
+/// how many heki could not read or parse.
 pub(super) fn judge<'d>(
     generated: Generated,
     cfg: &HekiConfig,
     (kept, suppressed): (&'d [Diagnostic], &'d [Diagnostic]),
     configured_now: &'d [Diagnostic],
-    unanalyzed: (bool, usize),
+    unanalyzed: (&LeftOut, usize),
     shown: &dyn Fn(&Path) -> String,
 ) -> Section {
     let Generated {
         candidates,
         not_tried,
         ignored,
+        strict_ignored,
     } = generated;
     let entries: Vec<&Entry> = candidates.iter().map(|c| &c.entry).collect();
     let mut reports = attribute_reports(cfg, &entries, kept, suppressed);
-    // A target lists its `__dict__` key for every contract (`unlisted-dict-keys`), so a
-    // candidate can hide a report the configuration makes now: that report counts as its own.
+    // A target lists its `__dict__` key for every contract (`unlisted-dict-keys`), on its class
+    // and the subclasses, so a candidate can hide a report the configuration makes now: that
+    // report counts as its own.
     let still: FxHashSet<ReportKey<'_>> = (kept.iter())
         .filter(|d| of_configured(cfg, d))
         .map(ReportKey::of)
@@ -928,13 +954,14 @@ pub(super) fn judge<'d>(
         ..Section::default()
     };
     for (candidate, reports) in candidates.into_iter().zip(reports) {
+        let kind = candidate.entry.kind();
         let mut kept = Kept {
-            trial: tally(candidate.entry.kind(), &reports, shown),
+            trial: tally(kind, &reports, shown),
             candidate,
             confidence: Confidence::High,
             caveats: Vec::new(),
         };
-        kept.weigh(unanalyzed);
+        kept.weigh(unanalyzed, strict_ignored.contains(&kind));
         section.kept.push(kept);
     }
     let trials = section.kept.iter().map(|k| k.trial.clone()).collect();
@@ -945,10 +972,11 @@ pub(super) fn judge<'d>(
 
 impl Kept {
     /// The confidence of a candidate the trial kept, and its entry's `unresolved`: `"report"`
-    /// only when the confidence is high. A medium one may leave accesses of unknown class
-    /// unseen (in the files left out or not parsed), which the rule of such accesses would
-    /// report once `heki check` sees them.
-    fn weigh(&mut self, (left_out, unparsed): (bool, usize)) {
+    /// only when the confidence is high and the configuration does not ignore the rule of such
+    /// accesses (`strict_ignored`). A medium one may leave accesses of unknown class unseen (in
+    /// the files left out or not parsed), which that rule would report once `heki check` sees
+    /// them.
+    fn weigh(&mut self, (left_out, unparsed): (&LeftOut, usize), strict_ignored: bool) {
         let kind = self.candidate.entry.kind();
         let unresolved = self.trial.reports_of(kind.strict_rule());
         if unresolved > 0 {
@@ -964,10 +992,16 @@ impl Kept {
                 "{unseen} function(s) of the scopes reach code heki does not see"
             ));
         }
-        if left_out {
+        if left_out.python_files > 0 {
             self.caveats.push(
                 "Python files below the project root were not analyzed: their accesses are not \
                  seen"
+                    .to_owned(),
+            );
+        } else if left_out.truncated {
+            self.caveats.push(
+                "the count of the Python files below the project root stopped before the end: \
+                 files it did not reach may be left out, and their accesses are not seen"
                     .to_owned(),
             );
         }
@@ -982,7 +1016,7 @@ impl Kept {
         }
         self.candidate
             .entry
-            .set_unresolved(self.confidence == Confidence::High);
+            .set_unresolved(self.confidence == Confidence::High && !strict_ignored);
         self.caveats.push(UNSEEN_CAVEAT.to_owned());
     }
 
@@ -1269,10 +1303,15 @@ pub(super) fn render(
                     " (at {}{more}), so unresolved = \"ignore\"",
                     at.join(", ")
                 );
+            } else if c.entry.get("unresolved").and_then(|v| v.as_str()) == Some("report") {
+                trial.push_str(" (unresolved = \"report\")");
             } else if c.confidence == Confidence::Medium {
                 trial.push_str(" (unresolved = \"ignore\", as for every medium candidate)");
             } else {
-                trial.push_str(" (unresolved = \"report\")");
+                let _ = write!(
+                    trial,
+                    " (unresolved = \"ignore\": the configuration ignores {strict})"
+                );
             }
         }
         let _ = writeln!(out, "    {trial}");

@@ -1275,6 +1275,17 @@ pub(crate) fn has_glob_syntax(text: &str) -> bool {
     text.contains(['*', '?', '[', '{'])
 }
 
+/// The characters glob syntax gives a meaning: a name part holding one is compiled as a glob.
+const GLOB_CHARACTERS: [char; 7] = ['*', '?', '[', ']', '{', '}', '\\'];
+
+/// Whether the module part of a [`DottedPattern`] can name the module `module` literally: a `:`
+/// would end the part, and a character glob syntax gives a meaning would make the pattern match
+/// other modules (`notes[1]` matches `notes1`) or fail to parse. A file name gives a module
+/// such characters (`[id].py`, `release:notes.py`).
+pub(crate) fn names_module_literally(module: &str) -> bool {
+    !module.contains(':') && !module.contains(GLOB_CHARACTERS)
+}
+
 /// One part of a [`DottedPattern`]: a literal name or a glob.
 #[derive(Debug, Clone)]
 pub(crate) struct NamePart {
@@ -1288,7 +1299,7 @@ impl NamePart {
     fn new(text: &str, pattern: &str, context: &'static str) -> Result<Self, RuleConfigError> {
         // Building a matcher compiles a regex: a plain name is compared as a string, and only text
         // with a character the glob syntax gives a meaning is compiled (and so validated).
-        if !text.contains(['*', '?', '[', ']', '{', '}', '\\']) {
+        if !text.contains(GLOB_CHARACTERS) {
             return Ok(Self {
                 text: text.to_owned(),
                 glob: None,

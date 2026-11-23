@@ -118,8 +118,9 @@ pub struct RecommendReport {
     /// Every rule the configuration does not run in full: the rules it leaves off, and the exact
     /// rules whose heuristic reports it withholds. The block's rules come first.
     pub rules: Vec<rules::RuleAdvice>,
-    /// The contracts the code keeps, which the block declares: each kept by the contract trial
-    /// and the verification run. By kind, then by rank within it.
+    /// The contracts the code keeps, which the block declares: each kept by the contract trial,
+    /// then applied with the whole block by the verification run. By kind, then by rank within
+    /// it.
     pub contracts: Vec<contracts::ContractAdvice>,
     /// The candidates a run with them declared reported for: not in the block.
     pub rejected_contracts: Vec<contracts::RejectedContract>,
@@ -267,8 +268,15 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     drop(diags);
     let env = &discovery.project.env;
     let declared = crate::declared_contracts(env, &discovery.index, &current)?;
+    // Test code as `relax-async-in-tests` finds it: a test file, or a `test_*` function in any
+    // file (a test class's method in Django's `tests.py`, for one).
     let tests: FxHashSet<&Path> = (discovery.project.files.iter())
-        .filter(|f| crate::eff_rules::is_test_code("", &f.rel))
+        .filter(|f| {
+            let qualnames = f.ir.functions.iter().map(|g| g.qualname.as_str());
+            std::iter::once("")
+                .chain(qualnames)
+                .any(|q| crate::eff_rules::is_test_code(q, &f.rel))
+        })
         .map(|f| f.path.as_path())
         .collect();
     let generated = contracts::generate(&discovery.index, &env.cfg, &declared, &current, &tests);
@@ -315,7 +323,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
             &user,
             (&kept, &suppressed),
             &configured_now,
-            (left_out.python_files > 0, project.errors.len()),
+            (&left_out, project.errors.len()),
             shown,
         )
     };
@@ -362,7 +370,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     };
     let block = block::render(&additions, &user, layout);
     let mut notes = Vec::new();
-    if left_out.python_files > 0 {
+    if left_out.python_files > 0 || left_out.truncated {
         notes.push(left_out_note(&left_out));
     }
     notes.extend(blind_spots::notes(&blind_spots, &trial));
@@ -576,6 +584,14 @@ fn left_out(
 }
 
 fn left_out_note(left_out: &LeftOut) -> String {
+    if left_out.python_files == 0 {
+        return format!(
+            "the count of the Python files below the project root stopped before the end (after \
+             the first {MAX_CENSUS_ENTRIES} entries, or at an entry it could not read): heki \
+             takes the analyzed files as the whole project, so what it says about callers, \
+             readers, and writers holds for those files only."
+        );
+    }
     let mut examples = left_out.files[..left_out.files.len().min(MAX_EXAMPLES)].join(", ");
     if left_out.python_files > MAX_EXAMPLES || left_out.truncated {
         examples.push_str(", ...");

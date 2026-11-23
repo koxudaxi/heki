@@ -219,11 +219,13 @@ fn recommend_json(p: &Project, args: &[&str]) -> Value {
     report
 }
 
-/// The diagnostics `heki check --output-format json <args>` prints.
+/// The diagnostics `heki check --output-format json <args>` prints, of a run that checked every
+/// file (exit code 0 or 1, not 2).
 fn checked(p: &Project, args: &[&str]) -> Vec<Value> {
     let mut all = vec!["check", "--output-format", "json"];
     all.extend_from_slice(args);
-    let (_, out, err) = p.heki(&all);
+    let (code, out, err) = p.heki(&all);
+    assert!(code == 0 || code == 1, "exit code {code}: {err}");
     serde_json::from_str::<Vec<Value>>(&out).unwrap_or_else(|e| panic!("{e}: {out}{err}"))
 }
 
@@ -604,6 +606,73 @@ fn a_package_holding_a_test_module_names_its_other_modules_one_by_one() {
 }
 
 #[test]
+fn a_module_defining_a_test_function_is_test_code_too() {
+    let p = layers("recommend_contract_test_functions");
+    // A Django-style `tests.py` (a test class's methods) in a package, and a `test_*` function
+    // in a module that would qualify alone.
+    p.write(
+        "app/domain/tests.py",
+        "from app.domain.rules import check\n\n\nclass RulesTests:\n    \
+         def test_check(self) -> None:\n        assert check(1)\n",
+    )
+    .write(
+        "lib/c.py",
+        "from lib.a import one\n\n\ndef four() -> int:\n    return 4\n\n\n\
+         def five() -> int:\n    return 5\n\n\ndef six() -> int:\n    return 6\n\n\n\
+         def test_one() -> None:\n    assert one() == 1\n",
+    );
+    let report = recommend_json(&p, &[]);
+    let domain = candidate(&report, "effect-boundaries", "app.domain");
+    assert_eq!(
+        domain["entry"]["scopes"],
+        json!(["app.domain:*", "app.domain.rules:*"])
+    );
+    let lib = candidate(&report, "effect-boundaries", "lib");
+    assert_eq!(lib["entry"]["scopes"], json!(["lib.a:*", "lib.b:*"]));
+    assert!(
+        kept(&report)
+            .iter()
+            .all(|(_, target, _, _)| target != "lib.c"),
+        "{report:#}"
+    );
+}
+
+#[test]
+fn a_module_a_pattern_cannot_name_gets_no_candidate() {
+    let p = layers("recommend_contract_unnamed_modules");
+    let functions = layers_module("route");
+    // `[id]` is a character class to a glob, and `[1` does not parse as one. The only writer
+    // of `Page.title` is in `notes[1`, which `allowed-writers` would have to name.
+    let reader = |name: &str| {
+        format!("from app.page import Page\n\n\ndef {name}(p: Page) -> str:\n    return p.title\n")
+    };
+    p.write("routes/[id].py", &functions)
+        .write(
+            "notes[1.py",
+            &format!(
+                "from app.page import Page\n\n\ndef rename(p: Page) -> None:\n    \
+                 p.title = \"x\"\n\n\n{functions}"
+            ),
+        )
+        .write(
+            "app/page.py",
+            "class Page:\n    def __init__(self) -> None:\n        self.title = \"\"\n",
+        )
+        .write("app/show.py", &reader("show"))
+        .write("app/feed.py", &reader("feed"));
+    let report = recommend_json(&p, &[]);
+    let targets: Vec<String> = kept(&report).into_iter().map(|c| c.1).collect();
+    assert!(
+        targets.contains(&s("lib"))
+            && !targets
+                .iter()
+                .any(|t| t.contains('[') || t.contains("Page.title")),
+        "{targets:?}"
+    );
+    assert_eq!(report["rejected_contracts"], json!([]), "{report:#}");
+}
+
+#[test]
 fn a_file_heki_cannot_parse_makes_every_candidate_medium() {
     let p = owners("recommend_contract_unparsed");
     p.write("app/broken.py", "def broken(:\n");
@@ -627,70 +696,85 @@ fn a_file_heki_cannot_parse_makes_every_candidate_medium() {
 
 #[test]
 fn a_candidate_hiding_a_report_of_a_configured_contract_is_rejected() {
-    let p = Project::new("recommend_contract_hides_unlisted_key");
-    p.write(
-        "pyproject.toml",
-        "[project]\nname = \"t\"\n\n[[tool.heki.write-owners]]\nname = \"a owners\"\n\
-         targets = [\"app.models:Store.a\"]\nallowed-writers = [\"app.models:*\"]\n\
-         unlisted-dict-keys = \"report\"\n",
-    )
-    .write("app/__init__.py", "")
-    .write(
-        "app/models.py",
-        "class Store:\n    def __init__(self) -> None:\n        self.a = 0\n        self.b = 0\n",
-    )
-    .write(
-        "app/store.py",
-        "from app.models import Store\n\n\ndef bump(s: Store) -> None:\n    s.b = s.b + 1\n\n\n\
-         def reset(s: Store) -> None:\n    s.__dict__[\"b\"] = 0\n",
-    )
-    .write(
-        "app/views.py",
-        "from app.models import Store\n\n\ndef show(s: Store) -> int:\n    return s.b\n",
-    )
-    .write(
-        "app/api.py",
-        "from app.models import Store\n\n\ndef dump(s: Store) -> int:\n    return s.b + 1\n",
-    );
-    let reported_now = |p: &Project| -> Vec<(String, u64)> {
-        checked(p, &["--select", "MUT201"])
-            .iter()
-            .map(|d| {
-                (
-                    d["path"].as_str().unwrap().to_owned(),
-                    d["line"].as_u64().unwrap(),
-                )
-            })
-            .collect()
-    };
-    assert_eq!(reported_now(&p), [("app/store.py".to_owned(), 9)]);
-    // Naming `Store.b` would list the key for `a owners` too, and allow its writer module.
-    let report = recommend_json(&p, &[]);
-    let rejected = &report["rejected_contracts"];
-    assert_eq!(rejected.as_array().unwrap().len(), 1, "{report:#}");
-    assert_eq!(
-        (
-            &rejected[0]["target"],
-            &rejected[0]["run"],
-            &rejected[0]["trial"]["reports"]
-        ),
-        (
-            &json!("app.models:Store.b"),
-            &json!("contract-trial"),
-            &json!({"MUT201": 1, "MUT205": 0})
+    // The write of the key is on a `Store`, or on a `Child` the target on `Store` covers.
+    for class in ["Store", "Child"] {
+        let p = Project::new(&format!("recommend_contract_hides_unlisted_key_{class}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[[tool.heki.write-owners]]\nname = \"a owners\"\n\
+             targets = [\"app.models:Store.a\"]\nallowed-writers = [\"app.models:*\"]\n\
+             unlisted-dict-keys = \"report\"\n",
         )
-    );
-    assert!(
-        kept(&report)
-            .iter()
-            .all(|(kind, _, _, _)| kind != "write-owners"),
-        "{report:#}"
-    );
-    // With the block, the write is still reported.
-    let block = report["config_toml"].as_str().unwrap();
-    let existing = std::fs::read_to_string(p.dir.join("pyproject.toml")).unwrap();
-    p.write("pyproject.toml", &applied(&existing, block));
-    assert_eq!(reported_now(&p), [("app/store.py".to_owned(), 9)]);
+        .write("app/__init__.py", "")
+        .write(
+            "app/models.py",
+            "class Store:\n    def __init__(self) -> None:\n        self.a = 0\n        self.b = 0\n\n\n\
+             class Child(Store):\n    pass\n",
+        )
+        .write(
+            "app/store.py",
+            &format!(
+                "from app.models import Child, Store\n\n\ndef bump(s: Store) -> None:\n    \
+                 s.b = s.b + 1\n\n\ndef reset(s: {class}) -> None:\n    s.__dict__[\"b\"] = 0\n"
+            ),
+        )
+        .write(
+            "app/views.py",
+            "from app.models import Store\n\n\ndef show(s: Store) -> int:\n    return s.b\n",
+        )
+        .write(
+            "app/api.py",
+            "from app.models import Store\n\n\ndef dump(s: Store) -> int:\n    return s.b + 1\n",
+        );
+        let reported_now = |p: &Project| -> Vec<(String, u64)> {
+            checked(p, &["--select", "MUT201"])
+                .iter()
+                .map(|d| {
+                    (
+                        d["path"].as_str().unwrap().to_owned(),
+                        d["line"].as_u64().unwrap(),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(
+            reported_now(&p),
+            [("app/store.py".to_owned(), 9)],
+            "{class}"
+        );
+        // Naming `Store.b` would list the key for `a owners` too, and allow its writer module.
+        let report = recommend_json(&p, &[]);
+        let rejected = &report["rejected_contracts"];
+        assert_eq!(rejected.as_array().unwrap().len(), 1, "{report:#}");
+        assert_eq!(
+            (
+                &rejected[0]["target"],
+                &rejected[0]["run"],
+                &rejected[0]["trial"]["reports"]
+            ),
+            (
+                &json!("app.models:Store.b"),
+                &json!("contract-trial"),
+                &json!({"MUT201": 1, "MUT205": 0})
+            ),
+            "{class}"
+        );
+        assert!(
+            kept(&report)
+                .iter()
+                .all(|(kind, _, _, _)| kind != "write-owners"),
+            "{report:#}"
+        );
+        // With the block, the write is still reported.
+        let block = report["config_toml"].as_str().unwrap();
+        let existing = std::fs::read_to_string(p.dir.join("pyproject.toml")).unwrap();
+        p.write("pyproject.toml", &applied(&existing, block));
+        assert_eq!(
+            reported_now(&p),
+            [("app/store.py".to_owned(), 9)],
+            "{class}"
+        );
+    }
 }
 
 /// `existing` with `block` added as a user would: the block's tables after the file's own.
@@ -826,6 +910,39 @@ fn files_the_paths_leave_out_make_every_candidate_medium() {
 }
 
 #[test]
+fn a_count_of_the_files_left_out_that_stops_early_makes_every_candidate_medium() {
+    let p = layers("recommend_contract_count_stops");
+    // Every Python file is analyzed, but the count stops in `data/` before it reaches them all.
+    for i in 0..10_000 {
+        p.write(&format!("data/f{i:05}.txt"), "");
+    }
+    let report = recommend_json(&p, &["app", "lib", "tests"]);
+    assert_eq!(
+        report["analyzed"]["left_out"],
+        json!({"python_files": 0, "files": [], "truncated": true})
+    );
+    let confidences: Vec<String> = kept(&report).into_iter().map(|c| c.2).collect();
+    assert!(
+        !confidences.is_empty() && confidences.iter().all(|c| c == "medium"),
+        "{report:#}"
+    );
+    assert_eq!(
+        candidate(&report, "effect-boundaries", "app.pricing")["caveats"][0],
+        json!(
+            "the count of the Python files below the project root stopped before the end: files \
+             it did not reach may be left out, and their accesses are not seen"
+        )
+    );
+    assert!(
+        report["notes"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("the count of the Python files below the project root stopped before"),
+        "{report:#}"
+    );
+}
+
+#[test]
 fn what_the_configuration_declares_or_ignores_is_not_proposed() {
     let p = owners("recommend_contract_declared");
     p.write("app/pricing.py", &layers_module("pricing"));
@@ -889,6 +1006,46 @@ fn a_selection_without_the_contract_rules_gets_them_from_the_block() {
     assert_eq!(
         report["config"]["lint"],
         json!({"extend-select": ["MUT201", "MUT203", "MUT205", "MUT206"]})
+    );
+}
+
+#[test]
+fn a_rule_of_unresolved_accesses_the_configuration_ignores_stays_off() {
+    let p = owners("recommend_contract_strict_ignored");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nignore = [\"EFF201\", \"MUT205\"]\n",
+    );
+    let report = recommend_json(&p, &[]);
+    let unresolved = |kind: &str, target: &str| {
+        let c = candidate(&report, kind, target);
+        (c["confidence"].clone(), c["entry"]["unresolved"].clone())
+    };
+    // A high `write-owners` candidate sets `unresolved = "ignore"`; `read-owners` still reports.
+    assert_eq!(
+        unresolved("write-owners", "app.models:Order.items"),
+        (json!("high"), json!("ignore"))
+    );
+    assert_eq!(
+        unresolved("read-owners", "app.models:Order._cache"),
+        (json!("high"), json!("report"))
+    );
+    let selected = &report["config"]["lint"]["extend-select"];
+    assert!(
+        !selected
+            .as_array()
+            .is_some_and(|rules| rules.contains(&json!("MUT205"))),
+        "{report:#}"
+    );
+    let (_, out, _) = p.heki(&["recommend"]);
+    assert!(
+        section(&out).contains(
+            "  write-owners  app.models:Order.items  high\n    written by 2 function(s), all in \
+             app.store (Store.add_item, Store.clear), changed in place; read in 2 other \
+             module(s)\n    trial: MUT201 0, MUT205 0 (unresolved = \"ignore\": the configuration \
+             ignores MUT205)\n"
+        ),
+        "{out}"
     );
 }
 

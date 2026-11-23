@@ -1545,7 +1545,7 @@
       "type": "string"
     },
     "contracts": {
-      "description": "The contracts the code keeps, which the block declares: each kept by the contract trial\nand the verification run. By kind, then by rank within it.",
+      "description": "The contracts the code keeps, which the block declares: each kept by the contract trial,\nthen applied with the whole block by the verification run. By kind, then by rank within\nit.",
       "items": {
         "$ref": "#/$defs/ContractAdvice"
       },

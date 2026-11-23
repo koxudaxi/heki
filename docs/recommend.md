@@ -133,8 +133,14 @@ Candidates are drawn from what the code does, never from names:
   whose class is used in at least two modules. The entry allows the readers as above.
 - `effect-boundaries`: a module whose functions reach no blocking call, with
   `forbid = ["blocking"]`; a package whose every module qualifies is one scope. A scope has at
-  least three functions. Test code, as `relax-async-in-tests` finds it, gets no boundary: a
-  package holding test modules names its other modules one by one, not by a wildcard.
+  least three functions. A package holding test code names its other modules one by one, not by
+  a wildcard.
+
+No candidate is drawn from a module holding test code, as `relax-async-in-tests` finds it: a
+test file, or a file defining a `test_*` function or method (a test class in Django's
+`tests.py`, for one). Its classes get no ownership contract and its functions no boundary. Nor
+is one drawn from a module whose name, taken from its path, has a character a pattern cannot
+spell literally: a `:`, or glob syntax (`routes/[id].py`).
 
 What the configuration already declares is not proposed: an attribute a `write-owners` or
 `read-owners` target names, and a module an effect boundary forbidding every blocking effect
@@ -147,24 +153,30 @@ module-part form (`app.models:Order.items`), which never matches another project
 The contract trial declares every candidate at once, the ownership contracts with
 `unresolved = "report"`, and runs their rules (`MUT201` and `MUT205`, `MUT203` and `MUT206`,
 `EFF201`) as `heki check` would: inline suppressions and `per-file-ignores` apply, and the
-reports they drop are counted apart. A candidate its rule reports is rejected and listed with the
-first report, and so is one that hides a report the configuration's own contracts make now: a
-target lists its `__dict__` key for every contract, so a contract with
-`unlisted-dict-keys = "report"` stops reporting a write of that key. Of each kind, the trial declares the first 32 candidates: `write-owners` with the
-attributes changed in place first, then by the modules reading them; `read-owners` by the
-modules using the class; boundaries by their functions times the functions calling into them
-from outside. The configuration's own `write-owners` contracts count against the 32.
+reports inline suppressions drop are counted apart (a rule `per-file-ignores` turns off for a
+file reports nothing there). A candidate the rule of its contract (`MUT201`, `MUT203`, `EFF201`)
+reports is rejected and listed with the first report, and so is one that hides a report the
+configuration's own contracts make now: a target lists its `__dict__` key, on its class and the
+subclasses, for every contract, so a contract with `unlisted-dict-keys = "report"` stops
+reporting a write of that key on an object of either (`Store.b` hides the report of a write of
+`Child.b` when `Child` derives from `Store`). Reports of `MUT205` or `MUT206`, accesses on objects
+of unknown class, reject no candidate: they make it medium (below). Of each kind, the trial
+declares the first 32 candidates: `write-owners` with the attributes changed in place first, then
+by the modules reading them; `read-owners` by the modules using the class; boundaries by their
+functions times the functions calling into them from outside. The configuration's own
+`write-owners` contracts take places of the 32.
 
 | Confidence | When |
 | ---------- | ---- |
-| high | the trial reports nothing for the contract, every Python file below the project root was read, parsed, and analyzed, and no function of a boundary's scopes reaches code heki does not see (a call it does not resolve, a library name without a catalog entry, a function it does not model) |
-| medium | the trial reports no violation, but `MUT205` or `MUT206` reports accesses on objects of unknown class (they are listed), files were left out or could not be parsed, or a scope function reaches code heki does not see (it is listed) |
+| high | the trial reports nothing for the contract, every Python file below the project root was read, parsed, and analyzed (when the paths given leave part of the root out, the count of the files there got to its end and found none), and no function of a boundary's scopes reaches code heki does not see (a call it does not resolve, a library name without a catalog entry, a function it does not model) |
+| medium | the trial reports no violation, but `MUT205` or `MUT206` reports accesses on objects of unknown class (they are listed), files were left out (or the count of them stopped before the end) or could not be parsed, or a scope function reaches code heki does not see (it is listed) |
 
 Medium candidates are in the block too, an ownership one with `unresolved = "ignore"`: heki may
 not see every access on objects of unknown class (in the files left out or not parsed, for one)
-that the rule of such accesses would report. A high one sets `unresolved = "report"`. A candidate
-on a subclass is left out when the one on its base class is kept: a target covers the subclasses
-of its class.
+that the rule of such accesses would report. A high one sets `unresolved = "report"`, unless the
+configuration ignores that rule (`MUT205`, `MUT206`): it stays ignored, so the entry sets
+`unresolved = "ignore"` and the block does not select the rule. A candidate on a subclass is
+left out when the one on its base class is kept: a target covers the subclasses of its class.
 Every candidate carries the caveat that accesses inside code heki cannot follow are not seen.
 
 The verification run then applies the whole block, the rules it enables and the contracts it
@@ -175,8 +187,10 @@ declares, as `heki check` would; the counts of the block's rules come from it.
 - Every count comes from the project, through the analysis `heki check` runs: inline
   suppressions, `per-file-ignores`, and the baseline apply as they do there. With the block
   applied, `heki check` prints the reports it promises.
-- A contract enters the block only when a trial of its rules reports nothing on the code as it
-  is, and a run with the whole block confirms it.
+- A contract enters the block only when the trial of its rules reports no violation of it on the
+  code as it is, and hides no report the configuration's own contracts make; accesses on objects
+  of unknown class make it medium, with `unresolved = "ignore"`. The verification run then
+  applies the whole block as `heki check` would.
 - How often a rule's reports are right is quoted only from published measurements, with their
   sample, interval, and date; a rule without one is "not measured". No score is computed.
 - What keeps a report heuristic comes from the report itself, as the analysis decided its
@@ -319,14 +333,14 @@ changes meaning.
 | `kind`, `version`, `heki` | `heki-recommend`, the version of the object, and the version of heki |
 | `root`, `config_file`, `table_prefix` | the project root, the configuration file (`null` without one), and the table its keys are under (`tool.heki`, or empty) |
 | `analyzed` | the files and functions analyzed, the files that could not be read or parsed, the paths given, and the Python files below the root they leave out |
-| `runs` | the analyses the report was computed from: `discovery`, then `source-roots` (the source-root trial) and `hypothetical-catalog` (the trial of library names) when they ran, `contract-trial` when there are contract candidates, and `verification` when the block adds rules or contracts |
+| `runs` | the analyses the report was computed from: `discovery`, then `source-roots` (the source-root trial) and `hypothetical-catalog` (the trial of library names) when they ran, `contract-trial` when it tried a contract candidate (none when the block sets `src`, or when every candidate is past the places of its kind), and `verification` when the block adds rules or contracts and does not set `src` |
 | `reports_now` | the counts of "Reports now" |
 | `open_premises` | the counts of "What keeps reports heuristic": by code; by premise or condition and cause, with what the cause states, what closes it, the reports, the reports it is the only open cause of, and the first 50 reports; the sets of causes that reports leave open together |
 | `blind_spots` | the counts of "What heki cannot see": the calls of library names without a catalog entry, by package and name, with what the trial run found; the names heki's catalog lacks in packages it covers; the calls heki does not resolve, by function and reason; the source-root candidates and their trials; the functions with an A1 hazard; the totals |
 | `rules` | each rule of "Rules worth enabling here": its metadata, the reports it would add, its published measurement, whether the block enables it, and why |
 | `contracts` | each contract candidate the block declares: its kind, what it is about, its entry, confidence, evidence, what the trial reported, and caveats |
 | `rejected_contracts` | the candidates a run reported for, with the run and its reports |
-| `contracts_not_tried` | per kind, the candidates past the first 32, which no trial declared |
+| `contracts_not_tried` | per kind, the candidates past the trial's places (32 of each kind, the configuration's own `write-owners` contracts taking `write-owners` places), which no trial declared |
 | `notes` | the notes |
 | `config`, `config_toml` | the keys to add or change, as keys and values and as TOML |
 | `content` | the report as the text output prints it |
