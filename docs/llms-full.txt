@@ -789,6 +789,9 @@ claim.
   `ASYNC103` and `ASYNC104` cover the shape.
 - `BytesIO` read without a seek: 69 sites in 7 packages, 57 of them one test suite; too rare.
 - Opposite lock orders: 106 ordered pairs of named locks in 31 packages, no pair in opposite order.
+- An `except` clause that nothing in its `try` body raises, through its calls: 2,730 clauses in 157 packages
+  for project exceptions and 3,597 in 153 for library ones; of 60 judged, one was harmful, and that one is a
+  one-statement shape. Which exceptions a function can raise is planned as a `heki inspect` fact instead.
 
 ## How a rule gets into heki
 
