@@ -2588,28 +2588,7 @@ impl ProjectDecls {
                 Some(target) => target,
                 None if aliases => match m.aliases.get(first) {
                     Some(target) if !self.alias_rebound(&m.module_name, first) => target,
-                    // `Holder.REQUIRE` of a class body binding `REQUIRE` to a name.
-                    _ => match tail.map(|t| t.split_once('.').unwrap_or((t, ""))) {
-                        Some((attr, more))
-                            if m.classes.contains_key(first)
-                                && !m.functions.contains_key(&format!("{first}.{attr}")) =>
-                        {
-                            let class = format!("{}.{first}", m.module_name);
-                            let Some((named, _)) = self.class_alias(&class, attr) else {
-                                break;
-                            };
-                            let next = match more {
-                                "" => named.to_owned(),
-                                more => format!("{named}.{more}"),
-                            };
-                            if next == cur {
-                                break;
-                            }
-                            cur = next;
-                            continue;
-                        }
-                        _ => break,
-                    },
+                    _ => break,
                 },
                 None => break,
             };
@@ -2637,7 +2616,24 @@ impl ProjectDecls {
     /// through the module aliases it names (`pkg.model._set` for `_set = object.__setattr__` in
     /// `pkg.model`). The name itself stays the alias's: only values are the object.
     pub fn object_named(&self, fqn: &str) -> String {
-        self.chase(fqn, true)
+        let named = self.chase(fqn, true);
+        self.class_aliased(&named)
+            .map_or(named, |target| self.chase(&target, true))
+    }
+
+    /// The name `Class.attr` stands for when the class body defining `attr` binds it to one
+    /// (`Holder.REQUIRE` of `REQUIRE = staticmethod(require)`, [`Self::class_alias`]).
+    fn class_aliased(&self, fqn: &str) -> Option<String> {
+        let (class, attr) = fqn.rsplit_once('.')?;
+        let (m, qualname) = self.split_module(class)?;
+        // A function the class body defines is a method, no alias.
+        if !m.classes.contains_key(qualname)
+            || m.functions.contains_key(&format!("{qualname}.{attr}"))
+        {
+            return None;
+        }
+        self.class_alias(class, attr)
+            .map(|(named, _)| named.to_owned())
     }
 
     /// The value the name `fqn` gives: a project global holding an instance is that instance,
@@ -4025,7 +4021,7 @@ impl ProjectDecls {
             return self.class_object(&self.object_named(class));
         }
         if type_vars
-            && let Ty::Inst(o) = ty
+            && let Some(o) = ty.obj()
             && let Some(bound) = self.type_var_bound(&o.class)
         {
             return self.declared_ty_with(bound, false);
@@ -8106,7 +8102,7 @@ impl<'a> TypeCtx<'a> {
     /// The value the item `key` of the table `read` reads gives ([`ProjectDecls::table`]):
     /// `Some(None)` for an entry of unknown value, `None` when `read` reads no table or the
     /// table has no such key (reading it raises `KeyError`).
-    pub(crate) fn table_item(&self, read: GlobalRead<'_>, key: &str) -> Option<Option<Ty>> {
+    pub(crate) fn table_value(&self, read: GlobalRead<'_>, key: &str) -> Option<Option<Ty>> {
         let fqn = match read {
             GlobalRead::Own(name) => match self.module.imports.get(name) {
                 Some(_) => self.module.fixed_import(name)?.clone(),

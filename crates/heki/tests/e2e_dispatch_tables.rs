@@ -742,3 +742,43 @@ fn a_class_attribute_bound_to_a_class_constructs_it() {
         .collect();
     assert_eq!(lines, marked);
 }
+
+/// A list attribute something changes in place keeps its class: its items are unknown, and a
+/// slice of it is a list too (`OPT112` reads the class).
+const BUFFER: &str = r#"class Writer:
+    def __init__(self, flush_amount):
+        self._items = []
+        self._flush_amount = flush_amount
+
+    def add(self, request):
+        self._remove_duplicates(request)
+        self._items.append(request)
+
+    def _remove_duplicates(self, request):
+        for item in self._items:
+            if item == request:
+                self._items.remove(item)  # OPT112
+
+    def flush(self):
+        sent = self._items[: self._flush_amount]
+        self._items = self._items[self._flush_amount :]
+        return sent
+"#;
+
+#[test]
+fn a_list_something_changes_in_place_stays_a_list() {
+    let p = Project::new("dispatch_changed_list");
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/writer.py", BUFFER);
+    let (code, stdout, stderr) = p.check(&["--select", "OPT112", "--output-format", "json"]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let lines: Vec<u64> = diags.iter().map(|d| d["line"].as_u64().unwrap()).collect();
+    let marked: Vec<u64> = BUFFER
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| l.ends_with("# OPT112"))
+        .map(|(i, _)| i as u64 + 1)
+        .collect();
+    assert_eq!(lines, marked);
+}
