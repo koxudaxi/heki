@@ -58,12 +58,10 @@ impl Lineage {
     /// calls the next one on `self` (`super().name(...)`) and does not invalidate `prop` itself
     /// (as for a private helper whose every caller invalidates it, `MUT101`).
     fn runs_stale(&self, index: &ProjectIndex, method: &FuncKey, prop: &str) -> bool {
-        let name = method
-            .qualname
-            .rsplit('.')
-            .next()
-            .unwrap_or(&method.qualname);
-        let Some(defs) = self.defs.get(name) else {
+        let Some(defs) = self
+            .defs
+            .get(mangling::member_name(&method.qualname).as_ref())
+        else {
             return false;
         };
         for pair in defs.windows(2) {
