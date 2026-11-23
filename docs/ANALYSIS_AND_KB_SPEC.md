@@ -44,6 +44,15 @@ nested class (its `__init__` in particular) are kept apart from the methods of t
 `__qualname__`: a class defined in a function is `factory.<locals>.Worker`, so its methods never
 share a summary with a module-level `Worker`.
 
+Names follow Python's private name mangling (`heki_semantic::mangling`). Inside a class, at any
+depth of nested functions, an attribute name that starts with two underscores and does not end
+with two is recorded as the member it is (`self.__run` is `AttrLoad { attr: "_Parser__run" }` in
+class `Parser`), and so is every name of a class body (`def __run` binds `_Parser__run`). A
+function's own variables keep their spelling: they are no members. A definition keeps its
+written name in its qualname (`Parser.__run`), so the declarations find a method reached by its
+member name through that spelling (`ModuleDecls::definition_path`), and the contract patterns match a definition under both spellings
+(`def_spellings`), an attribute target `C.__x` the member `_C__x` of the classes it names.
+
 ```text
 IrFunction {
     id, name, qualname,
@@ -2013,9 +2022,9 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    declaration reads (`DeclKeys::modules`, `DeclKeys::package_paths`; a change of a package's
    path changes the key of each package above it), so a module created, deleted, or changing a
    path re-summarizes the function.
-   A module body's accesses include those of the class bodies it runs, as its reference sites
-   do, when a scope names a module body (`Contracts::checks_module_bodies`) or reference sites
-   are kept. Without such a boundary the map stays empty. The language server compares a
+   A module body's accesses include those of the class bodies it runs, as a function's do, when
+   a scope names a module body (`Contracts::checks_module_bodies`). Without such a boundary the
+   map stays empty. The language server compares a
    file's accesses before and after an edit, without positions, and re-checks the files above
    a function whose accesses changed, as it does for its Layer 2 call sites.
 
