@@ -7323,28 +7323,12 @@ impl<'a> Extractor<'a> {
     /// [`Self::targets_complete`] of the call at `(bb, index)`, with the types its block narrows
     /// (those its callee was resolved with).
     fn targets_complete_at(&self, (bb, index): Position) -> bool {
-        match self.f.block(bb).insts.get(index).map(|i| &i.kind) {
-            Some(InstKind::MethodCall { recv, method, .. }) => {
-                let recv = self.val_in(bb, *recv);
-                let callee = self.cx.resolve_method(recv, method);
-                self.cx.method_targets_complete(recv, method, &callee)
-            }
-            Some(InstKind::Call { callee_var, .. }) => {
-                let value = callee_var.and_then(|v| self.val_in(bb, v));
-                let callee = self.cx.resolve_call(value);
-                self.cx.call_targets_complete(value, &callee)
-            }
-            // A read that runs property getters ([`Self::property_read`]): the getter each class
-            // the object may be finds for the name (more than CHA follows are none).
-            Some(InstKind::AttrLoad { obj, attr, .. }) => {
-                let recv = self.val_in(bb, *obj);
-                matches!(
-                    self.cx.resolve_attr_load(recv, attr),
-                    Some(Callee::Project(keys, _)) if self.cx.getter_targets_complete(recv, attr, &keys)
-                )
-            }
-            _ => false,
-        }
+        // A read that runs property getters ([`Self::property_read`]) runs the getter each class
+        // the object may be finds for the name (more than CHA follows are none).
+        self.f.block(bb).insts.get(index).is_some_and(|i| {
+            self.cx
+                .inst_targets_complete(&i.kind, |v| self.val_in(bb, v))
+        })
     }
 
     /// Whether `v` is a phi, with its inputs pushed on `next`.

@@ -669,6 +669,10 @@ const EXACT_SUB_OVERRIDING: &str = "from pkg.exact_base import Base\n\n\nclass Q
 const EXACT_SUB_BLOCKING: &str = "import requests\n\nfrom pkg.exact_base import Base\n\n\nclass Quiet(Base):\n    def fetch(self, url):\n        return requests.post(url)\n";
 const EXACT_USE: &str =
     "from pkg.exact_base import Base\n\n\nasync def serve(b: Base):\n    b.fetch(\"u\")\n";
+// The third module binds the base's method to another function, and the base's class body
+// binds it again: the call may run that function instead.
+const EXACT_SUB_REBINDING: &str = "from pkg import exact_base\n\n\ndef quiet(self, url):\n    return url\n\n\nsetattr(exact_base.Base, \"fetch\", quiet)\n";
+const EXACT_BASE_REBOUND: &str = "import requests\n\n\ndef _quiet(self, url):\n    return url\n\n\nclass Base:\n    def fetch(self, url):\n        return requests.get(url)\n\n    fetch = _quiet\n";
 
 // Store types (`ModuleDecls::global_types`, `ClassDecl::attr_stores`): an `async def` calls a
 // method on a module global, in its module and through an import, and on an instance attribute;
@@ -1304,6 +1308,33 @@ fn steps_exact_effects() -> Vec<Step> {
                 save("pkg/exact_base.py", EXACT_BASE),
                 save("pkg/exact_sub.py", EXACT_SUB),
             ],
+        )
+        .present(&[("pkg/exact_use.py", "EFF101")])
+        .absent(&[("pkg/exact_use.py", "EFF111")]),
+        // `ModuleDecls::rebound_globals` of another module and `ModuleDecls::rebound_definitions`
+        // of the base's: a name bound again leaves the call's targets incomplete
+        // (`ProjectDecls::lookup_rebound`).
+        Step::new(
+            "the third module binds the base's method to another function",
+            vec![save("pkg/exact_sub.py", EXACT_SUB_REBINDING)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF111")])
+        .absent(&[("pkg/exact_use.py", "EFF101")]),
+        Step::new(
+            "it stops binding the method",
+            vec![save("pkg/exact_sub.py", EXACT_SUB)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF101")])
+        .absent(&[("pkg/exact_use.py", "EFF111")]),
+        Step::new(
+            "the base's class body binds the method again",
+            vec![save("pkg/exact_base.py", EXACT_BASE_REBOUND)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF111")])
+        .absent(&[("pkg/exact_use.py", "EFF101")]),
+        Step::new(
+            "the base binds it once again",
+            vec![save("pkg/exact_base.py", EXACT_BASE)],
         )
         .present(&[("pkg/exact_use.py", "EFF101")])
         .absent(&[("pkg/exact_use.py", "EFF111")]),
