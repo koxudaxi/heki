@@ -5,7 +5,7 @@
 use crate::premises::{self, OpenCause, Told};
 use crate::{
     CheckContext, DottedPattern, FnSites, ModuleUnit, RuleConfigError, SitesByCaller, SitesBySpan,
-    has_glob_syntax, split_last_dot,
+    def_spellings, has_glob_syntax, split_last_dot,
 };
 use heki_ast::Span;
 use heki_diagnostics::{Certainty, Diagnostic, OpenPremise, OpenRecord};
@@ -19,6 +19,7 @@ use heki_effect::{
 use heki_env::HekiConfig;
 use heki_ir::walk::{Answer, Budget, FnShape, Visit, reach};
 use heki_ir::{BlockId, FnIndex, Inst, InstKind, IrFunction, VarId};
+use heki_semantic::mangling;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -50,6 +51,8 @@ const INIT_METHODS: &[&str] = &[
 /// a checked file also carries its IR, one per definition (only checked methods are reported).
 struct Method<'a> {
     key: FuncKey,
+    /// [`Self::name`].
+    name: String,
     /// The file defining it.
     path: &'a Path,
     checked: Option<Checked<'a>>,
@@ -62,14 +65,22 @@ struct Checked<'a> {
     f: &'a IrFunction,
 }
 
-impl Method<'_> {
-    /// The method's own name (the last component of its qualname).
+impl<'a> Method<'a> {
+    fn new(key: FuncKey, path: &'a Path, checked: Option<Checked<'a>>) -> Self {
+        let name = mangling::member_name(&key.qualname).into_owned();
+        Self {
+            key,
+            name,
+            path,
+            checked,
+        }
+    }
+
+    /// The name its class holds the method under: the last component of its qualname,
+    /// mangled for a private name (`_Parser__run` of `Parser.__run`), which no method of
+    /// another class overrides.
     fn name(&self) -> &str {
-        self.key
-            .qualname
-            .rsplit('.')
-            .next()
-            .unwrap_or(&self.key.qualname)
+        &self.name
     }
 
     /// The fqn of the class defining the method.
@@ -115,11 +126,11 @@ impl<'a> ClassMethods<'a> {
                 by_class
                     .entry(format!("{}.{owner}", unit.input.module_name))
                     .or_default()
-                    .push(Method {
-                        key: CheckContext::key(unit, f),
-                        path: &unit.input.path,
-                        checked: Some(Checked { unit, f }),
-                    });
+                    .push(Method::new(
+                        CheckContext::key(unit, f),
+                        &unit.input.path,
+                        Some(Checked { unit, f }),
+                    ));
             }
         }
         let checked: FxHashSet<&Path> = units.iter().map(|u| u.input.path.as_path()).collect();
@@ -138,11 +149,7 @@ impl<'a> ClassMethods<'a> {
             by_class
                 .entry(format!("{}.{owner}", key.module))
                 .or_default()
-                .push(Method {
-                    key: key.clone(),
-                    path,
-                    checked: None,
-                });
+                .push(Method::new(key.clone(), path, None));
         }
         Self { by_class }
     }
@@ -764,7 +771,7 @@ pub fn family_readers(
                 let inherited = ancestors
                     .iter()
                     .flat_map(|a| decls.methods_of(a))
-                    .filter_map(|k| k.qualname.rsplit('.').next().map(str::to_owned))
+                    .map(|k| mangling::member_name(&k.qualname).into_owned())
                     .collect();
                 let family: Vec<String> = ancestors
                     .into_iter()
@@ -860,7 +867,7 @@ pub use sentinel_copies::{SentinelTestKey, deep_copy_files, sentinel_tests_in};
 pub(crate) struct ContractTarget {
     /// The configured text (diagnostic target and baseline key).
     pub text: String,
-    attr: DottedPattern,
+    attr: MemberPattern,
     /// The entry key of an item target.
     pub key: Option<String>,
     /// Project classes (fqn) the class pattern names, plus all their subclasses: the
@@ -887,6 +894,48 @@ impl ContractTarget {
                 .key
                 .as_ref()
                 .is_none_or(|k| site.key.as_ref() == Some(k))
+    }
+}
+
+/// The member a contract target names after its last dot (`fields` of `pkg.Model.fields`),
+/// matched against an attribute name as its class holds it: as written in the class, and for a
+/// private name (`__cache`) mangled with a class the target names (`_Model__cache`).
+#[derive(Debug, Clone)]
+pub(crate) struct MemberPattern {
+    pattern: DottedPattern,
+    /// The names of the classes the target names, without their leading underscores.
+    holders: FxHashSet<String>,
+}
+
+impl MemberPattern {
+    /// `text` held by the classes of `all` that `holder` names (none without a holder).
+    pub(crate) fn new(
+        text: &str,
+        holder: Option<&DottedPattern>,
+        all: &[ContractClass],
+        context: &'static str,
+    ) -> Result<Self, RuleConfigError> {
+        let holders = holder.map_or_else(FxHashSet::default, |holder| {
+            all.iter()
+                .filter(|c| holder.matches_class(c))
+                .map(|c| {
+                    let qualname = c.qualname.as_deref().unwrap_or(&c.fqn);
+                    let name = qualname.rsplit('.').next().unwrap_or(qualname);
+                    name.trim_start_matches('_').to_owned()
+                })
+                .collect()
+        });
+        Ok(Self {
+            pattern: DottedPattern::new(text, context)?,
+            holders,
+        })
+    }
+
+    pub(crate) fn matches(&self, attr: &str) -> bool {
+        self.pattern.matches(attr)
+            || mangling::unmangled(attr).any(|(class, written)| {
+                self.holders.contains(class) && self.pattern.matches(written)
+            })
     }
 }
 
@@ -980,7 +1029,7 @@ pub(crate) fn parse_targets(
         let class = DottedPattern::new(class, context)?;
         out.push(ContractTarget {
             text: t.clone(),
-            attr: DottedPattern::new(attr, context)?,
+            attr: MemberPattern::new(attr, Some(&class), all, context)?,
             key,
             classes: class_set(cx, &class, all, Subclasses::Covered),
         });
@@ -1126,15 +1175,17 @@ impl FunctionMatcher {
         let Some((holder, member)) = &self.member else {
             return self.whole.matches_def(fqn, qualname);
         };
-        [fqn, qualname]
-            .into_iter()
-            .any(|name| match (holder, name.rsplit_once('.')) {
-                (None, split) => member.matches(split.map_or(name, |(_, last)| last)),
-                (Some(holder), Some((held_by, last))) => {
-                    member.matches(last) && holder.matches(held_by)
+        def_spellings(fqn, qualname).any(|(fqn, qualname)| {
+            [fqn.as_ref(), qualname.as_ref()].into_iter().any(|name| {
+                match (holder, name.rsplit_once('.')) {
+                    (None, split) => member.matches(split.map_or(name, |(_, last)| last)),
+                    (Some(holder), Some((held_by, last))) => {
+                        member.matches(last) && holder.matches(held_by)
+                    }
+                    (Some(_), None) => false,
                 }
-                (Some(_), None) => false,
             })
+        })
     }
 
     /// Whether the text names `symbol`, a function, class, or module attribute outside the
@@ -1160,8 +1211,11 @@ impl FunctionMatcher {
     pub(crate) fn matches(&self, key: &FuncKey) -> bool {
         self.names_def(&key.fqn(), &key.qualname)
             || self.method.as_ref().is_some_and(|(family, name)| {
-                key.qualname.rsplit_once('.').is_some_and(|(owner, last)| {
-                    name.matches(last) && family.contains(&format!("{}.{owner}", key.module))
+                key.qualname.rsplit_once('.').is_some_and(|(owner, _)| {
+                    // A method overrides by the name its class holds it under: a private name
+                    // (`__run`, held as `_Sub__run`) is its own class's, and overrides nothing.
+                    name.matches(&mangling::member_name(&key.qualname))
+                        && family.contains(&format!("{}.{owner}", key.module))
                 })
             })
     }

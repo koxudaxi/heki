@@ -1593,6 +1593,61 @@ fn steps_method_lookups() -> Vec<Step> {
     ]
 }
 
+const PV: &str = "class Pv:\n    def __run(self) -> int:\n        return 1\n\n    def go(self) -> int:\n        return self.__run()\n";
+const PV_USE: &str = "from pkg.pv import Pv\n\n\ndef use(p: Pv) -> int:\n    return p._Pv__run()\n";
+const PV_SUB: &str = "from pkg.pv import Pv\n\n\nclass Sub(Pv):\n    def __run(self) -> int:\n        return 2\n\n    def own(self) -> int:\n        return self.__run()\n\n    def peek(self) -> int:\n        return self._Pv__run()\n";
+
+/// A private method (`def __run`, the member `_Pv__run`) called by its mangled name from other
+/// modules: the call follows the class's declarations when the method is renamed and back, and a
+/// subclass's own `__run` is another method, which `self.__run` in the subclass calls.
+fn steps_private_names() -> Vec<Step> {
+    let contract = format!(
+        "{CONFIG}\n[[tool.heki.call-owners]]\nname = \"private-run\"\ntargets = [\"pkg.pv.Pv.__run\"]\nallowed-callers = [\"pkg.pv:Pv.*\"]\n"
+    );
+    vec![
+        Step::new(
+            "a module calls a private method of a class in another module by its mangled name",
+            vec![
+                Action::Configure(contract),
+                Action::Create("pkg/pv.py", PV.to_owned()),
+                Action::Create("pkg/pv_use.py", PV_USE.to_owned()),
+            ],
+        )
+        .present(&[("pkg/pv_use.py", "MUT204")])
+        .absent(&[("pkg/pv.py", "MUT204")]),
+        Step::new(
+            "the private method is renamed",
+            vec![save("pkg/pv.py", &PV.replace("__run", "__walk"))],
+        )
+        .absent(&[("pkg/pv_use.py", "MUT204")]),
+        Step::new(
+            "it is named back, and a subclass in another module defines its own `__run`",
+            vec![
+                save("pkg/pv.py", PV),
+                Action::Create("pkg/pv_sub.py", PV_SUB.to_owned()),
+            ],
+        )
+        .present(&[("pkg/pv_use.py", "MUT204"), ("pkg/pv_sub.py", "MUT204")]),
+        Step::new(
+            "the subclass calls only its own `__run`",
+            vec![save(
+                "pkg/pv_sub.py",
+                &PV_SUB.replace("self._Pv__run()", "self.__run()"),
+            )],
+        )
+        .absent(&[("pkg/pv_sub.py", "MUT204")]),
+        Step::new(
+            "the files and the contract are removed",
+            vec![
+                Action::Delete("pkg/pv_sub.py"),
+                Action::Delete("pkg/pv_use.py"),
+                Action::Delete("pkg/pv.py"),
+                Action::Configure(CONFIG.to_owned()),
+            ],
+        ),
+    ]
+}
+
 /// A helper over a dispatch keeps every implementation's wait (`MustExec::alternatives`, compared
 /// by Early Cutoff): the report through it names and relates each, and follows an edit of the
 /// wait that is not on the helper's shortest chain.
@@ -1700,6 +1755,38 @@ fn steps_references() -> Vec<Step> {
             ],
         )
         .absent(&[("pkg/accounts.py", "MUT204")]),
+    ]
+}
+
+const RECEIPT_HOLDER: &str =
+    "from pkg.ledger import Receipt\n\n\nclass Holder:\n    kept = Receipt(1)\n";
+
+/// A class body at module level constructs the guarded dataclass of another module: the module
+/// body makes the call, which follows the dataclass's module when it renames the class and back.
+fn steps_class_bodies() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a class attribute's value constructs the guarded dataclass",
+            vec![Action::Create(
+                "pkg/receipt_holder.py",
+                RECEIPT_HOLDER.to_owned(),
+            )],
+        )
+        .present(&[("pkg/receipt_holder.py", "MUT204")]),
+        Step::new(
+            "the dataclass's module renames it",
+            vec![save(
+                "pkg/ledger.py",
+                &LEDGER.replace("class Receipt", "class Slip"),
+            )],
+        )
+        .absent(&[("pkg/receipt_holder.py", "MUT204")]),
+        Step::new("the name comes back", vec![save("pkg/ledger.py", LEDGER)])
+            .present(&[("pkg/receipt_holder.py", "MUT204")]),
+        Step::new(
+            "the class body is removed",
+            vec![Action::Delete("pkg/receipt_holder.py")],
+        ),
     ]
 }
 
@@ -5117,9 +5204,11 @@ sessions!(editing, Session::start, {
     helper_witnesses: steps_helper_witnesses,
     imported_constants: steps_imported_constants,
     method_lookups: steps_method_lookups,
+    private_names: steps_private_names,
     contracts: steps_contracts,
     contract_extensions: steps_contract_extensions,
     references: steps_references,
+    class_bodies: steps_class_bodies,
     bases_and_attribution: steps_bases_and_attribution,
     argument_lists: steps_argument_lists,
     environment: steps_environment,

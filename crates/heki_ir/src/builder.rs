@@ -8,8 +8,9 @@ use crate::{
 use heki_ast::raw_ast::{self as ast, Expr, Pattern, Stmt};
 use heki_ast::{ParsedModule, Ranged, Span};
 use heki_env::RuntimeProfile;
-use heki_semantic::{ClassId, SemanticModel};
+use heki_semantic::{ClassId, SemanticModel, mangling};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::borrow::Cow;
 use std::cell::OnceCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -114,6 +115,7 @@ pub fn build_module_ir(
         outer_locals: OuterLocals::default(),
         walrus_target: WalrusTarget::OwnScope,
         walrus_globals: FxHashSet::default(),
+        private_class: None,
         body: FunctionBody::Suite(parsed.suite()),
     });
 
@@ -296,6 +298,8 @@ struct FunctionSpec<'a> {
     walrus_target: WalrusTarget,
     /// The names the function an assignment expression binds in declares `global`.
     walrus_globals: FxHashSet<String>,
+    /// [`FnBuilder::private_class`].
+    private_class: Option<String>,
     body: FunctionBody<'a>,
 }
 
@@ -422,6 +426,11 @@ impl<'a> ModuleLowerer<'a> {
         for nl in &scope_info.nonlocals {
             scope_info.locals.remove(nl);
         }
+        if spec.is_class_body
+            && let Some(class) = &spec.private_class
+        {
+            scope_info.mangle(class);
+        }
 
         let kind = match (spec.is_async, scope_info.has_yield) {
             (false, false) => FunctionKind::Sync,
@@ -481,6 +490,7 @@ impl<'a> ModuleLowerer<'a> {
             spec.walrus_target,
             spec.walrus_globals,
         );
+        builder.private_class = spec.private_class;
 
         if let Some(params) = spec.params {
             builder.bind_parameters(params);
@@ -579,6 +589,18 @@ struct ScopeBindings {
     has_yield: bool,
 }
 
+impl ScopeBindings {
+    /// The names of the body of the class named `class`, as the class holds them.
+    fn mangle(&mut self, class: &str) {
+        for names in [&mut self.locals, &mut self.globals, &mut self.nonlocals] {
+            *names = names
+                .drain()
+                .map(|n| mangling::mangle(class, &n).into_owned())
+                .collect();
+        }
+    }
+}
+
 /// The scope an assignment expression (`:=`) of a scope binds its name in.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WalrusTarget {
@@ -656,6 +678,12 @@ struct FnBuilder<'m, 'a> {
     own_locals: OnceCell<Rc<FxHashSet<String>>>,
     walrus_target: WalrusTarget,
     walrus_globals: FxHashSet<String>,
+    /// The name of the innermost class whose body holds this scope, at any depth: the compiler
+    /// mangles the private names written here with it (`heki_semantic::mangling`). The names of
+    /// a class body are the class's members, and attribute names are members of the object's
+    /// class, so both are recorded mangled; a function's own names are not members and keep
+    /// their spelling.
+    private_class: Option<String>,
     /// Variables in THIS function captured by nested functions/lambdas/genexprs.
     captured_by_children: FxHashSet<String>,
     /// Free variables read by THIS function from outer scopes.
@@ -766,6 +794,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             own_locals: OnceCell::new(),
             walrus_target,
             walrus_globals,
+            private_class: None,
             captured_by_children: FxHashSet::default(),
             free_reads: FxHashSet::default(),
             blocks: vec![entry],
@@ -991,6 +1020,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             self.write_local(&renamed, self.cur_bb, val);
             return;
         }
+        let name = self.scope_name(raw_name);
+        let raw_name = name.as_ref();
         if self.scope.globals.contains(raw_name) {
             self.emit(
                 InstKind::StoreGlobal {
@@ -1038,6 +1069,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         if let Some(renamed) = self.resolve_comp_rename(raw_name) {
             return self.read_local_ssa(&renamed, self.cur_bb, span);
         }
+        let name = self.scope_name(raw_name);
+        let raw_name = name.as_ref();
         if self.scope.globals.contains(raw_name) {
             let dst = self.fresh_var(Some(raw_name.to_string()));
             let is_lazy = self.module.lazy_import_names.contains(raw_name);
@@ -1402,7 +1435,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             Stmt::AnnAssign(aa) => {
                 let span = Span::from(aa.range);
                 let ann_text = self.module.slice_text(Span::from(aa.annotation.range()));
-                if let Some(target_text) = expr_dotted_name(&aa.target) {
+                if let Some(target_text) = self.annotated_target(&aa.target) {
                     self.local_annotations.push(LocalAnnotation {
                         target: target_text,
                         annotation: ann_text,
@@ -1629,6 +1662,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             outer_locals: child_outer,
             walrus_target: WalrusTarget::OwnScope,
             walrus_globals: FxHashSet::default(),
+            private_class: self.private_class.clone(),
             body: FunctionBody::Suite(&func.body),
         });
 
@@ -1736,6 +1770,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             outer_locals: child_outer,
             walrus_target: WalrusTarget::OwnScope,
             walrus_globals: FxHashSet::default(),
+            private_class: Some(cls.name.to_string()),
             body: FunctionBody::Suite(&cls.body),
         });
 
@@ -1864,7 +1899,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             }
             Expr::Attribute(attr) => {
                 let obj = self.lower_expr(&attr.value);
-                let attr_name = attr.attr.to_string();
+                let attr_name = self.attr_name(attr.attr.as_str()).into_owned();
                 self.record_a1_attr_if_hazard(&attr_name, Span::from(attr.range));
                 let lhs = self.fresh_var(None);
                 self.emit(
@@ -1947,7 +1982,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             }
             Expr::Attribute(attr) => {
                 let obj = self.lower_expr(&attr.value);
-                let attr_name = attr.attr.to_string();
+                let attr_name = self.attr_name(attr.attr.as_str()).into_owned();
                 self.record_a1_attr_if_hazard(&attr_name, Span::from(attr.range));
                 self.emit(
                     InstKind::AttrStore {
@@ -1981,6 +2016,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
     /// `del name`: the name is possibly unbound until it is bound again.
     fn lower_name_delete(&mut self, name: &str, span: Span) {
+        let name = self.scope_name(name);
+        let name = name.as_ref();
         let prev = self
             .current_def
             .get(&(self.cur_bb, name.to_owned()))
@@ -2065,7 +2102,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             Expr::Name(n) => self.lower_name_delete(n.id.as_str(), span),
             Expr::Attribute(attr) => {
                 let obj = self.lower_expr(&attr.value);
-                let attr_name = attr.attr.to_string();
+                let attr_name = self.attr_name(attr.attr.as_str()).into_owned();
                 self.record_a1_attr_if_hazard(&attr_name, Span::from(attr.range));
                 self.emit(
                     InstKind::AttrDelete {
@@ -3062,7 +3099,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             }
             Expr::Attribute(attr) => {
                 let obj = self.lower_expr(&attr.value);
-                let attr_name = attr.attr.to_string();
+                let attr_name = self.attr_name(attr.attr.as_str()).into_owned();
                 self.record_a1_attr_if_hazard(&attr_name, span);
                 if let Some(dotted) = expr_dotted_name(expr) {
                     self.record_a1_reference(&dotted, false, span);
@@ -3171,6 +3208,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     outer_locals: child_outer,
                     walrus_target: WalrusTarget::OwnScope,
                     walrus_globals: FxHashSet::default(),
+                    private_class: self.private_class.clone(),
                     body: FunctionBody::Expr(&lam.body),
                 });
                 let captured_names = self.collect_child_captures(child_id);
@@ -3209,6 +3247,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     outer_locals: child_outer,
                     walrus_target: self.comprehension_walrus_target(),
                     walrus_globals: self.comprehension_walrus_globals(),
+                    private_class: self.private_class.clone(),
                     body: FunctionBody::GenExpr(ge),
                 });
                 let captured_names = self.collect_child_captures(child_id);
@@ -3485,7 +3524,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 InstKind::MethodCall {
                     dst,
                     recv,
-                    method: attr.attr.to_string(),
+                    method: self.attr_name(attr.attr.as_str()).into_owned(),
                     args,
                     kwargs,
                     is_awaited,
@@ -3637,6 +3676,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 outer_locals: child_outer,
                 walrus_target: self.comprehension_walrus_target(),
                 walrus_globals: self.comprehension_walrus_globals(),
+                private_class: self.private_class.clone(),
                 body: FunctionBody::Comp {
                     generators,
                     elt,
@@ -3860,11 +3900,46 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
     /// Whether a read of `name` here resolves to a module global or a builtin.
     fn resolves_to_global(&self, name: &str) -> bool {
-        self.resolve_comp_rename(name).is_none()
-            && (self.scope.globals.contains(name)
-                || (!self.scope.nonlocals.contains(name)
-                    && !self.is_true_local(name)
-                    && !self.outer_locals.contains(name)))
+        if self.resolve_comp_rename(name).is_some() {
+            return false;
+        }
+        let name = self.scope_name(name);
+        let name = name.as_ref();
+        self.scope.globals.contains(name)
+            || (!self.scope.nonlocals.contains(name)
+                && !self.is_true_local(name)
+                && !self.outer_locals.contains(name))
+    }
+
+    /// `name` written here as the attribute of an object: a member of its class, mangled with
+    /// the class around this scope ([`Self::private_class`]).
+    fn attr_name<'n>(&self, name: &'n str) -> Cow<'n, str> {
+        match &self.private_class {
+            Some(class) => mangling::mangle(class, name),
+            None => Cow::Borrowed(name),
+        }
+    }
+
+    /// `name` written here as a variable: in a class body, a member of the class.
+    fn scope_name<'n>(&self, name: &'n str) -> Cow<'n, str> {
+        if self.is_class_body {
+            self.attr_name(name)
+        } else {
+            Cow::Borrowed(name)
+        }
+    }
+
+    /// The dotted target of an annotated assignment (`x`, `self.x`), each name spelled as the
+    /// scope binds or the class holds it.
+    fn annotated_target(&self, target: &Expr) -> Option<String> {
+        let Expr::Attribute(a) = target else {
+            return expr_dotted_name(target).map(|name| self.scope_name(&name).into_owned());
+        };
+        Some(format!(
+            "{}.{}",
+            self.annotated_target(&a.value)?,
+            self.attr_name(a.attr.as_str())
+        ))
     }
 
     fn record_a1_attr_if_hazard(&mut self, attr: &str, span: Span) {
