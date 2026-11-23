@@ -270,6 +270,9 @@ impl Watcher<'_> {
             });
             crate::check::heuristic_hint(rules_off, withheld);
         }
+        if matches!(self.args.output_format, OutputFormat::Full) {
+            crate::check::rule_pages(&all);
+        }
         let no_config = LintConfig::default();
         let lint = ws.map_or(&no_config, |ws| &ws.env.cfg.lint);
         crate::check::any_failing(&all, crate::check::fail_on(self.args, lint))

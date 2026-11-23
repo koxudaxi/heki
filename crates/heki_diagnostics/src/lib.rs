@@ -653,6 +653,7 @@ pub fn sarif(
                         json!({
                             "id": code,
                             "name": slug,
+                            "helpUri": heki_env::problem::rule_page(slug),
                             "properties": properties,
                         })
                     }).collect::<Vec<_>>()
@@ -1372,16 +1373,19 @@ mod tests {
                 {
                     "id": "EFF102",
                     "name": "loop-unpooled-client",
+                    "helpUri": "https://heki.koxudaxi.dev/rules/loop-unpooled-client/",
                     "properties": { "precision": "medium", "tags": ["heuristic"] }
                 },
                 {
                     "id": "MUT201",
                     "name": "write-owner-violation",
+                    "helpUri": "https://heki.koxudaxi.dev/rules/write-owner-violation/",
                     "properties": { "precision": "very-high" }
                 },
                 {
                     "id": "OPT110",
                     "name": "loop-linear-membership",
+                    "helpUri": "https://heki.koxudaxi.dev/rules/loop-linear-membership/",
                     "properties": { "precision": "medium", "tags": ["heuristic"] }
                 }
             ])

@@ -38,6 +38,13 @@ macro_rules! docs_pages {
 }
 
 docs_pages! {
+    Home => "",
+    GettingStarted => "getting-started/",
+    Configuration => "configuration/",
+    CodingAgents => "coding-agents/",
+    AgentSkill => "coding-agents/#agent-skill-experimental",
+    InstallSkill => "coding-agents/#install-the-skill",
+    LlmsTxt => "llms.txt",
     ConfigFiles => "configuration/#where-heki-finds-the-configuration",
     ConfigTables => "configuration/#which-tables-hold-the-settings",
     SourceRoots => "configuration/#module-names-follow-the-source-roots",
@@ -58,7 +65,14 @@ docs_pages! {
     Snapshots => "adoption/#effect-snapshots-mut103",
     Fixes => "fixes/#how-fix-applies-fixes",
     Profiles => "fixes/#profiles",
-    Check => "cli-reference/#heki-check",
+    CliCheck => "cli-reference/#heki-check",
+    CliServer => "cli-reference/#heki-server",
+    CliRule => "cli-reference/#heki-rule",
+    CliSnapshot => "cli-reference/#heki-snapshot",
+    CliAssumptions => "cli-reference/#heki-assumptions",
+    CliInspect => "cli-reference/#heki-inspect",
+    CliRecommend => "cli-reference/#heki-recommend",
+    CliSkillInstall => "cli-reference/#heki-skill-install",
     Inspect => "coding-agents/#before-an-edit-heki-inspect-experimental",
 }
 

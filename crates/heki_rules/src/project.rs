@@ -105,7 +105,7 @@ impl Explain for ProjectError {
                 }),
             Self::MissingPath(_) => problem
                 .help("pass files or directories that exist, relative to the working directory: `heki check src tests`")
-                .docs(Docs::Check),
+                .docs(Docs::CliCheck),
             Self::Walk { .. } => problem
                 .help("make the directory readable, or exclude it with `extend-exclude`")
                 .docs(Docs::CheckedFiles),

@@ -11,10 +11,12 @@ mod check;
 mod dump_facts;
 mod dump_recommend_facts;
 mod failure;
+mod help;
 mod inspect;
 mod open_premises;
 mod prompt;
 mod recommend;
+mod skill;
 mod watch;
 
 use anyhow::Result;
@@ -35,7 +37,8 @@ use std::process::ExitCode;
 #[command(
     name = "heki",
     version,
-    about = "Experimental static checker for Python that tracks side effects and mutations across function calls"
+    about = "Experimental static checker for Python that tracks side effects and mutations across function calls",
+    after_long_help = help::HEKI.render()
 )]
 struct Cli {
     #[command(subcommand)]
@@ -84,24 +87,31 @@ impl From<FailOn> for heki_env::Severity {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Run semantic checks across Python files or directories (Ruff-aligned).
+    #[command(after_long_help = help::CHECK.render())]
     Check(CheckArgs),
     /// Start the incremental Language Server Protocol (LSP) server.
-    #[command(visible_alias = "lsp")]
+    #[command(visible_alias = "lsp", after_long_help = help::SERVER.render())]
     Server(ServerArgs),
     /// Explain a rule, its Proof Obligations, and counterexamples (`ruff rule` style).
-    #[command(visible_alias = "explain")]
+    #[command(visible_alias = "explain", after_long_help = help::RULE.render())]
     Rule(RuleArgs),
     /// Manage interprocedural effect summary snapshots (`MUT103`).
+    #[command(after_long_help = help::SNAPSHOT.render())]
     Snapshot(SnapshotArgs),
     /// List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection, functions too
     /// large to model) in a project.
+    #[command(after_long_help = help::ASSUMPTIONS.render())]
     Assumptions(AssumptionsArgs),
     /// Experimental: what heki knows about one function (its effects, what it changes, keeps, and
     /// returns, whether it is pure, its callers, reports, and contracts).
+    #[command(after_long_help = help::INSPECT.render())]
     Inspect(InspectArgs),
     /// Experimental: advice on the configuration of a project, with counts from its analysis, and
     /// the keys to add (it writes no file).
+    #[command(after_long_help = help::RECOMMEND.render())]
     Recommend(RecommendArgs),
+    /// Experimental: install heki's Agent Skill where a coding agent reads skills.
+    Skill(SkillArgs),
     /// Internal/testing: dump `heki_semantic` scope tree as JSON for CPython `symtable` verification.
     #[command(hide = true)]
     DumpSemantic(DumpSemanticArgs),
@@ -402,6 +412,45 @@ struct DumpSemanticArgs {
 }
 
 #[derive(Debug, Args)]
+struct SkillArgs {
+    #[command(subcommand)]
+    command: SkillCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum SkillCommand {
+    /// Copy the Agent Skill this heki was built with into the coding agent's skills directory.
+    #[command(after_long_help = help::SKILL_INSTALL.render())]
+    Install(SkillInstallArgs),
+}
+
+#[derive(Debug, Args)]
+struct SkillInstallArgs {
+    /// The coding agent: Claude Code reads `.claude/skills/`, Codex `.agents/skills/`.
+    #[arg(long, value_enum)]
+    agent: SkillAgent,
+    /// `project`: under the working directory; `user`: under the home directory, for every
+    /// project.
+    #[arg(long, value_enum, default_value_t = SkillScope::Project)]
+    scope: SkillScope,
+    /// Replace the skill already installed there.
+    #[arg(long)]
+    overwrite: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SkillAgent {
+    ClaudeCode,
+    Codex,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SkillScope {
+    Project,
+    User,
+}
+
+#[derive(Debug, Args)]
 struct DumpOpenPremisesArgs {
     /// The project to analyze, as for `heki check`.
     #[arg(default_value = ".")]
@@ -477,6 +526,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Assumptions(args) => run_assumptions(args),
         Commands::Inspect(args) => inspect::run(&args),
         Commands::Recommend(args) => recommend::run(&args),
+        Commands::Skill(SkillArgs {
+            command: SkillCommand::Install(args),
+        }) => skill::install(&args),
         Commands::DumpSemantic(args) => {
             let (src, parsed) = parse_file(&args.file)?;
             let ver = heki_env::PythonVersion::parse_tag(&args.target_version)

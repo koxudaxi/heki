@@ -1775,8 +1775,12 @@ mod docs_links {
         out
     }
 
-    /// The Markdown file of the page at `path` below the site root (`configuration/`).
+    /// The file of the page at `path` below the site root: the Markdown of `configuration/`, or
+    /// a file the site serves as it is (`llms.txt`).
     fn page_file(docs: &Path, path: &str) -> PathBuf {
+        if !path.is_empty() && !path.ends_with('/') {
+            return docs.join(path);
+        }
         let page = path.trim_end_matches('/');
         let index = docs.join(page).join("index.md");
         if index.exists() {
