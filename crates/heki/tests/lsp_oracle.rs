@@ -4541,11 +4541,12 @@ fn cli_range(p: &Project, file: &str, span: &Value) -> Range {
 fn cli(p: &Project) -> BTreeMap<String, Vec<Diag>> {
     let (code, out, err) = p.check(&["--output-format", "json"]);
     assert!(matches!(code, 0..=2), "exit {code}: {err}");
-    // An invalid configuration: nothing is checked (exit 2, an error, no report).
-    let diags: Vec<Value> = if code == 2 && out.is_empty() {
+    let out: Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}:\n{out}\n{err}"));
+    // An invalid configuration: nothing is checked (exit 2, the error object, no report).
+    let diags: Vec<Value> = if code == 2 && out.get("error").is_some() {
         Vec::new()
     } else {
-        serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}:\n{out}\n{err}"))
+        serde_json::from_value(out).unwrap()
     };
     let mut by_file: BTreeMap<String, Vec<Diag>> = BTreeMap::new();
     for d in diags {
