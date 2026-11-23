@@ -5,19 +5,18 @@
 //! ([`heki_rules::census`]).
 //!
 //! The index is the one `heki check` builds for the same configuration and selection, with the
-//! facts of [`heki_rules::recommend_facts`].
+//! facts of [`heki_rules::recommend_facts`] ([`project::Facts::Recommend`]).
 
 use crate::DumpRecommendFactsArgs;
 use crate::OutputFormat;
 use crate::check::{finish, selection, shown_errors, shown_text};
 use anyhow::Result;
 use heki_ast::LineIndex;
-use heki_effect::analyze_project_for;
 use heki_rules::blind_spots::{
     BlindSite, BlindSpots, CallCounts, UncataloguedPackage, UnresolvedCalls,
 };
 use heki_rules::census::{Accesses, Census, CensusTotals, Writes};
-use heki_rules::project::{Project, ProjectOptions};
+use heki_rules::project::{self, Indexed, Project, ProjectOptions};
 use rustc_hash::FxHashMap;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -145,15 +144,8 @@ pub(crate) fn run(args: &DumpRecommendFactsArgs) -> Result<ExitCode> {
         removed: None,
     })?;
     let selection = selection(&args.analysis, &project)?;
-    let env = &project.env;
-    let index = analyze_project_for(
-        &project.inputs(),
-        &project.unread,
-        &env.kb,
-        heki_rules::summary_contracts(&env.cfg, &env.kb)?,
-        heki_rules::typed_writes(&env.cfg, &selection),
-        heki_rules::recommend_facts(&selection),
-    );
+    let Indexed { project, index, .. } =
+        Indexed::build(project, selection, None, project::Facts::Recommend)?;
     let lines: FxHashMap<&Path, LineIndex> = project
         .files
         .iter()
@@ -243,7 +235,7 @@ pub(crate) fn run(args: &DumpRecommendFactsArgs) -> Result<ExitCode> {
                     .map(|m| Module {
                         module: m.module,
                         path: shown_text(m.path),
-                        functions: m.functions,
+                        functions: m.functions.len(),
                         blocking: m.blocking.iter().map(|f| f.fqn()).collect(),
                         unseen: m.unseen.iter().map(|f| f.fqn()).collect(),
                     })

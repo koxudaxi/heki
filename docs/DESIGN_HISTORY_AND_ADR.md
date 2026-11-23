@@ -523,7 +523,9 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
   1. Every count is computed from this project by the pipeline `heki check` runs (inline
      suppressions, `per-file-ignores`, `relax-async-in-tests`, the baseline).
   2. A contract enters the block only when a trial run of its rules, with the strict sibling,
-     reports nothing on the code as it is, and a run with the whole block confirms it.
+     reports no violation of it on the code as it is and hides no report of the configuration's
+     own contracts; reports of the strict sibling make it medium, with `unresolved = "ignore"`.
+     A run with the whole block then applies it as `heki check` would.
   3. A catalog entry enters the block only when heki can verify every key it sets. heki cannot
      verify a library's effects, so library entries never enter it; such calls are listed as
      questions, with what a trial entry would report. `src` enters only after its trial.

@@ -5523,6 +5523,140 @@ fn the_census_of_many_classes_is_one_pass_over_their_sites() {
     );
 }
 
+/// `heki recommend --output-format json` of the project, which counts no walk steps: its shapes
+/// bound how many trials it runs.
+fn recommend(p: &Project) -> Value {
+    heki_json(p, &["recommend", "--output-format", "json", "."])
+}
+
+/// Thousands of `async def`s, each calling a library name of its own that the catalog lacks:
+/// the hypothetical-catalog run gives entries to the first 64 by reach only, and the lists keep
+/// their first 50.
+#[test]
+fn the_trial_of_library_names_without_an_entry_tries_a_bounded_number() {
+    let names = 3_000;
+    let mut lines = vec!["import stripe".to_owned()];
+    for i in 0..names {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("async def e{i}(x):"),
+            format!("    stripe.f{i}(x)"),
+        ]);
+    }
+    let p = Project::new("bounds_recommend_uncatalogued");
+    p.write("app.py", &(lines.join("\n") + "\n"));
+    let report = recommend(&p);
+    let blind = &report["blind_spots"];
+    let totals = &blind["totals"];
+    assert_eq!(
+        (
+            &totals["uncatalogued_symbols"],
+            &totals["tried"],
+            &totals["not_tried"]
+        ),
+        (&json!(names), &json!(64), &json!(names - 64)),
+        "{totals:#}"
+    );
+    let symbols = blind["uncatalogued"][0]["symbols"].as_array().unwrap();
+    assert_eq!(symbols.len(), 50);
+    assert!(
+        symbols
+            .iter()
+            .all(|s| s["if_waits"] == json!({"EFF101": 1, "EFF111": 0})),
+        "{symbols:#?}"
+    );
+    assert_eq!(blind["truncated"], json!(true));
+}
+
+/// Thousands of directories, each holding a module that a top-level file imports by a name
+/// below it: each directory is a source-root candidate, and the trial tries the first eight.
+#[test]
+fn the_source_root_trial_tries_a_bounded_number_of_directories() {
+    let dirs = 2_000;
+    let p = Project::new("bounds_recommend_source_roots");
+    let mut main = String::new();
+    for i in 0..dirs {
+        p.write(&format!("d{i}/m{i}.py"), "def f():\n    pass\n");
+        main.push_str(&format!("import m{i}\n"));
+    }
+    p.write("main.py", &main);
+    let report = recommend(&p);
+    let blind = &report["blind_spots"];
+    assert_eq!(blind["totals"]["source_root_candidates"], json!(dirs));
+    let roots = blind["source_roots"].as_array().unwrap();
+    assert_eq!(roots.len(), 50);
+    let tried: Vec<&Value> = roots.iter().filter(|r| r["in_block"] == true).collect();
+    assert_eq!(tried.len(), 8);
+    assert_eq!(
+        roots[8]["reason"],
+        json!("not tried: only the first 8 directories by imports are")
+    );
+    assert_eq!(report["config"]["src"].as_array().unwrap().len(), 8);
+}
+
+/// The `write-owners` candidates of thousands of classes, each attribute written in one module
+/// and read in two others, are ranked and capped before the contract trial: the trial declares
+/// the first 32.
+#[test]
+fn contract_candidates_of_thousands_of_classes_are_capped_before_the_trial() {
+    let classes = 3_000;
+    let p = Project::new("bounds_recommend_classes");
+    let [models, store, views] = classes_written_in_one_module(classes);
+    let api = views.1.replace("def show", "def dump");
+    for (path, text) in [models, store, views, ("app/api.py".to_owned(), api)] {
+        p.write(&path, &text);
+    }
+    let report = recommend(&p);
+    // `items` and `state` written by the store, `name` only while constructed.
+    assert_eq!(
+        report["contracts_not_tried"],
+        json!([{"kind": "write-owners", "tried": 32, "candidates": 3 * classes - 32}])
+    );
+    let tried = report["contracts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["kind"] == "write-owners")
+        .count();
+    assert_eq!(tried, 32);
+    assert_eq!(
+        report["runs"],
+        json!([{"label": "discovery"}, {"label": "contract-trial"},
+               {"label": "verification"}])
+    );
+}
+
+/// Thousands of modules in packages of fifty, whose functions reach no blocking call, next to
+/// one that does: each package is one scope, found from the modules' names in one pass, and
+/// the trial declares the first 32 scopes.
+#[test]
+fn boundary_candidates_of_thousands_of_modules_are_one_pass_over_their_names() {
+    let (modules, packages) = (2_000, 40);
+    let p = Project::new("bounds_recommend_modules");
+    p.write("app/__init__.py", "").write(
+        "app/net.py",
+        "import requests\n\n\ndef get(u):\n    return requests.get(u, timeout=5)\n",
+    );
+    let body: String = (0..3)
+        .map(|j| format!("def f{j}(x):\n    return x + {j}\n\n\n"))
+        .collect();
+    for i in 0..modules {
+        p.write(&format!("app/p{}/__init__.py", i % packages), "")
+            .write(&format!("app/p{}/m{i}.py", i % packages), &body);
+    }
+    let report = recommend(&p);
+    assert_eq!(
+        report["contracts_not_tried"],
+        json!([{"kind": "effect-boundaries", "tried": 32, "candidates": packages - 32}])
+    );
+    let first = &report["contracts"][0];
+    assert_eq!(
+        (&first["target"], &first["evidence"]["modules"]["count"]),
+        (&json!("app.p0"), &json!(modules / packages + 1))
+    );
+}
+
 /// A list front-inserted at `inserts` sites of a loop, then bound back and forth between two
 /// variables `16 * inserts` times after the loop: every insert is a candidate of the deque
 /// rewrite (`OPT121`), and each checks every binding of both variables.
