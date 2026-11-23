@@ -430,13 +430,13 @@ jobs:
         env:
           SHARD: ${{ matrix.shard }}/2
         run: python3 scripts/check_walk_shapes.py --heki target/release/heki --shard "$SHARD"
-      # At release time (release.yml calls this workflow), and on a manual run: the peak RSS of
-      # a release build, which also holds the allocator's fragmentation and mappings, under a
-      # coarse budget.
-      - if: matrix.shard == 1 && (github.event_name == 'release' || github.event_name == 'workflow_dispatch')
+      # On every push to main, at release time (release.yml calls this workflow), and on a manual
+      # run: the peak RSS of a release build, which also holds the allocator's fragmentation and
+      # mappings, under a coarse budget. Main runs it so that growth shows before a release does.
+      - if: matrix.shard == 1 && (github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'workflow_dispatch')
         run: cargo build --release -p heki
       - name: Peak RSS within budget
-        if: matrix.shard == 1 && (github.event_name == 'release' || github.event_name == 'workflow_dispatch')
+        if: matrix.shard == 1 && (github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'workflow_dispatch')
         run: python3 scripts/check_memory.py --heki target/release/heki --measure rss
 
   release-scripts:
