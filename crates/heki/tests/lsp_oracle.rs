@@ -120,6 +120,7 @@ allowed-callees = ["pkg.rack_ops.empty"]
 name = "extras-pass"
 scopes = ["pkg.extras_pass"]
 write-universe = ['Extras.values["init"]']
+allowed-callees = ["pkg.extras.trusted_value"]
 
 [[tool.heki.write-owners]]
 name = "rack"
@@ -241,6 +242,10 @@ const ASYNC_USER: &str = "from pkg.async_client import AsyncClient\n\n\nasync de
 // A store operation in another module writes the entry its caller passes (`set_value(e, "init", v)`).
 const EXTRAS: &str = "class Extras:\n    def __init__(self) -> None:\n        self.values: dict[str, object] = {}\n\n\ndef set_value(e: Extras, key: str, value: object) -> None:\n    e.values[key] = value\n";
 const EXTRAS_PASS: &str = "from pkg.extras import Extras, set_value\n\n\ndef prepare(e: Extras) -> None:\n    set_value(e, \"init\", 1)\n";
+// Two routes to the store operation passing the same key: one through an allowed callee, one
+// through a relay that is not allowed.
+const EXTRAS_ROUTES: &str = "\n\ndef trusted_value(e: Extras, key: str) -> None:\n    set_value(e, key, 1)\n\n\ndef relay_value(e: Extras, key: str) -> None:\n    _forward_value(e, key)\n\n\ndef _forward_value(e: Extras, key: str) -> None:\n    set_value(e, key, 1)\n";
+const EXTRAS_TRUSTED_PASS: &str = "from pkg.extras import Extras, relay_value, trusted_value\n\n\ndef prepare(e: Extras) -> None:\n    trusted_value(e, \"init\")\n";
 const KEY_CONSTS: &str = "from typing import Final\n\nKEY: Final = \"entries\"\n";
 const KEY_WRITER: &str = "from pkg.key_consts import KEY\nfrom pkg.model import Registry\n\n\ndef mark(r: Registry):\n    r.__dict__[KEY] = []\n";
 // A class constant names the guarded attribute for the class's own methods.
@@ -1637,10 +1642,15 @@ fn steps_method_lookups() -> Vec<Step> {
 const PV: &str = "class Pv:\n    def __run(self) -> int:\n        return 1\n\n    def go(self) -> int:\n        return self.__run()\n";
 const PV_USE: &str = "from pkg.pv import Pv\n\n\ndef use(p: Pv) -> int:\n    return p._Pv__run()\n";
 const PV_SUB: &str = "from pkg.pv import Pv\n\n\nclass Sub(Pv):\n    def __run(self) -> int:\n        return 2\n\n    def own(self) -> int:\n        return self.__run()\n\n    def peek(self) -> int:\n        return self._Pv__run()\n";
+const PV_DOC: &str = "from functools import cached_property\n\n\nclass PvDoc:\n    def __init__(self) -> None:\n        self.size = 0\n\n    @cached_property\n    def total(self) -> int:\n        return self.size + 1\n\n    def __grow(self) -> None:\n        self.size = 1\n";
+const PV_SHOW: &str =
+    "from pkg.pv_doc import PvDoc\n\n\ndef show(doc: PvDoc) -> int:\n    return doc.total\n";
 
 /// A private method (`def __run`, the member `_Pv__run`) called by its mangled name from other
 /// modules: the call follows the class's declarations when the method is renamed and back, and a
-/// subclass's own `__run` is another method, which `self.__run` in the subclass calls.
+/// subclass's own `__run` is another method, which `self.__run` in the subclass calls. A private
+/// method (`_PvDoc__grow`) that leaves a cached property stale makes its reads in another module
+/// stale reads until it invalidates the property.
 fn steps_private_names() -> Vec<Step> {
     let contract = format!(
         "{CONFIG}\n[[tool.heki.call-owners]]\nname = \"private-run\"\ntargets = [\"pkg.pv.Pv.__run\"]\nallowed-callers = [\"pkg.pv:Pv.*\"]\n"
@@ -1678,8 +1688,29 @@ fn steps_private_names() -> Vec<Step> {
         )
         .absent(&[("pkg/pv_sub.py", "MUT204")]),
         Step::new(
+            "a private method leaves a cached property stale that another module reads",
+            vec![
+                Action::Create("pkg/pv_doc.py", PV_DOC.to_owned()),
+                Action::Create("pkg/pv_show.py", PV_SHOW.to_owned()),
+            ],
+        )
+        .present(&[("pkg/pv_show.py", "MUT111"), ("pkg/pv_doc.py", "MUT101")]),
+        Step::new(
+            "the private method invalidates the cached property",
+            vec![save(
+                "pkg/pv_doc.py",
+                &PV_DOC.replace(
+                    "self.size = 1\n",
+                    "self.size = 1\n        self.__dict__.pop(\"total\", None)\n",
+                ),
+            )],
+        )
+        .absent(&[("pkg/pv_show.py", "MUT111"), ("pkg/pv_doc.py", "MUT101")]),
+        Step::new(
             "the files and the contract are removed",
             vec![
+                Action::Delete("pkg/pv_show.py"),
+                Action::Delete("pkg/pv_doc.py"),
                 Action::Delete("pkg/pv_sub.py"),
                 Action::Delete("pkg/pv_use.py"),
                 Action::Delete("pkg/pv.py"),
@@ -2613,6 +2644,30 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
         Step::new(
             "the store operation writes the entry its caller passes again",
             vec![save("pkg/extras.py", EXTRAS)],
+        )
+        .present(&[("pkg/extras_pass.py", "EFF201")]),
+        Step::new(
+            "the scope function passes the key only through an allowed callee of another module",
+            vec![
+                save("pkg/extras.py", &format!("{EXTRAS}{EXTRAS_ROUTES}")),
+                save("pkg/extras_pass.py", EXTRAS_TRUSTED_PASS),
+            ],
+        )
+        .absent(&[("pkg/extras_pass.py", "EFF201")]),
+        Step::new(
+            "it passes the same key through a relay that is not allowed too",
+            vec![save(
+                "pkg/extras_pass.py",
+                &format!("{EXTRAS_TRUSTED_PASS}    relay_value(e, \"init\")\n"),
+            )],
+        )
+        .present(&[("pkg/extras_pass.py", "EFF201")]),
+        Step::new(
+            "the store module and the scope function are as before",
+            vec![
+                save("pkg/extras.py", EXTRAS),
+                save("pkg/extras_pass.py", EXTRAS_PASS),
+            ],
         )
         .present(&[("pkg/extras_pass.py", "EFF201")]),
         Step::new(
