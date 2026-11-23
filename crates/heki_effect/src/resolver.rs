@@ -747,8 +747,8 @@ pub struct FunctionDecl {
     /// The fqn an import binds when every `return` of every definition returns what that import
     /// binds, a module or an object of one ([`returned_import`]): an import in the function
     /// (`from pkg import ops` then `return ops`, which breaks an import cycle) or one of the
-    /// module. Calling the function gives that object, whatever the return annotation says
-    /// (`-> ModuleType`).
+    /// module. Calling the function gives that object when it is a project module or the return
+    /// annotation names no class of its own (`-> ModuleType`, [`Self::declared_return`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returned_import: Option<Box<str>>,
     /// A `__getstate__` returning a state built only from the instance's own attributes
@@ -806,17 +806,28 @@ impl FunctionDecl {
 
     /// What calling it gives when its declaration says it returns `returned`: for an
     /// `async def` that no decorator replaces, the coroutine that awaiting gives `returned`.
-    /// The value calling it gives by the declarations: the object every return gives when an
-    /// import binds it ([`Self::returned_import`]), else what the return annotation names
-    /// (`Self` left unbound).
+    /// The value calling it gives by the declarations: what the return annotation names (`Self`
+    /// left unbound), unless every return gives an object an import binds
+    /// ([`Self::returned_import`]) and that object is a project module or the annotation names
+    /// none of its own (`-> ModuleType`, none).
     pub(crate) fn declared_return(&self, project: &ProjectDecls) -> Option<Ty> {
-        match &self.returned_import {
-            Some(fqn) => Some(project.named_ty(fqn)),
-            None => self
-                .return_type
-                .as_ref()
-                .and_then(|t| project.declared_ty(t))
-                .and_then(|t| t.bind_self(None)),
+        let declared = self
+            .return_type
+            .as_ref()
+            .and_then(|t| project.declared_ty(t))
+            .and_then(|t| t.bind_self(None));
+        let Some(fqn) = &self.returned_import else {
+            return declared;
+        };
+        let says_nothing = self
+            .return_type
+            .as_ref()
+            .is_none_or(|t| t.obj().is_some_and(|o| is_any_module(&o.class)));
+        let module = matches!(project.symbol(&project.object_named(fqn)), Symbol::Module);
+        if module || says_nothing {
+            Some(project.named_ty(fqn))
+        } else {
+            declared
         }
     }
 
