@@ -978,7 +978,9 @@ fn changes(
         (None, EntryKey::Written) => None,
     };
     let class_attrs = index.propagates_typed_writes().then(|| {
-        s.typed_field_writes
+        // The facts of one attribute differ in the objects written too, which are not shown.
+        let mut writes: Vec<ClassAttrWrite> = s
+            .typed_field_writes
             .iter()
             .map(|w| {
                 let sites: Vec<&TypedFieldWriteSite> = (s.typed_field_write_sites.iter())
@@ -1005,7 +1007,11 @@ fn changes(
                     keys: keys.into_iter().collect(),
                 }
             })
-            .collect()
+            .collect();
+        writes.dedup_by(|a, b| {
+            (&a.class, &a.attr, a.kind, a.fresh) == (&b.class, &b.attr, b.kind, b.fresh)
+        });
+        writes
     });
     Changes {
         params: param_changes,

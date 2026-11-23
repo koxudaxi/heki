@@ -58,7 +58,8 @@ pub use contracts::{ContractClass, Contracts};
 pub use environment::{AccessKind, ExternalAccess};
 pub use invalidation::{
     CoveredAfter, FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
-    builds_written_object, delegates_to_callers, is_initializer, reach_across,
+    builds_written_object, delegates_to_callers, initializes_own_self, is_initializer,
+    reach_across,
 };
 pub use iterations::{
     BetweenSteps, ContainerChange, ContainerIteration, IteratedContainer, IteratedResult,
@@ -114,16 +115,59 @@ pub struct AttrKeyPath {
 }
 
 /// A project-class attribute write a function reaches through any number of calls: the facts
-/// of a typed write site without its position, chain, and object (`EffectSummary::
-/// typed_field_writes`). A caller asks it whether a callee already sees the type of what it
-/// writes.
+/// of a typed write site without its position and chain (`EffectSummary::typed_field_writes`).
+/// A caller asks it whether a callee already sees the type of what it writes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TypedFieldWrite {
     pub class_qualname: String,
     pub attr: String,
     pub kind: WriteKind,
-    /// `TypedFieldWriteSite::fresh`.
+    /// The written object is under construction: `TypedFieldWriteSite::fresh`, or the object
+    /// a class's own initialization builds ([`initializes_own_self`]), written by the
+    /// initializer or by a helper it passes `self` to.
     pub fresh: bool,
+    /// `TypedFieldWriteSite::obj_params`, mapped through every call as for the sites: a
+    /// helper's write reaches the initializer handing it `self` as a write of its own `self`.
+    pub obj_params: u64,
+}
+
+/// The objects (`obj_params`) [`EffectSummary::typed_field_writes`] keeps apart for one write
+/// (field, kind, and freshness). A call can hand a helper a choice of its parameters (`h(p0 if
+/// flag else p1)`), so each level of a chain of helpers calling the one below twice could double
+/// them; past the bound they are one fact on an object that may be any of them, as a write site
+/// on several parameters is.
+const WRITTEN_OBJECTS_KEPT_APART: usize = 8;
+
+/// Join the objects of each write of `writes` that has more than
+/// [`WRITTEN_OBJECTS_KEPT_APART`]. It depends only on the set, not on the order the facts came
+/// in, so a summary stays the same however its callees' facts reach it.
+fn join_written_objects(writes: &mut BTreeSet<TypedFieldWrite>) {
+    // The facts order by field, kind, freshness, and then object: one write's facts are a run.
+    let same = |a: &TypedFieldWrite, b: &TypedFieldWrite| {
+        (&a.class_qualname, &a.attr, a.kind, a.fresh)
+            == (&b.class_qualname, &b.attr, b.kind, b.fresh)
+    };
+    let mut runs: Vec<(TypedFieldWrite, usize)> = Vec::new();
+    for w in writes.iter() {
+        match runs.last_mut() {
+            Some((first, n)) if same(first, w) => *n += 1,
+            _ => runs.push((w.clone(), 1)),
+        }
+    }
+    for (first, n) in runs
+        .into_iter()
+        .filter(|(_, n)| *n > WRITTEN_OBJECTS_KEPT_APART)
+    {
+        let joined: Vec<TypedFieldWrite> = writes.range(first.clone()..).take(n).cloned().collect();
+        let obj_params = joined.iter().fold(0, |mask, w| mask | w.obj_params);
+        for w in &joined {
+            writes.remove(w);
+        }
+        writes.insert(TypedFieldWrite {
+            obj_params,
+            ..first
+        });
+    }
 }
 
 /// One hop in an interprocedural call chain (for Boundary-Only & LSP RelatedLocation).
@@ -1565,21 +1609,33 @@ impl EffectSummary {
             .unwrap_or(&ownership::NO_RETURN_ORIGINS)
     }
 
-    /// Add the facts of the typed write sites to `typed_field_writes` (propagation adds those
-    /// of the callees).
-    pub(crate) fn refresh_typed_field_writes(&mut self) {
+    /// Add the facts of the typed write sites of `func` (this summary's function) to
+    /// `typed_field_writes`, also for what iterating its result runs (propagation adds those of
+    /// the callees).
+    pub(crate) fn refresh_typed_field_writes(&mut self, func: &FuncKey) {
+        // `initializes_own_self` of an object that may be `self`.
+        let initializes = initializes_own_self(func, self, 1);
+        self.add_site_facts(initializes);
+        if let Some(i) = &mut self.iterated {
+            i.add_site_facts(initializes);
+        }
+    }
+
+    /// Add the facts of this summary's typed write sites to `typed_field_writes`; `initializes`:
+    /// the function is an initializer, whose writes of what may be its `self` are fresh. Then
+    /// join the objects of each write past [`WRITTEN_OBJECTS_KEPT_APART`].
+    fn add_site_facts(&mut self, initializes: bool) {
         for s in &self.typed_field_write_sites {
             let fact = TypedFieldWrite {
                 class_qualname: s.class_qualname.clone(),
                 attr: s.attr.clone(),
                 kind: s.kind,
-                fresh: s.fresh,
+                fresh: s.fresh || initializes && s.obj_params & 1 != 0,
+                obj_params: s.obj_params,
             };
             self.typed_field_writes.insert(fact);
         }
-        if let Some(i) = &mut self.iterated {
-            i.refresh_typed_field_writes();
-        }
+        join_written_objects(&mut self.typed_field_writes);
     }
 
     /// Record that the function changes parameter `p` at `path` (`mutated_param_paths`);
