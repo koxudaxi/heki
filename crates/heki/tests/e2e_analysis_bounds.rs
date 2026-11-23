@@ -2623,6 +2623,61 @@ fn initializers_handing_self_down_a_helper_chain_reach_each_helper_at_most_twice
     assert_eq!(found, [(&json!("build"), &json!("build:Node.optional"))]);
 }
 
+/// A chain of forty helpers, each calling the one below twice: once with its own parameters and
+/// once with a choice of its first and its last one (`h(p0 if flag else pk, ...)`), the last
+/// helper writing its first parameter. The objects the write may be double at each level (two to
+/// the fortieth at the top); past a few, a summary keeps them as one write on an object that may
+/// be any of them. The write stays reported.
+#[test]
+fn objects_doubling_down_a_helper_chain_are_kept_as_one_write() {
+    let levels = 40;
+    let mut lines = vec![
+        "class Node:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.attr = 0".to_owned(),
+        String::new(),
+        String::new(),
+        "def h0(p0: Node, flag: bool) -> None:".to_owned(),
+        "    p0.attr = 1".to_owned(),
+    ];
+    for k in 1..=levels {
+        let params: Vec<String> = (0..=k).map(|i| format!("p{i}")).collect();
+        let rest = params[1..k]
+            .iter()
+            .map(|p| format!(", {p}"))
+            .collect::<String>();
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!(
+                "def h{k}({}: Node, flag: bool) -> None:",
+                params.join(": Node, ")
+            ),
+            format!("    h{}({}, flag)", k - 1, params[..k].join(", ")),
+            format!("    h{}(p0 if flag else p{k}{rest}, flag)", k - 1),
+        ]);
+    }
+    let args = vec!["n"; levels + 1].join(", ");
+    lines.extend([
+        String::new(),
+        String::new(),
+        "def top(n: Node, flag: bool) -> None:".to_owned(),
+        format!("    h{levels}({args}, flag)"),
+    ]);
+    let p = Project::new("bounds_doubling_objects");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"top\"\nscopes = [\"m.top\"]\nwrite-universe = [\"Node.*\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check(&p);
+    let found: Vec<(&Value, &Value)> = found
+        .iter()
+        .map(|d| (&d["qualname"], &d["target"]))
+        .collect();
+    assert_eq!(found, [(&json!("top"), &json!("top:Node.attr"))]);
+}
+
 /// Modules binding twelve thousand names, each to an attribute of the one before
 /// (`a1 = a0.x`, `a2 = a1.x`, ...), about as many as a module body's IR budget models: whether
 /// a binding is a string constant takes a bounded walk of copies and attribute loads, past

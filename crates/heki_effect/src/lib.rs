@@ -131,6 +131,45 @@ pub struct TypedFieldWrite {
     pub obj_params: u64,
 }
 
+/// The objects (`obj_params`) [`EffectSummary::typed_field_writes`] keeps apart for one write
+/// (field, kind, and freshness). A call can hand a helper a choice of its parameters (`h(p0 if
+/// flag else p1)`), so each level of a chain of helpers calling the one below twice could double
+/// them; past the bound they are one fact on an object that may be any of them, as a write site
+/// on several parameters is.
+const WRITTEN_OBJECTS_KEPT_APART: usize = 8;
+
+/// Join the objects of each write of `writes` that has more than
+/// [`WRITTEN_OBJECTS_KEPT_APART`]. It depends only on the set, not on the order the facts came
+/// in, so a summary stays the same however its callees' facts reach it.
+fn join_written_objects(writes: &mut BTreeSet<TypedFieldWrite>) {
+    // The facts order by field, kind, freshness, and then object: one write's facts are a run.
+    let same = |a: &TypedFieldWrite, b: &TypedFieldWrite| {
+        (&a.class_qualname, &a.attr, a.kind, a.fresh)
+            == (&b.class_qualname, &b.attr, b.kind, b.fresh)
+    };
+    let mut runs: Vec<(TypedFieldWrite, usize)> = Vec::new();
+    for w in writes.iter() {
+        match runs.last_mut() {
+            Some((first, n)) if same(first, w) => *n += 1,
+            _ => runs.push((w.clone(), 1)),
+        }
+    }
+    for (first, n) in runs
+        .into_iter()
+        .filter(|(_, n)| *n > WRITTEN_OBJECTS_KEPT_APART)
+    {
+        let joined: Vec<TypedFieldWrite> = writes.range(first.clone()..).take(n).cloned().collect();
+        let obj_params = joined.iter().fold(0, |mask, w| mask | w.obj_params);
+        for w in &joined {
+            writes.remove(w);
+        }
+        writes.insert(TypedFieldWrite {
+            obj_params,
+            ..first
+        });
+    }
+}
+
 /// One hop in an interprocedural call chain (for Boundary-Only & LSP RelatedLocation).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct CallHop {
@@ -1583,7 +1622,8 @@ impl EffectSummary {
     }
 
     /// Add the facts of this summary's typed write sites to `typed_field_writes`; `initializes`:
-    /// the function is an initializer, whose writes of what may be its `self` are fresh.
+    /// the function is an initializer, whose writes of what may be its `self` are fresh. Then
+    /// join the objects of each write past [`WRITTEN_OBJECTS_KEPT_APART`].
     fn add_site_facts(&mut self, initializes: bool) {
         for s in &self.typed_field_write_sites {
             let fact = TypedFieldWrite {
@@ -1595,6 +1635,7 @@ impl EffectSummary {
             };
             self.typed_field_writes.insert(fact);
         }
+        join_written_objects(&mut self.typed_field_writes);
     }
 
     /// Record that the function changes parameter `p` at `path` (`mutated_param_paths`);
