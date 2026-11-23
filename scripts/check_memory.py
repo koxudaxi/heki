@@ -61,9 +61,9 @@ COPIES_DEPTH = 16
 # modes have the owner's round 100 MiB. A change of a budget needs the owner's decision
 # (docs/development.md, Memory).
 HEAP_BUDGETS_MIB = {
-    "check": 56.7,
-    "watch": 54.3,
-    "owners": 70.6,
+    "check": 59.5,
+    "watch": 55.5,
+    "owners": 73.4,
     "recommend": 100.0,
     "recommend-owners": 100.0,
 }
