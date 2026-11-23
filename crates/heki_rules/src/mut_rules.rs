@@ -12,9 +12,10 @@ use heki_diagnostics::{Certainty, Diagnostic, OpenPremise, OpenRecord};
 use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
     AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite, CallTarget, Callee,
-    Construction, ContractClass, Delivery, EffectSummary, Facts, FuncKey, INITIALIZERS,
-    ProjectDecls, ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx,
-    TypedFieldWriteSite, Val, WriteKind, attr_writes, container_mutator, self_attr_writes,
+    Construction, ContractClass, Delivery, EffectSummary, Facts, FuncKey, ProjectDecls,
+    ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx, TypedFieldWriteSite, Val,
+    WriteKind, attr_writes, container_mutator, initializes_own_self, is_initializer,
+    self_attr_writes,
 };
 use heki_env::HekiConfig;
 use heki_ir::walk::{Answer, Budget, FnShape, Visit, reach};
@@ -941,7 +942,9 @@ impl MemberPattern {
 
 /// The targets of one contract `site` writes (by index): the item targets naming the entry it
 /// changes when there are any, else the attribute targets, so a write of one entry is reported
-/// once, under its most specific target.
+/// once, under its most specific target. A copy of a callee's write with the key a call passes
+/// ([`TypedFieldWriteSite::passed`]) hits item targets only: the callee's own site is the write
+/// of the attribute.
 pub(crate) fn write_hits<'t>(
     targets: &'t [ContractTarget],
     site: &TypedFieldWriteSite,
@@ -949,7 +952,7 @@ pub(crate) fn write_hits<'t>(
     let hits: Vec<(usize, &ContractTarget)> = targets
         .iter()
         .enumerate()
-        .filter(|(_, t)| t.matches_write(site))
+        .filter(|(_, t)| t.matches_write(site) && (t.key.is_some() || !site.passed))
         .collect();
     if hits.iter().any(|(_, t)| t.key.is_some()) {
         hits.into_iter().filter(|(_, t)| t.key.is_some()).collect()
@@ -1598,24 +1601,22 @@ pub(crate) fn binds_receiver(decl: &heki_effect::FunctionDecl) -> bool {
     decl.is_method && !decl.is_staticmethod
 }
 
-/// A class's own initialization: `key` is an initializer (`INITIALIZERS`) of a class of the
-/// target's `family`, and the accessed object may be its own instance (`obj_params` bit 0,
-/// `self`): only an object that is provably not `self` (another parameter, a fresh instance,
-/// an attribute) stays reported.
+/// A class's own initialization ([`initializes_own_self`]) of a class of the target's `family`:
+/// `key` is an initializer of such a class, and the accessed object may be its own instance
+/// (`obj_params` bit 0, `self`). Only an object that is provably not `self` (another parameter, a
+/// fresh instance, an attribute) stays reported.
 pub(crate) fn initializes_itself(
     cx: &CheckContext<'_>,
     key: &FuncKey,
     family: &FxHashSet<String>,
     obj_params: u64,
 ) -> bool {
-    let name = key.qualname.rsplit('.').next().unwrap_or(&key.qualname);
-    obj_params & 1 != 0
-        && INITIALIZERS.contains(&name)
-        && cx
-            .index
-            .summary(key)
-            .and_then(|s| s.owner_class_qualname.as_deref())
-            .is_some_and(|owner| family.contains(&format!("{}.{owner}", key.module)))
+    cx.index.summary(key).is_some_and(|s| {
+        initializes_own_self(key, s, obj_params)
+            && s.owner_class_qualname
+                .as_deref()
+                .is_some_and(|owner| family.contains(&format!("{}.{owner}", key.module)))
+    })
 }
 
 /// Whether `func` (about to be reported for an access to an object that may be its parameters
@@ -1674,8 +1675,6 @@ fn runs_inside_allowed_through(
     obj: u64,
     first: FirstCallers,
 ) -> bool {
-    let is_initializer =
-        |k: &FuncKey| INITIALIZERS.contains(&k.qualname.rsplit('.').next().unwrap_or(&k.qualname));
     if is_initializer(func) {
         return false;
     }
