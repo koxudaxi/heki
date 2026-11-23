@@ -332,18 +332,26 @@ fn the_installer_writes_the_repository_skill_where_the_agent_reads_it() {
     let source = tree(&repo_root().join(SKILL_DIR));
     let (code, _, stderr) = p.heki(&["skill", "install", "--agent", "claude-code"]);
     assert_eq!(code, 0, "{stderr}");
+    let installed = p.dir.join(".claude/skills/heki");
+    // The binary prints the path with the separator of the platform.
+    let shown = Path::new(".claude")
+        .join("skills")
+        .join("heki")
+        .display()
+        .to_string();
     assert_eq!(
         stderr,
-        "Installed the heki Agent Skill (experimental) at .claude/skills/heki\n"
+        format!("Installed the heki Agent Skill (experimental) at {shown}\n")
     );
-    let installed = p.dir.join(".claude/skills/heki");
     assert_eq!(tree(&installed), source);
 
     let (code, _, stderr) = p.heki(&["skill", "install", "--agent", "claude-code"]);
     assert_eq!(code, 2);
     assert_eq!(
         stderr,
-        "error: .claude/skills/heki: the skill is already installed\n  = help: pass `--overwrite` to replace it with the skill of this heki\n  = docs: https://heki.koxudaxi.dev/coding-agents/#install-the-skill\n"
+        format!(
+            "error: {shown}: the skill is already installed\n  = help: pass `--overwrite` to replace it with the skill of this heki\n  = docs: https://heki.koxudaxi.dev/coding-agents/#install-the-skill\n"
+        )
     );
     std::fs::write(installed.join("SKILL.md"), "edited").unwrap();
     std::fs::write(installed.join("extra.md"), "mine").unwrap();
@@ -389,7 +397,10 @@ fn the_installer_leaves_what_is_not_a_skill_directory() {
     let (code, _, stderr) = p.heki(&["skill", "install", "--agent", "claude-code"]);
     assert_eq!(code, 2);
     assert!(
-        stderr.starts_with("error: .claude/skills/heki: cannot write the skill: "),
+        stderr.starts_with(&format!(
+            "error: {}: cannot write the skill: ",
+            Path::new(".claude").join("skills").join("heki").display()
+        )),
         "{stderr}"
     );
 }
