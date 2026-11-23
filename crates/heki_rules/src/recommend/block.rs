@@ -40,16 +40,17 @@ fn set_lines<T: Serialize + Default>(entry: &T) -> String {
 }
 
 /// The keys of `entry` whose values differ from the type's default, as JSON.
-fn set_keys<T: Serialize + Default>(entry: &T) -> serde_json::Value {
+pub(super) fn set_keys<T: Serialize + Default>(
+    entry: &T,
+) -> serde_json::Map<String, serde_json::Value> {
     let object = |value: &T| -> serde_json::Map<String, serde_json::Value> {
         serde_json::from_value(json(value)).expect("a configuration entry is a table")
     };
     let default = object(&T::default());
-    let set = object(entry)
+    object(entry)
         .into_iter()
         .filter(|(key, value)| default.get(key) != Some(value))
-        .collect();
-    serde_json::Value::Object(set)
+        .collect()
 }
 
 /// The block that adds `additions` to `current`, the configuration read from a file of `layout`.
@@ -111,7 +112,7 @@ pub fn render(additions: &Additions, current: &HekiConfig, layout: ConfigLayout)
 fn written<T: Serialize + Default>(entries: &[T]) -> Vec<(String, serde_json::Value)> {
     entries
         .iter()
-        .map(|e| (set_lines(e), set_keys(e)))
+        .map(|e| (set_lines(e), serde_json::Value::Object(set_keys(e))))
         .collect()
 }
 

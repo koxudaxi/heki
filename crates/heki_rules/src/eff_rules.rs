@@ -4,7 +4,7 @@
 
 use crate::mut_rules::{
     CallTargets, ContractTarget, FunctionMatcher, FunctionMatchers, References, SiteId, Subclasses,
-    allows_fresh, call_verb, counts_references, group_texts, helper_changes_field,
+    allows_fresh, call_verb, contract_places, counts_references, group_texts, helper_changes_field,
     initializes_itself, parse_call_targets, parse_read_targets, parse_targets, patterns,
     project_classes, reports_import_probes, site_callee, write_hits,
 };
@@ -23,6 +23,7 @@ use heki_effect::{
     Construction, EffectSummary, ExternalAccess, Facts, FuncKey, HopGap, MustGap, PerItem, Runner,
     SiteEffect, SiteMust, TypeCtx, WriteKind, anchors_call_site, boundary_reports_in,
 };
+use heki_env::EffectBoundaryRule;
 pub(crate) use heki_ir::ItemOrigins;
 use heki_ir::walk::{self, Answer, Budget, FnShape, JoinMap, Or, Sparse, fixpoint};
 use heki_ir::{BlockId, Carries, InstKind, IrFunction, ItemOrigin, ItemSource, Must, Progress};
@@ -1005,6 +1006,24 @@ const FORBID_TOKENS: &[(&str, &[ExecEffectKind])] = &[
     ("reads-environment", &[]),
 ];
 
+/// The execution effects the `forbid` tokens of `boundary` forbid.
+pub(crate) fn forbidden_effects(
+    boundary: &EffectBoundaryRule,
+) -> Result<BTreeSet<ExecEffectKind>, RuleConfigError> {
+    let mut effects = BTreeSet::new();
+    for token in &boundary.forbid {
+        let Some((_, kinds)) = FORBID_TOKENS.iter().find(|(t, _)| t == token) else {
+            return Err(RuleConfigError::UnknownForbid {
+                boundary: boundary.name.clone(),
+                token: token.clone(),
+                expected: FORBID_EXPECTED.as_str(),
+            });
+        };
+        effects.extend(kinds.iter().copied());
+    }
+    Ok(effects)
+}
+
 /// `UnknownForbid::expected`, built from [`FORBID_TOKENS`].
 static FORBID_EXPECTED: LazyLock<String> = LazyLock::new(|| {
     let tokens: Vec<String> = FORBID_TOKENS
@@ -1174,17 +1193,7 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
     let all_classes = project_classes(cx);
     let mut out = Vec::new();
     for (index, b) in cx.config.effect_boundaries.iter().enumerate() {
-        let mut effects = BTreeSet::new();
-        for token in &b.forbid {
-            let Some((_, kinds)) = FORBID_TOKENS.iter().find(|(t, _)| t == token) else {
-                return Err(RuleConfigError::UnknownForbid {
-                    boundary: b.name.clone(),
-                    token: token.clone(),
-                    expected: FORBID_EXPECTED.as_str(),
-                });
-            };
-            effects.extend(kinds.iter().copied());
-        }
+        let effects = forbidden_effects(b)?;
         let forbids = |token: &str| b.forbid.iter().any(|t| t == token);
         for (token, key, targets) in [
             ("writes-targets", "write-targets", &b.write_targets),
@@ -1289,7 +1298,11 @@ pub(crate) fn eff201(
             for (bi, b) in boundaries.iter().enumerate() {
                 if b.in_scope(&key) && done.insert((key.clone(), bi)) {
                     let reach = Reach::search(cx, (&sites, &references), b, &key);
+                    let reported = out.len();
                     reach.report(cx, b, unit, f, &key, out);
+                    for d in &mut out[reported..] {
+                        d.contracts = contract_places([bi]);
+                    }
                 }
             }
         }

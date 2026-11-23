@@ -1035,8 +1035,18 @@ pub fn check_project(
         .collect();
     out.extend(per_unit.into_iter().flatten());
     heki_diagnostics::sort_diagnostics(&mut out);
+    // One report per access, rule, and target: the one kept stands for the contracts of both.
     out.dedup_by(|a, b| {
-        a.path == b.path && a.span == b.span && a.rule_code == b.rule_code && a.target == b.target
+        let same = a.path == b.path
+            && a.span == b.span
+            && a.rule_code == b.rule_code
+            && a.target == b.target;
+        if same && !a.contracts.is_empty() {
+            b.contracts.append(&mut a.contracts);
+            b.contracts.sort_unstable();
+            b.contracts.dedup();
+        }
+        same
     });
     Ok(out)
 }
@@ -1052,23 +1062,48 @@ pub fn contract_roles(
     selection: &RuleSelection,
     key: &FuncKey,
 ) -> Result<Vec<inspect::ContractRole>, RuleConfigError> {
-    let cx = CheckContext {
-        config,
-        kb,
-        soundness: soundness_kb,
-        index,
-        decls,
-        units: &[],
-        selection,
-        unit_by_path: FxHashMap::default(),
-        text_of: None,
-        open_premises: false,
-        must_explainer: None,
-    };
+    let cx = CheckContext::of_declarations(config, kb, soundness_kb, index, decls, selection);
     contracts::roles_of(&cx, key)
 }
 
+/// What the contracts of `env`'s configuration already declare (`heki recommend`).
+pub(crate) fn declared_contracts(
+    env: &project::ProjectEnv,
+    index: &ProjectIndex,
+    selection: &RuleSelection,
+) -> Result<contracts::Declared, RuleConfigError> {
+    let decls = index.project_decls();
+    let (config, kb, soundness) = (&env.cfg, &env.kb, &env.soundness_kb);
+    let cx = CheckContext::of_declarations(config, kb, soundness, index, &decls, selection);
+    contracts::Declared::of(&cx)
+}
+
 impl<'a> CheckContext<'a> {
+    /// A context over the project's declarations and summaries, with no unit to check: what the
+    /// rules' matchers compile from the configuration.
+    fn of_declarations(
+        config: &'a HekiConfig,
+        kb: &'a EffectiveEcosystemKb,
+        soundness: &'a EffectiveSoundnessKb,
+        index: &'a ProjectIndex,
+        decls: &'a ProjectDecls,
+        selection: &'a RuleSelection,
+    ) -> Self {
+        Self {
+            config,
+            kb,
+            soundness,
+            index,
+            decls,
+            units: &[],
+            selection,
+            unit_by_path: FxHashMap::default(),
+            text_of: None,
+            open_premises: false,
+            must_explainer: None,
+        }
+    }
+
     /// The unit's module constants without the displays another project module may change
     /// (`ProjectDecls::changed_elsewhere`): the constants the Advisory rules take as fixed.
     /// What its comprehension functions return goes with them, as it may rest on one.
@@ -1254,6 +1289,7 @@ impl<'a> CheckContext<'a> {
             sites: 1,
             fold_key: None,
             open_records: Vec::new(),
+            contracts: Vec::new(),
         });
         out.last_mut()
     }
@@ -1263,6 +1299,17 @@ impl<'a> CheckContext<'a> {
 /// one thing literally.
 pub(crate) fn has_glob_syntax(text: &str) -> bool {
     text.contains(['*', '?', '[', '{'])
+}
+
+/// The characters glob syntax gives a meaning: a name part holding one is compiled as a glob.
+const GLOB_CHARACTERS: [char; 7] = ['*', '?', '[', ']', '{', '}', '\\'];
+
+/// Whether the module part of a [`DottedPattern`] can name the module `module` literally: a `:`
+/// would end the part, and a character glob syntax gives a meaning would make the pattern match
+/// other modules (`notes[1]` matches `notes1`) or fail to parse. A file name gives a module
+/// such characters (`[id].py`, `release:notes.py`).
+pub(crate) fn names_module_literally(module: &str) -> bool {
+    !module.contains(':') && !module.contains(GLOB_CHARACTERS)
 }
 
 /// One part of a [`DottedPattern`]: a literal name or a glob.
@@ -1278,7 +1325,7 @@ impl NamePart {
     fn new(text: &str, pattern: &str, context: &'static str) -> Result<Self, RuleConfigError> {
         // Building a matcher compiles a regex: a plain name is compared as a string, and only text
         // with a character the glob syntax gives a meaning is compiled (and so validated).
-        if !text.contains(['*', '?', '[', ']', '{', '}', '\\']) {
+        if !text.contains(GLOB_CHARACTERS) {
             return Ok(Self {
                 text: text.to_owned(),
                 glob: None,
