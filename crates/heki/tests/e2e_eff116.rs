@@ -1,16 +1,17 @@
 //! `EFF116` (`generator-never-iterated`) end to end: a call of a generator function whose
 //! generator nothing iterates, as a statement (a method on `self`, a class method, a static
-//! method, a nested function calling itself, an async generator, a function of another module,
-//! in a module body), read only by truth tests (`if`, `while`, `assert`, a conditional
-//! expression, `not`, `bool()`), and handed to library calls that drop what they call returns
-//! (threads, timers, processes, event loop callbacks, `atexit`, signal handlers, exit stacks) or
-//! test it for truth (`filter` and three `itertools` functions), directly, as a bound method,
-//! and through `functools.partial`; the wording of a method with a plain implementation and of a
-//! name bound to two definitions; and the shapes left silent: a generator iterated, stepped,
-//! returned, yielded, delegated to, stored, bound, or passed on, a decorated generator function,
-//! an awaited call, a shadowed `bool`, a plain function, and the calls that hand the result back
-//! (executors, offloading APIs, `weakref.finalize`); the opt-in selection, and `heki rule`.
-//! Every line marked `# EFF116` in the sources is reported, and no other.
+//! method, a method whose every implementation is a generator function, a nested function calling
+//! itself, an async generator, a function of another module, in a module body), read only by
+//! truth tests (`if`, `while`, `assert`, a conditional expression, `not`, `bool()`), and handed to
+//! library calls that drop what they call returns (threads, timers, processes, event loop
+//! callbacks, `atexit`, signal handlers, exit stacks) or test it for truth (`filter` and three
+//! `itertools` functions), directly, as a bound method, and through `functools.partial`; the
+//! wording of a name bound to two definitions; and the shapes left silent: a call that may run a
+//! plain implementation, a generator iterated, stepped, returned, yielded, delegated to, stored,
+//! bound, or passed on, a decorated generator function, an awaited call, a shadowed `bool`, a
+//! plain function, and the calls that hand the result back (executors, offloading APIs,
+//! `weakref.finalize`); the opt-in selection, and `heki rule`. Every line marked `# EFF116` in the
+//! sources is reported, and no other.
 
 mod common;
 
@@ -253,8 +254,9 @@ def hands_back(text: str, items: list[str]) -> None:
     threading.Thread(target=plain, args=(text,)).start()
 "#;
 
-/// The reports worded as possible: a method whose call may run a plain implementation, and a
-/// name bound to two definitions.
+/// A method whose call may run a plain implementation, which is no report, one whose every
+/// implementation is a generator function, and a name bound to two definitions, which the report
+/// words as such.
 const POSSIBLE: &str = r#"import sys
 
 
@@ -266,6 +268,30 @@ class Source:
 class Cached(Source):
     def rows(self):
         return [1]
+
+
+class Stream:
+    def rows(self):
+        yield 1
+
+
+class Buffered(Stream):
+    def rows(self):
+        yield 2
+
+
+class Pager:
+    def pages(self):
+        yield 1
+
+
+class Paged(Pager):
+    if sys.version_info >= (3, 12):
+        def pages(self):
+            yield 2
+    else:
+        def pages(self):
+            yield 3
 
 
 if sys.version_info >= (3, 12):
@@ -280,9 +306,12 @@ def chunks():
     yield 1
 
 
-def run(source: Source) -> None:
-    source.rows()  # EFF116
+def run(source: Source, stream: Stream, pager: Pager) -> None:
+    source.rows()
+    Source().rows()
+    stream.rows()  # EFF116
     chunks()  # EFF116
+    pager.pages()  # EFF116
 "#;
 
 const SOURCES: &[(&str, &str)] = &[
@@ -396,16 +425,23 @@ fn a_report_names_the_function_and_what_reads_its_generator() {
          generator is always true, and the body does not run"
     );
     assert_eq!(
-        message_at(&diags, "pkg/possible.py", 27),
-        "the call of `Source.rows` is a statement, and `Source.rows`, one implementation the \
-         call may run, is a generator function: calling it only creates a generator, so the \
-         body does not run"
+        message_at(&diags, "pkg/possible.py", 53),
+        "the call of `Buffered.rows` is a statement, and `Buffered.rows` and the other \
+         implementations the call may run are generator functions: calling it only creates a \
+         generator, so the body does not run"
     );
     assert_eq!(
-        message_at(&diags, "pkg/possible.py", 28),
-        "the call of `chunks` is a statement, and `chunks`, one implementation the call may \
-         run, is a generator function: calling it only creates a generator, so the body does \
-         not run"
+        message_at(&diags, "pkg/possible.py", 54),
+        "the call of `chunks` is a statement, and `chunks` is a generator function, and its \
+         name is bound to more than one definition, of which heki reads the last: calling it \
+         only creates a generator, so the body does not run"
+    );
+    assert!(
+        message_at(&diags, "pkg/possible.py", 55).contains(
+            "are generator functions, and the name of one is bound to more than one definition"
+        ),
+        "{}",
+        message_at(&diags, "pkg/possible.py", 55)
     );
     let first = report_at(&diags, "pkg/statements.py", 17);
     assert_eq!(first["qualname"], "Code.instruction");

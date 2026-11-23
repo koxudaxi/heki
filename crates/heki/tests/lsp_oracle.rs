@@ -3971,8 +3971,8 @@ fn steps_eff115() -> Vec<Step> {
 }
 
 /// `EFF116`: whether a call's callees are generator functions comes from their declarations in
-/// other modules, a function's and a method override's, which change between a generator
-/// function and a plain one.
+/// other modules, a function's and a method's and its override's, which change between a
+/// generator function and a plain one; a call that may run a plain override is no report.
 fn steps_eff116() -> Vec<Step> {
     vec![
         Step::new(
@@ -3981,21 +3981,26 @@ fn steps_eff116() -> Vec<Step> {
         )
         .present(&[("pkg/gen_use.py", "EFF116")]),
         Step::new(
-            "an override in a third module becomes a plain function",
-            vec![save("pkg/gen_sub.py", GEN_SUB_PLAIN)],
+            "the function becomes a plain function again",
+            vec![save("pkg/gen_jobs.py", GEN_JOBS)],
         )
         .present(&[("pkg/gen_use.py", "EFF116")]),
         Step::new(
-            "the function and the base method become plain functions",
-            vec![
-                save("pkg/gen_jobs.py", GEN_JOBS),
-                save("pkg/gen_base.py", GEN_BASE_PLAIN),
-            ],
+            "an override in a third module becomes a plain function",
+            vec![save("pkg/gen_sub.py", GEN_SUB_PLAIN)],
         )
         .absent(&[("pkg/gen_use.py", "EFF116")]),
         Step::new(
-            "the override becomes a generator function again",
-            vec![save("pkg/gen_sub.py", GEN_SUB)],
+            "the base method becomes a plain function too",
+            vec![save("pkg/gen_base.py", GEN_BASE_PLAIN)],
+        )
+        .absent(&[("pkg/gen_use.py", "EFF116")]),
+        Step::new(
+            "both become generator functions again",
+            vec![
+                save("pkg/gen_base.py", GEN_BASE),
+                save("pkg/gen_sub.py", GEN_SUB),
+            ],
         )
         .present(&[("pkg/gen_use.py", "EFF116")]),
     ]

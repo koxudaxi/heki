@@ -261,15 +261,19 @@ fn handoff_report(
     );
 }
 
-/// The generator functions among the functions a call runs.
+/// The functions a call runs, when every one is a generator function. A call that may run a
+/// plain function instead is no report: what the call does with the result may be what that
+/// function is for.
 struct Generators<'k> {
-    /// The first generator function, by qualname.
+    /// The first of them, by qualname.
     name: &'k str,
-    /// It is an `async def`: an async generator function.
+    /// How many others the call may run.
+    others: usize,
+    /// Every one is an `async def`: an async generator function.
     is_async: bool,
-    /// Some function the call may run is not a generator function as defined, or a name is
-    /// bound to more than one definition.
-    others: bool,
+    /// The name of one of them is bound to more than one definition (`def` under `if` and
+    /// `else`): the call runs one of them, and the declaration is the last one's.
+    bound_twice: bool,
     /// The report's premises are established: every function the call runs is a generator
     /// function that no decorator replaces and whose name is bound once, and they are every
     /// implementation the call can run.
@@ -277,44 +281,65 @@ struct Generators<'k> {
 }
 
 impl<'k> Generators<'k> {
-    /// `None` when no function of `keys` is a generator function. `complete`: `keys` are every
-    /// implementation the call can run.
+    /// `None` unless every function of `keys` is a generator function. `complete`: `keys` are
+    /// every implementation the call can run.
     fn of(cx: &CheckContext<'_>, keys: &'k [FuncKey], complete: bool) -> Option<Self> {
-        let generator = |key: &FuncKey| cx.decls.function_decl(key).filter(|d| d.is_generator);
-        let (first, decl) = keys.iter().find_map(|k| Some((k, generator(k)?)))?;
-        // A name bound to two definitions (`def` under `if` and `else`) runs one of them, and its
-        // declaration is the last one's.
-        let bound_once = |key: &FuncKey| {
-            cx.index
-                .summary(key)
-                .is_some_and(|s| !s.must_exec.as_deref().is_some_and(|m| m.bound_twice))
-        };
-        let others = !keys.iter().all(|k| generator(k).is_some() && bound_once(k));
+        let decls: Vec<_> = keys
+            .iter()
+            .map(|k| cx.decls.function_decl(k).filter(|d| d.is_generator))
+            .collect::<Option<_>>()?;
+        let first = keys.first()?;
+        let summaries: Vec<_> = keys.iter().map(|k| cx.index.summary(k)).collect();
+        let bound_twice = summaries
+            .iter()
+            .flatten()
+            .any(|s| s.must_exec.as_deref().is_some_and(|m| m.bound_twice));
         Some(Self {
             name: &first.qualname,
-            is_async: decl.is_async,
-            others,
-            exact: complete && !others,
+            others: keys.len() - 1,
+            is_async: decls.iter().all(|d| d.is_async),
+            bound_twice,
+            exact: complete && !bound_twice && summaries.iter().all(Option::is_some),
         })
     }
 
-    /// What the report says the first generator function is.
+    /// What the report says the functions are.
     fn what(&self) -> String {
         let name = self.name;
-        let kind = self.kind();
-        if self.others {
-            format!("`{name}`, one implementation the call may run, is {kind} function")
+        let what = if self.others == 0 {
+            format!("`{name}` is {} function", self.kind())
         } else {
-            format!("`{name}` is {kind} function")
+            format!(
+                "`{name}` and the other implementations the call may run are {} functions",
+                self.noun()
+            )
+        };
+        match (self.bound_twice, self.others) {
+            (false, _) => what,
+            (true, 0) => format!(
+                "{what}, and its name is bound to more than one definition, of which heki reads the last"
+            ),
+            (true, _) => format!(
+                "{what}, and the name of one is bound to more than one definition, of which heki reads the last"
+            ),
         }
     }
 
-    /// `a generator` or `an async generator`: what calling the function creates.
+    /// `a generator` or `an async generator`: what calling the functions creates.
     fn kind(&self) -> &'static str {
         if self.is_async {
             "an async generator"
         } else {
             "a generator"
+        }
+    }
+
+    /// [`Self::kind`] without its article.
+    fn noun(&self) -> &'static str {
+        if self.is_async {
+            "async generator"
+        } else {
+            "generator"
         }
     }
 }

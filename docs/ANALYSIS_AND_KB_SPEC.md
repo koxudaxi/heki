@@ -1978,10 +1978,11 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      when either rule runs) and skips the APIs that hand the result back
      (`UnawaitedHandoff::hands_back`); each record also says whether its callees are every
      implementation calling the handed value can run (`UnawaitedHandoff::complete`).
-   - A report is worded as possible when a callee is not a generator function as defined or its
-     name is bound to more than one definition (`MustExec::bound_twice` of its summary). Its
-     tier is exact when its premises hold and the call is complete; the rule is heuristic until
-     it is certified, which caps the tier.
+   - Every callee must be a generator function: a call that may run a plain or decorated
+     implementation is no report. A report says so when a callee's name is bound to more than one
+     definition (`MustExec::bound_twice` of its summary). Its tier is exact when no name is bound
+     twice and the call is complete; the rule is heuristic until it is certified, which caps the
+     tier.
 14. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function (and each module body a scope names as `<module>`,
    `DottedPattern::names_module_bodies`) finds the shortest chain to each forbidden effect,

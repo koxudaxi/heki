@@ -34,16 +34,18 @@ It reports a call of a project generator function:
   `itertools.filterfalse`, `itertools.takewhile`, and `itertools.dropwhile`. The function is
   handed itself, as a bound method (`self.drain`), or through `functools.partial`.
 
-A report is worded as certain when every function the call may run is a generator function
-without decorators other than `staticmethod`, `classmethod`, `abstractmethod`, or `override`,
-and its name is bound to one definition. When another implementation of the method is a plain
-function, or the name is bound to more than one definition, the report says the call may run
-the generator function.
+Every function the call may run is a generator function without decorators other than
+`staticmethod`, `classmethod`, `abstractmethod`, or `override`: a call of a method that a
+subclass overrides with a plain function is no report. When the name is bound to more than one
+definition (`def` under `if` and `else`), the report says that the last one is a generator
+function.
 
 It does not report:
 
 - a generator that is iterated, stepped, returned, yielded, stored, bound to a name, passed to
   any call, or delegated to (`yield from gen()`);
+- a call that may run a plain function or a decorated one, such as another implementation of
+  the method;
 - a generator function under any other decorator: `contextlib.contextmanager`, a test fixture, or
   a decorator heki does not know may call the function or wrap the generator;
 - a call heki does not resolve to a project function, and a library function that returns a
@@ -64,9 +66,8 @@ there.
 Its premises:
 
 - **Generator function**: every function the call runs is a generator function that no
-  decorator replaces, and the name of each is bound to one definition. Open when another
-  implementation of the method is a plain function or a decorated one, or when the name is bound
-  to more than one definition (`def` under `if` and `else`).
+  decorator replaces, and the name of each is bound to one definition. Open when the name is
+  bound to more than one definition (`def` under `if` and `else`).
 - **Every implementation**: the call's targets are every implementation it can run (R1, R2, R5).
   Open for a receiver typed by a protocol, a base class heki knows nothing of that may define the
   method, more than 64 classes to dispatch over, a member of a union that does not resolve, or a
