@@ -70,8 +70,10 @@ only inspects its arguments (`print`, `getattr`, `type`), `super`, `typing.cast`
 function's defaults and annotations; a subscript (`Optional[Rule]`), a comparison (`f is decide`), a
 receiver (`Rule.of(...)`), and a module binding another name to it. A callable a builtin calls once
 per item (`sorted(xs, key=decide)`, `map(decide, xs)`) is a call already, and so is the
-`functools.partial` object handed to one. A reference in a class body counts for the function
-running the class statement (`<module>` for a class at module level). A class body, a function, a
+`functools.partial` object handed to one. A call or a reference in a class body (a class
+attribute's value, a method's decorator or default argument) counts for the function running the
+class statement (`<module>` for a class at module level, a nested class's included); a method's own
+body is the method's. A class body, a function, a
 lambda, or a comprehension nested in a function names what the function binds to a name it reads
 (a local import), at the name.
 

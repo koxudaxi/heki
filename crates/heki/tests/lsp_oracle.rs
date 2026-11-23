@@ -1758,6 +1758,38 @@ fn steps_references() -> Vec<Step> {
     ]
 }
 
+const RECEIPT_HOLDER: &str =
+    "from pkg.ledger import Receipt\n\n\nclass Holder:\n    kept = Receipt(1)\n";
+
+/// A class body at module level constructs the guarded dataclass of another module: the module
+/// body makes the call, which follows the dataclass's module when it renames the class and back.
+fn steps_class_bodies() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a class attribute's value constructs the guarded dataclass",
+            vec![Action::Create(
+                "pkg/receipt_holder.py",
+                RECEIPT_HOLDER.to_owned(),
+            )],
+        )
+        .present(&[("pkg/receipt_holder.py", "MUT204")]),
+        Step::new(
+            "the dataclass's module renames it",
+            vec![save(
+                "pkg/ledger.py",
+                &LEDGER.replace("class Receipt", "class Slip"),
+            )],
+        )
+        .absent(&[("pkg/receipt_holder.py", "MUT204")]),
+        Step::new("the name comes back", vec![save("pkg/ledger.py", LEDGER)])
+            .present(&[("pkg/receipt_holder.py", "MUT204")]),
+        Step::new(
+            "the class body is removed",
+            vec![Action::Delete("pkg/receipt_holder.py")],
+        ),
+    ]
+}
+
 /// `references = "calls-and-bases"` and `attribution = "lexical"` on the `ledger` call contract:
 /// a class of another module derives from the guarded dataclass, whose renaming and restoring
 /// in its own module turns the base off and on; then the private helper's construction is
@@ -5176,6 +5208,7 @@ sessions!(editing, Session::start, {
     contracts: steps_contracts,
     contract_extensions: steps_contract_extensions,
     references: steps_references,
+    class_bodies: steps_class_bodies,
     bases_and_attribution: steps_bases_and_attribution,
     argument_lists: steps_argument_lists,
     environment: steps_environment,

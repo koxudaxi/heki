@@ -171,59 +171,32 @@ fn extract_module(
         )
         .run();
         cell_aliases.extend(cells);
-        // A `class` statement in a function runs its body there: the body's effects and calls
-        // are the function's (its methods run only when they are called).
-        if !f.is_module_body {
-            for body in class_bodies_run_by(input.ir, f) {
-                let body = FnShape::new(body);
-                let facts = Extractor::new(
-                    &body,
-                    &key,
-                    &cx,
-                    &input.path,
-                    contracts,
-                    opt_in,
-                    &cell_aliases,
-                )
-                .run();
-                absorb_class_body(&mut summary, facts.summary);
-                external.extend(facts.external);
-                blind.extend(facts.blind);
-                unawaited.extend(facts.unawaited);
-                sites.extend(
-                    facts
-                        .sites
-                        .into_iter()
-                        .map(|site| CallSite { flow: None, ..site }),
-                );
-                references.extend(facts.references);
-            }
-        } else if opt_in.blind_spots
-            || opt_in.unawaited_handoffs
-            || contracts.is_some_and(|c| c.references() || c.checks_module_bodies())
-        {
-            // The module body runs the bodies of its classes: what they hand on (a dataclass
-            // field's `default_factory`) is handed on by the module, what they take from
-            // outside the project (`sys.platform`) the module takes, and the calls heki is
-            // blind to there, or that call a callable without awaiting it, are the module's.
-            // Their other facts are not the module's.
-            for body in class_bodies_run_by(input.ir, f) {
-                let body = FnShape::new(body);
-                let facts = Extractor::new(
-                    &body,
-                    &key,
-                    &cx,
-                    &input.path,
-                    contracts,
-                    opt_in,
-                    &cell_aliases,
-                )
-                .run();
-                references.extend(facts.references);
-                external.extend(facts.external);
-                blind.extend(facts.blind);
-                unawaited.extend(facts.unawaited);
-            }
+        // A `class` statement runs its body where it runs, in a function or the module body:
+        // the body's effects, calls (a class attribute's value, a decorator, a default
+        // argument), and accesses are that code's (its methods run only when they are called).
+        for body in class_bodies_run_by(input.ir, f) {
+            let body = FnShape::new(body);
+            let facts = Extractor::new(
+                &body,
+                &key,
+                &cx,
+                &input.path,
+                contracts,
+                opt_in,
+                &cell_aliases,
+            )
+            .run();
+            absorb_class_body(&mut summary, facts.summary);
+            external.extend(facts.external);
+            blind.extend(facts.blind);
+            unawaited.extend(facts.unawaited);
+            sites.extend(
+                facts
+                    .sites
+                    .into_iter()
+                    .map(|site| CallSite { flow: None, ..site }),
+            );
+            references.extend(facts.references);
         }
         if let Some(mut flow) = flow {
             // Site-list indices of the function become indices into the file's call sites.
