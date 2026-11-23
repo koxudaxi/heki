@@ -317,7 +317,7 @@ unresolved = "report"
 | `own-receiver` | `"report"` | `"report"` or `"allow"`: whether a write through the receiver of the method it is judged in (`self`, `cls`, `super()`) is allowed. See [How contracts report](#how-contracts-report). |
 | `allowed-protocols` | `[]` | Project protocols (class patterns, their subclasses included): a write through a value typed with one that declares the attribute, itself or through its protocol bases, is allowed. See [How contracts report](#how-contracts-report). |
 | `protocol-subclasses` | `true` | `false`: an `allowed-protocols` pattern names the protocols it matches, not their subprotocols (a protocol deriving from an allowed one stays judged). |
-| `unlisted-dict-keys` | `"ignore"` | `"ignore"` or `"report"`: whether a `__dict__` key of a target's class that no `write-owners` target names is reported when it is written. |
+| `unlisted-dict-keys` | `"ignore"` | `"ignore"` or `"report"`: whether a `__dict__` key of a target's class that no `write-owners` target names is reported when it is written; with `unresolved = "report"`, also on an object of unknown class (`MUT205`). |
 
 A container entry (`Class.attr["key"]`):
 
@@ -351,9 +351,10 @@ needs a target first. A target names the keys its attribute pattern matches (`Fi
 `_cache`), and an entry target names its container. A key another contract names is that
 contract's to guard: its writes are judged by that contract's allowance alone. The contract's
 allowance applies to an unlisted key as to a target write. A key computed at run time has no name
-to check (`MUT205`, with `unresolved = "report"`), and neither has a write in a helper that does
-not type the object. A key every function may write is listed by a contract that allows every
-writer:
+to check (`MUT205`, with `unresolved = "report"`), and neither has a write on an object heki
+cannot type, a helper's parameter that no annotation types included: with `unresolved = "report"`
+too, `MUT205` reports such a key (below). A key every function may write is listed by a contract
+that allows every writer:
 
 ```toml
 [[tool.heki.write-owners]]
@@ -367,7 +368,12 @@ With `unresolved = "report"`, `MUT205` reports:
 - an attribute named like a target, written on an object of unknown class;
 - a computed attribute name (`setattr(obj, name, v)`, `obj.__dict__[name] = v`,
   `obj.__dict__.update(...)`, `vars(obj) |= other`) written on a target class, or on an object
-  of unknown class, where it may be any target.
+  of unknown class, where it may be any target;
+- with `unlisted-dict-keys = "report"`, a constant `__dict__` key that no target names for some
+  class the contract's targets cover, written on an object of unknown class, where it may be a
+  new key of that class. A helper whose callers hand it only objects of classes no target covers
+  is not reported, and neither is a class's own initialization through a helper it passes `self`
+  to.
 
 ### `read-owners`
 

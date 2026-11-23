@@ -6169,6 +6169,70 @@ fn lsp_diagnostics_equal_a_full_check_for_keys_another_contract_names() {
     s.lsp.stop(true);
 }
 
+// ------------------------- `__dict__` keys no target names, on an object of unknown class
+
+const UNKNOWN_CLASS_KEYS_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201", "MUT205"]
+
+[[tool.heki.write-owners]]
+name = "caches"
+targets = ["pkg.model.Field._type_cache"]
+allowed-writers = ["pkg.store:*"]
+unlisted-dict-keys = "report"
+unresolved = "report"
+"#;
+
+const UNKNOWN_CLASS_KEYS_MODEL: &str = "class Field:\n    pass\n\n\nclass Other:\n    pass\n";
+const UNKNOWN_CLASS_KEYS_PASSES: &str =
+    "def fill(obj) -> None:\n    obj.__dict__[\"_new_cache\"] = 1\n";
+const UNKNOWN_CLASS_KEYS_USE: &str = "from pkg.model import Field, Other\nfrom pkg.passes import fill\n\n\ndef run(obj: Other) -> None:\n    fill(obj)\n";
+
+/// `unlisted-dict-keys` with `unresolved`: a helper writing a key no target names on its
+/// untyped parameter is reported when a caller in another module hands it an instance of a
+/// target's class, and not when the only caller hands it another class, as the caller's
+/// annotation changes and changes back.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_new_keys_on_objects_of_unknown_class() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/model.py", UNKNOWN_CLASS_KEYS_MODEL.to_owned()),
+        ("pkg/passes.py", UNKNOWN_CLASS_KEYS_PASSES.to_owned()),
+        ("pkg/use.py", UNKNOWN_CLASS_KEYS_USE.to_owned()),
+    ];
+    let mut s = Session::start_with(
+        "lsp_oracle_unknown_class_keys",
+        UNKNOWN_CLASS_KEYS_CONFIG,
+        files,
+        false,
+    );
+    let reported: &[(&str, &str)] = &[("pkg/passes.py", "MUT205")];
+    let steps = [
+        Step::new("initial index", Vec::new()).absent(reported),
+        Step::new(
+            "the caller hands the helper an instance of the target's class",
+            vec![save(
+                "pkg/use.py",
+                &UNKNOWN_CLASS_KEYS_USE.replace("obj: Other", "obj: Field"),
+            )],
+        )
+        .present(reported),
+        Step::new(
+            "the caller hands it another class again",
+            vec![save("pkg/use.py", UNKNOWN_CLASS_KEYS_USE)],
+        )
+        .absent(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
 // ------------------------------------ allowed protocols with and without their subprotocols
 
 const SUBPROTOCOL_CONFIG: &str = r#"[project]

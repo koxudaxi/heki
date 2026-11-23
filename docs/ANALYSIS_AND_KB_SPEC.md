@@ -1640,7 +1640,11 @@ message = "write model state through GenerationStore instead"
      targets cover, whose key no target of any `write-owners` contract covering the class names
      (`NamedDictKeys`, built once per run from every contract's targets), is judged the same way
      once per family of the contract's targets covering the class (`OwnerRule::written`), and
-     reported as that key (`Class.key`).
+     reported as that key (`Class.key`). With `unresolved = "report"` too, a `dict_direct`
+     unresolved write site (an object of unknown class) whose key no target names for some class
+     of the contract's targets is `MUT205`'s (`unlisted_key_classes`): a caller binding one of
+     those classes leaves the write there, as the caller's `IndirectHelper` site carries no
+     `__dict__` kind for `OwnerRule::written` to judge.
   3. Existing code bases migrate with **`heki check --baseline`**: counts are frozen per
      `(path, qualname, "MUT201", "Class.attr")` and can only shrink.
 

@@ -13,7 +13,7 @@ Strict mode of a `write-owners` contract (`unresolved = "report"`): writing an a
 ## What it does
 The strict mode of a `[[tool.heki.write-owners]]` contract that sets `unresolved = "report"`:
 reports the writes outside the write owners that `MUT201` cannot tie to a target class, so a clean
-`MUT201` run says how much it did not check. Three kinds of writes are reported, each once, at the
+`MUT201` run says how much it did not check. Four kinds of writes are reported, each once, at the
 write:
 
 - an attribute named like a target attribute (`fields` for `Model.fields`, any name for
@@ -36,7 +36,12 @@ write:
   `slots=True` along the way), and one stored on its class, a subclass, or an instance outside
   the class body (`Model.KEY = "x"`);
 - an attribute name computed at run time written on an object of unknown class (an unannotated
-  `target` in `setattr(target, name, v)` or `target.__dict__[key] = v`), which may be any target.
+  `target` in `setattr(target, name, v)` or `target.__dict__[key] = v`), which may be any target;
+- with `unlisted-dict-keys = "report"`, a constant `__dict__` key written on an object of unknown
+  class (`field.__dict__["_name_cache"] = v`, `field.__dict__.setdefault(KEY, v)`, `del
+  vars(field)["k"]`) that no target of any `write-owners` contract names for some class this
+  contract's targets cover: it may be a new key of that class, which `MUT201` reports on a typed
+  object.
 
 The rules of `MUT201` for what is allowed apply: allowed writers, exempt methods, a class's own
 initialization (`setattr(self, name, v)` in `__init__`), functions that only run inside allowed
@@ -45,7 +50,10 @@ they write. A parameter that every caller path binds to an object of a project c
 reported: `MUT201` reports the write at those callers. For a computed name on a parameter, a
 caller binding an object of a target class leaves the write to `MUT205` (`MUT201` has no name to
 report at that caller), unless it is that class's own initialization handing over its `self`,
-and one binding an object of another class ties it there. With
+and one binding an object of another class ties it there. The same holds for a `__dict__` key no
+target names: a caller binding an object of a class the key would be new to leaves the write to
+`MUT205` (`MUT201` sees no `__dict__` write at a caller handing the object to a helper that does
+not type it). With
 `attribution = "lexical"`, a function that only runs inside allowed writers is not allowed, and a
 caller path through an allowed writer counts like any other, while a helper that only a class's
 own initialization runs on its own `self` (`self._assign(name)` in `__init__`) stays allowed.
@@ -59,13 +67,16 @@ themselves, as for `MUT201`, after the contract's `message`:
 ## What a report states
 
 A report states that, outside the write owners, the function writes an attribute named like a target
-of the `write-owners` contract on an object whose class heki does not know, or a computed attribute
-name on a guarded class or on an object whose class heki does not know.
+of the `write-owners` contract on an object whose class heki does not know, a computed attribute
+name on a guarded class or on an object whose class heki does not know, or, with
+`unlisted-dict-keys = "report"`, a `__dict__` key no target names on an object whose class heki
+does not know.
 
 Its premises:
 
-- **Named like a target**: the attribute's name matches a target's, or is computed at run time.
-  Established.
+- **Named like a target**: the attribute's name matches a target's, or is computed at run time
+  (with `unlisted-dict-keys = "report"`, or is a `__dict__` key no target names for a class the
+  targets cover). Established.
 - **Unknown class**: heki did not resolve the class of the object. Established: the claim is about
   heki's own resolution.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
@@ -105,6 +116,13 @@ def read_only(model: Model) -> int:
     return len(model.fields)  # not reported: a read
 ```
 
+With `unlisted-dict-keys = "report"` as well:
+
+```python
+def remember(model) -> None:
+    model.__dict__["_seen"] = True  # MUT205: a key no target names, on an object of unknown class
+```
+
 Use instead:
 ```python
 def touch(model: Model) -> None:
@@ -117,5 +135,7 @@ No automatic fix.
 ## Options
 - `[[tool.heki.write-owners]]`:
   - `unresolved`: `"ignore"` (default) or `"report"`.
+  - `unlisted-dict-keys`: `"ignore"` (default) or `"report"`: also report a constant `__dict__`
+    key no `write-owners` target names, written on an object of unknown class.
   - `targets`, `allowed-writers`, `forbidden-writers`, `exempt-methods`, `fresh-objects`,
     `attribution`, `message`: as for `MUT201`.
