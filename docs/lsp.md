@@ -107,7 +107,9 @@ The server indexes the workspace in the background, then keeps only the per-func
 summaries in memory. It runs the analyses one at a time, in the order of the editor's messages
 (an edit's analysis takes its place when its debounce ends), so the diagnostics do not depend on
 which analysis happens to start first: of documents opened together, each is analyzed with the
-ones opened before it already indexed.
+ones opened before it already indexed. When the editor closes the server's input or goes away
+without ending the session, the server exits at once (exit code 1), also with an analysis still
+running.
 
 | Event | Re-analyzed |
 | ----- | ----------- |

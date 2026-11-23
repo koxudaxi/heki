@@ -899,9 +899,17 @@ impl<S: tower_service::Service<Request>> tower_service::Service<Request> for End
     }
 }
 
-/// Serve LSP over stdin / stdout until `exit` (or the end of stdin), with `selectors` over the
-/// configuration of the workspace. Returns whether the session ended as the protocol asks, after
-/// `shutdown`: the exit code is then 0, else 1.
+/// How much of the client's input the server reads ahead of the protocol loop. A handler that
+/// needs the state waits while an analysis holds it, and the loop waits with it; stdin is read
+/// apart from the loop so that its end is seen at once. Past this much unread input the client
+/// waits, as on a full pipe, and the end is seen once the loop reads again.
+const INPUT_READ_AHEAD: usize = 8 << 20;
+
+/// Serve LSP over stdin / stdout with `selectors` over the configuration of the workspace, until
+/// `exit` or the end of stdin (the client closed it or went away), whatever analysis is in
+/// flight: tower-lsp's `Server::serve` would first finish every handler it has started. Returns
+/// whether the session ended as the protocol asks, after `shutdown`: the exit code is then 0,
+/// else 1.
 pub fn run_stdio(selectors: Selectors) -> std::io::Result<bool> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -916,13 +924,20 @@ pub fn run_stdio(selectors: Selectors) -> std::io::Result<bool> {
             inner: service,
             exit: Arc::clone(&exit),
         };
+        let (received, mut input) = tokio::io::simplex(INPUT_READ_AHEAD);
+        let mut stdin = tokio::io::stdin();
+        // The loop runs on a worker thread, which a handler may hold; this thread only passes
+        // the input on and watches for the end of the session.
+        let serving =
+            tokio::spawn(Server::new(received, tokio::io::stdout(), socket).serve(service));
         tokio::select! {
-            () = Server::new(tokio::io::stdin(), tokio::io::stdout(), socket).serve(service) => {}
+            _ = serving => {}
+            _ = tokio::io::copy(&mut stdin, &mut input) => {}
             () = exit.notified() => {}
         }
         shut_down.load(Ordering::SeqCst)
     });
-    // `tokio::io::stdin` reads on a blocking thread; do not wait for it.
+    // Neither the blocking thread reading stdin nor an analysis in flight is waited for.
     runtime.shutdown_background();
     Ok(shut_down)
 }

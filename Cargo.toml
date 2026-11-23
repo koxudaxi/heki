@@ -66,7 +66,7 @@ smallvec = "1.13"
 # this crate).
 strsim = "0.11"
 thiserror = "2.0"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "time", "sync"] }
 toml = "0.8"
 # The positions of the keys and values of a configuration file, for its errors (`toml` already
 # builds this crate).
