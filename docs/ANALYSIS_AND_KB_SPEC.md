@@ -535,7 +535,27 @@ module binds is the module's own object of unknown value (`Symbol::Unknown`), ne
 of the same name: calling it is unresolved, unless a `[[tool.heki.ecosystem]]` entry declares it
 (`get = functools.partial(...)` listed as blocking, or with a `return-type`), which then
 describes it as it describes a library symbol. A name under a project module that the module
-does not bind (a compiled submodule, a star import) is what the catalog says of it.
+does not bind (a compiled submodule, a star import of a module outside the project) is what the
+catalog says of it.
+
+A star import of a project module (`from ._utils import *`) binds the names that module lists in
+its `__all__`, when the module binds `__all__` once to a list or tuple of string literals it does
+not change (`ModuleDecls::exports`), and without `__all__` the public names (no leading
+underscore) its namespace holds once its body has run, those its own star imports bind included
+(`ModuleDecls::star_imports`, `ProjectDecls::star_binding`). A name the module binds no other way
+is then the name read on the module the star import imports (`pkg.utils.fetch` is
+`pkg.utils._utils.fetch`), in the module itself and read from other modules, as an import would
+bind it: `canonical`, `object_named`, `from_import`, and the reads of constants follow it. A name
+the module binds itself keeps that binding, and the existing rules on what a star import may
+rebind (imports, constants, the globals the module body stores before it) still hold. The name is
+open (`Symbol::Unknown`), not external, when a star import binds it through a module heki could
+not read, through an `__all__` heki cannot read (built at run time, changed in place, imported),
+or when star imports bind it to different objects, which a star import of a module outside the
+project may do for any name (`try: from ._speedups import *` with a fallback). Deciding a name
+reads each module once, however many paths of star imports reach it; a star import back into a
+module being decided binds nothing more. It follows at most 128 star imports nested in one
+another (`MAX_STAR_IMPORT_DEPTH`), and past them the name is open. A change another module makes
+to the `__all__` of the module would have to run before the star import, and is not followed.
 
 A class-body name bound last, outside a field, to a module-level name (a function or class of
 its module the module binds once, an alias of its module, a name an import binds, or an attribute
