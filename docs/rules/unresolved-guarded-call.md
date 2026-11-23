@@ -37,6 +37,10 @@ name is no target: a class outside the target's family (`DataType` and its subcl
 caller path through an allowed caller counts like any other: the call is the function's own, and
 its callers only tell the receiver's class.
 
+The help names up to three allowed callers that call a target of the method's name
+themselves, as for `MUT204`, after the contract's `message`:
+``allowed callers of `replace_reference`: ...``.
+
 ## What a report states
 
 A report states that, outside the call owners, the function calls a method named like a target of

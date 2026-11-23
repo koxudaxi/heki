@@ -832,10 +832,14 @@ holds for `invalidation` too:
   list), and a protocol-typed value handed to a helper that changes it without typing its
   parameter stay reported. By the call graph, a private method of an implementation that a call
   through the protocol runs still hands its writes of its own `self` to the caller.
-- **One report stands for every site behind it.** A report at a call stands for every access
-  behind the call, and an effect boundary's report for every site its scope function reaches.
-  JSON output gives their number as `sites`, and a
-  [Ratchet baseline](adoption.md#ratchet-baselines) counts each of them.
+- **The help names the allowed code that does it today.** After the contract's `message`, the
+  help of a report names up to three public functions and methods whose own body does what the
+  report shows from a place the contract allows (an `allowed-*` pattern names them, or the
+  `forbidden-*` patterns leave them out; for `invalidation`, the functions announcing every
+  write of the target on every path and the `exempt-writers`), by fully qualified name:
+  ``add entries through `Store`; allowed writers of `Registry.entries`: `pkg.store.Store.add` ``.
+  Private functions (`_name`), special methods (`__init__`), and the exempt methods are not named.
+  JSON output gives them with their files as `allowed_examples` (`fqn`, `path`).
 
 ## Ecosystem knowledge: `[[tool.heki.ecosystem]]`
 

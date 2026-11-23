@@ -4543,6 +4543,133 @@ fn steps_contracts() -> Vec<Step> {
     ]
 }
 
+// The allowed functions the help of a contract report names, in other files.
+const STORE_WRITING: &str = "from pkg.model import Registry, Vault\n\n\nclass Store:\n    def put(self, r: Registry, x):\n        r.entries.append(x)\n";
+const STORE_WRITING_MOVED: &str = "from pkg.model import Registry, Vault\n\n\n# The store.\nclass Store:\n    def put(self, r: Registry, x):\n        r.entries.append(x)\n";
+const STORE_MORE: &str = "from pkg.ledger import Ledger\nfrom pkg.model import Registry, Vault\n\n\nclass Store:\n    def add(self, r: Registry):\n        r.entries.append(1)\n\n    def look(self, v: Vault):\n        return v.secret\n\n    def pay(self, l: Ledger):\n        return l.post(1)\n";
+// A subclass of the call target `Receipt`, constructed outside the allowed callers, and the
+// allowed `Store` starting to construct it.
+const SLIPS: &str = "from pkg.ledger import Receipt\n\n\nclass Slip(Receipt):\n    pass\n\n\ndef issue():\n    return Slip(1)\n";
+const STORE_ISSUING: &str = "from pkg.model import Registry, Vault\nfrom pkg.slips import Slip\n\n\nclass Store:\n    def put(self, r: Registry, x):\n        return x\n\n    def issue(self):\n        return Slip(2)\n";
+const STORE_NOT_ISSUING: &str = "from pkg.model import Registry, Vault\nfrom pkg.slips import Slip\n\n\nclass Store:\n    def put(self, r: Registry, x):\n        return x\n\n    def issue(self):\n        return 2 if Slip else 3\n";
+// A write no path announces, whose help names `pkg.grow.grow`: its announcement comes from
+// `pkg.announce`.
+const CARELESS: &str =
+    "from pkg.nodes import Node\n\n\ndef careless(node: Node, kid):\n    node.kids.append(kid)\n";
+// Owner targets named by private members (`Purse.__count`), which the class's own methods write
+// and read under the mangled names (`_Purse__count`).
+const PURSE_CONTRACTS: &str = "\n[[tool.heki.write-owners]]\nname = \"purse\"\ntargets = [\"Purse.__count\"]\nallowed-writers = [\"Purse.*\"]\n\n[[tool.heki.read-owners]]\nname = \"purse-seal\"\ntargets = [\"Purse.__seal\"]\nallowed-readers = [\"Purse.*\"]\n";
+const PURSE: &str = "class Purse:\n    def __init__(self):\n        self.__count = []\n        self.__seal = 0\n\n    def add(self, x):\n        return x\n\n    def seal(self):\n        return 0\n";
+const PURSE_WRITING: &str = "class Purse:\n    def __init__(self):\n        self.__count = []\n        self.__seal = 0\n\n    def add(self, x):\n        self.__count.append(x)\n\n    def seal(self):\n        return 0\n";
+const PURSE_READING: &str = "class Purse:\n    def __init__(self):\n        self.__count = []\n        self.__seal = 0\n\n    def add(self, x):\n        return x\n\n    def seal(self):\n        print(self.__seal)\n        return 0\n";
+const PURSE_USE: &str = "from pkg.purse import Purse\n\n\ndef poke(t: Purse):\n    t._Purse__count.append(1)\n\n\ndef peek(t: Purse):\n    return t._Purse__seal\n";
+
+/// The help of a contract report names the allowed functions of other files that do what it
+/// shows: a function starts and stops writing the target, a module with another one comes and
+/// goes, and a line added above one changes nothing the help names.
+fn steps_allowed_examples() -> Vec<Step> {
+    vec![
+        Step::new(
+            "an allowed writer starts writing the target itself",
+            vec![save("pkg/store.py", STORE_WRITING)],
+        )
+        .present(&[("pkg/ops.py", "MUT201")]),
+        Step::new(
+            "a comment above the allowed writer",
+            vec![save("pkg/store.py", STORE_WRITING_MOVED)],
+        )
+        .present(&[("pkg/ops.py", "MUT201")])
+        .cutoff(),
+        Step::new(
+            "a new module defines another allowed writer, reader, and caller",
+            vec![Action::Create("pkg/store_more.py", STORE_MORE.to_owned())],
+        )
+        .present(&[("pkg/ops.py", "MUT201")]),
+        Step::new(
+            "the new module is deleted",
+            vec![Action::Delete("pkg/store_more.py")],
+        )
+        .present(&[("pkg/ops.py", "MUT201")]),
+        Step::new(
+            "the allowed writer stops writing the target",
+            vec![save("pkg/store.py", STORE)],
+        )
+        .present(&[("pkg/ops.py", "MUT201")]),
+        Step::new(
+            "a module constructs a subclass of a call target outside the allowed callers",
+            vec![Action::Create("pkg/slips.py", SLIPS.to_owned())],
+        )
+        .present(&[("pkg/slips.py", "MUT204")]),
+        Step::new(
+            "an allowed caller that reads the subclass",
+            vec![save("pkg/store.py", STORE_NOT_ISSUING)],
+        )
+        .present(&[("pkg/slips.py", "MUT204")]),
+        Step::new(
+            "the allowed caller starts constructing the subclass",
+            vec![save("pkg/store.py", STORE_ISSUING)],
+        )
+        .present(&[("pkg/slips.py", "MUT204")]),
+        Step::new(
+            "the allowed caller stops constructing it",
+            vec![save("pkg/store.py", STORE_NOT_ISSUING)],
+        )
+        .present(&[("pkg/slips.py", "MUT204")]),
+        Step::new(
+            "a module writes an invalidation target no path announces",
+            vec![Action::Create("pkg/careless.py", CARELESS.to_owned())],
+        )
+        .present(&[("pkg/careless.py", "MUT109")]),
+        Step::new(
+            "the helper announcing an allowed writer's change in another module stops",
+            vec![save("pkg/announce.py", ANNOUNCE_SILENT)],
+        )
+        .present(&[("pkg/careless.py", "MUT109"), ("pkg/grow.py", "MUT109")]),
+        Step::new(
+            "the helper announces the change again",
+            vec![save("pkg/announce.py", ANNOUNCE)],
+        )
+        .present(&[("pkg/careless.py", "MUT109")])
+        .absent(&[("pkg/grow.py", "MUT109")]),
+        Step::new(
+            "a module writes and reads private owner targets of a class in another module",
+            vec![
+                Action::Configure(format!("{CONFIG}{PURSE_CONTRACTS}")),
+                Action::Create("pkg/purse.py", PURSE.to_owned()),
+                Action::Create("pkg/purse_use.py", PURSE_USE.to_owned()),
+            ],
+        )
+        .present(&[
+            ("pkg/purse_use.py", "MUT201"),
+            ("pkg/purse_use.py", "MUT203"),
+        ]),
+        Step::new(
+            "a method of the class starts writing its private target",
+            vec![save("pkg/purse.py", PURSE_WRITING)],
+        )
+        .present(&[
+            ("pkg/purse_use.py", "MUT201"),
+            ("pkg/purse_use.py", "MUT203"),
+        ]),
+        Step::new(
+            "it stops, and another starts reading the other private target",
+            vec![save("pkg/purse.py", PURSE_READING)],
+        )
+        .present(&[
+            ("pkg/purse_use.py", "MUT201"),
+            ("pkg/purse_use.py", "MUT203"),
+        ]),
+        Step::new(
+            "the methods neither write nor read them",
+            vec![save("pkg/purse.py", PURSE)],
+        )
+        .present(&[
+            ("pkg/purse_use.py", "MUT201"),
+            ("pkg/purse_use.py", "MUT203"),
+        ]),
+    ]
+}
+
 /// Files: a module created and deleted, a stub next to a module, and a package over the
 /// module of the same name.
 fn steps_files() -> Vec<Step> {
@@ -5339,6 +5466,7 @@ sessions!(editing, Session::start, {
     method_lookups: steps_method_lookups,
     private_names: steps_private_names,
     contracts: steps_contracts,
+    allowed_examples: steps_allowed_examples,
     contract_extensions: steps_contract_extensions,
     references: steps_references,
     class_bodies: steps_class_bodies,

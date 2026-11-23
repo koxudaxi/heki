@@ -89,6 +89,13 @@ declares the attribute, itself or through its protocol bases, is allowed whereve
 read through another protocol or the implementation's class stays reported. A pattern names the
 subprotocols of the protocols it matches too, unless `protocol-subclasses = false`.
 
+The help starts with the contract's `message` and then names up to three allowed readers that
+read the member the report names themselves: public functions and methods an `allowed-readers`
+pattern names (with `forbidden-readers`, every function outside them), by fully qualified name
+(``allowed readers of `Reference.children`: `pkg.index.GenerationIndex.children_of` ``). Private
+functions (`_name`), special methods, and the exempt methods do not count. JSON output gives them
+with their files as `allowed_examples` (`fqn`, `path`).
+
 ## What a report states
 
 A report states that the function reads a target of a `read-owners` contract outside the contract's

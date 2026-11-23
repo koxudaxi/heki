@@ -1173,6 +1173,7 @@ fn suppression_report(
         fold_key: None,
         open_records: Vec::new(),
         contracts: Vec::new(),
+        allowed_examples: Vec::new(),
     })
 }
 
