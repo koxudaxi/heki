@@ -14,6 +14,7 @@ use crate::mut_rules::{
     Allowance, AllowanceKeys, FunctionMatcher, Subclasses, class_set, parse_targets,
     project_classes, split_arguments, split_item,
 };
+use crate::selection::RuleSelection;
 use crate::{
     CheckContext, DottedPattern, RuleConfigError, has_glob_syntax, last_name, split_last_dot,
 };
@@ -149,8 +150,9 @@ impl Key<'_> {
 }
 
 /// Every key of the contracts of `config` whose entries name project code alone, in
-/// configuration order.
-fn judged_keys(config: &HekiConfig) -> Vec<Key<'_>> {
+/// configuration order, of the kinds whose rules `selection` runs: a contract whose rules do not
+/// run guards nothing either way, and is not validated.
+fn judged_keys<'c>(config: &'c HekiConfig, selection: &RuleSelection) -> Vec<Key<'c>> {
     use Definition::{CallTarget, Class, Exempt, Function, Scope};
     use Shape::{Attribute, Definition as Def};
     fn push<'c>(
@@ -172,8 +174,17 @@ fn judged_keys(config: &HekiConfig) -> Vec<Key<'_>> {
             });
         }
     }
+    // The contracts of a kind, when one of its rules runs.
+    fn running<'c, T>(contracts: &'c [T], codes: &[&str], selection: &RuleSelection) -> &'c [T] {
+        if codes.iter().any(|c| selection.is_enabled(c)) {
+            contracts
+        } else {
+            &[]
+        }
+    }
     let mut out = Vec::new();
-    for (i, r) in config.write_owners.iter().enumerate() {
+    let write_owners = running(&config.write_owners, &["MUT201", "MUT205"], selection);
+    for (i, r) in write_owners.iter().enumerate() {
         let lists = [
             ("write-owners.targets", &r.targets[..], Attribute),
             (
@@ -204,7 +215,8 @@ fn judged_keys(config: &HekiConfig) -> Vec<Key<'_>> {
         ];
         push(&mut out, (i, &r.name), &lists);
     }
-    for (i, r) in config.read_owners.iter().enumerate() {
+    let read_owners = running(&config.read_owners, &["MUT203", "MUT206"], selection);
+    for (i, r) in read_owners.iter().enumerate() {
         let lists = [
             ("read-owners.targets", &r.targets[..], Attribute),
             (
@@ -230,7 +242,8 @@ fn judged_keys(config: &HekiConfig) -> Vec<Key<'_>> {
         ];
         push(&mut out, (i, &r.name), &lists);
     }
-    for (i, r) in config.call_owners.iter().enumerate() {
+    let call_owners = running(&config.call_owners, &["MUT204", "MUT207"], selection);
+    for (i, r) in call_owners.iter().enumerate() {
         let lists = [
             ("call-owners.targets", &r.targets[..], Def(CallTarget)),
             (
@@ -256,7 +269,8 @@ fn judged_keys(config: &HekiConfig) -> Vec<Key<'_>> {
         ];
         push(&mut out, (i, &r.name), &lists);
     }
-    for (i, r) in config.effect_boundaries.iter().enumerate() {
+    let boundaries = running(&config.effect_boundaries, &["EFF201"], selection);
+    for (i, r) in boundaries.iter().enumerate() {
         let lists = [
             ("effect-boundaries.scopes", &r.scopes[..], Def(Scope)),
             (
@@ -277,7 +291,8 @@ fn judged_keys(config: &HekiConfig) -> Vec<Key<'_>> {
         ];
         push(&mut out, (i, &r.name), &lists);
     }
-    for (i, r) in config.invalidation.iter().enumerate() {
+    let invalidation = running(&config.invalidation, &["MUT109"], selection);
+    for (i, r) in invalidation.iter().enumerate() {
         let lists = [
             ("invalidation.targets", &r.targets[..], Attribute),
             (
@@ -439,7 +454,7 @@ fn last_part(qualname: &str) -> &str {
 pub(crate) fn unmatched_entries(
     cx: &CheckContext<'_>,
 ) -> Result<Vec<UnmatchedEntry>, RuleConfigError> {
-    let keys = judged_keys(cx.config);
+    let keys = judged_keys(cx.config, cx.selection);
     if keys.iter().all(|k| k.entries.is_empty()) {
         return Ok(Vec::new());
     }

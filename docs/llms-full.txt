@@ -1897,12 +1897,13 @@ $ heki check
 warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-caches` names no attribute, method, or `__dict__` key of `pkg.model.Field` in the analyzed files; `pkg.model.Field._type_cache` exists
 ```
 
-- Judged: the targets, `allowed-*`, `forbidden-*`, `exempt-methods`, `allowed-protocols`, and
-  `forbid-cached-property-on` of `write-owners`, `read-owners`, and `call-owners`; the
-  `scopes`, `write-targets`, `write-universe`, and `allow-writes` of `effect-boundaries`; and the
-  `targets`, `invalidators`, and `exempt-writers` of `invalidation`. The `read-targets`,
-  `call-targets`, and `allowed-callees` of an effect boundary and the `producers` of
-  `readonly-returns` may name symbols outside the project, and are not judged.
+- Judged, in the contracts whose rules run: the targets, `allowed-*`, `forbidden-*`,
+  `exempt-methods`, `allowed-protocols`, and `forbid-cached-property-on` of `write-owners`,
+  `read-owners`, and `call-owners`; the `scopes`, `write-targets`, `write-universe`, and
+  `allow-writes` of `effect-boundaries`; and the `targets`, `invalidators`, and
+  `exempt-writers` of `invalidation`. The `read-targets`, `call-targets`, and
+  `allowed-callees` of an effect boundary and the `producers` of `readonly-returns` may name
+  symbols outside the project, and are not judged.
 - Each entry is matched as its rule matches it, against the definitions of the analyzed files:
   a function pattern names a function, method, class, or module body; a call target a function,
   method, or class; an exempt method a method's name; a scope a module, class, or function; a

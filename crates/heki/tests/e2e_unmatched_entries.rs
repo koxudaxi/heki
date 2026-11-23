@@ -67,6 +67,7 @@ fn lines<'s>(stderr: &'s str, prefix: &str) -> Vec<&'s str> {
 /// A run over the whole project warns about the entries that name nothing, which do not fail
 /// it; a `__dict__` key some code writes on an object of the class and a method that exists
 /// name something. `"error"` makes them errors that fail the run, and `"ignore"` drops them.
+/// The contracts whose rules do not run are not judged.
 #[test]
 fn a_run_warns_about_the_entries_that_match_nothing() {
     let p = repro("unmatched_default", "");
@@ -90,6 +91,11 @@ fn a_run_warns_about_the_entries_that_match_nothing() {
     let (code, stdout, stderr) = p.heki(&["check"]);
     assert_eq!(code, 0, "{stdout}{stderr}");
     assert!(lines(&stderr, "warning: ").is_empty(), "{stderr}");
+
+    // A contract whose rules do not run is not judged.
+    let p = repro("unmatched_rules_off", "");
+    let (_, _, stderr) = p.heki(&["check", "--ignore", "MUT201,MUT205"]);
+    assert_eq!(lines(&stderr, "warning: "), REPRO_ENTRIES[2..], "{stderr}");
 
     let p = repro(
         "unmatched_bad_value",
