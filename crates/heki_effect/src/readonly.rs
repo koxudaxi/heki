@@ -678,21 +678,33 @@ fn constructed_kind<'t>(
     complete.open_means(Some(())).map_or(kind, |()| None)
 }
 
+/// What makes a producer's result shared with its other callers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProducerKind {
+    /// A function a `functools` cache keeps the results of (`MUT114`).
+    #[default]
+    FunctoolsCache,
+    /// A function handing out the values a memo it keeps by hand holds
+    /// ([`crate::cache_flow::MemoReturn`]; `MUT114`).
+    Memo,
+    /// A producer declared in `readonly-returns` (`MUT202`).
+    Declared,
+}
+
 /// A function that may return (on some path) a value shared with a read-only producer's other
-/// callers: a declared `readonly-returns` producer's or an `@lru_cache` function's result, or a
-/// part of one, directly or through other such functions.
+/// callers: a declared `readonly-returns` producer's, an `@lru_cache` function's, or a hand
+/// memo's result, or a part of one, directly or through other such functions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtectedReturn {
-    /// The declared producer or `@lru_cache` function the value comes from.
+    /// The producer the value comes from.
     pub producer: String,
     /// What the returned value shares, joined over the paths that return such a value.
     pub shared: Shared,
     /// Calls from this function down to the one that returns the producer's value.
     pub chain: SharedChain,
-    /// `producer` is declared in `readonly-returns` (`MUT202`), not an `@lru_cache` function
-    /// (`MUT114`).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub declared: bool,
+    #[serde(default)]
+    pub kind: ProducerKind,
 }
 
 impl ProtectedReturn {
@@ -710,7 +722,7 @@ impl ProtectedReturn {
     pub fn add(
         slot: &mut Option<Self>,
         producer: String,
-        declared: bool,
+        kind: ProducerKind,
         produced: Shared,
         step: ReturnStep,
         chain: SharedChain,
@@ -723,7 +735,7 @@ impl ProtectedReturn {
             producer,
             shared,
             chain,
-            declared,
+            kind,
         };
         match slot {
             Some(r) => r.join(found),
@@ -891,16 +903,16 @@ mod tests {
             producer: "m.deep".into(),
             shared: shared(false, true),
             chain: vec![hop("m.a"), hop("m.deep")],
-            declared: true,
+            kind: ProducerKind::Declared,
         };
         long.join(ProtectedReturn {
             producer: "m.flat".into(),
             shared: shared(true, false),
             chain: vec![hop("m.flat")],
-            declared: false,
+            kind: ProducerKind::FunctoolsCache,
         });
         assert_eq!(long.producer, "m.flat");
-        assert!(!long.declared);
+        assert_eq!(long.kind, ProducerKind::FunctoolsCache);
         assert_eq!(long.shared, shared(true, true));
         assert_eq!(long.chain.len(), 1);
     }

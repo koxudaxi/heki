@@ -23,7 +23,9 @@ use crate::locks::{self, LockStep, ObjRef};
 use crate::one_at_a_time;
 use crate::order_flow;
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, ReturnOrigins, Source};
-use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared, container_mutator};
+use crate::readonly::{
+    self, Derivation, ProducerKind, ProtectedReturn, ReturnStep, Shared, container_mutator,
+};
 use crate::resolver::{
     self, Callee, DeclKeys, FunctionDecl, ModuleDecls, TypeCtx, Val, func_qualname,
     is_generator_function, self_aliases,
@@ -447,6 +449,10 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     if into.cached_result != other.cached_result {
         into.cached_result = None;
     }
+    // A may-fact: either definition handing out a memo's values does.
+    if into.memo_return.is_none() {
+        into.memo_return.clone_from(&other.memo_return);
+    }
     into.add_self_reads(&other);
     into.returns_self_attrs.extend(other.returns_self_attrs);
     into.returns_self_attrs
@@ -520,12 +526,12 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
             producer,
             shared,
             chain,
-            declared,
+            kind,
         } = o;
         ProtectedReturn::add(
             &mut into.returns_protected,
             producer,
-            declared,
+            kind,
             shared,
             ReturnStep::ITSELF,
             chain,
@@ -1266,6 +1272,10 @@ impl<'a> Extractor<'a> {
             class_of,
         );
         ex.returned = returned;
+        if !ex.summary.is_lru_cache {
+            ex.summary.memo_return =
+                cache_flow::memo_return(shape, &ex.self_vars, &ex.returned).map(Box::new);
+        }
         ex.summary.typed_params = (0..64u32)
             .zip(&f.params)
             .filter(|(_, p)| ex.project_class(p.var).is_some())
@@ -7974,7 +7984,7 @@ impl<'a> Extractor<'a> {
         ProtectedReturn::add(
             &mut self.summary.returns_protected,
             producer,
-            true,
+            ProducerKind::Declared,
             Shared::produced(deep),
             step,
             chain,

@@ -556,3 +556,241 @@ def use(name):
         "{diags:#?}"
     );
 }
+
+// ============================================================================ hand memos
+
+/// A schema graph that validates each raw object once and hands every reader the same object
+/// (`Graph.schema`), and the other memos a function keeps by hand: a module global, a
+/// parameter's default, `setdefault`, an `in` test before the fill, a container named as a
+/// cache, and a key built from two arguments.
+const HAND_MEMOS: &str = r#"class Schema:
+    def __init__(self, raw):
+        self.description = raw.get("description")
+        self.tags = []
+
+
+class Graph:
+    def __init__(self):
+        self._schemas = {}
+        self._items = {}
+        self._cache = {}
+        self._pairs = {}
+        self._fixed = {}
+        self._states = {}
+
+    def schema(self, raw):
+        if (found := self._schemas.get(id(raw))) is None:
+            found = self._schemas[id(raw)] = Schema(raw)
+        return found
+
+    def kept(self, name):
+        return self._pairs.setdefault(name.lower(), Schema({"name": name}))
+
+    def pair(self, a, b):
+        if (a, b) in self._pairs:
+            return self._pairs[(a, b)]
+        made = Schema({"a": a, "b": b})
+        self._pairs[(a, b)] = made
+        return made
+
+    def cached(self, name):
+        return self._cache[name]
+
+    def lookup(self, name):
+        return self._items[name]
+
+    def only(self):
+        if "only" not in self._fixed:
+            self._fixed["only"] = Schema({})
+        return self._fixed["only"]
+
+    def misfiled(self, a, b):
+        if a not in self._items:
+            self._items[b] = Schema({"a": a})
+        return self._items[a]
+
+    def recorded(self, name):
+        made = Schema({"name": name})
+        self._pairs[name] = made
+        return Schema({"name": name})
+
+    def state(self, name):
+        if name not in self._states:
+            self._states[name] = Schema({})
+        return self._states[name]
+
+    def adopted(self, name, schema):
+        return self._states.setdefault(name, schema)
+
+    def rebuilt(self, name):
+        self._items = {name: Schema({"name": name})}
+        return self._items[name]
+
+    def evicted(self, name):
+        self._cache.clear()
+        return self._cache.get(name)
+
+
+_LOADED = {}
+FLAG = bool(len(_LOADED))
+
+
+def load(name):
+    if name not in _LOADED:
+        _LOADED[name] = Schema({"name": name})
+    return _LOADED[name]
+
+
+def parse(text, _memo={}):
+    if text in _memo:
+        return _memo[text]
+    found = _memo[text] = Schema({"text": text})
+    return found
+
+
+def schema_of(graph: Graph, raw):
+    return graph.schema(raw)
+
+
+if FLAG:
+
+    def loaded_twice(name):
+        return Schema({})
+
+else:
+
+    def loaded_twice(name):
+        if name not in _LOADED:
+            _LOADED[name] = Schema({"name": name})
+        return _LOADED[name]
+"#;
+
+const HAND_MEMO_READERS: &str = r#"from graph import Graph, Schema, load, loaded_twice, parse, schema_of
+
+
+def writes_the_shared_object(graph: Graph, raw):
+    graph.schema(raw).description = "changed"
+
+
+def _index(obj: Schema):
+    obj.description = "indexed"
+
+
+def hands_the_shared_object_on(graph: Graph, raw):
+    _index(graph.schema(raw))
+
+
+def writes_a_fresh_object(raw):
+    _index(Schema(raw))
+
+
+def through_a_wrapper(graph: Graph, raw):
+    schema_of(graph, raw).tags.append("x")
+
+
+def other_memos(graph: Graph, name):
+    load(name).tags.append("x")
+    parse(name).description = "x"
+    graph.kept(name).description = "x"
+    graph.pair(name, 1).description = "x"
+    loaded_twice(name).description = "x"
+
+
+def no_memos(graph: Graph, name, schema: Schema):
+    graph.cached(name).description = "x"
+    graph.lookup(name).description = "x"
+    graph.only().description = "x"
+    graph.misfiled(name, 2).description = "x"
+    graph.recorded(name).description = "x"
+    graph.state(name).description = "x"
+    graph.adopted(name, schema).description = "x"
+    graph.rebuilt(name).description = "x"
+    graph.evicted(name).description = "x"
+"#;
+
+/// `(line, function, message)` of every report of `code`.
+fn reports_of(diags: &[Value], code: &str) -> Vec<(u64, String, String)> {
+    diags
+        .iter()
+        .filter(|d| d["rule_code"] == code)
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["qualname"].as_str().unwrap().to_owned(),
+                d["message"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// A function handing out the results it keeps in a memo by hand (read from it, or stored into
+/// it, under a key derived from its arguments, where it fills the memo with results computed
+/// from them) is a shared producer, as a `functools` cache is: changing its result is a
+/// heuristic `MUT114` report, without a contract. A container the function reads without filling
+/// it (a cache object's accessor, a registry), a constant key, a fill of another key than the
+/// one tested, a fresh value returned beside a fill, and a new empty object or an argument kept
+/// per key (state the callers share on purpose) share nothing.
+#[test]
+fn mut114_follows_the_values_a_hand_memo_hands_out() {
+    let p = Project::new("mut114_hand_memos");
+    p.write("graph.py", HAND_MEMOS)
+        .write("readers.py", HAND_MEMO_READERS);
+    let diags = diagnostics(&p, &["--select", "MUT114"]);
+    let memo = |producer: &str, memo: &str| {
+        format!("mutates the shared object that `graph.{producer}` keeps in `{memo}`")
+    };
+    let found = reports_of(&diags, "MUT114");
+    let expected = [
+        (
+            5,
+            "writes_the_shared_object",
+            memo("Graph.schema", "self._schemas"),
+        ),
+        (
+            13,
+            "hands_the_shared_object_on",
+            memo("Graph.schema", "self._schemas"),
+        ),
+        (
+            21,
+            "through_a_wrapper",
+            memo("Graph.schema", "self._schemas"),
+        ),
+        (25, "other_memos", memo("load", "_LOADED")),
+        (26, "other_memos", memo("parse", "_memo")),
+        (27, "other_memos", memo("Graph.kept", "self._pairs")),
+        (28, "other_memos", memo("Graph.pair", "self._pairs")),
+        (29, "other_memos", memo("loaded_twice", "_LOADED")),
+    ];
+    assert_eq!(found.len(), expected.len(), "{found:#?}");
+    for ((line, qualname, message), (want_line, want_name, want)) in found.iter().zip(expected) {
+        assert_eq!((*line, qualname.as_str()), (want_line, want_name));
+        assert!(message.contains(&want), "{message}");
+    }
+    assert!(
+        found[2].2.ends_with("through `graph.schema_of`"),
+        "{found:#?}"
+    );
+    assert!(diags.iter().all(|d| d["certainty"] == "heuristic"));
+    // Heuristic reports stay out of a default run, and a declared producer reports under its
+    // contract instead.
+    let (_, stdout, stderr) = p.heki(&["check", "--output-format", "concise"]);
+    assert!(!stdout.contains("MUT114"), "{stdout}");
+    assert!(
+        stderr.contains("8 heuristic report(s) are not shown"),
+        "{stderr}"
+    );
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\nversion = \"0\"\n\n[[tool.heki.readonly-returns]]\nname = \"schemas\"\nproducers = [\"Graph.schema\"]\ndeep = true\n",
+    );
+    let diags = diagnostics(&p, &["--select", "MUT114,MUT202"]);
+    let lines = |code: &str| -> Vec<u64> {
+        reports_of(&diags, code)
+            .into_iter()
+            .map(|(l, _, _)| l)
+            .collect()
+    };
+    assert_eq!(lines("MUT202"), vec![5, 13, 21], "{diags:#?}");
+    assert_eq!(lines("MUT114"), vec![25, 26, 27, 28, 29], "{diags:#?}");
+}

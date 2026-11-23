@@ -50,8 +50,8 @@ mod summary;
 pub mod types;
 
 pub use cache_flow::{
-    CacheEvent, CacheFlow, FlowBlock, InPlaceChange, KeptRemoval, SelfAttrWrite, attr_writes,
-    self_attr_writes,
+    CacheEvent, CacheFlow, FlowBlock, InPlaceChange, KeptRemoval, MemoReturn, SelfAttrWrite,
+    attr_writes, self_attr_writes,
 };
 pub use capacity::{Bound, Capacity, CapacityOf, CapacityWait, ParamOf, SiteQueues, WhileFull};
 pub use contracts::{ContractClass, Contracts};
@@ -70,7 +70,7 @@ pub use ownership::{LocalOrigins, Origins, ResultOf, ReturnOrigins};
 pub use query::{CallerSite, Callers, CallsByCaller, ChangeChain, HandedChange, ParamChange};
 pub use readonly::container_mutator;
 pub use readonly::{
-    CacheDecorator, CachedResult, ContainerKind, ProtectedReturn, ReturnStep, Shared,
+    CacheDecorator, CachedResult, ContainerKind, ProducerKind, ProtectedReturn, ReturnStep, Shared,
 };
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
@@ -961,6 +961,10 @@ pub struct EffectSummary {
     /// (`MUT114`; a local fact, never propagated).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_result: Option<readonly::CachedResult>,
+    /// The function hands out the values a memo it keeps by hand holds (`MUT114`, `MUT202`; a
+    /// local fact, never propagated). Boxed: few functions have one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memo_return: Option<Box<cache_flow::MemoReturn>>,
     /// Module-relative class qualname of a method (`Outer.Inner`), as in `IrFunction`.
     pub owner_class_qualname: Option<String>,
     pub decorators: Vec<String>,

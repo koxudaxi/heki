@@ -408,6 +408,13 @@ pub const NOT_ESTABLISHED_CONTAINER_KIND: OpenCause = OpenCause {
     closer: Closer::None,
 };
 
+pub const KEPT_BY_A_HAND_MEMO: OpenCause = OpenCause {
+    id: "kept-by-a-hand-memo",
+    premise: &CACHED,
+    states: "the function keeps its results in a memo it writes itself (a container of `self`, a module global, or a parameter's default, filled under a key derived from its arguments), not a `functools` cache: heki does not establish that every call with the same arguments gets the object kept",
+    closer: Closer::None,
+};
+
 /// The causes a cached function's summary without a [`heki_effect::CachedResult`] leaves open,
 /// one for each premise that fact stands for.
 pub const CACHED_RESULT_NOT_ESTABLISHED: [&OpenCause; 3] = [
@@ -877,6 +884,7 @@ pub const CAUSES: &[&OpenCause] = &[
     &NOT_THE_CATALOG_CALL,
     &NO_CHANGING_BODY,
     &NOT_A_BUILTIN_CONTAINER_CHANGE,
+    &KEPT_BY_A_HAND_MEMO,
     &NOT_ESTABLISHED_CACHED,
     &NOT_ESTABLISHED_KEYED,
     &NOT_ESTABLISHED_CONTAINER_KIND,

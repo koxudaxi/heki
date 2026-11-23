@@ -406,6 +406,7 @@ const CATALOG: &str = "from functools import lru_cache\n\n\nclass Catalog:\n    
 const LOOKUP: &str = "from pkg.catalog import Catalog, defaults\n\n\ndef find(c: Catalog, key) -> dict:\n    return c.fresh(key)\n";
 const LOOKUP_SHARED: &str = "from pkg.catalog import Catalog, defaults\n\n\ndef find(c: Catalog, key) -> dict:\n    return c.entry(key)\n";
 const LOOKUP_CACHED: &str = "from pkg.catalog import Catalog, defaults\n\n\ndef find(c: Catalog, key) -> dict:\n    return defaults()\n";
+const LOOKUP_MEMO: &str = "from pkg.catalog import Catalog, defaults\n\n_FOUND = {}\n\n\ndef find(c: Catalog, key) -> dict:\n    if key not in _FOUND:\n        _FOUND[key] = c.fresh(key)\n    return _FOUND[key]\n";
 // `MUT114`: a method of a cached object in another module fills the object's own memo, then
 // changes its state instead.
 const GLYPHS: &str = "from functools import lru_cache\n\n\nclass Glyphs:\n    def __init__(self):\n        self._width_cache = {}\n        self.seen = []\n\n    def width(self, ch):\n        if ch not in self._width_cache:\n            self._width_cache[ch] = len(ch)\n        return self._width_cache[ch]\n\n\n@lru_cache\ndef shared_glyphs() -> Glyphs:\n    return Glyphs()\n";
@@ -3098,6 +3099,12 @@ fn steps_mut114_mut202_mut109() -> Vec<Step> {
         Step::new(
             "the wrapper returns an `@lru_cache` result instead",
             vec![save("pkg/lookup.py", LOOKUP_CACHED)],
+        )
+        .present(&[("pkg/tagger.py", "MUT114")])
+        .absent(&[("pkg/tagger.py", "MUT202")]),
+        Step::new(
+            "the wrapper hands out what a memo it keeps by hand holds",
+            vec![save("pkg/lookup.py", LOOKUP_MEMO)],
         )
         .present(&[("pkg/tagger.py", "MUT114")])
         .absent(&[("pkg/tagger.py", "MUT202")]),

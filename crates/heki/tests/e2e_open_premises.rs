@@ -1140,6 +1140,22 @@ fn a_cache_that_keeps_nothing_leaves_the_cached_result_open() {
 }
 
 #[test]
+fn a_memo_kept_by_hand_leaves_the_cache_open() {
+    let open = "_TABLES = {}\n\n\ndef table(name) -> list[str]:\n    if name not in _TABLES:\n        _TABLES[name] = [name, \"id\"]\n    return _TABLES[name]\n\n\ndef use(name):\n    result = table(name)\n    result.append(\"x\")\n";
+    let report = own_heuristic(
+        "op_mut114_hand_memo",
+        "MUT114",
+        open,
+        "MUT114",
+        &[("Cached", "kept-by-a-hand-memo")],
+    );
+    assert_eq!(
+        closer_line_detail(&report, 0),
+        ("none".to_owned(), None, Some("`app.table`".to_owned()))
+    );
+}
+
+#[test]
 fn a_subclass_the_annotation_admits_may_replace_the_change() {
     let frozen = "def table(name) -> list[str]:\n    return Frozen([name, \"id\"])";
     let report = own_heuristic(

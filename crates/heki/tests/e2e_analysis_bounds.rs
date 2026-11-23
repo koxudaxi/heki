@@ -6198,3 +6198,48 @@ fn open_premises_of_rewrite_candidates_over_shared_iterables_are_explained() {
         assert!(!r["open_premises"].as_array().unwrap().is_empty(), "{r:#?}");
     }
 }
+
+/// A memo filled under keys computed from the arguments through a long chain (`k1 = k0 + 1`,
+/// ...), one fill per key: which values derive from the arguments is found in one walk of the
+/// function, not once per key.
+#[test]
+fn hand_memo_keys_derive_from_the_arguments_in_one_walk() {
+    let found = check_linear(3000, |keys| {
+        let mut lines = vec![
+            "class Schema:".to_owned(),
+            "    def __init__(self, raw):".to_owned(),
+            "        self.tags = []".to_owned(),
+            String::new(),
+            String::new(),
+            "class Graph:".to_owned(),
+            "    def __init__(self):".to_owned(),
+            "        self._cache = {}".to_owned(),
+            String::new(),
+            "    def schema(self, raw):".to_owned(),
+            "        k0 = id(raw)".to_owned(),
+        ];
+        for i in 1..keys {
+            lines.push(format!("        k{i} = k{} + 1", i - 1));
+            lines.push(format!("        self._cache[k{i}] = Schema(raw)"));
+        }
+        lines.push(format!("        return self._cache[k{}]", keys - 1));
+        lines.extend(
+            [
+                "",
+                "",
+                "def use(graph: Graph, raw):",
+                "    graph.schema(raw).tags.append(1)",
+            ]
+            .map(str::to_owned),
+        );
+        let p = Project::new(&format!("bounds_hand_memo_keys_{keys}"));
+        p.write("m.py", &(lines.join("\n") + "\n"));
+        p
+    });
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT114")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["use"], "{found:#?}");
+}

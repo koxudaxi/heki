@@ -13,7 +13,7 @@ use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
     AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite, CallTarget, Callee,
     Construction, ContractClass, Delivery, EffectSummary, Facts, FuncKey, INITIALIZERS,
-    ProjectDecls, ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx,
+    ProducerKind, ProjectDecls, ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx,
     TypedFieldWriteSite, Val, WriteKind, attr_writes, container_mutator, self_attr_writes,
 };
 use heki_env::HekiConfig;
@@ -2906,19 +2906,24 @@ struct Ro {
     /// How the function got the value from the producer: the call of a function that returns
     /// it (a wrapper), then the wrapper's calls down to the producer (empty: a direct call).
     via: Vec<CallHop>,
-    /// `producer` is declared in `readonly-returns` (`MUT202`), not an `@lru_cache` function
-    /// (`MUT114`).
-    declared: bool,
+    /// What makes `producer`'s result shared: a declaration in `readonly-returns` reports under
+    /// `MUT202`, a `functools` cache or a hand memo under `MUT114`.
+    kind: ProducerKind,
 }
 
 impl Ro {
-    fn new(producer: String, declared: bool, shared: Shared, via: Vec<CallHop>) -> Option<Self> {
+    fn new(
+        producer: String,
+        kind: ProducerKind,
+        shared: Shared,
+        via: Vec<CallHop>,
+    ) -> Option<Self> {
         shared.any().then_some(Self {
             producer,
             deep: shared.elements,
             shallow_copy: !shared.object,
             via,
-            declared,
+            kind,
         })
     }
 
@@ -2943,7 +2948,7 @@ impl Ro {
             deep: shared.elements,
             shallow_copy: !shared.object,
             via: named.via.clone(),
-            declared: named.declared,
+            kind: named.kind,
         }
     }
 
@@ -2951,7 +2956,7 @@ impl Ro {
     fn derive(&self, step: ReturnStep) -> Option<Self> {
         Self::new(
             self.producer.clone(),
-            self.declared,
+            self.kind,
             step.apply(self.shared()),
             self.via.clone(),
         )
@@ -3297,6 +3302,11 @@ impl<'a> Mut202Fn<'a> {
     ) -> Option<(&'a FuncKey, heki_effect::CachedResult)> {
         let mut told = Told::new(steps);
         let named = |key: &FuncKey| Some(format!("`{}`", key.fqn()));
+        if r.kind == ProducerKind::Memo {
+            let about = Some(format!("`{}`", r.producer));
+            told.step((&premises::KEPT_BY_A_HAND_MEMO, about));
+            return None;
+        }
         // "Same object": the result of a direct call of one function on every path.
         let result_of = match self.must_results().get(&changed).copied() {
             Some(MustResult::Of(key)) if r.via.is_empty() => Some(key),
@@ -3362,6 +3372,17 @@ impl<'a> Mut202Fn<'a> {
             told.step((&premises::REPLACED_BY_A_SUBCLASS, cached_fn.and_then(named)));
         }
         (!told.open).then_some((cached_fn?, cached))
+    }
+
+    /// The memo the producer of `r` keeps its results in, when it is a hand memo
+    /// ([`heki_effect::MemoReturn`]).
+    fn memo_of(&self, r: &Ro) -> Option<&'a str> {
+        if r.kind != ProducerKind::Memo {
+            return None;
+        }
+        let key = self.cx.index.function_named(&r.producer)?;
+        let memo = self.cx.index.summary(&key)?.memo_return.as_deref()?;
+        Some(memo.memo.as_str())
     }
 
     /// The cached function `r` names, when the value's identity is not established: the callee
@@ -3442,21 +3463,25 @@ impl<'a> Mut202Fn<'a> {
     }
 
     /// The read-only origin of a call's (or a property read's) result: a declared producer, an
-    /// `@lru_cache` function, or a project function that returns one's value (its summary's
-    /// `returns_protected`), reached through the call at `span`.
+    /// `@lru_cache` function, a function handing out a hand memo's values, or a project function
+    /// that returns one's value (its summary's `returns_protected`), reached through the call at
+    /// `span`.
     fn producer(&self, callee: &Callee, span: Span) -> Option<Ro> {
-        let direct = |producer: String, declared: bool, deep: bool| {
-            Ro::new(producer, declared, Shared::produced(deep), vec![])
+        let direct = |producer: String, kind: ProducerKind, shared: Shared| {
+            Ro::new(producer, kind, shared, vec![])
         };
         match callee {
             Callee::Project(keys, _) => keys.iter().find_map(|k| {
                 let fqn = k.fqn();
                 let summary = self.cx.index.summary(k);
                 if summary.is_some_and(|s| s.is_lru_cache) {
-                    return direct(fqn, false, true);
+                    return direct(fqn, ProducerKind::FunctoolsCache, Shared::produced(true));
                 }
                 if let Some(d) = self.returns.producers.deep_for(&fqn, &k.qualname) {
-                    return direct(fqn, true, d);
+                    return direct(fqn, ProducerKind::Declared, Shared::produced(d));
+                }
+                if let Some(m) = summary.and_then(|s| s.memo_return.as_deref()) {
+                    return direct(fqn, ProducerKind::Memo, m.shared);
                 }
                 let r = summary?.returns_protected.as_ref()?;
                 let mut via = vec![CallHop {
@@ -3466,13 +3491,13 @@ impl<'a> Mut202Fn<'a> {
                     path: self.unit.input.path.clone(),
                 }];
                 via.extend(heki_effect::owned_chain(&r.chain));
-                Ro::new(r.producer.clone(), r.declared, r.shared, via)
+                Ro::new(r.producer.clone(), r.kind, r.shared, via)
             }),
             Callee::External(sym) => self
                 .returns
                 .producers
                 .deep_for(sym, sym)
-                .and_then(|d| direct(sym.clone(), true, d)),
+                .and_then(|d| direct(sym.clone(), ProducerKind::Declared, Shared::produced(d))),
             Callee::TooMany | Callee::Unresolved => None,
         }
     }
@@ -3502,7 +3527,12 @@ impl<'a> Mut202Fn<'a> {
                     };
                     let (fqn, qualname) = class.member(attr);
                     if let Some(deep) = self.returns.producers.deep_for(&fqn, &qualname) {
-                        return Ro::new(fqn, true, Shared::produced(deep), vec![]);
+                        return Ro::new(
+                            fqn,
+                            ProducerKind::Declared,
+                            Shared::produced(deep),
+                            vec![],
+                        );
                     }
                 }
                 // A property getter that returns a read-only producer's value.
@@ -3667,7 +3697,7 @@ impl<'a> Mut202Fn<'a> {
             .unwrap_or_default();
         let mut related = r.via.clone();
         related.extend(chain.iter().cloned());
-        if r.declared {
+        if r.kind == ProducerKind::Declared {
             self.cx.emit(
                 out,
                 "MUT202",
@@ -3699,10 +3729,16 @@ impl<'a> Mut202Fn<'a> {
                 format!("change a copy (`{}(...)`) instead", cached.kind.as_str()),
             ),
             None => (
-                format!(
-                    "`{}` mutates the shared object returned by cached function `{}`{through}",
-                    self.key.qualname, r.producer
-                ),
+                match self.memo_of(r) {
+                    Some(memo) => format!(
+                        "`{}` mutates the shared object that `{}` keeps in `{memo}`{through}",
+                        self.key.qualname, r.producer
+                    ),
+                    None => format!(
+                        "`{}` mutates the shared object returned by cached function `{}`{through}",
+                        self.key.qualname, r.producer
+                    ),
+                },
                 "change a copy (`copy.deepcopy(...)`) instead".to_owned(),
             ),
         };

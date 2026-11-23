@@ -13,9 +13,9 @@ use crate::scc::tarjan_scc;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallCycle, CallHop, CallSite, CallTarget, CellChange,
     Construction, Delivery, EffectSummary, EntryKey, Facts, FuncKey, LocalOrigins, NewArg, NewCond,
-    NewKind, Origins, ProjectIndex, ProtectedReturn, ReturnsNew, Runner, Shared, SharedChain,
-    SharedLine, SharedState, SiteRole, Slot, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind,
-    cache_flow,
+    NewKind, Origins, ProducerKind, ProjectIndex, ProtectedReturn, ReturnsNew, Runner, Shared,
+    SharedChain, SharedLine, SharedState, SiteRole, Slot, TypedFieldWriteSite, UnresolvedWriteSite,
+    WriteKind, cache_flow,
 };
 use heki_ast::Span;
 use heki_kb::ExecEffectKind;
@@ -1075,14 +1075,26 @@ fn return_flow_edge(
         return;
     }
     let fqn = bc.callee.fqn();
-    let (producer, declared, produced, tail) = if callee.is_lru_cache {
-        (fqn, false, Shared::produced(true), Vec::new())
+    let (producer, kind, produced, tail) = if callee.is_lru_cache {
+        (
+            fqn,
+            ProducerKind::FunctoolsCache,
+            Shared::produced(true),
+            Vec::new(),
+        )
     } else if let Some(deep) =
         contracts.and_then(|c| c.readonly_producer(&fqn, &bc.callee.qualname))
     {
-        (fqn, true, Shared::produced(deep), Vec::new())
+        (
+            fqn,
+            ProducerKind::Declared,
+            Shared::produced(deep),
+            Vec::new(),
+        )
+    } else if let Some(m) = &callee.memo_return {
+        (fqn, ProducerKind::Memo, m.shared, Vec::new())
     } else if let Some(r) = &callee.returns_protected {
-        (r.producer.clone(), r.declared, r.shared, r.chain.clone())
+        (r.producer.clone(), r.kind, r.shared, r.chain.clone())
     } else {
         return;
     };
@@ -1096,7 +1108,7 @@ fn return_flow_edge(
     ProtectedReturn::add(
         &mut s.returns_protected,
         producer,
-        declared,
+        kind,
         produced,
         step,
         chain,

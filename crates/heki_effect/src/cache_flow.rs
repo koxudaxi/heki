@@ -7,11 +7,11 @@
 //! decided from these facts and the summaries alone, also for a method of a file that is not
 //! checked (the language server checks one file).
 
-use crate::readonly::ContainerKind;
+use crate::readonly::{ContainerKind, ReturnStep, Shared};
 use crate::resolver::namespace_load;
 use crate::{CallSite, FuncKey, TypeCtx, Val, aliases_of, container_mutator, guards, self_aliases};
 use heki_ast::Span;
-use heki_ir::walk::{self, Answer, Budget, FnShape, Visit};
+use heki_ir::walk::{self, Answer, Budget, FnShape, Use, Visit};
 use heki_ir::{
     BlockId, BuiltinKind, CompareOpKind, ConstLiteral, InstKind, IrFunction, Terminator, VarId,
 };
@@ -181,6 +181,167 @@ pub fn is_memo_name(attr: &str) -> bool {
     words
         .iter()
         .any(|w| w.starts_with("cache") || w.starts_with("memo") && !w.starts_with("memor"))
+}
+
+/// A function that hands out the values a memo keeps, as `functools.cache` does: what it
+/// returns on some path is read from, or stored into, a container held by its `self`, by a
+/// module global, or by a parameter as its default, under a key derived from its other
+/// parameters, where the container is a memo (the function fills it under a missing key or
+/// through `setdefault`, or its name says cache or memo). Every call with the same arguments
+/// gets the same object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoReturn {
+    /// The container, as the function names it (`self._schemas`, `_CACHE`, `_memo`).
+    pub memo: String,
+    /// What the returned value shares of a kept one, joined over the returns.
+    pub shared: Shared,
+}
+
+/// The holder of a memo container that is a module global ([`memo_return`]).
+const GLOBAL_HOLDER: u32 = u32::MAX;
+/// The holder of a memo container that is a parameter's default ([`memo_return`]).
+const DEFAULT_HOLDER: u32 = u32::MAX - 1;
+/// The holder of a memo container that is an attribute of `self` ([`memo_return`]).
+const SELF_HOLDER: u32 = 0;
+
+/// The [`MemoReturn`] of `f`, whose `self` is `self_vars` (none for a function that is no
+/// method) and whose returned values are `returned` ([`crate::readonly::returned_values`]).
+pub(crate) fn memo_return(
+    shape: &FnShape<'_>,
+    self_vars: &FxHashSet<VarId>,
+    returned: &FxHashMap<VarId, ReturnStep>,
+) -> Option<MemoReturn> {
+    let f = shape.f;
+    // Most functions return no item read from a container nor one they store.
+    let reads = returned
+        .keys()
+        .any(|v| match shape.inst(*v).map(|i| &i.kind) {
+            Some(InstKind::SubscriptLoad { .. }) => true,
+            Some(InstKind::MethodCall { method, .. }) => {
+                matches!(method.as_str(), "get" | "setdefault")
+            }
+            _ => false,
+        });
+    let stores = || {
+        f.blocks.iter().flat_map(|b| &b.insts).any(
+            |i| matches!(&i.kind, InstKind::SubscriptStore { value, .. } if returned.contains_key(value)),
+        )
+    };
+    if !reads && !stores() {
+        return None;
+    }
+    let objects: FxHashMap<VarId, u32> = self_vars.iter().map(|v| (*v, SELF_HOLDER)).collect();
+    let mut containers: Vec<(VarId, Held<'_>)> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| match &i.kind {
+            InstKind::LoadGlobal { dst, name, .. } => Some((*dst, (GLOBAL_HOLDER, name.as_str()))),
+            _ => None,
+        })
+        .collect();
+    containers.extend(
+        f.params
+            .iter()
+            .filter(|p| p.container_default)
+            .map(|p| (p.var, (DEFAULT_HOLDER, p.name.as_str()))),
+    );
+    let alias = holders(shape, &objects, &containers);
+    let writes = write_ops(shape, &objects, &alias);
+    let key_params: FxHashSet<VarId> = f
+        .params
+        .iter()
+        .filter(|p| !p.container_default && !self_vars.contains(&p.var))
+        .map(|p| p.var)
+        .collect();
+    let budget = Budget::of_function("cache_flow::memo_return", f);
+    let derived = derived_from(shape, &budget, &key_params);
+    let keyed = |k: VarId| derived.contains(&k);
+    // A result computed from the arguments (`Schema(raw)`, `[name, "id"]`). A new object built
+    // from none of them (`State()`, `{}`) or an argument kept as it is holds state the callers
+    // share on purpose (a registry), not a result.
+    let computed = |v: VarId| shape.inst(shape.copy_root(v)).is_some() && keyed(v);
+    // The containers the function fills as a memo with results computed from its arguments,
+    // and each such result it stores, with its container.
+    let mut memos: FxHashSet<Held<'_>> = FxHashSet::default();
+    let mut results: FxHashMap<VarId, Held<'_>> = FxHashMap::default();
+    for (held, w, op, _) in &writes {
+        if op.is_none() || !w.fills_memo(held.1) {
+            continue;
+        }
+        let (key, value) = match &f.block(w.block).insts[w.index as usize].kind {
+            InstKind::SubscriptStore { index, value, .. } => (*index, *value),
+            InstKind::MethodCall { args, .. } if args.len() == 2 => (args[0], args[1]),
+            _ => continue,
+        };
+        if keyed(key) && computed(value) {
+            memos.insert(*held);
+            results.insert(value, *held);
+        }
+    }
+    let mut found: Option<(Held<'_>, Shared)> = None;
+    for (v, step) in returned {
+        let read = match shape.inst(*v).map(|i| &i.kind) {
+            Some(InstKind::SubscriptLoad {
+                obj,
+                index,
+                is_slice: false,
+                ..
+            }) => alias.get(obj).map(|h| (*h, *index)),
+            Some(InstKind::MethodCall {
+                recv, method, args, ..
+            }) if matches!(method.as_str(), "get" | "setdefault") && !args.is_empty() => {
+                alias.get(recv).map(|h| (*h, args[0]))
+            }
+            _ => None,
+        };
+        let kept = read.filter(|(h, k)| memos.contains(h) && keyed(*k));
+        let Some(held) = kept.map(|(h, _)| h).or_else(|| results.get(v).copied()) else {
+            continue;
+        };
+        let shared = step.apply(Shared::produced(true));
+        found = Some(match found {
+            Some((first, s)) => (first, s.join(shared)),
+            None => (held, shared),
+        });
+    }
+    let ((holder, name), shared) = found?;
+    let memo = match holder {
+        SELF_HOLDER => {
+            let this = f.params.first().map_or("self", |p| p.name.as_str());
+            format!("{this}.{name}")
+        }
+        _ => name.to_owned(),
+    };
+    Some(MemoReturn { memo, shared })
+}
+
+/// The values derived from `params`: they themselves, and every value an instruction or a phi
+/// computes from one (`id(raw)`, `(a, b)`, `name.lower()`), each reached once. Past `budget`,
+/// none.
+fn derived_from(
+    shape: &FnShape<'_>,
+    budget: &Budget,
+    params: &FxHashSet<VarId>,
+) -> FxHashSet<VarId> {
+    let f = shape.f;
+    let mut derived: FxHashSet<VarId> = FxHashSet::default();
+    let walked = walk::reach(
+        budget,
+        params.iter().copied(),
+        |v, next| {
+            next.extend(shape.readers(v).iter().filter_map(|u| match *u {
+                Use::Inst(b, i) => f.block(b).insts[i as usize].kind.dst(),
+                Use::Phi(b, i) => Some(f.block(b).phis[i as usize].dst),
+                Use::Terminator(_) => None,
+            }));
+        },
+        |v| {
+            derived.insert(v);
+            Visit::<()>::Expand
+        },
+    );
+    (!walked.is_open()).then_some(derived).unwrap_or_default()
 }
 
 /// One block of a method: its normal control flow and the points that invalidate or read a
@@ -373,7 +534,7 @@ pub fn attr_writes<'f>(
 }
 
 /// [`attr_writes`], and the changes of the containers `containers` holds itself, each as the
-/// attribute it is given (a parameter's default container).
+/// attribute it is given (a parameter's own default container, a module global).
 pub fn container_writes<'f>(
     shape: &FnShape<'f>,
     objects: &FxHashMap<VarId, u32>,

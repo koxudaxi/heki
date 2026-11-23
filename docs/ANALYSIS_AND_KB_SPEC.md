@@ -611,7 +611,10 @@ EffectSummary(f) = {
                                                            // memo) of a project-class object, with its
                                                            // classes; never propagated (MUT118)
     returns_protected:        Option<ProtectedReturn>,     // may return a protected value: producer, depth,
-                                                           // call chain (MUT202)
+                                                           // call chain, kind (MUT202 / MUT114)
+    memo_return:              Option<MemoReturn>,          // hands out the results a memo it writes
+                                                           // keeps: container, depth; never
+                                                           // propagated (MUT114)
     must_invalidate:          Bitset,                      // invalidation contracts announced on every
                                                            // normal path (MUT109)
     unmet_invalidation:       Set<UnmetWrite>,             // target writes, own or passed up by private
@@ -1603,7 +1606,13 @@ deep = true   # changes to attributes and nested containers below are forbidden 
 
 - **Algorithm**:
   1. The SSA value returned by a call to a `producers` entry (or to an `@lru_cache` / `@cache`
-     function) gets a read-only origin tag.
+     function, or to a function keeping its results in a memo it writes itself) gets a
+     read-only origin tag. `cache_flow::memo_return` decides the last from the function's own
+     body: a value it returns (`readonly::returned_values`) is read from, or stored into, a
+     container held by its `self`, a module global, or a parameter's default
+     (`ParamInfo::container_default`), under a key derived from its other parameters
+     (`walk::reach` over operands), where the function fills that container under such a key with
+     a value derived from them (a memo fill of `SelfAttrWrite::fills_memo`).
   2. The tag flows within the function through `Copy`, attribute reads (with `deep = true`),
      subscripts, and tuple / list unpacking; copy sanitizers end it (`copy.deepcopy`, `.copy()`,
      `model_copy(deep=True)`, `dataclasses.replace`, `copy.replace`, the builtin container
@@ -1624,7 +1633,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      shallow copy, below the attributes `changed_param_attrs` names; for a producer that is not
      deep, not below its items), is reported as **`MUT202`**
      with the call hop, or as **`MUT114`** when the value comes from an `@lru_cache` / `@cache`
-     function rather than a declared producer. A `MUT114` report is exact when the cached
+     function or a hand memo rather than a declared producer (`ProducerKind`). A `MUT114` report is exact when the cached
      function carries a `CachedResult` (a `functools` cache resolved by import, with a `maxsize`
      other than `0`, a parameter besides `self` / `cls`, and a builtin list, dict, or set on every
      live return, by its return annotation or by construction), the changed value is that one
@@ -1637,7 +1646,8 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      own premises stay apart) or a wrapper on the way, "Cached", "Keyed", and "Container kind"
      together from a missing `CachedResult` (it keeps no reason, so all three are recorded), and
      "Changed in place" from a change through a called function, a line that is no change of the
-     kind, or a subclass the annotation admits that replaces the method. Filling a memo of the shared object or initializing one of its attributes
+     kind, or a subclass the annotation admits that replaces the method; a hand memo leaves
+     "Cached" open (`kept-by-a-hand-memo`). Filling a memo of the shared object or initializing one of its attributes
      lazily (`SelfAttrWrite::fills_memo`, `lazy_init`, on any object a parameter or a tagged value
      holds; through a call, a change of the object a memo-named attribute holds) is no change:
      what the object computes stays the same. A memo fill is a store under a test finding its key
