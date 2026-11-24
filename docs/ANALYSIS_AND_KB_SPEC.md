@@ -1810,7 +1810,11 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      `heki_effect::with_paths`: the module's bindings, the members of modules, and the context
      managers whose exit never suppresses, `exit_suppresses`) say whether the function has made
      the call whenever it returns normally (`CallSite::on_every_return`: made, returned, or
-     reachable at all).
+     reachable at all). A call of a class body the function runs is made or returned whenever
+     the function returns only when the body's own paths say so and the function has run the
+     `class` statement to its end whenever it returns (a nested class's statement through the
+     statements around it; a statement a `finally` body repeats, through one of its copies), and
+     reachable only when the statement is.
    - A call's targets are complete (`CallSite::complete`) when they are every implementation
      the call can run under R2 and R5: for each of the receiver's class and its project
      subclasses (at most `DISPATCH_CLASS_LIMIT`, 64), the definition its MRO finds is a target;
