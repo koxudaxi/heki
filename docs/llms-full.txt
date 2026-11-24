@@ -2272,6 +2272,10 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   included: it needs only what holds that part (`pkg.store` of `pkg.store:*`, the class of
   `Field._*`, the function of `run.*`). A glob without a literal holder (`*_helper`, `__*__`) is
   not judged.
+- The names offered are found by comparing an entry with the names that share its holder or its
+  last part. A run makes at most 64 such comparisons per function and class of the project (at
+  least 4,096) for all its entries, so of thousands of entries that name nothing in a large
+  module only the first get names. Every entry is still reported.
 - The warnings do not fail the run; with `unmatched-contract-entries = "error"` they are errors,
   which fail it, and `"ignore"` turns them off. A suppression comment or a baseline does not
   hide them.
