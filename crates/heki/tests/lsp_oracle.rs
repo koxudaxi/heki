@@ -6870,7 +6870,8 @@ const DEPENDENCIES_CONFIG: &str = "[project]\nname = \"pkg\"\ndependencies = [\"
 /// through every module's imports: an edit of the package's `__init__` adds or removes the
 /// report in the module it loads, also through a module that is no package code, and a handler
 /// around that import takes it away. The declarations decide them: moving a distribution into
-/// the dependencies, or `module-distributions` naming another one, takes the report away.
+/// the dependencies, or `module-distributions` naming another one, takes the report away, and
+/// dependencies the build backend computes take every report away.
 /// `IMP104` follows the module an import names, which a deleted file no longer is.
 #[test]
 fn lsp_diagnostics_equal_a_full_check_through_dependencies_at_import_time() {
@@ -6948,6 +6949,19 @@ fn lsp_diagnostics_equal_a_full_check_through_dependencies_at_import_time() {
             vec![Action::Configure(DEPENDENCIES_CONFIG.to_owned())],
         )
         .present(&[("pkg/cache.py", "IMP302")]),
+        Step::new(
+            "the build backend computes the dependencies",
+            vec![Action::Configure(DEPENDENCIES_CONFIG.replace(
+                "dependencies = [\"httpx\"]",
+                "dynamic = [\"dependencies\"]",
+            ))],
+        )
+        .absent(&[("pkg/cache.py", "IMP302"), ("pkg/clock.py", "IMP301")]),
+        Step::new(
+            "they are listed again",
+            vec![Action::Configure(DEPENDENCIES_CONFIG.to_owned())],
+        )
+        .present(&[("pkg/cache.py", "IMP302"), ("pkg/clock.py", "IMP301")]),
         Step::new(
             "a package module imports test code",
             vec![save("pkg/clock.py", "import tests.factories\n")],
