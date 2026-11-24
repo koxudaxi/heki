@@ -13,7 +13,9 @@ $ heki check --fix --include-size-dependent      # also the proven-safe size-dep
 ```
 
 - A fix comes with a report: `--fix` applies only the fixes of the reports shown. A report whose
-  rewrite heki proves safe is [exact](precision.md#certifications), and `OPT101` and `OPT102`
+  rewrite heki proves safe has a safe fix, and it is [exact](precision.md#certifications) only
+  when its other premises hold too: an `OPT120` report in a `while` loop is heuristic even when
+  its rewrite is proven safe, because the loop's trip count is open. `OPT101` and `OPT102`
   run by default, so a run without configuration applies their fixes. Over another loop than one
   the data sizes, an `OPT101` or `OPT102` rewrite is heuristic, and its fix applies with
   `--heuristic` or when its rule is selected.
@@ -21,9 +23,10 @@ $ heki check --fix --include-size-dependent      # also the proven-safe size-dep
   opt-in: their rewrites are proven, but the loops they report were rarely large enough to matter
   ([Rule precision](precision.md#certifications)).
 - `--include-size-dependent` runs the size-dependent rules with a rewrite (`OPT110`, `OPT111`,
-  `OPT120`, `OPT121`, `OPT130`), as if `extend-select` named them, and applies their proven
-  rewrites in every function, also over a loop whose trip count the data does not decide. After
-  the fixes, the run lists their reports it could not rewrite, each with the obligation that
+  `OPT120`, `OPT121`, `OPT130`; not `OPT103`, which has no rewrite), as if `extend-select`
+  named them. The flag alone changes no file: with `--fix` it applies their proven
+  rewrites in every function (with `--diff`, it shows them), also over a loop whose trip count
+  the data does not decide. After the fixes, the run lists their reports it could not rewrite, each with the obligation that
   blocks it.
 - `--diff` takes the same flags as `--fix` and writes nothing.
 - With `--touched`, or files given as paths, `--fix` and `--diff` rewrite only those files. A
