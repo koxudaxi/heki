@@ -42,7 +42,12 @@ comprehension before 3.12), per class body, and for the module's top level. The 
 nested class (its `__init__` in particular) are kept apart from the methods of the outer class
 (against the `MUT101` false positives found in Stage 0-A). Qualnames are Python's
 `__qualname__`: a class defined in a function is `factory.<locals>.Worker`, so its methods never
-share a summary with a module-level `Worker`.
+share a summary with a module-level `Worker`. A `class` or `def` statement in a function or a
+class body that declares its name `global` binds the module's name, and CPython names it as a
+module-level definition (`Worker`, `Worker.run`), as heki does; it is no method of the class body
+holding it. Since such a qualname does not name the functions around the definition,
+`IrFunction::enclosing` records the scope whose code makes each one, and the closure cells a
+scope reads belong to the functions along that chain (`ModuleIr::enclosing_functions`).
 
 Names follow Python's private name mangling (`heki_semantic::mangling`). Inside a class, at any
 depth of nested functions, an attribute name that starts with two underscores and does not end
@@ -580,6 +585,19 @@ in the same way what binds it last (`ModuleDecls::aliases`), or one of the objec
 that may be last bind (`ModuleDecls::alias_paths`): a call through the name, in the module, from
 another one, or imported, runs each of them. An alias of the definition bound before the
 rebinding (`_original = fetch`) keeps the definition (`ProjectDecls::follow`).
+
+A class or function whose statement a function or a class body runs under a `global` declaration
+of its name (`global Config`, then `class Config(Base): ...` in `_define`) is a definition of the
+module under that name (`ModuleDecls::made_in`), with its bases, methods, and attributes: contract
+targets, annotations, imports, and subclasses in other modules name it as one defined at module
+level. The module body binds it where it calls such a function, a plain module-level `def`
+binding the name once on every path through it, or runs such a class body (`BodyBindings`), as it
+binds a name by a store. Bound so on every path, the name holds the definition; when the module
+body may not run that binding (no call, a call on a branch, a function nested in another), a read
+of the name may find it unbound, so a call through it may run another object than the definition
+(`ModuleDecls::rebound_definitions`); a later binding on some paths makes it one of the objects
+(`ModuleDecls::alias_paths`). The code of the definition's class body is that function's for
+`attribution = "lexical"`.
 
 A value bound to one of several named objects (a branch `f = a if c else b`, the values of a
 table) is one of them (`Ty::OneOf`, at most `MAX_NAMED`, eight): a call runs every one, which must

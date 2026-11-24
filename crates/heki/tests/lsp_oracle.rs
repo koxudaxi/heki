@@ -697,6 +697,14 @@ const EXACT_FETCH_ON_A_PATH: &str = "import os\n\nimport requests\n\n\ndef _quie
 const EXACT_FETCH_REBOUND: &str = "import requests\n\n\ndef _quiet(url):\n    return url\n\n\ndef fetch(url):\n    return requests.get(url)\n\n\nfetch = _quiet\n";
 const EXACT_FETCH_USE: &str =
     "from pkg import exact_fetch\n\n\nasync def serve():\n    exact_fetch.fetch(\"u\")\n";
+// A class a function binds under `global` (`ModuleDecls::made_in`): the module's name holds it
+// once the module body runs the function on every path, and may be unbound when it runs on a
+// branch; without the declaration the class is the function's own.
+const EXACT_MADE: &str = "import time\n\n\ndef _define():\n    global Made\n\n    class Made:\n        def __init__(self):\n            time.sleep(1)\n\n\n_define()\n";
+const EXACT_MADE_ON_A_BRANCH: &str = "import os\nimport time\n\n\ndef _define():\n    global Made\n\n    class Made:\n        def __init__(self):\n            time.sleep(1)\n\n\nif os.environ.get(\"MADE\"):\n    _define()\n";
+const EXACT_MADE_LOCAL: &str = "import time\n\n\ndef _define():\n    class Made:\n        def __init__(self):\n            time.sleep(1)\n\n\n_define()\n";
+const EXACT_MADE_USE: &str =
+    "from pkg import exact_made\n\n\nasync def serve():\n    exact_made.Made()\n";
 
 // Store types (`ModuleDecls::global_types`, `ClassDecl::attr_stores`): an `async def` calls a
 // method on a module global, in its module and through an import, and on an instance attribute;
@@ -1412,6 +1420,34 @@ fn steps_exact_effects() -> Vec<Step> {
             ("pkg/exact_fetch_use.py", "EFF101"),
             ("pkg/exact_fetch_use.py", "EFF111"),
         ]),
+        Step::new(
+            "a module binds a class under `global` in a function it runs on every path",
+            vec![
+                Action::Create("pkg/exact_made.py", EXACT_MADE.to_owned()),
+                Action::Create("pkg/exact_made_use.py", EXACT_MADE_USE.to_owned()),
+            ],
+        )
+        .present(&[("pkg/exact_made_use.py", "EFF101")]),
+        Step::new(
+            "it runs the function on a branch only",
+            vec![save("pkg/exact_made.py", EXACT_MADE_ON_A_BRANCH)],
+        )
+        .present(&[("pkg/exact_made_use.py", "EFF111")])
+        .absent(&[("pkg/exact_made_use.py", "EFF101")]),
+        Step::new(
+            "the class stays local to the function",
+            vec![save("pkg/exact_made.py", EXACT_MADE_LOCAL)],
+        )
+        .absent(&[
+            ("pkg/exact_made_use.py", "EFF101"),
+            ("pkg/exact_made_use.py", "EFF111"),
+        ]),
+        Step::new(
+            "the function binds it under `global` again",
+            vec![save("pkg/exact_made.py", EXACT_MADE)],
+        )
+        .present(&[("pkg/exact_made_use.py", "EFF101")])
+        .absent(&[("pkg/exact_made_use.py", "EFF111")]),
     ]
 }
 

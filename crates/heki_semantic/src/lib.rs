@@ -88,9 +88,11 @@ pub struct ClassInfo {
     pub id: ClassId,
     pub scope: ScopeId,
     pub name: String,
-    /// Python's `__qualname__`: `Outer.Inner`, `factory.<locals>.Local`.
+    /// Python's `__qualname__`: `Outer.Inner`, `factory.<locals>.Local`, and `Local` when
+    /// `factory` declares the name `global`.
     pub qualname: String,
-    /// The class whose body holds this class statement directly.
+    /// The class whose body holds this class statement directly, as one of its members (not
+    /// under a `global` declaration of the name).
     pub parent_class: Option<ClassId>,
     /// The positional bases in order: each one's dotted name (`Base`, `core.Base`, `Base` of
     /// `Base[int]`), or `None` for another expression (`with_metaclass(Meta)`, `*bases`), whose
@@ -424,13 +426,24 @@ impl<'a> Analyzer<'a> {
     }
 
     /// `__qualname__` of a definition named `name` in the current block: `f.<locals>.C` in a
-    /// function, `C.m` in a class body.
+    /// function, `C.m` in a class body, and the name alone where the block declares it
+    /// `global`, as CPython names it: the statement binds the module's name.
     fn child_qualname(&self, name: &str) -> String {
+        if self.binds_global(name) {
+            return name.to_owned();
+        }
         match self.qualnames.last() {
             None => name.to_owned(),
             Some((outer, true)) => format!("{outer}.<locals>.{name}"),
             Some((outer, false)) => format!("{outer}.{name}"),
         }
+    }
+
+    /// Whether the current block declares `name` `global`: a `def` or `class` statement of the
+    /// name there binds the module's name, not a local or a member of the class.
+    fn binds_global(&self, name: &str) -> bool {
+        let scope = &self.scopes[self.cur_scope_id().0 as usize];
+        scope.global_decls.contains(&scope.mangle(name))
     }
 
     /// The class whose body the current statement is directly in (not in one of its methods).
@@ -913,7 +926,7 @@ impl<'a> Analyzer<'a> {
     }
 
     /// In the enclosing scope; a function a class body defines directly is also one of the
-    /// class's methods (CHA).
+    /// class's methods (CHA), unless the body declares its name `global`.
     fn bind_function_name(&mut self, func: &ast::StmtFunctionDef) {
         self.cur_scope_mut().add_binding(
             func.name.as_str(),
@@ -922,7 +935,9 @@ impl<'a> Analyzer<'a> {
             false,
         );
         self.note_guard_binding(func.name.as_str(), GuardBinding::Other);
-        if let Some(cid) = self.cur_class_body() {
+        if let Some(cid) = self.cur_class_body()
+            && !self.binds_global(func.name.as_str())
+        {
             let member = self.cur_scope_mut().mangle(func.name.as_str());
             self.classes[cid.0 as usize].methods.push(member);
         }
@@ -976,7 +991,9 @@ impl<'a> Analyzer<'a> {
 
     fn visit_class_def(&mut self, cls: &ast::StmtClassDef) {
         let line = self.definition_line(cls.range, &cls.decorator_list);
-        let parent_class = self.cur_class_body();
+        let parent_class = self
+            .cur_class_body()
+            .filter(|_| !self.binds_global(cls.name.as_str()));
         let qualname = self.child_qualname(cls.name.as_str());
         for dec in &cls.decorator_list {
             self.visit_expr(&dec.expression);

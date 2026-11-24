@@ -798,6 +798,12 @@ pub struct IrFunction {
     /// as `.0` from the function creating it: that function and the iterable there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passed_from: Option<(FunctionId, VarId)>,
+    /// The scope whose code makes this one: the function, class body, or module body holding
+    /// its `def`, `class`, `lambda`, or comprehension (`None` for the module body). The
+    /// functions around a scope are not always those its qualname names: a definition under a
+    /// `global` declaration of its name is named as a module-level one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enclosing: Option<FunctionId>,
 }
 
 impl IrFunction {
@@ -1048,6 +1054,18 @@ pub struct ModuleIr {
 impl ModuleIr {
     pub fn function(&self, id: FunctionId) -> &IrFunction {
         &self.functions[id.0 as usize]
+    }
+
+    /// The functions around `f`, nearest first ([`IrFunction::enclosing`]): those whose
+    /// variables the scopes nested in them may capture, so neither class bodies nor the module
+    /// body.
+    pub fn enclosing_functions<'m>(
+        &'m self,
+        f: &'m IrFunction,
+    ) -> impl Iterator<Item = &'m IrFunction> + 'm {
+        std::iter::successors(Some(f), |g| Some(self.function(g.enclosing?)))
+            .skip(1)
+            .filter(|g| !g.is_class_body && !g.is_module_body)
     }
 
     /// The values the class statements of `shape`'s function pass as bases
