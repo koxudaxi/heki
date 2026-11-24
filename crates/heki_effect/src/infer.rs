@@ -794,6 +794,55 @@ fn pair(a: Elem, b: Elem) -> Elem {
 /// The types `isinstance` checks give variables.
 type Narrowed = FxHashMap<VarId, Ty>;
 
+/// The catalog APIs handing back what a callable returns (`asyncio.to_thread(f, x)`) that one
+/// call is followed through, each running the next (`to_thread(run_in_threadpool, f)`).
+const MAX_HANDED_CALLS: usize = 4;
+
+/// What a call is of: the value a variable holds, or a method of a receiver.
+#[derive(Clone, Copy)]
+enum Called<'m> {
+    Value(VarId),
+    Method(VarId, &'m str),
+}
+
+/// The arguments a call passes on to the call it makes: of the callable a `functools.partial`
+/// object holds, or of the one a catalog API runs ([`ResultOf`]).
+struct HandedArgs {
+    args: Vec<VarId>,
+    kwargs: Vec<(Option<String>, VarId)>,
+    star_from: Option<u8>,
+}
+
+impl HandedArgs {
+    fn passed(&self) -> Passed<'_> {
+        Passed {
+            args: &self.args,
+            kwargs: &self.kwargs,
+            star_from: self.star_from,
+        }
+    }
+
+    /// The callable a call of a catalog API runs ([`ResultOf`]), at position `of.arg`, and what
+    /// it passes it: the positional arguments after it and, with `of.keywords`, the call's
+    /// keywords. `None` when it is not passed by position, or `*` unpacking may move it.
+    fn of(of: ResultOf, call: Passed<'_>) -> Option<(VarId, HandedArgs)> {
+        let k = usize::from(of.arg);
+        if call.star_from.is_some_and(|s| usize::from(s) <= k) {
+            return None;
+        }
+        let args = HandedArgs {
+            args: call.args.get(k + 1..)?.to_vec(),
+            kwargs: if of.keywords {
+                call.kwargs.to_vec()
+            } else {
+                Vec::new()
+            },
+            star_from: call.star_from.map(|s| s - of.arg - 1),
+        };
+        Some((call.args[k], args))
+    }
+}
+
 /// `f` is a lambda whose body does not yield: calling it gives the value of its body.
 fn is_plain_lambda(f: &IrFunction) -> bool {
     f.name == "<lambda>" && f.kind == FunctionKind::Sync
@@ -850,6 +899,9 @@ struct Engine<'e, 'a> {
     /// and depth, while one block is entered: a condition reaches the same phi through many
     /// paths (a loop header's phi is an input of itself on each `continue`).
     implied_memo: RefCell<FxHashMap<(VarId, bool, BlockId, u8), Narrowed>>,
+    /// The value of the body of each lambda the function makes (by the variable holding it),
+    /// as the function's cells held where the pass made it: what calling the lambda gives.
+    lambda_bodies: RefCell<FxHashMap<VarId, Elem>>,
 }
 
 /// A closure cell the function binds.
@@ -960,6 +1012,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             narrowing: None,
             cur: FxHashMap::default(),
             implied_memo: RefCell::default(),
+            lambda_bodies: RefCell::default(),
         };
         engine.seed_params();
         if let Some(seed) = seed.iterated {
@@ -1620,9 +1673,15 @@ impl<'e, 'a> Engine<'e, 'a> {
                 }
             }
             InstKind::MakeClosure {
-                func_id: Some(id), ..
+                dst,
+                func_id: Some(id),
+                ..
             } => {
                 let f = cx.ir().function(*id);
+                if is_plain_lambda(f) {
+                    let body = cx.child_output(*id, None, self.child_cells(*id));
+                    self.lambda_bodies.borrow_mut().insert(*dst, body);
+                }
                 Some(Ty::Ref(format!("{}.{}", cx.module_name(), f.qualname)))
             }
             InstKind::Call {
@@ -1637,7 +1696,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                     kwargs,
                     star_from: *star_from,
                 };
-                return self.call_value(*c, call);
+                return self.call_of(Called::Value(*c), call);
             }
             // A non-inlined comprehension (Python 3.11) returns the container it builds from the
             // value it iterates.
@@ -1664,7 +1723,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                     kwargs,
                     star_from: *star_from,
                 };
-                return self.method_call(*recv, method, call);
+                return self.call_of(Called::Method(*recv, method), call);
             }
             _ => None,
         })
@@ -1841,45 +1900,115 @@ impl<'e, 'a> Engine<'e, 'a> {
             .unwrap_or_else(any)
     }
 
-    /// What calling the value `callable` holds with `call`'s arguments returns, as the call
-    /// written where the value is made would: a `functools.partial` object's callable called
-    /// with the arguments the object holds first, a bound method (`m = obj.method`) as
-    /// `obj.method(...)`, a lambda the value of its body; any other value what calling its type
-    /// returns.
-    fn call_value(&self, callable: VarId, call: Passed<'_>) -> Step {
-        let partial = Partial::of(
-            callable,
-            |v| self.shape.copy_root(v),
-            |object| self.partial_parts(object),
-        );
-        let Some(partial) = partial else {
-            return self.call_held(callable, call);
-        };
-        let Some(held) = partial.called_with(call.args, call.kwargs, call.star_from) else {
-            return Ok(None);
-        };
-        let call = Passed {
-            args: &held.args,
-            kwargs: &held.kwargs,
-            star_from: held.star_from,
-        };
-        self.call_held(held.callable, call)
+    /// What a call returns. A call of a catalog API that runs a callable it is handed and hands
+    /// back what that returns ([`ResultOf`]: `asyncio.to_thread(f, x)`) returns the future the
+    /// catalog's `return_type` names holding that result, or the coroutine of an `async def`
+    /// giving it; the call of the callable is followed in turn, through at most
+    /// [`MAX_HANDED_CALLS`] such APIs (a callable passed by keyword, or one `*` unpacking may
+    /// move, is not followed). A call of a value the function makes is typed as the call
+    /// written where the value is made ([`Self::call_held`]), a `functools.partial` object's
+    /// callable with the arguments the object holds first.
+    fn call_of(&self, called: Called<'_>, call: Passed<'_>) -> Step {
+        let mut called = called;
+        // The arguments of the call followed last, once they are not the instruction's own.
+        let mut handed: Option<HandedArgs> = None;
+        // What each API followed hands back in: its future's class, or a coroutine.
+        let mut holders: Vec<Option<String>> = Vec::new();
+        // Past the bound, what the last call followed returns is unknown.
+        let mut result = Ok(None);
+        for _ in 0..=MAX_HANDED_CALLS {
+            if let Called::Value(v) = called
+                && let Some(partial) = Partial::of(
+                    v,
+                    |v| self.shape.copy_root(v),
+                    |object| self.partial_parts(object),
+                )
+            {
+                let passed = handed.as_ref().map_or(call, HandedArgs::passed);
+                let Some(held) = partial.called_with(passed.args, passed.kwargs, passed.star_from)
+                else {
+                    break;
+                };
+                called = Called::Value(held.callable);
+                handed = Some(HandedArgs {
+                    args: held.args,
+                    kwargs: held.kwargs,
+                    star_from: held.star_from,
+                });
+            }
+            let passed = handed.as_ref().map_or(call, HandedArgs::passed);
+            let Some((symbol, of)) = self.hands_back(called) else {
+                result = match called {
+                    Called::Value(v) => self.call_held(v, passed),
+                    Called::Method(recv, method) => self.method_call(recv, method, passed),
+                };
+                break;
+            };
+            let holder = match self
+                .cx
+                .call_result(&symbol, |i, k| self.passed(passed, i, k))
+            {
+                Some(Ty::Inst(future)) => Some(future.class),
+                _ => None,
+            };
+            holders.push(holder);
+            let Some(next) = HandedArgs::of(of, passed) else {
+                break;
+            };
+            called = Called::Value(next.0);
+            handed = Some(next.1);
+        }
+        holders
+            .into_iter()
+            .rev()
+            .fold(result, |inner, holder| match holder {
+                Some(class) => {
+                    let result = inner.map_or(Elem::Empty, Elem::of);
+                    Ok(Some(Ty::container(&class, Args::result(result))))
+                }
+                // A coroutine whose result no value reaches yet is not tracked: the coroutine
+                // itself is a value.
+                None => Ok(inner.ok().flatten().map(|t| Ty::Coroutine(Box::new(t)))),
+            })
     }
 
-    /// [`Self::call_value`] of a value that is no `functools.partial` object made here.
+    /// The catalog API a call runs when it hands back what a call of a callable it is handed
+    /// returns ([`ResultOf`]), as the call targets resolve it.
+    fn hands_back(&self, called: Called<'_>) -> Option<(String, ResultOf)> {
+        let val = |v: VarId| self.need(v).ok().flatten().and_then(Ty::val);
+        let callee = match called {
+            Called::Value(v) => match self.bound_method(v) {
+                Some((recv, method)) => self.cx.resolve_method(val(recv).as_ref(), method),
+                None => self.cx.resolve_call(val(v).as_ref()),
+            },
+            Called::Method(recv, method) => self.cx.resolve_method(val(recv).as_ref(), method),
+        };
+        let Callee::External(symbol) = callee else {
+            return None;
+        };
+        let of = self.cx.catalog(&symbol)?.result_of?;
+        Some((symbol, of))
+    }
+
+    /// The receiver and method name of the bound method `v` holds (`m = obj.method`, through
+    /// copies).
+    fn bound_method(&self, v: VarId) -> Option<(VarId, &'e str)> {
+        match &self.shape.inst(self.shape.copy_root(v))?.kind {
+            InstKind::AttrLoad { obj, attr, .. } => Some((*obj, attr.as_str())),
+            _ => None,
+        }
+    }
+
+    /// What calling the value `callable` holds returns, when it is no `functools.partial` object
+    /// made here: a bound method (`m = obj.method`) what `obj.method(...)` does, a lambda the
+    /// value of its body; any other value what calling its type returns.
     fn call_held(&self, callable: VarId, call: Passed<'_>) -> Step {
-        let made = self.shape.inst(self.shape.copy_root(callable));
-        match made.map(|i| &i.kind) {
-            Some(InstKind::AttrLoad { obj, attr, .. }) => {
-                return self.method_call(*obj, attr, call);
-            }
-            // A lambda whose body yields returns a generator instead.
-            Some(InstKind::MakeClosure {
-                func_id: Some(id), ..
-            }) if is_plain_lambda(self.cx.ir().function(*id)) => {
-                return item_ty(self.cx.child_output(*id, None, self.child_cells(*id)));
-            }
-            _ => {}
+        if let Some((recv, method)) = self.bound_method(callable) {
+            return self.method_call(recv, method, call);
+        }
+        let root = self.shape.copy_root(callable);
+        if let Some(body) = self.lambda_bodies.borrow().get(&root) {
+            return item_ty(body.clone());
         }
         Ok(match self.need(callable)? {
             Some(Ty::Ref(fqn)) if fqn == "builtins.super" && call.args.is_empty() => {
@@ -1928,44 +2057,10 @@ impl<'e, 'a> Engine<'e, 'a> {
         crate::partial::parts(args, kwargs, *star_from)
     }
 
-    /// What a call of the catalog API `symbol`, which hands back what a call of a callable it is
-    /// handed returns ([`ResultOf`]), returns: the future the catalog's `return_type` names,
-    /// holding that result, or the coroutine of an `async def` giving it.
-    fn handing_back(&self, symbol: &str, of: ResultOf, call: Passed<'_>) -> Option<Ty> {
-        let result = self.result_of(of, call);
-        match self.cx.call_result(symbol, |i, k| self.passed(call, i, k)) {
-            Some(Ty::Inst(future)) => {
-                let result = result.map_or(Elem::Empty, Elem::of);
-                Some(Ty::container(&future.class, Args::result(result)))
-            }
-            // A coroutine whose result no value reaches yet is not tracked: the coroutine
-            // itself is a value.
-            _ => Some(Ty::Coroutine(Box::new(result.ok()??))),
-        }
-    }
-
-    /// What the call a call hands back the result of returns ([`ResultOf`]): of the callable at
-    /// position `of.arg`, with the positional arguments after it and, with `of.keywords`, the
-    /// call's keywords. Unknown when `*` unpacking may move the callable.
-    fn result_of(&self, of: ResultOf, call: Passed<'_>) -> Step {
-        let k = usize::from(of.arg);
-        let moved = call.star_from.is_some_and(|s| usize::from(s) <= k);
-        let Some(&callable) = call.args.get(k).filter(|_| !moved) else {
-            return Ok(None);
-        };
-        let passed = Passed {
-            args: &call.args[k + 1..],
-            kwargs: if of.keywords { call.kwargs } else { &[] },
-            star_from: call.star_from.map(|s| s - of.arg - 1),
-        };
-        self.call_value(callable, passed)
-    }
-
     /// The result of calling the named object `fqn`: the builtins that wrap an iterable keep
-    /// its items, a catalog API handing back what a callable it is handed returns gives that
-    /// ([`Self::handing_back`]), anything else returns what [`TypeCtx::call_result`] says. A
-    /// container they build is one whatever it wraps, so an unset argument adds no items yet
-    /// (as in a display): a loop rebinding `items = list(items)` keeps its type.
+    /// its items, anything else returns what [`TypeCtx::call_result`] says. A container they
+    /// build is one whatever it wraps, so an unset argument adds no items yet (as in a display):
+    /// a loop rebinding `items = list(items)` keeps its type.
     fn call_named(&self, fqn: &str, call: Passed<'_>) -> Step {
         let args = call.args;
         let items = |i: usize| args.get(i).map_or(Elem::Empty, |a| self.items_of(*a));
@@ -2051,9 +2146,6 @@ impl<'e, 'a> Engine<'e, 'a> {
                 let entry = self.cx.catalog(fqn);
                 if !args.is_empty() && entry.is_some_and(|e| e.copy_sanitizer.is_some()) {
                     return Ok(self.need(args[0])?.cloned());
-                }
-                if let Some(of) = entry.and_then(|e| e.result_of) {
-                    return Ok(self.handing_back(fqn, of, call));
                 }
                 return Ok(self.cx.call_result(fqn, |i, k| self.passed(call, i, k)));
             }
@@ -2222,9 +2314,6 @@ impl<'e, 'a> Engine<'e, 'a> {
                     || e.returns_receiver_in(e.case_for(|i, k| self.passed(call, i, k))) =>
             {
                 Some(self_ty)
-            }
-            (Callee::External(symbol), Some(e)) if let Some(of) = e.result_of => {
-                self.handing_back(symbol, of, call)
             }
             _ => cx.callee_result(&callee, |i, k| self.passed(call, i, k)),
         }
