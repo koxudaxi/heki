@@ -918,6 +918,7 @@ def run(holder: Holder, untyped: Any, rows: list[int]) -> None:
     holder.bag.add("x")
     _helper(holder.bag)
     cast("Any", holder).bag.add("z")
+    cast("Any", untyped).bag.add("w")
     untyped.add("w")
     rows.append(2)
 
@@ -947,22 +948,24 @@ fn mut201_counts_a_method_changing_its_receiver_as_an_in_place_write() {
     let diags = diagnostics(&p, &["--select", "MUT201,MUT205,EFF201"]);
     let at = "pkg/passes.py";
     // The ledger is allowed; the builtin `append`, the method of the bag's class, the helper
-    // calling it, and the method on a receiver of unknown class write the guarded attributes.
-    // A method that reads its receiver or changes only an object it builds writes nothing, the
-    // static method is a helper the contract allows, and the alias holds the attribute's value.
+    // calling it, the method on a cast to `Any` of a value known to be a `Holder`, and the
+    // method on a receiver of unknown class write the guarded attributes. A method that reads
+    // its receiver or changes only an object it builds writes nothing, the static method is a
+    // helper the contract allows, and the alias holds the attribute's value.
     assert_eq!(
         found(&diags),
         vec![
             d(at, 12, "MUT201", "run"),
             d(at, 13, "MUT201", "run"),
             d(at, 14, "MUT201", "run"),
-            d(at, 15, "MUT205", "run"),
-            d(at, 22, "MUT201", "shapes"),
+            d(at, 15, "MUT201", "run"),
+            d(at, 16, "MUT205", "run"),
             d(at, 23, "MUT201", "shapes"),
-            d(at, 24, "EFF201", "shapes"),
             d(at, 24, "MUT201", "shapes"),
+            d(at, 25, "EFF201", "shapes"),
             d(at, 25, "MUT201", "shapes"),
-            d(at, 28, "MUT201", "shapes"),
+            d(at, 26, "MUT201", "shapes"),
+            d(at, 29, "MUT201", "shapes"),
         ],
         "{diags:#?}"
     );
@@ -982,15 +985,19 @@ fn mut201_counts_a_method_changing_its_receiver_as_an_in_place_write() {
         message(14, "MUT201"),
         "`run` writes `pkg.model:Holder.bag` (through a helper) via `pkg.passes._helper` outside the write owners of `through-ledger`"
     );
+    assert_eq!(
+        message(15, "MUT201"),
+        "`run` writes `pkg.model:Holder.bag` (in place) outside the write owners of `through-ledger`"
+    );
     // A method changing its receiver on one path only, through a subclass's MRO, through
     // `super()`, and through its own calls on `self`.
-    for line in [22, 23, 24, 25] {
+    for line in [23, 24, 25, 26] {
         assert!(message(line, "MUT201").contains("(in place)"), "{diags:#?}");
     }
     // The method the boundary allows still changes, at the call, the attribute it is called
     // on.
     assert_eq!(
-        message(24, "EFF201"),
+        message(25, "EFF201"),
         "`shapes` writes `pkg.model:Holder.counted` (in place), which effect boundary `pure` forbids"
     );
 }
