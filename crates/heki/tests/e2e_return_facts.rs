@@ -73,6 +73,10 @@ class Remote(Fetcher):
 
 def fetcher() -> Fetcher:
     return Remote()
+
+
+def connect_moved() -> sqlite3.Connection:
+    return sqlite3.connect(MOVED)
 "#;
 
 const APP: &str = r#"import sqlite3
@@ -117,6 +121,10 @@ async def tp_subclass_factory() -> object:
 
 async def tp_module_attribute_path() -> object:
     return sqlite3.connect(db.DB_PATH).execute("SELECT 1")
+
+
+async def th_rebound_factory_constant() -> object:
+    return db.connect_moved().execute("SELECT 1")
 "#;
 
 const ELSEWHERE: &str = r#"from pkg import db
@@ -179,6 +187,13 @@ fn a_factory_gives_what_every_return_gives_and_a_path_constant_names_its_file() 
         ),
         runs(42, "tp_module_attribute_path", "sqlite3.Connection.execute"),
         runs(42, "tp_module_attribute_path", "sqlite3.connect"),
+        // The factory opens the constant another module binds to an in-memory name.
+        reaches(
+            46,
+            "th_rebound_factory_constant",
+            "sqlite3.Connection.execute",
+        ),
+        reaches(46, "th_rebound_factory_constant", "sqlite3.connect"),
     ];
     expected.sort();
     assert_eq!(reports(&p), expected);
