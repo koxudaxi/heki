@@ -386,6 +386,26 @@ fn the_report_of_a_group_stays_where_it_is_when_imports_are_reordered() {
     assert!(err.contains("All checks passed"), "{err}");
 }
 
+/// `from . import _speedups` of a name the package binds nowhere, with no module of that name
+/// among the project's files, imports a compiled extension module: it reads nothing of the
+/// package. Once the package binds the name, the import reads the package while it loads.
+#[test]
+fn a_name_the_package_binds_nowhere_closes_no_cycle_through_it() {
+    let p = project(
+        "import_cycles_extension",
+        &[
+            ("ext/__init__.py", "from .a import VALUE\n"),
+            ("ext/a.py", "from . import _speedups\n\nVALUE = 1\n"),
+        ],
+    );
+    assert_eq!(reports(&p, &[]), Vec::<String>::new());
+    p.write(
+        "ext/__init__.py",
+        "_speedups = None\nfrom .a import VALUE\n",
+    );
+    assert_eq!(reports(&p, &[]), ["ext/a.py:1 <module> [ext, ext.a]"]);
+}
+
 /// `cycle-edges` takes the timing classes by name.
 #[test]
 fn an_unknown_timing_class_is_a_configuration_error() {

@@ -37,9 +37,11 @@ imports the submodule `pkg.name` only when `pkg/__init__.py` binds no `name` bef
 it. An import also loads the parent packages of its module first: `import pkg.sub.leaf` runs
 `pkg/sub/__init__.py`, and that load is a step of a cycle. The packages holding the importing
 module are the exception: Python loaded them before the module ran, so `import pkg.b` in
-`pkg/a.py` does not step back into `pkg/__init__.py`. An import that names such a package itself
-(`from pkg import name` in `pkg/a.py`) is a step: it reads the package while it may still be
-loading.
+`pkg/a.py` does not step back into `pkg/__init__.py`. An import of such a package itself, or of
+a name it binds (`from pkg import name` in `pkg/a.py`), is a step: it reads the package while it
+may still be loading. A name the package binds nowhere, with no module of that name among the
+project's files, is a submodule Python finds elsewhere (a compiled extension module), and no
+step.
 
 ## What a report states
 
@@ -55,7 +57,8 @@ Its premises:
   resolved against the project's modules, with `from` imports split between a submodule and an
   attribute as for `IMP201`. An import whose module heki cannot name is no step: a by-name import
   of a name the code does not fix, or `from a import c` where heki cannot tell whether `c` is the
-  submodule `a.c` (the package `a` loads either way, and is a step).
+  submodule `a.c` (the package `a` loads either way, and is a step unless it holds the importing
+  module, which then may not read it).
 
 A report says where each import of the cycle is written, never that a branch around it is
 taken, and never that the cycle fails: modules that import each other can load fine.

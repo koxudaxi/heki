@@ -818,16 +818,19 @@ impl<'i> ImportGraph<'i> {
             Target::Module(ModuleRef::Project(p)) => {
                 let package_name = self.modules[p as usize].clone();
                 let full = format!("{package_name}.{name}");
-                if !decls.holds_module(&full) {
-                    return package;
-                }
+                let held = decls.holds_module(&full);
+                let either = || Target::PackageOrSubmodule {
+                    package: ModuleRef::Project(p),
+                    submodule: full.clone(),
+                };
                 match decls.from_import(&package_name, name) {
-                    FromImport::Submodule => self.module_target(&full, decls),
-                    FromImport::Attribute => package,
-                    FromImport::Open => Target::PackageOrSubmodule {
-                        package: ModuleRef::Project(p),
-                        submodule: full,
-                    },
+                    FromImport::Submodule if held => self.module_target(&full, decls),
+                    // A name the package binds nowhere is the submodule, which the project's
+                    // files lack: Python finds it elsewhere (a compiled extension module) or
+                    // not at all.
+                    FromImport::Submodule => either(),
+                    FromImport::Open if held => either(),
+                    FromImport::Attribute | FromImport::Open => package,
                 }
             }
             Target::Module(m @ ModuleRef::External(e)) => Target::PackageOrSubmodule {
@@ -910,11 +913,12 @@ impl<'i> ImportGraph<'i> {
     /// The project modules site `j` of the project module `m` loads anew, each with the hop
     /// into it: the parent packages of the module the site certainly loads
     /// ([`Target::certain`]) that do not hold `m` ([`Self::holds`]), outermost first, then that
-    /// module unless it is `m` itself. A package holding `m` that the site names itself (`from
-    /// pkg import name` in `pkg.a`) is a hop: the site reads it while it may still be loading.
+    /// module unless it is `m` itself. A package holding `m` is a hop only when the site imports
+    /// it, or a name it binds ([`Target::Module`]: `from pkg import name` in `pkg.a`), and so
+    /// reads it while it may still be loading.
     pub fn hops(&self, m: u32, j: usize) -> Vec<ImportHop> {
-        let certain = self.sites(m).and_then(|s| s[j].1.certain());
-        let Some(t) = certain.and_then(ModuleRef::project) else {
+        let target = &self.sites(m).expect("hops are of a module's sites")[j].1;
+        let Some(t) = target.certain().and_then(ModuleRef::project) else {
             return Vec::new();
         };
         let hop = |to, parent| ImportHop {
@@ -927,7 +931,10 @@ impl<'i> ImportGraph<'i> {
             .filter(|&p| !self.holds(p, m))
             .filter_map(ModuleRef::project)
             .map(|p| hop(p, true));
-        parents.chain((t != m).then(|| hop(t, false))).collect()
+        let steps_in = !self.holds(ModuleRef::Project(t), m) || matches!(target, Target::Module(_));
+        parents
+            .chain((t != m && steps_in).then(|| hop(t, false)))
+            .collect()
     }
 
     /// The groups of project modules importing each other through the sites `counts` takes:

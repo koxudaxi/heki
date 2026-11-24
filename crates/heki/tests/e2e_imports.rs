@@ -65,6 +65,27 @@ fn sites(report: &Value, name: &str) -> Vec<String> {
         .collect()
 }
 
+/// `from pkg import name` of a name the package binds nowhere, with no module `pkg.name` among
+/// the project's files: Python imports the submodule, which it finds outside them (a compiled
+/// extension module) or not at all; the package loads either way.
+#[test]
+fn a_name_the_package_binds_nowhere_may_be_a_submodule_outside_the_files() {
+    let p = Project::new("imports_unbound_name");
+    p.write("ext/__init__.py", "VALUE = 1\n").write(
+        "ext/user.py",
+        "from ext import _speedups\nfrom ext import VALUE\n",
+    );
+    let (code, report, err) = imports(&p, "ext.user", &[]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        sites(&report, "ext.user"),
+        strings(&[
+            "1 from _speedups body always -> ext | ext._speedups",
+            "2 from VALUE body always -> ext",
+        ])
+    );
+}
+
 /// `(project modules, other modules)` loading `name` loads while it loads.
 fn loads(report: &Value, name: &str) -> (Vec<String>, Vec<String>) {
     let loads = &module(report, name)["loads"];

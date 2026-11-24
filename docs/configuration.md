@@ -896,7 +896,8 @@ or a glob whose `*` spans dots, never a suffix (`pkg.*` names `pkg.facts` and
 - `import a.b.c` imports `a.b.c`, not `a` or `a.b`, which it loads first. `from a.b import c`
   imports the submodule `a.b.c` when the package has one and binds no `c` before importing it,
   and `a.b` otherwise. An import of a module the project lacks below one of its packages fails,
-  and is no import.
+  and is no import; `from a.b import c` of a name `a.b` binds nowhere still imports `a.b`, and
+  may import a module `a.b.c` outside the project's files (a compiled extension module).
 - One report per import and module. A report's target, which a
   [baseline](adoption.md#ratchet-baselines) counts it by, is the module imported.
 - With `reach`, each module reached is reported once per importer, at the import of the importer

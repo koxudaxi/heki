@@ -2269,9 +2269,10 @@ an import itself.
   kept in the index): what each site loads (`Target`). `import a.b.c` loads `a.b.c`, after its
   parent packages. `from p import n` loads `p.n` when the project has that module and
   `ProjectDecls::from_import` says the name is the submodule, `p` when it is the package's
-  attribute or `n` is no module, and `p` with `p.n` open when the package binds `n` before the
-  submodule is imported (`PackageOrSubmodule`); for a package outside the project, `p`, with `p.n`
-  open. A module below a project package that the project does not have is `Missing`; one the
+  attribute or `n` is no module the package binds, and `p` with `p.n` open when the package binds
+  `n` before the submodule is imported, or binds no `n` and the project has no module `p.n`, which
+  Python then looks for outside the project's files (a compiled extension module)
+  (`PackageOrSubmodule`); for a package outside the project, `p`, with `p.n` open. A module below a project package that the project does not have is `Missing`; one the
   project has but an import may find elsewhere first (`ProjectDecls::holds_module`), or a name the
   code does not fix, is open. The lookups are declaration reads (`DeclKeys::modules`).
 - **Loads while it loads** (`ImportGraph::loads`): a module's `body` sites that run on every
