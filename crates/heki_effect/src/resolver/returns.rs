@@ -79,7 +79,7 @@ pub enum NoItems {
     Unsized,
 }
 
-/// The most passes deciding a module's return facts ([`ReturnFacts::decide`]): a function
+/// The most passes deciding a module's return facts ([`ReturnFacts::in_passes`]): a function
 /// returning what another returns (`a` returning `b()` returning `c()`) is decided a pass after
 /// it, so a function more than this many functions down such a chain gets no fact.
 const MAX_RETURN_PASSES: usize = 8;
@@ -418,7 +418,7 @@ pub(super) fn record_return_facts(
         types: RefCell::default(),
     };
     let mut decided: FxHashMap<&str, ReturnFact> = FxHashMap::default();
-    for (qualname, items) in facts.decide() {
+    for (qualname, items) in facts.in_passes() {
         decided.entry(qualname).or_default().items = Some(items);
     }
     for (qualname, definitions) in &typed {
@@ -568,7 +568,7 @@ impl<'f> ReturnFacts<'_, 'f> {
     /// its fact one pass after it), until no fact changes or [`MAX_RETURN_PASSES`] passes. A
     /// fact, once decided, stays: a pass only adds facts, so the facts do not depend on the
     /// order of the candidates. Past the bound, a function down a longer chain gets none.
-    fn decide(&self) -> FxHashMap<&'f str, ReturnedItems> {
+    fn in_passes(&self) -> FxHashMap<&'f str, ReturnedItems> {
         let mut facts: FxHashMap<&'f str, ReturnedItems> = FxHashMap::default();
         for _ in 0..MAX_RETURN_PASSES {
             let next: FxHashMap<&'f str, ReturnedItems> = self
