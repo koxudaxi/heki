@@ -575,13 +575,16 @@ def too_many(value: Model | Other | Ref | Node) -> None:
     value.fields = []
 "#;
 
-/// Return types: properties, methods along the MRO, `Self`, copies, partial objects, casts.
+/// Return types: properties, methods along the MRO, `Self`, copies, partial objects, casts (which
+/// type what nothing else types, as an annotation of a local does).
 const RETURNS: &str = r#"from __future__ import annotations
 
 import dataclasses
 import functools
 from dataclasses import dataclass
 from typing import Any, cast
+
+import typing_extensions
 
 from pkg.model import Model, make_model
 from pkg.shelf import Shelf, Wall
@@ -645,6 +648,22 @@ def cast_any(obj: object) -> None:
     cast(Any, obj).fields = []
 
 
+def cast_any_of_model(model: Model) -> None:
+    cast(Any, model).fields = []
+
+
+def cast_any_text_of_model(model: Model) -> None:
+    cast("Any", model).fields = []
+
+
+def cast_object_of_model(model: Model) -> None:
+    typing_extensions.cast(object, model).fields = []
+
+
+def cast_any_of_any(obj: Any) -> None:
+    cast(Any, obj).fields = []
+
+
 def bound_method(shelf: Shelf) -> None:
     shelf.picked.fields = []
 "#;
@@ -676,7 +695,7 @@ fn reported(p: &Project, args: &[&str], file: &str) -> BTreeSet<(String, String)
         .map(|d| {
             (
                 d["qualname"].as_str().unwrap().to_owned(),
-                d["rule_code"].as_str().unwrap().to_owned(),
+                common::tiered_code(d).to_owned(),
             )
         })
         .collect()
@@ -822,18 +841,105 @@ fn return_types_of_properties_methods_self_copies_partials_and_casts() {
             "partial_ctor",
             "cast_str",
             "cast_class",
+            "cast_any_of_model",
+            "cast_any_text_of_model",
+            "cast_object_of_model",
         ] {
             assert!(
                 found.contains(name),
                 "{name} not reported for {version}: {found:?}"
             );
         }
-        // A getter without a return annotation, a cast to `Any`, and a bound method read as an
-        // attribute name no class.
-        for name in ["loose", "cast_any", "bound_method"] {
+        // A getter without a return annotation, a cast to `Any` of a value nothing else types,
+        // and a bound method read as an attribute name no class. A cast to a broader type keeps
+        // the class its value is known to have.
+        for name in ["loose", "cast_any", "cast_any_of_any", "bound_method"] {
             assert!(!found.contains(name), "{name} reported for {version}");
         }
     }
+}
+
+/// The call-owners shape of a cast: `typing.cast` returns its value unchanged, so a cast to
+/// `Any` keeps the class its value is known to have, as an annotated local does; a value only an
+/// annotation of `Any` types stays unresolved.
+const CAST_CALLS: &str = r#"from typing import Any, cast
+
+from pkg.imports import Imports
+
+
+class Parser:
+    def __init__(self) -> None:
+        self.imports = Imports()
+
+
+def direct(parser: Parser) -> None:
+    parser.imports.append("a")
+
+
+def through_cast_any(parser: Parser) -> None:
+    cast("Any", parser).imports.append("b")
+
+
+def through_cast_any_name(parser: Parser) -> None:
+    cast(Any, parser).imports.append("c")
+
+
+def through_local_any(parser: Parser) -> None:
+    p: Any = parser
+    p.imports.append("e")
+
+
+def through_parameter_any(parser: Any) -> None:
+    cast(Any, parser).imports.append("f")
+"#;
+
+#[test]
+fn a_cast_keeps_the_class_its_value_is_known_to_have() {
+    let p = Project::new("receiver_casts");
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT204", "MUT207"]
+
+[[tool.heki.call-owners]]
+name = "imports"
+targets = ["pkg.imports:Imports.append"]
+allowed-callers = ["pkg.imports:*"]
+unresolved = "report"
+"#,
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/imports.py",
+        "class Imports:\n    def __init__(self) -> None:\n        self.items: list[str] = []\n\n\n\
+         \x20   def append(self, name: str) -> None:\n        self.items.append(name)\n",
+    )
+    .write("pkg/parser.py", CAST_CALLS);
+    let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let found: Vec<(u64, &str)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            (12, "MUT204"),
+            (16, "MUT204"),
+            (20, "MUT204"),
+            (25, "MUT204"),
+            (29, "MUT207"),
+        ]
+    );
 }
 
 const HELPERS_CONFIG: &str = r#"[project]
@@ -992,7 +1098,7 @@ name = "t"
 target-version = "py311"
 
 [tool.heki.lint]
-select = ["MUT201", "EFF101", "EFF111"]
+select = ["MUT201", "EFF101"]
 
 [[tool.heki.write-owners]]
 name = "store"
@@ -1089,8 +1195,8 @@ fn protocol_receivers_dispatch_to_the_classes_implementing_them() {
         // lacks `data_type`).
         ("write_view", "MUT201"),
         ("extend_view", "MUT201"),
-        // `Sleepy.pause` blocks; a protocol's implementations are never complete (`EFF111`).
-        ("run", "EFF111"),
+        // `Sleepy.pause` blocks; a protocol's implementations are never complete (heuristic).
+        ("run", "EFF101 [heuristic]"),
     ]
     .iter()
     .map(|(q, r)| ((*q).to_owned(), (*r).to_owned()))
@@ -1139,7 +1245,7 @@ fn a_protocol_typed_argument_ties_a_helper_write_to_the_implementations() {
     p.write(
         "pyproject.toml",
         &format!("{PROTOCOL_CONFIG}unresolved = \"report\"\n").replace(
-            "select = [\"MUT201\", \"EFF101\", \"EFF111\"]",
+            "select = [\"MUT201\", \"EFF101\"]",
             "select = [\"MUT201\", \"MUT205\"]",
         ),
     )
@@ -1210,10 +1316,7 @@ fn a_protocol_target_covers_the_writes_of_helpers_handed_a_protocol_typed_object
     p.write(
         "pyproject.toml",
         &PROTOCOL_CONFIG
-            .replace(
-                "select = [\"MUT201\", \"EFF101\", \"EFF111\"]",
-                "select = [\"MUT201\"]",
-            )
+            .replace("select = [\"MUT201\", \"EFF101\"]", "select = [\"MUT201\"]")
             .replace(
                 "targets = [\"Field.data_type\", \"Field.name\"]",
                 "targets = [\"FieldView.data_type\", \"Named.name\"]",

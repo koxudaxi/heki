@@ -60,8 +60,8 @@ def logged_names(names, source, log):
     return found
 ";
 
-/// A project with an exact `EFF101` and `OPT101` report, a heuristic `OPT101` and `OPT110`
-/// report, an `EFF111` report, and four test files.
+/// A project with an exact `EFF101` and `OPT101` report, a heuristic `EFF101`, `OPT101`, and
+/// `OPT110` report, and four test files.
 fn shop(name: &str) -> Project {
     let p = Project::new(name);
     p.write("app/__init__.py", "")
@@ -84,6 +84,24 @@ fn recommend_json(p: &Project, args: &[&str]) -> (i32, Value, String) {
     let (code, out, err) = p.heki(&all);
     let value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}{err}"));
     (code, value, err)
+}
+
+/// The notes on what makes `heki check` fail: `failing` reports shown now fail it, `passing`
+/// do not.
+fn exit_notes(failing: usize, passing: usize) -> Vec<String> {
+    vec![
+        format!(
+            "heki check fails on {failing} report(s) shown now (exit code 1): a Ratchet baseline \
+             records them, so that it fails only on new ones (`heki check --baseline \
+             heki-baseline.toml --update-baseline`, then `baseline = \"heki-baseline.toml\"` in \
+             the configuration)."
+        ),
+        format!(
+            "heki check does not fail on {passing} report(s) shown now: warnings, and heuristic \
+             reports, which can be wrong about the code and count as warnings; `fail-on = \
+             \"warning\"` in the lint settings makes them fail it."
+        ),
+    ]
 }
 
 /// The diagnostics `heki check --output-format json <args>` prints.
@@ -129,19 +147,19 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
         rest,
         "heki recommend (experimental) on .: 8 file(s), 20 function(s)\n\
          \n\
-         Reports now  2 shown (2 exact, 0 heuristic), 1 heuristic withheld, 5 heuristic rule(s) \
+         Reports now  2 shown (2 exact, 0 heuristic), 2 heuristic withheld, 3 heuristic rule(s) \
          off\n\
          \n\
          Rules worth enabling here\n\
          \x20 rule    reports  exact  consequence  right about the code (published)  real harm  \
          block\n\
-         \x20 EFF111        1      -  slowdown     not measured                      -          \
+         \x20 EFF101        1      0  slowdown     82% (69-90%), n=50, 2026-11-21    32%        \
          no: slower code, not a bug\n\
          \x20 OPT101        1      0  slowdown     78% (45-94%), n=9, 2026-11-21     0%         \
          no: slower code, not a bug\n\
          \x20 OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         \
          no: slower code, not a bug\n\
-         \x20 No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF112, EFF113, EFF114, EFF115, EFF116, \
+         \x20 No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF112, EFF114, EFF115, EFF116, \
          IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT106, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, \
          OPT103, OPT111, OPT112, OPT120, OPT121, OPT130\n\
          \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then \
@@ -155,7 +173,19 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
          \x20 For every candidate, accesses inside code heki cannot follow (unresolved calls, \
          libraries without a catalog) are not seen.\n\
          \n\
+         Notes\n\
+         \x20 - heki check fails on 1 report(s) shown now (exit code 1): a Ratchet baseline \
+         records them, so that it fails only on new ones (`heki check --baseline \
+         heki-baseline.toml --update-baseline`, then `baseline = \"heki-baseline.toml\"` in the \
+         configuration).\n\
+         \x20 - heki check does not fail on 1 report(s) shown now: warnings, and heuristic \
+         reports, which can be wrong about the code and count as warnings; `fail-on = \
+         \"warning\"` in the lint settings makes them fail it.\n\
+         \n\
          pyproject.toml: keys to add or change\n\
+         \x20 [tool.heki.lint]\n\
+         \x20 extend-select = [\"EFF111\"]  # adds EFF111\n\
+         \n\
          \x20 [[tool.heki.effect-boundaries]]\n\
          \x20 name = \"app.lists without blocking calls\"\n\
          \x20 scopes = [\"app.lists:*\"]\n\
@@ -163,7 +193,7 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
     );
     let (_, _, note) = p.heki(&["check"]);
     assert!(
-        note.contains("5 heuristic rule(s) are off and 1 heuristic report(s) are not shown"),
+        note.contains("3 heuristic rule(s) are off and 2 heuristic report(s) are not shown"),
         "{note}"
     );
     // The same counts as `heki check` for every selection, also with `lint.heuristic`.
@@ -179,31 +209,43 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
         let now = &report["reports_now"];
         let shown = checked(&p, args);
         let exact = shown.iter().filter(|d| d["certainty"] == "exact").count();
+        let failing = (shown.iter())
+            .filter(|d| d["certainty"] == "exact" && d["severity"] == "error")
+            .count();
         assert_eq!(
-            (&now["shown"], &now["exact"], &now["heuristic"]),
+            (
+                &now["shown"],
+                &now["exact"],
+                &now["heuristic"],
+                &now["failing"]
+            ),
             (
                 &json!(shown.len()),
                 &json!(exact),
-                &json!(shown.len() - exact)
+                &json!(shown.len() - exact),
+                &json!(failing)
             ),
             "{args:?}"
         );
+        // The reports that fail the run are those that make `heki check` exit with 1.
+        let (check_code, _, _) = p.heki(&[&["check"][..], args].concat());
+        assert_eq!(check_code, i32::from(failing > 0), "{args:?}");
         assert_follows_the_schema(&report);
     }
     let (_, heuristic, _) = recommend_json(&p, &["--heuristic"]);
     assert_eq!(
         heuristic["reports_now"],
         json!({"shown": 4, "exact": 2, "heuristic": 2, "withheld_heuristic": 0,
-               "heuristic_rules_off": 0, "baseline": null})
+               "heuristic_rules_off": 0, "baseline": null, "failing": 1})
     );
-    // Naming the exact rule shows its heuristic report.
+    // Naming the exact rule shows its heuristic report; `EFF101`'s, not named, stays withheld.
     let (_, named, _) = recommend_json(&p, &["--extend-select", "OPT101"]);
     assert_eq!(
         (
             &named["reports_now"]["withheld_heuristic"],
             &named["reports_now"]["heuristic"]
         ),
-        (&json!(0), &json!(1))
+        (&json!(1), &json!(1))
     );
     // An inline suppression counts as in `heki check`.
     p.write(
@@ -226,7 +268,7 @@ fn the_json_object_names_the_project_and_its_run() {
         (&report["kind"], &report["version"], &report["heki"]),
         (
             &json!("heki-recommend"),
-            &json!(1),
+            &json!(2),
             &json!(env!("CARGO_PKG_VERSION"))
         )
     );
@@ -253,11 +295,13 @@ fn the_json_object_names_the_project_and_its_run() {
     assert_eq!(
         (&report["notes"], &report["config"], &report["config_toml"]),
         (
-            &json!([]),
-            &json!({"effect-boundaries": [{"name": "app.lists without blocking calls",
+            &json!(exit_notes(1, 1)),
+            &json!({"lint": {"extend-select": ["EFF111"]},
+                    "effect-boundaries": [{"name": "app.lists without blocking calls",
                                            "scopes": ["app.lists:*"], "forbid": ["blocking"]}]}),
             &json!(
-                "[[tool.heki.effect-boundaries]]\nname = \"app.lists without blocking calls\"\n\
+                "[tool.heki.lint]\nextend-select = [\"EFF111\"]  # adds EFF111\n\n\
+                 [[tool.heki.effect-boundaries]]\nname = \"app.lists without blocking calls\"\n\
                  scopes = [\"app.lists:*\"]\nforbid = [\"blocking\"]\n"
             )
         )
@@ -265,16 +309,15 @@ fn the_json_object_names_the_project_and_its_run() {
     let (_, text, _) = p.heki(&["recommend"]);
     assert_eq!(report["content"], json!(text));
     // Without a contract or rule to add, the discovery run is the only one.
-    let (_, ignoring, _) = recommend_json(&p, &["--ignore", "EFF201"]);
+    let (_, ignoring, _) = recommend_json(&p, &["--heuristic", "--ignore", "EFF201"]);
     assert_eq!(ignoring["runs"], json!([{"label": "discovery"}]));
+    let mut notes = exit_notes(1, 3);
+    notes.push(
+        "the configuration ignores EFF201, so no effect-boundaries contract is proposed".to_owned(),
+    );
     assert_eq!(
         (&ignoring["config"], &ignoring["notes"]),
-        (
-            &json!({}),
-            &json!([
-                "the configuration ignores EFF201, so no effect-boundaries contract is proposed"
-            ])
-        )
+        (&json!({}), &json!(notes))
     );
 }
 
@@ -326,6 +369,15 @@ fn a_baseline_splits_the_reports_into_allowed_and_regressions() {
         json!({"allowed": 2, "regressions": regressions})
     );
     assert_eq!(regressions, 1);
+    // The regression is an exact error: `heki check` fails on it, and on nothing else, so no
+    // note proposes a baseline or `fail-on`.
+    assert_eq!(report["reports_now"]["failing"], json!(1));
+    assert_eq!(p.heki(&["check", "--baseline", "b.toml"]).0, 1);
+    assert!(
+        (report["notes"].as_array().unwrap().iter())
+            .all(|note| !note.as_str().unwrap().starts_with("heki check")),
+        "{report:#}"
+    );
     assert_follows_the_schema(&report);
     // The baseline of the configuration, relative to the project root.
     p.write(
@@ -390,7 +442,10 @@ fn a_file_that_does_not_parse_exits_2_after_the_report() {
 fn the_configuration_file_decides_where_the_keys_go() {
     let p = shop("recommend_config_file");
     std::fs::remove_file(p.dir.join("pyproject.toml")).unwrap();
-    p.write("heki.toml", "[lint]\nextend-select = [\"EFF105\"]\n");
+    p.write(
+        "heki.toml",
+        "[lint]\nextend-select = [\"EFF105\"]\nheuristic = true\n",
+    );
     let (_, report, _) = recommend_json(&p, &[]);
     assert_eq!(
         (&report["config_file"], &report["table_prefix"]),
@@ -417,10 +472,10 @@ fn the_configuration_file_decides_where_the_keys_go() {
         (&none["config_file"], &none["table_prefix"]),
         (&Value::Null, &json!("tool.heki"))
     );
+    let content = none["content"].as_str().unwrap();
     assert!(
-        none["content"].as_str().unwrap().contains(
-            "\npyproject.toml: keys to add or change\n  [[tool.heki.effect-boundaries]]\n"
-        ),
+        content.contains("\npyproject.toml: keys to add or change\n  [tool.heki.lint]\n")
+            && content.contains("\n  [[tool.heki.effect-boundaries]]\n"),
         "{none}"
     );
     assert_follows_the_schema(&none);
@@ -654,21 +709,22 @@ fn rules_worth_enabling_follow_the_policy() {
         section,
         "  rule    reports  exact  consequence  right about the code (published)  real harm  block\n\
         \x20 EFF107        1      -  bug          not measured                      -          yes\n\
+        \x20 EFF111        1      -  bug          not measured                      -          yes\n\
         \x20 MUT106        1      -  bug          not measured                      -          yes\n\
-        \x20 EFF111        1      -  slowdown     not measured                      -          no: slower code, not a bug\n\
+        \x20 EFF101        1      0  slowdown     82% (69-90%), n=50, 2026-11-21    32%        no: slower code, not a bug\n\
         \x20 MUT107        1      -  bug          78% (65-87%), n=50, 2026-11-21    4%         no: real harm below 10%\n\
         \x20 OPT101        1      0  slowdown     78% (45-94%), n=9, 2026-11-21     0%         no: slower code, not a bug\n\
         \x20 OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug\n\
         \x20 Optional (experimental, never in the block)\n\
         \x20 EFF109        1      -  bug          not measured                      -          no: experimental\n\
-        \x20 No reports here: EFF102, EFF105, EFF106, EFF110, EFF112, EFF113, EFF114, EFF115, EFF116, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT108, MUT111, MUT112, MUT113, \
+        \x20 No reports here: EFF102, EFF105, EFF106, EFF110, EFF112, EFF114, EFF115, EFF116, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT108, MUT111, MUT112, MUT113, \
         MUT115, MUT118, MUT120, OPT103, OPT111, OPT112, OPT120, OPT121, OPT130\n\
         \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it."
     );
     assert!(
         out.contains(
             "\npyproject.toml: keys to add or change\n  [tool.heki.lint]\n  extend-select = \
-             [\"EFF107\", \"MUT106\"]  # adds EFF107, MUT106\n"
+             [\"EFF107\", \"EFF111\", \"MUT106\"]  # adds EFF107, EFF111, MUT106\n"
         ),
         "{out}"
     );
@@ -720,10 +776,10 @@ fn rules_worth_enabling_follow_the_policy() {
     assert_eq!(rule(&report, "MUT103")["reports"], Value::Null);
     assert_eq!(
         report["config"]["lint"],
-        json!({"extend-select": ["EFF107", "MUT106"]})
+        json!({"extend-select": ["EFF107", "EFF111", "MUT106"]})
     );
     // Rules the current selection runs in full, and contract rules, are not listed.
-    for code in ["EFF101", "OPT102", "MUT201", "EFF201"] {
+    for code in ["EFF103", "OPT102", "MUT201", "EFF201"] {
         assert!(
             report["rules"]
                 .as_array()
@@ -743,7 +799,7 @@ fn rules_worth_enabling_follow_the_policy() {
     );
     assert_eq!(
         ignoring["config"]["lint"],
-        json!({"extend-select": ["EFF107"]})
+        json!({"extend-select": ["EFF107", "EFF111"]})
     );
     // A selected `MUT103` is not advice.
     let (_, selected, _) = recommend_json(&p, &["--extend-select", "MUT103"]);
@@ -935,8 +991,8 @@ fn paths_are_written_as_heki_check_writes_them() {
     );
 }
 
-/// Heuristic reports of exact claims, one per closer: `EFF111` (a branch skips the wait: code),
-/// `EFF113` (a loop over a library result the catalog does not size: heki's catalog), `OPT113`
+/// Heuristic reports of exact claims, one per closer: `EFF101` (a branch skips the wait: code),
+/// `EFF103` (a loop over a library result the catalog does not size: heki's catalog), `OPT113`
 /// (items of unknown type: two annotations), and `OPT110` (a loop the code counts: a condition of
 /// the exact tier, nothing to apply). `handle_quietly`'s report is suppressed.
 const HEURISTIC_CLAIMS: [(&str, &str); 4] = [
@@ -944,7 +1000,7 @@ const HEURISTIC_CLAIMS: [(&str, &str); 4] = [
         "app/waits.py",
         "import time\n\n\ndef pause(flag):\n    if flag:\n        return None\n    time.sleep(1)\n\n\n\
          async def handle(flag):\n    pause(flag)\n\n\nasync def handle_quietly(flag):\n    \
-         pause(flag)  # heki: ignore[EFF111]\n",
+         pause(flag)  # heki: ignore[EFF101]\n",
     ),
     (
         "app/queries.py",
@@ -1003,7 +1059,7 @@ fn heuristic_reports_are_counted_by_the_premise_they_leave_open_and_why() {
     assert_eq!(section["reports"], json!(4), "{section:#}");
     assert_eq!(
         section["by_rule"],
-        json!([{"rule": "EFF111", "reports": 1}, {"rule": "EFF113", "reports": 1},
+        json!([{"rule": "EFF101", "reports": 1}, {"rule": "EFF103", "reports": 1},
                {"rule": "OPT110", "reports": 1}, {"rule": "OPT113", "reports": 1}])
     );
     let row = |name: &str, cause: &str, closer: &str, reports: u64, only: u64| {
@@ -1037,14 +1093,13 @@ fn heuristic_reports_are_counted_by_the_premise_they_leave_open_and_why() {
         (&by_cause[0]["kind"], &by_cause[2]["kind"]),
         (&json!("premise"), &json!("condition"))
     );
-    // A heuristic side's reports count under the claim of its exact rule.
     assert_eq!(
         by_cause[0]["rules"],
-        json!([{"rule": "EFF101", "reported_as": "EFF111", "reports": 1, "only_open": 1}])
+        json!([{"rule": "EFF101", "reports": 1, "only_open": 1}])
     );
     assert_eq!(
         by_cause[0]["examples"],
-        json!([{"path": "app/waits.py", "line": 11, "column": 5, "rule": "EFF111",
+        json!([{"path": "app/waits.py", "line": 11, "column": 5, "rule": "EFF101",
                 "at": {"path": "app/waits.py", "line": 7, "column": 5}, "detail": null}])
     );
     assert_eq!(
@@ -1061,8 +1116,16 @@ fn heuristic_reports_are_counted_by_the_premise_they_leave_open_and_why() {
         (&section["not_recorded"], &section["truncated"]),
         (&json!([]), &json!(false))
     );
-    // Nothing of this section enters the block.
-    assert_eq!(report["config"], json!({}));
+    // Nothing of this section enters the block: it holds the rules the rules section enables.
+    let enabled: Vec<&Value> = (report["rules"].as_array().unwrap().iter())
+        .filter(|r| r["in_block"] == true)
+        .map(|r| &r["code"])
+        .collect();
+    assert_eq!(
+        report["config"],
+        json!({"lint": {"extend-select": enabled}}),
+        "{report:#}"
+    );
     assert_follows_the_schema(&report);
     let (_, out, _) = p.heki(&["recommend"]);
     let text = out
@@ -1074,13 +1137,13 @@ fn heuristic_reports_are_counted_by_the_premise_they_leave_open_and_why() {
     assert_eq!(
         lines[..3],
         [
-            "  4 heuristic report(s) of exact claims: EFF111 1, EFF113 1, OPT110 1, OPT113 1",
+            "  4 heuristic report(s) of exact claims: EFF101 1, EFF103 1, OPT110 1, OPT113 1",
             "  premise: cause                                 reports  only open  closed by",
             "  Every return: not-made-on-every-return               1          1  code",
         ],
         "{text}"
     );
-    assert_eq!(lines[4], "    e.g. app/waits.py:11 EFF111", "{text}");
+    assert_eq!(lines[4], "    e.g. app/waits.py:11 EFF101", "{text}");
     for line in [
         "  Origin: library-call-without-items                   1          1  heki's catalog",
         "  Trip count open (condition): trip-count-fixed        1          1  none",
@@ -1225,7 +1288,7 @@ fn library_names_without_a_catalog_entry_are_listed_with_what_heki_would_report(
         (&packages[0]["package"], &packages[0]["calls"]),
         (&json!("stripe"), &json!(3))
     );
-    let tried = |eff101: u64, eff103: u64| json!([{"EFF101": eff101, "EFF111": 0}, {"EFF103": eff103, "EFF113": 0}]);
+    let tried = |eff101: u64, eff103: u64| json!([{"exact": eff101, "heuristic": 0}, {"exact": eff103, "heuristic": 0}]);
     // On the event loop it would wait there; in a loop over a parameter it would send a query
     // per item; awaited, it holds nothing up.
     assert_eq!(
@@ -1275,7 +1338,15 @@ fn library_names_without_a_catalog_entry_are_listed_with_what_heki_would_report(
     let keys: Vec<&String> = report["config"].as_object().unwrap().keys().collect();
     assert_eq!(keys, ["effect-boundaries"]);
     assert_eq!(report["reports_now"]["shown"], json!(0));
-    assert_eq!(rule(&report, "EFF111")["reports"], json!(0));
+    // `EFF101` withholds no report here, so it is not listed.
+    assert!(
+        report["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["code"] != "EFF101"),
+        "{report:#}"
+    );
     assert!(
         report["notes"][0]
             .as_str()
@@ -1288,11 +1359,11 @@ fn library_names_without_a_catalog_entry_are_listed_with_what_heki_would_report(
     for line in [
         "  calls of packages heki's catalog does not cover: 3 call(s) of 3 name(s) in 1 \
          package(s)",
-        "    name                        calls  async  loops  if it waits  if it sends a query",
-        "    stripe.Charge.create            1      1      0  EFF101 1     -",
-        "    stripe.Charge.capture           1      0      1  -            EFF103 1",
-        "    stripe.Refund.create_async      1      0      0  -            -",
-        "    requests.utils.quote      1      1      0  EFF101 1     -",
+        "    name                        calls  async  loops  if it waits     if it sends a query",
+        "    stripe.Charge.create            1      1      0  EFF101 1 exact  -",
+        "    stripe.Charge.capture           1      0      1  -               EFF103 1 exact",
+        "    stripe.Refund.create_async      1      0      0  -               -",
+        "    requests.utils.quote      1      1      0  EFF101 1 exact  -",
         "  1 function(s) with an A1 hazard, 0 of them too large to model: the Soundness lane \
          proves nothing in them (`heki assumptions` lists them)",
     ] {
@@ -1308,7 +1379,7 @@ fn library_names_without_a_catalog_entry_are_listed_with_what_heki_would_report(
         "[project]\nname = \"t\"\n\n[[tool.heki.ecosystem]]\nsymbol = \"stripe.Charge.create\"\n\
          effects = [\"blocking_net\", \"db_query\"]\n",
     );
-    let shown = checked(&p, &["--select", "EFF101,EFF111,EFF103,EFF113"]);
+    let shown = checked(&p, &["--select", "EFF101,EFF103"]);
     let through: Vec<&Value> = shown
         .iter()
         .filter(|d| d["target"] == "stripe.Charge.create")
@@ -1891,11 +1962,11 @@ fn a_report_naming_several_library_names_counts_for_the_first() {
     let (_, report, _) = recommend_json(&p, &[]);
     let symbols = &report["blind_spots"]["uncatalogued"][0]["symbols"];
     assert_eq!(
-        (&symbols[0]["symbol"], &symbols[0]["if_waits"]["EFF101"]),
+        (&symbols[0]["symbol"], &symbols[0]["if_waits"]["exact"]),
         (&json!("stripe.a"), &json!(1))
     );
     assert_eq!(
-        (&symbols[1]["symbol"], &symbols[1]["if_waits"]["EFF101"]),
+        (&symbols[1]["symbol"], &symbols[1]["if_waits"]["exact"]),
         (&json!("stripe.b"), &json!(0))
     );
     assert!(
@@ -2068,7 +2139,7 @@ fn names_the_catalog_lacks_come_by_what_heki_would_report_through_them() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|s| (s["symbol"].clone(), s["if_waits"]["EFF101"].clone()))
+        .map(|s| (s["symbol"].clone(), s["if_waits"]["exact"].clone()))
         .collect();
     assert_eq!(
         missing,
@@ -2080,7 +2151,7 @@ fn names_the_catalog_lacks_come_by_what_heki_would_report_through_them() {
     // A query on some paths only would be reported as heuristic.
     assert_eq!(
         blind["uncatalogued"][0]["symbols"][0]["if_queries"],
-        json!({"EFF103": 0, "EFF113": 1})
+        json!({"exact": 0, "heuristic": 1})
     );
     assert_follows_the_schema(&report);
 }

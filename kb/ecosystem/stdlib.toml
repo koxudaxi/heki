@@ -1080,6 +1080,7 @@ opaque_to_layer3 = true
 symbol = "sqlite3.Cursor.fetchmany"
 effects = ["blocking_db"]
 items = "rows"
+items_up_to = { arg = 0, param = "size" }
 emits = "if-on-disk"
 opaque_to_layer3 = true
 
@@ -1226,6 +1227,7 @@ opaque_to_layer3 = true
 symbol = 'sqlite3.connect(file).cursor().fetchmany'
 effects = ["blocking_db"]
 items = "rows"
+items_up_to = { arg = 0, param = "size" }
 api = "sqlite3.Cursor.fetchmany"
 opaque_to_layer3 = true
 

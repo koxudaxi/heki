@@ -18,16 +18,20 @@ fn diagnostics(p: &Project, args: &[&str]) -> Vec<Value> {
     serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}: {stdout}"))
 }
 
-/// The `(qualname, rule)` pairs `rules` report on the single module `source`.
+/// The `(qualname, rule)` pairs `rules` report on the single module `source`: a code selects
+/// every report of its rule, and `EFF101 [heuristic]` only the heuristic ones of `EFF101`
+/// ([`common::with_tier`]).
 fn reports(name: &str, source: &str, rules: &str) -> Vec<(String, String)> {
     let p = Project::new(name);
     p.write("case.py", source);
-    diagnostics(&p, &["--select", &common::select_with_siblings(rules)])
+    let one_tier = rules != common::code_of(rules);
+    diagnostics(&p, &["--select", common::code_of(rules)])
         .iter()
+        .filter(|d| !one_tier || common::tiered_code(d) == rules)
         .map(|d| {
             (
                 d["qualname"].as_str().unwrap().to_owned(),
-                d["rule_code"].as_str().unwrap().to_owned(),
+                common::tiered_code(d).to_owned(),
             )
         })
         .collect()
@@ -83,8 +87,8 @@ async def iterates():
     assert_eq!(function(&ir, "rows")["kind"], "generator");
     // Calling a generator function only creates the generator; iterating it runs the body.
     assert_eq!(
-        reports("ir_fstring_yield", src, "EFF111"),
-        pairs(&[("iterates", "EFF111")])
+        reports("ir_fstring_yield", src, "EFF101 [heuristic]"),
+        pairs(&[("iterates", "EFF101 [heuristic]")])
     );
 }
 
@@ -215,8 +219,8 @@ async def module_function(items):
     // Inside the comprehension `item` is its iteration variable (a cell of the frame), not
     // the module's blocking function.
     assert_eq!(
-        reports("ir_comprehension_cells", src, "EFF111"),
-        pairs(&[("module_function", "EFF111")])
+        reports("ir_comprehension_cells", src, "EFF101 [heuristic]"),
+        pairs(&[("module_function", "EFF101 [heuristic]")])
     );
     let ir = dump_ir("ir_comprehension_cells", src, "py315");
     let captured = function(&ir, "lambda_in_comprehension")["captured_vars"].clone();
@@ -251,13 +255,11 @@ async def attribute_target(pairs, holder):
     for version in ["py311", "py315"] {
         let p = Project::new(&format!("ir_comprehension_targets_{version}"));
         p.write("case.py", src);
-        let got: Vec<String> = diagnostics(
-            &p,
-            &["--select", "EFF101,EFF111", "--target-version", version],
-        )
-        .iter()
-        .map(|d| d["qualname"].as_str().unwrap().to_owned())
-        .collect();
+        let got: Vec<String> =
+            diagnostics(&p, &["--select", "EFF101", "--target-version", version])
+                .iter()
+                .map(|d| d["qualname"].as_str().unwrap().to_owned())
+                .collect();
         assert_eq!(got, ["starred_target", "attribute_target"], "{version}");
     }
 }
@@ -698,11 +700,11 @@ def merged(maps):
     // PEP 798: `[*it for ...]` extends the list with each `it`, `(*it for ...)` yields from it;
     // a plain element only holds the generator.
     assert_eq!(
-        reports("ir_unpacking_comprehensions", src, "EFF111"),
+        reports("ir_unpacking_comprehensions", src, "EFF101 [heuristic]"),
         pairs(&[
-            ("flattened", "EFF111"),
-            ("flattened_set", "EFF111"),
-            ("yielded_from", "EFF111"),
+            ("flattened", "EFF101 [heuristic]"),
+            ("flattened_set", "EFF101 [heuristic]"),
+            ("yielded_from", "EFF101 [heuristic]"),
         ])
     );
     let ir = dump_ir("ir_unpacking_comprehensions", src, "py315");
@@ -1000,8 +1002,11 @@ async def plain(query: sqlalchemy.orm.Query):
     // `iter(query)` runs when the generator expression is created, whatever its later
     // clauses are: the query executes on the event loop.
     assert_eq!(
-        reports("ir_genexpr_first_iteration", src, "EFF111"),
-        pairs(&[("later_async_clause", "EFF111"), ("plain", "EFF111")])
+        reports("ir_genexpr_first_iteration", src, "EFF101 [heuristic]"),
+        pairs(&[
+            ("later_async_clause", "EFF101 [heuristic]"),
+            ("plain", "EFF101 [heuristic]")
+        ])
     );
 }
 

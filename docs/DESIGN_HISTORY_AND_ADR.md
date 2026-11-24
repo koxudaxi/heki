@@ -447,6 +447,18 @@ that need no configuration, the import contracts of other tools, and heki's own 
      effect rules (their claims differ, and a rule is its claim); a selection that reads a
      per-report certainty (the selection stays per rule, and a filter withholds the heuristic
      reports of an exact rule).
+     *Amended in 0.4.0*: the effect rules keep one code too, with a certainty per report:
+     `EFF111` is now the heuristic tier of `EFF101`, and `EFF113` that of `EFF103`. Every gain in
+     precision moved a report from the heuristic code to the exact one, so it changed the
+     report's code: an inline suppression stopped matching it, a baseline counted it as new, and
+     the entry of the old code was left unused. 13 rules already carried both tiers under one
+     code (the eight `OPT` rewrite rules, `OPT113`, `DATA101`, `MUT110`, `MUT114`, and
+     `MUT119`), `DATA101` split by the same must-facts as the effect rules, and within one code a
+     baseline entry already holds across a change of tier. The heuristic tier states the
+     weaker claim of the same premises, each open premise recorded as for the other rules. The
+     old codes are no aliases, as `MUT109` was not in 0.3.0: in a selector, a suppression, or a
+     baseline entry they are read like any unknown code. Decision 10 is unchanged: naming
+     `EFF101` or `EFF103` shows its heuristic reports.
   10. **Selecting the heuristic rules and reports** (D6): `[tool.heki.lint] heuristic = true` and
       `--heuristic` / `--no-heuristic` (on `check` and `server`), modelled on Ruff's `preview`:
       prefixes and `ALL` then also select the heuristic `Default` rules, and an exact code or name
@@ -531,6 +543,28 @@ that need no configuration, the import contracts of other tools, and heki's own 
   (the update did not happen) and pending `--diff` changes (files would change) still exit 1.
   *Rejected*: failing on both severities (the 0.1 behavior); an `--exit-zero` switch (it hides
   the bugs too).
+- **Amended in 0.4.0**: only a certain bug that can be critical fails a run.
+  1. `EFF101` is a `Bug`, an `error`: a call that blocks the event loop holds up every
+     concurrent task while it waits, as `EFF106`'s deadlock does. Its heuristic reports (a
+     call that can reach a blocking call) keep the severity and fail nothing by default (point 2).
+     Slower code (`EFF102`, `EFF103`, `EFF105`, `DATA101`, the `OPT` rules) stays a
+     `warning`: of the 4 `EFF103` reports on an event-loop boundary in the corpus, none adds a
+     package the `EFF101` reports do not already fail.
+  2. A heuristic report counts as a `warning` for `fail-on`, whatever its severity
+     (`Diagnostic::fails_run`). It can be wrong about the code, and a check that fails on a
+     report that may be false is turned off as surely as one that fails on every slower loop.
+     The report keeps its rule's severity in every output: the severity says what the bug costs
+     if the report is right, the certainty whether it is. `fail-on = "warning"` fails on it,
+     which is how a project makes its contracts, whose rules are heuristic until certified, stop
+     a run.
+
+  On the development corpus (364 packages analyzed), a run with no configuration fails 36
+  packages instead of 7 (the median newly failing package has 2 reports, the largest 13), with
+  the same reports. *Rejected*: failing on every exact report, slower code included (a new
+  `fail-on` value as the default: 62 packages fail); `fail-on = "warning"` as the default, as
+  Ruff and ty do (62, and 249 with every rule and `--heuristic`, mostly on reports heki labels as
+  possibly wrong); showing a heuristic report of an `error` rule as a `warning` (the label and the
+  SARIF level would stop saying what the bug costs).
 ### ADR-020: `heki recommend`: advice on the configuration from the project's own analysis
 - **Background**: what to enable and declare is the user's question after a first run: which
   heuristic reports could be made exact, which opt-in rules would report here, which ownership

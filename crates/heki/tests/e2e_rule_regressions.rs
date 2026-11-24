@@ -25,11 +25,17 @@ fn helps(p: &Project, rule: &str) -> Vec<(u64, String, String)> {
     reports_with(p, rule, "help")
 }
 
+/// `rule` is a code with its tier ([`common::with_tier`]): `EFF101` for the exact reports of the
+/// rule, `EFF101 [heuristic]` for its heuristic ones.
 fn reports_with(p: &Project, rule: &str, field: &str) -> Vec<(u64, String, String)> {
-    diagnostics(p, &["--select", rule])
+    let code = common::code_of(rule);
+    diagnostics(p, &["--select", code])
         .iter()
+        .filter(|d| {
+            assert_eq!(d["rule_code"], code, "{d:#}");
+            common::tiered_code(d) == rule
+        })
         .map(|d| {
-            assert_eq!(d["rule_code"], rule, "{d:#}");
             (
                 d["line"].as_u64().unwrap(),
                 d["qualname"].as_str().unwrap().to_owned(),
@@ -987,20 +993,18 @@ fn eff103_counts_executed_and_iterated_queries_not_built_ones() {
     // generator expression. Comprehensions run in the function from Python 3.12 (PEP 709) and
     // in a function of their own before.
     for (target, comprehension) in [("py312", (38, 27)), ("py311", (38, 15))] {
-        let found: Vec<(u64, u64, String, String)> = diagnostics(
-            &p,
-            &["--select", "EFF103,EFF113", "--target-version", target],
-        )
-        .iter()
-        .map(|d| {
-            (
-                d["line"].as_u64().unwrap(),
-                d["column"].as_u64().unwrap(),
-                d["qualname"].as_str().unwrap().to_owned(),
-                d["target"].as_str().unwrap().to_owned(),
-            )
-        })
-        .collect();
+        let found: Vec<(u64, u64, String, String)> =
+            diagnostics(&p, &["--select", "EFF103", "--target-version", target])
+                .iter()
+                .map(|d| {
+                    (
+                        d["line"].as_u64().unwrap(),
+                        d["column"].as_u64().unwrap(),
+                        d["qualname"].as_str().unwrap().to_owned(),
+                        d["target"].as_str().unwrap().to_owned(),
+                    )
+                })
+                .collect();
         let r = |line, column, qualname: &str, target: &str| {
             (line, column, qualname.to_owned(), target.to_owned())
         };
@@ -1040,7 +1044,7 @@ fn eff101_sees_a_query_iterated_on_the_event_loop() {
         "handler.py",
         "from sqlalchemy.orm import Session\n\n\nasync def handler(session: Session):\n    for row in session.query(object):\n        print(row)\n    return session.query(object).filter_by(id=1)\n",
     );
-    let found = reports(&p, "EFF111");
+    let found = reports(&p, "EFF101 [heuristic]");
     assert_eq!(found.len(), 1, "{found:#?}");
     assert_eq!(found[0].0, 5);
     assert!(
@@ -1051,7 +1055,9 @@ fn eff101_sees_a_query_iterated_on_the_event_loop() {
     );
     // The help of a database call names an async driver.
     assert!(
-        helps(&p, "EFF111")[0].2.ends_with("or use an async driver"),
+        helps(&p, "EFF101 [heuristic]")[0]
+            .2
+            .ends_with("or use an async driver"),
         "{found:#?}"
     );
 }

@@ -95,7 +95,9 @@ method call or a `@property` / `cached_property` read has the return annotation 
 definition the receiver's class finds first along its MRO, as for a type checker (`typing.Self`
 is the receiver's class); a copy (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`,
 `model_copy`) has its original's class, calling a `functools.partial` object returns what the
-wrapped function returns, and `typing.cast` names the class. A variable rebound in a loop
+wrapped function returns, and `typing.cast` names the class of a value nothing else types
+(a cast to `Any` or to a base class keeps the class the value is known to have, as an annotated
+local does). A variable rebound in a loop
 (`node = node.parent`) or assigned on some paths only (a walrus inside `and` / `or`) has the
 classes of the values reaching it; a value of two or three classes (`Model | Node`, from an
 annotation or from different assignments) is each of them, and an `isinstance` check narrows it

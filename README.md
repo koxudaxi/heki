@@ -53,7 +53,7 @@ async def get_user(user_id: int) -> dict[str, str]:
 
 ```console
 $ heki check
-app/api.py:5:12: EFF101 (async-blocking-call) [warning] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)
+app/api.py:5:12: EFF101 (async-blocking-call) [error] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)
   |
 5 |     return load_user(user_id)
   |            ^
@@ -63,7 +63,7 @@ app/api.py:5:12: EFF101 (async-blocking-call) [warning] `app.users.load_user` al
   = help: offload it with `asyncio.to_thread`, or use an async client
 
 Found 1 diagnostic(s) in 2 file(s).
-note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+note: 3 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 EFF101 (async-blocking-call): `heki rule EFF101`, https://heki.koxudaxi.dev/rules/async-blocking-call/
 ```
 
@@ -95,7 +95,7 @@ app/orders.py:11:37: EFF103 (loop-db-query) [warning] every iteration over param
   = help: batch the queries, or load the data once before the loop
 
 Found 1 diagnostic(s) in 1 file(s).
-note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+note: 3 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 EFF103 (loop-db-query): `heki rule EFF103`, https://heki.koxudaxi.dev/rules/loop-db-query/
 ```
 
@@ -122,10 +122,13 @@ use it next to them.
 
 Run `uvx heki check` (or `heki check` once installed) in the directory with `pyproject.toml`:
 
-- An error reports a bug: a wrong result, an exception, a lost update, a deadlock, or a broken
-  contract. A warning reports slower code, like the two above, or a bug that is rarely harmful.
-- Warnings are printed and do not fail the run (exit code 0). Errors fail it (exit code 1).
-  `--fail-on warning` (`lint.fail-on = "warning"`) makes warnings fail it too.
+- An error reports a bug that can be critical: a wrong result, an exception, a lost update, a
+  deadlock, an event loop held up for every other task, like the first example above, or a
+  broken contract. A warning reports slower code, like the second, or a bug that is rarely
+  harmful.
+- An exact error fails the run (exit code 1). Warnings, and heuristic reports, which can be
+  wrong about the code, are printed and do not fail it (exit code 0). `--fail-on warning`
+  (`lint.fail-on = "warning"`) makes them fail it too.
 - A note at the end says how many heuristic rules were left off; `--heuristic` runs them.
 - Next, [`heki recommend`](https://heki.koxudaxi.dev/recommend/) (experimental) says which rules
   would report on the project, what heki could not see, and the contracts the code already
@@ -391,10 +394,12 @@ jobs:
       - run: uvx heki check --output-format github
 ```
 
-Errors fail the hook and the last step. Warnings, such as `EFF101` and `EFF103` reports, do not,
-unless you add `--fail-on warning` or set `fail-on = "warning"` in `[tool.heki.lint]`. The SARIF
-step keeps findings as alerts and fails only on a configuration, read, or syntax error. See
-[Adopting heki](https://heki.koxudaxi.dev/adoption/) for a hook without uv and a Ratchet baseline.
+Exact errors, such as `EFF101` reports, fail the hook and the last step. Warnings, such as
+`EFF103` reports, and heuristic reports do not, unless you add `--fail-on warning` or set
+`fail-on = "warning"` in `[tool.heki.lint]`. The SARIF step keeps findings as alerts and fails
+only on a configuration, read, or syntax error. See
+[Adopting heki](https://heki.koxudaxi.dev/adoption/) for a hook without uv and a Ratchet baseline
+that records today's errors, so that only new ones fail.
 
 ## 📚 Documentation
 
@@ -403,7 +408,7 @@ step keeps findings as alerts and fails only on a configuration, read, or syntax
 - 🚀 [Getting started](https://heki.koxudaxi.dev/getting-started/) - run heki on a project, read a diagnostic, apply a fix
 - 🎯 [Scope and limitations](https://heki.koxudaxi.dev/scope/) - what heki checks and what it leaves to other tools
 - ⚙️ [Configuration](https://heki.koxudaxi.dev/configuration/) - rule selection, contracts, the Python version
-- 📏 [Rules](https://heki.koxudaxi.dev/rules/) - all 46 rules
+- 📏 [Rules](https://heki.koxudaxi.dev/rules/) - all 53 rules
 - 📐 [Rule precision](https://heki.koxudaxi.dev/precision/) - exact and heuristic rules, and how they are measured
 - 🔧 [Fixes and safety](https://heki.koxudaxi.dev/fixes/) - how rewrites are proven safe
 - 🪜 [Adopting heki](https://heki.koxudaxi.dev/adoption/) - Ratchet baselines, pre-commit, CI

@@ -84,8 +84,8 @@ pub enum RuleFamily {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Consequence {
-    /// A bug that can be critical: a wrong result, an exception, a lost update, a deadlock, or a
-    /// broken contract.
+    /// A bug that can be critical: a wrong result, an exception, a lost update, a deadlock, an
+    /// event loop held up for every other task, or a broken contract.
     Bug,
     /// A bug that is rarely harmful: a promise the code makes is broken, such as a read-only
     /// annotation, where the callers seldom notice.
@@ -477,23 +477,11 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Eff,
         certainty: Certainty::Exact,
         activation: Activation::Default,
-        consequence: Consequence::Slowdown,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
-        summary: "A call in `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop.",
+        summary: "A call in `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop; its heuristic reports, a call that can reach a blocking call.",
         doc: include_str!("../rule-docs/EFF101.md"),
-    },
-    RuleMeta {
-        code: "EFF111",
-        slug: "async-possibly-blocking-call",
-        family: RuleFamily::Eff,
-        certainty: Certainty::Heuristic,
-        activation: Activation::Default,
-        consequence: Consequence::Slowdown,
-        size_dependent_fix: false,
-        auto_fix_default: false,
-        summary: "Heuristic sibling of `EFF101`: a call in `async def` that can reach a blocking call on the event loop.",
-        doc: include_str!("../rule-docs/EFF111.md"),
     },
     RuleMeta {
         code: "EFF102",
@@ -516,20 +504,8 @@ pub const CORE_RULES: &[RuleMeta] = &[
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
-        summary: "A loop over data whose every iteration sends a database statement.",
+        summary: "A loop over data whose every iteration sends a database statement; its heuristic reports, a loop that can run a database query on every iteration.",
         doc: include_str!("../rule-docs/EFF103.md"),
-    },
-    RuleMeta {
-        code: "EFF113",
-        slug: "loop-possible-db-query",
-        family: RuleFamily::Eff,
-        certainty: Certainty::Heuristic,
-        activation: Activation::Default,
-        consequence: Consequence::Slowdown,
-        size_dependent_fix: false,
-        auto_fix_default: false,
-        summary: "Heuristic sibling of `EFF103`: a loop that can run a database query on every iteration.",
-        doc: include_str!("../rule-docs/EFF113.md"),
     },
     RuleMeta {
         code: "EFF105",

@@ -43,7 +43,7 @@ The recorded set can only shrink:
 | --------- | ------------ | ------------------------------ |
 | No baseline file yet | an error (exit code 2) | records today's findings |
 | A finding was fixed | a note that the entry can shrink; with [`report-unused-suppressions`](configuration.md#unused-suppressions), an entry that matches nothing is an error (exit code 1) | records the smaller entry |
-| An entry grew, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1 for an error, and for a warning with [`fail-on = "warning"`](configuration.md#rule-selection-toolhekilint)) | reports it the same way and leaves the file as it is (exit code 1) |
+| An entry grew, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1 for an exact error, and for a warning or a heuristic report with [`fail-on = "warning"`](configuration.md#rule-selection-toolhekilint)) | reports it the same way and leaves the file as it is (exit code 1) |
 | A file could not be analyzed (a syntax error, an unreadable file) | reports the error and the other files' findings (exit code 2) | writes nothing, so the entries of that file are not lost (exit code 2) |
 
 To record new findings on purpose, delete the baseline and record it again.
@@ -147,14 +147,24 @@ pre-commit appends the files after the hook's `args`, so `--touched` comes last:
 every commit instead, set `args: []` and `pass_filenames: false` on the hook, or drop `--touched`
 from a local hook's `entry` and set `pass_filenames: false`.
 
-The hook fails on errors and passes with warnings, which it prints. To make warnings fail it too,
-set `fail-on = "warning"` in `[tool.heki.lint]`, or add `--fail-on warning` before `--touched`.
+The hook fails on exact errors and passes with warnings and heuristic reports, which it prints. To
+make them fail it too, set `fail-on = "warning"` in `[tool.heki.lint]`, or add `--fail-on warning`
+before `--touched`.
 With a baseline configured, the hook fails only on new findings. A baseline entry counts every
 report of its key, so a run with `--touched` compares all of them, and judges the entries of the
 touched files and of the reports it shows: a grown entry fails the run when one of its reports
 touches a staged file, and a stale entry elsewhere is left to a run over the whole project.
 
 ## Continuous integration
+
+A run fails (exit code 1) on an exact report of an `error` rule: a bug that can be critical, such
+as a call that blocks the event loop (`EFF101`). Warnings (slower code, or a bug that is rarely
+harmful) and heuristic reports, which can be wrong about the code, are reported without failing
+it, whatever their rule's severity: a contract report, heuristic today, is one of them.
+`fail-on = "warning"` in `[tool.heki.lint]` (or `--fail-on warning`) makes them fail it too. A
+code base with errors today records them in a [Ratchet baseline](#ratchet-baselines) first, so
+that the job fails only on new ones; [`heki recommend`](recommend.md) says how many reports fail
+the run now.
 
 === "GitHub Actions annotations"
 
@@ -172,8 +182,9 @@ touches a staged file, and a stale entry elsewhere is left to a run over the who
         sarif_file: heki.sarif
     ```
 
-Warnings become annotations without failing the step; `fail-on = "warning"` in
-`[tool.heki.lint]` (or `--fail-on warning`) makes them fail it, as in pre-commit.
+Warnings and heuristic reports become annotations without failing the step (a heuristic report
+of an `error` rule is an `error` annotation); `fail-on = "warning"` in `[tool.heki.lint]` (or
+`--fail-on warning`) makes them fail it, as in pre-commit.
 
 In GitHub Actions (`GITHUB_ACTIONS=true`), `heki check` writes these annotations without
 `--output-format github`. To keep the text output there, pass `--output-format full`, or set
@@ -245,6 +256,20 @@ exact ones that are not opt-in do ([Getting Started](getting-started.md#run-it) 
   no longer matches: its report counts as a regression. Change `rule_code = "MUT109"` to
   `"MUT208"` in those entries, or record the baseline anew.
 - `heki check --fix` applies the proven fixes of `OPT101` and `OPT102` by default, as in 0.1.
+
+### From heki 0.2 and 0.3
+
+`EFF111` and `EFF113` are no longer codes of their own: their reports are the heuristic reports
+of `EFF101` and `EFF103`, labelled `heuristic` and shown, as before, with `lint.heuristic = true`
+or where the code is named. The old codes and names are not kept.
+
+- Write `EFF101` for `EFF111` (`async-possibly-blocking-call`) and `EFF103` for `EFF113`
+  (`loop-possible-db-query`) in `select`, `extend-select`, `ignore`, `per-file-ignores`,
+  `severity`, and suppression comments. In the configuration the old codes are unknown rules
+  (exit code 2); a comment naming one suppresses nothing.
+- A baseline entry with `rule_code = "EFF111"` or `"EFF113"` no longer matches: its reports count
+  as regressions. Change the code to `"EFF101"` or `"EFF103"` (adding up the counts of two entries
+  that then have the same file, function, and target), or record the baseline anew.
 
 ## Effect snapshots (`MUT103`)
 

@@ -305,7 +305,9 @@ pub enum WaitKind {
 /// When a call does its effects ([`EcosystemEntry::emits`]): for a database call, when it sends a
 /// statement or otherwise waits on the database; for any call, whether the library's
 /// configuration can make it skip them.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum Emits {
     /// On every call.
@@ -425,6 +427,9 @@ pub struct EcosystemEntry {
     /// What the items of the call's result are, when the environment decides how many there
     /// are (the origin of a loop's items: `EFF103`).
     pub items: Option<ResultItems>,
+    /// The call gives at most as many of its [`Self::items`] as the integer passed here
+    /// (`fetchmany(size)`): a count the code passes fixes how many there are.
+    pub items_up_to: Option<ArgSlot>,
     /// The library API a method of a catalog class is, as reports name it: the class of what a
     /// call returns in one case (`sqlite3.connect(":memory:")`) has the methods of a library
     /// class (`sqlite3.Connection.execute`).
@@ -579,7 +584,7 @@ pub struct ArgSlot {
 /// the call has the case's `effects` and `return_type` (those it sets) instead of the entry's.
 /// An argument the call does not pass, or may pass through `*` / `**` unpacking, passes no
 /// test, so the entry's own facts are those of the unknown argument.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ArgCase {
     pub arg: Option<u8>,
@@ -610,30 +615,43 @@ pub struct ArgCase {
 }
 
 /// A literal `ArgCase::equals` compares with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ArgLiteral {
     Bool(bool),
     Int(i64),
 }
 
-/// What the analysis knows of an argument a call passes ([`EcosystemEntry::case_for`]).
-#[derive(Debug, Clone, Default, PartialEq)]
+/// What the analysis knows of an argument a call passes ([`EcosystemEntry::case_for`]), or of
+/// the value a call binds to a parameter of a project function, which the callee's tests of
+/// the parameter are decided by.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ArgFact {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub literal: Option<LiteralValue>,
     /// The value is established to name a file: a literal or a module constant bound once with
     /// no in-memory form (`":memory:"`, `file::memory:`, `mode=memory`), `__file__`, or a path
     /// built only from such parts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub names_file: bool,
     /// The class of the value, when it is an instance of a known one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub class: Option<String>,
     /// The named constants the value sets with `|` (one name alone sets itself): each flag is
     /// set whatever the other operands are.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<String>,
+    /// `class` is the value's own class, which no instance of a subclass can stand for: a
+    /// constant, a display or comprehension, or a buffer the code constructs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exact: bool,
+    /// Whether the value is true, when the analysis knows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truthy: Option<bool>,
 }
 
 /// A constant argument.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum LiteralValue {
     Bool(bool),
     Int(i64),
@@ -641,8 +659,25 @@ pub enum LiteralValue {
     Str(String),
 }
 
+// No literal is a NaN, the one float unequal to itself.
+impl Eq for LiteralValue {}
+
+impl std::hash::Hash for LiteralValue {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::Bool(b) => b.hash(state),
+            Self::Int(n) => n.hash(state),
+            // `0.0 == -0.0`.
+            Self::Float(x) => (if *x == 0.0 { 0 } else { x.to_bits() }).hash(state),
+            Self::Str(s) => s.hash(state),
+        }
+    }
+}
+
 impl ArgCase {
-    fn holds(&self, fact: &ArgFact) -> bool {
+    /// Whether an argument `fact` describes passes every test the case sets.
+    pub fn holds(&self, fact: &ArgFact) -> bool {
         let literal = fact.literal.as_ref();
         let text = match literal {
             Some(LiteralValue::Str(s)) => Some(s.as_str()),
@@ -704,6 +739,13 @@ impl EcosystemEntry {
     /// boundaries forbid it: never for an `excluded` entry, which is never reported.
     pub fn environment_access(&self) -> Option<EnvironmentAccess> {
         self.environment.filter(|_| !self.excluded)
+    }
+
+    /// The position and keyword every case tests, when they test one argument.
+    pub fn case_slot(&self) -> Option<(Option<u8>, Option<&str>)> {
+        let mut slots = self.cases.iter().map(|c| (c.arg, c.param.as_deref()));
+        let first = slots.next()?;
+        slots.all(|s| s == first).then_some(first)
     }
 
     pub fn effects_in<'e>(&'e self, case: Option<&'e ArgCase>) -> &'e [ExecEffectKind] {
@@ -1051,6 +1093,11 @@ pub struct EffectiveEcosystemKb {
     /// Catalog class -> the library class whose methods it has, by the [`EcosystemEntry::api`]
     /// of its methods' entries ([`Self::api_class`]).
     pub api_classes: BTreeMap<String, String>,
+    /// The classes and the flags some case tests an argument for ([`ArgCase::instance_of`],
+    /// [`ArgCase::flag`]), with the catalog classes of [`Self::api_classes`]: what of an
+    /// argument's class and flags can decide a case or a method ([`Self::decides_class`]).
+    pub case_classes: BTreeSet<String>,
+    pub case_flags: BTreeSet<String>,
     pub digest: String,
 }
 
@@ -1082,7 +1129,13 @@ impl EffectiveEcosystemKb {
                 let (api_class, api_method) = e.api.as_deref()?.rsplit_once('.')?;
                 (method == api_method).then(|| (class.to_owned(), api_class.to_owned()))
             })
+            .collect::<BTreeMap<String, String>>();
+        let cases = || entries.values().flat_map(|e| &e.cases);
+        let case_classes = cases()
+            .flat_map(|c| c.instance_of.iter().cloned())
+            .chain(api_classes.keys().cloned())
             .collect();
+        let case_flags = cases().flat_map(|c| c.flag.iter().cloned()).collect();
         Self {
             entries,
             opaque_packages,
@@ -1096,6 +1149,8 @@ impl EffectiveEcosystemKb {
             provides: Vec::new(),
             result_of_names,
             api_classes,
+            case_classes,
+            case_flags,
             digest,
         }
     }
@@ -1302,6 +1357,25 @@ impl EffectiveEcosystemKb {
     /// instance of that class in a state the catalog knows (on a file, in memory).
     pub fn api_class(&self, class: &str) -> Option<&str> {
         self.api_classes.get(class).map(String::as_str)
+    }
+
+    /// The catalog classes of the library class `library`: its instances in the states the
+    /// catalog knows ([`Self::api_class`]).
+    pub fn states_of<'k>(&'k self, library: &'k str) -> impl Iterator<Item = &'k str> + 'k {
+        self.api_classes
+            .iter()
+            .filter(move |(_, l)| *l == library)
+            .map(|(class, _)| class.as_str())
+    }
+
+    /// Whether an argument's class can select a case, or a method of a catalog class.
+    pub fn decides_class(&self, class: &str) -> bool {
+        self.case_classes.contains(class)
+    }
+
+    /// Whether an argument setting the flag `name` can select a case.
+    pub fn decides_flag(&self, name: &str) -> bool {
+        self.case_flags.contains(name)
     }
 
     /// Whether a row of the catalog types an attribute named `attr`, on any class.

@@ -250,16 +250,10 @@ impl HandedValues {
                             }
                         }
                     }
-                    // A comprehension frame's arguments: the iterable its first loop runs
-                    // over, then its captures.
-                    InstKind::Call {
-                        callee_var: None,
-                        args,
-                        ..
-                    } => {
-                        if let Some(iterable) = args.first() {
-                            flow.add(*iterable, span, Usage::Reads);
-                        }
+                    // A comprehension iterates its outermost iterable; its captures are its
+                    // body's.
+                    kind if let Some((iterable, _)) = kind.comprehension_operands() => {
+                        flow.add(iterable, span, Usage::Reads);
                     }
                     InstKind::AttrStore { obj, value, .. } => {
                         flow.add(*value, span, Usage::HandsOn);
@@ -276,9 +270,6 @@ impl HandedValues {
                         value: Some(value), ..
                     } => flow.add(*value, span, Usage::HandsOn),
                     InstKind::StoreGlobal { value, .. } => flow.add(*value, span, binding),
-                    InstKind::MakeGenExpr { outer_iter, .. } => {
-                        flow.add(*outer_iter, span, Usage::Reads);
-                    }
                     // A `def` or `lambda` makes the function its value refers to: in a module
                     // body, bound to its name as an import is, so read without a load of its own
                     // (`HANDLERS = [run]` after `def run`). A class statement's own uses are its

@@ -29,21 +29,20 @@ type Mark = (
 const MARKS: &[Mark] = &[
     ("# EFF101", "EFF101", &[]),
     (
-        "# EFF111",
-        "EFF111",
+        "# EFF101 [heuristic]",
+        "EFF101 [heuristic]",
         &[("Every implementation", "incomplete-targets")],
     ),
     (
-        "# EFF111 either",
-        "EFF111",
+        "# EFF101 [heuristic] either",
+        "EFF101 [heuristic]",
         &[("Every implementation", "implementation-without-the-fact")],
     ),
 ];
 
-/// Every `EFF101` and `EFF111` report, before reports are grouped (`heki
-/// dump-open-premises`).
+/// Every `EFF101` report, before reports are grouped (`heki dump-open-premises`).
 fn reported(p: &Project) -> Vec<Report> {
-    let (code, stdout, stderr) = p.heki(&["dump-open-premises", "--select", "EFF101,EFF111", "."]);
+    let (code, stdout, stderr) = p.heki(&["dump-open-premises", "--select", "EFF101", "."]);
     assert_eq!(code, 0, "{stderr}");
     let out: Value = serde_json::from_str(&stdout).unwrap();
     let mut found: Vec<Report> = out["reports"]
@@ -62,7 +61,11 @@ fn reported(p: &Project) -> Vec<Report> {
             (
                 r["path"].as_str().unwrap().to_owned(),
                 r["line"].as_u64().unwrap(),
-                r["rule"].as_str().unwrap().to_owned(),
+                common::with_tier(
+                    r["rule"].as_str().unwrap(),
+                    r["certainty"].as_str().unwrap(),
+                )
+                .to_owned(),
                 open,
             )
         })
@@ -152,7 +155,15 @@ fn the_class_a_function_binds_is_a_class_of_the_module() {
         .write("pkg/__init__.py", "")
         .write("pkg/config.py", REPRO_MODULE)
         .write("pkg/use.py", REPRO_USE);
-    let (code, stdout, stderr) = p.heki(&["check", "--output-format", "json", "."]);
+    // The contract's report is heuristic: it fails the run at `fail-on = "warning"`.
+    let (code, stdout, stderr) = p.heki(&[
+        "check",
+        "--fail-on",
+        "warning",
+        "--output-format",
+        "json",
+        ".",
+    ]);
     assert_eq!(code, 1, "{stdout}\n{stderr}");
     assert!(!stderr.contains("names no"), "{stderr}");
     let reports: Value = serde_json::from_str(&stdout).unwrap();
@@ -318,27 +329,27 @@ async def no_method_of_the_class(h: defs.Holder):
 
 
 async def never_run_at_import():
-    defs.Never()  # EFF111
+    defs.Never()  # EFF101 [heuristic]
 
 
 async def run_on_a_branch():
-    defs.Branch()  # EFF111
+    defs.Branch()  # EFF101 [heuristic]
 
 
 async def nested_function():
-    defs.Nested()  # EFF111
+    defs.Nested()  # EFF101 [heuristic]
 
 
 async def bound_again_on_a_branch():
-    defs.Late()  # EFF111 either
+    defs.Late()  # EFF101 [heuristic] either
 
 
 async def made_on_some_paths():
-    defs.Sometimes()  # EFF111
+    defs.Sometimes()  # EFF101 [heuristic]
 
 
 async def deleted_after():
-    defs.Reset()  # EFF111
+    defs.Reset()  # EFF101 [heuristic]
 
 
 async def a_generic_class_at_module_level():
@@ -474,10 +485,10 @@ def _define(engine: Engine):
 _define(Engine())
 "#,
         );
-    let (code, stdout, stderr) = p.heki(&["check", "."]);
+    let (code, stdout, stderr) = p.heki(&["check", "--fail-on", "warning", "."]);
     assert_eq!(code, 0, "{stdout}\n{stderr}");
     p.write("pyproject.toml", &config("pkg.base:Engine"));
-    let (code, stdout, stderr) = p.heki(&["check", "."]);
+    let (code, stdout, stderr) = p.heki(&["check", "--fail-on", "warning", "."]);
     assert_eq!(code, 1, "{stdout}\n{stderr}");
     assert!(
         stdout.contains("`_define` calls `pkg.base.Engine._run` outside the call owners"),
@@ -515,7 +526,7 @@ class A:
             value = (lambda: Engine()._run())()
 "#,
     );
-    let (code, stdout, stderr) = p.heki(&["check", "."]);
+    let (code, stdout, stderr) = p.heki(&["check", "--fail-on", "warning", "."]);
     assert_eq!(code, 1, "{stdout}\n{stderr}");
     assert!(
         stdout.contains("`<module>` calls `pkg.base.Engine._run` outside the call owners"),

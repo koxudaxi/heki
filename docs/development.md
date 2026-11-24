@@ -145,12 +145,11 @@ cannot strip stops the run, so the generator grows with the table. `--table-heki
 table from another build, to check a release older than the table with it, and `--table-rules`
 keeps only the rules it names, for the oracle run of one rule's certification.
 
-For the rules whose heuristic reports record the premises they leave open (`OPEN_PREMISE_CODES`
-in `premise_generator.py`: `EFF101` through `EFF111`, `EFF103` through `EFF113`, and the `OPT`
-rewrites, `OPT113`, `DATA101`, `MUT110`, and `MUT114` through their own codes), a program with a
-premise stripped is also run through `heki dump-open-premises`: each heuristic report of the claim
-has to name the stripped premise among its open ones, since the causes come from the decision that
-made the report heuristic. A report that does not is an oracle finding of its own kind, written to
+For the rules whose heuristic reports record the premises they leave open (`OPEN_PREMISE_RULES`
+in `premise_generator.py`: `EFF101`, `EFF103`, the `OPT` rewrites, `OPT113`, `DATA101`,
+`MUT110`, and `MUT114`), a program with a premise stripped is also run through `heki
+dump-open-premises`: each heuristic report of the claim has to name the stripped premise among
+its open ones, since the causes come from the decision that made the report heuristic. A report that does not is an oracle finding of its own kind, written to
 `unrecorded/` beside the refutations and counted with them for `--fail-on-refutation`. A heki
 without the command (an older release) skips the check.
 
@@ -164,6 +163,28 @@ starting new seeds after `--time-limit` seconds, and use `--jobs` processes.
 failing on a project, a child process that crashed or timed out, the recorder failing). The programs need CPython 3.12 or newer;
 CI runs the checker tests and seeds 0 to 199 with `--fail-on-refutation` on CPython 3.12 to
 3.15.
+
+## Boundary equivalence
+
+`crates/heki/tests/e2e_boundary_equivalence.rs` checks a principle of the effect rules through the
+binary: moving the value an effect depends on into a helper's parameter (annotated or not, one or
+two helpers deep), a factory's return (with or without a return annotation), a module constant, a
+function `asyncio.to_thread` runs, or a factory called through `functools.partial` does not
+change what heki reports about the effect. Each row of the table is an expression (a connection
+opened in memory or on a file, also one a module constant names, a sleep, also of a value read
+from the environment, a URL, a queue, a flag, the rows of a query) and the statement using it; the
+test writes the row in every form and requires the code and certainty the inline form reports, or
+no report where the inline form has none.
+
+Today's exceptions are listed in `GAPS` with what each form reports instead, grouped by the fact
+heki does not carry across that boundary. The list is exact: a form that starts to report as its
+inline form does fails the test until its line is removed, so the list only shrinks as the facts
+cross more boundaries, and a form that changes otherwise fails it too.
+
+To add a row, add a `Row` to `ROWS` (the rule, the module's setup, the expression and the class
+annotating it, the statement using it as `{v}`, and the calls that make the value, whose own
+reports are not the use's), run the test, and check every difference it prints: a difference is a
+new gap, which goes to `GAPS` only with the fact it lacks, or a bug.
 
 ## Memory
 

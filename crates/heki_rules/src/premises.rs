@@ -16,9 +16,8 @@
 //!   them (`crate::recommend::premises`); no output format of `heki check` writes them. The
 //!   list grows with what the homes tell apart: a cause stands for the cases its facts cannot
 //!   separate yet, and says so, rather than guessing one of them. The rules recording causes so
-//!   far are `EFF101` (with its heuristic side `EFF111`), `EFF103` (with `EFF113`), the eight
-//!   `OPT` rewrites (a cause of "Rewrite proven safe" per proof obligation,
-//!   [`OBLIGATION_CAUSES`]), `OPT113`, `DATA101`, `MUT110`, and `MUT114`.
+//!   far are `EFF101`, `EFF103`, the eight `OPT` rewrites (a cause of "Rewrite proven safe" per
+//!   proof obligation, [`OBLIGATION_CAUSES`]), `OPT113`, `DATA101`, `MUT110`, and `MUT114`.
 //! - The exact tier of a size-dependent `OPT` rewrite and of `OPT113` also asks for a
 //!   [`Condition`] that is no premise: "Trip count open" (Safety × Profitability, ADR-007 and
 //!   ADR-011: the claim holds over a loop the code counts, the change does not pay off there). A
@@ -274,7 +273,7 @@ pub const FIXED_BY_THE_CODE: OpenCause = OpenCause {
 pub const ITEMS_NOT_FROM_THE_DATA: OpenCause = OpenCause {
     id: "items-not-from-the-data",
     premise: &ORIGIN,
-    states: "the loop's items come from something heki does not take as the data: a method's receiver, a project function's result, or a call heki does not resolve",
+    states: "the loop's items come from something heki does not take as the data: a method's receiver, a project function's result whose returns heki does not follow to such items, or a call heki does not resolve",
     closer: Closer::None,
 };
 
@@ -924,16 +923,6 @@ pub fn cause(premise: &str, id: &str) -> Option<&'static OpenCause> {
         .find(|c| c.premise.name == premise && c.id == id)
 }
 
-/// The exact rule whose claim the heuristic rule `code` reports with a premise open (ADR-018
-/// decision 9: one claim, one code), whose premise row its reports' open premises belong to.
-pub fn exact_side_of(code: &str) -> Option<&'static str> {
-    match code {
-        "EFF111" => Some("EFF101"),
-        "EFF113" => Some("EFF103"),
-        _ => None,
-    }
-}
-
 /// A condition of an exact rule's exact tier that is no premise of its claim: the claim is true
 /// whatever it says (the rule pages say so under "Not part of the claim"), and a report is exact
 /// only when it holds because the change then pays off (Safety × Profitability, ADR-007,
@@ -985,7 +974,7 @@ pub const TRIPS_FIXED_BY_THE_CODE: ConditionCause = ConditionCause {
 pub const TRIPS_NOT_FROM_THE_DATA: ConditionCause = ConditionCause {
     id: ITEMS_NOT_FROM_THE_DATA.id,
     condition: &TRIP_COUNT_OPEN,
-    states: "the loop's items come from something heki does not take as the data: a method's receiver (`self.layers`), a project function's result, or a call heki does not resolve, so the program's structure may decide their number",
+    states: "the loop's items come from something heki does not take as the data: a method's receiver (`self.layers`), a project function's result whose returns heki does not follow to such items, or a call heki does not resolve, so the program's structure may decide their number",
     closer: ITEMS_NOT_FROM_THE_DATA.closer,
 };
 
@@ -1272,17 +1261,5 @@ mod tests {
             assert_eq!(obligation_cause(*kind), *cause);
             assert!(CAUSES.contains(cause), "{kind}");
         }
-    }
-
-    #[test]
-    fn a_heuristic_side_reports_the_claim_of_an_exact_rule() {
-        for rule in CORE_RULES {
-            if let Some(exact) = exact_side_of(rule.code) {
-                assert_eq!(rule.certainty, Certainty::Heuristic, "{}", rule.code);
-                assert!(!of_rule(exact).is_empty(), "{exact}");
-            }
-        }
-        assert_eq!(exact_side_of("EFF111"), Some("EFF101"));
-        assert_eq!(exact_side_of("EFF113"), Some("EFF103"));
     }
 }

@@ -18,8 +18,8 @@ use std::fmt::Write as _;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RulePolicy {
     /// The block enables it when it reports here, it is not experimental, and no published
-    /// measurement shows real harm below [`MIN_REAL_HARM_PERCENT`]: it reports bugs, worth
-    /// stopping a run for (ADR-019).
+    /// measurement shows real harm below [`MIN_REAL_HARM_PERCENT`]: it reports bugs that can be
+    /// critical, whose exact reports stop a run (ADR-019).
     Enable,
     /// Listed with its reports, never enabled by the block: it reports slower code or a bug
     /// that is rarely harmful, worth reading but not worth failing a run for.
@@ -65,12 +65,10 @@ pub const RULE_POLICY: &[(&str, RulePolicy)] = &[
     ("IMP202", RulePolicy::Contract),
     ("IMP301", RulePolicy::Enable),
     ("IMP302", RulePolicy::Enable),
-    ("EFF101", RulePolicy::List),
-    ("EFF111", RulePolicy::List),
+    ("EFF101", RulePolicy::Enable),
     ("EFF112", RulePolicy::List),
     ("EFF102", RulePolicy::List),
     ("EFF103", RulePolicy::List),
-    ("EFF113", RulePolicy::List),
     ("EFF114", RulePolicy::List),
     ("EFF115", RulePolicy::List),
     ("EFF116", RulePolicy::List),

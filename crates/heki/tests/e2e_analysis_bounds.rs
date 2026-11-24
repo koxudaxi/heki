@@ -954,7 +954,11 @@ fn classes_past_the_pass_bound_are_unknown() {
         p.write("m.py", &chain_before_buffer_read(links));
         p
     };
-    let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF111").count();
+    let blocking = |found: Vec<Value>| {
+        (found.iter())
+            .filter(|d| common::tiered_code(d) == "EFF101 [heuristic]")
+            .count()
+    };
     assert_eq!(blocking(check(&shape(4))), 0);
     assert_eq!(blocking(check_linear(12, shape)), 1);
 }
@@ -1702,7 +1706,7 @@ fn waits_on_a_future_look_up_the_awaits_before_them_once() {
         };
         let lines: Vec<u64> = found
             .iter()
-            .filter(|d| d["rule_code"] == "EFF111")
+            .filter(|d| common::tiered_code(d) == "EFF101 [heuristic]")
             .map(|d| d["line"].as_u64().unwrap())
             .collect();
         let expected: Vec<u64> = if waits > 10 {
@@ -1936,7 +1940,7 @@ fn lists_that_extend_each_other_are_not_fixed() {
     let found = check(&p);
     let queries: Vec<&Value> = found
         .iter()
-        .filter(|d| d["rule_code"] == "EFF113")
+        .filter(|d| common::tiered_code(d) == "EFF103 [heuristic]")
         .collect();
     assert_eq!(queries.len(), 1, "{found:#?}");
 }
@@ -1981,7 +1985,7 @@ fn a_chain_of_lists_extending_each_other_is_followed_to_its_end() {
     let found = check(&p);
     let queries: Vec<&str> = found
         .iter()
-        .filter(|d| d["rule_code"] == "EFF113")
+        .filter(|d| common::tiered_code(d) == "EFF103 [heuristic]")
         .map(|d| d["path"].as_str().unwrap())
         .collect();
     assert_eq!(queries, ["cycle.py"], "{found:#?}");
@@ -2018,7 +2022,9 @@ fn a_list_extending_many_deep_chains_is_decided_again_on_one_budget() {
         ((found, steps.clone()), steps)
     });
     assert!(
-        found.iter().all(|d| d["rule_code"] != "EFF113"),
+        found
+            .iter()
+            .all(|d| common::tiered_code(d) != "EFF103 [heuristic]"),
         "{found:#?}"
     );
     let replays = steps[&("heki_ir::facts::FnIndex::sizes".to_owned(), None)];
@@ -2098,7 +2104,11 @@ fn callables_past_the_partial_and_copy_bounds_are_not_followed() {
         p.write("m.py", &partial_chain(depth, copies));
         p
     };
-    let queries = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF113").count();
+    let queries = |found: Vec<Value>| {
+        (found.iter())
+            .filter(|d| common::tiered_code(d) == "EFF103 [heuristic]")
+            .count()
+    };
     assert_eq!(queries(check(&shape(3, 3))), 1);
     assert_eq!(queries(check_linear(30, |depth| shape(depth, 3))), 0);
     assert_eq!(queries(check_linear(30, |copies| shape(3, copies))), 0);
@@ -2962,7 +2972,7 @@ fn tests_of_a_wide_merge_keep_their_edges_within_a_budget() {
     });
     let reported: Vec<&str> = found
         .iter()
-        .filter(|d| d["rule_code"] == "EFF111")
+        .filter(|d| common::tiered_code(d) == "EFF101 [heuristic]")
         .map(|d| d["qualname"].as_str().unwrap())
         .collect();
     assert_eq!(reported, vec!["load"], "{found:#?}");
@@ -3827,7 +3837,7 @@ fn puts_after_many_rebindings_of_a_queue_walk_each_value_once() {
     assert!(
         found
             .iter()
-            .any(|d| d["rule_code"] == "EFF111" && d["qualname"] == "fill"),
+            .any(|d| common::tiered_code(d) == "EFF101 [heuristic]" && d["qualname"] == "fill"),
         "{found:#?}"
     );
 }
@@ -3869,7 +3879,7 @@ fn queue_parameters_along_a_reversed_chain_of_helpers_resolve_in_linear_time() {
     assert!(
         found
             .iter()
-            .any(|d| d["rule_code"] == "EFF111" && d["qualname"] == "entry"),
+            .any(|d| common::tiered_code(d) == "EFF101 [heuristic]" && d["qualname"] == "entry"),
         "{found:#?}"
     );
 }
@@ -3916,7 +3926,7 @@ fn puts_along_a_chain_of_attributes_resolve_each_attribute_once() {
     assert!(
         found
             .iter()
-            .any(|d| d["rule_code"] == "EFF111" && d["qualname"] == "entry"),
+            .any(|d| common::tiered_code(d) == "EFF101 [heuristic]" && d["qualname"] == "entry"),
         "{found:#?}"
     );
 }
@@ -4353,7 +4363,7 @@ fn hash_reads_per_writer_class_visit_each_method_once() {
 
 /// The implementations of a call are checked over at most 64 classes (the receiver's class and
 /// its project subclasses): a receiver class with more subclasses has no complete set of targets,
-/// so a call that blocks through every one of them is not established (`EFF111`, not `EFF101`).
+/// so a call that blocks through every one of them is not established (a heuristic `EFF101`).
 #[test]
 fn implementations_past_the_class_bound_are_not_complete() {
     let shape = |subclasses: usize| {
@@ -4386,11 +4396,11 @@ fn implementations_past_the_class_bound_are_not_complete() {
     let codes = |found: Vec<Value>| -> Vec<String> {
         found
             .iter()
-            .map(|d| d["rule_code"].as_str().unwrap().to_owned())
+            .map(|d| common::tiered_code(d).to_owned())
             .collect()
     };
     assert_eq!(codes(check(&shape(3))), ["EFF101"]);
-    assert_eq!(codes(check_linear(300, shape)), ["EFF111"]);
+    assert_eq!(codes(check_linear(300, shape)), ["EFF101 [heuristic]"]);
 }
 
 /// A project selecting `EFF109` with the class `C` (a helper `helper` taking `self._lock`, and
@@ -5686,7 +5696,7 @@ fn values_past_the_budget_of_the_grown_variables_may_be_grown() {
         let p = Project::new(&format!("bounds_grown_variables_{params}"));
         p.write(
             "pyproject.toml",
-            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF103\", \"EFF113\"]\n",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF103\"]\n",
         )
         .write(
             "m.py",
@@ -5704,7 +5714,7 @@ fn values_past_the_budget_of_the_grown_variables_may_be_grown() {
         (found.iter())
             .map(|d| {
                 (
-                    d["rule_code"].as_str().unwrap().to_owned(),
+                    common::tiered_code(d).to_owned(),
                     d["line"].as_u64().unwrap(),
                 )
             })
@@ -5713,7 +5723,7 @@ fn values_past_the_budget_of_the_grown_variables_may_be_grown() {
     assert_eq!(queries(&check(&shape(8))), []);
     let grown_vars = "heki_ir::facts::FnIndex::grown_vars";
     let found = check_past_budgets(6_000, &[grown_vars], shape);
-    assert_eq!(queries(&found), [("EFF113".to_owned(), 8)]);
+    assert_eq!(queries(&found), [("EFF103 [heuristic]".to_owned(), 8)]);
 }
 
 /// Open premises along shared chains are decided once per call: thousands of `async def`s each
@@ -5745,7 +5755,7 @@ fn open_premises_along_shared_chains_are_explained_once_per_call() {
         let p = Project::new(&format!("bounds_open_premises_chains_{k}"));
         p.write(
             "pyproject.toml",
-            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF111\"]\n",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF101\"]\n",
         )
         .write("m.py", &(lines.join("\n") + "\n"));
         p
@@ -5753,7 +5763,7 @@ fn open_premises_along_shared_chains_are_explained_once_per_call() {
     check_linear(SCALE, shape);
     let out = heki_json(
         &shape(SCALE),
-        &["dump-open-premises", "--select", "EFF111", "."],
+        &["dump-open-premises", "--select", "EFF101", "."],
     );
     let reports = out["reports"].as_array().unwrap();
     assert_eq!(reports.len(), 4000);
@@ -6264,7 +6274,7 @@ fn the_trial_of_library_names_without_an_entry_tries_a_bounded_number() {
     assert!(
         symbols
             .iter()
-            .all(|s| s["if_waits"] == json!({"EFF101": 1, "EFF111": 0})),
+            .all(|s| s["if_waits"] == json!({"exact": 1, "heuristic": 0})),
         "{symbols:#?}"
     );
     assert_eq!(blind["truncated"], json!(true));
@@ -7050,7 +7060,7 @@ fn changes_through_a_chain_of_merged_lists_are_joined_once_per_alias() {
     };
     let blocking = |found: Vec<Value>| {
         (found.iter())
-            .filter(|d| d["rule_code"] == "EFF111" || d["rule_code"] == "EFF101")
+            .filter(|d| d["rule_code"] == "EFF101")
             .count()
     };
     assert_eq!(blocking(check(&shape(8))), 1);
@@ -7087,6 +7097,63 @@ fn memo_keys_of_many_values_are_compared_once() {
     });
     assert!(
         found.iter().all(|d| d["rule_code"] != "MUT114"),
+        "{found:#?}"
+    );
+}
+
+/// A chain of `links` functions, each returning what the next one returns, the last the rows
+/// of a query, and for each a loop over what it returns that sends a query per row.
+fn helpers_returning_rows(links: usize) -> String {
+    let mut out = vec![
+        "import sqlite3".to_owned(),
+        String::new(),
+        "CONN = sqlite3.connect(\"app.db\")".to_owned(),
+        String::new(),
+        String::new(),
+        "def book(i):".to_owned(),
+        "    return CONN.execute(\"SELECT * FROM b WHERE a = ?\", (i,)).fetchone()".to_owned(),
+    ];
+    for k in 0..links {
+        let returned = if k + 1 == links {
+            "CONN.execute(\"SELECT id FROM a\").fetchall()".to_owned()
+        } else {
+            format!("h{}()", k + 1)
+        };
+        out.extend([
+            String::new(),
+            String::new(),
+            format!("def h{k}():"),
+            format!("    return {returned}"),
+            String::new(),
+            String::new(),
+            format!("def each_{k}():"),
+            format!("    for r in h{k}():"),
+            "        book(r[0])".to_owned(),
+        ]);
+    }
+    out.join("\n") + "\n"
+}
+
+/// A module's return facts are decided in a bounded number of passes, each from the facts of
+/// the pass before: the rows a function returns through a chain of helpers longer than the bound
+/// are not followed, and the loop over them is a heuristic report.
+#[test]
+fn return_facts_past_the_pass_bound_are_not_followed() {
+    let shape = |links: usize| {
+        let p = Project::new(&format!("bounds_return_passes_{links}"));
+        p.write("m.py", &helpers_returning_rows(links));
+        p
+    };
+    let found = check_linear(64, shape);
+    let queries = |certainty: &str| {
+        found
+            .iter()
+            .filter(|d| d["rule_code"] == "EFF103" && d["certainty"] == certainty)
+            .count()
+    };
+    assert_eq!(
+        (queries("exact"), queries("heuristic")),
+        (8, 56),
         "{found:#?}"
     );
 }

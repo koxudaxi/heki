@@ -2829,6 +2829,26 @@ const GLOBALS_USES: &[(&str, &str, &str)] = &[
     ),
     ("read_len", "    return len(globals())", ""),
     (
+        "read_generator",
+        "    return tuple(key for key in globals() if not key.startswith(\"_\"))",
+        "",
+    ),
+    (
+        "read_list_comprehension",
+        "    return [key for key in globals()]",
+        "",
+    ),
+    (
+        "read_set_comprehension",
+        "    return {key for key in globals()}",
+        "",
+    ),
+    (
+        "read_dict_comprehension",
+        "    return {key: name for key in globals()}",
+        "",
+    ),
+    (
         "read_alias",
         "    found = globals()\n    return found.get(name)",
         "",
@@ -2867,6 +2887,21 @@ const GLOBALS_USES: &[(&str, &str, &str)] = &[
         "",
     ),
     ("write_del", "    del globals()[name]\n    return None", ""),
+    (
+        "write_comprehension_body",
+        "    return [globals().update({key: value}) for key in name]",
+        "",
+    ),
+    (
+        "write_comprehension_captured",
+        "    found = globals()\n    return [found.update({key: value}) for key in found]",
+        "",
+    ),
+    (
+        "write_generator_captured",
+        "    found = globals()\n    return list(found.pop(key) for key in list(found))",
+        "",
+    ),
     (
         "missing_setdefault",
         "    return globals().setdefault(name, value)",
@@ -2921,6 +2956,13 @@ const GLOBALS_USES: &[(&str, &str, &str)] = &[
         "missing_getattr",
         "    return None",
         "def __getattr__(name: str) -> object:\n    value = object()\n    \
+         globals()[name] = value\n    return value\n",
+    ),
+    (
+        "missing_getattr_generator",
+        "    return None",
+        "def __getattr__(name: str) -> object:\n    \
+         value = tuple(n for n in globals() if not n.startswith(\"_\"))\n    \
          globals()[name] = value\n    return value\n",
     ),
     (
@@ -3025,14 +3067,15 @@ fn globals_project(name: &str) -> Project {
 }
 
 /// Reading the dict of module globals (`globals().get(name)`, `globals()[name]`, `name in
-/// globals()`, iterating it, `len(globals())` with the real builtin) binds no name, so the
+/// globals()`, iterating it, in a comprehension too, before 3.12 and since, `len(globals())`
+/// with the real builtin) binds no name, so the
 /// module's constants still name keys, and so does a change binding only a name the namespace
 /// lacks: `setdefault`, and a store in the module's `__getattr__` under the name Python passes
 /// it, which Python does only for a missing name. Storing into it otherwise (another key, the
 /// name rebound, through a helper, in a hook the module's code calls or decorates, in a
 /// coroutine, generator, nested function, or method, from a keyword-only parameter), deleting
-/// from it, a method
-/// changing it, or handing it on may bind any name, even one declared `Final`. Handing it on
+/// from it, a method changing it (in a comprehension's body too), or handing it on may bind any
+/// name, even one declared `Final`. Handing it on
 /// includes the builtin `globals` itself, a call of a reading builtin's name that the module, an
 /// import, a parameter, or a local rebinds (`def len(ns)`; a class attribute does not rebind it
 /// for the methods), and a place where another object's method receives the dict: an index
@@ -3053,11 +3096,6 @@ fn only_a_change_through_the_dict_of_module_globals_unfixes_its_constants() {
             ),
         );
     }
-    let codes: Vec<(String, String)> = found(&diagnostics(&p, &[]))
-        .into_iter()
-        .filter(|x| x.1 == 9)
-        .map(|x| (x.0, x.2))
-        .collect();
     let expected: Vec<(String, String)> = GLOBALS_USES
         .iter()
         .map(|(module, _, _)| {
@@ -3071,7 +3109,67 @@ fn only_a_change_through_the_dict_of_module_globals_unfixes_its_constants() {
         .collect();
     let mut sorted = expected.clone();
     sorted.sort();
-    assert_eq!(codes, sorted);
+    // Before 3.12 a comprehension is a function of its own, called with the outermost iterable.
+    for version in ["py311", "py312"] {
+        let codes: Vec<(String, String)> = found(&diagnostics(&p, &["--target-version", version]))
+            .into_iter()
+            .filter(|x| x.1 == 9)
+            .map(|x| (x.0, x.2))
+            .collect();
+        assert_eq!(codes, sorted, "{version}");
+    }
+}
+
+/// A list display of keys that a comprehension iterates still holds its items where a loop over
+/// it stores them, as with a `for` loop, also before 3.12, where the comprehension is a function
+/// of its own called with the list; one whose body changes the list may hold any name.
+const KEYS_ITERATED_BY_COMPREHENSIONS: &str = r#"from pkg.model import Node
+
+
+def listed(src: Node, dst: Node) -> list[str]:
+    keys = ["_hidden", "kind"]
+    names = [k.upper() for k in keys]
+    for key in keys:
+        dst.__dict__[key] = src.__dict__[key]
+    return names
+
+
+def generated(src: Node, dst: Node) -> tuple[str, ...]:
+    keys = ["_hidden", "kind"]
+    names = tuple(k.upper() for k in keys)
+    for key in keys:
+        dst.__dict__[key] = src.__dict__[key]
+    return names
+
+
+def grown(src: Node, dst: Node, extra: str) -> list[None]:
+    keys = ["_hidden", "kind"]
+    names = [keys.append(extra) for k in list(keys)]
+    for key in keys:
+        dst.__dict__[key] = src.__dict__[key]
+    return names
+"#;
+
+#[test]
+fn a_key_display_a_comprehension_iterates_still_names_its_keys() {
+    let p = globals_project("keys_iterated_by_comprehensions");
+    p.write("pkg/keys.py", KEYS_ITERATED_BY_COMPREHENSIONS);
+    let k = "pkg/keys.py";
+    for version in ["py311", "py312"] {
+        let keys: Vec<_> = found(&diagnostics(&p, &["--target-version", version]))
+            .into_iter()
+            .filter(|x| x.0 == k)
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                d(k, 8, "MUT201", "listed", "pkg.model.Node._hidden"),
+                d(k, 16, "MUT201", "generated", "pkg.model.Node._hidden"),
+                d(k, 24, "MUT205", "grown", "Node"),
+            ],
+            "{version}"
+        );
+    }
 }
 
 /// A module whose `__getattr__` caches what it serves (`globals()[name] = value`) and binds

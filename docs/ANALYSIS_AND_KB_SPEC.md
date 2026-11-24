@@ -257,7 +257,10 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     the module writes, which aliases and items share), whose length gives its display. It is
     the one view of a module name bound once (a star import that runs, not one under
     `if TYPE_CHECKING:`, rebinds every name not bound after it for good, also one with an
-    underscore, which the imported module's `__all__` may list; `LastBindings`). A change
+    underscore, which the imported module's `__all__` may list; `LastBindings`). Reading the
+    dict `globals()` returns binds nothing, iterating it included, also as the outermost
+    iterable of a comprehension (`InstKind::comprehension_operands`: the enclosing scope calls
+    `iter()` on it and hands the comprehension the iterator). A change
     through `globals()` leaves no name fixed unless it binds only a name the namespace lacks
     (`globals().setdefault(k, v)`, or `globals()[name] = v` in the module's `__getattr__`, keyed
     by the parameter Python passes the missing name in, which only Python calls: an undecorated
@@ -341,6 +344,7 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     item of a call's result, a global that is no constant, and anything else are `Open`. The walk
     is a `Closure` over questions `(function, value, steps)`, the steps being what the way from
     the loop applies to the value's sources (an item, a count, pieces of text).
+    `ItemOrigins::of_value` asks the same of any value (a function's returned one).
   - The reader has two set-ups. Where types are inferred, `heki_effect::with_paths` builds it
     (the module's bindings, members from the catalog or the project, methods of the inferred
     class, managers the catalog says suppress nothing): the summaries' must-facts, `EFF103`'s
@@ -673,6 +677,23 @@ decorator but those keeping calls as defined and a `functools` cache, returns th
 annotation of a class of its own (none, `-> ModuleType`). A value of
 `types.ModuleType` says nothing of the names the module binds: a call of one is unresolved, as on
 `Any`.
+
+A function's return fact (`FunctionDecl::returns`, `heki_effect::resolver::returns`) is what
+every `return` of every definition of its name gives, past what the annotation says. It is
+pass 1: inferred against the module's own declarations, completed against themselves (the
+module's own stores type its globals and attributes), so it stays a function of the module's
+text, and a value another module gives is of no type there. Its items (`ReturnFact::items`)
+are those of the calls every returned value's items come from (`ItemOrigins::of_value`), when
+they agree: the rows, lines, or entries of a catalog call sizing its result, or what another
+function of the module returns. `TypeCtx::call_items` is the one reading of the items of a call's
+result, for the return facts and for `EFF103`'s "Origin" (`data_origin`): a catalog call's
+`items`, a project function's return fact, and for an API handing back what a callable it is
+handed returns (`result_of`: `asyncio.to_thread(f, x)`) the callable's, through
+`functools.partial` objects as typing follows them. A count the code fixes is no data's
+(`TypeCtx::fixed_call_items`: a statement whose text fixes its rows, `items_up_to`, a call on
+a receiver a call of the same items made): such a call gives no items fact, and in a loop it is
+a trip count `FnIndex::fixed_trips` reads through its `leaf`. The facts of a module are
+decided in at most eight passes, each from the facts of the pass before.
 
 A module-level `TypeVar` bound once with a `bound=` (a name, an attribute of one, or the string of
 an annotation) or constraints is that bound, or the union of the constraints, wherever an
@@ -1051,9 +1072,9 @@ body where it is called), once from every `async def` (not through a worker thre
 the calls inside a loop or once per item, giving the functions on an event loop and below a loop; `heki_rules::blind_spots` counts the calls by package and name and by function and reason,
 and the hidden `heki dump-recommend-facts` prints them. `heki recommend` lists them
 (`heki_rules::recommend::blind_spots`), after two trials that build no fact of their own: a run
-of `EFF101`, `EFF111`, `EFF103`, and `EFF113` with a hypothetical catalog entry
-(`blocking_net`, `db_query`) for each of the 64 library names with the most reach, whose
-reports count for the name at the end of their chain; and the module names of the files with a
+of `EFF101` and `EFF103`, named so that their heuristic reports are printed too, with a
+hypothetical catalog entry (`blocking_net`, `db_query`) for each of the 64 library names with the
+most reach, whose reports count for the name at the end of their chain, by certainty; and the module names of the files with a
 candidate directory added to `src`, by which it resolves the imports again.
 
 The census contract candidates are drawn from (`heki_rules::census`) is a pass over the index and
@@ -1097,7 +1118,18 @@ caller): a constant argument, a value whose exact class the caller knows (`Const
 or comprehension, an `io.StringIO` / `io.BytesIO` it constructs, or a phi of values of one such
 class), the literal default of an omitted parameter, or a test the caller has made on the same
 value that decides a guard against the effect prunes it there; an undecided test of a caller
-input becomes the caller's guard. A known class decides `is None`; `isinstance`, true when a
+input becomes the caller's guard. The binding keeps what the caller knows of the argument as the
+catalog's `ArgFact` (`ArgBinding::fact`: its literal or string constant, whether it names a
+file, a class or flag a catalog case or method tells apart, and the exact class and truthiness
+`ConstArg` is read from), only where that decides something. A catalogued call that selects no
+case sets a test of the function's parameter on each effect a case lacks when the parameter is
+the argument every case of the entry tests (`time.sleep(seconds)`), and on each effect a state
+of the library class lacks when the call is made on the parameter, or on what catalog methods
+return of it (`db.execute(sql).fetchone()` on `db: sqlite3.Connection`, whose states are
+`sqlite3.connect(":memory:")` and `sqlite3.connect(file)`): `GuardTest::Value`, the cases with
+their outcomes or the states with theirs, so that a binding's fact decides it as the inline call
+decides its own argument. Two occurrences testing the same parameter's states join into the
+states either keeps the effect in. A known class decides `is None`; `isinstance`, true when a
 tested class is in its MRO and false when every tested class is a builtin type, one of the `io`
 classes, or `os.PathLike` outside it; and `hasattr` for the attributes of the file protocol
 (`read`, `write`, `close`, ...), which the buffers have and the builtin values lack (a buffer may
@@ -1886,9 +1918,9 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   callers, with the same initializer and allowed-context rules as `MUT201`. Reads through
   parameters without a project-class type are not seen.
 
-### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF111`, `EFF112`, `EFF113`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
 0. **Must-facts and the exact tier** (`EffectSummary::must_exec`, computed only when `EFF101`,
-   `EFF111`, `EFF103`, or `EFF113` runs: `OptInFacts::must_effects`):
+   `EFF103`, `DATA101`, or `EFF114` runs: `OptInFacts::must_effects`):
    - Per call instruction, the path facts (`heki_ir::Paths`, with the reader of
      `heki_effect::with_paths`: the module's bindings, the members of modules, and the context
      managers whose exit never suppresses, `exit_suppresses`) say whether the function has made
@@ -1926,10 +1958,12 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      (`ProjectIndex::site_must`); `EFF103` when the call runs on every iteration that completes
      of a loop over a parameter, a part of one, or a catalog call's `items`, whose trip count the
      code does not fix (`heki_ir::ItemOrigins`, `FnIndex::fixed_trips`), and has sent a statement
-     whenever it returns. Everything else the heuristic tier finds is `EFF111` / `EFF113`.
+     whenever it returns. Everything else the rules find is their heuristic tier, under the same
+     code: the report's certainty is heuristic.
    - Open premises (`CheckExtras::open_premises`, off in `heki check` and the language server,
-     on in `heki recommend` and the hidden `heki dump-open-premises`): an `EFF111` / `EFF113` report records which
-     premises of its claim's row (`heki_rules::premises`) it left open, each with a cause. The
+     on in `heki recommend` and the hidden `heki dump-open-premises`): a heuristic `EFF101` /
+     `EFF103` report records which premises of its claim's row (`heki_rules::premises`) it left
+     open, each with a cause. The
      decisions above tell each step that does not hold (`MustGap`) to whoever asks: a decision
      stops at the first, an explanation goes on. Along the reported chain each call is evaluated
      (`MustExplainer::gaps_along`): its targets' completeness, whether they run there as
@@ -2507,7 +2541,7 @@ Every candidate also needs `A1HazardFree` (no frame introspection in the functio
 | **OPT120** / **OPT121** | `size-dependent` | `Unique(q)` (no escape, not returned), `ExactType(q, list)`, only operations `deque` supports equally (`DequeEquivalentOps`: no `list(*a)` / `list(**kw)`, no iterator live at a change or consumed by it, iterators used only for their elements, `q = q[1:]` exactly, no other object bound to a variable it reaches) | `NotConstSmall`, **no index `q[i]` other than the ends (`0`, `-1`)** | S12, `sort()`, $O(n)$ middle indexes, `q.extend(reversed(q))`, `type(iter(q))` |
 | **OPT130** | `size-dependent` | Every argument `ValueLoopInvariant`, `SideEffectFree` (no method arguments), `ZeroTripExceptionSafe` (no `*` arguments), the built container used by the membership test only (`ValueLoopInvariant(call)`) | `NotConstSmall` (100 times slower when the loop runs zero times: A.8), not a `ConstSmall` / retry loop, not `tuple(t)` of a tuple | S22, S28, A.8 |
 
-Open premises (`CheckExtras::open_premises`, as for `EFF111` / `EFF113` in section 2.4): a
+Open premises (`CheckExtras::open_premises`, as for `EFF101` / `EFF103` in section 2.4): a
 heuristic report of an `OPT` rewrite records "Rewrite proven safe" once for each obligation of
 its verdict that is not established, with the obligation's kind as the cause
 (`heki_rules::premises::OBLIGATION_CAUSES`, one row per `ObligationKind`) and its description
@@ -2522,8 +2556,9 @@ over a loop the data sizes), which the Advisory lane decides for the loop around
 not fix or cap its trip count (`FnIndex::fixed_trips`, computed with the candidate), and its
 items are the data's as `EFF103`'s "Origin" establishes them (`DataOrigins::of_loop_items`: a
 parameter or a part of one, `*args` included, or the rows, lines, or entries of a call the
-catalog sizes, through `ItemOrigins::of_loop` and `data_origin`; a walk budget per function). A
-loop over a receiver's attribute, a project function's result, `range` of a number that is no
+catalog sizes or a project function returns, through `ItemOrigins::of_loop` and `data_origin`;
+a walk budget per function). A loop over a receiver's attribute, a project function's result
+whose return fact gives no items, `range` of a number that is no
 constant or length, an item of a call's result (`type(x).__mro__`), or a `while` loop runs as
 many times as the program has parts, however large the input. A proven report over such a loop
 leaves no premise of its row open; it records the condition with its cause in the same list as

@@ -26,9 +26,8 @@ It takes the options of `heki check` that decide what is analyzed: `--select`,
   reports of exact rules that `lint.heuristic = false` withholds, and the heuristic rules it
   leaves off. With a baseline, the reports it allows and the regressions.
 - **What keeps reports heuristic**: the heuristic reports of exact claims (the heuristic reports
-  of exact rules, and those of `EFF111` and `EFF113`, which report the claims of `EFF101` and
-  `EFF103` with a premise open), counted by the premise of the claim each leaves open and why
-  ([Rule Precision](precision.md)), or by the condition of the exact tier that is no premise
+  of exact rules), counted by the premise of the claim each leaves open and why ([Rule
+  Precision](precision.md)), or by the condition of the exact tier that is no premise
   ("Trip count open": the claim holds, and the change pays off only over a loop the data
   sizes). Each row says what the cause states, how many reports leave it open, how many leave
   nothing else open, and what closes it: an annotation, which must be true; a change of the
@@ -52,10 +51,14 @@ It takes the options of `heki check` that decide what is analyzed: `--select`,
   ([Entries that match nothing](configuration.md#entries-that-match-nothing)). They are listed
   whatever `lint.unmatched-contract-entries` says, and the section is left out when there is
   none.
-- **Notes**: what to know to weigh the advice. When the paths given leave out Python files
-  below the project root, the note names them: heki takes the files it analyzed as the whole
-  project, so what it says about callers, readers, and writers holds for those files only. It
-  counts up to 50 such files, among the first 10,000 entries below the root.
+- **Notes**: what to know to weigh the advice. How many of the reports shown now (with a
+  baseline, the regressions) make `heki check` fail, with the Ratchet baseline that records them
+  so that only new ones fail; and at the default `fail-on`, how many do not (warnings, and
+  heuristic reports, which count as warnings), which `fail-on = "warning"` would make fail it.
+  When the paths given leave out Python files below the project root, the note names them: heki
+  takes the files it analyzed as the whole project, so what it says about callers, readers, and
+  writers holds for those files only. It counts up to 50 such files, among the first 10,000
+  entries below the root.
 - **The keys to add or change**, for the file the project reads its configuration from:
   `[tool.heki...]` tables in a `pyproject.toml`, tables at the top level in `heki.toml`,
   `.heki.toml`, or a `--config` file. Without a configuration file, the keys go into a new
@@ -74,10 +77,10 @@ one.
   inheritance or aliases). heki takes such a call to have no effect. For the 64 names with the
   most reach, a trial run gives each a catalog entry that waits on the network and sends a
   database query (`effects = ["blocking_net", "db_query"]`) and says what `heki check` would
-  then print through it: "if it waits" (`EFF101`, `EFF111`) and "if it sends a query"
-  (`EFF103`, `EFF113`). heki cannot know what a library call does, so no entry enters the
-  block, and the trial's counts are kept out of every count of reports: add an entry if you know
-  what the call does.
+  then print through it, exact and heuristic: "if it waits" (`EFF101`) and "if it sends a query"
+  (`EFF103`). heki cannot know what a library call does, so no entry enters the block, and the
+  trial's counts are kept out of every count of reports: add an entry if you know what the call
+  does.
 - **Names heki's catalog lacks in packages it covers**: the same, for the names the trial shows
   heki would report through. If such a call waits or sends a query, report it at heki's issue
   tracker: the catalog should list it.
@@ -279,7 +282,7 @@ def test_load_user() -> None:
 $ heki recommend app
 heki recommend (experimental) on .: 4 file(s), 13 function(s)
 
-Reports now  1 shown (1 exact, 0 heuristic), 0 heuristic withheld, 5 heuristic rule(s) off
+Reports now  1 shown (1 exact, 0 heuristic), 0 heuristic withheld, 3 heuristic rule(s) off
 
 What keeps reports heuristic
   1 heuristic report(s) of exact claims: OPT110 1
@@ -294,14 +297,14 @@ What keeps reports heuristic
 
 What heki cannot see (no report either way)
   calls of packages heki's catalog does not cover: 1 call(s) of 1 name(s) in 1 package(s)
-    name                  calls  async  loops  if it waits  if it sends a query
-    stripe.Charge.create      1      1      0  EFF101 1     -
+    name                  calls  async  loops  if it waits     if it sends a query
+    stripe.Charge.create      1      1      0  EFF101 1 exact  -
 
 Rules worth enabling here
   rule    reports  exact  consequence  right about the code (published)  real harm  block
   MUT106        1      -  bug          not measured                      -          yes
   OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
-  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF112, EFF113, EFF114, EFF115, EFF116, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, OPT103, OPT111, OPT112, OPT120, OPT121, OPT130
+  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF112, EFF114, EFF115, EFF116, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, OPT103, OPT111, OPT112, OPT120, OPT121, OPT130
   MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it.
 
 Contract candidates
@@ -312,6 +315,7 @@ Contract candidates
 
 Notes
   - 1 Python file(s) below the project root were not analyzed (tests/test_users.py): heki takes the analyzed files as the whole project, so what it says about callers, readers, and writers holds for those files only.
+  - heki check fails on 1 report(s) shown now (exit code 1): a Ratchet baseline records them, so that it fails only on new ones (`heki check --baseline heki-baseline.toml --update-baseline`, then `baseline = "heki-baseline.toml"` in the configuration).
   - "if it waits" and "if it sends a query" come from a trial run that gives each library name tried a catalog entry with `effects = ["blocking_net", "db_query"]`: what `heki check` would print if the call waited on the network or sent a database query. heki cannot see what these calls do, so no entry for them is in the block; add one in `[[tool.heki.ecosystem]]` if you know.
 
 pyproject.toml: keys to add or change
@@ -329,7 +333,7 @@ pyproject.toml: keys to add or change
 ## JSON output
 
 `--output-format json` prints one object, described by the JSON Schema at
-[schemas/recommend-1.json](schemas/recommend-1.json), the URL its `$schema` field names, which
+[schemas/recommend-2.json](schemas/recommend-2.json), the URL its `$schema` field names, which
 `heki recommend --output-format-json-schema` prints.
 Within a `version`, fields are only added; the `version` changes when a field is removed or
 changes meaning.
@@ -340,7 +344,7 @@ changes meaning.
 | `root`, `config_file`, `table_prefix` | the project root, the configuration file (`null` without one), and the table its keys are under (`tool.heki`, or empty) |
 | `analyzed` | the files and functions analyzed, the files that could not be read or parsed, the paths given, and the Python files below the root they leave out |
 | `runs` | the analyses the report was computed from: `discovery`, then `source-roots` (the source-root trial) and `hypothetical-catalog` (the trial of library names) when they ran, `contract-trial` when it tried a contract candidate (none when the block sets `src`, or when every candidate is past the places of its kind), and `verification` when the block adds rules or contracts and does not set `src` |
-| `reports_now` | the counts of "Reports now" |
+| `reports_now` | the counts of "Reports now", and `failing`: the reports shown (with a baseline, the regressions) that make `heki check` fail at the configuration's `fail-on` |
 | `open_premises` | the counts of "What keeps reports heuristic": by code; by premise or condition and cause, with what the cause states, what closes it, the reports, the reports it is the only open cause of, and the first 50 reports; the sets of causes that reports leave open together |
 | `blind_spots` | the counts of "What heki cannot see": the calls of library names without a catalog entry, by package and name, with what the trial run found; the names heki's catalog lacks in packages it covers; the calls heki does not resolve, by function and reason; the source-root candidates and their trials; the functions with an A1 hazard; the totals |
 | `rules` | each rule of "Rules worth enabling here": its metadata, the reports it would add, its published measurement, whether the block enables it, and why |

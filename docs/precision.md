@@ -15,7 +15,7 @@ open: an `OPT` rewrite heki could not prove safe, a size-dependent `OPT` rewrite
 trip count the data does not decide (the code fixes or caps it, or the loop's items are not a
 parameter, the rows of a query, the lines of a file, or the entries of a directory), an `OPT113`
 join whose rule page premises do not all hold, or
-a `DATA101`, `MUT110`, `MUT114`, or `MUT119` report whose rule page premises are not all established. Only exact reports are shown by
+an `EFF101`, `EFF103`, `DATA101`, `MUT110`, `MUT114`, or `MUT119` report whose rule page premises are not all established. Only exact reports are shown by
 default, and only those of the exact rules that are not opt-in.
 
 - A heuristic rule runs when `select` or `extend-select` names its code or name. With
@@ -26,6 +26,10 @@ default, and only those of the exact rules that are not opt-in.
 - A contract rule runs when its contract is declared, whatever its certainty.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   ends with a note saying how many.
+- Only an exact report fails a run by default: a heuristic report counts as a warning for
+  [`fail-on`](configuration.md#rule-selection-toolhekilint), whatever its rule's severity, and
+  fails the run only with `fail-on = "warning"`. A false heuristic report never stops a CI or a
+  hook that keeps the default.
 
 See [Rule selection](configuration.md#rule-selection-toolhekilint). `EFF101`, `EFF103`,
 `DATA101`, `MUT101`, `MUT110`, `MUT111`, `MUT114`, `MUT119`, the proven tier of the eight `OPT`
@@ -76,9 +80,8 @@ and what closes it: an annotation, a change of the code, heki's catalog, or noth
 causes come from the steps of the decision that made the report heuristic, each premise evaluated
 on its own along the reported chain and loop, so they cannot disagree with its tier.
 [`heki recommend`](recommend.md) counts the heuristic reports by these causes; no output format of
-`heki check` and nothing in the language server shows them. `EFF111` and `EFF113` record them for the claims of `EFF101` and `EFF103`, and the heuristic
-reports of the eight `OPT` rewrite rules, `OPT113`, `DATA101`, `MUT110`, and `MUT114` for their own
-claims. A proven size-dependent `OPT` rewrite, or an `OPT113` join whose premises all hold, over
+`heki check` and nothing in the language server shows them. The heuristic reports of `EFF101`,
+`EFF103`, the eight `OPT` rewrite rules, `OPT113`, `DATA101`, `MUT110`, and `MUT114` record them. A proven size-dependent `OPT` rewrite, or an `OPT113` join whose premises all hold, over
 a loop the data does not size is heuristic for a condition of the exact tier that is no premise,
 "Trip count open" (the claim holds, but the change pays off only over a loop the data sizes): the
 code fixes the loop at more than 16 trips or caps it, or, for a rewrite, the loop's items are not

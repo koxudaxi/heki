@@ -42,9 +42,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 mod package_paths;
+mod returns;
 mod sentinels;
 pub(crate) mod stores;
 mod workspace;
+
+pub use returns::{CallItems, NoItems, ReturnFact, ReturnedItems};
 
 /// The derived indexes of a [`ProjectDecls`] version (`ProjectDecls::index_changes`).
 struct Indexes {
@@ -758,7 +761,7 @@ pub struct FunctionDecl {
     /// otherwise raise `TypeError`.
     pub has_kwargs: bool,
     /// The literal defaults, by parameter position (`guards`: an omitted argument).
-    pub defaults: Vec<(u8, crate::ConstArg)>,
+    pub defaults: Vec<(u8, ArgFact)>,
     /// Calling it returns a fresh (async) generator: a generator function without decorators
     /// other than `staticmethod` / `classmethod` / `abstractmethod` / `override` (a
     /// `@contextmanager` generator returns a context manager). `MUT106` single-pass sources.
@@ -808,6 +811,10 @@ pub struct FunctionDecl {
     /// annotation names no class of its own (`-> ModuleType`, [`Self::declared_return`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returned_import: Option<Box<str>>,
+    /// What every `return` of every definition gives, past what the annotation says, inferred
+    /// in pass 1 against the module's own declarations ([`returns::record_return_facts`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returns: Option<Box<ReturnFact>>,
     /// A `__getstate__` returning a state built only from the instance's own attributes
     /// (`stores::state_of_self`), which `__setstate__` restores.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -5480,7 +5487,7 @@ pub(crate) fn update_module_decls(
     passes: &mut DeclPasses,
 ) -> (DeclKeys, Arc<ModuleDecls>, DeclKeys) {
     let name = &input.module_name;
-    let structural = structural_decls(input);
+    let structural = structural_decls(input, kb);
     let restructured = passes.structural.module(name) != Some(&structural);
     let before = restructured.then(|| passes.structural.indexes());
     if restructured {
@@ -5505,7 +5512,7 @@ pub(crate) fn own_module_decls(
     passes: &DeclPasses,
 ) -> (Arc<ModuleDecls>, DeclKeys) {
     let (completed, reads) =
-        complete_against(input, structural_decls(input), &passes.structural, kb);
+        complete_against(input, structural_decls(input, kb), &passes.structural, kb);
     (Arc::new(completed), reads)
 }
 
@@ -5540,7 +5547,7 @@ pub(crate) fn project_decls_for(
     };
     let structural: Vec<(PathBuf, Arc<ModuleDecls>)> = modules
         .iter()
-        .map(|m| (m.path.clone(), Arc::new(structural_decls(m))))
+        .map(|m| (m.path.clone(), Arc::new(structural_decls(m, kb))))
         .collect();
     let others = others.unwrap_or_default();
     let pass1 = ProjectDecls::new(order(
@@ -5709,7 +5716,7 @@ fn statement_in_module_body(semantic: &SemanticModel, class: &ClassInfo) -> bool
 }
 
 /// Pass 1: imports, classes (bases), functions (signatures) — no inference.
-fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
+fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> ModuleDecls {
     let semantic = input.semantic;
     let module_scope = module_scope(semantic);
     let mut decls = ModuleDecls {
@@ -6028,8 +6035,8 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, p)| {
-                    let c = crate::ConstArg::of_literal(p.default.as_ref()?)?;
-                    Some((u8::try_from(i).ok()?, c))
+                    let fact = crate::guards::literal_fact(p.default.as_ref()?)?;
+                    Some((u8::try_from(i).ok()?, fact))
                 })
                 .collect(),
             is_generator: is_generator_function(f),
@@ -6043,6 +6050,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             property_type: getter_types.get(f.qualname.as_str()).cloned(),
             returns_param_attr: returned_attrs[f.qualname.as_str()].clone(),
             returned_import: returned_imports[f.qualname.as_str()].clone(),
+            returns: None,
             state_of_self: false,
             captured_params: captured_params
                 .get(f.qualname.as_str())
@@ -6082,6 +6090,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     decls.object_sentinels = sentinels::object_sentinels(input, &decls);
     sentinels::named_attrs(input, &mut decls);
     decls.copy_registrations = sentinels::copy_registrations(input, &decls);
+    returns::record_return_facts(input, &mut decls, kb);
     decls
 }
 
@@ -6699,14 +6708,7 @@ fn returned_import(
     if !matches!(f.kind, FunctionKind::Sync) || is_generator_function(f) {
         return None;
     }
-    let keeps_result = |d: &String| {
-        decorators::keeps(decorators::last_name(d), |k| k.keeps_call)
-            || matches!(
-                decls.decorator_symbol(d).as_deref(),
-                Some("functools.cache" | "functools.lru_cache")
-            )
-    };
-    if !f.decorators.iter().all(keeps_result) {
+    if !keeps_body_result(f, decls) {
         return None;
     }
     let shape = FnShape::new(f);
@@ -6735,6 +6737,18 @@ fn returned_import(
         out = Some(target);
     }
     out.map(Box::from)
+}
+
+/// Calling `f` gives what its body returns: its decorators keep calling it as defined, or are a
+/// `functools` cache, which hands out the object a call returned.
+fn keeps_body_result(f: &IrFunction, decls: &ModuleDecls) -> bool {
+    f.decorators.iter().all(|d| {
+        decorators::keeps(decorators::last_name(d), |k| k.keeps_call)
+            || matches!(
+                decls.decorator_symbol(d).as_deref(),
+                Some("functools.cache" | "functools.lru_cache")
+            )
+    })
 }
 
 fn unknown_globals(stores: &GlobalStores<'_>, decls: &ModuleDecls) -> BTreeSet<String> {
@@ -8155,7 +8169,7 @@ fn copy_root<'i>(def: impl Fn(VarId) -> Option<&'i Inst>, var: VarId) -> Option<
 }
 
 /// A literal's value, as a catalog case compares it.
-fn literal_value(literal: &ConstLiteral) -> Option<LiteralValue> {
+pub(crate) fn literal_value(literal: &ConstLiteral) -> Option<LiteralValue> {
     match literal {
         ConstLiteral::Bool(b) => Some(LiteralValue::Bool(*b)),
         ConstLiteral::Int(n) => Some(LiteralValue::Int(*n)),
@@ -8181,6 +8195,7 @@ pub(crate) fn arg_fact<'i>(
         names_file: names_a_file(&def, &name_of, globals, var),
         class: class_of(var).or_else(|| bytes_literal_class(&def, var)),
         flags: set_flags(&def, &name_of, var),
+        ..ArgFact::default()
     }
 }
 
@@ -8198,7 +8213,7 @@ fn bytes_literal_class<'i>(def: &impl Fn(VarId) -> Option<&'i Inst>, var: VarId)
 
 /// Whether a database name opens a database in memory (`sqlite3.connect`), or opens none that
 /// heki can name: the empty name is a temporary database.
-fn in_memory_name(text: &str) -> bool {
+pub(crate) fn in_memory_name(text: &str) -> bool {
     text.is_empty()
         || text == ":memory:"
         || text.starts_with("file::memory:")

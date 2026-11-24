@@ -5254,7 +5254,7 @@ opaque_to_layer3 = true
 # `task_always_eager` (a test setting) `delay()` / `apply_async()` run the task in the caller
 # without a broker, and with kombu's in-memory transport even `send_task()` publishes without
 # the network. The configuration is not visible at the call, so the effect is never certain
-# (`emits = "unless-configured-otherwise"`) and only heuristic reports (`EFF111`)
+# (`emits = "unless-configured-otherwise"`) and only heuristic reports (`EFF101`)
 # follow.
 # `AsyncResult.get()` is not listed: it returns at once for a result already fetched
 # (`ready()` stores a finished one) or a task that ignores its result.

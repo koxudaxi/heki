@@ -1317,9 +1317,16 @@ impl<'a> FnIndex<'a> {
     /// their size).
     fn grown_operands(&self, inst: &Inst, list_only: bool, out: &mut Vec<VarId>) {
         let starred = |dst: VarId, i: usize| self.f.is_starred(dst, i);
+        // A comprehension only iterates its outermost iterable; the others are the names its
+        // body reads.
+        if let Some((_, captured)) = inst.kind.comprehension_operands() {
+            out.extend(captured);
+            return;
+        }
         match &inst.kind {
             InstKind::Copy { .. }
             | InstKind::MakeIter { .. }
+            | InstKind::MakeGenExpr { .. }
             | InstKind::IterNext { .. }
             | InstKind::Compare { .. }
             | InstKind::UnaryOp { .. }
@@ -1393,14 +1400,10 @@ impl<'a> FnIndex<'a> {
                 let reads_only = self
                     .builtin(*callee_var, callee)
                     .is_some_and(|n| READ_ONLY_BUILTINS.contains(&n));
-                // A comprehension function only iterates its first argument (the outermost
-                // iterable); the others are the names its body reads.
-                let iterated = usize::from(comprehension_id(*callee_var, callee).is_some());
                 if !reads_only {
                     out.extend(
                         args.iter()
                             .enumerate()
-                            .skip(iterated)
                             .filter(|(i, _)| !starred(*dst, *i))
                             .map(|(_, a)| *a),
                     );
@@ -1421,9 +1424,7 @@ impl<'a> FnIndex<'a> {
                     }
                 }
             }
-            InstKind::MakeGenExpr { captured, .. } | InstKind::MakeClosure { captured, .. } => {
-                out.extend(captured);
-            }
+            InstKind::MakeClosure { captured, .. } => out.extend(captured),
             // Binding a module constant: every load of it was checked (`module_constants`). An
             // import binding its name is another name of the imported global, not a new place
             // it escapes to.
@@ -1570,7 +1571,8 @@ impl<'a> FnIndex<'a> {
     /// `range(...)` of integer constants, or a builtin wrapper of one (`enumerate`, `zip` of at least one, `reversed`,
     /// `sorted`, `list`, `tuple`, `set`, `frozenset`, `dict`, `iter`, `map` / `filter` of one
     /// iterable, `.items()` / `.keys()` / `.values()`). `leaf` decides a load of a global or an
-    /// attribute this module's constants do not cover (the Advisory lane knows other modules).
+    /// attribute this module's constants do not cover (the Advisory lane knows other modules),
+    /// and what a call gives at most (the catalog knows library calls).
     pub fn iter_bound(&self, v: VarId, leaf: &mut dyn FnMut(&Inst) -> Option<u32>) -> Option<u32> {
         self.iter_bound_depth(v, leaf, 0, SMALL_MAX, &mut false)
     }
@@ -1676,6 +1678,13 @@ impl<'a> FnIndex<'a> {
             | InstKind::LoadName { .. }
             | InstKind::AttrLoad { .. }
             | InstKind::Import { .. } => leaf(inst).filter(|n| *n <= cap),
+            // What a call gives, when the reader sizes it, caps what may be input
+            // (`fetchmany(3)` gives at most three rows).
+            InstKind::Call { .. } | InstKind::MethodCall { .. } => {
+                let n = leaf(inst).filter(|n| *n <= cap);
+                *capped |= n.is_some();
+                n
+            }
             _ => None,
         }
     }
@@ -1957,7 +1966,7 @@ impl<'a> FnIndex<'a> {
     }
 
     /// The trip count the code fixes for the `for` loop `lp`, up to `cap`: what its iterable
-    /// yields ([`Self::iter_bound`], `leaf` deciding loads of globals and attributes), or the
+    /// yields ([`Self::iter_bound`], `leaf` deciding loads of globals and attributes, and calls), or the
     /// length a test every path to the loop passes caps it at ([`Self::guarded_len`]).
     pub fn fixed_trip(
         &self,
@@ -1980,7 +1989,7 @@ impl<'a> FnIndex<'a> {
     /// [`LEN_CAP_MAX`]), or the counter a `while` loop steps ([`Self::counted_trips`]). `Open`
     /// when nothing these facts read bounds it. No claim rests on a size: an open count only
     /// leaves the loop data-sized to the rules that read it so. `leaf` decides loads of globals
-    /// and attributes.
+    /// and attributes, and calls.
     pub fn fixed_trips(
         &self,
         lp: &NaturalLoop,
@@ -2803,8 +2812,8 @@ enum GlobalsWrites {
 /// other than the object a real reading builtin reads, or an operand whose operation runs
 /// another object's method) may bind any name, also one declared `Final`, which the runtime does
 /// not enforce, unless the change binds only a missing name ([`binds_only_missing`]). Reading
-/// the dict (`globals().get(name)`, `globals()[name]`, `name in globals()`, iterating it) binds
-/// nothing. The builtin `globals` itself handed on (`g = globals`) may be called anywhere, and a
+/// the dict (`globals().get(name)`, `globals()[name]`, `name in globals()`, iterating it, also
+/// as the outermost iterable of a comprehension) binds nothing. The builtin `globals` itself handed on (`g = globals`) may be called anywhere, and a
 /// call of whatever the code binds to that name may return the dict. `missing_name`: the
 /// parameter of the module's `__getattr__` when `f` is that hook ([`missing_name_param`]).
 fn globals_writes(
@@ -2845,6 +2854,11 @@ fn globals_writes(
         .collect();
     let reads_only = |kind: &InstKind| match kind {
         InstKind::Copy { .. } | InstKind::MakeIter { .. } => true,
+        // A comprehension iterates its outermost iterable; what its body does with the values it
+        // captures is the child function's own.
+        _ if let Some((_, captured)) = kind.comprehension_operands() => {
+            !captured.iter().any(|v| is_dict(*v))
+        }
         // `obj[d]` hands the dict to `obj.__getitem__`.
         InstKind::SubscriptLoad { obj, .. } => is_dict(*obj),
         // `d in obj` runs `obj.__contains__(d)`, and a rich comparison runs the other operand's
