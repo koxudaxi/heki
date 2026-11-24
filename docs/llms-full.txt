@@ -5554,8 +5554,8 @@ release. A draft is published by hand, and only while no Release Draft run is qu
 The release tag is the version (`v` + the version), so nothing is bumped before a release. Right
 after checking out the tag, every `release.yml` job that builds writes the version into
 `pyproject.toml`, `Cargo.toml` (`workspace.package.version` and the internal crates under
-`workspace.dependencies`), and the workspace entries of `Cargo.lock`
-(`scripts/set_release_versions.py`, which fails when a value it rewrites is not found exactly
+`workspace.dependencies`), the workspace entries of `Cargo.lock`, and the project's entry of
+`uv.lock` (`scripts/set_release_versions.py`, which fails when a value it rewrites is not found exactly
 once), and the release fails unless every wheel, the source distribution, and the executable
 declare it. Nothing is committed: `main` declares the newest release once the sync pull request
 is merged.
@@ -5618,7 +5618,7 @@ changes in an exact rule.
    (the run then warns), and a draft page loaded before the run's update publishes without it.
 3. The Release Sync workflow opens the pull request `chore: sync release metadata for <version>`
    from the branch `release/sync-<version>`, labeled `maintenance` to keep it out of the next
-   draft's changes. It writes the version into the manifests and `Cargo.lock`, renames the
+   draft's changes. It writes the version into the manifests and the lock files, renames the
    section heading to `## [<version>] - <publish date>` (the UTC date), and makes the
    `[<version>]` compare link end at the release tag instead of `HEAD` (a missing link compares
    the previous release with the tag). When a section is headed `[Unreleased]`, its link compares
