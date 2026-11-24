@@ -297,7 +297,10 @@ Missed findings close as heki learns more:
 - A module-level table of functions (`HANDLERS = {"create": create}`) gives the value of a key
   a string constant gives, and one of its values for any other key, only while no code changes
   it in place; a change through a call it is handed to (`register(HANDLERS)`) is not seen.
-  Changing a dict or list a global or an attribute holds in place leaves its items untyped.
+  Changing a dict, set, or list a global or an attribute holds in place joins what the change
+  adds to its items when heki types it (`append(x)` with `x: Field`, `extend` or `+=` of a list
+  of known items, `d[k] = v` with `v` of a known class), and leaves its items untyped otherwise.
+  A change of an item it holds (`d[k].append(x)`) is not seen.
 - The type of a module global or an instance attribute joins every store of it through a
   receiver whose type heki knows: `self`, an instance of the class (a parameter `obj: Helper`,
   `cls()` in a class method, one the storing module keeps in its own attribute or global, as

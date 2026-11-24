@@ -411,14 +411,27 @@ the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores
   (`ProjectDecls::elsewhere`).
 - **Changes in place.** A change the module's code makes to the object a global or an
   attribute holds, through a load of it (an item store `HANDLERS[kind] = run`, a method that may
-  add items such as `append`, `update`, or `setdefault`; `heki_ir::FnIndex::changed_vars`,
-  through copies and phis), is a store of the object's class with its items unknown (of an
-  annotated global's declaration): a name holding `{"noop": noop}` keeps `dict` and no item
-  type the code may replace. A change through the module's own object (a module importing
-  itself, `tables.HANDLERS[kind] = run`), whose read types the global by its name alone, leaves
-  the global its declaration or no type. Another module's change marks the name
-  (`StoredElsewhere::changed`), whose type then keeps no items where it is read. What a call the object is handed to does is not
-  followed (the assumption on objects of unknown origin).
+  add items such as `append`, `update`, or `setdefault`, an in-place operator `ITEMS += more`;
+  `heki_ir::FnIndex::changes_in_place`, through copies and phis), is a store of the loaded type
+  joined with what the changes add (`types::Container::added`, `Ty::with_added`; of an
+  annotated global's declaration). A list or a deque gets the items `append`, `insert`,
+  `appendleft`, `extend`, `extendleft`, `+=`, and item stores add (of a slice, the value's
+  items), a set those of `add`, `update`, `symmetric_difference_update`, `|=`, and `^=`, a dict
+  the keys and values of item stores, `setdefault`, `update` (also by keyword), and `|=`. An
+  argument of unknown type, an unpacked one, a method the container does not have, and a change
+  of what a change gave (`d.setdefault(k, []).append(x)`, `xs += ys` then `xs.append(x)`) add
+  items of unknown type: a name holding `{"noop": noop}` that `HANDLERS[kind] = run` changes
+  with `run` of unknown type keeps `dict` and no item type, and `HANDLERS["require"] = require`
+  gives its values the type of either function. Any other class keeps no items. A change
+  through the module's own object (a module importing itself, `tables.HANDLERS[kind] = run`),
+  whose read types the global by its name alone, leaves the global its declaration or no type.
+  Another module's change records what it adds (`StoredElsewhere::changed`, typed against pass
+  1), joined into the name's type where it is read. A local display joins what the function's
+  changes add the same way (`infer::Engine::add_contents`; a method a display does not have
+  raises and adds nothing), and an in-place operator on a container of known class gives its
+  type with what the operator adds. What a call the object
+  is handed to does is not followed (the assumption on objects of unknown origin), nor a change
+  of an item it holds (`d[k].append(x)`).
 - **Annotations.** An annotation types every store of the name it declares (Priority 2): an
   annotated global holds its declaration, refined by what the value says beyond it
   (`ProjectDecls::refine`: a narrower value, or for an instance of the declared container class

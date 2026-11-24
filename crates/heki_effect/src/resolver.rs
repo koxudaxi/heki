@@ -15,7 +15,7 @@
 
 use crate::capacity::CapacityOf;
 use crate::decorators;
-use crate::types::{Args, Elem, Generic, Ty, generic, typing_generic};
+use crate::types::{Added, Args, Elem, Generic, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
 use heki_env::HekiConfig;
@@ -462,10 +462,10 @@ pub struct StoredElsewhere {
     /// (`obj.items += [x]`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_place: bool,
-    /// The module's code changes the object the name holds in place (`cfg.HANDLERS[kind] =
-    /// run`, `obj.items.append(x)`): its items are unknown.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub changed: bool,
+    /// What the module's code changing the object the name holds in place adds to it
+    /// (`cfg.HANDLERS[kind] = run`, `obj.items.append(x)`): its items join what they add.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed: Option<Added>,
 }
 
 /// A module's global and attribute types decided without what reading them gives, where they
