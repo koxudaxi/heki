@@ -1,9 +1,10 @@
-//! `MUT110` (`readonly-param-mutation`) end to end: a `Sequence` / `Mapping` / `ReadOnly`
-//! parameter handed to code that changes it in place — through `Optional` / `| None` /
+//! `MUT110` (`readonly-param-mutation`) end to end: a `Sequence` / `Mapping` / `AbstractSet` /
+//! `ReadOnly` parameter handed to code that changes it in place — through `Optional` / `| None` /
 //! `Annotated` / quoted annotations, aliases, keyword arguments, methods, and helpers one and
 //! two calls deep — every exclusion (changes in the function itself, value-side changes, copies,
 //! callee parameters annotated mutable or read-only, variadic parameters), the default selection
-//! (`MUT110` runs, `MUT108` does not), `heki rule`, and the incremental LSP server.
+//! (`MUT110` runs, `MUT108` does not), `heki rule`, the incremental LSP server, and the premises
+//! of a set ABC parameter's report.
 
 mod common;
 
@@ -225,7 +226,7 @@ fn mut110_readonly_parameters_handed_to_helpers() {
     );
     assert_eq!(
         one["help"],
-        "pass a copy (`list(items)` / `dict(items)`), or annotate the helper's parameter with a mutable type"
+        "pass a copy (`list(items)` / `dict(items)` / `set(items)`), or annotate the helper's parameter with a mutable type"
     );
     // `push` does not type `items`: whether `append` changes it in place is open, so the report
     // names no line and is heuristic.
@@ -682,4 +683,262 @@ fn mut110_leaves_open_a_metaclass_or_getattribute_but_not_an_operator() {
             .collect();
         assert_eq!(got, certainties, "{name}: {diags:#?}");
     }
+}
+
+// ======================================================================== the set ABCs
+
+/// `typing.AbstractSet` and `collections.abc.Set` promise what `Mapping` does, in every spelling
+/// `Mapping` takes: bare or subscripted, through an import alias or the module, quoted, inside
+/// `Optional`, `| None`, `Union[..., None]`, and `Annotated`. `typing.Set` is the builtin `set`,
+/// and `typing_extensions` names are read as `Mapping`'s are, as no read-only type.
+const SET_SPELLINGS: &str = r#"import collections.abc
+import typing
+import typing_extensions
+from collections.abc import Mapping, MutableSet, Set
+from collections.abc import Set as ReadOnlySet
+from typing import AbstractSet, Annotated, Optional, Union
+
+
+def put(table):
+    if isinstance(table, dict):
+        table["k"] = 1
+
+
+def grow(items):
+    if isinstance(items, set):
+        items.add(1)
+
+
+def add_one(items: set[int]) -> None:
+    items.add(1)
+
+
+def relay(items: AbstractSet[int]) -> None:
+    grow(items)
+
+
+def spelled(
+    a: AbstractSet[int],
+    b: Set[int],
+    c: ReadOnlySet[int],
+    d: collections.abc.Set[int],
+    e: typing.AbstractSet[int],
+    f: Set,
+    g: AbstractSet,
+) -> None:
+    grow(a)
+    grow(b)
+    grow(c)
+    grow(d)
+    grow(e)
+    grow(f)
+    grow(g)
+
+
+def wrapped(
+    a: "Set[int]",
+    b: "typing.AbstractSet[int]",
+    c: Optional[Set[int]],
+    d: Set[int] | None,
+    e: "Union[AbstractSet[int], None]",
+    f: Annotated[Set[int], "doc"],
+) -> None:
+    grow(a)
+    grow(b)
+    grow(c)
+    grow(d)
+    grow(e)
+    grow(f)
+
+
+def not_read_only(
+    a: set[int],
+    b: typing.Set[int],
+    c: MutableSet[int],
+    d: frozenset[int],
+    e: Set[int] | list[int],
+    f: typing_extensions.AbstractSet[int],
+    g: typing_extensions.Mapping[str, int],
+) -> None:
+    grow(a)
+    grow(b)
+    grow(c)
+    grow(d)
+    grow(e)
+    grow(f)
+    put(g)
+
+
+def through_annotated_helpers(items: Set[int]) -> None:
+    add_one(items)
+    relay(items)
+
+
+def mapping(table: Mapping[str, int]) -> None:
+    put(table)
+"#;
+
+#[test]
+fn mut110_reads_the_set_abcs_in_every_spelling_the_mapping_takes() {
+    let p = Project::new("mut110_set_spellings");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/spellings.py", SET_SPELLINGS);
+    let diags = diagnostics(&p, &[]);
+    let s = "pkg/spellings.py";
+    assert_eq!(
+        found(&diags),
+        vec![
+            // A helper whose parameter is read-only reports its own handing over; one annotated
+            // `set[int]` is left to the type checker.
+            d(s, 24, "relay", "items"),
+            d(s, 36, "spelled", "a"),
+            d(s, 37, "spelled", "b"),
+            d(s, 38, "spelled", "c"),
+            d(s, 39, "spelled", "d"),
+            d(s, 40, "spelled", "e"),
+            d(s, 41, "spelled", "f"),
+            d(s, 42, "spelled", "g"),
+            d(s, 53, "wrapped", "a"),
+            d(s, 54, "wrapped", "b"),
+            d(s, 55, "wrapped", "c"),
+            d(s, 56, "wrapped", "d"),
+            d(s, 57, "wrapped", "e"),
+            d(s, 58, "wrapped", "f"),
+            d(s, 85, "mapping", "table"),
+        ]
+    );
+    for diag in &diags {
+        assert_eq!(diag["certainty"], "exact", "{diag:#}");
+    }
+    assert_eq!(
+        message(at(&diags, s, 36)),
+        "`spelled` passes its read-only parameter `a` to `pkg.spellings.grow`; whenever line 16 of `grow` runs, it changes the caller's object in place"
+    );
+    assert_eq!(chain(at(&diags, s, 36)), vec![(s.into(), 36), (s.into(), 16)]);
+    assert_eq!(
+        at(&diags, s, 36)["help"],
+        "pass a copy (`list(a)` / `dict(a)` / `set(a)`), or annotate the helper's parameter with a mutable type"
+    );
+}
+
+/// Each premise of the claim for a set ABC parameter: reported, naming the line, when all three
+/// hold; with one stripped, no exact report. "Read-only parameter": `set[int]`, `frozenset[int]`.
+/// "Passed as itself": a copy, also on one path. "Changed at the line": a change no type test
+/// makes a builtin set's, a rebinding of a frozenset, a helper that only reads, and (in a project
+/// of its own) a project subclass of `set` overriding `add`.
+const SET_PREMISES: &str = r#"from collections.abc import Set
+from typing import AbstractSet
+
+
+def grow(items):
+    if isinstance(items, set):
+        items.add(1)
+
+
+def grow_unguarded(items):
+    items.add(1)
+
+
+def merge(items):
+    if isinstance(items, set):
+        items |= {1}
+
+
+def rebind_frozen(items):
+    if isinstance(items, frozenset):
+        items |= {1}
+
+
+def only_reads(items):
+    return len(items)
+
+
+def held(items: AbstractSet[int]) -> None:
+    grow(items)
+
+
+def held_alias(items: Set[int]) -> None:
+    alias = items
+    grow(alias)
+
+
+def held_operator(items: Set[int]) -> None:
+    merge(items)
+
+
+def stripped_annotation(items: set[int], others: frozenset[int]) -> None:
+    grow(items)
+    grow(others)
+
+
+def stripped_copy(items: Set[int], fresh: bool) -> None:
+    grow(set(items))
+    if fresh:
+        items = set(items)
+    grow(items)
+
+
+def stripped_one_path(items: AbstractSet[int], flag: bool) -> None:
+    grow(items if flag else set())
+
+
+def stripped_unguarded(items: Set[int]) -> None:
+    grow_unguarded(items)
+
+
+def stripped_rebinding(items: Set[int]) -> None:
+    rebind_frozen(items)
+
+
+def stripped_reading(items: Set[int]) -> None:
+    only_reads(items)
+"#;
+
+#[test]
+fn mut110_set_abc_reports_hold_every_premise() {
+    let p = Project::new("mut110_set_premises");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/premises.py", SET_PREMISES);
+    let s = "pkg/premises.py";
+    let diags = diagnostics(&p, &[]);
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(s, 29, "held", "items"),
+            d(s, 34, "held_alias", "items"),
+            d(s, 38, "held_operator", "items"),
+            d(s, 58, "stripped_unguarded", "items"),
+        ]
+    );
+    let certainties: Vec<&str> = diags
+        .iter()
+        .map(|d| d["certainty"].as_str().unwrap())
+        .collect();
+    assert_eq!(certainties, vec!["exact", "exact", "exact", "heuristic"]);
+    assert_eq!(chain(&diags[0]), vec![(s.into(), 29), (s.into(), 7)]);
+    assert_eq!(chain(&diags[2]), vec![(s.into(), 38), (s.into(), 16)]);
+    assert_eq!(chain(&diags[3]), vec![(s.into(), 58)]);
+    // The default run shows only the reports whose premises all hold.
+    let exact = diagnostics(&p, &["--no-heuristic"]);
+    assert_eq!(
+        found(&exact),
+        vec![
+            d(s, 29, "held", "items"),
+            d(s, 34, "held_alias", "items"),
+            d(s, 38, "held_operator", "items"),
+        ]
+    );
+
+    // A project subclass of `set` overriding `add` may be the argument under R2: the line may
+    // change nothing, and the report names none.
+    let quiet = "class Quiet(set):\n    def add(self, item):\n        pass\n\n\n";
+    let p = Project::new("mut110_set_overridden");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/premises.py", &format!("{quiet}{SET_PREMISES}"));
+    let diags = diagnostics(&p, &[]);
+    let held = at(&diags, s, 34);
+    assert_eq!(held["certainty"], "heuristic", "{held:#}");
+    assert_eq!(chain(held), vec![(s.into(), 34)]);
+    // `|=` calls `__ior__`, which `Quiet` keeps.
+    assert_eq!(at(&diags, s, 43)["certainty"], "exact");
 }

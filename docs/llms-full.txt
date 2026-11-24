@@ -119,7 +119,7 @@ across modules. heki models effects and aliases, what code does:
 | Tool | Models | heki adds |
 | --- | --- | --- |
 | Ruff | syntax and style | the effects behind a call: a blocking call, a query, or a write, wherever it happens |
-| ty, Pyrefly, pyright, mypy | declared types | in-place changes, through aliases and helpers, to `frozen`, `ReadOnly`, and `Final` fields and to `Sequence` / `Mapping` arguments |
+| ty, Pyrefly, pyright, mypy | declared types | in-place changes, through aliases and helpers, to `frozen`, `ReadOnly`, and `Final` fields and to `Sequence` / `Mapping` / `AbstractSet` arguments |
 | tach, import-linter | which modules may import which | which functions write or read a field, call a function, or reach I/O; which modules may import which, knowing when each import runs (experimental); planned: these tools' contracts read as heki contracts |
 
 Their stricter settings do not close the gap. The second example above is fully annotated and
@@ -224,7 +224,7 @@ These rules are exact and run by default. Each report shows the chain of calls t
 | --- | --- |
 | A blocking call that a call in an `async def` always runs, several helpers below | [`EFF101`](https://heki.koxudaxi.dev/rules/async-blocking-call/) |
 | A database statement on every iteration of a loop over data | [`EFF103`](https://heki.koxudaxi.dev/rules/loop-db-query/) |
-| A `Sequence` / `Mapping` argument changed in place by a helper | [`MUT110`](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) |
+| A `Sequence` / `Mapping` / `AbstractSet` argument changed in place by a helper | [`MUT110`](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) |
 | A list, dict, or set that an `lru_cache` / `cache` function returned, changed in place | [`MUT114`](https://heki.koxudaxi.dev/rules/cached-result-mutation/) |
 | A change of a builtin container that is lost because the object is new and nothing holds it (`list(xs).sort()`) | [`MUT119`](https://heki.koxudaxi.dev/rules/change-lost-on-new-object/) |
 | A DataFrame or array concatenated with itself on every loop iteration | [`DATA101`](https://heki.koxudaxi.dev/rules/loop-carried-concat/) |
@@ -683,8 +683,8 @@ Catalog lookups are exact. These contribute no effect until you add them with
 
 ### Read-only types
 
-- `MUT110` follows `Sequence` / `Mapping` / `ReadOnly` parameters into the helpers they are
-  handed to, any number of calls deep. A helper parameter annotated with a mutable type is left
+- `MUT110` follows `Sequence` / `Mapping` / `AbstractSet` / `ReadOnly` parameters into the
+  helpers they are handed to, any number of calls deep. A helper parameter annotated with a mutable type is left
   to the type checker, and a container inside the argument does not count.
 - `MUT108` (opt-in) follows frozen dataclasses, `NamedTuple`s, classes that a
   `dataclass_transform(frozen_default=True)` in the checked files builds, `Final` / `ReadOnly`
@@ -3950,7 +3950,7 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT106 | [iterator-double-consumption](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) | Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items). | ≈ 🔌 |
 | MUT107 | [hash-attr-mutation](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) | Opt-in: a method other than the initializers rebinds or changes in place an attribute that the `__hash__` of its instances reads. | ≈ 🔌 |
 | MUT108 | [readonly-type-mutation](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) | Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper. | ≈ 🔌 |
-| MUT110 | [readonly-param-mutation](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter, as itself, to a function whose body (or a helper's) changes it in place at a named line. |  |
+| MUT110 | [readonly-param-mutation](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | Handing a `Sequence` / `Mapping` / `AbstractSet` / `ReadOnly` parameter, as itself, to a function whose body (or a helper's) changes it in place at a named line. |  |
 | MUT111 | [cached-property-stale-read](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports). | 🔌 🧪 |
 | MUT112 | [conditional-ownership-mutation](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another. | ≈ 🔌 🧪 |
 | MUT113 | [iterated-container-mutation](https://heki.koxudaxi.dev/rules/iterated-container-mutation/) | Opt-in: a dict, set, or deque of the instance changed while a method iterates it, by another method while a generator is suspended in the loop or by a function the loop's body calls (the next step raises `RuntimeError`). | ≈ 🔌 🧪 |
@@ -10612,15 +10612,16 @@ Source: https://heki.koxudaxi.dev/rules/readonly-param-mutation/
 
 Family: Mutation & State (MUT) · Exact · Enabled by default · Severity `warning` (a bug that is rarely harmful) · No automatic fix
 
-Handing a `Sequence` / `Mapping` / `ReadOnly` parameter, as itself, to a function whose body (or a helper's) changes it in place at a named line.
+Handing a `Sequence` / `Mapping` / `AbstractSet` / `ReadOnly` parameter, as itself, to a function whose body (or a helper's) changes it in place at a named line.
 
 ## What it does
 Checks functions that hand a parameter annotated as a read-only container to code that changes
-it in place: a parameter annotated `Sequence[...]`, `Mapping[...]`, or `ReadOnly[...]` (also
-inside `Optional`, `| None`, `Annotated`, and quotes), passed as itself or through a local alias
-(`alias = items`) to a function that changes its argument in place (`items.sort()`,
-`items.append(...)`, `table[key] = ...`), itself or through further helpers, any number of calls
-deep.
+it in place: a parameter annotated `Sequence[...]`, `Mapping[...]`, `AbstractSet[...]`
+(`typing.AbstractSet` or `collections.abc.Set`, not `typing.Set`, which is `set`), or
+`ReadOnly[...]` (also inside `Optional`, `| None`, `Annotated`, and quotes), passed as itself or
+through a local alias (`alias = items`) to a function that changes its argument in place
+(`items.sort()`, `items.append(...)`, `table[key] = ...`, `tags.add(...)`), itself or through
+further helpers, any number of calls deep.
 
 The rule reports the call that hands the parameter over, and names the line where the change
 happens, with the calls down to it and the line itself as related locations. A generator function changes what it is handed where its generator is
@@ -10633,9 +10634,10 @@ It does not report:
   checkers report it on the read-only type;
 - a container inside the argument (`values["a"].append(1)` with
   `values: Mapping[str, list[int]]`): only the argument itself counts;
-- a call that hands over a copy (`helper(list(items))`, `helper(dict(table))`);
+- a call that hands over a copy (`helper(list(items))`, `helper(dict(table))`,
+  `helper(set(tags))`);
 - a helper parameter annotated with a mutable type (`list[int]`, `dict[str, int]`,
-  `MutableSequence[int]`, `deque[int]`, ...): the type checker reports the argument;
+  `set[int]`, `MutableSequence[int]`, `deque[int]`, ...): the type checker reports the argument;
 - a helper parameter annotated read-only: that helper is checked in turn (its own handing over is
   reported, a change in its own body is a type error); a change reached only through such a
   helper, or through one whose parameter is annotated with a mutable type, further down the
@@ -10644,11 +10646,11 @@ It does not report:
 
 ## What a report states
 
-A report states that the function hands its parameter annotated `Sequence`, `Mapping`, or
-`ReadOnly`, as itself, to a function, and that whenever the named line runs during that call, it
-changes the caller's object in place. It does not say that every call reaches the line: the
-change often sits under a test of the argument's type (`if isinstance(values, list):`), and the
-claim is anchored there.
+A report states that the function hands its parameter annotated `Sequence`, `Mapping`,
+`AbstractSet`, or `ReadOnly`, as itself, to a function, and that whenever the named line runs
+during that call, it changes the caller's object in place. It does not say that every call
+reaches the line: the change often sits under a test of the argument's type
+(`if isinstance(values, list):`), and the claim is anchored there.
 
 Its premises:
 
@@ -10668,11 +10670,12 @@ Its premises:
   that another function returns is iterated; such a report names no line and is heuristic.
 
 ## Why is this bad?
-A `Sequence` or `Mapping` annotation promises the caller that the function only reads its
-argument, so callers pass their own lists and dictionaries, shared values, or tuples. A helper
-that changes the argument in place breaks the promise: the caller's object changes behind its
-back, or the call fails on a tuple. Type checkers trust the helper's signature, so an
-unannotated or `Any` helper accepts the `Sequence` and hides the change.
+A `Sequence`, `Mapping`, or `AbstractSet` annotation promises the caller that the function only
+reads its argument, so callers pass their own lists, dictionaries, and sets, shared values, or
+tuples and frozensets. A helper that changes the argument in place breaks the promise: the
+caller's object changes behind its back, or the call fails on a tuple or a frozenset. Type
+checkers trust the helper's signature, so an unannotated or `Any` helper accepts the `Sequence`
+and hides the change.
 
 ## Example
 ```python
@@ -10863,8 +10866,8 @@ which type checkers let through because they only stop rebinding:
   `Final` field of a dataclass or `NamedTuple`) or `ReadOnly[...]`, and a `ReadOnly` key of a
   `TypedDict` (`movie["names"].append(...)`).
 
-A `Sequence` / `Mapping` parameter handed to a helper that changes it is `MUT110`
-(`readonly-param-mutation`), which shares this analysis.
+A `Sequence` / `Mapping` / `AbstractSet` parameter handed to a helper that changes it is
+`MUT110` (`readonly-param-mutation`), which shares this analysis.
 
 Changes are followed through local aliases (`tags = config.tags; tags.append(...)`) and through
 helpers, annotated or not and any number of calls deep, that change what they are handed: the
@@ -10997,7 +11000,7 @@ A type checker reports a write of a view's property made through the view
   mutable container type (`view.extras["k"] = v`, `view.items.append(x)`), directly, through a
   local alias, or through helpers (`fill(view.extras)`, `reset(view)` changing `p.extras`), as
   `MUT108` does for frozen fields. Through a helper, a property annotated with a read-only type
-  (`Sequence`, `Mapping`) counts too.
+  (`Sequence`, `Mapping`, `AbstractSet`) counts too.
 
 The rule does not report:
 
@@ -11006,8 +11009,8 @@ The rule does not report:
   hands it on to one that does not is reported at its own call;
 - a change made through a value of a class that implements the view (`field: Field`, not
   `field: FieldView`);
-- a direct change of a container a property annotated `Sequence` / `Mapping` returns: the type
-  checker reports it;
+- a direct change of a container a property annotated `Sequence` / `Mapping` / `AbstractSet`
+  returns: the type checker reports it;
 - a copy (`extras = dict(view.extras)`, `fill(list(view.items))`), and a container inside the one
   the property returns (`view.tables["a"].append(1)`);
 - a class with a setter or deleter, a plain attribute (`required: bool` in a protocol), a
