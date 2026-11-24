@@ -35,6 +35,9 @@ struct Row {
 const SQLITE: &str = "import sqlite3\n";
 const SQLITE_FILE: &str = "import sqlite3\n\nCONN = sqlite3.connect(\"app.db\")\n";
 const SQLITE_MEMORY: &str = "import sqlite3\n\nMEM = sqlite3.connect(\":memory:\")\n";
+const SQLITE_NAME: &str = "import sqlite3\n\nDB_NAME = \"app.db\"\n";
+const SQLITE_PATH: &str = "import sqlite3\nfrom pathlib import Path\n\n\
+    DB_PATH = Path(__file__).resolve().parent / \"app.db\"\n";
 const BOOK_COUNTS: &str = "import sqlite3\n\nCONN = sqlite3.connect(\"app.db\")\n\n\n\
     def count_books(author: int) -> int:\n    \
     return CONN.execute(\"SELECT COUNT(*) FROM b WHERE a = ?\", (author,)).fetchone()[0]\n";
@@ -97,6 +100,26 @@ const ROWS: &[Row] = &[
         usage: EXECUTE,
     },
     Row {
+        name: "sqlite-file-name-constant",
+        rule: "EFF101",
+        made_by: &["sqlite3.connect"],
+        on_event_loop: true,
+        setup: SQLITE_NAME,
+        value: "sqlite3.connect(DB_NAME)",
+        annotation: "sqlite3.Connection",
+        usage: EXECUTE,
+    },
+    Row {
+        name: "sqlite-file-path-constant",
+        rule: "EFF101",
+        made_by: &["sqlite3.connect"],
+        on_event_loop: true,
+        setup: SQLITE_PATH,
+        value: "sqlite3.connect(DB_PATH)",
+        annotation: "sqlite3.Connection",
+        usage: EXECUTE,
+    },
+    Row {
         name: "sleep",
         rule: "EFF101",
         made_by: &[],
@@ -113,6 +136,16 @@ const ROWS: &[Row] = &[
         on_event_loop: true,
         setup: "import time\n",
         value: "0",
+        annotation: "float",
+        usage: "time.sleep({v})",
+    },
+    Row {
+        name: "sleep-from-environment",
+        rule: "EFF101",
+        made_by: &[],
+        on_event_loop: true,
+        setup: "import os\nimport time\n",
+        value: "float(os.environ.get(\"DELAY\", \"1\"))",
         annotation: "float",
         usage: "time.sleep({v})",
     },
@@ -333,9 +366,36 @@ const GAPS: &[(&str, &str, &str)] = &[
         "EFF101 [heuristic]",
     ),
     ("sqlite-memory-global", "two-helpers", "EFF101 [heuristic]"),
+    (
+        "sqlite-file-name-constant",
+        "annotated-helper",
+        "EFF101 [heuristic]",
+    ),
+    (
+        "sqlite-file-name-constant",
+        "two-helpers",
+        "EFF101 [heuristic]",
+    ),
+    ("sqlite-file-name-constant", "unannotated-helper", "-"),
+    ("sqlite-file-path-constant", "unannotated-helper", "-"),
     ("sleep", "annotated-helper", "EFF101 [heuristic]"),
     ("sleep", "two-helpers", "EFF101 [heuristic]"),
     ("sleep", "unannotated-helper", "EFF101 [heuristic]"),
+    (
+        "sleep-from-environment",
+        "annotated-helper",
+        "EFF101 [heuristic]",
+    ),
+    (
+        "sleep-from-environment",
+        "two-helpers",
+        "EFF101 [heuristic]",
+    ),
+    (
+        "sleep-from-environment",
+        "unannotated-helper",
+        "EFF101 [heuristic]",
+    ),
     ("sleep-zero", "annotated-helper", "EFF101 [heuristic]"),
     ("sleep-zero", "two-helpers", "EFF101 [heuristic]"),
     ("sleep-zero", "unannotated-helper", "EFF101 [heuristic]"),
@@ -359,6 +419,15 @@ const GAPS: &[(&str, &str, &str)] = &[
     ("sqlite-file-global", "unannotated-factory", "-"),
     ("sqlite-file-global", "to-thread", "EFF101 [heuristic]"),
     ("sqlite-file-global", "partial", "EFF101 [heuristic]"),
+    ("sqlite-file-name-constant", "factory", "EFF101 [heuristic]"),
+    ("sqlite-file-name-constant", "unannotated-factory", "-"),
+    (
+        "sqlite-file-name-constant",
+        "to-thread",
+        "EFF101 [heuristic]",
+    ),
+    ("sqlite-file-name-constant", "partial", "EFF101 [heuristic]"),
+    ("sqlite-file-path-constant", "unannotated-factory", "-"),
     ("sqlite-memory", "factory", "EFF101 [heuristic]"),
     ("sqlite-memory", "to-thread", "EFF101 [heuristic]"),
     ("sqlite-memory", "partial", "EFF101 [heuristic]"),
@@ -385,6 +454,9 @@ const GAPS: &[(&str, &str, &str)] = &[
     ),
     ("shutdown-no-wait", "to-thread", "EFF101 [heuristic]"),
     ("shutdown-no-wait", "partial", "EFF101 [heuristic]"),
+    // A `Path` module constant read inside a function is not known to name a file, while the
+    // module body's own call on it is: here the inline form is the heuristic one.
+    ("sqlite-file-path-constant", "module-constant", "EFF101"),
     // The items a loop steps through are the data's ("Origin") only when they come from a
     // parameter or a catalog call written in the function: the rows a project function returns,
     // also through `asyncio.to_thread` or `functools.partial`, and the rows a module constant

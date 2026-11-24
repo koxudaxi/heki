@@ -171,9 +171,10 @@ binary: moving the value an effect depends on into a helper's parameter (annotat
 two helpers deep), a factory's return (with or without a return annotation), a module constant, a
 function `asyncio.to_thread` runs, or a factory called through `functools.partial` does not
 change what heki reports about the effect. Each row of the table is an expression (a connection
-opened on a file or in memory, a sleep, a URL, a queue, a flag, the rows of a query) and the
-statement using it; the test writes the row in every form and requires the code and certainty the
-inline form reports, or no report where the inline form has none.
+opened in memory or on a file, also one a module constant names, a sleep, also of a value read
+from the environment, a URL, a queue, a flag, the rows of a query) and the statement using it; the
+test writes the row in every form and requires the code and certainty the inline form reports, or
+no report where the inline form has none.
 
 Today's exceptions are listed in `GAPS` with what each form reports instead, grouped by the fact
 heki does not carry across that boundary. The list is exact: a form that starts to report as its
