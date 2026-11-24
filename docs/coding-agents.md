@@ -162,6 +162,7 @@ function's effects are in question, not before every edit.
 $ heki inspect app.users.load_user --output-format json
 $ heki inspect app/users.py:42
 $ heki inspect app/users.py::load_user --callers --depth 3
+$ printf '%s\n' app.users.load_user 'app.orders.*' | heki inspect - --output-format json
 ```
 
 | Field | Content |
@@ -180,6 +181,13 @@ $ heki inspect app/users.py::load_user --callers --depth 3
   says what to do (in JSON, `error.help`; a misspelled name gets the functions whose names look
   like it) and lists the functions to choose from (`error.candidates`, `error.suggestions`,
   `error.methods`, or `error.functions`).
+- With `-` for the name, the names are read from standard input, one per line, and heki analyzes
+  the project once for all of them: the JSON output is an array of the objects, in the order of
+  the names, and the text output one section per function. Here a glob names each function it
+  matches, in the order of their full names (on the command line, a glob matching several is
+  ambiguous). A name that names no single function takes its place in the array as the error
+  object it prints alone, the others are still reported, and the exit code is 2. No names give
+  an empty array.
 - `pure` means heki found no effect and no change of an input or of shared state, and resolved
   every call below. Libraries the [catalog](configuration.md#ecosystem-knowledge-toolhekiecosystem)
   does not list count as having no effects.
@@ -192,8 +200,8 @@ $ heki inspect app/users.py::load_user --callers --depth 3
   100; `truncated` says there are more. `purity.unknown_at` is the first of them. Both are given
   for an `impure` function too: what it changes may then be incomplete.
 - A field the configuration does not compute is `null`, with the setting that computes it.
-- Exit code 0 when the function was inspected, 2 otherwise or when a file could not be analyzed
-  (the report is still printed, with `complete: false`).
+- Exit code 0 when every function was inspected, 2 otherwise or when a file could not be
+  analyzed (the reports are still printed, with `complete: false`).
 
 To see what an edit changed in a function, inspect it before and after the edit and compare
 `effects`, `changes`, `retains`, and `returns`: a new entry is new behavior. Fact keys carry no line

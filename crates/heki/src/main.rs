@@ -240,7 +240,9 @@ struct AnalysisArgs {
 #[derive(Debug, Args)]
 struct InspectArgs {
     /// A dotted name (`pkg.mod.Class.method`, a dotted suffix such as `Class.method`, or a
-    /// glob), `path.py:LINE`, or `path.py::NAME`.
+    /// glob), `path.py:LINE`, or `path.py::NAME`. `-` reads such symbols from standard input,
+    /// one per line, and reports on every function they name, a glob on each function it
+    /// matches, from one analysis: a JSON array, or one text section per function.
     symbol: String,
     /// The project to analyze, as for `heki check`.
     #[arg(default_value = ".")]

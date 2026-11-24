@@ -27,8 +27,8 @@ pub mod snapshot;
 pub mod unmatched;
 
 pub use contracts::{
-    MAX_INVALIDATIONS, declares_ownership, inspect_facts, opt_in_facts, recommend_facts,
-    summary_contracts, typed_writes,
+    ContractRoles, MAX_INVALIDATIONS, declares_ownership, inspect_facts, opt_in_facts,
+    recommend_facts, summary_contracts, typed_writes,
 };
 pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
 pub use heki_diagnostics::Certainty;
@@ -1139,19 +1139,18 @@ pub fn check_project(
     Ok(out)
 }
 
-/// The roles `key` has in the contracts of `config` and in the ecosystem catalog
-/// (`heki inspect`), from the matchers the rules compile.
-pub fn contract_roles(
-    config: &HekiConfig,
-    kb: &EffectiveEcosystemKb,
-    soundness_kb: &EffectiveSoundnessKb,
-    index: &ProjectIndex,
-    decls: &ProjectDecls,
-    selection: &RuleSelection,
-    key: &FuncKey,
-) -> Result<Vec<inspect::ContractRole>, RuleConfigError> {
+/// The matchers of the contracts of `config`, for the roles functions have in them and in the
+/// ecosystem catalog (`heki inspect`), compiled as the rules compile them.
+pub fn contract_roles<'a>(
+    config: &'a HekiConfig,
+    kb: &'a EffectiveEcosystemKb,
+    soundness_kb: &'a EffectiveSoundnessKb,
+    index: &'a ProjectIndex,
+    decls: &'a ProjectDecls,
+    selection: &'a RuleSelection,
+) -> Result<ContractRoles<'a>, RuleConfigError> {
     let cx = CheckContext::of_declarations(config, kb, soundness_kb, index, decls, selection);
-    contracts::roles_of(&cx, key)
+    ContractRoles::new(&cx)
 }
 
 /// The entries of the contracts of `env`'s configuration that match nothing in the files of
