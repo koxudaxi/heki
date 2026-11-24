@@ -199,7 +199,8 @@ impl RuleMeta {
 /// The certainty of the eight Soundness-lane `OPT` rules (`OPT101`-`OPT103`, `OPT110`, `OPT111`,
 /// `OPT120`, `OPT121`, `OPT130`). Their exact tier is the reports whose rewrite is proven safe,
 /// the others are heuristic whatever this says (ADR-018, decision 9). They are certified
-/// together, so that whether the proven tier runs by default is this one value.
+/// together. Only `OPT101` and `OPT102`, whose rewrite is faster for every input, run by default
+/// (ADR-018, decision 13 and its amendment).
 const PROVEN_OPT_TIER: Certainty = Certainty::Exact;
 
 /// Core v1.0 rule catalog (empirically validated in Stage 0-A + `dcg` study).
@@ -773,11 +774,11 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "immutable-quadratic-concat",
         family: RuleFamily::Opt,
         certainty: PROVEN_OPT_TIER,
-        activation: Activation::Default,
+        activation: Activation::OptIn,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
-        summary: "Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).",
+        summary: "Opt-in: size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).",
         doc: include_str!("../rule-docs/OPT103.md"),
     },
     RuleMeta {
@@ -785,11 +786,11 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "loop-linear-membership",
         family: RuleFamily::Opt,
         certainty: PROVEN_OPT_TIER,
-        activation: Activation::Default,
+        activation: Activation::OptIn,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
-        summary: "Size-dependent `e in lst` inside a loop -> hoist `set` outside loop.",
+        summary: "Opt-in: size-dependent `e in lst` inside a loop -> hoist `set` outside loop.",
         doc: include_str!("../rule-docs/OPT110.md"),
     },
     RuleMeta {
@@ -797,11 +798,11 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "loop-linear-dedup",
         family: RuleFamily::Opt,
         certainty: PROVEN_OPT_TIER,
-        activation: Activation::Default,
+        activation: Activation::OptIn,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
-        summary: "Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.",
+        summary: "Opt-in: size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.",
         doc: include_str!("../rule-docs/OPT111.md"),
     },
     RuleMeta {
@@ -833,11 +834,11 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "list-front-pop",
         family: RuleFamily::Opt,
         certainty: PROVEN_OPT_TIER,
-        activation: Activation::Default,
+        activation: Activation::OptIn,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
-        summary: "Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.",
+        summary: "Opt-in: size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.",
         doc: include_str!("../rule-docs/OPT120.md"),
     },
     RuleMeta {
@@ -845,11 +846,11 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "list-front-insert",
         family: RuleFamily::Opt,
         certainty: PROVEN_OPT_TIER,
-        activation: Activation::Default,
+        activation: Activation::OptIn,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
-        summary: "Size-dependent `q.insert(0, v)` -> `collections.deque`.",
+        summary: "Opt-in: size-dependent `q.insert(0, v)` -> `collections.deque`.",
         doc: include_str!("../rule-docs/OPT121.md"),
     },
     RuleMeta {
@@ -857,11 +858,11 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "loop-invariant-container-rebuild",
         family: RuleFamily::Opt,
         certainty: PROVEN_OPT_TIER,
-        activation: Activation::Default,
+        activation: Activation::OptIn,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
-        summary: "Size-dependent loop-invariant container reconstruction (`e in set(keys)`).",
+        summary: "Opt-in: size-dependent loop-invariant container reconstruction (`e in set(keys)`).",
         doc: include_str!("../rule-docs/OPT130.md"),
     },
 ];

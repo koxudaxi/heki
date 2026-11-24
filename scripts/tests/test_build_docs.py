@@ -78,6 +78,12 @@ def test_the_tables_are_written_from_the_data() -> None:
     assert build_docs.certifications_table(precision, experimental).splitlines()[2] == (
         "| `OPT110` | 0.3.0 (experimental) | 240 / 0 | 31 / 0 |"
     )
+    # The harm of the exact reports, for a certification whose runs classed it.
+    classed = certification(0, 0)
+    classed["census"]["harm"] = {"confirmed": 0, "plausible": 2, "benign": 230, "unclassified": 8}
+    classed["holdout"]["harm"] = {"confirmed": 1, "plausible": 0, "benign": 30, "unclassified": 0}
+    harm = build_docs.harm_table({"certifications": [certification(0, 0), classed]})
+    assert harm.splitlines()[2:] == ["| `OPT110` | 0 / 2 / 230 / 8 | 1 / 0 / 30 / 0 |"]
     rules = [{"code": "EFF102", "certainty": "heuristic"}]
     assert build_docs.measurements_table(precision, rules).splitlines()[2] == (
         "| `EFF102` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 25 / 23 | 54% | 40-67% | 4% |"

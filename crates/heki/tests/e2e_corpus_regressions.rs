@@ -996,7 +996,7 @@ fn diff_headers_and_every_output_format_print_paths_from_the_working_directory()
         .write("src/pkg/a.py", &format!("import os\n\n\n{IMPORT_BLOCKS}"));
     let run = |args: &[&str]| {
         let out = common::heki_command()
-            .args(["check", "--heuristic"])
+            .args(["check", "--heuristic", "--extend-select", "OPT120"])
             .args(args)
             .current_dir(p.dir.join("src"))
             .output()
@@ -1504,7 +1504,8 @@ fn absolute_paths_print_from_the_working_directory_through_links_and_stay_absolu
         .write("src/other.py", &format!("import os\n\n\n{IMPORT_BLOCKS}"));
     let run = |cwd: &std::path::Path, arg: &std::path::Path| {
         let out = common::heki_command()
-            .args(["check", "--heuristic", "--output-format", "concise"])
+            .args(["check", "--heuristic", "--extend-select", "OPT120"])
+            .args(["--output-format", "concise"])
             .arg(arg)
             .current_dir(cwd)
             .output()
@@ -1541,7 +1542,8 @@ fn absolute_paths_through_a_link_into_the_working_directory_print_relative() {
     let link = p.dir.join("link");
     std::os::unix::fs::symlink(&src, &link).unwrap();
     let out = common::heki_command()
-        .args(["check", "--heuristic", "--output-format", "concise"])
+        .args(["check", "--heuristic", "--extend-select", "OPT120"])
+        .args(["--output-format", "concise"])
         .arg(&link)
         .current_dir(&src)
         .output()

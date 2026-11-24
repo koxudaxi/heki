@@ -2,16 +2,17 @@
 
 # list-front-insert (OPT121)
 
-Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Opt-in · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
-Size-dependent `q.insert(0, v)` -> `collections.deque`.
+Opt-in: size-dependent `q.insert(0, v)` -> `collections.deque`.
 
 ## What it does
 Checks loops that insert at the front of a list, `q.insert(0, v)`, and suggests a
 `collections.deque` with `appendleft(v)`.
 
-Size-dependent: applied only with `--fix --include-size-dependent`. A list rebuilt in every iteration of the loop is not reported: its front insert
-costs no more than building it.
+Opt-in and size-dependent: it runs when `extend-select` names it or with
+`--include-size-dependent`, which also applies its proven rewrites with `--fix`. A list rebuilt
+in every iteration of the loop is not reported: its front insert costs no more than building it.
 
 ## What a report states
 

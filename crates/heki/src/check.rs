@@ -35,6 +35,15 @@ pub(crate) fn selectors(args: &AnalysisArgs) -> Selectors {
         extend_select: args.extend_select.clone(),
         ignore: args.ignore.clone(),
         heuristic: args.heuristic.value(),
+        size_dependent_rewrites: false,
+    }
+}
+
+/// The selection options of `heki check`: [`selectors`] and `--include-size-dependent`.
+pub(crate) fn check_selectors(args: &CheckArgs) -> Selectors {
+    Selectors {
+        size_dependent_rewrites: args.include_size_dependent,
+        ..selectors(&args.analysis)
     }
 }
 
@@ -82,12 +91,13 @@ fn snapshot_for(
     Ok(None)
 }
 
-/// The project at `paths` (with `overrides` in place of files' text), with the rule selection and
-/// the saved summary snapshot `heki check` uses for `analysis`. `format` is the output format the
-/// run's warnings follow.
+/// The project at `paths` (with `overrides` in place of files' text), with the rule selection of
+/// `selectors` and the saved summary snapshot `heki check` uses for `analysis`. `format` is the
+/// output format the run's warnings follow.
 pub(crate) fn load(
     paths: &[PathBuf],
     analysis: &AnalysisArgs,
+    selectors: &Selectors,
     format: OutputFormat,
     overrides: Option<&FxHashMap<PathBuf, String>>,
 ) -> Result<(Project, RuleSelection, Option<SummarySnapshot>)> {
@@ -99,7 +109,7 @@ pub(crate) fn load(
         overrides,
         removed: None,
     })?;
-    let selection = selection(analysis, &project)?;
+    let selection = RuleSelection::resolve(&project.env.cfg.lint, selectors)?;
     let snapshot = snapshot_for(&selection, &project.env.root, format)?;
     Ok((project, selection, snapshot))
 }
@@ -108,11 +118,12 @@ pub(crate) fn load(
 pub(crate) fn load_and_index(
     paths: &[PathBuf],
     analysis: &AnalysisArgs,
+    selectors: &Selectors,
     format: OutputFormat,
     overrides: Option<&FxHashMap<PathBuf, String>>,
     facts: Facts,
 ) -> Result<Indexed> {
-    let (project, selection, snapshot) = load(paths, analysis, format, overrides)?;
+    let (project, selection, snapshot) = load(paths, analysis, selectors, format, overrides)?;
     Ok(Indexed::build(project, selection, snapshot, facts)?)
 }
 
@@ -146,6 +157,7 @@ fn analyze(args: &CheckArgs, overrides: Option<&FxHashMap<PathBuf, String>>) -> 
     let indexed = load_and_index(
         &args.paths,
         &args.analysis,
+        &check_selectors(args),
         args.output_format,
         overrides,
         Facts::Check,

@@ -2,16 +2,17 @@
 
 # loop-linear-membership (OPT110)
 
-Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Opt-in · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
-Size-dependent `e in lst` inside a loop -> hoist `set` outside loop.
+Opt-in: size-dependent `e in lst` inside a loop -> hoist `set` outside loop.
 
 ## What it does
 Checks membership tests against a list or tuple inside a loop, `e in lst`, where the list does
 not change during the loop, and suggests building a `set` once before the loop.
 
-This is a size-dependent rewrite: it is reported as a suggestion and applied only with
-`heki check --fix --include-size-dependent`. Not reported:
+This is a size-dependent rewrite, and the rule is opt-in: it runs when `extend-select` names it
+or with `heki check --include-size-dependent`, which also applies its proven rewrites with
+`--fix`. Not reported:
 
 - small containers: at most 16 items that nothing grows, whatever the items are
   (`x in ("a", "b")`, `x in [b"1", b"2"]`, also through a name bound to one, a comprehension

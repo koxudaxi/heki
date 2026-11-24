@@ -20,7 +20,7 @@
 mod common;
 
 use common::lsp::{Lsp, codes, uri};
-use common::{Project, wait_or_hang};
+use common::{Project, SIZE_DEPENDENT_OPT_RULES, wait_or_hang};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -74,15 +74,21 @@ fn heki_json(p: &Project, args: &[&str]) -> Value {
     serde_json::from_slice(&run(p, args, &[0])).unwrap()
 }
 
+/// The rules the shapes here run: every rule that is not opt-in, and the opt-in size-dependent
+/// `OPT` rules, whose Soundness-lane walks the shapes bound too.
+const EVERY_RULE: [&str; 3] = ["--heuristic", "--extend-select", SIZE_DEPENDENT_OPT_RULES];
+
 /// `heki check --output-format json` of the project, run once without counting: a shape that
 /// guards only against a run that never ends, or a size too small to count that a test checks
 /// next to a full one.
 fn check(p: &Project) -> Vec<Value> {
-    let out = run(
-        p,
-        &["check", "--heuristic", "--output-format", "json", "."],
-        &[0, 1],
-    );
+    let args = [
+        &["check"][..],
+        &EVERY_RULE,
+        &["--output-format", "json", "."],
+    ]
+    .concat();
+    let out = run(p, &args, &[0, 1]);
     serde_json::from_slice(&out).unwrap()
 }
 
@@ -104,19 +110,15 @@ type StepsByOwner = BTreeMap<(String, Option<String>), Steps>;
 /// of its walks.
 fn check_counted(p: &Project) -> (Vec<Value>, StepsByOwner) {
     let path = p.dir.join(".walk-steps.json");
-    let out = run(
-        p,
-        &[
-            "check",
-            "--heuristic",
-            "--output-format",
-            "json",
-            "--walk-steps",
-            path.to_str().unwrap(),
-            ".",
-        ],
-        &[0, 1],
-    );
+    let steps = ["--walk-steps", path.to_str().unwrap(), "."];
+    let args = [
+        &["check"][..],
+        &EVERY_RULE,
+        &["--output-format", "json"],
+        &steps,
+    ]
+    .concat();
+    let out = run(p, &args, &[0, 1]);
     (serde_json::from_slice(&out).unwrap(), walk_steps(&path))
 }
 

@@ -85,7 +85,7 @@ Options:
           Apply `safe` + `unconditional` fixes (`OPT101`/`OPT102`)
 
       --include-size-dependent
-          Also apply the proven-safe `size-dependent` fixes, in every function
+          Also run the opt-in rules with a `size-dependent` rewrite (`OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`), as if `--extend-select` named them, and with `--fix` or `--diff` apply their proven-safe rewrites, in every function
 
       --diff
           Preview fixes as a unified diff without writing files

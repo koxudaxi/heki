@@ -564,7 +564,7 @@ fn opt_rules_without_edits_and_per_rule_selection() {
         "a.py",
         "def member_while(n):\n    allowed = list(range(0, 50, 3))\n    hits = []\n    i = 0\n    while i < n:\n        if i in allowed:\n            hits.append(i)\n        i += 1\n    return hits\n\n\ndef build(items):\n    x = []\n    for i in items:\n        x = x + [i]\n    return x\n",
     );
-    let (code, stdout, _) = p.check(&["--output-format", "json"]);
+    let (code, stdout, _) = p.check(&["--extend-select", "OPT110", "--output-format", "json"]);
     assert_eq!(code, 1);
     let diags = json(&stdout);
     // Hoisting out of a `while` loop has no edit: the rewrite is proven safe but manual.
@@ -577,8 +577,9 @@ fn opt_rules_without_edits_and_per_rule_selection() {
         "{stdout}"
     );
     assert!(diags[0]["fix"].is_null());
-    // One `OPT` rule can be ignored while the others still run.
-    let (_, stdout, _) = p.check(&["--ignore", "OPT110", "--output-format", "json"]);
+    // One `OPT` rule can be ignored while the others still run, also when it is selected.
+    let ignored = ["--extend-select", "OPT110", "--ignore", "OPT110"];
+    let (_, stdout, _) = p.check(&[&ignored[..], &["--output-format", "json"]].concat());
     assert_eq!(hits(&stdout), vec![hit("a.py", 15, "OPT101")]);
 }
 

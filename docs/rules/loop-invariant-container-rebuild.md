@@ -2,16 +2,17 @@
 
 # loop-invariant-container-rebuild (OPT130)
 
-Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Opt-in · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
-Size-dependent loop-invariant container reconstruction (`e in set(keys)`).
+Opt-in: size-dependent loop-invariant container reconstruction (`e in set(keys)`).
 
 ## What it does
 Checks loops that rebuild the same container on every iteration just to test membership,
 `e in set(keys)` (also `list(...)`, `tuple(...)`, `dict(...)`), and suggests building it once
 before the loop.
 
-Size-dependent: applied only with `--fix --include-size-dependent`.
+Opt-in and size-dependent: it runs when `extend-select` names it or with
+`--include-size-dependent`, which also applies its proven rewrites with `--fix`.
 
 ## What a report states
 

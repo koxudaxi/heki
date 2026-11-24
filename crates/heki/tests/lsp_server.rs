@@ -433,7 +433,9 @@ fn lsp_debounce_close_and_pending_refresh_of_unopened_files() {
 fn lsp_code_actions_for_rewrites_plain_diagnostics_and_other_ranges() {
     let p = Project::new("lsp_actions");
     let text = "import time\n\n\ndef member(n):\n    allowed = list(range(0, 50, 3))\n    hits = []\n    for p in range(n):\n        if p in allowed:\n            hits.append(p)\n    return hits\n\n\nasync def handler():\n    time.sleep(1)\n";
-    p.write("a.py", text);
+    // `OPT110` is opt-in: the configuration names it.
+    p.write("a.py", text)
+        .write("heki.toml", "[lint]\nextend-select = [\"OPT110\"]\n");
     let a = uri(&p.dir.join("a.py"));
     let mut lsp = Lsp::start(&p.dir, &["server", "--stdio"]);
     lsp.request(

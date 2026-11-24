@@ -21,11 +21,24 @@ pub struct Certification {
     pub holdout: Checked,
 }
 
-/// Reports checked by hand, and the false claims found among them.
+/// Reports checked by hand, the false claims found among them, and the harm of the right ones
+/// where the run classed it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Checked {
     pub reports: u32,
     pub false_claims: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub harm: Option<Harm>,
+}
+
+/// The right reports of a run by class (docs/precision.md): confirmed, plausible, and benign, and
+/// those the run left without a class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Harm {
+    pub confirmed: u32,
+    pub plausible: u32,
+    pub benign: u32,
+    pub unclassified: u32,
 }
 
 /// A sample of a rule's reports, each given one class (docs/precision.md): the problem is real
@@ -165,6 +178,21 @@ const CERTIFIED: &[(&str, &str, [u32; 2], [u32; 2])] = &[
     ("MUT119", "0.2.5", [23, 0], [2, 0]),
 ];
 
+/// The harm of the exact reports of a certification's census and holdout run, for the rules whose
+/// runs classed it: confirmed, plausible, benign, and not classed, of the census and of the
+/// holdout run.
+const CERTIFIED_HARM: &[(&str, [u32; 4], [u32; 4])] = &[
+    ("OPT101", [0, 0, 6, 1], [0, 0, 2, 0]),
+    ("OPT102", [0, 0, 1, 0], [0, 0, 0, 0]),
+    ("OPT103", [0, 0, 124, 4], [0, 0, 188, 0]),
+    ("OPT110", [0, 0, 7, 1], [0, 0, 0, 0]),
+    ("OPT111", [0, 0, 7, 0], [0, 0, 7, 0]),
+    ("OPT120", [0, 2, 52, 16], [0, 1, 32, 0]),
+    ("OPT121", [0, 0, 10, 2], [0, 0, 5, 0]),
+    ("OPT130", [0, 0, 1, 0], [0, 0, 0, 0]),
+    ("OPT113", [0, 2, 6, 0], [0, 0, 6, 0]),
+];
+
 /// The latest measurement of each measured rule, in the order the table lists them: the round,
 /// the date of the build it measured, and the sampled reports as confirmed, plausible, benign,
 /// and false (docs/precision.md says how the reviewers of each round classed them).
@@ -191,15 +219,23 @@ const MEASURED: &[(&str, u32, &str, [u32; 4])] = &[
 /// Every certification, in the order the table lists them.
 pub fn certifications() -> impl Iterator<Item = Certification> {
     CERTIFIED.iter().map(|&(rule, release, census, holdout)| {
-        let checked = |[reports, false_claims]: [u32; 2]| Checked {
+        let harm = CERTIFIED_HARM.iter().find(|(code, ..)| *code == rule);
+        let classed = |[confirmed, plausible, benign, unclassified]: [u32; 4]| Harm {
+            confirmed,
+            plausible,
+            benign,
+            unclassified,
+        };
+        let checked = |[reports, false_claims]: [u32; 2], harm: Option<[u32; 4]>| Checked {
             reports,
             false_claims,
+            harm: harm.map(classed),
         };
         Certification {
             rule,
             release,
-            census: checked(census),
-            holdout: checked(holdout),
+            census: checked(census, harm.map(|h| h.1)),
+            holdout: checked(holdout, harm.map(|h| h.2)),
         }
     })
 }
@@ -233,6 +269,18 @@ pub fn measurement(code: &str) -> Option<Measurement> {
 mod tests {
     use super::*;
     use crate::find_rule;
+
+    #[test]
+    fn the_classed_harm_counts_every_right_report_of_its_run() {
+        for (code, ..) in CERTIFIED_HARM {
+            let c = certification(code).unwrap_or_else(|| panic!("{code}: not certified"));
+            for run in [c.census, c.holdout] {
+                let h = run.harm.unwrap();
+                let classed = h.confirmed + h.plausible + h.benign + h.unclassified;
+                assert_eq!(classed, run.reports - run.false_claims, "{code}");
+            }
+        }
+    }
 
     #[test]
     fn every_entry_names_a_rule_once() {

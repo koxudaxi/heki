@@ -456,6 +456,7 @@ fn selection_of(lint: &LintConfig, codes: Vec<String>) -> Result<RuleSelection, 
         extend_select: Vec::new(),
         ignore: Vec::new(),
         heuristic: Some(true),
+        size_dependent_rewrites: false,
     };
     RuleSelection::resolve(&lint, &selectors)
 }

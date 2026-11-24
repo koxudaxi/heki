@@ -81,15 +81,17 @@ RSS_RUNS = 3
 MIB = 1024 * 1024
 HEAP_LINE = re.compile(r"^heki heap: peak (\d+) bytes, total (\d+) bytes$", re.MULTILINE)
 
-# `--heuristic`: every rule that is not opt-in runs, the heuristic ones too.
+# `--heuristic`: every rule that is not opt-in runs, the heuristic ones too; the opt-in
+# size-dependent `OPT` rules are named, so the Soundness lane's rewrites run as well.
+EVERY_RULE = ["--heuristic", "--extend-select", "OPT103,OPT110,OPT111,OPT120,OPT121,OPT130"]
 MODES = {
-    "check": (["check", "--heuristic", "--output-format", "json", "."], {}),
+    "check": (["check", *EVERY_RULE, "--output-format", "json", "."], {}),
     "watch": (
-        ["check", "--heuristic", "--watch", "--output-format", "json", "."],
+        ["check", *EVERY_RULE, "--watch", "--output-format", "json", "."],
         {"HEKI_WATCH_MAX_RUNS": "0"},
     ),
     "owners": (
-        ["check", "--heuristic", "--output-format", "json", "--config", "owners.toml", "."],
+        ["check", *EVERY_RULE, "--output-format", "json", "--config", "owners.toml", "."],
         {},
     ),
     "recommend": (["recommend", "--output-format", "json", "."], {}),

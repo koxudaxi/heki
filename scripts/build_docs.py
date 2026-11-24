@@ -431,6 +431,26 @@ def certifications_table(precision: dict, rules: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def harm_table(precision: dict) -> str:
+    """The harm of the exact reports of the certifications whose census and holdout run classed
+    it."""
+    lines = [
+        "| Rule | Census: C / P / B / not classified | Holdout: C / P / B / not classified |",
+        "| ---- | ---------------------------------- | ----------------------------------- |",
+    ]
+
+    def classes(harm: dict) -> str:
+        return " / ".join(
+            str(harm[k]) for k in ("confirmed", "plausible", "benign", "unclassified")
+        )
+
+    for c in precision["certifications"]:
+        census, holdout = c["census"].get("harm"), c["holdout"].get("harm")
+        if census is not None and holdout is not None:
+            lines.append(f"| `{c['rule']}` | {classes(census)} | {classes(holdout)} |")
+    return "\n".join(lines) + "\n"
+
+
 def measurements_table(precision: dict, rules: list[dict]) -> str:
     """The measurements, each with the rule's certainty now."""
     certainty = {r["code"]: r["certainty"] for r in rules}
@@ -483,6 +503,7 @@ def outputs(heki: Path, rules: list[dict], registry: dict, precision: dict) -> d
             PRECISION_PAGE,
             {
                 "certifications": certifications_table(precision, rules),
+                "harm": harm_table(precision),
                 "measurements": measurements_table(precision, rules),
             },
         ),

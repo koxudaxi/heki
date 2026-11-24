@@ -180,7 +180,7 @@ impl Watcher<'_> {
         drop(env);
         let (ws, errors) = Workspace::load(
             &self.opts(),
-            &crate::check::selectors(&self.args.analysis),
+            &crate::check::check_selectors(self.args),
             self.args.analysis.baseline.as_deref(),
             Facts::Check,
         )?;

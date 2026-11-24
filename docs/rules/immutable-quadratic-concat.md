@@ -2,9 +2,9 @@
 
 # immutable-quadratic-concat (OPT103)
 
-Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · No automatic fix
+Family: Complexity Rewrites (OPT) · Exact · Opt-in · Severity `warning` (slower code) · No automatic fix
 
-Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).
+Opt-in: size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).
 
 ## What it does
 Checks quadratic accumulation of immutable values in a loop:
@@ -21,6 +21,8 @@ no other reference. Neither are:
   as one `and` operand or with a module constant: at most 4096), whatever the input;
 - `obj.attr += x` where `obj` is a different object in every iteration (the loop element, or
   an object created in the iteration): each attribute gets one piece.
+
+Opt-in and size-dependent: it runs when `extend-select` names it. It has no automatic rewrite.
 
 ## What a report states
 

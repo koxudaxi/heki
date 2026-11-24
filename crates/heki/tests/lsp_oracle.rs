@@ -28,7 +28,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "EFF115", "EFF116", "MUT115", "MUT118", "MUT119", "MUT120"]
+extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "EFF115", "EFF116", "MUT115", "MUT118", "MUT119", "MUT120", "OPT103", "OPT110", "OPT111", "OPT120", "OPT121", "OPT130"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -5176,6 +5176,20 @@ fn steps_project_assumptions() -> Vec<Step> {
         Step::new(
             "the module patching builtins is deleted",
             vec![Action::Delete("pkg/compat.py")],
+        )
+        .present(&[("pkg/loops.py", "OPT110")]),
+        // The size-dependent rewrites are opt-in: without their codes the report goes.
+        Step::new(
+            "the configuration stops naming the size-dependent rules",
+            vec![Action::Configure(CONFIG.replace(
+                ", \"OPT103\", \"OPT110\", \"OPT111\", \"OPT120\", \"OPT121\", \"OPT130\"",
+                "",
+            ))],
+        )
+        .absent(&[("pkg/loops.py", "OPT110")]),
+        Step::new(
+            "the configuration names them again",
+            vec![Action::Configure(CONFIG.to_owned())],
         )
         .present(&[("pkg/loops.py", "OPT110")]),
         Step::new(

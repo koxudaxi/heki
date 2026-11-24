@@ -209,7 +209,7 @@ the installed release changed, and the changelog on GitHub lists every release.
 
 | Key | Default | Meaning |
 | --- | ------- | ------- |
-| `select` | the exact rules and the contract rules | Rules to enable instead of the defaults. An empty list enables no rule before `extend-select`, as in Ruff. |
+| `select` | the exact rules that are not opt-in, and the contract rules | Rules to enable instead of the defaults. An empty list enables no rule before `extend-select`, as in Ruff. |
 | `extend-select` | `[]` | Rules to add. |
 | `ignore` | `[]` | Rules to disable. |
 | `per-file-ignores` | `{}` | Glob → rules disabled in matching files (project-relative POSIX paths). As in Ruff, `*` also matches `/`: `scripts/*.py` covers `scripts/tools/worker.py` too. |
@@ -224,8 +224,9 @@ the installed release changed, and the changelog on GitHub lists every release.
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
   (`EFF`, `MUT2`), or `ALL`. An unknown rule is a configuration error.
 - Every rule is exact or heuristic ([Rule Precision](precision.md)). The defaults, a prefix, and
-  `ALL` enable the exact rules and the contract rules; with `heuristic = true` they also enable
-  the heuristic rules that are not opt-in, as Ruff's `preview` does. Its code or name enables a
+  `ALL` enable the exact rules that are not opt-in, and the contract rules; with
+  `heuristic = true` they also enable the heuristic rules that are not opt-in, as Ruff's
+  `preview` does. Its code or name enables a
   heuristic rule either way.
 - An exact rule's report that did not establish every premise of its claim (an `OPT` report
   whose rewrite is not proven) is heuristic, and is shown where a heuristic rule would run: with
@@ -235,8 +236,11 @@ the installed release changed, and the changelog on GitHub lists every release.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
   `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `IMP101`, `IMP102`, `IMP104`, `IMP301`,
   `IMP302`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`,
-  `MUT115`, `MUT120`): they need their exact code or name. In `ignore`, a prefix covers every
-  rule it matches.
+  `MUT115`, `MUT120`, `OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`): they need
+  their exact code or name. In `ignore`, a prefix covers every rule it matches.
+- `heki check --include-size-dependent` also runs the opt-in rules whose size-dependent rewrites
+  it applies (`OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`), as if `--extend-select` named
+  them; `ignore` still removes them.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
 

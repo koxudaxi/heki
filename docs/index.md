@@ -185,7 +185,11 @@ These rules are exact and run by default. Each report shows the chain of calls t
 | A list, dict, or set that an `lru_cache` / `cache` function returned, changed in place | [`MUT114`](rules/cached-result-mutation.md) |
 | A change of a builtin container that is lost because the object is new and nothing holds it (`list(xs).sort()`) | [`MUT119`](rules/change-lost-on-new-object.md) |
 | A DataFrame or array concatenated with itself on every loop iteration | [`DATA101`](rules/loop-carried-concat.md) |
-| A quadratic list, dict, set, bytes, or queue pattern | `OPT101`-`OPT103`, `OPT110`, `OPT111`, `OPT113`, `OPT120`, `OPT121`, `OPT130` ([fixes](fixes.md)) |
+| A list rebuilt, or a dict or set merged, on every loop iteration, and a nested-loop join | `OPT101`, `OPT102`, `OPT113` ([fixes](fixes.md)) |
+
+The size-dependent rewrites (`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`) are exact
+too, but opt-in: the loops they report were rarely large enough to matter
+([Rule precision](precision.md#certifications)).
 
 To certify a rule, two reviewers check by hand every exact report it makes on the development
 corpus (378 packages and 30.75 million lines, plus packages added for rules with few reports), and
@@ -281,8 +285,9 @@ $ heki check --diff --include-size-dependent jobs.py
 Would fix 1 issue(s) in 1 file(s).
 ```
 
-`--fix` alone applies the rewrites that are faster for every input (`OPT101`, `OPT102`); a
-size-dependent one like this needs `--include-size-dependent`.
+`--fix` alone applies the rewrites that are faster for every input (`OPT101`, `OPT102`). A
+size-dependent one like this comes from an opt-in rule: `--include-size-dependent` runs those
+rules and applies their rewrites.
 
 The scope analysis is checked against CPython's `symtable` on 3.11 to 3.15, and adversarial
 programs that break a naive rewrite must all be blocked on CPython. When a proof fails, the

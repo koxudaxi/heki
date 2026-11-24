@@ -194,7 +194,11 @@ These rules are exact and run by default. Each report shows the chain of calls t
 | A list, dict, or set that an `lru_cache` / `cache` function returned, changed in place | [`MUT114`](https://heki.koxudaxi.dev/rules/cached-result-mutation/) |
 | A change of a builtin container that is lost because the object is new and nothing holds it (`list(xs).sort()`) | [`MUT119`](https://heki.koxudaxi.dev/rules/change-lost-on-new-object/) |
 | A DataFrame or array concatenated with itself on every loop iteration | [`DATA101`](https://heki.koxudaxi.dev/rules/loop-carried-concat/) |
-| A quadratic list, dict, set, bytes, or queue pattern | `OPT101`-`OPT103`, `OPT110`, `OPT111`, `OPT113`, `OPT120`, `OPT121`, `OPT130` ([fixes](https://heki.koxudaxi.dev/fixes/)) |
+| A list rebuilt, or a dict or set merged, on every loop iteration, and a nested-loop join | `OPT101`, `OPT102`, `OPT113` ([fixes](https://heki.koxudaxi.dev/fixes/)) |
+
+The size-dependent rewrites (`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`) are exact
+too, but opt-in: the loops they report were rarely large enough to matter
+([Rule precision](https://heki.koxudaxi.dev/precision/#certifications)).
 
 To certify a rule, two reviewers check by hand every exact report it makes on the development
 corpus (378 packages and 30.75 million lines, plus packages added for rules with few reports), and
@@ -290,8 +294,9 @@ $ heki check --diff --include-size-dependent jobs.py
 Would fix 1 issue(s) in 1 file(s).
 ```
 
-`--fix` alone applies the rewrites that are faster for every input (`OPT101`, `OPT102`); a
-size-dependent one like this needs `--include-size-dependent`.
+`--fix` alone applies the rewrites that are faster for every input (`OPT101`, `OPT102`). A
+size-dependent one like this comes from an opt-in rule: `--include-size-dependent` runs those
+rules and applies their rewrites.
 
 The scope analysis is checked against CPython's `symtable` on 3.11 to 3.15, and adversarial
 programs that break a naive rewrite must all be blocked on CPython. When a proof fails, the
@@ -1313,7 +1318,7 @@ the installed release changed, and the changelog on GitHub lists every release.
 
 | Key | Default | Meaning |
 | --- | ------- | ------- |
-| `select` | the exact rules and the contract rules | Rules to enable instead of the defaults. An empty list enables no rule before `extend-select`, as in Ruff. |
+| `select` | the exact rules that are not opt-in, and the contract rules | Rules to enable instead of the defaults. An empty list enables no rule before `extend-select`, as in Ruff. |
 | `extend-select` | `[]` | Rules to add. |
 | `ignore` | `[]` | Rules to disable. |
 | `per-file-ignores` | `{}` | Glob → rules disabled in matching files (project-relative POSIX paths). As in Ruff, `*` also matches `/`: `scripts/*.py` covers `scripts/tools/worker.py` too. |
@@ -1328,8 +1333,9 @@ the installed release changed, and the changelog on GitHub lists every release.
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
   (`EFF`, `MUT2`), or `ALL`. An unknown rule is a configuration error.
 - Every rule is exact or heuristic ([Rule Precision](https://heki.koxudaxi.dev/precision/)). The defaults, a prefix, and
-  `ALL` enable the exact rules and the contract rules; with `heuristic = true` they also enable
-  the heuristic rules that are not opt-in, as Ruff's `preview` does. Its code or name enables a
+  `ALL` enable the exact rules that are not opt-in, and the contract rules; with
+  `heuristic = true` they also enable the heuristic rules that are not opt-in, as Ruff's
+  `preview` does. Its code or name enables a
   heuristic rule either way.
 - An exact rule's report that did not establish every premise of its claim (an `OPT` report
   whose rewrite is not proven) is heuristic, and is shown where a heuristic rule would run: with
@@ -1339,8 +1345,11 @@ the installed release changed, and the changelog on GitHub lists every release.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
   `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `IMP101`, `IMP102`, `IMP104`, `IMP301`,
   `IMP302`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`,
-  `MUT115`, `MUT120`): they need their exact code or name. In `ignore`, a prefix covers every
-  rule it matches.
+  `MUT115`, `MUT120`, `OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`): they need
+  their exact code or name. In `ignore`, a prefix covers every rule it matches.
+- `heki check --include-size-dependent` also runs the opt-in rules whose size-dependent rewrites
+  it applies (`OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`), as if `--extend-select` named
+  them; `ignore` still removes them.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
 
@@ -2375,14 +2384,19 @@ $ heki check --fix --include-size-dependent      # also the proven-safe size-dep
 ```
 
 - A fix comes with a report: `--fix` applies only the fixes of the reports shown. A report whose
-  rewrite heki proves safe is [exact](https://heki.koxudaxi.dev/precision/#certifications) and shown by default, so a
-  run without configuration applies the fixes of `OPT101` and `OPT102`. A size-dependent one is
-  exact only over a loop the data sizes (its items are a parameter, the rows of a query, the
-  lines of a file, or the entries of a directory, and the code does not fix their number); over
-  another loop it is heuristic, and its fix applies with `--heuristic` or when its rule is
-  selected.
+  rewrite heki proves safe is [exact](https://heki.koxudaxi.dev/precision/#certifications), and `OPT101` and `OPT102`
+  run by default, so a run without configuration applies their fixes. Over another loop than one
+  the data sizes, an `OPT101` or `OPT102` rewrite is heuristic, and its fix applies with
+  `--heuristic` or when its rule is selected.
+- The size-dependent rules (`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`) are
+  opt-in: their rewrites are proven, but the loops they report were rarely large enough to matter
+  ([Rule precision](https://heki.koxudaxi.dev/precision/#certifications)).
+- `--include-size-dependent` runs the size-dependent rules with a rewrite (`OPT110`, `OPT111`,
+  `OPT120`, `OPT121`, `OPT130`), as if `extend-select` named them, and applies their proven
+  rewrites in every function, also over a loop whose trip count the data does not decide. After
+  the fixes, the run lists their reports it could not rewrite, each with the obligation that
+  blocks it.
 - `--diff` takes the same flags as `--fix` and writes nothing.
-- `--include-size-dependent` applies the size-dependent rewrites in every function.
 
 ## What each finding offers
 
@@ -2407,8 +2421,8 @@ Two independent questions decide whether heki offers the rewrite:
 | Profitability | Rules | Certainty | Applied by |
 | ------------- | ----- | --------- | ---------- |
 | Unconditional (faster from the first iteration) | `OPT101`, `OPT102` | exact (the proven reports) | `heki check --fix` |
-| Size-dependent | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | exact (the proven reports over a loop the data sizes) | `heki check --fix --include-size-dependent` |
-| Size-dependent, no rewrite | `OPT103`, `OPT112`, `OPT113` | `OPT103` exact (the proven reports over a loop the data sizes), `OPT113` exact (its exact tier), `OPT112` heuristic | none: suggestion only |
+| Size-dependent | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` (opt-in) | exact (the proven reports over a loop the data sizes) | `heki check --fix --include-size-dependent` |
+| Size-dependent, no rewrite | `OPT103` (opt-in), `OPT112`, `OPT113` | `OPT103` exact (the proven reports over a loop the data sizes), `OPT113` exact (its exact tier), `OPT112` heuristic | none: suggestion only |
 
 ### When the size is fixed
 
@@ -2742,7 +2756,9 @@ For custom tooling, `--output-format json` gives every field: see
 heki 0.1 ran every rule that is not opt-in by default. Since rules have a certainty, only the
 exact ones do ([Getting Started](https://heki.koxudaxi.dev/getting-started/#run-it) lists them).
 
-- `lint.heuristic = true` restores the rules of 0.1, now labelled `heuristic` in every output.
+- `lint.heuristic = true` restores the rules of 0.1, now labelled `heuristic` in every output,
+  except the size-dependent `OPT` rules, which are opt-in since 0.2.8: name them in
+  `extend-select` (`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`).
 - A baseline keeps its entries: their keys (file, function, rule, target) do not change.
 - `heki check --fix` applies the proven fixes of `OPT101` and `OPT102` by default, as in 0.1.
 
@@ -3049,7 +3065,7 @@ def test_load_user() -> None:
 $ heki recommend app
 heki recommend (experimental) on .: 4 file(s), 13 function(s)
 
-Reports now  1 shown (1 exact, 0 heuristic), 1 heuristic withheld, 5 heuristic rule(s) off
+Reports now  1 shown (1 exact, 0 heuristic), 0 heuristic withheld, 5 heuristic rule(s) off
 
 What keeps reports heuristic
   1 heuristic report(s) of exact claims: OPT110 1
@@ -3071,7 +3087,7 @@ Rules worth enabling here
   rule    reports  exact  consequence  right about the code (published)  real harm  block
   MUT106        1      -  bug          not measured                      -          yes
   OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
-  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF112, EFF113, EFF114, EFF115, EFF116, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, OPT112
+  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF112, EFF113, EFF114, EFF115, EFF116, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, OPT103, OPT111, OPT112, OPT120, OPT121, OPT130
   MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it.
 
 Contract candidates
@@ -3214,7 +3230,7 @@ Options:
           Apply `safe` + `unconditional` fixes (`OPT101`/`OPT102`)
 
       --include-size-dependent
-          Also apply the proven-safe `size-dependent` fixes, in every function
+          Also run the opt-in rules with a `size-dependent` rewrite (`OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`), as if `--extend-select` named them, and with `--fix` or `--diff` apply their proven-safe rewrites, in every function
 
       --diff
           Preview fixes as a unified diff without writing files
@@ -3835,14 +3851,14 @@ Quadratic patterns heki can rewrite, each proven safe by the alias analysis befo
 | ---- | ---- | ------- | ------: |
 | OPT101 | [list-quadratic-concat](https://heki.koxudaxi.dev/rules/list-quadratic-concat/) | Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`). | 🛠️ |
 | OPT102 | [set-dict-quadratic-merge](https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/) | Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first). | 🛠️ |
-| OPT103 | [immutable-quadratic-concat](https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/) | Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`). |  |
-| OPT110 | [loop-linear-membership](https://heki.koxudaxi.dev/rules/loop-linear-membership/) | Size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 |
-| OPT111 | [loop-linear-dedup](https://heki.koxudaxi.dev/rules/loop-linear-dedup/) | Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 |
+| OPT103 | [immutable-quadratic-concat](https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/) | Opt-in: size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`). | 🔌 |
+| OPT110 | [loop-linear-membership](https://heki.koxudaxi.dev/rules/loop-linear-membership/) | Opt-in: size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 🔌 |
+| OPT111 | [loop-linear-dedup](https://heki.koxudaxi.dev/rules/loop-linear-dedup/) | Opt-in: size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 🔌 |
 | OPT112 | [loop-linear-list-lookup](https://heki.koxudaxi.dev/rules/loop-linear-list-lookup/) | Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans). | ≈ |
 | OPT113 | [nested-loop-equijoin](https://heki.koxudaxi.dev/rules/nested-loop-equijoin/) | Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index. |  |
-| OPT120 | [list-front-pop](https://heki.koxudaxi.dev/rules/list-front-pop/) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 |
-| OPT121 | [list-front-insert](https://heki.koxudaxi.dev/rules/list-front-insert/) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 |
-| OPT130 | [loop-invariant-container-rebuild](https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 |
+| OPT120 | [list-front-pop](https://heki.koxudaxi.dev/rules/list-front-pop/) | Opt-in: size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 🔌 |
+| OPT121 | [list-front-insert](https://heki.koxudaxi.dev/rules/list-front-insert/) | Opt-in: size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 🔌 |
+| OPT130 | [loop-invariant-container-rebuild](https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/) | Opt-in: size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 🔌 |
 
 ## Imports (IMP)
 
@@ -3881,7 +3897,7 @@ trip count the data does not decide (the code fixes or caps it, or the loop's it
 parameter, the rows of a query, the lines of a file, or the entries of a directory), an `OPT113`
 join whose rule page premises do not all hold, or
 a `DATA101`, `MUT110`, `MUT114`, or `MUT119` report whose rule page premises are not all established. Only exact reports are shown by
-default.
+default, and only those of the exact rules that are not opt-in.
 
 - A heuristic rule runs when `select` or `extend-select` names its code or name. With
   `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by
@@ -3893,8 +3909,11 @@ default.
   ends with a note saying how many.
 
 See [Rule selection](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint). `EFF101`, `EFF103`,
-`DATA101`, `MUT110`, `MUT114`, the proven tier of the eight `OPT` rewrite rules, and the exact
-tier of `OPT113` are exact (certified below); the other rules are heuristic.
+`DATA101`, `MUT101`, `MUT110`, `MUT111`, `MUT114`, `MUT119`, the proven tier of the eight `OPT`
+rewrite rules, and the exact tier of `OPT113` are exact (certified below); the other rules are
+heuristic. `MUT101`, `MUT111`, and the six size-dependent `OPT` rules (`OPT103`, `OPT110`,
+`OPT111`, `OPT120`, `OPT121`, `OPT130`) are exact and opt-in, for their share of real harm
+(below).
 
 ## What a report states
 
@@ -3987,7 +4006,18 @@ Each checked report gets one class:
 
 "Right about the code" is C, P, and B together; "real harm" is C and P. Real harm is published
 for each rule. It decides only whether an exact rule runs by default: it does when its share of
-real harm is worth the line it prints, and is opt-in otherwise.
+real harm is worth the line it prints, and is opt-in otherwise. For the `OPT` rules the share is
+that of their exact reports in their certification runs ([Harm of the exact
+reports](https://heki.koxudaxi.dev/precision/#harm-of-the-exact-reports)):
+
+- The six size-dependent rules are opt-in: their rewrites are proven, but of their exact reports
+  only 2 of the 203 the census classified, and 1 of the 233 of the holdout run, were of real
+  harm.
+- `OPT101` and `OPT102` run by default although none of their exact reports was: their rewrite
+  is faster for every input and the default `heki check --fix` applies it
+  ([Fixes and Safety](https://heki.koxudaxi.dev/fixes/)), so a report is a fix, not only a line to read.
+- `OPT113` runs by default on its own share: 2 of its 8 census reports, and none of its 6
+  holdout reports.
 
 ## How a rule becomes exact
 
@@ -4042,6 +4072,42 @@ before reports reaching one waiting call are folded together.
 
 The exact tier of the size-dependent rewrites has since asked that the data decide the loop's trip
 count, which keeps a subset of the reports their census and holdout run checked.
+
+## Harm of the exact reports
+
+The certification runs of the `OPT` rules classed the harm of their exact reports. The census
+reused the classes of an earlier pre-check, which classed a sample, so some census reports have
+none.
+
+| Rule | Census: C / P / B / not classified | Holdout: C / P / B / not classified |
+| ---- | ---------------------------------- | ----------------------------------- |
+| `OPT101` | 0 / 0 / 6 / 1 | 0 / 0 / 2 / 0 |
+| `OPT102` | 0 / 0 / 1 / 0 | 0 / 0 / 0 / 0 |
+| `OPT103` | 0 / 0 / 124 / 4 | 0 / 0 / 188 / 0 |
+| `OPT110` | 0 / 0 / 7 / 1 | 0 / 0 / 0 / 0 |
+| `OPT111` | 0 / 0 / 7 / 0 | 0 / 0 / 7 / 0 |
+| `OPT120` | 0 / 2 / 52 / 16 | 0 / 1 / 32 / 0 |
+| `OPT121` | 0 / 0 / 10 / 2 | 0 / 0 / 5 / 0 |
+| `OPT130` | 0 / 0 / 1 / 0 | 0 / 0 / 0 / 0 |
+| `OPT113` | 0 / 2 / 6 / 0 | 0 / 0 / 6 / 0 |
+
+A run of the 0.2.8 build on the frozen holdout corpus (2026-11-24), with the eight rewrite rules
+and `OPT113` selected by code, has 134 exact reports. Each is a report the certification's holdout
+run checked by hand, and each is benign: the tier that asks the data to decide the trip count
+left out the one plausible report. 108 of the 122 `OPT103` reports are one function body, copied
+across one vendored library.
+
+| Rule | Exact reports | C / P / B |
+| ---- | ------------: | --------- |
+| `OPT101` | 2 | 0 / 0 / 2 |
+| `OPT102` | 0 | - |
+| `OPT103` | 122 | 0 / 0 / 122 |
+| `OPT110` | 0 | - |
+| `OPT111` | 4 | 0 / 0 / 4 |
+| `OPT120` | 0 | - |
+| `OPT121` | 0 | - |
+| `OPT130` | 0 | - |
+| `OPT113` | 6 | 0 / 0 / 6 |
 
 ## Measurements
 
@@ -8031,9 +8097,9 @@ Source: https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/
 
 # immutable-quadratic-concat (OPT103)
 
-Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · No automatic fix
+Family: Complexity Rewrites (OPT) · Exact · Opt-in · Severity `warning` (slower code) · No automatic fix
 
-Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).
+Opt-in: size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).
 
 ## What it does
 Checks quadratic accumulation of immutable values in a loop:
@@ -8050,6 +8116,8 @@ no other reference. Neither are:
   as one `and` operand or with a module constant: at most 4096), whatever the input;
 - `obj.attr += x` where `obj` is a different object in every iteration (the loop element, or
   an object created in the iteration): each attribute gets one piece.
+
+Opt-in and size-dependent: it runs when `extend-select` names it. It has no automatic rewrite.
 
 ## What a report states
 
@@ -8628,16 +8696,17 @@ Source: https://heki.koxudaxi.dev/rules/list-front-insert/
 
 # list-front-insert (OPT121)
 
-Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Opt-in · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
-Size-dependent `q.insert(0, v)` -> `collections.deque`.
+Opt-in: size-dependent `q.insert(0, v)` -> `collections.deque`.
 
 ## What it does
 Checks loops that insert at the front of a list, `q.insert(0, v)`, and suggests a
 `collections.deque` with `appendleft(v)`.
 
-Size-dependent: applied only with `--fix --include-size-dependent`. A list rebuilt in every iteration of the loop is not reported: its front insert
-costs no more than building it.
+Opt-in and size-dependent: it runs when `extend-select` names it or with
+`--include-size-dependent`, which also applies its proven rewrites with `--fix`. A list rebuilt
+in every iteration of the loop is not reported: its front insert costs no more than building it.
 
 ## What a report states
 
@@ -8701,18 +8770,21 @@ Source: https://heki.koxudaxi.dev/rules/list-front-pop/
 
 # list-front-pop (OPT120)
 
-Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Opt-in · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
-Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.
+Opt-in: size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.
 
 ## What it does
 Checks loops that remove the first element of a list: `q.pop(0)`, `del q[0]`, and
 `q = q[1:]`, and suggests a `collections.deque` with `popleft()`.
 
-Size-dependent: applied only with `--fix --include-size-dependent`. The rewrite changes the list's creation to `collections.deque(...)`, rewrites the
-variable's `list[...]` annotation to `collections.deque[...]`, and adds `import collections`
-when needed: in sorted position among the module's standard-library imports, or after the
-docstring and `__future__` imports of a module without other imports.
+Opt-in and size-dependent: it runs when `extend-select` names it or with
+`--include-size-dependent`, which also applies its proven rewrites with `--fix`.
+
+The rewrite changes the list's creation to `collections.deque(...)`, rewrites the variable's
+`list[...]` annotation to `collections.deque[...]`, and adds `import collections` when needed: in
+sorted position among the module's standard-library imports, or after the docstring and
+`__future__` imports of a module without other imports.
 
 Not reported: a small display that the loop only drains (`expected = [b"a", b""]` and
 `expected.pop(0)` in the loop: it never holds more than its items), and a list rebuilt in every
@@ -9312,16 +9384,17 @@ Source: https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/
 
 # loop-invariant-container-rebuild (OPT130)
 
-Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Opt-in · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
-Size-dependent loop-invariant container reconstruction (`e in set(keys)`).
+Opt-in: size-dependent loop-invariant container reconstruction (`e in set(keys)`).
 
 ## What it does
 Checks loops that rebuild the same container on every iteration just to test membership,
 `e in set(keys)` (also `list(...)`, `tuple(...)`, `dict(...)`), and suggests building it once
 before the loop.
 
-Size-dependent: applied only with `--fix --include-size-dependent`.
+Opt-in and size-dependent: it runs when `extend-select` names it or with
+`--include-size-dependent`, which also applies its proven rewrites with `--fix`.
 
 ## What a report states
 
@@ -9399,15 +9472,16 @@ Source: https://heki.koxudaxi.dev/rules/loop-linear-dedup/
 
 # loop-linear-dedup (OPT111)
 
-Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Opt-in · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
-Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.
+Opt-in: size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.
 
 ## What it does
 Checks the de-duplication idiom `if v not in seen: seen.append(v)` inside a loop and suggests
 keeping an auxiliary `set` next to the list.
 
-Size-dependent: applied only with `--fix --include-size-dependent`.
+Opt-in and size-dependent: it runs when `extend-select` names it or with
+`--include-size-dependent`, which also applies its proven rewrites with `--fix`.
 
 ## What a report states
 
@@ -9575,16 +9649,17 @@ Source: https://heki.koxudaxi.dev/rules/loop-linear-membership/
 
 # loop-linear-membership (OPT110)
 
-Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Opt-in · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
-Size-dependent `e in lst` inside a loop -> hoist `set` outside loop.
+Opt-in: size-dependent `e in lst` inside a loop -> hoist `set` outside loop.
 
 ## What it does
 Checks membership tests against a list or tuple inside a loop, `e in lst`, where the list does
 not change during the loop, and suggests building a `set` once before the loop.
 
-This is a size-dependent rewrite: it is reported as a suggestion and applied only with
-`heki check --fix --include-size-dependent`. Not reported:
+This is a size-dependent rewrite, and the rule is opt-in: it runs when `extend-select` names it
+or with `heki check --include-size-dependent`, which also applies its proven rewrites with
+`--fix`. Not reported:
 
 - small containers: at most 16 items that nothing grows, whatever the items are
   (`x in ("a", "b")`, `x in [b"1", b"2"]`, also through a name bound to one, a comprehension

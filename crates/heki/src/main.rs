@@ -148,7 +148,9 @@ struct CheckArgs {
     /// Apply `safe` + `unconditional` fixes (`OPT101`/`OPT102`).
     #[arg(long)]
     fix: bool,
-    /// Also apply the proven-safe `size-dependent` fixes, in every function.
+    /// Also run the opt-in rules with a `size-dependent` rewrite (`OPT110`, `OPT111`, `OPT120`,
+    /// `OPT121`, `OPT130`), as if `--extend-select` named them, and with `--fix` or `--diff`
+    /// apply their proven-safe rewrites, in every function.
     #[arg(long)]
     include_size_dependent: bool,
     /// Preview fixes as a unified diff without writing files.
