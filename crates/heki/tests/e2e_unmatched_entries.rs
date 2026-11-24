@@ -106,6 +106,209 @@ fn a_run_warns_about_the_entries_that_match_nothing() {
     assert!(stderr.contains("unmatched-contract-entries"), "{stderr}");
 }
 
+const REPRO_COPY: &str = "
+
+def copy_field(field: Field) -> Field:
+    new = Field()
+    for key, value in field.__dict__.items():
+        new.__dict__[key] = value
+    return new
+";
+
+/// A copy of the entries an instance has already (a `__deepcopy__` writing each key of
+/// `self.__dict__` into the new object's) adds no attribute: the entries naming nothing are
+/// reported as they are without the copy.
+#[test]
+fn a_copy_of_the_namespace_hides_no_entry() {
+    let p = repro(
+        "unmatched_namespace_copy",
+        "unmatched-contract-entries = \"error\"\n",
+    );
+    p.write("pkg/store.py", &format!("{REPRO_STORE}{REPRO_COPY}"));
+    let (code, stdout, stderr) = p.heki(&["check"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert_eq!(lines(&stderr, "error: "), REPRO_ENTRIES, "{stderr}");
+}
+
+const KEYS_MODEL: &str = "\
+class Field:
+    kind: str = \"str\"
+
+    def __deepcopy__(self, memo: dict) -> \"Field\":
+        new = Field()
+        for key, value in self.__dict__.items():
+            new.__dict__[key] = value
+        return new
+
+
+class Through:
+    kind: str = \"str\"
+
+
+class Base:
+    kind: str = \"str\"
+
+
+class Sub(Base):
+    extra: int = 0
+
+
+class Named:
+    kind: str = \"str\"
+
+
+class Removed:
+    kind: str = \"str\"
+
+
+class Computed:
+    kind: str = \"str\"
+
+
+class Other:
+    kind: str = \"str\"
+
+
+class FromBase:
+    kind: str = \"str\"
+
+
+class Narrow(FromBase):
+    extra: int = 0
+";
+
+const KEYS_COPIES: &str = "\
+from pkg.model import Base, Computed, FromBase, Named, Narrow, Other, Removed, Sub, Through
+
+
+def keys(new: Through, old: Through) -> None:
+    for key in old.__dict__.keys():
+        new.__dict__[key] = old.__dict__[key]
+
+
+def through_vars(new: Through, old: Through) -> None:
+    for key in vars(old):
+        setattr(new, key, getattr(old, key))
+
+
+def listed_items(new: Through, old: Through) -> None:
+    for key, value in list(vars(old).items()):
+        object.__setattr__(new, key, value)
+
+
+def copied_items(new: Through, old: Through) -> None:
+    for key, value in old.__dict__.copy().items():
+        new.__dict__.setdefault(key, value)
+
+
+def updated(new: Through, old: Through) -> None:
+    new.__dict__.update(old.__dict__)
+
+
+def from_a_subclass(new: Base, old: Sub) -> None:
+    for key, value in old.__dict__.items():
+        new.__dict__[key] = value
+
+
+def constants(new: Named) -> None:
+    for key in (\"_first\", \"_second\"):
+        setattr(new, key, None)
+
+
+def removals(old: Removed, name: str) -> None:
+    del old.__dict__[name]
+    old.__dict__.pop(name, None)
+    old.__dict__.clear()
+
+
+def computed(new: Computed, name: str) -> None:
+    new.__dict__[name] = 1
+
+
+def from_another_class(new: Computed, old: Other) -> None:
+    for key, value in old.__dict__.items():
+        new.__dict__[key] = value
+
+
+def from_a_base(new: Narrow, old: FromBase) -> None:
+    for key, value in old.__dict__.items():
+        new.__dict__[key] = value
+";
+
+/// The classes of [`KEYS_MODEL`].
+const KEYS_CLASSES: [&str; 10] = [
+    "Field", "Through", "Base", "Sub", "Named", "Removed", "Computed", "Other", "FromBase",
+    "Narrow",
+];
+
+/// A project whose contract names a stale attribute of each class of [`KEYS_MODEL`], and the
+/// keys `_first` and `_second` of `Named`; `lint` holds the rest of the `[tool.heki.lint]`
+/// table.
+fn keys_project(name: &str, lint: &str) -> Project {
+    let mut targets: Vec<String> = KEYS_CLASSES
+        .iter()
+        .map(|c| format!("\"pkg.model.{c}.gone\""))
+        .collect();
+    targets.push("\"pkg.model.Named._first\"".to_owned());
+    targets.push("\"pkg.model.Named._second\"".to_owned());
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n{lint}\n\
+             [[tool.heki.write-owners]]\nname = \"stale\"\ntargets = [{}]\n\
+             allowed-writers = [\"pkg.*\"]\n",
+            targets.join(", ")
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", KEYS_MODEL)
+    .write("pkg/copies.py", KEYS_COPIES);
+    p
+}
+
+/// The message of the entry naming nothing of `class`, with `suffix`.
+fn stale(class: &str, suffix: &str) -> String {
+    format!(
+        "`targets` entry `pkg.model.{class}.gone` of write-owners `stale` names no attribute, \
+         method, or `__dict__` key of `pkg.model.{class}` in the analyzed files{suffix}"
+    )
+}
+
+/// A key a store takes from the namespace of an instance of the class or a subclass names an
+/// attribute the instance has already: through `items()`, `keys()`, iterating the namespace or
+/// `vars(obj)`, a `list` or a copy of them, and `update`, stored through the namespace,
+/// `setattr`, or `object.__setattr__`, also in the class's own module. A key a loop takes from
+/// a tuple of string constants names those constants, and a deletion adds no attribute. A key
+/// heki cannot trace (a parameter, one of another class's namespace or of a base's) may name
+/// anything: the entries naming nothing else of its class family are reported only under
+/// `"error"`, as ones that may name nothing.
+#[test]
+fn only_a_key_heki_cannot_trace_may_name_anything() {
+    let named_at_run_time = ["Computed", "FromBase", "Narrow"];
+    let p = keys_project("unmatched_keys_warning", "");
+    let (code, stdout, stderr) = p.heki(&["check"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let known = KEYS_CLASSES
+        .iter()
+        .filter(|c| !named_at_run_time.contains(c));
+    let expected: Vec<String> = known.map(|c| stale(c, "")).collect();
+    assert_eq!(lines(&stderr, "warning: "), expected, "{stderr}");
+
+    let p = keys_project(
+        "unmatched_keys_error",
+        "unmatched-contract-entries = \"error\"\n",
+    );
+    let (code, stdout, stderr) = p.heki(&["check"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    let suffix = |c: &str| match named_at_run_time.contains(&c) {
+        true => ", unless it is one the code names at run time",
+        false => "",
+    };
+    let expected: Vec<String> = KEYS_CLASSES.iter().map(|c| stale(c, suffix(c))).collect();
+    assert_eq!(lines(&stderr, "error: "), expected, "{stderr}");
+}
+
 /// Without the key, a run over some files of the project judges nothing: an entry naming code
 /// in a file the paths leave out would look unmatched. With the key, the files given are the
 /// project.

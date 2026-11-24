@@ -13,6 +13,7 @@ use crate::environment::{self, AccessKind, ExternalAccess};
 use crate::fresh;
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
 use crate::held;
+use crate::imports::{ImportSite, module_imports};
 use crate::infer::CellKey;
 use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
 use crate::invokes;
@@ -25,6 +26,7 @@ use crate::order_flow;
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, ReturnOrigins, Source};
 use crate::partial::Partial;
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared, container_mutator};
+use crate::resolver::stores::{self, AttrName};
 use crate::resolver::{
     self, Callee, DeclKeys, FunctionDecl, ModuleDecls, TypeCtx, Val, func_qualname,
     is_generator_function, self_aliases,
@@ -142,6 +144,7 @@ fn extract_module(
         .map(func_qualname)
         .collect();
     let mut cell_aliases = CellAliases::default();
+    let mut imported_by_name: Vec<ImportSite> = Vec::new();
     for f in &input.ir.functions {
         if f.is_class_body || (is_overload(f) && implemented.contains(func_qualname(f))) {
             continue;
@@ -161,8 +164,10 @@ fn extract_module(
             kept_points,
             types,
             mut blind,
+            imports: by_name,
             mut unawaited,
             fresh_return,
+            mut class_runs,
         } = Extractor::new(
             &shape,
             &key,
@@ -174,10 +179,12 @@ fn extract_module(
         )
         .run();
         cell_aliases.extend(cells);
+        imported_by_name.extend(by_name);
         // A `class` statement runs its body where it runs, in a function or the module body:
         // the body's effects, calls (a class attribute's value, a decorator, a default
         // argument), and accesses are that code's (its methods run only when they are called).
         for body in class_bodies_run_by(input.ir, f) {
+            let ran = class_runs.get(&body.id).copied().unwrap_or_default();
             let body = FnShape::new(body);
             let facts = Extractor::new(
                 &body,
@@ -192,14 +199,17 @@ fn extract_module(
             absorb_class_body(&mut summary, facts.summary, &key);
             external.extend(facts.external);
             blind.extend(facts.blind);
+            imported_by_name.extend(facts.imports);
             unawaited.extend(facts.unawaited);
-            sites.extend(
-                facts
-                    .sites
-                    .into_iter()
-                    .map(|site| CallSite { flow: None, ..site }),
-            );
+            let in_function = |site: CallSite| CallSite {
+                flow: None,
+                on_every_return: run_through(site.on_every_return, ran),
+                ..site
+            };
+            sites.extend(facts.sites.into_iter().map(in_function));
             references.extend(facts.references);
+            let nested = facts.class_runs.into_iter();
+            class_runs.extend(nested.map(|(id, run)| (id, run_through(run, ran))));
         }
         if let Some(mut flow) = flow {
             // Site-list indices of the function become indices into the file's call sites.
@@ -281,29 +291,55 @@ fn extract_module(
             }
         }
     }
+    if opt_in.imports
+        && let Some(imports) = module_imports(input, imported_by_name)
+    {
+        file.opt_in_tables_mut().imports = Some(Box::new(imports));
+    }
     release_spare_capacity(&mut file);
     file
 }
 
 /// The class bodies the `class` statements of `f` run, nested classes included, each once (a
-/// `class` statement in a `finally` body is made once per way out of its `try`).
+/// `class` statement in a `finally` body is made once per way out of its `try`), each before
+/// the bodies of the classes it makes.
 fn class_bodies_run_by<'m>(ir: &'m ModuleIr, f: &'m IrFunction) -> Vec<&'m IrFunction> {
     let mut out: Vec<&IrFunction> = Vec::new();
     let mut stack = vec![f];
     while let Some(g) = stack.pop() {
         for inst in g.blocks.iter().flat_map(|b| &b.insts) {
-            if let InstKind::MakeClosure {
-                func_id: Some(id), ..
-            } = &inst.kind
-                && ir.function(*id).is_class_body
-                && out.iter().all(|c| c.id != *id)
+            if let Some(id) = class_body_made(ir, &inst.kind)
+                && out.iter().all(|c| c.id != id)
             {
-                out.push(ir.function(*id));
-                stack.push(ir.function(*id));
+                out.push(ir.function(id));
+                stack.push(ir.function(id));
             }
         }
     }
     out
+}
+
+/// The class body the instruction runs, when it is a `class` statement.
+fn class_body_made(ir: &ModuleIr, kind: &InstKind) -> Option<FunctionId> {
+    match kind {
+        InstKind::MakeClosure {
+            func_id: Some(id), ..
+        } if ir.function(*id).is_class_body => Some(*id),
+        _ => None,
+    }
+}
+
+/// [`CallSite::on_every_return`] of a point of a class body (a call, or the `class` statement of
+/// a nested class) in the code that runs the body, from `body`, that code's flags of its `class`
+/// statement ([`Extractor::class_runs`]). The point has run whenever the code returns only when
+/// the body has returned too: an exception the body raised before the point may have been
+/// caught there.
+fn run_through(point: OnEveryReturn, body: OnEveryReturn) -> OnEveryReturn {
+    OnEveryReturn {
+        called: point.called && body.returned,
+        returned: point.returned && body.returned,
+        live: point.live && body.live,
+    }
 }
 
 /// Add the boxed local sites `more` to `into`.
@@ -552,6 +588,31 @@ struct Owner {
     var: Option<VarId>,
 }
 
+/// Which classes a write under a name heki cannot read may add an attribute to
+/// ([`Unresolved::Name`] rather than [`Unresolved::Existing`]).
+#[derive(Debug, Clone, Copy)]
+enum Adds<'s> {
+    /// Every class: the name is computed at run time.
+    Any,
+    /// Those that not every one of these classes is or derives from: the name is a key of the
+    /// namespace of an instance of one of them ([`AttrName::KeyOf`]).
+    UnlessKeysOf(&'s [String]),
+    /// None: the write removes the attribute.
+    Nothing,
+}
+
+impl Adds<'_> {
+    fn to(self, project: &resolver::ProjectDecls, class: &str) -> bool {
+        match self {
+            Self::Any => true,
+            Self::UnlessKeysOf(sources) => {
+                !(sources.iter()).all(|s| project.keys_exist_in(s, class))
+            }
+            Self::Nothing => false,
+        }
+    }
+}
+
 /// `obj.<attr>` with project-class `obj` (or `obj["key"]` with a `TypedDict` `obj`).
 #[derive(Debug, Clone)]
 struct ObjAttr {
@@ -666,10 +727,14 @@ struct Extracted {
     types: FxHashMap<VarId, Val>,
     /// [`FileSummary::blind_calls`].
     blind: Vec<BlindCall>,
+    /// The calls importing a module by name ([`FileSummary::imports`]).
+    imports: Vec<ImportSite>,
     /// [`FileSummary::unawaited_handoffs`].
     unawaited: Vec<UnawaitedHandoff>,
     /// The local fact of [`crate::OptInTables::fresh_returns`].
     fresh_return: Option<fresh::FreshReturn>,
+    /// [`Extractor::class_runs`].
+    class_runs: FxHashMap<FunctionId, OnEveryReturn>,
 }
 
 /// The points of a function that read one `self` attribute ([`Extractor::self_read_points`]).
@@ -824,6 +889,9 @@ struct Extractor<'a> {
     /// Per call instruction, whether the function has made it whenever it returns normally
     /// (filled before the visit when an enabled rule reads [`EffectSummary::must_exec`]).
     must_run: FxHashMap<(BlockId, usize), OnEveryReturn>,
+    /// Per class body a `class` statement of the function runs, [`Self::must_run`] of that
+    /// statement as a call of the body (filled with it).
+    class_runs: FxHashMap<FunctionId, OnEveryReturn>,
     /// [`KeyFacts`], built on first use.
     key_facts: OnceCell<KeyFacts<'a>>,
     /// The changes of checked containers of `self` the visit finds, recorded after it
@@ -850,6 +918,8 @@ struct Extractor<'a> {
     /// The calls heki is blind to (`OptInTables::blind_spots`), with
     /// [`OptInFacts::blind_spots`].
     blind: Vec<BlindCall>,
+    /// The calls importing a module by name, with [`OptInFacts::imports`].
+    imports: Vec<ImportSite>,
     /// The project functions handed to a library call that calls them without awaiting what
     /// they return (`OptInTables::unawaited_handoffs`), with
     /// [`OptInFacts::unawaited_handoffs`].
@@ -1198,6 +1268,7 @@ impl<'a> Extractor<'a> {
             ownership: false,
             opt_in,
             must_run: FxHashMap::default(),
+            class_runs: FxHashMap::default(),
             key_facts: OnceCell::new(),
             self_changes: Vec::new(),
             builtin_methods: FxHashMap::default(),
@@ -1208,6 +1279,7 @@ impl<'a> Extractor<'a> {
             established: OnceCell::new(),
             followed_callables: OnceCell::new(),
             blind: Vec::new(),
+            imports: Vec::new(),
             unawaited: Vec::new(),
         };
         ex.ownership = contracts.is_some_and(|c| c.ownership());
@@ -2228,10 +2300,10 @@ impl<'a> Extractor<'a> {
     /// The enclosing function whose variable `name` is (the nearest one whose nested functions
     /// capture it), by qualname.
     fn cell_owner(&self, name: &str) -> Option<String> {
-        let qualname = func_qualname(self.f);
-        qualname
-            .rmatch_indices(".<locals>.")
-            .map(|(i, _)| &qualname[..i])
+        self.cx
+            .ir()
+            .enclosing_functions(self.f)
+            .map(func_qualname)
             .find(|outer| self.cx.captures(outer, name))
             .map(str::to_owned)
     }
@@ -2504,6 +2576,46 @@ impl<'a> Extractor<'a> {
             .str_constant_with(var, &|v| self.defs.get(&v).copied(), &self.types)
     }
 
+    /// The name the variable `key` holding an attribute name names ([`stores::key_name`]).
+    fn key_name(&self, key: VarId) -> AttrName<'static> {
+        let def = |v: VarId| self.defs.get(&v).copied();
+        stores::key_name(self.cx, self.f, key, &def, &self.types)
+    }
+
+    /// The names the keys of `other` name, stored by `ns.update(other)` ([`stores::update_keys`]).
+    fn update_keys(&self, other: VarId) -> AttrName<'static> {
+        let def = |v: VarId| self.defs.get(&v).copied();
+        stores::update_keys(self.cx, self.f, other, &def, &self.types)
+    }
+
+    /// A store (`removes`: a deletion) of the attribute `name` names on `owner`'s object through
+    /// its namespace or `setattr`: a write of each name a constant gives, or of a name heki
+    /// cannot read ([`Self::computed_name`]).
+    fn write_named(
+        &mut self,
+        owner: Owner,
+        name: &AttrName<'_>,
+        removes: bool,
+        kind: WriteKind,
+        span: Span,
+    ) {
+        let attrs: Vec<&str> = match name {
+            AttrName::Named(attr) => vec![attr],
+            AttrName::OneOf(attrs) => attrs.iter().map(String::as_str).collect(),
+            _ if removes => return self.computed_name(&owner, Adds::Nothing, kind, span),
+            AttrName::KeyOf(sources) => {
+                return self.computed_name(&owner, Adds::UnlessKeysOf(sources), kind, span);
+            }
+            AttrName::Unknown => return self.computed_name(&owner, Adds::Any, kind, span),
+        };
+        for attr in attrs {
+            if removes && owner.is_self {
+                self.summary.invalidates_cached.insert(attr.to_owned());
+            }
+            self.write_owner_attr(owner.clone(), attr, kind, span);
+        }
+    }
+
     /// [`Self::memo_fills`]: the writes of the parameters' own attributes that fill a memo or
     /// initialize lazily ([`cache_flow::attr_writes`], each parameter an object of its own), and
     /// the fills of a container a parameter has as its default (`def f(x, _memo={})`).
@@ -2730,8 +2842,10 @@ impl<'a> Extractor<'a> {
             kept_points: self.kept_points,
             types: self.types,
             blind: self.blind,
+            imports: self.imports,
             unawaited: self.unawaited,
             fresh_return,
+            class_runs: self.class_runs,
         }
     }
 
@@ -2899,9 +3013,7 @@ impl<'a> Extractor<'a> {
             }
             // A class statement runs the metaclass, the bases' `__init_subclass__`, and the
             // attributes' `__set_name__`.
-            InstKind::MakeClosure {
-                func_id: Some(id), ..
-            } if self.cx.ir().function(*id).is_class_body => any,
+            kind if class_body_made(self.cx.ir(), kind).is_some() => any,
             // The first import of a project module runs its body.
             InstKind::Import { .. } => {
                 let target = self
@@ -3635,10 +3747,11 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// Record `inst` when it reads an attribute of a module outside the project that an effect
-    /// boundary forbids reading (`sys.platform`, or `platform` bound by `from sys import
-    /// platform`). The value read must be that object by name: a value of unknown origin
-    /// reads nothing, nor does a closure cell (`LoadDeref`), whose value is not typed.
+    /// Record `inst` when it reads an attribute of a module outside the project that a contract
+    /// names (`sys.platform`, or `platform` bound by `from sys import platform`). The value
+    /// read must be that object by name: a value of unknown origin reads nothing, nor does a
+    /// closure cell (`LoadDeref`), whose value is not typed. A name loaded only to be called
+    /// there (`getframe(1)` of an imported function) is the call's, as `sys._getframe(1)` is.
     fn external_read(&mut self, inst: &InstKind, span: Span) {
         let (InstKind::AttrLoad { dst, .. }
         | InstKind::LoadGlobal { dst, .. }
@@ -3650,6 +3763,7 @@ impl<'a> Extractor<'a> {
         if let Some(Val::Ref(fqn)) = self.types.get(dst)
             && self.contracts.is_some_and(|c| c.external_read(fqn))
             && matches!(self.cx.project.symbol(fqn), resolver::Symbol::External)
+            && (matches!(inst, InstKind::Import { .. }) || !self.only_called(*dst))
         {
             self.external.push(ExternalAccess {
                 kind: AccessKind::Read,
@@ -3658,6 +3772,24 @@ impl<'a> Extractor<'a> {
                 imports_project_module: false,
             });
         }
+    }
+
+    /// Whether every use of `var` calls it, passing it nowhere.
+    fn only_called(&self, var: VarId) -> bool {
+        let readers = self.shape.readers(var);
+        !readers.is_empty()
+            && readers.iter().all(|u| {
+                let Use::Inst(bb, i) = *u else {
+                    return false;
+                };
+                matches!(
+                    &self.f.block(bb).insts[i as usize].kind,
+                    InstKind::Call { callee_var: Some(callee), args, kwargs, .. }
+                        if *callee == var
+                            && !args.contains(&var)
+                            && kwargs.iter().all(|(_, k)| *k != var)
+                )
+            })
     }
 
     /// Record the imports that probe whether their module is installed
@@ -4667,7 +4799,8 @@ impl<'a> Extractor<'a> {
                 in_place: true,
                 ..
             } if self.dict_of.contains_key(lhs) => {
-                self.container_method(*lhs, BinOpKind::BitOr.in_place_method(), &[], span);
+                let method = BinOpKind::BitOr.in_place_method();
+                self.container_method(*lhs, method, &[], false, span);
             }
             InstKind::BinOp {
                 dst,
@@ -4757,7 +4890,8 @@ impl<'a> Extractor<'a> {
                 // summary (`Stats.clear()` may change nothing).
                 let changes_recv = !calls_property && !matches!(callee, Callee::Project(..));
                 if container_mutator(method) && changes_recv {
-                    self.container_method(*recv, method, args, span);
+                    let plain = kwargs.is_empty() && star_from.is_none();
+                    self.container_method(*recv, method, args, plain, span);
                     for a in args {
                         if matches!(method.as_str(), "append" | "insert" | "add" | "setdefault") {
                             self.note_escape(*a);
@@ -5478,6 +5612,7 @@ impl<'a> Extractor<'a> {
             return;
         }
         let obj_params = self.exact_param(obj);
+        let protocol = self.unknown_protocol(obj);
         self.summary
             .unresolved_access_sites
             .insert(UnresolvedAccessSite {
@@ -5485,7 +5620,52 @@ impl<'a> Extractor<'a> {
                 access,
                 span,
                 obj_params,
+                protocol,
             });
+    }
+
+    /// The project protocol `var`'s object is typed with although heki cannot tie it to a class
+    /// ([`UnresolvedAccessSite::protocol`]): an instance of a protocol whose implementations
+    /// heki cannot list, or a class object whose annotation is `type[P]`
+    /// ([`ProjectDecls::protocol_class`]).
+    fn unknown_protocol(&self, var: VarId) -> Option<String> {
+        match self.val(var) {
+            Some(Val::Inst(c)) if self.cx.project.protocol(c) == Some(None) => Some(c.clone()),
+            Some(_) => None,
+            None => self.cx.project.protocol_class(&self.declared_type(var)?),
+        }
+    }
+
+    /// What the annotation of the place `var`'s value comes from declares, as its module
+    /// resolves it: the parameter it is on every path, the local it is bound to, or the
+    /// attribute it is read from (along the MRO of the object's class).
+    fn declared_type(&self, var: VarId) -> Option<crate::types::Ty> {
+        let resolve = |text: &str| self.cx.module.resolve_annotation_ty(text);
+        if let Some((i, None)) = self.param_alias.get(&var) {
+            return resolve(self.f.params.get(usize::from(*i))?.annotation.as_deref()?);
+        }
+        // The annotated local is any name along the copies the value went through.
+        let mut cur = var;
+        loop {
+            let name = self
+                .f
+                .var_names
+                .get(cur.0 as usize)
+                .and_then(Option::as_deref);
+            let annotated =
+                name.and_then(|name| self.f.local_annotations.iter().find(|a| a.target == name));
+            if let Some(local) = annotated {
+                return resolve(&local.annotation);
+            }
+            match self.shape.inst(cur).map(|i| &i.kind) {
+                Some(InstKind::Copy { src, .. }) => cur = *src,
+                Some(InstKind::AttrLoad { obj, attr, .. }) => {
+                    let class = self.instance_of(*obj)?;
+                    return self.cx.project.member_type(&class, attr, false);
+                }
+                _ => return None,
+            }
+        }
     }
 
     /// Record a write heki cannot tie to a class (`MUT205`) of the object `obj` holds (`None`:
@@ -5496,12 +5676,17 @@ impl<'a> Extractor<'a> {
             return;
         }
         let obj_params = obj.map_or(0, |o| self.exact_param(o));
+        let protocol = match (&what, obj) {
+            (Unresolved::Receiver(_), Some(obj)) => self.unknown_protocol(obj),
+            _ => None,
+        };
         let site = UnresolvedWriteSite {
             what,
             kind,
             span,
             obj_params,
             construction: Construction::No,
+            protocol,
         };
         if let Some(obj) = obj.filter(|o| self.track && self.trackable(*o)) {
             let query = self.rec.query(self.at(), obj);
@@ -5513,12 +5698,18 @@ impl<'a> Extractor<'a> {
 
     /// A computed attribute name written on `owner`'s object (`setattr(obj, name, v)`,
     /// `obj.__dict__[name] = v`): unresolved when the object has a project class, or when heki
-    /// knows nothing of its class.
-    fn computed_name(&mut self, owner: &Owner, kind: WriteKind, span: Span) {
+    /// knows nothing of its class. `adds` tells which of the classes it may add an attribute
+    /// to.
+    fn computed_name(&mut self, owner: &Owner, adds: Adds<'_>, kind: WriteKind, span: Span) {
         let Some(var) = owner.var else { return };
         self.change_object(var, span);
         for class in &owner.typed_classes {
-            self.unresolved(Unresolved::Name(class.clone()), Some(var), kind, span);
+            let what = if adds.to(self.cx.project, class) {
+                Unresolved::Name(class.clone())
+            } else {
+                Unresolved::Existing(class.clone())
+            };
+            self.unresolved(what, Some(var), kind, span);
         }
         if owner.typed_classes.is_empty() && self.unknown_class(var) {
             self.unresolved(Unresolved::Anything, Some(var), kind, span);
@@ -5978,14 +6169,11 @@ impl<'a> Extractor<'a> {
     ) {
         if let Some(owner) = self.dict_of.get(&obj).cloned() {
             // `x.__dict__["a"] = v` / `del self.__dict__["prop"]` / `x.__dict__[KEY] = v`.
-            if let Some(k) = self.key_of(key_const, index) {
-                if is_delete && owner.is_self {
-                    self.summary.invalidates_cached.insert(k.clone());
-                }
-                self.write_owner_attr(owner, &k, WriteKind::DictDirect, span);
-            } else {
-                self.computed_name(&owner, WriteKind::DictDirect, span);
-            }
+            let name = match key_const {
+                Some(k) => AttrName::Named(k.to_owned().into()),
+                None => self.key_name(index),
+            };
+            self.write_named(owner, &name, is_delete, WriteKind::DictDirect, span);
             return;
         }
         // The changed entry's key matters only for a typed attribute's container.
@@ -6002,26 +6190,40 @@ impl<'a> Extractor<'a> {
         self.container_mut(obj, method, false, key_const, item_key, span);
     }
 
-    fn container_method(&mut self, recv: VarId, method: &str, args: &[VarId], span: Span) {
+    /// A call of the container method `method` on `recv` with the positional arguments
+    /// `args` (`plain`: and no keyword or `*` argument).
+    fn container_method(
+        &mut self,
+        recv: VarId,
+        method: &str,
+        args: &[VarId],
+        plain: bool,
+        span: Span,
+    ) {
         if let Some(owner) = self.dict_of.get(&recv).cloned() {
-            match method {
-                "pop" | "__delitem__" | "setdefault" | "__setitem__" => {
-                    if let Some(k) = args.first().and_then(|a| self.resolved_str(*a)) {
-                        if owner.is_self && matches!(method, "pop" | "__delitem__") {
-                            self.summary.invalidates_cached.insert(k.clone());
-                        }
-                        self.write_owner_attr(owner, &k, WriteKind::DictDirect, span);
-                    } else {
-                        self.computed_name(&owner, WriteKind::DictDirect, span);
-                    }
+            let kind = WriteKind::DictDirect;
+            match (method, args) {
+                ("pop" | "__delitem__" | "setdefault" | "__setitem__", _) => {
+                    let name = args
+                        .first()
+                        .map_or(AttrName::Unknown, |a| self.key_name(*a));
+                    let removes = matches!(method, "pop" | "__delitem__");
+                    self.write_named(owner, &name, removes, kind, span);
                 }
-                // `update`, `popitem`, `clear`, `|=` (`__ior__`): attributes heki cannot name.
-                _ => {
+                ("update", [other]) if plain => match self.update_keys(*other) {
+                    AttrName::KeyOf(sources) => {
+                        self.computed_name(&owner, Adds::UnlessKeysOf(&sources), kind, span);
+                    }
+                    _ => self.computed_name(&owner, Adds::Any, kind, span),
+                },
+                ("popitem" | "clear", _) => {
                     if method == "clear" && owner.is_self {
                         self.summary.invalidates_cached.insert("*".to_owned());
                     }
-                    self.computed_name(&owner, WriteKind::DictDirect, span);
+                    self.computed_name(&owner, Adds::Nothing, kind, span);
                 }
+                // `update` of keywords, `|=` (`__ior__`): attributes heki cannot name.
+                _ => self.computed_name(&owner, Adds::Any, kind, span),
             }
             return;
         }
@@ -6289,6 +6491,9 @@ impl<'a> Extractor<'a> {
         self.call_escapes(callee, call);
         match callee {
             Callee::External(symbol) => {
+                if self.opt_in.imports {
+                    self.import_by_name(bb, symbol, call);
+                }
                 if let Some(c) = self.contracts {
                     if c.external_call(symbol) {
                         let imports = self.cx.catalog(symbol).and_then(|e| e.environment_access())
@@ -7229,11 +7434,12 @@ impl<'a> Extractor<'a> {
         self.f.params.iter().any(|p| p.var == v)
     }
 
-    /// [`Self::must_run`] and [`MustExec::never_returns`], from the path facts of the function
-    /// with what the catalog and the project's declarations know: the members of modules and
-    /// the context managers whose exit never suppresses an exception.
+    /// [`Self::must_run`], [`Self::class_runs`], and [`MustExec::never_returns`], from the path
+    /// facts of the function with what the catalog and the project's declarations know: the
+    /// members of modules and the context managers whose exit never suppresses an exception.
     fn path_facts(&mut self) {
         let f = self.f;
+        let ir = self.cx.ir();
         let every = |a: Answer<Must>| a == Answer::Known(Must::Every);
         let owner = "heki_effect::summary::Extractor::path_facts";
         let read_points = if self.opt_in.kept_values {
@@ -7241,24 +7447,36 @@ impl<'a> Extractor<'a> {
         } else {
             BTreeMap::new()
         };
-        let (must_run, never_returns, must_reads) =
+        let (must_run, class_runs, never_returns, must_reads) =
             crate::with_paths(self.cx, f, &self.types, owner, |paths, _| {
                 let mut must_run = FxHashMap::default();
+                let mut class_runs: FxHashMap<FunctionId, OnEveryReturn> = FxHashMap::default();
                 for bb in &f.blocks {
                     for (index, inst) in bb.insts.iter().enumerate() {
-                        if !crate::anchors_call_site(&inst.kind) {
+                        let class_body = class_body_made(ir, &inst.kind);
+                        if class_body.is_none() && !crate::anchors_call_site(&inst.kind) {
                             continue;
                         }
                         let at = (bb.id, index);
                         let called = paths.on_every_return(at, Progress::Called);
-                        must_run.insert(
-                            at,
-                            OnEveryReturn {
-                                called: every(called),
-                                returned: every(paths.on_every_return(at, Progress::Returned)),
-                                live: called.is_open() || called != Answer::Known(Must::Dead),
-                            },
-                        );
+                        let run = OnEveryReturn {
+                            called: every(called),
+                            returned: every(paths.on_every_return(at, Progress::Returned)),
+                            live: called.is_open() || called != Answer::Known(Must::Dead),
+                        };
+                        match class_body {
+                            // A `class` statement in a `finally` body is made once per way out
+                            // of its `try`: the body has run when one of them has.
+                            Some(id) => {
+                                let any = class_runs.entry(id).or_default();
+                                any.called |= run.called;
+                                any.returned |= run.returned;
+                                any.live |= run.live;
+                            }
+                            None => {
+                                must_run.insert(at, run);
+                            }
+                        }
                     }
                 }
                 let never_returns = f.blocks.first().is_some_and(|entry| {
@@ -7289,12 +7507,13 @@ impl<'a> Extractor<'a> {
                         }
                     }
                 }
-                (must_run, never_returns, must_reads)
+                (must_run, class_runs, never_returns, must_reads)
             });
         if !must_reads.is_empty() {
             self.summary.kept_mut().must_read_self_attrs = must_reads;
         }
         self.must_run = must_run;
+        self.class_runs = class_runs;
         if never_returns && self.opt_in.must_effects {
             self.summary.must_exec = Some(Box::new(MustExec {
                 never_returns,
@@ -7499,13 +7718,9 @@ impl<'a> Extractor<'a> {
         let args = passed.args;
         if symbol == "builtins.setattr" || symbol == "builtins.object.__setattr__" {
             let Some(obj) = args.first() else { return };
-            match args.get(1).and_then(|a| self.resolved_str(*a)) {
-                Some(attr) => self.write_attr(*obj, &attr, WriteKind::SetAttr, span),
-                None => {
-                    let owner = self.owner_of(*obj);
-                    self.computed_name(&owner, WriteKind::SetAttr, span);
-                }
-            }
+            let name = args.get(1).map_or(AttrName::Unknown, |a| self.key_name(*a));
+            let owner = self.owner_of(*obj);
+            self.write_named(owner, &name, false, WriteKind::SetAttr, span);
             return;
         }
         if symbol == "builtins.getattr" || symbol == "builtins.object.__getattribute__" {

@@ -820,6 +820,8 @@ pub enum Facts {
     Inspect,
     /// Also what `heki recommend` reads ([`crate::recommend_facts`]).
     Recommend,
+    /// Also the import facts ([`crate::import_facts`]): `heki inspect --imports`.
+    Imports,
 }
 
 /// What an index is built with: the contracts its summaries depend on, whether typed writes
@@ -842,6 +844,7 @@ impl IndexFacts {
             Facts::Check => crate::opt_in_facts(selection),
             Facts::Inspect => crate::inspect_facts(selection),
             Facts::Recommend => crate::recommend_facts(selection),
+            Facts::Imports => crate::import_facts(selection),
         };
         // The calls an effect boundary reporting what it cannot judge names (`EFF201`).
         opt_in.blind_spots |= selection.is_enabled("EFF201")
@@ -849,6 +852,11 @@ impl IndexFacts {
                 .effect_boundaries
                 .iter()
                 .any(|b| b.unresolved.as_deref() == Some("report"));
+        // `IMP201` and `IMP202` read the import facts of every file once a contract is declared.
+        opt_in.imports |= ["IMP201", "IMP202"]
+            .iter()
+            .any(|code| selection.is_enabled(code))
+            && !config.import_owners.is_empty();
         Ok(Self {
             contracts: crate::summary_contracts(config, kb)?,
             typed_writes: crate::typed_writes(config, selection),

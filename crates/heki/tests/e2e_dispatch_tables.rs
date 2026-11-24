@@ -4,7 +4,8 @@
 //! library, a `staticmethod` or a class (through the class, `cls`, or an instance), a function
 //! or a method returning a module it imports (a local import breaking a cycle, with a
 //! `functools` cache), and a value typed by a `TypeVar` with a bound or constraints. A dict or
-//! list something changes in place keeps no items. A module-level function or a method its body
+//! list something changes in place keeps the items of its own and of what the changes add, or
+//! none when a change adds what heki cannot type. A module-level function or a method its body
 //! binds again on some paths may be either object.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
@@ -194,9 +195,9 @@ fn a_table_of_functions_bound_once_gives_the_value_of_each_key() {
     );
 }
 
-/// Something changing a table in place (an item store, `update`, through an import of it or in
-/// another module, through the module's own object) leaves its items unknown: no key gives a
-/// value, and the function calling one is not pure. An annotated global keeps the items it
+/// Something changing a table in place with values of unknown type (an item store, `update`,
+/// through an import of it or in another module, through the module's own object) leaves its
+/// items unknown: no key gives a value, and the function calling one is not pure. An annotated global keeps the items it
 /// declares, also a tuple annotated as one of any length.
 const CHANGED: &str = r#"from __future__ import annotations
 
@@ -945,6 +946,247 @@ fn a_list_something_changes_in_place_stays_a_list() {
         .map(|(i, _)| i as u64 + 1)
         .collect();
     assert_eq!(lines, marked);
+}
+
+/// Changes in place adding items of known types, in another module or in the module itself,
+/// keep the items a list, a set, or a dict holds, joined with what they add: `append` of a
+/// typed value, `extend` and `+=` of a list of known items, an item store of a typed value
+/// (also of a slice), `add` to a set, and a function added to a table of functions (a call
+/// through it runs either). An addition heki cannot type (an unannotated value, a `Callable`, a
+/// list a `setdefault` gives that the code then appends to) leaves the items unknown.
+const TYPED_MODEL: &str = r#"from __future__ import annotations
+
+from typing import Callable
+
+from pkg.model import Field
+
+
+class Model:
+    def __init__(self, fields: list[Field]) -> None:
+        self.fields = self._validate(fields) if fields else []
+        self.extended = self._validate(fields)
+        self.grown = self._validate(fields)
+        self.sliced = self._validate(fields)
+        self.untyped = self._validate(fields)
+        self.by_name = {"first": fields[0]}
+        self.groups = {"all": self._validate(fields)}
+        self.unique = set(self._validate(fields))
+        self.own = self._validate(fields)
+
+    def _validate(self, fields: list[Field]) -> list[Field]:
+        return fields
+
+    def add_own(self, field: Field) -> None:
+        self.own.append(field)
+
+
+def _noop(field: Field) -> None:
+    pass
+
+
+def _require(field: Field) -> None:
+    field.required = True
+
+
+HANDLERS = {"noop": _noop}
+CALLABLES = {"noop": _noop}
+RUNS = [_noop]
+
+
+def register_require() -> None:
+    HANDLERS["require"] = _require
+
+
+def register_callable(name: str, run: Callable[[Field], None]) -> None:
+    CALLABLES[name] = run
+
+
+def add_require() -> None:
+    global RUNS
+    RUNS += [_require]
+"#;
+
+const TYPED_STORE: &str = r#"from __future__ import annotations
+
+from pkg.model import Field
+from pkg.typed import Model
+
+
+def append_field(model: Model, field: Field) -> None:
+    model.fields.append(field)
+
+
+def extend_fields(model: Model, more: list[Field]) -> None:
+    model.extended.extend(more)
+
+
+def grow(model: Model, field: Field) -> None:
+    model.grown += [field]
+
+
+def splice(model: Model, more: list[Field]) -> None:
+    model.sliced[1:2] = more
+
+
+def append_any(model: Model, thing) -> None:
+    model.untyped.append(thing)
+
+
+def name_field(model: Model, name: str, field: Field) -> None:
+    model.by_name[name] = field
+
+
+def group(model: Model, key: str, thing) -> None:
+    model.groups.setdefault(key, []).append(thing)
+
+
+def add_unique(model: Model, field: Field) -> None:
+    model.unique.add(field)
+"#;
+
+const TYPED_CALLS: &str = r#"from __future__ import annotations
+
+from pkg.model import Field
+from pkg.typed import CALLABLES, HANDLERS, RUNS, Model
+
+
+def through_fields(models: list[Model]) -> None:
+    for model in models:
+        for field in model.fields:
+            field.required = True  # EFF201
+
+
+def through_one_model(model: Model) -> None:
+    model.fields[0].required = True  # EFF201
+
+
+def through_extended(model: Model) -> None:
+    for field in model.extended:
+        field.required = True  # EFF201
+
+
+def through_grown(model: Model) -> None:
+    for field in model.grown:
+        field.required = True  # EFF201
+
+
+def through_sliced(model: Model) -> None:
+    for field in model.sliced:
+        field.required = True  # EFF201
+
+
+def through_untyped(model: Model) -> None:
+    for field in model.untyped:
+        field.required = True
+
+
+def through_by_name(model: Model) -> None:
+    model.by_name["a"].required = True  # EFF201
+
+
+def through_groups(model: Model) -> None:
+    for field in model.groups["all"]:
+        field.required = True
+
+
+def through_unique(model: Model) -> None:
+    for field in model.unique:
+        field.required = True  # EFF201
+
+
+def through_own(model: Model) -> None:
+    for field in model.own:
+        field.required = True  # EFF201
+
+
+def by_handler(field: Field, kind: str) -> None:
+    HANDLERS[kind](field)  # EFF201
+
+
+def by_callable(field: Field, kind: str) -> None:
+    CALLABLES[kind](field)
+
+
+def by_run(field: Field) -> None:
+    for run in RUNS:
+        run(field)  # EFF201
+"#;
+
+#[test]
+fn typed_additions_keep_the_items_and_join_what_they_add() {
+    let files = [
+        ("pkg/typed.py", TYPED_MODEL),
+        ("pkg/store.py", TYPED_STORE),
+        ("pkg/passes.py", TYPED_CALLS),
+    ];
+    let p = project("dispatch_typed_additions", &files);
+    assert_eq!(reported(&p), marked(&files));
+    assert_eq!(verdict(&p, "pkg.passes.by_callable"), "unknown");
+    assert_eq!(verdict(&p, "pkg.passes.by_handler"), "impure");
+    assert_eq!(verdict(&p, "pkg.passes.by_run"), "impure");
+}
+
+/// A list a global or an attribute holds that the code extends with `+=` and then changes
+/// through what the operator gave (`xs += [a]`, then `xs.append(b)`), or extends with `+=` from
+/// a local alias, gets what both add: `heki inspect` does not call a loop over it pure.
+const IN_PLACE_OPERATORS: &str = r#"COUNT = 0
+
+
+class Quiet:
+    def run(self) -> None:
+        pass
+
+
+class Loud:
+    def run(self) -> None:
+        global COUNT
+        COUNT += 1
+
+
+ITEMS = [Quiet()]
+ALIASED = [Quiet()]
+
+
+def grow() -> None:
+    global ITEMS
+    ITEMS += [Loud()]
+
+
+def grow_through_alias(extra) -> None:
+    xs = ALIASED
+    xs += [Quiet()]
+    xs.append(extra)
+
+
+def run_items() -> None:
+    for item in ITEMS:
+        item.run()
+
+
+def run_aliased() -> None:
+    for item in ALIASED:
+        item.run()
+
+
+class Holder:
+    def __init__(self) -> None:
+        self.items = [Quiet()]
+
+    def grow(self) -> None:
+        self.items += [Loud()]
+
+    def run_all(self) -> None:
+        for item in self.items:
+            item.run()
+"#;
+
+#[test]
+fn in_place_operators_add_their_items() {
+    let p = Project::new("dispatch_in_place_operators");
+    p.write("m.py", IN_PLACE_OPERATORS);
+    assert_eq!(verdict(&p, "m.run_items"), "impure");
+    assert_eq!(verdict(&p, "m.run_aliased"), "unknown");
+    assert_eq!(verdict(&p, "m.Holder.run_all"), "impure");
 }
 
 /// A module body or a class body binding a function's name again on some paths

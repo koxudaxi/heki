@@ -19,10 +19,13 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `rule.EFF114` | rule | [`EFF114`](rules/recursion-error-as-value.md) | 0.2.4 | - |
 | `rule.EFF115` | rule | [`EFF115`](rules/async-def-as-sync-callback.md) | 0.2.5 | - |
 | `rule.EFF116` | rule | [`EFF116`](rules/generator-never-iterated.md) | 0.2.6 | - |
+| `rule.IMP201` | rule | [`IMP201`](rules/import-owner-violation.md) | 0.2.7 | - |
+| `rule.IMP202` | rule | [`IMP202`](rules/unresolved-guarded-import.md) | 0.2.7 | - |
 | `rule.MUT101` | rule | [`MUT101`](rules/cached-property-stale-mutation.md) | 0.1.0 | - |
 | `rule.MUT111` | rule | [`MUT111`](rules/cached-property-stale-read.md) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](rules/conditional-ownership-mutation.md) | 0.2.0 | - |
 | `rule.MUT113` | rule | [`MUT113`](rules/iterated-container-mutation.md) | 0.2.0 | - |
+| `rule.MUT120` | rule | [`MUT120`](rules/readonly-view-mutation.md) | 0.2.7 | - |
 
 ## `cli-option.generate-prompt`
 
@@ -112,6 +115,22 @@ The development corpus has no report of it, so its precision is not measured, an
 
 The development corpus has few reports of it, and its premises are not yet certified.
 
+## `rule.IMP201`
+
+- **Kind:** rule
+- **Target:** [`IMP201`](rules/import-owner-violation.md)
+- **Since:** 0.2.7
+
+It is new: its reports are heuristic until a review of its reports on real code bases certifies its claim.
+
+## `rule.IMP202`
+
+- **Kind:** rule
+- **Target:** [`IMP202`](rules/unresolved-guarded-import.md)
+- **Since:** 0.2.7
+
+It is the strict mode of `IMP201`, which is experimental.
+
 ## `rule.MUT101`
 
 - **Kind:** rule
@@ -143,3 +162,11 @@ Its precision on real code bases is still low: much of what it reports is code t
 - **Since:** 0.2.0
 
 It has few reports, and most of them are still false.
+
+## `rule.MUT120`
+
+- **Kind:** rule
+- **Target:** [`MUT120`](rules/readonly-view-mutation.md)
+- **Since:** 0.2.7
+
+It is new: its reports are heuristic until a review of its reports on real code bases certifies its claim.

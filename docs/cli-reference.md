@@ -90,6 +90,9 @@ Options:
       --diff
           Preview fixes as a unified diff without writing files
 
+      --touched <FILE>...
+          Show, fix, and fail on only the diagnostics in one of these files or with a hop of their call chain (`related`) in one, such as the files a commit or a pull request changed; the analysis still covers PATHS (put PATHS before the option). A path that is not an analyzed file is named in a warning
+
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
 
@@ -170,6 +173,8 @@ Examples:
       check two directories
   heki check --select EFF,MUT101 --ignore OPT110
       choose the rules for one run
+  heki check --touched app/users.py app/api.py
+      analyze the project, report only what touches the two files (pre-commit, a pull request)
   heki check --diff
       show the fixes heki proves safe; `--fix` applies them
   heki check --baseline heki-baseline.toml --update-baseline
@@ -376,7 +381,7 @@ Usage: heki inspect [OPTIONS] <SYMBOL> [PATHS]...
 
 Arguments:
   <SYMBOL>
-          A dotted name (`pkg.mod.Class.method`, a dotted suffix such as `Class.method`, or a glob), `path.py:LINE`, or `path.py::NAME`
+          A dotted name (`pkg.mod.Class.method`, a dotted suffix such as `Class.method`, or a glob), `path.py:LINE`, or `path.py::NAME`. `-` reads such symbols from standard input, one per line, and reports on every function they name, a glob on each function it matches, from one analysis: a JSON array, or one text section per function
 
   [PATHS]...
           The project to analyze, as for `heki check`
@@ -397,6 +402,9 @@ Options:
           How many caller levels `--callers` lists
           
           [default: 3]
+
+      --imports
+          Show the imports of the project modules SYMBOL names (a module name or a glob over module names): each import with when it runs and what it loads, and what loading the module loads while it loads
 
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
@@ -436,18 +444,22 @@ Documentation:
   Agent Skill      https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental
 
 Exit codes:
-  0  the function's report is printed
-  2  the symbol names no single function (the error lists the candidates), or a file could not be analyzed
+  0  the report of each function is printed
+  2  a symbol names no single function (the error lists the candidates), or a file could not be analyzed
 
 Examples:
   heki inspect pkg.users.fetch
       a function by its full name
   heki inspect src/pkg/users.py:42 --callers
       the function at a line, with its callers
+  printf '%s\n' pkg.users.fetch 'pkg.orders.*' | heki inspect -
+      every function the symbols name, from one analysis
 
 Output for programs:
   heki inspect <SYMBOL> --output-format json
       the report as one object; on exit code 2, `error` with the candidates
+  heki inspect - --output-format json
+      an array: the object of each function the symbols on standard input name, in their order
 ```
 
 ## `heki recommend`

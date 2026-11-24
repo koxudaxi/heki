@@ -1379,6 +1379,12 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "importlib.import_module"
 environment = "import"
+loads_module = { name = { arg = 0, param = "name" }, package = { arg = 1, param = "package" } }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "builtins.__import__"
+loads_module = { name = { arg = 0, param = "name" }, level = { arg = 4, param = "level" } }
 opaque_to_layer3 = true
 
 [[entries]]

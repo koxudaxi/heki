@@ -18,9 +18,9 @@ pub mod walk;
 pub use builder::build_module_ir;
 pub use dominators::{Dominated, DominatorTree, immediate_dominators};
 pub use facts::{
-    Carries, Decided, FnIndex, GlobalStores, ItemOrigin, ItemOrigins, ItemSource, LEN_CAP_MAX,
-    LastBindings, ModuleBindings, ModuleConstants, Must, PathReader, Paths, Progress, SMALL_MAX,
-    SmallDisplay, Trips, comprehension_id, is_builtin_name,
+    Carries, Decided, FnIndex, GlobalStores, InPlaceChanges, ItemOrigin, ItemOrigins, ItemSource,
+    LEN_CAP_MAX, LastBindings, ModuleBindings, ModuleConstants, Must, PathReader, Paths, Progress,
+    SMALL_MAX, SmallDisplay, Trips, comprehension_id, is_builtin_name,
 };
 pub use special_methods::SpecialMethods;
 
@@ -798,6 +798,12 @@ pub struct IrFunction {
     /// as `.0` from the function creating it: that function and the iterable there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passed_from: Option<(FunctionId, VarId)>,
+    /// The scope whose code makes this one: the function, class body, or module body holding
+    /// its `def`, `class`, `lambda`, or comprehension (`None` for the module body). The
+    /// functions around a scope are not always those its qualname names: a definition under a
+    /// `global` declaration of its name is named as a module-level one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enclosing: Option<FunctionId>,
 }
 
 impl IrFunction {
@@ -1017,6 +1023,11 @@ pub struct ModuleIr {
     /// may be rebound by it (`heki_soundness` builtin-shadowing protection, Assumption A1(b)).
     #[serde(default)]
     pub has_star_import: bool,
+    /// The `from m import *` statements of the module body, with the block of each: they bind
+    /// names, so they are no instructions. A statement in a `finally` body is listed once per
+    /// way out of its `try`. None when the module body is left unmodeled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub star_imports: Vec<(BlockId, Span)>,
     /// Module-level names the code fixes (integer constants and small displays), for the
     /// size facts of [`FnIndex`] and the declarations other modules read.
     #[serde(default)]
@@ -1048,6 +1059,18 @@ pub struct ModuleIr {
 impl ModuleIr {
     pub fn function(&self, id: FunctionId) -> &IrFunction {
         &self.functions[id.0 as usize]
+    }
+
+    /// The functions around `f`, nearest first ([`IrFunction::enclosing`]): those whose
+    /// variables the scopes nested in them may capture, so neither class bodies nor the module
+    /// body.
+    pub fn enclosing_functions<'m>(
+        &'m self,
+        f: &'m IrFunction,
+    ) -> impl Iterator<Item = &'m IrFunction> + 'm {
+        std::iter::successors(Some(f), |g| Some(self.function(g.enclosing?)))
+            .skip(1)
+            .filter(|g| !g.is_class_body && !g.is_module_body)
     }
 
     /// The values the class statements of `shape`'s function pass as bases

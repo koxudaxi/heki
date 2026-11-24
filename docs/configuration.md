@@ -234,7 +234,7 @@ the installed release changed, and the changelog on GitHub lists every release.
   says how many.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
   `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `MUT101`, `MUT103`, `MUT106`, `MUT107`,
-  `MUT108`, `MUT111`, `MUT112`, `MUT113`, `MUT115`): they need their exact code or name. In `ignore`, a prefix covers every
+  `MUT108`, `MUT111`, `MUT112`, `MUT113`, `MUT115`, `MUT120`): they need their exact code or name. In `ignore`, a prefix covers every
   rule it matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
@@ -256,11 +256,13 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 | [`effect-boundaries`](#effect-boundaries) | what a scope must not reach: I/O, writes, reads, or calls | `EFF201` | heuristic |
 | [`readonly-returns`](#readonly-returns) | results every caller shares | `MUT202` | heuristic |
 | [`invalidation`](#invalidation) | writes that must be announced | `MUT109` | heuristic |
+| [`import-owners`](#import-owners) | which modules a module may import (experimental) | `IMP201`; `IMP202` with `unresolved = "report"` | heuristic |
 
 - These rules report nothing until a contract exists. The results of `functools.lru_cache` /
   `functools.cache` functions are checked without one by `MUT114` (`cached-result-mutation`).
 - Declaring a contract selects its rule, whatever its certainty.
-- Every name in a contract is a dotted pattern. It matches the full name or any dotted suffix
+- Every name in a contract but `import-owners`, whose names are
+  [module patterns](#import-owners), is a dotted pattern. It matches the full name or any dotted suffix
   (`DataModel.fields` matches `pkg.model.DataModel.fields`, not `pkg.BigModel.fields`), and it
   may be a glob (`*`, `?`, `[...]`, `{a,b}`).
 - A glob's `*` spans dots (`pkg.parser.*` covers the functions of every module under
@@ -301,9 +303,10 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, a name with more than one colon or an empty module or qualified name, call
   targets whose globs are too many to match together (tens of thousands of complex ones), an
-  argument list heki cannot read, an invalid glob in `allowed-protocols`, or an unknown value of
-  `forbid`, `fresh-objects`, `unresolved`, `references`, `attribution`, `own-receiver`, or
-  `unlisted-dict-keys`.
+  argument list heki cannot read, an invalid glob in `allowed-protocols`, an unknown group or an
+  `ignored-imports` entry without `->` in `import-owners`, or an unknown value of `forbid`,
+  `fresh-objects`, `unresolved`, `references`, `attribution`, `own-receiver`,
+  `unlisted-dict-keys`, `type-checking`, or `reach`.
 - With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
   method named like a target, accessed on an object of unknown class (an unannotated parameter,
@@ -378,8 +381,10 @@ class names the key, in this contract or in any other `write-owners` contract, s
 needs a target first. A target names the keys its attribute pattern matches (`Field._*` names
 `_cache`), and an entry target names its container. A key another contract names is that
 contract's to guard: its writes are judged by that contract's allowance alone. The contract's
-allowance applies to an unlisted key as to a target write. A key computed at run time has no name
-to check (`MUT205`, with `unresolved = "report"`), and neither has a write on an object heki
+allowance applies to an unlisted key as to a target write. A key a loop takes from a tuple,
+list, or set of string constants writes each of them. A key computed at run time has no name
+to check (`MUT205`, with `unresolved = "report"`), nor has a copy of the keys of an instance's
+namespace, whose keys exist already, and neither has a write on an object heki
 cannot type, a helper's parameter that no annotation types included: with `unresolved = "report"`
 too, `MUT205` reports such a key (below). A key every function may write is listed by a contract
 that allows every writer:
@@ -426,17 +431,18 @@ judged by the protocol, the type the code uses it through: `def f(h: Host): h._m
 `Host._m`, not `_m` of the classes implementing `Host`, and a private method of an
 implementation called through the protocol keeps what it reads and calls. A write through such
 a value still writes the implementations' attribute. `allowed-protocols` allows the reads, calls,
-and writes through the protocols it names (see [How contracts report](#how-contracts-report)).
+and writes through the protocols it names, also through a class object typed `type[P]` of such a
+protocol (see [How contracts report](#how-contracts-report)).
 
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `name` | `""` | The contract's name in reports. |
-| `targets` | `[]` | `Class.attr` attributes. A container entry (`Class.attr["key"]`) is a write target only, and a configuration error here. |
+| `targets` | `[]` | `Class.attr` attributes. A container entry (`Class.attr["key"]`) is a write target only, and a configuration error here. An entry can also name attributes of modules outside the project ([below](#symbols-outside-the-project)). |
 | `allowed-readers` | `[]` | Functions allowed to read the targets. |
 | `forbidden-readers` | `[]` | When set, only reads by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to read the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
-| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the reads of a target's attribute name on an object of unknown class are reported under [`MUT206`](rules/unresolved-guarded-read.md). |
+| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the reads of a target's attribute name on an object of unknown class are reported under [`MUT206`](rules/unresolved-guarded-read.md). A target ending in a glob (`Context._*`) matches only the names a class it names, or a project subclass, has from project code ([below](#globs-on-objects-of-unknown-class)). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 | `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
 | `allowed-protocols` | `[]` | As in `write-owners`, for a read or a call through the protocol. |
@@ -463,13 +469,13 @@ The call side of `write-owners`.
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `name` | `""` | The contract's name in reports. |
-| `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass, also through a `functools.partial` object holding it and through a library method building an instance of its receiver's class (a pydantic model's `model_construct`, `model_validate` of a dict, `model_copy`). A target may end in an argument list (`DataType(is_dict=True)`, below). |
+| `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass, also through a `functools.partial` object holding it and through a library method building an instance of its receiver's class (a pydantic model's `model_construct`, `model_validate` of a dict, `model_copy`). A target may end in an argument list (`DataType(is_dict=True)`, below). An entry can also name functions and classes outside the project ([below](#symbols-outside-the-project)). |
 | `subclasses` | `true` | `false`: a class target means constructing exactly the class, not a subclass (an exception class whose subclasses anyone may raise). `Class.method` targets keep covering overrides. |
 | `allowed-callers` | `[]` | Functions allowed to call the targets. |
 | `forbidden-callers` | `[]` | When set, only calls by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to call the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
-| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the calls of a method named like a target (its last name) on an object of unknown class are reported under [`MUT207`](rules/unresolved-guarded-call.md). |
+| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the calls of a method named like a target (its last name) on an object of unknown class are reported under [`MUT207`](rules/unresolved-guarded-call.md). A target ending in a glob matches only the names a class it names, or a project subclass, has from project code ([below](#globs-on-objects-of-unknown-class)). |
 | `references` | `"ignore"` | `"ignore"`, `"calls"`, `"calls-and-bases"`, or `"reads"`: whether a reference handing a target on to be called later counts as a call of it (`[decide]`, `return decide`, `partial(decide)`, `field(default_factory=Rule)`, `obj.callback = self.decide`), with `"calls-and-bases"` a class statement naming a class target among its bases too (`class Derived(Base)`), and with `"reads"` every other use of a target's value as well (`Keys.of(...)`, `Code.OK`, `isinstance(x, Keys)`, `case Keys():`, `tuple[Keys, int]`). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 | `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
@@ -558,6 +564,70 @@ The call side of `write-owners`.
   statement). A load handing a target on is reported as a hand-on only. A read is matched as a
   construction is, so a subclass counts unless `subclasses = false`; an instance of the class is
   no read of it.
+
+### Symbols outside the project
+
+The `targets` of `call-owners` and `read-owners` can also name functions, classes, and module
+attributes outside the project, as an effect boundary's `call-targets` and `read-targets` do, so
+one contract guards the private members of both:
+
+```toml
+[[tool.heki.call-owners]]
+name = "no-private-calls"
+targets = ["pkg.*._*", "<external>._*"]
+forbidden-callers = ["pkg.parser.*"]
+
+[[tool.heki.read-owners]]
+name = "no-private-reads"
+targets = ["sys._getframe"]
+forbidden-readers = ["pkg.parser.*"]
+```
+
+- A dotted name starting with the top-level module names that symbol: `sys._getframe` matches a
+  call of `sys._getframe`, also through `from sys import _getframe`, an alias, or a project
+  module re-exporting it (an access is judged at the symbol heki resolves it to). A glob in the
+  last name names the members it matches (`sys._*`). A dotted suffix (`_getframe`), a leading
+  glob (`*._getframe`), a module part, or an argument list names project code only.
+- `<external>.<name>` names the members of every module and class outside the project whose last
+  name `<name>` matches: `<external>._*` the private ones. A glob there leaves out the names that
+  are public API although they start with an underscore: dunder (`__name__`) and sunder
+  (`_missing_`) names, and `_asdict`, `_field_defaults`, `_fields`, `_make`, and `_replace` of
+  `collections.namedtuple`, the names ruff's `flake8-self` does not report either. A name written
+  out (`<external>._replace`) matches as written. `<external>` takes one name after it; any other
+  spelling is a configuration error.
+- A `call-owners` target counts the calls of the symbol, a `read-owners` target every other load
+  of it: `return sys._getframe`, `getframe = sys._getframe`, and an import binding it (`from sys
+  import _getframe`, at the import, in the function or the module body running it). A name
+  loaded only to be called there (`_getframe(1)`) is a call, not a read, as `sys._getframe(1)` is.
+  A reference handing an outside symbol on is no call of it, whatever `references` says.
+- Only a call or a read heki resolves counts: a name of unknown origin, or an attribute read by
+  name (`getattr(sys, name)`), is not reported. With `unresolved = "report"`, an `<external>`
+  entry matches nothing on an object of unknown class; a written last name (`sys._getframe`)
+  matches its name there, as any target's last name does.
+- The rest of the contract applies as for project targets: the allowed and forbidden functions,
+  the exempt methods, `attribution`, and the reports of private helpers at their callers. A
+  class's own initialization and `own-receiver` allow none of these accesses: an outside symbol
+  is no member of the class making them.
+
+### Globs on objects of unknown class
+
+With `unresolved = "report"`, a `read-owners` or `call-owners` target names the reads or calls of
+its last name on objects of unknown class (`MUT206`, `MUT207`). A last name that is a glob
+(`Context._*`) matches there only the names a class the target names, or a project subclass of
+one, has from project code: the names the class or a project base declares (in its body, set on
+its instances by its methods or its module, or stored on the class object), and the names the
+code writes on objects typed with one of them or on objects of unknown class. A name only a base
+outside the project gives the class is that base's API, which any object may have: with
+`targets = ["Context._*"]` and `class Context(NamedTuple)`, an untyped `ctx._replace(...)` is not
+reported, and an untyped `ctx._secret()` is when `Context` defines `_secret`.
+
+- A class whose module stores attributes heki cannot name (`setattr(self, name, v)`), or on
+  whose instances the code writes names computed at run time, may have any name.
+- A glob naming no holder (`_*` among the `call-owners` targets) matches the names of every
+  project class; one naming only modules (`pkg.util.*`) or symbols outside the project matches
+  none: no object of unknown class has them as members.
+- A written-out last name (`Context._replace`) matches by name, and so do the writes `MUT205`
+  counts: a write may add the member.
 
 ### Allowed and forbidden functions
 
@@ -650,7 +720,10 @@ name, starting with the top-level module: `os.getenv` matches a call of `os.gete
 `from os import getenv`, `import os as o`), `platform.*` every function of `platform`, and
 `sys.platform` a read of `sys.platform` (also `from sys import platform`, or `import sys as s`
 and `s.platform`). A dotted suffix (`getenv`), a leading glob (`*.getenv`), or a module part (`os:getenv`) never
-names a symbol outside the project, so an entry for project functions keeps its meaning. Only a call or a read
+names a symbol outside the project, so an entry for project functions keeps its meaning.
+`<external>._*` names the private members of every module and class outside the project, as for
+the [owner contracts](#symbols-outside-the-project), whose rules for calls and reads these
+entries follow. Only a call or a read
 heki resolves counts: an attribute read by name (`getattr(sys, name)`) or on an object of unknown
 origin is not reported.
 
@@ -779,6 +852,88 @@ container methods, `setattr` / `__dict__`, and helpers. A helper changing an arg
 not type writes the field or instance its caller binds to it. At most 64 `invalidation`
 contracts can be declared.
 
+### `import-owners`
+
+```toml
+[[tool.heki.import-owners]]
+name = "facts-leaf"
+importers = ["pkg.facts"]
+allowed-imports = ["<stdlib>", "pkg._records"]
+
+[[tool.heki.import-owners]]
+name = "shared-model-backends"
+importers = ["pkg.model.shared"]
+forbidden-imports = ["pkg.model.backend", "pkg.model.backend.*"]
+
+[[tool.heki.import-owners]]
+name = "no-root-import"
+importers = ["pkg.*"]
+forbidden-imports = ["pkg"]
+```
+
+Which modules the modules of `importers` may import, checked by
+[`IMP201`](rules/import-owner-violation.md). Its names are module patterns: a whole module name
+or a glob whose `*` spans dots, never a suffix (`pkg.*` names `pkg.facts` and
+`pkg.model.shared`, not `pkg`), or one of the groups `<stdlib>` (the standard library),
+`<project>` (the project's modules), and `<third-party>` (every other module).
+
+| Key | Default | Meaning |
+| --- | ------- | ------- |
+| `name` | `""` | The contract's name in reports. |
+| `importers` | every module | The modules judged. |
+| `exempt-importers` | `[]` | Modules of `importers` that are not judged. |
+| `allowed-imports` | `[]` | The modules the importers may import: every other import is reported. |
+| `forbidden-imports` | `[]` | When set, only imports of these modules are reported, less the allowed ones, as in [Allowed and forbidden functions](#allowed-and-forbidden-functions). A contract setting neither list allows no imports. |
+| `ignored-imports` | `[]` | `"importer -> imported"` pairs of module patterns whose imports the contract accepts (`"pkg.cli -> pkg.db"`). |
+| `type-checking` | `"ignore"` | `"ignore"` or `"report"`: whether the imports under `if TYPE_CHECKING:`, which never run, count. |
+| `reach` | `"statement"` | `"statement"`: each import of an importer is judged. `"import-time"`: every module loading an importer loads while it loads. `"all"`: every module a chain of imports that run leads to. |
+| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the imports whose module heki cannot name are reported under [`IMP202`](rules/unresolved-guarded-import.md). |
+| `message` | none | The help of every report of the contract. |
+
+- An import counts wherever it runs: in the module body, a class body, a function, or lazily,
+  with or without an `ImportError` handler around it. `importlib.import_module` and
+  `__import__` with a constant name count as imports of that module.
+- `import a.b.c` imports `a.b.c`, not `a` or `a.b`, which it loads first. `from a.b import c`
+  imports the submodule `a.b.c` when the package has one and binds no `c` before importing it,
+  and `a.b` otherwise. An import of a module the project lacks below one of its packages fails,
+  and is no import.
+- One report per import and module. A report's target, which a
+  [baseline](adoption.md#ratchet-baselines) counts it by, is the module imported.
+- With `reach`, each module reached is reported once per importer, at the import of the importer
+  that starts a shortest chain to it, with the other steps as related locations. A step through
+  a parent package counts: loading `pkg.models.base` runs `pkg/models/__init__.py` first. The
+  packages holding the importer load before it and are never reached. The walks of one contract
+  share a budget proportional to the import graph, in the order of the modules; past it, the
+  importers left get no report.
+- Definitions are not import targets: who may use a class or a function is a
+  [`call-owners`](#call-owners) or [`read-owners`](#read-owners) contract.
+
+Outside a package, only its public entry: every module but the package's own may import
+`app.billing`, and none of the modules under it.
+
+```toml
+[[tool.heki.import-owners]]
+name = "billing-entry"
+exempt-importers = ["app.billing", "app.billing.*"]
+forbidden-imports = ["app.billing.*"]
+message = "import `app.billing` and use what it exports"
+```
+
+`from app.billing import Invoice` imports the package, while `from app.billing import invoice`,
+`import app.billing.invoice`, and `from app.billing.invoice import Invoice` import the
+submodule.
+
+A start-up contract: loading `pkg.cli` must not load `torch`, however many modules lie between
+them.
+
+```toml
+[[tool.heki.import-owners]]
+name = "startup"
+importers = ["pkg.cli"]
+forbidden-imports = ["torch", "torch.*"]
+reach = "import-time"
+```
+
 ### How contracts report
 
 These hold for `write-owners`, `read-owners`, and `call-owners`, and the reporting at callers
@@ -831,7 +986,11 @@ holds for `invalidation` too:
 - **`allowed-protocols` allows the accesses through the protocols it names.** A read, call, or
   write through a value typed with a project protocol a pattern names (or a subprotocol of one)
   that declares the member, itself or through its protocol bases, is allowed wherever it is
-  judged, and so is a reference that `references` counts (`return h._helper`): `allowed-protocols = ["*Host"]` allows `parser._flag` with `parser: RenderHost` and
+  judged, and so is a reference that `references` counts (`return h._helper`). So is one through
+  a class object typed `type[P]` of such a protocol (a parameter, a local, or an attribute
+  annotated so: `cls._items_constraints(obj)` with `cls: type[KeywordsHost]`), and one through a
+  protocol whose implementations heki cannot list, though heki cannot tie either to a class
+  (`MUT205`, `MUT206`, `MUT207`): `allowed-protocols = ["*Host"]` allows `parser._flag` with `parser: RenderHost` and
   `class RenderHost(RuntimeFlags, Protocol)` when `RuntimeFlags` declares `_flag`, while the same
   read through `flags: RuntimeFlags` stays reported. With `protocol-subclasses = false`, a
   pattern names the protocols it matches only, not their subprotocols: with
@@ -841,9 +1000,9 @@ holds for `invalidation` too:
   protocol is allowed for the protocol's member and for each implementation's attribute alike.
   Accesses through a
   protocol that does not declare the member, through an implementation's class, through a value
-  of unknown class (`unresolved = "report"`, also a protocol whose implementations heki cannot
-  list), and a protocol-typed value handed to a helper that changes it without typing its
-  parameter stay reported. By the call graph, a private method of an implementation that a call
+  of unknown class that no annotation types with such a protocol (`unresolved = "report"`), and a
+  protocol-typed value handed to a helper that changes it without typing its parameter stay
+  reported. By the call graph, a private method of an implementation that a call
   through the protocol runs still hands its writes of its own `self` to the caller.
 - **The help names the allowed code that does it today.** After the contract's `message`, the
   help of a report names up to three public functions and methods whose own body does what the
@@ -874,6 +1033,14 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   `exempt-writers` of `invalidation`. The `read-targets`, `call-targets`, and
   `allowed-callees` of an effect boundary and the `producers` of `readonly-returns` may name
   symbols outside the project, and are not judged.
+- A `call-owners` or `read-owners` target whose first name is no module of the project may name
+  code outside it. It is matched when the analyzed files call or read a symbol outside the
+  project it names, and it is not judged when it is an `<external>` entry or its first name is a
+  module outside the project (one of the standard library, or one a module of the analyzed files
+  imports at module level): it is a rule about any use of that code, now or later, and heki
+  cannot list what such a module has. Any other entry is judged as above, so a misspelled class
+  (`Feild.removed`) is still reported, and so is an entry naming project code a run over some
+  files leaves out.
 - Each entry is matched as its rule matches it, against the definitions of the analyzed files:
   a function pattern names a function, method, class, or module body; a call target a function,
   method, or class; an exempt method a method's name; a scope a module, class, or function; a
@@ -882,9 +1049,17 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   class body binds (a method, an annotation, an assignment), one its methods or its module set
   on its instances, one of a project base, an attribute or a constant `__dict__` key the code
   writes or reads on an object typed with the class or a subclass, or one written on an object
-  heki cannot type. A class whose module stores attributes heki cannot name
-  (`setattr(self, name, v)`), or that the code gives a name computed at run time, may have any
-  attribute. An attribute that only a base outside the project defines matches when the code
+  heki cannot type. A key a loop takes from a tuple, list, or set of string constants
+  (`for key in ("_a", "_b")`) names each of them. A class whose module stores attributes heki
+  cannot name (`setattr(self, name, v)`), or that the code gives a name computed at run time,
+  may have any attribute: an entry naming none of its known ones is not reported, except with
+  `unmatched-contract-entries = "error"`, as one that names nothing "unless it is one the code
+  names at run time". A key taken from the namespace of an instance of the class or a
+  subclass (`for key, value in other.__dict__.items()`, `.keys()`, iterating it or
+  `vars(other)`, also through `list`, `tuple`, `sorted`, or a copy, and
+  `obj.__dict__.update(other.__dict__)`) names an attribute the instance has already, as a
+  `__deepcopy__` copying it does, and a deletion adds none: neither gives the class a name.
+  An attribute that only a base outside the project defines matches when the code
   uses it on the class. An entry target (`Class.attr["key"]`) is judged by its attribute.
 - An entry whose last part is a glob is a rule about every name it may match, later ones
   included: it needs only what holds that part (`pkg.store` of `pkg.store:*`, the class of
@@ -993,7 +1168,8 @@ a.py:6:12: unused-suppression No `EFF101` report on this line to suppress
 - A run judges what it reported, under its configuration: with `relax-async-in-tests`, a
   suppression of `EFF101` in a test suppresses nothing. A run over some files of a project misses
   the reports that come from the others (`heki check a.py` when the blocking call is in `b.py`),
-  so judge, and fix, on the whole project, as a pre-commit hook with `pass_filenames: false` does.
+  so judge, and fix, on the whole project: to look at some files, pass them to `--touched`, which
+  keeps the analysis whole, as the pre-commit hook does.
 - `heki check --fix` (and `--diff`) removes the unused codes, and the language server offers the
   same edit as a quick fix. The other codes stay; a suppression left without codes goes, with
   the blanks before it, and so does its line when the comment is alone on it. Other text of the

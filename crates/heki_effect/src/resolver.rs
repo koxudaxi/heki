@@ -15,24 +15,24 @@
 
 use crate::capacity::CapacityOf;
 use crate::decorators;
-use crate::types::{Args, Elem, Generic, Ty, generic, typing_generic};
+use crate::types::{Added, Args, Elem, Generic, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
 use heki_env::HekiConfig;
 use heki_ir::walk::{Answer, Budget, FnShape, ReadLog, SharedMemo, Visit, reach};
 use heki_ir::{
-    BinOpKind, BlockId, ConstLiteral, FnIndex, FunctionKind, GlobalStores, Inst, InstKind,
-    IrFunction, LastBindings, ModuleIr, SmallDisplay, Terminator, VarId,
+    BinOpKind, BlockId, ConstLiteral, FnIndex, FunctionId, FunctionKind, GlobalStores, Inst,
+    InstKind, IrFunction, LastBindings, ModuleIr, SmallDisplay, Terminator, VarId,
 };
 use heki_kb::{
     ArgFact, CopyDepth, EcosystemEntry, EffectiveEcosystemKb, ExecEffectKind, LiteralValue,
 };
-use heki_semantic::{ModuleImport, ScopeKind, SemanticModel, StarImport, mangling};
+use heki_semantic::{ClassInfo, ModuleImport, ScopeKind, SemanticModel, StarImport, mangling};
 use rayon::prelude::*;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::BuildHasher;
 use std::ops::Bound;
@@ -462,10 +462,10 @@ pub struct StoredElsewhere {
     /// (`obj.items += [x]`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_place: bool,
-    /// The module's code changes the object the name holds in place (`cfg.HANDLERS[kind] =
-    /// run`, `obj.items.append(x)`): its items are unknown.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub changed: bool,
+    /// What the module's code changing the object the name holds in place adds to it
+    /// (`cfg.HANDLERS[kind] = run`, `obj.items.append(x)`): its items join what they add.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed: Option<Added>,
 }
 
 /// A module's global and attribute types decided without what reading them gives, where they
@@ -530,6 +530,11 @@ pub struct ClassDecl {
     /// value.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stores_any_attr: bool,
+    /// One of those stores may add an attribute an instance did not have: its name is no key of
+    /// the namespace of an instance of the class or a subclass (a copy,
+    /// `self.__dict__.update(other.__dict__)`, [`ProjectDecls::keys_exist_in`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adds_unnamed_attrs: bool,
     /// The attributes the module's code rebinds to what an in-place operator gives on their own
     /// value (`self.items += [x]`), sorted: such a store binds the object it read when the
     /// attribute holds a value the operator changes in place ([`ProjectDecls::join_family`]).
@@ -604,6 +609,17 @@ pub struct ClassDecl {
     /// own attribute ([`ProjectDecls::attr_write_runs_code`]).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub properties: BTreeSet<String>,
+    /// The `@property` getters whose return annotation is a container type, as for
+    /// `container_fields`, with the access the type promises: reading the attribute gives a
+    /// container, which a type checker stops changing in place when the type is read-only
+    /// (`Sequence`, `Mapping`) (`MUT120`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub container_properties: BTreeMap<String, ParamAccess>,
+    /// Every name the class defines (`members`), at least one, is a property without a setter
+    /// or deleter: a `properties` name whose getter is a `FunctionDecl::is_property`
+    /// ([`ProjectDecls::is_readonly_view`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub only_getters: bool,
     /// The attributes its module stores on the class object or deletes outside the class body
     /// (`Keys.KEY = "x"`, `cls.KEY = "x"`, [`class_attrs_rebound`]): the class's own value of
     /// the name from then on, which no string constant of the class or its bases fixes.
@@ -1008,6 +1024,13 @@ pub struct ModuleDecls {
     /// [`Self::alias_paths`]).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub rebound_definitions: BTreeSet<String>,
+    /// The module's classes and functions whose `class` or `def` statement a function or a
+    /// class body runs under a `global` declaration of the name (`global Config`, then
+    /// `class Config: ...` in `_define`), by qualname, with the qualname of that scope
+    /// ([`made_in`]). CPython names them as module-level definitions, which they are once that
+    /// scope has run; the code written in them is that scope's. Boxed: few modules have one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub made_in: Option<Box<BTreeMap<String, String>>>,
     /// What the module's code stores into the globals of other project modules and into the
     /// instances of their classes (`stores::record`). Boxed: most modules store into none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1190,6 +1213,7 @@ impl ModuleDecls {
             class.attr_types.clear();
             class.attr_stores = Box::default();
             class.stores_any_attr = false;
+            class.adds_unnamed_attrs = false;
             class.restores_state = false;
             class.in_place_attrs = Box::default();
             class.attr_capacities.clear();
@@ -1599,16 +1623,17 @@ pub(crate) fn qualifiers<'t>(
 fn container_annotation(
     text: &str,
     resolve: &impl Fn(&str) -> Option<String>,
-) -> (Qualifiers, bool) {
+) -> (Qualifiers, Option<ParamAccess>) {
     let (q, inner) = qualifiers(text, resolve);
-    let container =
-        !q.class_var && !q.pseudo_field && inner.and_then(|t| param_access(t, resolve)).is_some();
+    let container = inner
+        .filter(|_| !q.class_var && !q.pseudo_field)
+        .and_then(|t| param_access(t, resolve));
     (q, container)
 }
 
 /// What a parameter annotation promises about changing the argument (`MUT108`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ParamAccess {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ParamAccess {
     /// `Sequence[...]` / `Mapping[...]` / `ReadOnly[...]`: the argument is only read.
     ReadOnly,
     /// A mutable container type: the argument may be changed in place.
@@ -2027,7 +2052,7 @@ pub struct ProjectDecls {
     catalog_attributes: SharedMemo<(String, String), Option<String>, DeclKeys>,
 }
 
-/// Why an attribute (or `TypedDict` key) of a project class is read-only (`MUT108`).
+/// Why an attribute (or `TypedDict` key) of a project class is read-only (`MUT108`, `MUT120`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadOnlyKind {
     /// A field of a frozen class: a frozen dataclass, a `NamedTuple`, or a class that a
@@ -2035,6 +2060,9 @@ pub enum ReadOnlyKind {
     Frozen,
     /// Declared `Final[...]` or `ReadOnly[...]` (`ClassDecl::readonly_attrs`).
     Declared,
+    /// A property of a read-only view ([`ProjectDecls::is_readonly_view`]): the class declares
+    /// the whole value read-only, not one field (`MUT120`).
+    View,
 }
 
 /// The declaration that makes an attribute read-only: the first class along the MRO that
@@ -2043,7 +2071,26 @@ pub enum ReadOnlyKind {
 pub struct ReadOnlyAttr {
     pub class: String,
     pub kind: ReadOnlyKind,
+    /// The attribute holds a container. Fields and declarations are read-only only when they
+    /// do (`ClassDecl::container_fields`, `readonly_attrs`); a view's property holds one when
+    /// its getter's return annotation is a container type (`ClassDecl::container_properties`).
+    pub holds_container: bool,
+    /// A view's property annotated with a read-only container type (`Sequence`, `Mapping`): a
+    /// type checker stops changing in place what it returns, through the view.
+    pub typed_read_only: bool,
 }
+
+/// The bases outside the project a read-only view may have: they define no attribute of its
+/// instances ([`ProjectDecls::is_readonly_view`]).
+const VIEW_BASES: &[&str] = &[
+    "object",
+    "builtins.object",
+    "abc.ABC",
+    "typing.Generic",
+    "typing_extensions.Generic",
+    "typing.Protocol",
+    "typing_extensions.Protocol",
+];
 
 /// Where an import looks for the modules under a package ([`ProjectDecls::search_under`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -3466,10 +3513,11 @@ impl ProjectDecls {
         self.class(fqn).is_some()
     }
 
-    /// Whether the module of the project class `class` stores attributes of its instances that
-    /// heki cannot name (`setattr(self, name, v)`, `self.__dict__.update(other)`).
-    pub fn stores_unnamed_attrs(&self, class: &str) -> bool {
-        self.class(class).is_some_and(|c| c.stores_any_attr)
+    /// Whether the module of the project class `class` may add attributes heki cannot name to
+    /// its instances (`setattr(self, name, v)`, `self.__dict__.update(other)`), past the copies
+    /// of the namespaces of instances of the class family ([`ClassDecl::adds_unnamed_attrs`]).
+    pub fn adds_unnamed_attrs(&self, class: &str) -> bool {
+        self.class(class).is_some_and(|c| c.adds_unnamed_attrs)
     }
 
     /// The names the project class `class` declares itself: its members (class-body names and
@@ -3538,22 +3586,68 @@ impl ProjectDecls {
         m.classes.contains_key(rest).then_some(rest)
     }
 
-    /// Why attribute `attr` of an instance of `class` is read-only (`MUT108`): the first class
-    /// along the MRO that has it as a field of a frozen class, or declares it `Final` /
-    /// `ReadOnly`.
+    /// Why attribute `attr` of an instance of `class` is read-only (`MUT108`, `MUT120`): the
+    /// first class along the MRO that has it as a field of a frozen class, or declares it
+    /// `Final` / `ReadOnly`; or, when `class` is a read-only view, the class along its MRO that
+    /// defines the property.
     pub fn readonly_attr(&self, class: &str, attr: &str) -> Option<ReadOnlyAttr> {
-        self.mro(class).into_iter().find_map(|c| {
-            let decl = self.class(&c)?;
-            self.read(|k| note(&mut k.class_facts, &c));
-            let kind = if self.frozen.contains(&c) && decl.container_fields.contains(attr) {
+        let mro = self.mro(class);
+        let declared = mro.iter().find_map(|c| {
+            let decl = self.class(c)?;
+            self.read(|k| note(&mut k.class_facts, c));
+            let kind = if self.frozen.contains(c) && decl.container_fields.contains(attr) {
                 ReadOnlyKind::Frozen
             } else if decl.readonly_attrs.contains(attr) {
                 ReadOnlyKind::Declared
             } else {
                 return None;
             };
-            Some(ReadOnlyAttr { class: c, kind })
+            let class = c.clone();
+            Some(ReadOnlyAttr {
+                class,
+                kind,
+                holds_container: true,
+                typed_read_only: false,
+            })
+        });
+        declared.or_else(|| {
+            if !self.is_view_along(&mro) {
+                return None;
+            }
+            let (c, decl) = mro
+                .iter()
+                .find_map(|c| Some((c, self.class(c).filter(|d| d.members.contains(attr))?)))?;
+            let access = decl.container_properties.get(attr);
+            Some(ReadOnlyAttr {
+                class: c.clone(),
+                kind: ReadOnlyKind::View,
+                holds_container: access.is_some(),
+                typed_read_only: access == Some(&ParamAccess::ReadOnly),
+            })
         })
+    }
+
+    /// Whether `class` is a read-only view: a project class, a protocol or not, that defines,
+    /// with every project class along its MRO, nothing but properties without a setter or
+    /// deleter (`@property` getters), at least one; no plain attribute, method, or
+    /// `__setattr__`, no metaclass heki does not know, and no other base than those defining no
+    /// attribute ([`VIEW_BASES`]). Code holding a value through such a class can only read it.
+    pub fn is_readonly_view(&self, class: &str) -> bool {
+        self.is_view_along(&self.mro(class))
+    }
+
+    /// [`Self::is_readonly_view`] of the class whose MRO is `mro`.
+    fn is_view_along(&self, mro: &[String]) -> bool {
+        let mut getters = false;
+        let views = mro.iter().all(|c| {
+            self.read(|k| note(&mut k.class_facts, c));
+            let Some(decl) = self.class(c) else {
+                return VIEW_BASES.contains(&c.as_str());
+            };
+            getters |= decl.only_getters;
+            !decl.custom_metaclass && (decl.only_getters || decl.members.is_empty())
+        });
+        views && getters
     }
 
     /// Whether a project class along the MRO of `class` names a metaclass other than `type` and
@@ -4180,6 +4274,15 @@ impl ProjectDecls {
         self.mro(sub).iter().skip(1).any(|c| c == base)
     }
 
+    /// Whether a key of the namespace of an instance of the project class `source` names an
+    /// attribute an instance of the project class `class` may have already:
+    /// `source` is `class` or derives from it, so its instances hold only attributes of the
+    /// family of `class`, and a copy of such a namespace adds none.
+    pub(crate) fn keys_exist_in(&self, source: &str, class: &str) -> bool {
+        let (source, class) = (self.canonical(source), self.canonical(class));
+        source == class || self.is_subclass(&source, &class)
+    }
+
     /// The method resolution order of `class`: Python's C3 linearization of its project bases;
     /// an external base stands for itself (its bases are not known). A hierarchy C3 cannot
     /// linearize (Python rejects the class statement, or a cycle) keeps the depth-first,
@@ -4538,6 +4641,17 @@ impl ProjectDecls {
     pub(crate) fn class_object(&self, class: &str) -> Option<Ty> {
         (self.is_project_class(class) && self.protocol(class).is_none())
             .then(|| Ty::Class(class.to_owned()))
+    }
+
+    /// The project protocol a class object type names (`type[P]` of an annotation), whose
+    /// class [`Self::class_object`] leaves unknown: the contracts still judge an access through
+    /// it by the protocol (`allowed-protocols`).
+    pub(crate) fn protocol_class(&self, ty: &Ty) -> Option<String> {
+        let Ty::Class(class) = ty else {
+            return None;
+        };
+        let class = self.object_named(class);
+        self.protocol(&class).is_some().then_some(class)
     }
 
     /// Whether the inferred type `t` is narrower than the declared `declared`, so that a value
@@ -5419,6 +5533,18 @@ fn module_read(
     }
 }
 
+/// Whether the module body runs the `class` statement `class` itself: the nearest block around
+/// it, past a PEP 695 type-parameter scope, is the module's. A class named as a module-level one
+/// may be made by a function declaring its name `global` ([`ModuleDecls::made_in`]).
+fn statement_in_module_body(semantic: &SemanticModel, class: &ClassInfo) -> bool {
+    let scope =
+        |id: heki_semantic::ScopeId| semantic.scopes.get(id.0 as usize).filter(|sc| sc.id == id);
+    let first = scope(class.scope).and_then(|sc| sc.parent).and_then(scope);
+    std::iter::successors(first, |sc| sc.parent.and_then(scope))
+        .find(|sc| sc.kind != ScopeKind::TypeParameters)
+        .is_some_and(|sc| sc.kind == ScopeKind::Module)
+}
+
 /// Pass 1: imports, classes (bases), functions (signatures) — no inference.
 fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     let semantic = input.semantic;
@@ -5455,13 +5581,16 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             decls.functions.insert(f.qualname.clone(), Box::default());
         }
     }
-    (decls.aliases, decls.alias_paths) = module_aliases(input, &decls);
+    let made_in = made_in(input);
+    decls.made_in = (!made_in.is_empty()).then(|| Box::new(made_in));
+    let bindings = BodyBindings::of(input, &decls);
+    (decls.aliases, decls.alias_paths) = module_aliases(input, &decls, &bindings);
     decls.type_vars = type_vars(input, &decls);
     let stores = GlobalStores::of(&input.ir.functions);
     decls.unknown_globals = unknown_globals(&stores, &decls);
     let rebound = rebound_imports(input, &stores, &decls);
     decls.rebound_imports = (!rebound.is_empty()).then(|| Box::new(rebound));
-    decls.rebound_definitions = rebound_definitions(input, &stores, &decls);
+    decls.rebound_definitions = rebound_definitions(input, &stores, &decls, &bindings);
     decls.private_members = (decls.classes.keys())
         .chain(decls.functions.keys())
         .any(|qualname| mangling::member_path(qualname).is_some());
@@ -5510,7 +5639,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                 .map(|(_, target, _, _)| target)
         };
         let mut bases: Vec<String> = Vec::new();
-        if !class.qualname.contains('.') {
+        if statement_in_module_body(semantic, class) {
             // The module body names its bases through the module's names; an expression
             // (`with_metaclass(Meta)`, `*bases`) is an unknown base.
             bases.extend(class.bases.iter().filter_map(|b| {
@@ -5899,8 +6028,8 @@ fn attr_calls<'f>(
         Some(InstKind::Const {
             literal: ConstLiteral::Str(s),
             ..
-        }) => Some(s.clone()),
-        _ => None,
+        }) => stores::AttrName::Named(Cow::Owned(s.clone())),
+        _ => stores::AttrName::Unknown,
     };
     calls
         .iter()
@@ -6556,6 +6685,7 @@ fn rebound_imports(
 fn module_aliases(
     input: &ModuleInput<'_>,
     decls: &ModuleDecls,
+    bindings: &BodyBindings<'_>,
 ) -> (BTreeMap<String, String>, BTreeMap<String, Vec<String>>) {
     let module = module_scope(input.semantic);
     let module_imports = || {
@@ -6631,7 +6761,9 @@ fn module_aliases(
         }
     }
     let mut paths = BTreeMap::new();
-    for (name, objects) in definitions_bound_again(input, decls, &stores, &named, &mut known) {
+    for (name, objects) in
+        definitions_bound_again(input, decls, bindings, &stores, &named, &mut known)
+    {
         match <[String; 1]>::try_from(objects) {
             Ok([target]) => {
                 if target != format!("{}.{name}", decls.module_name) {
@@ -6649,14 +6781,17 @@ fn module_aliases(
 /// The module-level classes and functions the module body binds again (`def fetch(...)`, then
 /// `fetch = _quiet`), each with the objects it may hold once the module has run (sorted, the
 /// definition as its own fqn): what the bindings that may be the last one bind
-/// ([`LastBindings::last_of`]; a path leaving the name unbound raises where it is called). A
-/// name another function stores or deletes, an import binds, or one of those bindings binds to
-/// anything but a named object is none, and so is every name where a star import, `exec`, or
-/// `globals()` may bind any. A definition of the module among the objects is the object its
-/// statement made, whatever its name holds later ([`ProjectDecls::named_on_paths`]).
+/// ([`LastBindings::last_of`]; a path leaving the name unbound raises where it is called), where
+/// running a scope that binds the definition under `global` binds the definition itself
+/// ([`BodyBindings`]). A name another function stores or deletes, an import binds, or one of
+/// those bindings binds to anything but a named object is none, and so is every name where a
+/// star import, `exec`, or `globals()` may bind any. A definition of the module among the
+/// objects is the object its statement made, whatever its name holds later
+/// ([`ProjectDecls::named_on_paths`]).
 fn definitions_bound_again<'i>(
-    input: &'i ModuleInput<'_>,
+    input: &ModuleInput<'_>,
     decls: &ModuleDecls,
+    bindings: &BodyBindings<'i>,
     stores: &GlobalStores<'_>,
     named: &Named<'_>,
     known: &mut FxHashMap<VarId, Option<String>>,
@@ -6665,47 +6800,196 @@ fn definitions_bound_again<'i>(
     if input.ir.constants.dynamic || input.ir.has_star_import {
         return out;
     }
-    let body = input.ir.function(input.ir.module_fn);
-    let defines =
-        |name: &str| decls.classes.contains_key(name) || decls.functions.contains_key(name);
-    let mut bindings: FxHashMap<&str, Vec<(BlockId, u32, VarId)>> = FxHashMap::default();
-    for bb in &body.blocks {
-        for inst in &bb.insts {
-            if let InstKind::StoreGlobal { name, value } = &inst.kind
-                && defines(name)
-            {
-                bindings
-                    .entry(name)
-                    .or_default()
-                    .push((bb.id, inst.span.start, *value));
-            }
-        }
-    }
-    bindings.retain(|name, binds| {
-        binds.len() > 1
-            && stores.exactly(name, binds.len() as u32)
-            && !decls.imports.contains_key(*name)
+    let candidates = bindings.by_name.iter().filter(|(name, binds)| {
+        binds.at.len() > 1
+            && stores.exactly(name, binds.stores)
+            && !decls.imports.contains_key(**name)
     });
-    if bindings.is_empty() {
-        return out;
-    }
-    let shape = FnShape::new(body);
-    let last = LastBindings::of(&shape);
-    for (name, binds) in bindings {
-        let at: Vec<(BlockId, u32)> = binds.iter().map(|&(b, start, _)| (b, start)).collect();
-        let (reaching, _) = last.last_of(&shape, &at);
+    for (name, binds) in candidates {
+        let (reaching, _) = bindings.last().last_of(&bindings.shape, &binds.at);
         let objects: Option<Vec<String>> = reaching
             .iter()
-            .map(|&i| named.object(binds[i].2, known))
+            .map(|&i| match binds.values[i] {
+                Some(value) => named.object(value, known),
+                None => Some(format!("{}.{name}", decls.module_name)),
+            })
             .collect();
         let Some(mut objects) = objects else { continue };
         objects.sort();
         objects.dedup();
         if (1..=crate::types::MAX_NAMED).contains(&objects.len()) {
-            out.push((name, objects));
+            out.push((*name, objects));
         }
     }
     out.sort();
+    out
+}
+
+/// Where the module body binds each of the module's classes and functions: its stores of the
+/// name, and where it runs a scope binding the name's definition on every path through it, by
+/// its `class` or `def` statement under a `global` declaration of the name, the scope's one
+/// store of the name ([`global_binders`]): a call of a module-level function (`_define()`
+/// running `global Config`, then `class Config: ...`), or the `class` statement of a class
+/// body.
+struct BodyBindings<'i> {
+    shape: FnShape<'i>,
+    /// Built on first use: most modules bind no definition again.
+    last: OnceCell<LastBindings>,
+    by_name: FxHashMap<&'i str, NameBindings>,
+}
+
+/// The module body's bindings of one name ([`BodyBindings`]).
+#[derive(Default)]
+struct NameBindings {
+    /// Each binding's block and start, in the module body's order.
+    at: Vec<(BlockId, u32)>,
+    /// What each binding binds: a store's value, or `None` for a scope binding the definition.
+    values: Vec<Option<VarId>>,
+    /// The stores of the name the bindings run: the module body's own, and one for each scope
+    /// they run.
+    stores: u32,
+}
+
+impl<'i> BodyBindings<'i> {
+    fn of(input: &'i ModuleInput<'_>, decls: &ModuleDecls) -> Self {
+        let body = input.ir.function(input.ir.module_fn);
+        let shape = FnShape::new(body);
+        let defines =
+            |name: &str| decls.classes.contains_key(name) || decls.functions.contains_key(name);
+        let binders = global_binders(input, decls);
+        let mut by_name: FxHashMap<&'i str, NameBindings> = FxHashMap::default();
+        let mut runs: FxHashSet<(FunctionId, &str)> = FxHashSet::default();
+        for bb in &body.blocks {
+            for inst in &bb.insts {
+                let mut bind = |name: &'i str, value: Option<VarId>, stores: u32| {
+                    let binds = by_name.entry(name).or_default();
+                    binds.at.push((bb.id, inst.span.start));
+                    binds.values.push(value);
+                    binds.stores += stores;
+                };
+                // The binder the instruction runs: a function it calls, or a class body its
+                // `class` statement runs.
+                let runs_binder = match &inst.kind {
+                    InstKind::StoreGlobal { name, value } if defines(name) => {
+                        bind(name, Some(*value), 1);
+                        continue;
+                    }
+                    _ if binders.is_empty() => continue,
+                    InstKind::Call {
+                        callee_var: Some(callee),
+                        ..
+                    } => match shape.inst(shape.copy_root(*callee)).map(|i| &i.kind) {
+                        Some(InstKind::MakeClosure {
+                            func_id: Some(id), ..
+                        }) if !input.ir.function(*id).is_class_body => *id,
+                        _ => continue,
+                    },
+                    InstKind::MakeClosure {
+                        func_id: Some(id), ..
+                    } if input.ir.function(*id).is_class_body => *id,
+                    _ => continue,
+                };
+                for &name in binders.get(&runs_binder).into_iter().flatten() {
+                    bind(name, None, u32::from(runs.insert((runs_binder, name))));
+                }
+            }
+        }
+        Self {
+            shape,
+            last: OnceCell::new(),
+            by_name,
+        }
+    }
+
+    fn last(&self) -> &LastBindings {
+        self.last.get_or_init(|| LastBindings::of(&self.shape))
+    }
+
+    /// Whether the module body binds `name` on every path ([`LastBindings::always_runs`]).
+    fn always_binds(&self, name: &str) -> bool {
+        self.by_name.get(name).is_some_and(|binds| {
+            (binds.at.iter()).any(|&(block, _)| self.last().always_runs(&self.shape, block))
+        })
+    }
+}
+
+/// The scopes the module body may run that bind definitions of the module under `global` on
+/// every path through them, with the names they bind: a module-level function the module body
+/// can call (a plain `def`: no decorator, which could replace it, and no generator or coroutine
+/// function, whose call runs nothing of its body) or a class body of a module-level `class`
+/// statement, storing the name once, by the `class` or `def` statement of a definition with
+/// that qualname ([`ModuleDecls::made_in`]), in a block every path through it to a return runs.
+fn global_binders<'i>(
+    input: &'i ModuleInput<'_>,
+    decls: &ModuleDecls,
+) -> FxHashMap<FunctionId, Vec<&'i str>> {
+    let mut out: FxHashMap<FunctionId, Vec<&'i str>> = FxHashMap::default();
+    let Some(made_in) = decls.made_in.as_deref() else {
+        return out;
+    };
+    let makers: FxHashSet<&str> = made_in.values().map(String::as_str).collect();
+    let binders = input.ir.functions.iter().filter(|f| {
+        f.enclosing == Some(input.ir.module_fn)
+            && makers.contains(f.qualname.as_str())
+            && (f.is_class_body
+                || (matches!(f.kind, FunctionKind::Sync) && f.decorators.is_empty()))
+    });
+    for f in binders {
+        // Each global's stores in `f`, with a deletion as a store of no value.
+        let mut stores: FxHashMap<&str, Vec<(BlockId, Option<VarId>)>> = FxHashMap::default();
+        for bb in &f.blocks {
+            for inst in &bb.insts {
+                let (name, value) = match &inst.kind {
+                    InstKind::StoreGlobal { name, value } => (name, Some(*value)),
+                    InstKind::Delete {
+                        name, global: true, ..
+                    } => (name, None),
+                    _ => continue,
+                };
+                stores.entry(name).or_default().push((bb.id, value));
+            }
+        }
+        let shape = FnShape::new(f);
+        let last = LastBindings::of(&shape);
+        let makes = |value: VarId| match shape.inst(value).map(|i| &i.kind) {
+            Some(InstKind::MakeClosure {
+                func_id: Some(id), ..
+            }) => Some(input.ir.function(*id).qualname.as_str()),
+            _ => None,
+        };
+        let bound: Vec<&'i str> = stores
+            .into_iter()
+            .filter_map(|(name, at)| match at[..] {
+                [(block, Some(value))]
+                    if makes(value) == Some(name)
+                        && made_in.get(name) == Some(&f.qualname)
+                        && last.always_runs(&shape, block) =>
+                {
+                    Some(name)
+                }
+                _ => None,
+            })
+            .collect();
+        if !bound.is_empty() {
+            out.insert(f.id, bound);
+        }
+    }
+    out
+}
+
+/// [`ModuleDecls::made_in`]: the definitions named as module-level ones (a `class` or a named
+/// `def`) whose scope is made by a function or a class body, with its qualname.
+fn made_in(input: &ModuleInput<'_>) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for f in &input.ir.functions {
+        let Some(maker) = f.enclosing.map(|id| input.ir.function(id)) else {
+            continue;
+        };
+        if !maker.is_module_body && !f.qualname.contains('.') && !f.qualname.starts_with('<') {
+            out.entry(f.qualname.clone())
+                .or_insert_with(|| maker.qualname.clone());
+        }
+    }
     out
 }
 
@@ -6798,6 +7082,7 @@ fn rebound_definitions(
     input: &ModuleInput<'_>,
     stores: &GlobalStores<'_>,
     decls: &ModuleDecls,
+    bindings: &BodyBindings<'_>,
 ) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut by_statement: FxHashMap<&str, u32> = FxHashMap::default();
@@ -6842,6 +7127,12 @@ fn rebound_definitions(
     // (`ModuleDecls::aliases`, `ModuleDecls::alias_paths`): a call through the name runs them,
     // and a value naming the definition is the object its statement made.
     let resolved = |q: &str| decls.aliases.contains_key(q) || decls.alias_paths.contains_key(q);
+    // A definition whose statement a function runs holds the name once that function has run
+    // (`ModuleDecls::made_in`): unless the module body binds the name on every path, a read
+    // may find it unbound, or bound to what that function binds at some other time.
+    let made_in = decls.made_in.as_deref();
+    let bound_late =
+        |q: &str| made_in.is_some_and(|m| m.contains_key(q)) && !bindings.always_binds(q);
     out.extend(
         decls
             .functions
@@ -6851,7 +7142,8 @@ fn rebound_definitions(
             .filter(|q| {
                 dynamic
                     || !(resolved(q)
-                        || stores.exactly(q, by_statement.get(q.as_str()).copied().unwrap_or(0)))
+                        || (stores.exactly(q, by_statement.get(q.as_str()).copied().unwrap_or(0))
+                            && !bound_late(q)))
             })
             .cloned(),
     );
@@ -7028,7 +7320,8 @@ fn param_accesses(f: &IrFunction, decls: &ModuleDecls) -> (u64, u64) {
 }
 
 /// `MUT108` metadata of the module's classes (`ClassDecl::is_frozen`, `container_fields`,
-/// `readonly_attrs`, `decorators`, and `transform`), resolved through the module's imports.
+/// `readonly_attrs`, `decorators`, and `transform`), resolved through the module's imports, and
+/// `MUT120`'s `ClassDecl::only_getters`.
 fn readonly_metadata(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
     struct Found {
         qualname: String,
@@ -7056,7 +7349,7 @@ fn readonly_metadata(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
         let shape = FnShape::new(body);
         for ann in &body.local_annotations {
             let (q, container) = container_annotation(&ann.annotation, &resolve);
-            if ann.target.contains('.') || !container {
+            if ann.target.contains('.') || container.is_none() {
                 continue;
             }
             if !compares_false(&shape, ann.span, &resolve) {
@@ -7108,7 +7401,8 @@ fn readonly_metadata(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
                 .filter_map(|a| {
                     let (q, container) = container_annotation(&a.annotation, &resolve);
                     let attr = a.target.strip_prefix(&prefix)?;
-                    (!attr.contains('.') && q.is_final && container).then(|| attr.to_owned())
+                    (!attr.contains('.') && q.is_final && container.is_some())
+                        .then(|| attr.to_owned())
                 })
                 .collect();
             found.push(Found {
@@ -7132,17 +7426,42 @@ fn readonly_metadata(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
             c.transform = c.transform.max(f.transform);
         }
     }
+    // `MUT120`: the classes defining nothing but property getters.
+    let only_getters: Vec<String> = decls
+        .classes
+        .iter()
+        .filter(|(qualname, c)| {
+            !c.members.is_empty()
+                && c.members.iter().all(|m| {
+                    let getter = decls
+                        .definition_path(&format!("{qualname}.{m}"))
+                        .into_owned();
+                    c.properties.contains(m)
+                        && decls.functions.get(&getter).is_some_and(|f| f.is_property)
+                })
+        })
+        .map(|(qualname, _)| qualname.clone())
+        .collect();
+    for qualname in only_getters {
+        if let Some(c) = decls.classes.get_mut(&qualname) {
+            c.only_getters = true;
+        }
+    }
 }
 
 /// `ClassDecl::properties` of the module's classes: their methods decorated with `property`
 /// (`abc.abstractproperty`) or with an accessor of one (`@x.setter`, `@x.deleter`,
 /// `@x.getter`), and the class-body names bound to a call of the builtin `property`.
 /// `functools.cached_property` is no data descriptor: a store sets the instance's attribute.
+/// Also `ClassDecl::container_properties`: the getters among them annotated to return a
+/// container.
 fn class_properties(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
     let builtin_property = !decls.imports.contains_key("property")
         && !decls.functions.contains_key("property")
         && !decls.classes.contains_key("property");
+    let resolve = |name: &str| decls.resolve_dotted(name, true);
     let mut found: Vec<(String, String)> = Vec::new();
+    let mut containers: Vec<(String, String, ParamAccess)> = Vec::new();
     for f in &input.ir.functions {
         if f.is_class_body {
             let calls: FxHashSet<VarId> = f
@@ -7177,20 +7496,36 @@ fn class_properties(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
         let Some((owner, name)) = method else {
             continue;
         };
-        let is_property = f.decorators.iter().any(|d| {
-            let (head, _) = decorator_parts(d);
-            decls.decorator_is(d, &["property", "abstractproperty"])
-                || head
-                    .rsplit_once('.')
-                    .is_some_and(|(_, a)| matches!(a, "setter" | "deleter" | "getter"))
+        let getter = f
+            .decorators
+            .iter()
+            .any(|d| decls.decorator_is(d, &["property", "abstractproperty"]));
+        let accessor = f.decorators.iter().any(|d| {
+            decorator_parts(d)
+                .0
+                .rsplit_once('.')
+                .is_some_and(|(_, a)| matches!(a, "setter" | "deleter" | "getter"))
         });
-        if is_property {
+        let container = f
+            .return_annotation
+            .as_deref()
+            .filter(|_| getter)
+            .and_then(|a| container_annotation(a, &resolve).1);
+        if let Some(access) = container {
+            containers.push((owner.to_owned(), name.clone().into_owned(), access));
+        }
+        if getter || accessor {
             found.push((owner.to_owned(), name.into_owned()));
         }
     }
     for (class, name) in found {
         if let Some(c) = decls.classes.get_mut(&class) {
             c.properties.insert(name);
+        }
+    }
+    for (class, name, access) in containers {
+        if let Some(c) = decls.classes.get_mut(&class) {
+            c.container_properties.insert(name, access);
         }
     }
 }
@@ -8091,6 +8426,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     grown_globals: BTreeSet::new(),
     rebound_globals: BTreeSet::new(),
     rebound_definitions: BTreeSet::new(),
+    made_in: None,
     stores_elsewhere: None,
     store_fallbacks: None,
     calls_setstate: false,

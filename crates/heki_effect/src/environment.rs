@@ -1,9 +1,9 @@
-//! What a function takes from outside the project that effect boundaries forbid
+//! What a function takes from outside the project that the contracts name
 //! (`FileSummary::external_accesses`): the calls of external functions and the reads of
-//! external module attributes a boundary names, and the imports it probes. Only the names some
-//! boundary forbids are kept ([`crate::Contracts::external_call`],
-//! [`crate::Contracts::external_read`], [`crate::Contracts::import_probes`]), so a project
-//! without such a boundary keeps none.
+//! external module attributes an effect boundary or an owner contract names, and the imports a
+//! boundary probes. Only the names some contract names are kept
+//! ([`crate::Contracts::external_call`], [`crate::Contracts::external_read`],
+//! [`crate::Contracts::import_probes`]), so a project without such a contract keeps none.
 
 use crate::resolver::resolve_relative_module;
 use heki_ast::Span;
