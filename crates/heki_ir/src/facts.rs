@@ -578,6 +578,7 @@ struct Lifetimes {
 }
 
 /// The changes in place a function makes itself ([`FnIndex::changes_in_place`]).
+#[derive(Default)]
 pub struct InPlaceChanges<'a> {
     /// Each variable whose object a change may change, with the variables aliasing it in one
     /// step (a copy of it, a phi it enters) whose object a change may change too: a change of
