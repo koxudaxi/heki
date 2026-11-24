@@ -5,7 +5,7 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
-## [0.4.0] - Unreleased
+## [0.4.0] - 2026-11-24
 
 ### Breaking changes
 
@@ -2207,7 +2207,7 @@ The first public preview.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
-[0.4.0]: https://github.com/koxudaxi/heki/compare/v0.3.0...HEAD
+[0.4.0]: https://github.com/koxudaxi/heki/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/koxudaxi/heki/compare/v0.2.7...v0.3.0
 [0.2.7]: https://github.com/koxudaxi/heki/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/koxudaxi/heki/compare/v0.2.5...v0.2.6
