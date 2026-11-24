@@ -20,6 +20,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `rule.EFF115` | rule | [`EFF115`](rules/async-def-as-sync-callback.md) | 0.2.5 | - |
 | `rule.EFF116` | rule | [`EFF116`](rules/generator-never-iterated.md) | 0.2.6 | - |
 | `rule.IMP101` | rule | [`IMP101`](rules/import-cycle.md) | 0.2.7 | - |
+| `rule.IMP102` | rule | [`IMP102`](rules/circular-import-failure.md) | 0.2.8 | - |
 | `rule.IMP201` | rule | [`IMP201`](rules/import-owner-violation.md) | 0.2.7 | - |
 | `rule.IMP202` | rule | [`IMP202`](rules/unresolved-guarded-import.md) | 0.2.7 | - |
 | `rule.MUT101` | rule | [`MUT101`](rules/cached-property-stale-mutation.md) | 0.1.0 | - |
@@ -123,6 +124,14 @@ The development corpus has few reports of it, and its premises are not yet certi
 - **Since:** 0.2.7
 
 It is new: its reports are heuristic until a review of its reports on real code bases certifies its claim, and which imports count can still change.
+
+## `rule.IMP102`
+
+- **Kind:** rule
+- **Target:** [`IMP102`](rules/circular-import-failure.md)
+- **Since:** 0.2.8
+
+It is new: every report rests on established premises only, but its reports are heuristic until a review of its reports on real code bases certifies its claim, and which imports and code stop a run can still change.
 
 ## `rule.IMP201`
 

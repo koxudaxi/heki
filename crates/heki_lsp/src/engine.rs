@@ -18,9 +18,9 @@ use heki_rules::project::{
 use heki_rules::{
     CHAIN_RULES, ChainFacts, CheckExtras, EXAMPLE_RULES, ExampleOwners, MemberName, RuleSelection,
     SNAPSHOT_FILE, SelectionError, SentinelTestKey, SnapshotError, StaleWriteKey, SummarySnapshot,
-    chain_facts, check_project, class_member_names, deep_copy_files, example_digest,
-    family_readers, import_cycle_files, kept_removals_in, lazy_setup_files, sentinel_tests_in,
-    stale_writes_by_file,
+    chain_facts, check_project, circular_failure_files, class_member_names, deep_copy_files,
+    example_digest, family_readers, import_cycle_files, kept_removals_in, lazy_setup_files,
+    sentinel_tests_in, stale_writes_by_file,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
@@ -113,6 +113,26 @@ enum ShownAt {
     SentinelTest(String, String, String),
     /// An import site, by the function holding it (the steps of import chains).
     Import(String),
+}
+
+/// The files the selected import rules that read every module's imports report in: `IMP101`'s
+/// and `IMP102`'s, sorted.
+fn import_report_files(
+    config: &heki_env::HekiConfig,
+    selection: &RuleSelection,
+    index: &ProjectIndex,
+    decls: &heki_effect::ProjectDecls,
+) -> Result<Vec<PathBuf>, heki_rules::RuleConfigError> {
+    let mut files = Vec::new();
+    if selection.is_enabled("IMP101") {
+        files.extend(import_cycle_files(config, index, decls)?);
+    }
+    if selection.is_enabled("IMP102") {
+        files.extend(circular_failure_files(index, decls));
+    }
+    files.sort();
+    files.dedup();
+    Ok(files)
 }
 
 /// The places in its text `source` of the spans of `file` that other files' diagnostics can
@@ -281,10 +301,10 @@ pub struct Workspace {
     /// files of the cached properties of those names need a new check when they change (their
     /// lazy setup steps read whether any function removes them).
     kept_removals: FxHashMap<PathBuf, BTreeSet<String>>,
-    /// The files `IMP101` reports in, as of the latest analysis: the file of the import closing
-    /// the cycle of each group of modules importing each other; kept while `IMP101` is
-    /// selected (`Workspace::note_import_cycles`).
-    cycle_files: Vec<PathBuf>,
+    /// The files the import rules reading every module's imports report in, as of the latest
+    /// analysis ([`import_report_files`]): kept while `IMP101` or `IMP102` is selected
+    /// (`Workspace::note_import_reports`).
+    import_report_files: Vec<PathBuf>,
     /// What the configured contracts read across functions (`Workspace::affected_by`).
     reach: ContractReach,
     stats: EngineStats,
@@ -591,11 +611,9 @@ impl Workspace {
         } else {
             FxHashMap::default()
         };
-        let cycle_files = if selection.is_enabled("IMP101") {
-            import_cycle_files(&env.cfg, &index, decls.completed()).map_err(EngineError::Rules)?
-        } else {
-            Vec::new()
-        };
+        let import_report_files =
+            import_report_files(&env.cfg, &selection, &index, decls.completed())
+                .map_err(EngineError::Rules)?;
         let class_members = if reach.class_members {
             (class_member_names(&index).into_iter())
                 .map(MemberName::into_owned)
@@ -629,7 +647,7 @@ impl Workspace {
                 stale_writes,
                 sentinel_tests,
                 kept_removals,
-                cycle_files,
+                import_report_files,
                 reach,
                 stats,
             },
@@ -979,22 +997,25 @@ impl Workspace {
         deep_copy_files(&self.index)
     }
 
-    /// Record the files `IMP101` reports in against the current index. Its reports read the
-    /// imports of every module: when some file's imports changed (`imports_changed`), or those
-    /// files did, the files reporting before and after need a new check, and are returned.
-    fn note_import_cycles(&mut self, imports_changed: bool) -> Vec<PathBuf> {
-        if !self.selection.is_enabled("IMP101") {
-            return Vec::new();
-        }
-        let now = import_cycle_files(&self.env.cfg, &self.index, self.decls.completed())
-            .expect("invalid rule options fail `Workspace::load`");
-        let before = std::mem::replace(&mut self.cycle_files, now);
-        if !imports_changed && before == self.cycle_files {
+    /// Record the files `IMP101` and `IMP102` report in against the current index. Their
+    /// reports read the imports of every module: when some file's imports changed
+    /// (`imports_changed`), or those files did, the files reporting before and after need a new
+    /// check, and are returned.
+    fn note_import_reports(&mut self, imports_changed: bool) -> Vec<PathBuf> {
+        let now = import_report_files(
+            &self.env.cfg,
+            &self.selection,
+            &self.index,
+            self.decls.completed(),
+        )
+        .expect("invalid rule options fail `Workspace::load`");
+        let before = std::mem::replace(&mut self.import_report_files, now);
+        if !imports_changed && before == self.import_report_files {
             return Vec::new();
         }
         before
             .into_iter()
-            .chain(self.cycle_files.iter().cloned())
+            .chain(self.import_report_files.iter().cloned())
             .collect()
     }
 
@@ -1294,7 +1315,7 @@ impl Workspace {
         affected.extend(self.note_stale_writes(&parsed.path));
         affected.extend(self.note_sentinel_tests(&parsed.path));
         affected.extend(self.note_kept_removals(&parsed.path));
-        affected.extend(self.note_import_cycles(update.imports_changed));
+        affected.extend(self.note_import_reports(update.imports_changed));
         // Call chains of other files show this file's call sites, and `MUT113` reports the
         // container changes of its methods: when they move, those diagnostics move with them
         // (the summaries copying call sites were re-propagated).
@@ -1413,7 +1434,7 @@ impl Workspace {
         affected.extend(self.note_stale_writes(path));
         affected.extend(self.note_sentinel_tests(path));
         affected.extend(self.note_kept_removals(path));
-        affected.extend(self.note_import_cycles(update.imports_changed));
+        affected.extend(self.note_import_reports(update.imports_changed));
         if named_examples {
             affected.extend(self.example_reports.iter().cloned());
         }

@@ -2256,9 +2256,18 @@ an import itself.
   by-name call's every text, as `EFF201`'s `imports_project_module` reads them, open when one is
   unknown or `__import__` is passed a `level` other than `0`). Each site carries its function
   (`<module>` for the module body and the class bodies it runs), whether an `ImportError`
-  handler takes its failure (around the import, or around the class statement holding it), and
-  whether it runs on every path to a normal return of its function, outside loops (never
-  established in a class body).
+  handler takes its failure (around the import, or around the class statement holding it),
+  whether a handler may take it (`caught`: also `except Exception`, a bare `except`, a type
+  heki cannot tell is another builtin exception, a `with` block's exit or a `finally` body;
+  `environment::may_take_import_error`), whether it is lazy, and whether it runs on every path
+  to a normal return of its function, outside loops (never established in a class body).
+- **Body order** (`ModuleImports::bound_before`, `any_bound_before`, `code_before`): what the
+  module body does between its sites, by the first site it happens before, so that the facts do
+  not move with the code: each module global it may bind before a site (a store of the body; a
+  store under `global` in a function or a class body counts before every site), any name (a star
+  import; `exec`, `globals()`, `vars()` or `locals()` before every site), and the first code it
+  runs other than imports and stores of names (a call, a class statement, an operator, an
+  attribute or item access, a truth test of a value other than a constant or `TYPE_CHECKING`).
 - **Timing** (`imports::Timing`): `type-checking` under `if TYPE_CHECKING:` (the semantic
   model's guards); `function` in a function body; `lazy` for a lazy import (1.1) whose binding
   no read of the module body (or of a class body it runs) reaches, `body` when one may (the
@@ -2275,11 +2284,13 @@ an import itself.
 - **The graph** (`ImportGraph`, built per check from the summaries and the declarations, never
   kept in the index): what each site loads (`Target`). `import a.b.c` loads `a.b.c`, after its
   parent packages. `from p import n` loads `p.n` when the project has that module and
-  `ProjectDecls::from_import` says the name is the submodule, `p` when it is the package's
-  attribute or `n` is no module the package binds, and `p` with `p.n` open when the package binds
-  `n` before the submodule is imported, or binds no `n` and the project has no module `p.n`, which
-  Python then looks for outside the project's files (a compiled extension module)
-  (`PackageOrSubmodule`); for a package outside the project, `p`, with `p.n` open. A module below a project package that the project does not have is `Missing`; one the
+  `ProjectDecls::from_import` says the name is the submodule, `p` when `n` is no module the
+  package binds, and `p` with `p.n` open when the package binds `n` before the submodule is
+  imported, binds it to an object of the submodule after importing it (`from .n import n`, which
+  the import takes only once the package has run it: while the package is still loading it
+  takes the submodule), or binds no `n` and the project has no module `p.n`, which Python then
+  looks for outside the project's files (a compiled extension module) (`PackageOrSubmodule`);
+  for a package outside the project, `p`, with `p.n` open. A module below a project package that the project does not have is `Missing`; one the
   project has but an import may find elsewhere first (`ProjectDecls::holds_module`), or a name the
   code does not fix, is open. The lookups are declaration reads (`DeclKeys::modules`).
 - **Loads while it loads** (`ImportGraph::loads`): a module's `body` sites that run on every
@@ -2314,9 +2325,31 @@ an import itself.
   unmetered: Tarjan takes each hop once, and each search walks the modules of its own group,
   which no other group shares (one step per module, owner `import_cycles`).
   The language server re-checks the files whose groups close a cycle, before and after an
-  import changes (`Workspace::note_import_cycles`).
-- **Early Cutoff**: `IncrementalUpdate::imports_changed` tells whether a file's sites changed,
-  without positions (`ModuleImports::same_facts`), or appeared or disappeared with the file.
+  import changes (`Workspace::note_import_reports`).
+- **Circular failures** (`ImportGraph::circular_failures`, for `IMP102`): the cycle groups
+  through the sites that may run while a module loads (`body`, or open). Each module of a group,
+  and each package holding one outside the group whose import loads the group, is imported first
+  in turn: its parent packages, then its body, run through their sites in order; a site that
+  imports whenever its module loads, where it is written, with no handler that may take an
+  `ImportError` (`ImportSite::always_imports_uncaught`), runs the body of each module it enters
+  that has not loaded yet before going on. A module of the group has not until the run enters
+  it; one outside the group has not when its load certainly loads a module of the group (a
+  `walk::Closure` over those sites) and may reach the group through no import other than such
+  hops (it cannot have run whole, nor be paused at an import leading to the entry), and changes
+  nothing the run reads when its load may load no module of the group. A `from M import n` of
+  such a site, naming `M` itself, fails when `M` is loading, the project has no module `M.n`, `M`
+  may not have bound `n`, `__getattr__`, or any name before the site it is paused at (body
+  order), and no other module binds `M.n` (`ProjectDecls::global_bound_elsewhere`). What else
+  may load a module of the group stops the run: a site the run cannot place, or whose module
+  heki cannot name, that may load a module of the group not loaded yet; a module outside the
+  group whose load may load one of the group or any module (`walk::Closure` over every site that
+  may run while a module loads, with bitsets of the groups); and, when a function or lazy import
+  of the project may load a module of the group, code a module body runs (body order). The runs
+  of every group share one `Budget::of_graph` (owner `import_failures`), one step per site run;
+  past it no further run reports.
+- **Early Cutoff**: `IncrementalUpdate::imports_changed` tells whether a file's sites or body
+  order changed, without positions (`ModuleImports::same_facts`), or appeared or disappeared
+  with the file.
 - **Kinds of code** (`heki_effect::code_kind`): a test module (under `tests/` or `test/`,
   `test_*.py`, `*_test.py`, `conftest.py`) is development code; in the project's own src
   layout, the code below a source root is the package's and the code outside every root

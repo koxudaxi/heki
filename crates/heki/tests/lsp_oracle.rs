@@ -6749,6 +6749,92 @@ fn lsp_diagnostics_equal_a_full_check_through_import_cycles() {
     run_steps(s, &steps);
 }
 
+// ------------------------------------------------------------------ circular imports that fail
+
+const FAILURES_CONFIG: &str =
+    "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"IMP102\"]\n";
+const FAILING_A: &str = "import pkg.b\n\n\ndef helper_a():\n    return 1\n";
+
+/// `IMP102` reads the imports and the order of the module bodies of every module: an edit of one
+/// module adds or removes the report in another. Binding the name before the import, a handler
+/// around the failing import, another module storing the name, and a function that may load the
+/// cycle called before the import each take the report away, and undoing them brings it back.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_circular_imports() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/a.py", FAILING_A.to_owned()),
+        ("pkg/b.py", "import json\n".to_owned()),
+    ];
+    let s = Session::start_with("lsp_oracle_circular_imports", FAILURES_CONFIG, files, false);
+    let steps = [
+        Step::new("a module imports another", Vec::new()).absent(&[("pkg/b.py", "IMP102")]),
+        Step::new(
+            "the other module imports a name of the first, which binds it after its import",
+            vec![save("pkg/b.py", "from pkg.a import helper_a\n")],
+        )
+        .present(&[("pkg/b.py", "IMP102")]),
+        Step::new(
+            "the first module binds the name before its import",
+            vec![save(
+                "pkg/a.py",
+                "def helper_a():\n    return 1\n\n\nimport pkg.b\n",
+            )],
+        )
+        .absent(&[("pkg/b.py", "IMP102")]),
+        Step::new(
+            "the first module binds the name after its import again",
+            vec![save("pkg/a.py", FAILING_A)],
+        )
+        .present(&[("pkg/b.py", "IMP102")]),
+        Step::new(
+            "a handler takes the error",
+            vec![save(
+                "pkg/b.py",
+                "try:\n    from pkg.a import helper_a\nexcept ImportError:\n    helper_a = None\n",
+            )],
+        )
+        .absent(&[("pkg/b.py", "IMP102")]),
+        Step::new(
+            "the handler goes",
+            vec![save("pkg/b.py", "from pkg.a import helper_a\n")],
+        )
+        .present(&[("pkg/b.py", "IMP102")]),
+        Step::new(
+            "another module stores the name into the first",
+            vec![Action::Create(
+                "pkg/c.py",
+                "import pkg.a\n\n\ndef install():\n    pkg.a.helper_a = len\n".to_owned(),
+            )],
+        )
+        .absent(&[("pkg/b.py", "IMP102")]),
+        Step::new("that module is deleted", vec![Action::Delete("pkg/c.py")])
+            .present(&[("pkg/b.py", "IMP102")]),
+        Step::new(
+            "the first module calls a function before its import",
+            vec![
+                Action::Create("pkg/loader.py", "def load():\n    pass\n".to_owned()),
+                save(
+                    "pkg/a.py",
+                    &format!("from pkg.loader import load\n\nload()\n{FAILING_A}"),
+                ),
+            ],
+        )
+        .present(&[("pkg/b.py", "IMP102")]),
+        Step::new(
+            "the function imports a module of the cycle",
+            vec![save("pkg/loader.py", "def load():\n    import pkg.b\n")],
+        )
+        .absent(&[("pkg/b.py", "IMP102")]),
+        Step::new(
+            "the function imports nothing again",
+            vec![save("pkg/loader.py", "def load():\n    pass\n")],
+        )
+        .present(&[("pkg/b.py", "IMP102")]),
+    ];
+    run_steps(s, &steps);
+}
+
 // ---------------------------------------------- what contracts cannot attribute across modules
 
 // What a strict contract reports from another module's facts: an effect boundary the call

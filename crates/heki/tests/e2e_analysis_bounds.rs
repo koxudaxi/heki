@@ -6502,6 +6502,40 @@ fn a_clique_of_modules_importing_each_other_is_one_report() {
     );
 }
 
+/// The modules of package `f` in a ring, each importing a name from the next before it binds
+/// its own, with `IMP102` selected: importing any of them first fails at the module before it,
+/// after a run through the whole ring.
+fn failing_ring(modules: usize) -> Project {
+    let p = Project::new("bounds_failing_ring");
+    p.write("f/__init__.py", "");
+    for i in 0..modules {
+        p.write(
+            &format!("f/m{i}.py"),
+            &format!(
+                "from f.m{} import f\n\n\ndef f():\n    return 1\n",
+                (i + 1) % modules
+            ),
+        );
+    }
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"IMP102\"]\n",
+    );
+    p
+}
+
+/// Every module of the ring is an entry, and each run walks the ring: the runs share one budget
+/// proportional to the import graph, which the full ring spends; the runs before it report.
+#[test]
+fn the_runs_of_the_entries_of_one_cycle_share_one_budget() {
+    let modules = 10_000;
+    let diags = check_past_budgets(modules, &["import_failures"], failing_ring);
+    let reports = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP102")
+        .count();
+    assert!(0 < reports && reports < modules, "{reports}");
+}
+
 /// A package whose `__init__` imports thousands of submodules, each importing `json`.
 fn package_of_submodules(submodules: usize) -> Project {
     let p = Project::new("bounds_import_package");

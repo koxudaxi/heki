@@ -233,9 +233,9 @@ the installed release changed, and the changelog on GitHub lists every release.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   says how many.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
-  `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `IMP101`, `MUT101`, `MUT103`, `MUT106`,
-  `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`, `MUT115`, `MUT120`): they need their exact
-  code or name. In `ignore`, a prefix covers every rule it matches.
+  `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `IMP101`, `IMP102`, `MUT101`, `MUT103`,
+  `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`, `MUT115`, `MUT120`): they need
+  their exact code or name. In `ignore`, a prefix covers every rule it matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
 
@@ -897,7 +897,10 @@ or a glob whose `*` spans dots, never a suffix (`pkg.*` names `pkg.facts` and
   imports the submodule `a.b.c` when the package has one and binds no `c` before importing it,
   and `a.b` otherwise. An import of a module the project lacks below one of its packages fails,
   and is no import; `from a.b import c` of a name `a.b` binds nowhere still imports `a.b`, and
-  may import a module `a.b.c` outside the project's files (a compiled extension module).
+  may import a module `a.b.c` outside the project's files (a compiled extension module). When
+  the package binds `c` to an object of its submodule after importing it (`from .c import c`),
+  `from a.b import c` imports `a.b`, and also `a.b.c` while the package has not run that binding
+  yet.
 - One report per import and module. A report's target, which a
   [baseline](adoption.md#ratchet-baselines) counts it by, is the module imported.
 - With `reach`, each module reached is reported once per importer, at the import of the importer
