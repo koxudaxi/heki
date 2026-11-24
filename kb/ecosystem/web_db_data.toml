@@ -169,6 +169,45 @@ symbol = "pydantic.BaseModel.model_validate"
 builds_receiver = { arg = 0, param = "obj", only_from_dict = true }
 opaque_to_layer3 = true
 
+# The fields a model declares (see `[[declared_fields]]` in stdlib.toml), each kept in the
+# instance's `__dict__`: dicts from each field's name to its `FieldInfo` (`ModelField` in
+# pydantic 1, also `pydantic.v1`), read on the class or an instance. `__pydantic_fields__` exists
+# from 2.10, and `__fields__` is a deprecated alias of `model_fields` in pydantic 2.
+[[declared_fields]]
+bases = ["pydantic.BaseModel"]
+attributes = ["model_fields", "__pydantic_fields__", "__fields__"]
+items = "keys"
+versions = "pydantic 1.10.13, 2.0, 2.10.0, 2.12.3"
+
+[[declared_fields]]
+bases = ["pydantic.v1.BaseModel"]
+attributes = ["__fields__"]
+items = "keys"
+versions = "pydantic 2.12.3"
+
+# --- Models: attrs ---
+# The fields of a class an attrs decorator builds: `__attrs_attrs__` and `fields(cls)` hold the
+# `Attribute` objects, each with its `name`; `fields_dict(cls)` is a dict from each name. Both
+# functions take only a class.
+[[declared_fields]]
+decorators = [
+    "attr.s", "attr.attrs", "attr.define", "attr.mutable", "attr.frozen", "attr.dataclass",
+    "attrs.define", "attrs.mutable", "attrs.frozen",
+]
+attributes = ["__attrs_attrs__"]
+items = "names"
+versions = "attrs 22.2.0, 25.4.0"
+
+[[declared_fields]]
+functions = ["attr.fields", "attrs.fields"]
+items = "names"
+versions = "attrs 22.2.0, 25.4.0"
+
+[[declared_fields]]
+functions = ["attr.fields_dict", "attrs.fields_dict"]
+items = "keys"
+versions = "attrs 22.2.0, 25.4.0"
+
 # --- HTTP: requests ---
 # The module functions open a new connection pool per call; `Session` methods reuse one.
 

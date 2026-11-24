@@ -7,7 +7,8 @@
 //! or on objects heki cannot type, which may be of any class. A class the code gives attributes
 //! named at run time may have any attribute: an entry naming none of its known ones is reported
 //! only under `"error"`, as one that may name nothing. A name a copy takes from the namespace
-//! of an instance of the class family, or a deletion removes, is one the class has already.
+//! of an instance of the class family or from the fields it declares, or a deletion removes, is
+//! one the class has already.
 //! Only the keys whose entries name project code alone are judged: the read and call targets and
 //! the allowed callees of an effect boundary, and the producers of `readonly-returns`, may name
 //! symbols outside the project.

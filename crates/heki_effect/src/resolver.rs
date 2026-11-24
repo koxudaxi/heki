@@ -25,7 +25,8 @@ use heki_ir::{
     InstKind, IrFunction, LastBindings, ModuleIr, SmallDisplay, Terminator, VarId,
 };
 use heki_kb::{
-    ArgFact, CopyDepth, EcosystemEntry, EffectiveEcosystemKb, ExecEffectKind, LiteralValue,
+    ArgFact, CopyDepth, EcosystemEntry, EffectiveEcosystemKb, ExecEffectKind, FieldItems,
+    LiteralValue,
 };
 use heki_semantic::{ClassInfo, ModuleImport, ScopeKind, SemanticModel, StarImport, mangling};
 use rayon::prelude::*;
@@ -532,7 +533,8 @@ pub struct ClassDecl {
     pub stores_any_attr: bool,
     /// One of those stores may add an attribute an instance did not have: its name is no key of
     /// the namespace of an instance of the class or a subclass (a copy,
-    /// `self.__dict__.update(other.__dict__)`, [`ProjectDecls::keys_exist_in`]).
+    /// `self.__dict__.update(other.__dict__)`) and no field they declare
+    /// ([`ProjectDecls::keys_exist_in`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub adds_unnamed_attrs: bool,
     /// The attributes the module's code rebinds to what an in-place operator gives on their own
@@ -4274,10 +4276,10 @@ impl ProjectDecls {
         self.mro(sub).iter().skip(1).any(|c| c == base)
     }
 
-    /// Whether a key of the namespace of an instance of the project class `source` names an
-    /// attribute an instance of the project class `class` may have already:
-    /// `source` is `class` or derives from it, so its instances hold only attributes of the
-    /// family of `class`, and a copy of such a namespace adds none.
+    /// Whether a key of the namespace of an instance of the project class `source`, or a field
+    /// `source` declares, names an attribute an instance of the project class `class` may have
+    /// already: `source` is `class` or derives from it, so its instances hold only attributes
+    /// of the family of `class`, and a copy of such a namespace or of its fields adds none.
     pub(crate) fn keys_exist_in(&self, source: &str, class: &str) -> bool {
         let (source, class) = (self.canonical(source), self.canonical(class));
         source == class || self.is_subclass(&source, &class)
@@ -4813,17 +4815,72 @@ impl ProjectDecls {
             })
     }
 
-    /// [`Self::catalog_attribute`] of the canonical `class`, decided: the walk over the classes
-    /// the value may be stops at the first that takes another row or none, or past
-    /// [`DISPATCH_CLASS_LIMIT`] of them.
+    /// [`Self::catalog_attribute`] of the canonical `class`, decided
+    /// ([`Self::row_of_every_value`]).
     fn find_catalog_attribute<'k>(
         &self,
         class: &str,
         attr: &str,
         kb: &'k EffectiveEcosystemKb,
     ) -> Option<&'k str> {
-        let found = self.attribute_row_along(&self.mro(class), attr, kb)?;
-        let budget = Budget::unmetered("heki_effect::resolver::ProjectDecls::catalog_attribute");
+        self.row_of_every_value(class, |mro| {
+            self.row_along(mro, attr, |c| kb.attribute_type(c, attr), |_| None)
+        })
+    }
+
+    /// How reading `attr` on the project class `class`, or on an instance of it, holds the
+    /// fields the class declares (`heki_kb::DeclaredFields`, R3): the catalog lists the
+    /// attribute for the library base, or for a decorator of the project class, that each class
+    /// the value may be under R2 finds first along its MRO, the same way for all of them, as
+    /// [`Self::catalog_attribute`] decides a row.
+    pub(crate) fn declared_fields_attr(
+        &self,
+        class: &str,
+        attr: &str,
+        kb: &EffectiveEcosystemKb,
+    ) -> Option<FieldItems> {
+        if !kb.keeps_fields_in(attr) {
+            return None;
+        }
+        let decorated = |d: &ClassDecl| {
+            (d.decorators.iter()).find_map(|(head, _)| kb.decorator_fields(head, attr))
+        };
+        self.row_of_every_value(&self.canonical(class), |mro| {
+            self.row_along(mro, attr, |c| kb.base_fields(c, attr), decorated)
+        })
+    }
+
+    /// Whether reading `__class__` on a value of the project class `class` gives the class of
+    /// the value, as `type(value)` does: no class it may be under R2 binds the name or hooks
+    /// attribute reads, no store gives its instances another class, and every base outside the
+    /// project along their MROs is a plain base or a library base keeping the fields its
+    /// subclasses declare (`heki_kb::DeclaredFields`: a model base, which defines no
+    /// `__class__`).
+    pub(crate) fn reads_own_class(&self, class: &str, kb: &EffectiveEcosystemKb) -> bool {
+        let read = self.attr_read(class, "__class__");
+        let known_base = |b: &String| {
+            self.is_project_class(b) || PLAIN_BASES.contains(&b.as_str()) || kb.is_fields_base(b)
+        };
+        read.binders.is_empty()
+            && !read.runs_hook(false)
+            && self.value_classes(class).iter().all(|c| {
+                let mro = self.mro(c);
+                !self.lookup_rebound(&mro, "__class__") && mro.iter().all(known_base)
+            })
+    }
+
+    /// The row `row_along` finds along the MRO of every class a value of the canonical `class`
+    /// may be under R2 (`class` and every project subclass), the same for all of them. `None`
+    /// when one finds another row or none, a class along the MRO of one defines
+    /// `__getattribute__` or has a metaclass heki does not know, or there are more than
+    /// [`DISPATCH_CLASS_LIMIT`] classes: the walk over the classes stops at the first such.
+    fn row_of_every_value<R: Copy + PartialEq>(
+        &self,
+        class: &str,
+        row_along: impl Fn(&[String]) -> Option<R>,
+    ) -> Option<R> {
+        let found = row_along(&self.mro(class))?;
+        let budget = Budget::unmetered("heki_effect::resolver::ProjectDecls::row_of_every_value");
         let mut visited = 0;
         let differs = reach(
             &budget,
@@ -4835,8 +4892,7 @@ impl ProjectDecls {
                     return Visit::Stop(());
                 }
                 let mro = self.mro(c);
-                let same = !self.hooks_attribute_reads(&mro)
-                    && self.attribute_row_along(&mro, attr, kb) == Some(found);
+                let same = !self.hooks_attribute_reads(&mro) && row_along(&mro) == Some(found);
                 if same { Visit::Expand } else { Visit::Stop(()) }
             },
         );
@@ -4853,30 +4909,32 @@ impl ProjectDecls {
         })
     }
 
-    /// The `[[attributes]]` row reading `attr` finds along `mro`: that of the first class
-    /// outside the project, a builtin type without one passed over; none past a project class
-    /// binding the name, in its body, on `self`, or on the class object outside its body.
-    fn attribute_row_along<'k>(
+    /// The catalog row reading `attr` finds along `mro`: that of the first class outside the
+    /// project (`library`), a builtin type without one passed over, or of the first project
+    /// class whose decorators give it one (`decorated`); none past a project class binding the
+    /// name, in its body, on `self`, or on the class object outside its body.
+    fn row_along<R>(
         &self,
         mro: &[String],
         attr: &str,
-        kb: &'k EffectiveEcosystemKb,
-    ) -> Option<&'k str> {
+        library: impl Fn(&str) -> Option<R>,
+        decorated: impl Fn(&ClassDecl) -> Option<R>,
+    ) -> Option<R> {
         for c in mro {
-            if self.is_project_class(c) {
+            if let Some(d) = self.class(c) {
                 self.read(|k| note(&mut k.class_facts, c));
-                let binds = self
-                    .class(c)
-                    .is_some_and(|d| d.members.contains(attr) || d.rebound_attrs.contains(attr));
-                if binds {
+                if d.members.contains(attr) || d.rebound_attrs.contains(attr) {
                     return None;
+                }
+                if let Some(found) = decorated(d) {
+                    return Some(found);
                 }
                 continue;
             }
             if is_unknown_base(c) || self.under_unread(c) {
                 return None;
             }
-            if let Some(found) = kb.attribute_type(c, attr) {
+            if let Some(found) = library(c) {
                 return Some(found);
             }
             if !c.starts_with("builtins.") {
@@ -7719,15 +7777,25 @@ pub(crate) fn namespace_load<'v>(
 }
 
 /// Which of the objects `fqns` the call `kind`, without keywords or a `*` argument, calls, with
-/// its result and its arguments: the one its callee holds (`val`, as for [`namespace_load`]), or
-/// the member of the module or class a method is called on, as [`TypeCtx::method_call_targets`]
-/// names it (`builtins.setattr(obj, name, v)` calls `builtins.setattr`).
+/// its result and its arguments ([`plain_callee`]; `builtins.setattr(obj, name, v)` calls
+/// `builtins.setattr`).
 pub(crate) fn plain_call<'k, 'v>(
     kind: &'k InstKind,
     fqns: &[&'static str],
     val: impl FnOnce(VarId) -> Option<&'v Val>,
 ) -> Option<(&'static str, VarId, &'k [VarId])> {
-    let (called, dst, args) = match kind {
+    let (callee, dst, args) = plain_callee(kind, val)?;
+    Some((fqns.iter().copied().find(|fqn| callee.is(fqn))?, dst, args))
+}
+
+/// The object the call `kind`, without keywords or a `*` argument, calls, with its result and
+/// its arguments: the one its callee holds (`val`, as for [`namespace_load`]), or the member of
+/// the module or class a method is called on, as [`TypeCtx::method_call_targets`] names it.
+pub(crate) fn plain_callee<'k, 'v>(
+    kind: &'k InstKind,
+    val: impl FnOnce(VarId) -> Option<&'v Val>,
+) -> Option<(PlainCallee<'k, 'v>, VarId, &'k [VarId])> {
+    let (callee, dst, args) = match kind {
         InstKind::Call {
             dst,
             callee_var: Some(f),
@@ -7736,7 +7804,7 @@ pub(crate) fn plain_call<'k, 'v>(
             star_from: None,
             ..
         } if kwargs.is_empty() => match val(*f)? {
-            Val::Ref(s) => (fqns.iter().find(|fqn| **fqn == s.as_str())?, dst, args),
+            Val::Ref(fqn) => (PlainCallee::Named(fqn), dst, args),
             _ => return None,
         },
         InstKind::MethodCall {
@@ -7748,19 +7816,41 @@ pub(crate) fn plain_call<'k, 'v>(
             star_from: None,
             ..
         } if kwargs.is_empty() => match val(*recv)? {
-            Val::Ref(owner) => {
-                let member = |fqn: &&&str| {
-                    fqn.strip_suffix(method.as_str())
-                        .and_then(|o| o.strip_suffix('.'))
-                        == Some(owner.as_str())
-                };
-                (fqns.iter().find(member)?, dst, args)
-            }
+            Val::Ref(owner) => (PlainCallee::Member { owner, method }, dst, args),
             _ => return None,
         },
         _ => return None,
     };
-    Some((called, *dst, args.as_slice()))
+    Some((callee, *dst, args.as_slice()))
+}
+
+/// The object a plain call calls ([`plain_callee`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PlainCallee<'k, 'v> {
+    /// The one a name holds, by fqn.
+    Named(&'v str),
+    /// The member `method` of the module or class `owner` (fqn).
+    Member { owner: &'v str, method: &'k str },
+}
+
+impl<'v> PlainCallee<'_, 'v> {
+    /// Whether this is the object `fqn`.
+    pub(crate) fn is(self, fqn: &str) -> bool {
+        match self {
+            Self::Named(named) => named == fqn,
+            Self::Member { owner, method } => {
+                fqn.strip_suffix(method).and_then(|o| o.strip_suffix('.')) == Some(owner)
+            }
+        }
+    }
+
+    /// Its fqn.
+    pub(crate) fn fqn(self) -> Cow<'v, str> {
+        match self {
+            Self::Named(named) => Cow::Borrowed(named),
+            Self::Member { owner, method } => Cow::Owned(format!("{owner}.{method}")),
+        }
+    }
 }
 
 /// Variables that alias `root` through `Copy` and phis whose inputs all alias it.

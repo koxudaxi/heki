@@ -1964,6 +1964,30 @@ versions = "CPython 3.11, 3.15"
 keeps = "a non-data descriptor whose __get__ stores the getter's value in instance.__dict__[attrname], which later reads find before the descriptor"
 invalidation = "del obj.<name> and obj.__dict__.pop(<name>) remove the entry (the descriptor defines no __delete__); an instance without a __dict__ raises TypeError and keeps nothing"
 
+# --- Where a library keeps the fields a class declares ---
+# `[[declared_fields]]`: the fields a class declares are the names the bodies of the class and of
+# its bases declare as fields, which the library collects as it builds the class. Each row lists
+# the attributes holding them on the classes deriving from one of its `bases` or built by one of
+# its class `decorators` (and on their subclasses), read on the class or an instance, and the
+# `functions` returning them for the class, or the instance, passed first. `items` says how the
+# value holds each field's name: as a key of a mapping (`keys`), or as the `name` of each object
+# of a sequence (`names`). A key a loop takes from them names an attribute the class declares, so
+# a store under it gives the class no attribute it does not declare (`stores::key_name`).
+
+# `@dataclass` sets `__dataclass_fields__` to a dict from each field's name (`ClassVar` and
+# `InitVar` pseudo-fields included); `fields(cls_or_instance)` returns a tuple of the `Field`
+# objects of the real fields, each with its `name`.
+[[declared_fields]]
+decorators = ["dataclasses.dataclass"]
+attributes = ["__dataclass_fields__"]
+items = "keys"
+versions = "CPython 3.11, 3.15"
+
+[[declared_fields]]
+functions = ["dataclasses.fields"]
+items = "names"
+versions = "CPython 3.11, 3.15"
+
 # --- Calls a callable without awaiting it (`[[calls_unawaited]]`, EFF115 and EFF116, opt-in) ---
 # Each entry names the callable argument (position `arg`, the receiver not counted, or the
 # keyword `param`) that the call calls as a plain function, now or later, on this thread or

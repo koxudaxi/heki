@@ -384,10 +384,10 @@ contract's to guard: its writes are judged by that contract's allowance alone. T
 allowance applies to an unlisted key as to a target write. A key a loop takes from a tuple,
 list, or set of string constants writes each of them. A key computed at run time has no name
 to check (`MUT205`, with `unresolved = "report"`), nor has a copy of the keys of an instance's
-namespace, whose keys exist already, and neither has a write on an object heki
-cannot type, a helper's parameter that no annotation types included: with `unresolved = "report"`
-too, `MUT205` reports such a key (below). A key every function may write is listed by a contract
-that allows every writer:
+namespace or of the fields its class declares, whose keys exist already, and neither has a
+write on an object heki cannot type, a helper's parameter that no annotation types included:
+with `unresolved = "report"` too, `MUT205` reports such a key (below). A key every function may
+write is listed by a contract that allows every writer:
 
 ```toml
 [[tool.heki.write-owners]]
@@ -978,7 +978,13 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   subclass (`for key, value in other.__dict__.items()`, `.keys()`, iterating it or
   `vars(other)`, also through `list`, `tuple`, `sorted`, or a copy, and
   `obj.__dict__.update(other.__dict__)`) names an attribute the instance has already, as a
-  `__deepcopy__` copying it does, and a deletion adds none: neither gives the class a name.
+  `__deepcopy__` copying it does, and a deletion adds none: neither gives the class a name. So
+  does a key taken from the fields the class or a subclass declares, where a library keeps them
+  (heki's catalog): a pydantic model's `model_fields`, `__pydantic_fields__`, or `__fields__`
+  read on the class (`type(obj)`, `obj.__class__`, `cls`) or an instance, with their keys and
+  pairs as for a namespace; a dataclass's `__dataclass_fields__` and the `name` of each of
+  `dataclasses.fields(obj)`; an attrs class's `__attrs_attrs__`, `attrs.fields(cls)`, and
+  `attrs.fields_dict(cls)`.
   An attribute that only a base outside the project defines matches when the code
   uses it on the class. An entry target (`Class.attr["key"]`) is judged by its attribute.
 - An entry whose last part is a glob is a rule about every name it may match, later ones

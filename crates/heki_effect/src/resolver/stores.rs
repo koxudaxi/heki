@@ -24,7 +24,7 @@ use heki_ir::{
     BlockId, BuiltinKind, InPlaceChanges, Inst, InstKind, IrFunction, LastBindings, Terminator,
     VarId,
 };
-use heki_kb::EffectiveEcosystemKb;
+use heki_kb::{EffectiveEcosystemKb, FieldItems};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::{Borrow, Cow};
 use std::cell::RefCell;
@@ -1526,9 +1526,10 @@ pub(crate) enum AttrName<'f> {
     /// One of the string constants of the tuple, list, or set display a loop takes the name
     /// from (`for key in ("a", "b")`).
     OneOf(Vec<String>),
-    /// A key of the namespace of an instance of one of these project classes (canonical;
-    /// `for key, value in src.__dict__.items()`): a name that instance has already
-    /// ([`ProjectDecls::keys_exist_in`]).
+    /// An attribute one of these project classes (canonical) gives its instances: a key of
+    /// the namespace of an instance (`for key, value in src.__dict__.items()`), which that
+    /// instance has already, or a field the class declares (`for name in type(src).model_fields`,
+    /// `heki_kb::DeclaredFields`) ([`ProjectDecls::keys_exist_in`]).
     KeyOf(Vec<String>),
     /// One heki cannot read: any name.
     Unknown,
@@ -1539,16 +1540,21 @@ pub(crate) enum AttrName<'f> {
 enum Items {
     /// The string constants of a display.
     Constants(Vec<String>),
-    /// The keys of the namespace of the object the variable holds.
-    Keys(VarId),
-    /// The `(key, value)` pairs of the namespace of the object the variable holds.
-    Pairs(VarId),
+    /// The keys of a mapping from attributes of instances of these project classes
+    /// ([`AttrName::KeyOf`]): the namespace of an instance, or the fields the class declares.
+    Keys(Vec<String>),
+    /// The `(key, value)` pairs of such a mapping.
+    Pairs(Vec<String>),
+    /// Objects whose `name` is a field one of these project classes declares
+    /// (`dataclasses.fields(obj)`).
+    Fields(Vec<String>),
 }
 
 /// The values a loop iterates, followed through the function of `f`: `def` gives each
 /// variable's defining instruction, `types` the inferred values, `constant` the string constant
 /// a variable holds.
 struct Iterated<'a, 'i> {
+    cx: &'a TypeCtx<'a>,
     f: &'a IrFunction,
     def: &'a dyn Fn(VarId) -> Option<&'i Inst>,
     types: &'a FxHashMap<VarId, crate::resolver::Val>,
@@ -1583,11 +1589,12 @@ impl<'i> Iterated<'_, 'i> {
         }
     }
 
-    /// What a loop over `iterable` takes: the items of a display of string constants, or the
-    /// keys or the pairs of a namespace (`vars(src)`, `src.__dict__`), its copy (`.copy()`,
-    /// `dict(...)`), its `keys()` or `items()`, or a `list`, `tuple`, or `sorted` of one of
-    /// these. Each wrapper holds one value, so the walk follows one chain to the display or the
-    /// namespace, then applies the wrappers from the inside out.
+    /// What a loop over `iterable` takes: the items of a display of string constants, the keys
+    /// or the pairs of a namespace (`vars(src)`, `src.__dict__`), the fields a class declares
+    /// ([`Self::declared_fields`]), a copy of a mapping (`.copy()`, `dict(...)`), its `keys()`
+    /// or `items()`, or a `list`, `tuple`, or `sorted` of one of these. Each wrapper holds one
+    /// value, so the walk follows one chain to the display, the namespace, or the fields, then
+    /// applies the wrappers from the inside out.
     fn items(&self, iterable: VarId) -> Option<Items> {
         const WRAPPERS: &[&str] = &[
             "builtins.list",
@@ -1599,8 +1606,12 @@ impl<'i> Iterated<'_, 'i> {
         let mut cur = iterable;
         for _ in 0..=Self::MAX_WRAPPERS {
             let inst = self.def(cur)?;
-            if let Some((_, obj)) = super::namespace_load(&inst.kind, |v| self.types.get(&v)) {
-                let inner = Items::Keys(obj);
+            let namespace = super::namespace_load(&inst.kind, |v| self.types.get(&v));
+            let inner = match namespace {
+                Some((_, obj)) => Some(Items::Keys(self.instances(obj)?)),
+                None => self.declared_fields(&inst.kind),
+            };
+            if let Some(inner) = inner {
                 return (wrappers.iter().rev()).try_fold(inner, |items, w| w.apply(items));
             }
             match &inst.kind {
@@ -1648,16 +1659,82 @@ impl<'i> Iterated<'_, 'i> {
         }
         None
     }
+
+    /// The fields of a class that the instruction `kind` reads (`type(obj).model_fields`,
+    /// `obj.__dataclass_fields__`, [`ProjectDecls::declared_fields_attr`]) or that a call returns
+    /// (`dataclasses.fields(obj)`), as the catalog keeps them (`heki_kb::DeclaredFields`), the
+    /// same way for each class the object read or passed may be ([`Self::classes`]).
+    fn declared_fields(&self, kind: &InstKind) -> Option<Items> {
+        let (project, kb) = (self.cx.project, self.cx.kb);
+        let (classes, items) = match kind {
+            InstKind::AttrLoad { obj, attr, .. } if kb.keeps_fields_in(attr) => {
+                let classes = self.classes(*obj)?;
+                let mut items = classes
+                    .iter()
+                    .map(|c| project.declared_fields_attr(c, attr, kb));
+                let first = items.next()??;
+                items
+                    .all(|i| i == Some(first))
+                    .then_some((classes, first))?
+            }
+            kind => {
+                let (callee, _, args) = super::plain_callee(kind, |v| self.types.get(&v))?;
+                let items = kb.function_fields(&callee.fqn())?;
+                let [obj] = args else { return None };
+                (self.classes(*obj)?, items)
+            }
+        };
+        Some(match items {
+            FieldItems::Keys => Items::Keys(classes),
+            FieldItems::Names => Items::Fields(classes),
+        })
+    }
+
+    /// The project classes (canonical) of the instance `var` holds: one, or each of a union.
+    fn instances(&self, var: VarId) -> Option<Vec<String>> {
+        use crate::resolver::Val;
+        match self.types.get(&var)? {
+            Val::Inst(class) => Some(vec![self.project_class(class)?]),
+            Val::Union(classes) => classes.iter().map(|c| self.project_class(c)).collect(),
+            _ => None,
+        }
+    }
+
+    /// The project classes (canonical) of the value `var` holds, an instance or a class object
+    /// (named, `cls`, `type(obj)`), or `obj.__class__` when reading it gives the class of the
+    /// instance (`ProjectDecls::reads_own_class`).
+    fn classes(&self, var: VarId) -> Option<Vec<String>> {
+        let project = self.cx.project;
+        if let Some(class) = self.types.get(&var).and_then(|v| v.class_object(project)) {
+            return Some(vec![self.project_class(class)?]);
+        }
+        match self.def(var).map(|i| &i.kind) {
+            Some(InstKind::AttrLoad { obj, attr, .. }) if attr == "__class__" => {
+                let classes = self.instances(*obj)?;
+                let kb = self.cx.kb;
+                (classes.iter().all(|c| project.reads_own_class(c, kb))).then_some(classes)
+            }
+            _ => self.instances(var),
+        }
+    }
+
+    /// The canonical name of the project class `class`, unless it is a protocol, whose values
+    /// need not derive from it.
+    fn project_class(&self, class: &str) -> Option<String> {
+        let project = self.cx.project;
+        (project.is_project_class(class) && project.protocol(class).is_none())
+            .then(|| project.canonical(class))
+    }
 }
 
 /// What a call around an iterable gives a loop over its result ([`Iterated::items`]).
 #[derive(Debug, Clone, Copy)]
 enum Wrapper {
-    /// `ns.keys()`, `ns.copy()`: the keys of a namespace.
+    /// `ns.keys()`, `ns.copy()`: the keys of a namespace or of a mapping of fields.
     Keys,
     /// `ns.items()`: its pairs.
     Pairs,
-    /// `dict(...)` of a namespace or its pairs: its keys.
+    /// `dict(...)` of such a mapping or its pairs: its keys.
     Dict,
     /// `list`, `tuple`, `sorted`: the same items.
     Same,
@@ -1666,9 +1743,11 @@ enum Wrapper {
 impl Wrapper {
     fn apply(self, inner: Items) -> Option<Items> {
         match (self, inner) {
-            (Self::Keys, Items::Keys(obj)) => Some(Items::Keys(obj)),
-            (Self::Pairs, Items::Keys(obj)) => Some(Items::Pairs(obj)),
-            (Self::Dict, Items::Keys(obj) | Items::Pairs(obj)) => Some(Items::Keys(obj)),
+            (Self::Keys, Items::Keys(classes)) => Some(Items::Keys(classes)),
+            (Self::Pairs, Items::Keys(classes)) => Some(Items::Pairs(classes)),
+            (Self::Dict, Items::Keys(classes) | Items::Pairs(classes)) => {
+                Some(Items::Keys(classes))
+            }
             (Self::Same, items) => Some(items),
             _ => None,
         }
@@ -1683,7 +1762,9 @@ impl Wrapper {
 /// takes from a display of string constants names one of them; one it takes from the namespace
 /// of an object (`for key in vars(src)`, `src.__dict__.keys()`, the first of each pair of
 /// `src.__dict__.items()`, also through a copy, `list`, `tuple`, or `sorted`) names an attribute
-/// that object has. Any other key may be any name.
+/// that object has, and one it takes from the fields a class declares (`type(src).model_fields`
+/// and its keys or pairs as for a namespace, the `name` of each of `dataclasses.fields(src)`)
+/// names an attribute the class declares. Any other key may be any name.
 pub(crate) fn key_name<'i>(
     cx: &TypeCtx<'_>,
     f: &IrFunction,
@@ -1696,10 +1777,16 @@ pub(crate) fn key_name<'i>(
         return AttrName::Named(Cow::Owned(name));
     }
     let loops = Iterated {
+        cx,
         f,
         def,
         types,
         constant: &constant,
+    };
+    // What the loop the item `item` comes from takes.
+    let item_of = |item: VarId| match loops.def(item).map(|i| &i.kind) {
+        Some(InstKind::IterNext { iter, .. }) => loops.items_of_iter(*iter),
+        _ => None,
     };
     let items = match loops.def(key).map(|i| &i.kind) {
         Some(InstKind::IterNext { iter, .. }) => loops.items_of_iter(*iter),
@@ -1710,46 +1797,28 @@ pub(crate) fn key_name<'i>(
             key_const: None,
             is_slice: false,
             ..
-        }) if is_int(loops.def(*index), 0) => match loops.def(*obj).map(|i| &i.kind) {
-            Some(InstKind::IterNext { iter, .. }) => match loops.items_of_iter(*iter) {
-                Some(Items::Pairs(obj)) => Some(Items::Keys(obj)),
-                _ => None,
-            },
+        }) if is_int(loops.def(*index), 0) => match item_of(*obj) {
+            Some(Items::Pairs(classes)) => Some(Items::Keys(classes)),
+            _ => None,
+        },
+        // The name of the field a loop takes (`for field in dataclasses.fields(obj)`).
+        Some(InstKind::AttrLoad { obj, attr, .. }) if attr == "name" => match item_of(*obj) {
+            Some(Items::Fields(classes)) => Some(Items::Keys(classes)),
             _ => None,
         },
         _ => None,
     };
     match items {
         Some(Items::Constants(names)) => AttrName::OneOf(names),
-        Some(Items::Keys(obj)) => keys_of(cx, obj, types),
-        Some(Items::Pairs(_)) | None => AttrName::Unknown,
+        Some(Items::Keys(classes)) => AttrName::KeyOf(classes),
+        Some(Items::Pairs(_) | Items::Fields(_)) | None => AttrName::Unknown,
     }
-}
-
-/// The name a key of the namespace of what `obj` holds names: one of an instance of the project
-/// classes heki knows it may be ([`AttrName::KeyOf`]), else any name.
-fn keys_of(
-    cx: &TypeCtx<'_>,
-    obj: VarId,
-    types: &FxHashMap<VarId, crate::resolver::Val>,
-) -> AttrName<'static> {
-    use crate::resolver::Val;
-    let project = cx.project;
-    let instance = |class: &String| {
-        (project.is_project_class(class) && project.protocol(class).is_none())
-            .then(|| project.canonical(class))
-    };
-    let classes = match types.get(&obj) {
-        Some(Val::Inst(class)) => instance(class).map(|c| vec![c]),
-        Some(Val::Union(classes)) => classes.iter().map(instance).collect(),
-        _ => None,
-    };
-    classes.map_or(AttrName::Unknown, AttrName::KeyOf)
 }
 
 /// What the keys of `other` name, stored by `ns.update(other)` (as for [`key_name`]): those of
 /// the namespace of an object, of its copy, or of its `items()`, name attributes that object
-/// has ([`AttrName::KeyOf`]); any others may be any names.
+/// has, and those of the fields a class declares attributes the class declares
+/// ([`AttrName::KeyOf`]); any others may be any names.
 pub(crate) fn update_keys<'i>(
     cx: &TypeCtx<'_>,
     f: &IrFunction,
@@ -1759,14 +1828,15 @@ pub(crate) fn update_keys<'i>(
 ) -> AttrName<'static> {
     let constant = |v: VarId| cx.str_constant_with(v, def, types);
     let loops = Iterated {
+        cx,
         f,
         def,
         types,
         constant: &constant,
     };
     match loops.items(other) {
-        Some(Items::Keys(obj) | Items::Pairs(obj)) => keys_of(cx, obj, types),
-        Some(Items::Constants(_)) | None => AttrName::Unknown,
+        Some(Items::Keys(classes) | Items::Pairs(classes)) => AttrName::KeyOf(classes),
+        Some(Items::Constants(_) | Items::Fields(_)) | None => AttrName::Unknown,
     }
 }
 
