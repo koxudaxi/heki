@@ -6660,6 +6660,45 @@ fn dependency_groups_included_along_many_paths_are_read_once_each() {
     check(&layered_dependency_groups(40));
 }
 
+/// The package `d`, named like the project, whose `__init__` starts a chain of modules each
+/// importing the next while it loads; the last imports a distribution of an extra and one of a
+/// development group. `IMP301` and `IMP302` selected.
+fn dependency_chain(modules: usize) -> Project {
+    let p = Project::new("bounds_dependency_chain");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"d\"\ndependencies = []\n\n[project.optional-dependencies]\nredis = [\"redis\"]\n\n[dependency-groups]\ntest = [\"pytest\"]\n\n[tool.heki.lint]\nselect = [\"IMP301\", \"IMP302\"]\n",
+    );
+    p.write("d/__init__.py", "import d.m0\n");
+    for i in 0..modules {
+        let next = if i + 1 < modules {
+            format!("import d.m{}\n", i + 1)
+        } else {
+            "import redis\nimport pytest\n".to_owned()
+        };
+        p.write(&format!("d/m{i}.py"), &next);
+    }
+    p
+}
+
+/// What the package modules and the base module load is walked once from all of them: the
+/// import of the extra's distribution is reported with the whole chain from the package.
+#[test]
+fn what_a_long_chain_loads_from_the_package_is_walked_once() {
+    let modules = 10_000;
+    let diags = check_past_budgets(modules, &[], dependency_chain);
+    let reports: Vec<String> = (diags.iter())
+        .map(|d| format!("{} {}", d["path"].as_str().unwrap(), d["rule_code"]))
+        .collect();
+    assert_eq!(
+        reports,
+        ["d/m9999.py \"IMP302\"", "d/m9999.py \"IMP301\""],
+        "{reports:#?}"
+    );
+    let extra = (diags.iter()).find(|d| d["rule_code"] == "IMP302").unwrap();
+    assert_eq!(extra["related"].as_array().unwrap().len(), modules);
+}
+
 /// [`import_chain`] with an `import-owners` contract walking what `importers` import, which
 /// forbids the module at the end of the chain.
 fn import_chain_with_contract(modules: usize, importers: &str) -> Project {

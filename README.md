@@ -234,7 +234,9 @@ strict mode, yet sends one query per order. Import contracts (experimental) know
 runs: in a function, lazily, by a constant name, or never under `TYPE_CHECKING`, and so does the
 opt-in import cycle rule, which counts only the imports that run while modules load. Another
 opt-in rule finds, with no configuration, the circular imports that fail: a `from` import that
-raises `ImportError` when one module of the cycle is imported before the others. Reading the
+raises `ImportError` when one module of the cycle is imported before the others. Other opt-in
+rules read `pyproject.toml` and find package code that imports test code, and dependencies
+declared only for development or in an extra that loading the package loads. Reading the
 contracts of tach and import-linter is planned. See the
 [comparison](https://heki.koxudaxi.dev/#how-heki-differs).
 

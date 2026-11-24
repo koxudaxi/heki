@@ -3,6 +3,7 @@
 
 use super::*;
 use heki_ast::parse_module;
+use heki_effect::resolver::ModuleLayout;
 use heki_effect::{ModuleInput, analyze_project, module_name_for_path};
 use heki_env::{PythonVersion, ReadOnlyReturnRule, RuntimeProfile, WriteOwnerRule};
 use heki_ir::{ModuleIr, build_module_ir};
@@ -79,6 +80,10 @@ fn check_with(files: &[(&str, &str)], config: &HekiConfig, select: &[&str]) -> V
         project_patches_builtins: None,
         text_of: None,
         open_premises: false,
+        layout: ProjectLayout {
+            root: Path::new("."),
+            modules: &ModuleLayout::default(),
+        },
     };
     check_project(&units, config, &kb, &index, &selection, &extras).unwrap()
 }
@@ -475,6 +480,10 @@ fn mut201_glob_writers_and_bad_targets() {
         project_patches_builtins: None,
         text_of: None,
         open_premises: false,
+        layout: ProjectLayout {
+            root: Path::new("."),
+            modules: &ModuleLayout::default(),
+        },
             }
         ),
         Err(RuleConfigError::InvalidTarget { section: "write-owners", target: t }) if t == "nodot"
@@ -913,6 +922,10 @@ fn check_against(checked: &[Built], indexed: &[Built], select: &[&str]) -> Vec<D
         project_patches_builtins: None,
         text_of: None,
         open_premises: false,
+        layout: ProjectLayout {
+            root: Path::new("."),
+            modules: &ModuleLayout::default(),
+        },
     };
     check_project(&units, &config, &kb, &index, &selection, &extras).unwrap()
 }

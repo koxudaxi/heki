@@ -89,7 +89,9 @@ FAMILIES = {
     ),
     "Imp": (
         "Imports (IMP)",
-        "Imports a contract does not allow, wherever they run, counted as Python loads them.",
+        "Imports a contract does not allow, modules importing each other, and code or "
+        "dependencies the package loads that installing it does not provide, each counted as "
+        "Python loads them.",
     ),
 }
 

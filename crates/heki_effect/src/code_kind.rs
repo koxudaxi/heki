@@ -12,9 +12,13 @@ use serde::Serialize;
 pub enum CodeKind {
     /// Code of a package the project distributes.
     Package,
-    /// Test code ([`is_test_module`]), or a module outside the source roots of a src layout
-    /// (`scripts/`, `tools/`, `examples/` run from the project root): no installed
-    /// distribution holds it.
+    /// A test module ([`is_test_module`]) inside the tree of a package the project distributes
+    /// (`src/acme/tests/`, `acme/test_io.py`): it installs with the package, but is no code
+    /// of it the package's users load.
+    PackageTest,
+    /// A test module outside the packages the project distributes, or a module outside the
+    /// source roots of a src layout (`scripts/`, `tools/`, `examples/` run from the project
+    /// root): no installed distribution holds it.
     Development,
     /// heki cannot tell: the project names its packages nowhere heki reads.
     Open,
@@ -24,6 +28,7 @@ impl CodeKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Package => "package",
+            Self::PackageTest => "package test",
             Self::Development => "development",
             Self::Open => "open",
         }
@@ -44,21 +49,40 @@ pub fn is_test_module(rel_path: &str) -> bool {
 }
 
 /// The kind of code of the module in the project file `rel_path` (POSIX, relative to the
-/// project root), named `module`. A test module is development code. Otherwise the code is the
-/// package's when the project is a src layout and the file is below a source root, or when its
-/// top-level package is named like the project (`[project] name`, normalized) or named by the
-/// build backend's settings ([`heki_env::Declared::packages`]). Outside every source root of a
-/// src layout, it is development code. Anything else is open: a workspace's members, and a flat
-/// layout whose packages are named nowhere heki reads.
+/// project root), named `module`. A file is in the tree of a package the project distributes
+/// when the project is a src layout and the file is below a source root, or when its top-level
+/// package is named like the project (`[project] name`, normalized) or named by the build
+/// backend's settings ([`heki_env::Declared::packages`]): it is the package's code, or, as a
+/// test module, [`CodeKind::PackageTest`]. Outside every source root of a src layout, and a
+/// test module outside the package's tree, it is development code. Anything else is open: a
+/// workspace's members, and a flat layout whose packages are named nowhere heki reads.
 pub fn code_kind(
     rel_path: &str,
     module: &str,
     layout: &ModuleLayout,
     cfg: &HekiConfig,
 ) -> CodeKind {
-    if is_test_module(rel_path) {
-        return CodeKind::Development;
+    let test = is_test_module(rel_path);
+    let in_package = match package_tree(rel_path, module, layout, cfg) {
+        Some(in_package) => in_package,
+        None if test => false,
+        None => return CodeKind::Open,
+    };
+    match (in_package, test) {
+        (true, false) => CodeKind::Package,
+        (true, true) => CodeKind::PackageTest,
+        (false, _) => CodeKind::Development,
     }
+}
+
+/// Whether the file `rel_path` of the module `module` is in the tree of a package the project
+/// distributes ([`code_kind`]); `None` when heki cannot tell.
+fn package_tree(
+    rel_path: &str,
+    module: &str,
+    layout: &ModuleLayout,
+    cfg: &HekiConfig,
+) -> Option<bool> {
     // The project's own src layout: its roots sit at the project root, with no workspace
     // member's roots or packages beside them.
     let src_layout = !layout.source_roots.is_empty()
@@ -70,11 +94,7 @@ pub fn code_kind(
                 .strip_prefix(root.as_str())
                 .is_some_and(|rest| rest.starts_with('/'))
         };
-        return if layout.source_roots.iter().any(below) {
-            CodeKind::Package
-        } else {
-            CodeKind::Development
-        };
+        return Some(layout.source_roots.iter().any(below));
     }
     let top = normalize_distribution(module.split('.').next().unwrap_or(module));
     let named = cfg
@@ -84,11 +104,7 @@ pub fn code_kind(
     let built = (cfg.declared.iter())
         .flat_map(|d| &d.packages)
         .any(|package| normalize_distribution(package) == top);
-    if named || built {
-        CodeKind::Package
-    } else {
-        CodeKind::Open
-    }
+    (named || built).then_some(true)
 }
 
 /// Under a `test/` or `tests/` directory, or a `test_*.py` or `*_test.py` file.
@@ -162,7 +178,19 @@ mod tests {
                 "src/acme/tests/test_io.py",
                 "acme.tests.test_io",
                 &src,
+                CodeKind::PackageTest,
+            ),
+            (
+                "tests/test_io.py",
+                "tests.test_io",
+                &src,
                 CodeKind::Development,
+            ),
+            (
+                "acme_core/test_io.py",
+                "acme_core.test_io",
+                &flat,
+                CodeKind::PackageTest,
             ),
             (
                 "scripts/release.py",
@@ -189,5 +217,6 @@ mod tests {
             CodeKind::Open
         );
         assert_eq!(CodeKind::Development.as_str(), "development");
+        assert_eq!(CodeKind::PackageTest.as_str(), "package test");
     }
 }

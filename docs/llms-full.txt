@@ -1338,9 +1338,10 @@ the installed release changed, and the changelog on GitHub lists every release.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   says how many.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
-  `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `IMP101`, `IMP102`, `MUT101`, `MUT103`,
-  `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`, `MUT115`, `MUT120`): they need
-  their exact code or name. In `ignore`, a prefix covers every rule it matches.
+  `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `IMP101`, `IMP102`, `IMP104`, `IMP301`,
+  `IMP302`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`,
+  `MUT115`, `MUT120`): they need their exact code or name. In `ignore`, a prefix covers every
+  rule it matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
 
@@ -2191,11 +2192,12 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
 
 ## Imports: `[tool.heki.imports]`
 
-Which imports the import rules count.
+Which imports the import rules count, and which distributions provide the modules they import.
 
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `cycle-edges` | `["body"]` | The timing classes of the imports [`IMP101`](https://heki.koxudaxi.dev/rules/import-cycle/) follows when it looks for modules importing each other: `"body"`, `"lazy"`, `"function"`, and `"type-checking"`. |
+| `module-distributions` | `{}` | The distributions that may provide a module outside the project, by the module: [`IMP301`](https://heki.koxudaxi.dev/rules/development-dependency-at-import-time/) and [`IMP302`](https://heki.koxudaxi.dev/rules/optional-dependency-at-import-time/) take them for the module and the modules below it, instead of the catalog's and the distributions named like the module. |
 
 ```toml
 [tool.heki.lint]
@@ -2214,6 +2216,23 @@ cycle-edges = ["body", "lazy"]   # also the lazy imports the module body does no
 - `"type-checking"`: an import under `if TYPE_CHECKING:`, which never runs.
 - An import whose class heki cannot tell (a lazy import whose reads it cannot place) counts for
   no class.
+
+`IMP301` and `IMP302` compare the modules a package loads with the distributions its
+`pyproject.toml` declares. A distribution provides the modules named like it (PEP 503 names:
+`ruamel.yaml` and `ruamel_yaml` are both `ruamel-yaml`), and the catalog knows the common ones
+named otherwise (`PyYAML` provides `yaml`, `Pillow` provides `PIL`). For any other,
+`module-distributions` says it, and it also settles a module several declared distributions may
+provide:
+
+```toml
+[tool.heki.imports]
+module-distributions = { cv2 = ["opencv-python-headless"], "google.cloud.storage" = ["google-cloud-storage"] }
+```
+
+- Each key is a module name; it covers the module and every module below it, and the longest key
+  naming a module decides it.
+- Distribution names are compared as PEP 503 normalizes them. A module the map gives only
+  distributions the project does not declare is not judged.
 
 ## Ecosystem knowledge: `[[tool.heki.ecosystem]]`
 
@@ -3079,7 +3098,7 @@ Rules worth enabling here
   rule    reports  exact  consequence  right about the code (published)  real harm  block
   MUT106        1      -  bug          not measured                      -          yes
   OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
-  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF112, EFF113, EFF114, EFF115, EFF116, IMP101, IMP102, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, OPT112
+  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF112, EFF113, EFF114, EFF115, EFF116, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, OPT112
   MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it.
 
 Contract candidates
@@ -3763,7 +3782,7 @@ Source: https://heki.koxudaxi.dev/rules/
 
 # Rules
 
-heki has 52 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
+heki has 55 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
 
 - The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report of an exact rule that did not establish every premise (an `OPT` report whose rewrite is not proven) is shown where a heuristic rule would run.
 - A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
@@ -3857,14 +3876,17 @@ Quadratic patterns heki can rewrite, each proven safe by the alias analysis befo
 
 ## Imports (IMP)
 
-Imports a contract does not allow, wherever they run, counted as Python loads them.
+Imports a contract does not allow, modules importing each other, and code or dependencies the package loads that installing it does not provide, each counted as Python loads them.
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
 | IMP101 | [import-cycle](https://heki.koxudaxi.dev/rules/import-cycle/) | Opt-in: project modules that import each other while they load (an import cycle), reported once per group at the import closing a shortest cycle. | ≈ 🔌 🧪 |
 | IMP102 | [circular-import-failure](https://heki.koxudaxi.dev/rules/circular-import-failure/) | Opt-in: a `from M import name` that raises `ImportError` when a module of its import cycle is imported before the others, because `M` is still loading and has not bound `name`. | ≈ 🔌 🧪 |
+| IMP104 | [development-code-import](https://heki.koxudaxi.dev/rules/development-code-import/) | Opt-in: a module of the package the project distributes imports test code, or a module outside the source roots of a src layout, by an import that runs. | ≈ 🔌 🧪 |
 | IMP201 | [import-owner-violation](https://heki.koxudaxi.dev/rules/import-owner-violation/) | An import that an `import-owners` contract does not allow: a forbidden module, or one outside the allowed imports. | ≈ 📜 🧪 |
 | IMP202 | [unresolved-guarded-import](https://heki.koxudaxi.dev/rules/unresolved-guarded-import/) | Strict mode of an `import-owners` contract (`unresolved = "report"`): an import whose module heki cannot name, which may be one the contract does not allow. | ≈ 📜 🧪 |
+| IMP301 | [development-dependency-at-import-time](https://heki.koxudaxi.dev/rules/development-dependency-at-import-time/) | Opt-in: a package module loads, while it loads, a module whose distribution the project declares only for development (a dependency group), not in its dependencies or extras. | ≈ 🔌 🧪 |
+| IMP302 | [optional-dependency-at-import-time](https://heki.koxudaxi.dev/rules/optional-dependency-at-import-time/) | Opt-in: importing a top-level package or an entry point's module loads, while it loads, a module whose distribution the project declares only in extras, so the import fails without them. | ≈ 🔌 🧪 |
 
 
 ---
@@ -4110,8 +4132,11 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `rule.EFF116` | rule | [`EFF116`](https://heki.koxudaxi.dev/rules/generator-never-iterated/) | 0.2.6 | - |
 | `rule.IMP101` | rule | [`IMP101`](https://heki.koxudaxi.dev/rules/import-cycle/) | 0.2.7 | - |
 | `rule.IMP102` | rule | [`IMP102`](https://heki.koxudaxi.dev/rules/circular-import-failure/) | 0.2.8 | - |
+| `rule.IMP104` | rule | [`IMP104`](https://heki.koxudaxi.dev/rules/development-code-import/) | 0.2.8 | - |
 | `rule.IMP201` | rule | [`IMP201`](https://heki.koxudaxi.dev/rules/import-owner-violation/) | 0.2.7 | - |
 | `rule.IMP202` | rule | [`IMP202`](https://heki.koxudaxi.dev/rules/unresolved-guarded-import/) | 0.2.7 | - |
+| `rule.IMP301` | rule | [`IMP301`](https://heki.koxudaxi.dev/rules/development-dependency-at-import-time/) | 0.2.8 | - |
+| `rule.IMP302` | rule | [`IMP302`](https://heki.koxudaxi.dev/rules/optional-dependency-at-import-time/) | 0.2.8 | - |
 | `rule.MUT101` | rule | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | 0.1.0 | - |
 | `rule.MUT111` | rule | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | 0.2.0 | - |
@@ -4222,6 +4247,14 @@ It is new: its reports are heuristic until a review of its reports on real code 
 
 It is new: every report rests on established premises only, but its reports are heuristic until a review of its reports on real code bases certifies its claim, and which imports and code stop a run can still change.
 
+## `rule.IMP104`
+
+- **Kind:** rule
+- **Target:** [`IMP104`](https://heki.koxudaxi.dev/rules/development-code-import/)
+- **Since:** 0.2.8
+
+It is new: every report rests on established premises only, but its reports are heuristic until a review of its reports on real code bases certifies its claim, and which modules count as package and development code can still change.
+
 ## `rule.IMP201`
 
 - **Kind:** rule
@@ -4237,6 +4270,22 @@ It is new: its reports are heuristic until a review of its reports on real code 
 - **Since:** 0.2.7
 
 It is the strict mode of `IMP201`, which is experimental.
+
+## `rule.IMP301`
+
+- **Kind:** rule
+- **Target:** [`IMP301`](https://heki.koxudaxi.dev/rules/development-dependency-at-import-time/)
+- **Since:** 0.2.8
+
+It is new: every report rests on established premises only, but its reports are heuristic until a review of its reports on real code bases certifies its claim, and which distributions provide a module can still change.
+
+## `rule.IMP302`
+
+- **Kind:** rule
+- **Target:** [`IMP302`](https://heki.koxudaxi.dev/rules/optional-dependency-at-import-time/)
+- **Since:** 0.2.8
+
+It is new: every report rests on established premises only, but its reports are heuristic until a review of its reports on real code bases certifies its claim, and which distributions provide a module and which modules are base modules can still change.
 
 ## `rule.MUT101`
 
@@ -4418,7 +4467,7 @@ On a save, the edit reaches other files only through what it changes:
 | a function's own in-place changes, attribute rebindings, or calls, while its effects stay the same | the files with `MUT108` / `MUT110` / `MUT120` reports above it: a report's call chain ends at the first function whose body makes the change |
 | the position of a call site, also when its bytes stay where they were | the files whose call chains show that call site |
 | the position of a method's own change of a container | the files whose `MUT113` reports show it |
-| the position of an import | the files whose `import-owners` chains, `IMP101` cycles, or `IMP102` chains show it |
+| the position of an import | the files whose `import-owners` chains, `IMP101` cycles, or `IMP102`, `IMP301`, or `IMP302` chains show it |
 
 Contracts reach further when a function changes its calls:
 
@@ -4430,6 +4479,7 @@ Contracts reach further when a function changes its calls:
 | an `import-owners` contract with `reach`, when a file's imports change | every module the contract judges | an importer's report follows the imports of every module its walk reaches, and the walks share one budget |
 | `IMP101` selected, when a file's imports change | the files reporting a cycle before and after the change | which modules import each other, and which import closes a group's cycle, depend on the imports of every module |
 | `IMP102` selected, when a file's imports, or what its body binds and runs between them, change | the files reporting a failing import before and after the change | which import fails, and for which modules imported first, depends on the imports and the order of the module bodies of every module of the cycle |
+| `IMP301` or `IMP302` selected, when a file's imports change | the files reporting an import of such a distribution before and after the change | whether a package or base module loads the import depends on the imports of every module on the way |
 
 Edits that change none of these, such as most comments, stop at the edited file.
 
@@ -7122,6 +7172,235 @@ No automatic fix.
 
 ## Options
 - `lint.extend-select = ["MUT112"]` enables the rule.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/development-code-import/
+
+# development-code-import (IMP104)
+
+Family: Imports (IMP) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+
+Opt-in: a module of the package the project distributes imports test code, or a module outside the source roots of a src layout, by an import that runs.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+
+!!! warning "Experimental"
+
+    It is new: every report rests on established premises only, but its reports are heuristic until a review of its reports on real code bases certifies its claim, and which modules count as package and development code can still change. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
+
+## What it does
+Reports an import, in a module of the package the project distributes, of development code: test
+code beside the package, or a module outside the source roots of a src layout. The import runs: it
+is in the module body, a lazy import, or inside a function. An import under `TYPE_CHECKING` never
+runs, and an import a handler may take the `ImportError` of expects the module to be missing;
+neither is reported. One report is given per function and module imported, at its first import: the
+names of one `from` statement are one import.
+
+heki finds it without configuration, from the project's layout and `pyproject.toml`:
+
+- **Package code** is a module in the tree of the package the project distributes: in a src
+  layout, below a source root (`src/acme/io.py`); in a flat layout, below a top-level package
+  named like the project (`[project] name`, normalized) or named by the build backend's settings
+  (`[tool.setuptools] packages`, `[tool.hatch.build.targets.wheel] packages`,
+  `[tool.uv.build-backend] module-name`). Test modules, the files pytest collects tests or
+  fixtures from by default (under a `tests/` or `test/` directory, `test_*.py`, `*_test.py`,
+  `conftest.py`), are not package code: those in the package's tree install with it, and are
+  neither package nor development code here.
+- **Development code** is what no installed distribution holds: a test module outside the
+  package's tree (`tests/` beside the package), and, in a src layout, every module outside the
+  source roots (`scripts/`, `tools/`, `examples/`, run from the project root).
+
+## What a report states
+
+A report states that the module of the package it is in imports, at the reported statement, a
+module of the project that is development code, outside the tree of the package the project
+distributes. It says where the code is: a build that adds that code to the distribution makes the
+import work.
+
+Its premises, each established or no report:
+
+- **Package code**: the module of the import is package code, as above. A workspace's members and
+  a flat layout whose packages are named nowhere heki reads are neither: their modules give no
+  report.
+- **Development code**: the module imported is development code, as above.
+- **Module**: the import loads that module, its name resolved against the project's modules (for
+  `from a import c`, the package `a`, which it loads in any case).
+- **Runs**: the import is in the module body, a lazy import, or in a function, not under
+  `TYPE_CHECKING`.
+- **No handler**: no handler may take its `ImportError`: no `except` clause naming
+  `ImportError`, `Exception`, `BaseException`, a type heki cannot tell is another builtin
+  exception, or a bare `except`, and no `with` block or `finally` body around it.
+
+## Why is this bad?
+An installed package usually holds only its own modules. Test helpers, `conftest.py`, and the
+scripts of a src layout stay in the repository, so an import of them works in the project's own
+checkout and fails for everyone who installs the package. The tests pass, because they run where
+the development code is.
+
+## Example
+```python
+# src/acme/report.py
+from tests.factories import make_order  # IMP104
+
+
+def sample_report() -> str:
+    return render(make_order())
+```
+
+Use instead:
+```python
+# src/acme/samples.py
+def make_order() -> Order:
+    return Order(items=[])
+```
+
+```python
+# src/acme/report.py
+from acme.samples import make_order
+
+
+def sample_report() -> str:
+    return render(make_order())
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- Its reports are errors: `lint.severity = { IMP104 = "warning" }` makes them warnings.
+
+## Known limitations
+- Which files a build ships is read only from the settings listed above: a build that leaves
+  out part of the package's tree, or adds files from outside it, is not known.
+- Imports heki does not see (`exec`, `runpy`, a module loaded from a file path) are not judged.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/development-dependency-at-import-time/
+
+# development-dependency-at-import-time (IMP301)
+
+Family: Imports (IMP) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+
+Opt-in: a package module loads, while it loads, a module whose distribution the project declares only for development (a dependency group), not in its dependencies or extras.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+
+!!! warning "Experimental"
+
+    It is new: every report rests on established premises only, but its reports are heuristic until a review of its reports on real code bases certifies its claim, and which distributions provide a module can still change. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
+
+## What it does
+Reports an import, run while a module of the package the project distributes loads, of a module
+whose distribution the project declares only for development. The import is in the package
+module's body, or in the body of a project module it loads while it loads. The project declares
+the distribution in a development group and in none of `[project] dependencies` and
+`[project.optional-dependencies]`, so installing the package does not ask for it.
+
+Development groups are PEP 735 `[dependency-groups]` (with the groups an `include-group` takes
+in), `[tool.uv] dev-dependencies`, `[tool.poetry.group.<name>.dependencies]`,
+`[tool.poetry.dev-dependencies]`, and `[tool.pdm.dev-dependencies]`. Package code is the code of
+the package the project distributes, as [`IMP104`](https://heki.koxudaxi.dev/rules/development-code-import/) decides it.
+
+One report is given per module and module imported, at its first import (the names of one `from`
+statement are one import), naming the package module whose load runs it when that is another module,
+with the imports leading there as related locations.
+
+## What a report states
+
+A report states that loading the package module it names runs the reported import whenever it
+loads, and that the project declares every distribution that may provide the imported module only
+for development.
+
+Its premises, each established or no report:
+
+- **Package code**: the module whose load runs the import is package code.
+- **Chain**: the reported import, and each import leading to it from that module, is in a module
+  body (or a class body it runs, or a constant by-name import there), runs on every path through
+  the body, is no lazy import, and loads the module shown, its parent packages first.
+- **No handler**: no handler may take the `ImportError` of any of them: no `except` clause naming
+  `ImportError`, `Exception`, `BaseException`, a type heki cannot tell is another builtin
+  exception, or a bare `except`, and no `with` block or `finally` body around one.
+- **Distribution**: the distributions that may provide the imported module are, when
+  `[tool.heki.imports] module-distributions` names the module or a package holding it, the ones it
+  lists; otherwise the ones the catalog lists for it (`PyYAML` provides `yaml`, `pytest` provides
+  `_pytest`) and the ones named like the module or a package holding it, with names compared as
+  PEP 503 normalizes them (`ruamel.yaml` is `ruamel-yaml`). The project declares at least one of
+  them, and each one it declares is in no dependency and no extra. The project's own name in a
+  group or an extra (`dev = ["acme[test]"]`) adds that extra, no distribution.
+- **No copy**: without `module-distributions`, the project holds no module or package (a
+  namespace package too) of the imported module's top-level name in a directory without
+  `__init__.py` (`setuptools/_vendor/`), which a `sys.path` entry the code adds may name: the
+  import may find that copy.
+- **Known dependencies**: the project's `pyproject.toml` has a `[project]` or `[tool.poetry]`
+  table, and `[project] dynamic` lists neither `dependencies` nor `optional-dependencies`.
+
+## Why is this bad?
+A dependency group is installed only in the project's own environments: `uv sync`, `pdm install`,
+or `poetry install` add it for development, and installing the package does not. A package module
+that imports such a distribution while it loads works in the project's checkout and its tests, and
+raises `ImportError` for users, unless something else they install happens to depend on it.
+
+## Example
+```toml
+[project]
+name = "acme"
+dependencies = ["httpx"]
+
+[dependency-groups]
+test = ["pytest", "freezegun"]
+```
+
+```python
+# acme/clock.py
+from freezegun import freeze_time  # IMP301
+
+
+def frozen(at: str):
+    return freeze_time(at)
+```
+
+Use instead:
+```python
+# acme/clock.py
+def frozen(at: str):
+    from freezegun import freeze_time
+
+    return freeze_time(at)
+```
+
+or declare `freezegun` in `[project] dependencies` (or in an extra, which [`IMP302`](https://heki.koxudaxi.dev/rules/optional-dependency-at-import-time/)
+then judges).
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `[tool.heki.imports] module-distributions` names the distributions that may provide a module
+  whose name differs from theirs, or settles a module several distributions may provide:
+  `module-distributions = { cv2 = ["opencv-python-headless"] }`.
+- Its reports are errors: `lint.severity = { IMP301 = "warning" }` makes them warnings.
+
+## Known limitations
+- A module whose distribution is named neither like it nor by the catalog or
+  `module-distributions` is not judged, and a distribution named like a module may not be the one
+  that provides it (a project depending on `tensorflow-cpu` and listing `tensorflow` in a
+  development group).
+- Imports inside functions, lazy imports, and imports on a branch of the module body are not
+  judged: they need not run while the module loads.
+- Dependencies declared outside `pyproject.toml` (`setup.py`, `setup.cfg`, a requirements file a
+  build backend reads) are not known, and neither are Hatch environments' dependencies.
+- A distribution a dependency installs is still reported: the report is about what the project
+  declares, and relying on another distribution's dependencies breaks when that one changes.
+- A module only a host program loads (a mypy, pytest, Sphinx, or MkDocs plugin of the package)
+  is judged like any package module: the host installs what it needs.
 
 
 ---
@@ -9826,6 +10105,126 @@ such displays), the help advises indexing a hashable form of it instead (a `tupl
 
 ## Fix safety
 No automatic fix.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/optional-dependency-at-import-time/
+
+# optional-dependency-at-import-time (IMP302)
+
+Family: Imports (IMP) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+
+Opt-in: importing a top-level package or an entry point's module loads, while it loads, a module whose distribution the project declares only in extras, so the import fails without them.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+
+!!! warning "Experimental"
+
+    It is new: every report rests on established premises only, but its reports are heuristic until a review of its reports on real code bases certifies its claim, and which distributions provide a module and which modules are base modules can still change. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
+
+## What it does
+Reports an import, run while a base module of the project loads, of a module whose distribution
+the project declares only in extras (`[project.optional-dependencies]`, `[tool.poetry.extras]`).
+A base module is a top-level package of the package the project distributes, or a module an entry
+point names (`[project.scripts]`, `[project.gui-scripts]`, `[project.entry-points.<group>]`,
+`[tool.poetry.scripts]`) with the packages holding it. Installing the package without the extra
+leaves the distribution out, and importing the base module raises `ImportError`.
+
+The import is in the base module's body, or in the body of a project module it loads while it loads.
+One report is given per module and module imported, at its first import (the names of one `from`
+statement are one import), naming the base module whose import fails, with the imports leading there
+as related locations. A module that only some other module loads, such as `acme.backends.redis` for
+the extra `redis`, is not reported.
+
+## What a report states
+
+A report states that importing the base module it names runs the reported import whenever it
+loads, and that the project declares every distribution that may provide the imported module only
+in extras: importing the base module needs them. Unless something else installs them, the import
+raises `ImportError` in an installation without the extras.
+
+Its premises, each established or no report:
+
+- **Base module**: the module whose load runs the import is a top-level package module of the
+  package code ([`IMP104`](https://heki.koxudaxi.dev/rules/development-code-import/) says which code that is), or a module an
+  entry point names, or a package holding one.
+- **Chain**: the reported import, and each import leading to it from that module, is in a module
+  body (or a class body it runs, or a constant by-name import there), runs on every path through
+  the body, is no lazy import, and loads the module shown, its parent packages first.
+- **No handler**: no handler may take the `ImportError` of any of them: no `except` clause naming
+  `ImportError`, `Exception`, `BaseException`, a type heki cannot tell is another builtin
+  exception, or a bare `except`, and no `with` block or `finally` body around one.
+- **Distribution**: the distributions that may provide the imported module are found as for
+  [`IMP301`](https://heki.koxudaxi.dev/rules/development-dependency-at-import-time/), with its premise that the project holds no
+  copy of the module. The project declares at least one of them, and each one it declares is in
+  an extra and in no dependency.
+- **Known dependencies**: the project's `pyproject.toml` has a `[project]` or `[tool.poetry]`
+  table, and `[project] dynamic` lists neither `dependencies` nor `optional-dependencies`.
+
+## Why is this bad?
+An extra is what users opt into: `pip install acme` installs the package without it, and
+`pip install "acme[redis]"` with it. When `import acme` loads the extra's distribution, the plain
+install is broken, and the error names a module the user never imported. A command an entry point
+installs fails the same way before it can say which extra it needs.
+
+## Example
+```toml
+[project]
+name = "acme"
+dependencies = ["httpx"]
+
+[project.optional-dependencies]
+redis = ["redis"]
+```
+
+```python
+# acme/__init__.py
+from acme.cache import Cache
+```
+
+```python
+# acme/cache.py
+import redis  # IMP302
+
+
+class Cache:
+    def __init__(self, url: str) -> None:
+        self.client = redis.Redis.from_url(url)
+```
+
+Use instead:
+```python
+# acme/cache.py
+class Cache:
+    def __init__(self, url: str) -> None:
+        try:
+            import redis
+        except ImportError as e:
+            raise ImportError("install acme[redis] to use Cache") from e
+        self.client = redis.Redis.from_url(url)
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `[tool.heki.imports] module-distributions` names the distributions that may provide a module
+  (see [`IMP301`](https://heki.koxudaxi.dev/rules/development-dependency-at-import-time/)).
+- Its reports are errors: `lint.severity = { IMP302 = "warning" }` makes them warnings.
+
+## Known limitations
+- An entry point of a plugin group (`[project.entry-points."pytest11"]`) is loaded by the program
+  that defines the group, which may itself be the extra's distribution; such a report is right
+  about the import and harmless in practice.
+- A distribution a dependency installs is still reported: the report is about what the project
+  declares.
+- Imports inside functions, lazy imports, and imports on a branch of the module body are not
+  judged, and neither are the modules of a distribution named neither like them nor by the
+  catalog or `module-distributions`.
+- Dependencies declared outside `pyproject.toml` are not known.
 
 
 ---

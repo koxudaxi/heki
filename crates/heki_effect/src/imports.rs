@@ -7,8 +7,10 @@
 //! check from them and the project declarations, and never kept in the index (ADR-017).
 
 mod circular;
+mod distributions;
 
 pub use circular::CircularFailure;
+pub use distributions::{DeclaredOnly, Distributions, Only};
 
 use crate::resolver::{FromImport, ProjectDecls, resolve_relative_module};
 use crate::{FileSummary, ModuleInput, environment, is_stub, scc};
@@ -1253,6 +1255,34 @@ impl<'i> ImportGraph<'i> {
         self.paths[m as usize]
     }
 
+    /// The names the project's modules and packages, namespace packages included, have in a
+    /// directory that is no regular package (the project root, a source root, `scripts/`,
+    /// `setuptools/_vendor/`, a namespace package's directory): the top-level names a `sys.path`
+    /// entry naming that directory makes importable. Under the source roots they are the
+    /// project's top-level modules; elsewhere they may be copies of modules from outside the
+    /// project that the code puts on `sys.path`.
+    pub fn loose_names(&self) -> FxHashSet<&str> {
+        let mut names = FxHashSet::default();
+        for module in &self.modules {
+            let mut holder = None;
+            for (i, part) in module.split('.').enumerate() {
+                // The directory holding `part`: the root, or a prefix of the name that is no
+                // module of the project (a directory without `__init__.py`).
+                if holder.is_none_or(|prefix: &str| !self.module_ids.contains_key(prefix)) {
+                    names.insert(part);
+                }
+                let end = (module.match_indices('.').nth(i)).map_or(module.len(), |(at, _)| at);
+                holder = Some(&module[..end]);
+            }
+        }
+        names
+    }
+
+    /// How many project modules there are: their ids are `0..` it, in the order of their names.
+    pub fn module_count(&self) -> u32 {
+        self.modules.len() as u32
+    }
+
     /// The id of the project module named `name`.
     pub fn module(&self, name: &str) -> Option<u32> {
         self.module_ids.get(name).copied()
@@ -1308,6 +1338,49 @@ impl<'i> ImportGraph<'i> {
         })
     }
 
+    /// The project modules that loading any of the project modules `starts` loads while it
+    /// loads, through imports whose failure leaves their module
+    /// ([`ImportSite::always_imports_uncaught`]) of the modules `enters` takes: breadth first,
+    /// so that each module is reached by a shortest chain of [`Self::hops`] from the start
+    /// nearest to it. One walk from all the starts, linear in the modules and sites and
+    /// unmetered: each module is visited once.
+    pub fn loaded_from(
+        &self,
+        starts: impl IntoIterator<Item = u32>,
+        enters: impl Fn(u32) -> bool,
+    ) -> LoadedFrom {
+        let starts: Vec<u32> = starts.into_iter().collect();
+        let is_start: FxHashSet<u32> = starts.iter().copied().collect();
+        let mut into: FxHashMap<u32, ImportHop> = FxHashMap::default();
+        let mut order: Vec<u32> = Vec::new();
+        reach_breadth_first::<_, ()>(
+            &Budget::unmetered("import_dependencies"),
+            starts,
+            |m, next| {
+                for (j, (site, _)) in self.sites(m).into_iter().flatten().enumerate() {
+                    if !site.always_imports_uncaught() {
+                        continue;
+                    }
+                    for hop in self.hops(m, j) {
+                        if is_start.contains(&hop.to) || !enters(hop.to) {
+                            continue;
+                        }
+                        if let Entry::Vacant(entry) = into.entry(hop.to) {
+                            entry.insert(hop);
+                            next.push(hop.to);
+                        }
+                    }
+                }
+            },
+            |m| {
+                order.push(m);
+                Visit::Expand
+            },
+        )
+        .open_means(None);
+        LoadedFrom { order, into }
+    }
+
     /// [`ImportTime`] of every project module, each asked in the order of the modules.
     pub fn import_time(&self, budget: &Budget) -> ImportTime {
         let closure: Closure<u32, BitSet> = Closure::new();
@@ -1352,6 +1425,29 @@ impl ImportTime {
             names.sort_unstable();
             names
         })
+    }
+}
+
+/// What loading some project modules loads while they load ([`ImportGraph::loaded_from`]).
+pub struct LoadedFrom {
+    /// The starts, then the modules reached, in the order of their distance from the starts.
+    pub order: Vec<u32>,
+    /// The hop into each module reached that is no start.
+    into: FxHashMap<u32, ImportHop>,
+}
+
+impl LoadedFrom {
+    /// The hops from the start nearest to the module `m` reached into it, in order: none for a
+    /// start.
+    pub fn chain(&self, m: u32) -> Vec<ImportHop> {
+        let mut hops = Vec::new();
+        let mut at = m;
+        while let Some(&hop) = self.into.get(&at) {
+            hops.push(hop);
+            at = hop.from;
+        }
+        hops.reverse();
+        hops
     }
 }
 

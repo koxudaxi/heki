@@ -16,11 +16,11 @@ use heki_rules::project::{
     RulesRun, discovers, exclude_set, parse_source, retain_unsuppressed, unread_module,
 };
 use heki_rules::{
-    CHAIN_RULES, ChainFacts, CheckExtras, EXAMPLE_RULES, ExampleOwners, MemberName, RuleSelection,
-    SNAPSHOT_FILE, SelectionError, SentinelTestKey, SnapshotError, StaleWriteKey, SummarySnapshot,
-    chain_facts, check_project, circular_failure_files, class_member_names, deep_copy_files,
-    example_digest, family_readers, import_cycle_files, kept_removals_in, lazy_setup_files,
-    sentinel_tests_in, stale_writes_by_file,
+    CHAIN_RULES, ChainFacts, CheckExtras, EXAMPLE_RULES, ExampleOwners, MemberName, ProjectLayout,
+    RuleSelection, SNAPSHOT_FILE, SelectionError, SentinelTestKey, SnapshotError, StaleWriteKey,
+    SummarySnapshot, chain_facts, check_project, circular_failure_files, class_member_names,
+    deep_copy_files, dependency_report_files, example_digest, family_readers, import_cycle_files,
+    kept_removals_in, lazy_setup_files, sentinel_tests_in, stale_writes_by_file,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
@@ -115,21 +115,28 @@ enum ShownAt {
     Import(String),
 }
 
-/// The files the selected import rules that read every module's imports report in: `IMP101`'s
-/// and `IMP102`'s, sorted.
+/// The files the selected import rules that read every module's imports report in: `IMP101`'s,
+/// `IMP102`'s, `IMP301`'s, and `IMP302`'s, sorted.
 fn import_report_files(
-    config: &heki_env::HekiConfig,
+    env: &ProjectEnv,
     selection: &RuleSelection,
     index: &ProjectIndex,
     decls: &heki_effect::ProjectDecls,
 ) -> Result<Vec<PathBuf>, heki_rules::RuleConfigError> {
     let mut files = Vec::new();
     if selection.is_enabled("IMP101") {
-        files.extend(import_cycle_files(config, index, decls)?);
+        files.extend(import_cycle_files(&env.cfg, index, decls)?);
     }
     if selection.is_enabled("IMP102") {
         files.extend(circular_failure_files(index, decls));
     }
+    let layout = ProjectLayout {
+        root: &env.root,
+        modules: &env.layout,
+    };
+    files.extend(dependency_report_files(
+        selection, &env.cfg, &env.kb, layout, index, decls,
+    ));
     files.sort();
     files.dedup();
     Ok(files)
@@ -302,8 +309,8 @@ pub struct Workspace {
     /// lazy setup steps read whether any function removes them).
     kept_removals: FxHashMap<PathBuf, BTreeSet<String>>,
     /// The files the import rules reading every module's imports report in, as of the latest
-    /// analysis ([`import_report_files`]): kept while `IMP101` or `IMP102` is selected
-    /// (`Workspace::note_import_reports`).
+    /// analysis ([`import_report_files`]): kept while `IMP101`, `IMP102`, `IMP301`, or `IMP302`
+    /// is selected (`Workspace::note_import_reports`).
     import_report_files: Vec<PathBuf>,
     /// What the configured contracts read across functions (`Workspace::affected_by`).
     reach: ContractReach,
@@ -583,6 +590,10 @@ impl Workspace {
             project_patches_builtins: Some(false),
             text_of: None,
             open_premises: false,
+            layout: ProjectLayout {
+                root: &env.root,
+                modules: &env.layout,
+            },
         };
         check_project(&[], &env.cfg, &env.kb, &index, &selection, &extras)
             .map_err(EngineError::Rules)?;
@@ -611,9 +622,8 @@ impl Workspace {
         } else {
             FxHashMap::default()
         };
-        let import_report_files =
-            import_report_files(&env.cfg, &selection, &index, decls.completed())
-                .map_err(EngineError::Rules)?;
+        let import_report_files = import_report_files(&env, &selection, &index, decls.completed())
+            .map_err(EngineError::Rules)?;
         let class_members = if reach.class_members {
             (class_member_names(&index).into_iter())
                 .map(MemberName::into_owned)
@@ -720,6 +730,10 @@ impl Workspace {
             project_patches_builtins: Some(!self.patching_builtins.is_empty()),
             text_of: Some(&|p: &Path| heki_ast::read_source(p).ok()),
             open_premises: false,
+            layout: ProjectLayout {
+                root: &self.env.root,
+                modules: &self.env.layout,
+            },
         };
         let (mut diags, reads) = self.decls.completed().record(|| {
             let mut diags = check_project(
@@ -997,13 +1011,13 @@ impl Workspace {
         deep_copy_files(&self.index)
     }
 
-    /// Record the files `IMP101` and `IMP102` report in against the current index. Their
-    /// reports read the imports of every module: when some file's imports changed
+    /// Record the files `IMP101`, `IMP102`, `IMP301`, and `IMP302` report in against the current
+    /// index. Their reports read the imports of every module: when some file's imports changed
     /// (`imports_changed`), or those files did, the files reporting before and after need a new
     /// check, and are returned.
     fn note_import_reports(&mut self, imports_changed: bool) -> Vec<PathBuf> {
         let now = import_report_files(
-            &self.env.cfg,
+            &self.env,
             &self.selection,
             &self.index,
             self.decls.completed(),

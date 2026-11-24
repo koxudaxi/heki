@@ -6899,6 +6899,125 @@ fn lsp_diagnostics_equal_a_full_check_through_circular_imports() {
     run_steps(s, &steps);
 }
 
+// --------------------------------------------- development code and dependencies at import time
+
+const DEPENDENCIES_CONFIG: &str = "[project]\nname = \"pkg\"\ndependencies = [\"httpx\"]\n\n[project.optional-dependencies]\nredis = [\"redis\"]\n\n[dependency-groups]\ntest = [\"pytest\"]\n\n[tool.heki.lint]\nselect = [\"IMP104\", \"IMP301\", \"IMP302\"]\n";
+
+/// `IMP302` reads what the base module loads, and `IMP301` what the package modules load,
+/// through every module's imports: an edit of the package's `__init__` adds or removes the
+/// report in the module it loads, also through a module that is no package code, and a handler
+/// around that import takes it away. The declarations decide them: moving a distribution into
+/// the dependencies, or `module-distributions` naming another one, takes the report away, and
+/// dependencies the build backend computes take every report away.
+/// `IMP104` follows the module an import names, which a deleted file no longer is.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_dependencies_at_import_time() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/cache.py", "import redis\n".to_owned()),
+        ("pkg/clock.py", "import json\n".to_owned()),
+        ("helpers.py", "import pytest\n".to_owned()),
+        ("tests/__init__.py", String::new()),
+        ("tests/factories.py", String::new()),
+    ];
+    let s = Session::start_with(
+        "lsp_oracle_import_dependencies",
+        DEPENDENCIES_CONFIG,
+        files,
+        false,
+    );
+    let steps = [
+        Step::new("no base module loads the extra's module", Vec::new())
+            .absent(&[("pkg/cache.py", "IMP302"), ("helpers.py", "IMP301")]),
+        Step::new(
+            "the package imports it",
+            vec![save("pkg/__init__.py", "from pkg import cache\n")],
+        )
+        .present(&[("pkg/cache.py", "IMP302")]),
+        Step::new(
+            "a handler takes its error",
+            vec![save(
+                "pkg/__init__.py",
+                "try:\n    from pkg import cache\nexcept ImportError:\n    cache = None\n",
+            )],
+        )
+        .absent(&[("pkg/cache.py", "IMP302")]),
+        Step::new(
+            "the handler goes",
+            vec![save("pkg/__init__.py", "from pkg import cache\n")],
+        )
+        .present(&[("pkg/cache.py", "IMP302")]),
+        Step::new(
+            "a package module imports a development dependency",
+            vec![save("pkg/clock.py", "import pytest\n")],
+        )
+        .present(&[("pkg/clock.py", "IMP301")]),
+        Step::new(
+            "the dependency is declared",
+            vec![Action::Configure(
+                DEPENDENCIES_CONFIG.replace("[\"httpx\"]", "[\"httpx\", \"pytest\"]"),
+            )],
+        )
+        .absent(&[("pkg/clock.py", "IMP301")]),
+        Step::new(
+            "it is a development dependency again",
+            vec![Action::Configure(DEPENDENCIES_CONFIG.to_owned())],
+        )
+        .present(&[("pkg/clock.py", "IMP301")]),
+        Step::new(
+            "the package loads a module that is no package code",
+            vec![save("pkg/__init__.py", "from pkg import cache\nimport helpers\n")],
+        )
+        .present(&[("helpers.py", "IMP301"), ("pkg/cache.py", "IMP302")]),
+        Step::new(
+            "it no longer does",
+            vec![save("pkg/__init__.py", "from pkg import cache\n")],
+        )
+        .absent(&[("helpers.py", "IMP301")]),
+        Step::new(
+            "the user's map names a dependency for the extra's module",
+            vec![Action::Configure(format!(
+                "{DEPENDENCIES_CONFIG}\n[tool.heki.imports]\nmodule-distributions = {{ redis = [\"httpx\"] }}\n"
+            ))],
+        )
+        .absent(&[("pkg/cache.py", "IMP302")]),
+        Step::new(
+            "the map goes",
+            vec![Action::Configure(DEPENDENCIES_CONFIG.to_owned())],
+        )
+        .present(&[("pkg/cache.py", "IMP302")]),
+        Step::new(
+            "the build backend computes the dependencies",
+            vec![Action::Configure(DEPENDENCIES_CONFIG.replace(
+                "dependencies = [\"httpx\"]",
+                "dynamic = [\"dependencies\"]",
+            ))],
+        )
+        .absent(&[("pkg/cache.py", "IMP302"), ("pkg/clock.py", "IMP301")]),
+        Step::new(
+            "they are listed again",
+            vec![Action::Configure(DEPENDENCIES_CONFIG.to_owned())],
+        )
+        .present(&[("pkg/cache.py", "IMP302"), ("pkg/clock.py", "IMP301")]),
+        Step::new(
+            "a package module imports test code",
+            vec![save("pkg/clock.py", "import tests.factories\n")],
+        )
+        .present(&[("pkg/clock.py", "IMP104")]),
+        Step::new(
+            "the test module is deleted",
+            vec![Action::Delete("tests/factories.py")],
+        )
+        .absent(&[("pkg/clock.py", "IMP104")]),
+        Step::new(
+            "it is back",
+            vec![Action::Create("tests/factories.py", String::new())],
+        )
+        .present(&[("pkg/clock.py", "IMP104")]),
+    ];
+    run_steps(s, &steps);
+}
+
 // ---------------------------------------------- what contracts cannot attribute across modules
 
 // What a strict contract reports from another module's facts: an effect boundary the call

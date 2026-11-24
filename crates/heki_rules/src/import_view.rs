@@ -28,7 +28,7 @@ pub struct ImportsReport {
 pub struct ModuleReport {
     pub module: String,
     pub path: String,
-    /// `package`, `development`, or `open` ([`CodeKind`]).
+    /// `package`, `package_test`, `development`, or `open` ([`CodeKind`]).
     pub kind: CodeKind,
     /// `None`: heki has no import facts of the module (a typing stub, whose imports never
     /// run, or a file it could not read).

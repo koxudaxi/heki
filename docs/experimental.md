@@ -21,8 +21,11 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `rule.EFF116` | rule | [`EFF116`](rules/generator-never-iterated.md) | 0.2.6 | - |
 | `rule.IMP101` | rule | [`IMP101`](rules/import-cycle.md) | 0.2.7 | - |
 | `rule.IMP102` | rule | [`IMP102`](rules/circular-import-failure.md) | 0.2.8 | - |
+| `rule.IMP104` | rule | [`IMP104`](rules/development-code-import.md) | 0.2.8 | - |
 | `rule.IMP201` | rule | [`IMP201`](rules/import-owner-violation.md) | 0.2.7 | - |
 | `rule.IMP202` | rule | [`IMP202`](rules/unresolved-guarded-import.md) | 0.2.7 | - |
+| `rule.IMP301` | rule | [`IMP301`](rules/development-dependency-at-import-time.md) | 0.2.8 | - |
+| `rule.IMP302` | rule | [`IMP302`](rules/optional-dependency-at-import-time.md) | 0.2.8 | - |
 | `rule.MUT101` | rule | [`MUT101`](rules/cached-property-stale-mutation.md) | 0.1.0 | - |
 | `rule.MUT111` | rule | [`MUT111`](rules/cached-property-stale-read.md) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](rules/conditional-ownership-mutation.md) | 0.2.0 | - |
@@ -133,6 +136,14 @@ It is new: its reports are heuristic until a review of its reports on real code 
 
 It is new: every report rests on established premises only, but its reports are heuristic until a review of its reports on real code bases certifies its claim, and which imports and code stop a run can still change.
 
+## `rule.IMP104`
+
+- **Kind:** rule
+- **Target:** [`IMP104`](rules/development-code-import.md)
+- **Since:** 0.2.8
+
+It is new: every report rests on established premises only, but its reports are heuristic until a review of its reports on real code bases certifies its claim, and which modules count as package and development code can still change.
+
 ## `rule.IMP201`
 
 - **Kind:** rule
@@ -148,6 +159,22 @@ It is new: its reports are heuristic until a review of its reports on real code 
 - **Since:** 0.2.7
 
 It is the strict mode of `IMP201`, which is experimental.
+
+## `rule.IMP301`
+
+- **Kind:** rule
+- **Target:** [`IMP301`](rules/development-dependency-at-import-time.md)
+- **Since:** 0.2.8
+
+It is new: every report rests on established premises only, but its reports are heuristic until a review of its reports on real code bases certifies its claim, and which distributions provide a module can still change.
+
+## `rule.IMP302`
+
+- **Kind:** rule
+- **Target:** [`IMP302`](rules/optional-dependency-at-import-time.md)
+- **Since:** 0.2.8
+
+It is new: every report rests on established premises only, but its reports are heuristic until a review of its reports on real code bases certifies its claim, and which distributions provide a module and which modules are base modules can still change.
 
 ## `rule.MUT101`
 

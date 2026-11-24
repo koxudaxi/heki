@@ -2347,15 +2347,41 @@ an import itself.
   of the project may load a module of the group, code a module body runs (body order). The runs
   of every group share one `Budget::of_graph` (owner `import_failures`), one step per site run;
   past it no further run reports.
+- **Loads from the package** (`ImportGraph::loaded_from`, for `IMP301` and `IMP302`): one walk,
+  breadth first from all the modules a rule judges at once (the package modules, or the base
+  modules: the top-level package modules and the modules entry points name with their parent
+  packages), over the sites that import whenever their module loads with no handler that may
+  take an `ImportError` (`ImportSite::always_imports_uncaught`), into the modules
+  `ImportGraph::hops` enters except development code, which an installed package does not have.
+  It keeps the hop into each module from the nearest one, so each module reached has a shortest
+  chain from one start, and spends one step per module of one `Budget::of_graph` (owner
+  `import_dependencies`); past it the rule reports nothing. It runs only when some module
+  imports, that way, a module whose distributions the project declares only as the rule judges,
+  and the kinds of code are decided only then.
+- **Distributions** (`heki_effect::imports::Distributions`): the declared distributions that may
+  provide a module outside the project are the ones `[tool.heki.imports] module-distributions`
+  lists for the longest of the module and its packages it names; without one, the catalog's
+  `[[provides]]` rows for it and the distributions named like it or a package holding it (PEP
+  503 names), unless the project holds a copy: a module or package (a namespace package too) of
+  the module's top-level name in a directory of the project without `__init__.py`
+  (`ImportGraph::loose_names`, from the module names), which a `sys.path` entry the code adds may
+  name. The project's own name is no distribution. A
+  distribution is declared only for development when it is in a development group and no
+  dependency or extra, only in extras when it is in an extra and no dependency; a module is judged
+  when the project declares one of its distributions and all of them alike, and its `[project]
+  dynamic` lists neither `dependencies` nor `optional-dependencies`. One report per module and
+  set of distributions, at the first import of them.
 - **Early Cutoff**: `IncrementalUpdate::imports_changed` tells whether a file's sites or body
   order changed, without positions (`ModuleImports::same_facts`), or appeared or disappeared
   with the file.
-- **Kinds of code** (`heki_effect::code_kind`): a test module (under `tests/` or `test/`,
-  `test_*.py`, `*_test.py`, `conftest.py`) is development code; in the project's own src
-  layout, the code below a source root is the package's and the code outside every root
-  (`scripts/`, `tools/`) is development code; otherwise a module is the package's when its
+- **Kinds of code** (`heki_effect::code_kind`): a file is in the tree of a package the project
+  distributes when it is below a source root of the project's own src layout, or when its
   top-level package is named like `[project] name` (normalized) or by the build backend's
-  settings (`heki_env::Declared::packages`), and open when not.
+  settings (`heki_env::Declared::packages`). There it is the package's code, and a test module
+  (under `tests/` or `test/`, `test_*.py`, `*_test.py`, `conftest.py`) is package test code,
+  which installs with the package. A test module outside the package's tree, and in a src
+  layout the code outside every root (`scripts/`, `tools/`), is development code, which no
+  installed distribution holds; anything else is open.
 - **Declarations** (`heki_env::Declared`, read with `requires-python`): the runtime
   dependencies (`[project] dependencies`, Poetry's non-optional ones), the extras, the
   development groups (PEP 735 `[dependency-groups]` with `include-group`, `[tool.uv]

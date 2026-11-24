@@ -180,6 +180,16 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         tracking: None,
     },
     ExperimentalFeature {
+        id: "rule.IMP104",
+        kind: ExperimentalKind::Rule,
+        target: "IMP104",
+        since: "0.2.8",
+        reason: "It is new: every report rests on established premises only, but its reports are \
+            heuristic until a review of its reports on real code bases certifies its claim, and \
+            which modules count as package and development code can still change.",
+        tracking: None,
+    },
+    ExperimentalFeature {
         id: "rule.IMP201",
         kind: ExperimentalKind::Rule,
         target: "IMP201",
@@ -194,6 +204,27 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         target: "IMP202",
         since: "0.2.7",
         reason: "It is the strict mode of `IMP201`, which is experimental.",
+        tracking: None,
+    },
+    ExperimentalFeature {
+        id: "rule.IMP301",
+        kind: ExperimentalKind::Rule,
+        target: "IMP301",
+        since: "0.2.8",
+        reason: "It is new: every report rests on established premises only, but its reports are \
+            heuristic until a review of its reports on real code bases certifies its claim, and \
+            which distributions provide a module can still change.",
+        tracking: None,
+    },
+    ExperimentalFeature {
+        id: "rule.IMP302",
+        kind: ExperimentalKind::Rule,
+        target: "IMP302",
+        since: "0.2.8",
+        reason: "It is new: every report rests on established premises only, but its reports are \
+            heuristic until a review of its reports on real code bases certifies its claim, and \
+            which distributions provide a module and which modules are base modules can still \
+            change.",
         tracking: None,
     },
     ExperimentalFeature {

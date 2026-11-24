@@ -4,8 +4,8 @@
 //! commands that report from `heki check`'s analysis build.
 
 use crate::{
-    CheckExtras, ModuleUnit, RuleConfigError, RuleSelection, SummarySnapshot, check_project,
-    find_rule,
+    CheckExtras, ModuleUnit, ProjectLayout, RuleConfigError, RuleSelection, SummarySnapshot,
+    check_project, find_rule,
 };
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use heki_ast::{LineIndex, Span};
@@ -989,6 +989,10 @@ impl Indexed {
             ),
             text_of: Some(&text_of),
             open_premises,
+            layout: ProjectLayout {
+                root: &env.root,
+                modules: &env.layout,
+            },
         };
         check_project(
             units,
