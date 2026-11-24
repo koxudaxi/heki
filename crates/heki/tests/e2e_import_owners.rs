@@ -830,8 +830,8 @@ def by_name(flag: bool, name: str) -> object:
 /// own `__package__` or `__name__`. A full name, a relative name anchored at a package the code
 /// spells (also in a module constant), and a by-name import whose names include the full name of the module are reported;
 /// with `unresolved = "report"`, so are a by-name import some of whose names break the contract,
-/// a head that may name a module of the key, and `__import__` with a `level`, whose module heki
-/// cannot name. Lazy imports count, and those under `TYPE_CHECKING` only with the key.
+/// a head that may name a module of the key, a relative name anchored at a package only known at
+/// run time (`os.environ[...]`), and `__import__` with a `level`, whose module heki cannot name. Lazy imports count, and those under `TYPE_CHECKING` only with the key.
 #[test]
 fn relative_imports_judge_every_spelling_of_an_import() {
     let contract = |keys: &str| {
@@ -853,6 +853,7 @@ fn relative_imports_judge_every_spelling_of_an_import() {
         "pkg/_runtime/a.py:22 IMP202 by_name *",
         "pkg/_runtime/a.py:24 IMP202 by_name pkg._runtime.b|pkg._runtime.c",
         "pkg/_runtime/a.py:26 IMP202 by_name pkg._runtime.*",
+        "pkg/_runtime/dynamic.py:8 IMP202 dynamic *",
     ];
     for (keys, expected) in [
         ("", exact.to_vec()),
@@ -878,6 +879,10 @@ fn relative_imports_judge_every_spelling_of_an_import() {
         p.write(
             "pkg/_runtime/anchored.py",
             "import importlib\n\nPACKAGE = \"pkg._runtime\"\n\n\ndef anchored() -> object:\n    return importlib.import_module(\".b\", PACKAGE)\n",
+        );
+        p.write(
+            "pkg/_runtime/dynamic.py",
+            "import importlib\nimport os\n\nPACKAGE = os.environ[\"PKG\"]\n\n\ndef dynamic() -> object:\n    return importlib.import_module(\".b\", PACKAGE)\n",
         );
         let mut found = reports(&p);
         found.sort();
