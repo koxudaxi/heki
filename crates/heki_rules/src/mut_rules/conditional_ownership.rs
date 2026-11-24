@@ -15,7 +15,7 @@
 //! changes that attribute in place.
 
 use super::readonly_mutation::IN_PLACE;
-use super::{CallInst, CallParts, ClassMethods, MUTABLE_BUILTINS, facts_run_at, site_call};
+use super::{CallInst, CallParts, ClassMethods, facts_run_at, mutable_builtin, site_call};
 use crate::{CheckContext, FnSites, ModuleUnit, SitesBySpan};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
@@ -1063,7 +1063,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
                 in_place: true,
                 ..
             } => {
-                let mutable = matches!(self.types.get(lhs), Some(Val::Inst(t)) if MUTABLE_BUILTINS.contains(&t.as_str()));
+                let mutable = matches!(self.types.get(lhs), Some(Val::Inst(t)) if mutable_builtin(self.u.cx.decls, t));
                 return if mutable {
                     vec![own(*lhs, false)]
                 } else {
