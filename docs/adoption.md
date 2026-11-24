@@ -112,6 +112,7 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
             types: [python]
             pass_filenames: true
             require_serial: true
+            verbose: true      # show warnings: they do not fail the hook
     ```
 
 === "Without uv"
@@ -129,6 +130,7 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
             types: [python]
             pass_filenames: true
             require_serial: true
+            verbose: true      # show warnings: they do not fail the hook
     ```
 
 pre-commit appends the files after the hook's `args`, so `--touched` comes last: options for the
@@ -197,15 +199,18 @@ For custom tooling, `--output-format json` gives every field: see
 
 ## Rolling out rules
 
-1. Start with the default rules and a baseline, or `--select` one family at a time. Only the
-   exact rules run by default; add the heuristic ones with `lint.heuristic = true` (or
-   `--heuristic`), or name the ones you want in `extend-select`. Their reports can be wrong
-   about the code, and every output labels them `heuristic`
+1. Run [`heki recommend`](recommend.md) (experimental): it says which rules would report on
+   the project, what heki could not see, and the contracts the code already keeps, with the keys
+   to add. It writes no file.
+2. Start with the default rules and a baseline, or `--select` one family at a time. Only the
+   exact rules that are not opt-in run by default; add the heuristic ones with
+   `lint.heuristic = true` (or `--heuristic`), or name the ones you want in `extend-select`.
+   Their reports can be wrong about the code, and every output labels them `heuristic`
    ([Rule Precision](precision.md)).
-2. Declare [contracts](configuration.md#contracts) for the shared state and the operations you
+3. Declare [contracts](configuration.md#contracts) for the shared state and the operations you
    care about, and effect boundaries for the code that must stay pure. `MUT201`, `MUT203`,
    `MUT204`, `MUT208`, and `EFF201` report nothing until a contract exists.
-3. Enable the opt-in rules where they matter:
+4. Enable the opt-in rules where they matter:
 
     | Rule | Certainty | Turn it on for |
     | ---- | --------- | -------------- |
@@ -214,13 +219,14 @@ For custom tooling, `--output-format json` gives every field: see
     | [`MUT103`](rules/summary-effect-regression.md) | heuristic | library APIs (with [effect snapshots](#effect-snapshots-mut103)) |
     | [`MUT106`](rules/iterator-double-consumption.md) | heuristic | code that passes iterators and generators around |
     | [`MUT108`](rules/readonly-type-mutation.md) | heuristic | code that relies on frozen dataclasses and `ReadOnly` fields |
+    | `OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | exact | loops over large inputs; `--include-size-dependent` runs the ones with a rewrite and applies it |
 
-4. Use `per-file-ignores` rather than broad `ignore` lists, so new code stays covered.
+5. Use `per-file-ignores` rather than broad `ignore` lists, so new code stays covered.
 
 ### From heki 0.1
 
 heki 0.1 ran every rule that is not opt-in by default. Since rules have a certainty, only the
-exact ones do ([Getting Started](getting-started.md#run-it) lists them).
+exact ones that are not opt-in do ([Getting Started](getting-started.md#run-it) lists them).
 
 - `lint.heuristic = true` restores the rules of 0.1, now labelled `heuristic` in every output,
   except the size-dependent `OPT` rules, which are opt-in since 0.2.8: name them in

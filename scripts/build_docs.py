@@ -470,11 +470,12 @@ def measurements_table(precision: dict, rules: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def exact_rules_list(rules: list[dict]) -> str:
+def default_rules_list(rules: list[dict]) -> str:
+    """The rules a run without configuration runs: the exact rules that are not opt-in."""
     return "".join(
         f"- [`{r['code']}` ({r['slug']})](rules/{r['slug']}.md)\n"
         for r in rules
-        if r["certainty"] == "exact"
+        if r["certainty"] == "exact" and r["activation"] == "default"
     )
 
 
@@ -509,7 +510,7 @@ def outputs(heki: Path, rules: list[dict], registry: dict, precision: dict) -> d
         ),
         RECOMMEND_PAGE: with_generated_parts(RECOMMEND_PAGE, {"report": recommend_example(heki)}),
         GETTING_STARTED_PAGE: with_generated_parts(
-            GETTING_STARTED_PAGE, {"exact-rules": exact_rules_list(rules)}
+            GETTING_STARTED_PAGE, {"default-rules": default_rules_list(rules)}
         ),
         RECOMMEND_SCHEMA: run(heki, "recommend", "--output-format-json-schema"),
         EXAMPLE_IMAGE: example_image(heki),

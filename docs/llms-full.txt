@@ -111,6 +111,23 @@ EFF103 (loop-db-query): `heki rule EFF103`, https://heki.koxudaxi.dev/rules/loop
 
 Ruff, ty, Pyrefly, pyright, and mypy report nothing for either example with their default settings.
 
+### How heki differs
+
+The difference is the model, not reaching across files: type checkers already follow types
+across modules. heki models effects and aliases, what code does:
+
+| Tool | Models | heki adds |
+| --- | --- | --- |
+| Ruff | syntax and style | the effects behind a call: a blocking call, a query, or a write, wherever it happens |
+| ty, Pyrefly, pyright, mypy | declared types | in-place changes, through aliases and helpers, to `frozen`, `ReadOnly`, and `Final` fields and to `Sequence` / `Mapping` arguments |
+| tach, import-linter | which modules may import which | which functions write or read a field, call a function, or reach I/O; which modules may import which, knowing when each import runs (experimental); planned: these tools' contracts read as heki contracts |
+
+Their stricter settings do not close the gap. The second example above is fully annotated and
+passes Ruff's annotation rules (`ANN`), `mypy --strict`, pyright's strict mode, and Pyrefly's
+`strict` preset, yet it sends one query per order: the types are right, and what the code does
+is slow. heki leaves syntax, style, and types to these tools, and keeps doing so as they grow:
+use it next to them.
+
 ### What a first run shows
 
 Run `uvx heki check` (or `heki check` once [installed](https://heki.koxudaxi.dev/installation/)) in the directory with
@@ -122,12 +139,16 @@ Run `uvx heki check` (or `heki check` once [installed](https://heki.koxudaxi.dev
   [`--fail-on warning`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint)
   (`lint.fail-on = "warning"`) makes warnings fail it too.
 - A note at the end says how many heuristic rules were left off; `--heuristic` runs them.
+- Next, [`heki recommend`](https://heki.koxudaxi.dev/recommend/) (experimental) says which rules would report on the
+  project, what heki could not see, and the contracts the code already keeps, with the keys to
+  add.
 
-### Your own conventions, too
+### Your conventions, checked instead of reviewed
 
 The checks above need no configuration: `EFF101` and `EFF103` are exact and run by default.
 The rules of your own project, which you keep today by review, by AST scripts, or by run-time
-guards in tests, can be added as a few lines of [configuration](https://heki.koxudaxi.dev/configuration/).
+guards in tests, and which a coding agent cannot know unless a check tells it, can be added as a
+few lines of [configuration](https://heki.koxudaxi.dev/configuration/).
 
 For example, these lines say that only the functions in `app.store` may change `Order.items`:
 
@@ -165,6 +186,16 @@ time. Each kind of rule has its own contract:
 | Code in `app.render` makes no blocking call | `effect-boundaries` | `scopes = ["app.render.*"]`, `forbid = ["blocking"]` |
 
 See [Contracts](https://heki.koxudaxi.dev/configuration/#contracts) for every key.
+
+### A safety net for reviews and coding agents
+
+- The [language server](https://heki.koxudaxi.dev/lsp/) checks while you edit and re-checks only what an edit can affect.
+- [`heki snapshot`](https://heki.koxudaxi.dev/adoption/#effect-snapshots-mut103) records what each public function does, and `MUT103` reports a function that gained an
+  effect, which a diff does not show.
+- [Coding agents](https://heki.koxudaxi.dev/coding-agents/) get the same checks as JSON, and an
+  [Agent Skill](https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental) teaches them the workflow.
+- [`heki inspect`](https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental) (experimental)
+  says what one function does, so an agent does not read its callees to find out.
 
 !!! warning "Experimental"
 
@@ -213,16 +244,6 @@ every output labels them.
 The other rules are heuristic or opt-in, and the [contract](https://heki.koxudaxi.dev/configuration/#contracts) rules run
 once you declare a contract: see [Rules](https://heki.koxudaxi.dev/rules/) and [Rule precision](https://heki.koxudaxi.dev/precision/).
 
-### A safety net for reviews and coding agents
-
-- The [language server](https://heki.koxudaxi.dev/lsp/) checks while you edit and re-checks only what an edit can affect.
-- [`heki snapshot`](https://heki.koxudaxi.dev/adoption/#effect-snapshots-mut103) records what each public function does, and `MUT103` reports a function that gained an
-  effect, which a diff does not show.
-- [Coding agents](https://heki.koxudaxi.dev/coding-agents/) get the same checks as JSON, and an
-  [Agent Skill](https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental) teaches them the workflow.
-- [`heki inspect`](https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental) (experimental)
-  says what one function does, so an agent does not read its callees to find out.
-
 ### Fast, quiet, and easy to adopt
 
 - A 100,000-line project is checked in a few seconds.
@@ -240,25 +261,6 @@ once you declare a contract: see [Rules](https://heki.koxudaxi.dev/rules/) and [
 | A signature does not say what a function does | effect types, `IO` in the type (Haskell) | blocking calls reached from `async def`, and clients and queries in loops (`EFF101`–`EFF103`); `effect-boundaries` (`EFF201`); effect snapshots (`MUT103`) |
 | Shared mutable objects hide changes | value semantics, immutability by default | stale cached properties and hashes (`MUT101`, `MUT107`); changed shared return values (`MUT114`, `MUT202`); writes an `invalidation` contract must announce (`MUT208`) |
 | Dynamic dispatch blocks optimizations | static types let a compiler prove a rewrite | quadratic patterns (`OPT`), rewritten only when proven under CPython's semantics |
-
-## 🔍 How heki differs
-
-The difference is the model, not reaching across files: type checkers already follow types
-across modules. heki models effects and aliases, what code does:
-
-| Tool | Models | heki adds |
-| --- | --- | --- |
-| Ruff | syntax and style | the effects behind a call: a blocking call, a query, or a write, wherever it happens |
-| ty, Pyrefly, pyright, mypy | declared types | in-place changes, through aliases and helpers, to `frozen`, `ReadOnly`, and `Final` fields and to `Sequence` / `Mapping` arguments |
-| tach, import-linter | which modules may import which | which functions write or read a field, call a function, or reach I/O; which modules may import which, knowing when each import runs (experimental); planned: these tools' contracts read as heki contracts |
-
-Their stricter settings do not close the gap. The second example above is fully annotated and
-passes Ruff's annotation rules (`ANN`), `mypy --strict`, pyright's strict mode, and Pyrefly's
-`strict` preset, yet it sends one query per order: the types are right, and what the code does
-is slow.
-
-heki leaves syntax, style, and types to these tools, and keeps doing so as they grow: use it next
-to them.
 
 ## 🔧 Rewrites proven under CPython's semantics
 
@@ -335,7 +337,10 @@ and what it does when it cannot tell.
    write, read, call, reach an effect, and import what. Which modules may import which, and
    import cycles, are walls
    ([ADR-022](https://github.com/koxudaxi/heki/blob/main/docs/DESIGN_HISTORY_AND_ADR.md#adr-022)).
-   heki's import rules are not released yet; until they are, tach or import-linter check imports.
+   heki's import rules ship as experimental: the `import-owners` contracts, and opt-in rules for
+   import cycles, circular imports that fail, and imports of test code or of dependencies
+   declared only for development or in an extra. Reading tach's and import-linter's contracts is
+   planned.
 3. Patterns and style that one file decides belong to linters such as Ruff and isort, and type
    correctness to type checkers.
 4. An idea from another language's tools is taken when it fits the core or the walls and passes
@@ -933,14 +938,12 @@ $ heki check
 $ heki check --heuristic
 ```
 
-The first command runs the exact rules and the rules of the [contracts](https://heki.koxudaxi.dev/configuration/#contracts)
-you declare. An exact rule is certified: every report it made on the development corpus and on a
-frozen holdout corpus was checked by hand, and none was false
-([Rule Precision](https://heki.koxudaxi.dev/precision/#certifications)). The exact rules are:
+The first command runs the exact rules that are not opt-in, and the rules of the
+[contracts](https://heki.koxudaxi.dev/configuration/#contracts) you declare. An exact rule is certified: every report it
+made on the development corpus and on a frozen holdout corpus was checked by hand, and none was
+false ([Rule Precision](https://heki.koxudaxi.dev/precision/#certifications)). Without configuration, it runs:
 
-- [`MUT101` (cached-property-stale-mutation)](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/)
 - [`MUT110` (readonly-param-mutation)](https://heki.koxudaxi.dev/rules/readonly-param-mutation/)
-- [`MUT111` (cached-property-stale-read)](https://heki.koxudaxi.dev/rules/cached-property-stale-read/)
 - [`MUT114` (cached-result-mutation)](https://heki.koxudaxi.dev/rules/cached-result-mutation/)
 - [`MUT119` (change-lost-on-new-object)](https://heki.koxudaxi.dev/rules/change-lost-on-new-object/)
 - [`EFF101` (async-blocking-call)](https://heki.koxudaxi.dev/rules/async-blocking-call/)
@@ -948,13 +951,11 @@ frozen holdout corpus was checked by hand, and none was false
 - [`DATA101` (loop-carried-concat)](https://heki.koxudaxi.dev/rules/loop-carried-concat/)
 - [`OPT101` (list-quadratic-concat)](https://heki.koxudaxi.dev/rules/list-quadratic-concat/)
 - [`OPT102` (set-dict-quadratic-merge)](https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/)
-- [`OPT103` (immutable-quadratic-concat)](https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/)
-- [`OPT110` (loop-linear-membership)](https://heki.koxudaxi.dev/rules/loop-linear-membership/)
-- [`OPT111` (loop-linear-dedup)](https://heki.koxudaxi.dev/rules/loop-linear-dedup/)
 - [`OPT113` (nested-loop-equijoin)](https://heki.koxudaxi.dev/rules/nested-loop-equijoin/)
-- [`OPT120` (list-front-pop)](https://heki.koxudaxi.dev/rules/list-front-pop/)
-- [`OPT121` (list-front-insert)](https://heki.koxudaxi.dev/rules/list-front-insert/)
-- [`OPT130` (loop-invariant-container-rebuild)](https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/)
+
+`MUT101`, `MUT111`, and the size-dependent `OPT` rules (`OPT103`, `OPT110`, `OPT111`, `OPT120`,
+`OPT121`, `OPT130`) are exact too, but run only when `extend-select` names them: their reports
+were rarely harmful ([Rule Precision](https://heki.koxudaxi.dev/precision/)).
 
 A report of an exact rule that did not establish every premise of its claim, such as an `OPT`
 rewrite heki could not prove safe, is heuristic. A text run says how many heuristic rules and
@@ -968,6 +969,18 @@ to narrow it:
 ```console
 $ heki check src/ tests/test_api.py
 ```
+
+## Ask what fits the project
+
+`heki recommend` (experimental) analyzes the project as `heki check` does and says which rules
+would report here, what heki could not see, and the contracts the code already keeps, with the
+keys to add to `[tool.heki]`. It writes no file:
+
+```console
+$ heki recommend
+```
+
+See [Configuration Advice](https://heki.koxudaxi.dev/recommend/).
 
 ## Read a diagnostic
 
@@ -1049,7 +1062,7 @@ The other forms (`# heki: ignore`, `# noqa: EFF101`) and `per-file-ignores` are 
 ```console
 $ heki check --select EFF,MUT        # only these families
 $ heki check --extend-select EFF105  # add an opt-in rule
-$ heki check --ignore OPT110         # everything except one rule
+$ heki check --ignore OPT113         # everything except one rule
 ```
 
 Codes, code prefixes, and rule names (`async-blocking-call`) are accepted. A prefix does not
@@ -2646,6 +2659,7 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
             types: [python]
             pass_filenames: true
             require_serial: true
+            verbose: true      # show warnings: they do not fail the hook
     ```
 
 === "Without uv"
@@ -2663,6 +2677,7 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
             types: [python]
             pass_filenames: true
             require_serial: true
+            verbose: true      # show warnings: they do not fail the hook
     ```
 
 pre-commit appends the files after the hook's `args`, so `--touched` comes last: options for the
@@ -2731,15 +2746,18 @@ For custom tooling, `--output-format json` gives every field: see
 
 ## Rolling out rules
 
-1. Start with the default rules and a baseline, or `--select` one family at a time. Only the
-   exact rules run by default; add the heuristic ones with `lint.heuristic = true` (or
-   `--heuristic`), or name the ones you want in `extend-select`. Their reports can be wrong
-   about the code, and every output labels them `heuristic`
+1. Run [`heki recommend`](https://heki.koxudaxi.dev/recommend/) (experimental): it says which rules would report on
+   the project, what heki could not see, and the contracts the code already keeps, with the keys
+   to add. It writes no file.
+2. Start with the default rules and a baseline, or `--select` one family at a time. Only the
+   exact rules that are not opt-in run by default; add the heuristic ones with
+   `lint.heuristic = true` (or `--heuristic`), or name the ones you want in `extend-select`.
+   Their reports can be wrong about the code, and every output labels them `heuristic`
    ([Rule Precision](https://heki.koxudaxi.dev/precision/)).
-2. Declare [contracts](https://heki.koxudaxi.dev/configuration/#contracts) for the shared state and the operations you
+3. Declare [contracts](https://heki.koxudaxi.dev/configuration/#contracts) for the shared state and the operations you
    care about, and effect boundaries for the code that must stay pure. `MUT201`, `MUT203`,
    `MUT204`, `MUT208`, and `EFF201` report nothing until a contract exists.
-3. Enable the opt-in rules where they matter:
+4. Enable the opt-in rules where they matter:
 
     | Rule | Certainty | Turn it on for |
     | ---- | --------- | -------------- |
@@ -2748,13 +2766,14 @@ For custom tooling, `--output-format json` gives every field: see
     | [`MUT103`](https://heki.koxudaxi.dev/rules/summary-effect-regression/) | heuristic | library APIs (with [effect snapshots](https://heki.koxudaxi.dev/adoption/#effect-snapshots-mut103)) |
     | [`MUT106`](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) | heuristic | code that passes iterators and generators around |
     | [`MUT108`](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) | heuristic | code that relies on frozen dataclasses and `ReadOnly` fields |
+    | `OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | exact | loops over large inputs; `--include-size-dependent` runs the ones with a rewrite and applies it |
 
-4. Use `per-file-ignores` rather than broad `ignore` lists, so new code stays covered.
+5. Use `per-file-ignores` rather than broad `ignore` lists, so new code stays covered.
 
 ### From heki 0.1
 
 heki 0.1 ran every rule that is not opt-in by default. Since rules have a certainty, only the
-exact ones do ([Getting Started](https://heki.koxudaxi.dev/getting-started/#run-it) lists them).
+exact ones that are not opt-in do ([Getting Started](https://heki.koxudaxi.dev/getting-started/#run-it) lists them).
 
 - `lint.heuristic = true` restores the rules of 0.1, now labelled `heuristic` in every output,
   except the size-dependent `OPT` rules, which are opt-in since 0.2.8: name them in
@@ -4368,9 +4387,9 @@ heki's diagnostics and fixes while you edit, with the results `heki check` repor
 
 === "VS Code"
 
-    heki does not ship its own extension yet. Any generic LSP client extension that starts a
-    command for a language works; configure it to run `heki server` for `python` documents, for
-    example:
+    heki ships no extension of its own: `heki server` speaks LSP, so any generic LSP client
+    extension that starts a command for a language runs it. Configure it to run `heki server`
+    for `python` documents, for example:
 
     ```json
     {

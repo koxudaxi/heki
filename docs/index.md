@@ -102,6 +102,23 @@ EFF103 (loop-db-query): `heki rule EFF103`, https://heki.koxudaxi.dev/rules/loop
 
 Ruff, ty, Pyrefly, pyright, and mypy report nothing for either example with their default settings.
 
+### How heki differs
+
+The difference is the model, not reaching across files: type checkers already follow types
+across modules. heki models effects and aliases, what code does:
+
+| Tool | Models | heki adds |
+| --- | --- | --- |
+| Ruff | syntax and style | the effects behind a call: a blocking call, a query, or a write, wherever it happens |
+| ty, Pyrefly, pyright, mypy | declared types | in-place changes, through aliases and helpers, to `frozen`, `ReadOnly`, and `Final` fields and to `Sequence` / `Mapping` arguments |
+| tach, import-linter | which modules may import which | which functions write or read a field, call a function, or reach I/O; which modules may import which, knowing when each import runs (experimental); planned: these tools' contracts read as heki contracts |
+
+Their stricter settings do not close the gap. The second example above is fully annotated and
+passes Ruff's annotation rules (`ANN`), `mypy --strict`, pyright's strict mode, and Pyrefly's
+`strict` preset, yet it sends one query per order: the types are right, and what the code does
+is slow. heki leaves syntax, style, and types to these tools, and keeps doing so as they grow:
+use it next to them.
+
 ### What a first run shows
 
 Run `uvx heki check` (or `heki check` once [installed](installation.md)) in the directory with
@@ -113,12 +130,16 @@ Run `uvx heki check` (or `heki check` once [installed](installation.md)) in the 
   [`--fail-on warning`](configuration.md#rule-selection-toolhekilint)
   (`lint.fail-on = "warning"`) makes warnings fail it too.
 - A note at the end says how many heuristic rules were left off; `--heuristic` runs them.
+- Next, [`heki recommend`](recommend.md) (experimental) says which rules would report on the
+  project, what heki could not see, and the contracts the code already keeps, with the keys to
+  add.
 
-### Your own conventions, too
+### Your conventions, checked instead of reviewed
 
 The checks above need no configuration: `EFF101` and `EFF103` are exact and run by default.
 The rules of your own project, which you keep today by review, by AST scripts, or by run-time
-guards in tests, can be added as a few lines of [configuration](configuration.md).
+guards in tests, and which a coding agent cannot know unless a check tells it, can be added as a
+few lines of [configuration](configuration.md).
 
 For example, these lines say that only the functions in `app.store` may change `Order.items`:
 
@@ -156,6 +177,16 @@ time. Each kind of rule has its own contract:
 | Code in `app.render` makes no blocking call | `effect-boundaries` | `scopes = ["app.render.*"]`, `forbid = ["blocking"]` |
 
 See [Contracts](configuration.md#contracts) for every key.
+
+### A safety net for reviews and coding agents
+
+- The [language server](lsp.md) checks while you edit and re-checks only what an edit can affect.
+- [`heki snapshot`](adoption.md#effect-snapshots-mut103) records what each public function does, and `MUT103` reports a function that gained an
+  effect, which a diff does not show.
+- [Coding agents](coding-agents.md) get the same checks as JSON, and an
+  [Agent Skill](coding-agents.md#agent-skill-experimental) teaches them the workflow.
+- [`heki inspect`](coding-agents.md#what-a-function-does-heki-inspect-experimental) (experimental)
+  says what one function does, so an agent does not read its callees to find out.
 
 !!! warning "Experimental"
 
@@ -204,16 +235,6 @@ every output labels them.
 The other rules are heuristic or opt-in, and the [contract](configuration.md#contracts) rules run
 once you declare a contract: see [Rules](rules/index.md) and [Rule precision](precision.md).
 
-### A safety net for reviews and coding agents
-
-- The [language server](lsp.md) checks while you edit and re-checks only what an edit can affect.
-- [`heki snapshot`](adoption.md#effect-snapshots-mut103) records what each public function does, and `MUT103` reports a function that gained an
-  effect, which a diff does not show.
-- [Coding agents](coding-agents.md) get the same checks as JSON, and an
-  [Agent Skill](coding-agents.md#agent-skill-experimental) teaches them the workflow.
-- [`heki inspect`](coding-agents.md#what-a-function-does-heki-inspect-experimental) (experimental)
-  says what one function does, so an agent does not read its callees to find out.
-
 ### Fast, quiet, and easy to adopt
 
 - A 100,000-line project is checked in a few seconds.
@@ -231,25 +252,6 @@ once you declare a contract: see [Rules](rules/index.md) and [Rule precision](pr
 | A signature does not say what a function does | effect types, `IO` in the type (Haskell) | blocking calls reached from `async def`, and clients and queries in loops (`EFF101`–`EFF103`); `effect-boundaries` (`EFF201`); effect snapshots (`MUT103`) |
 | Shared mutable objects hide changes | value semantics, immutability by default | stale cached properties and hashes (`MUT101`, `MUT107`); changed shared return values (`MUT114`, `MUT202`); writes an `invalidation` contract must announce (`MUT208`) |
 | Dynamic dispatch blocks optimizations | static types let a compiler prove a rewrite | quadratic patterns (`OPT`), rewritten only when proven under CPython's semantics |
-
-## 🔍 How heki differs
-
-The difference is the model, not reaching across files: type checkers already follow types
-across modules. heki models effects and aliases, what code does:
-
-| Tool | Models | heki adds |
-| --- | --- | --- |
-| Ruff | syntax and style | the effects behind a call: a blocking call, a query, or a write, wherever it happens |
-| ty, Pyrefly, pyright, mypy | declared types | in-place changes, through aliases and helpers, to `frozen`, `ReadOnly`, and `Final` fields and to `Sequence` / `Mapping` arguments |
-| tach, import-linter | which modules may import which | which functions write or read a field, call a function, or reach I/O; which modules may import which, knowing when each import runs (experimental); planned: these tools' contracts read as heki contracts |
-
-Their stricter settings do not close the gap. The second example above is fully annotated and
-passes Ruff's annotation rules (`ANN`), `mypy --strict`, pyright's strict mode, and Pyrefly's
-`strict` preset, yet it sends one query per order: the types are right, and what the code does
-is slow.
-
-heki leaves syntax, style, and types to these tools, and keeps doing so as they grow: use it next
-to them.
 
 ## 🔧 Rewrites proven under CPython's semantics
 

@@ -11,7 +11,10 @@ and what it does when it cannot tell.
    write, read, call, reach an effect, and import what. Which modules may import which, and
    import cycles, are walls
    ([ADR-022](https://github.com/koxudaxi/heki/blob/main/docs/DESIGN_HISTORY_AND_ADR.md#adr-022)).
-   heki's import rules are not released yet; until they are, tach or import-linter check imports.
+   heki's import rules ship as experimental: the `import-owners` contracts, and opt-in rules for
+   import cycles, circular imports that fail, and imports of test code or of dependencies
+   declared only for development or in an extra. Reading tach's and import-linter's contracts is
+   planned.
 3. Patterns and style that one file decides belong to linters such as Ruff and isort, and type
    correctness to type checkers.
 4. An idea from another language's tools is taken when it fits the core or the walls and passes
