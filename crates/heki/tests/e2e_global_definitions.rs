@@ -484,3 +484,41 @@ _define(Engine())
         "{stdout}"
     );
 }
+
+/// Two classes making each other through `global` declarations (`class A` holding `global B;
+/// class B`, whose body holds `global A; class A`): with `attribution = "lexical"`, the walk
+/// from a lambda in the inner class body to the code running it ends at the module body.
+#[test]
+fn lexical_attribution_ends_at_classes_making_each_other() {
+    let p = Project::new("global_definitions_lexical_cycle");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n\
+         [[tool.heki.call-owners]]\nname = \"private\"\ntargets = [\"pkg.base.Engine._run\"]\n\
+         allowed-callers = [\"pkg.base:Engine\"]\nattribution = \"lexical\"\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/base.py",
+        r#"class Engine:
+    def _run(self):
+        return 1
+
+
+class A:
+    global B
+
+    class B:
+        global A
+
+        class A:
+            value = (lambda: Engine()._run())()
+"#,
+    );
+    let (code, stdout, stderr) = p.heki(&["check", "."]);
+    assert_eq!(code, 1, "{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("`<module>` calls `pkg.base.Engine._run` outside the call owners"),
+        "{stdout}"
+    );
+}
