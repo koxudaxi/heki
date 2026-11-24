@@ -1575,15 +1575,13 @@ enum Items {
 
 /// The values a loop iterates, followed through the function of `f`: `def` gives each
 /// variable's defining instruction, `types` the inferred values, `constant` the string constant
-/// a variable holds. In the body of a generator expression, `passed` gives what a loop over its
-/// `.0` takes: the outermost iterable, which the creating function evaluates and passes.
+/// a variable holds.
 struct Iterated<'a, 'i> {
     cx: &'a TypeCtx<'a>,
     f: &'a IrFunction,
     def: &'a dyn Fn(VarId) -> Option<&'i Inst>,
     types: &'a FxHashMap<VarId, crate::resolver::Val>,
     constant: &'a dyn Fn(VarId) -> Option<String>,
-    passed: Option<&'a dyn Fn() -> Option<Items>>,
 }
 
 impl<'i> Iterated<'_, 'i> {
@@ -1639,11 +1637,11 @@ impl<'i> Iterated<'_, 'i> {
     /// What a loop over `iterable` takes: the items of a display of string constants or of a
     /// module's tuple constant ([`TypeCtx::global_read_str_tuple`]), the keys or the pairs of a
     /// namespace (`vars(src)`, `src.__dict__`), the fields a class declares
-    /// ([`Self::declared_fields`]), what a generator expression yields ([`Self::generated`]), a
-    /// copy of a mapping (`.copy()`, `dict(...)`), its `keys()` or `items()`, or a `list`,
-    /// `tuple`, or `sorted` of one of these. Each wrapper holds one value, so the walk follows one
-    /// chain to the display, the namespace, or the fields, then applies the wrappers from the
-    /// inside out.
+    /// ([`Self::declared_fields`]), a copy of a mapping (`.copy()`, `dict(...)`), its `keys()`
+    /// or `items()`, a `list`, `tuple`, or `sorted` of one of these, or a generator expression
+    /// over one ([`Self::yielded`]). Each wrapper holds one value, so the walk follows one chain
+    /// to the display, the namespace, or the fields, then applies the wrappers from the inside
+    /// out.
     fn items(&self, iterable: VarId) -> Option<Items> {
         const WRAPPERS: &[&str] = &[
             "builtins.list",
@@ -1657,9 +1655,6 @@ impl<'i> Iterated<'_, 'i> {
         let mut wrappers: Vec<Wrapper> = Vec::new();
         let mut cur = iterable;
         for _ in 0..=Self::MAX_WRAPPERS {
-            if let Some(passed) = self.passed.filter(|_| self.f.var_name(cur) == Some(".0")) {
-                return wrapped(&wrappers, passed()?);
-            }
             let inst = self.def(cur)?;
             let namespace = super::namespace_load(&inst.kind, |v| self.types.get(&v));
             let inner = match namespace {
@@ -1692,7 +1687,16 @@ impl<'i> Iterated<'_, 'i> {
                     func_id: Some(body),
                     outer_iter,
                     ..
-                } => return wrapped(&wrappers, self.generated(*body, *outer_iter)?),
+                } => match self.yielded(*body)? {
+                    Yielded::PairsOf(name) => {
+                        let inner = Items::Pairs(Box::new(Items::Constants(vec![name])));
+                        return wrapped(&wrappers, inner);
+                    }
+                    Yielded::Items(wrapper) => {
+                        wrappers.push(wrapper);
+                        cur = *outer_iter;
+                    }
+                },
                 InstKind::MethodCall {
                     recv,
                     method,
@@ -1739,80 +1743,63 @@ impl<'i> Iterated<'_, 'i> {
     }
 
     /// What the generator expression whose body is the function `body` yields, when heki can
-    /// name it: the items of a loop of the body (`(key for key in RECORDS if ...)`), or
-    /// `(key, value)` pairs whose keys it names (`((key, src.__dict__[key]) for key in
-    /// RECORDS)`), each key as [`key_name`] decides it. The body receives `outer_iter`, the
-    /// outermost iterable, from this function, as `.0`.
-    fn generated(&self, body: FunctionId, outer_iter: VarId) -> Option<Items> {
+    /// name it from the outermost iterable, which its creator evaluates and passes as `.0`: each
+    /// item a loop over `.0` takes (`(key for key in RECORDS if ...)`, [`Wrapper::Same`]), or a
+    /// `(key, value)` pair keyed by that item (`((key, src.__dict__[key]) for key in RECORDS)`,
+    /// [`Wrapper::Keyed`]), or a pair keyed by a string constant. A key a later `for` clause
+    /// takes, or any other value, is none heki names.
+    fn yielded(&self, body: FunctionId) -> Option<Yielded> {
         let f = self.cx.ir().function(body);
-        let mut yielded = insts(f).filter_map(|inst| match &inst.kind {
+        let defs: FxHashMap<VarId, &Inst> = insts(f)
+            .filter_map(|inst| Some((inst.kind.dst()?, inst)))
+            .collect();
+        // The variable `v` copies, and the instruction defining it.
+        let source = |v: VarId| {
+            let mut cur = v;
+            for _ in 0..Self::MAX_COPIES {
+                let inst = defs.get(&cur)?;
+                match &inst.kind {
+                    InstKind::Copy { src, .. } => cur = *src,
+                    _ => return Some((cur, *inst)),
+                }
+            }
+            None
+        };
+        let mut yields = insts(f).filter_map(|inst| match &inst.kind {
             InstKind::Yield { value, .. } => Some(*value),
             InstKind::YieldFrom { .. } => Some(None),
             _ => None,
         });
-        let (Some(Some(value)), None) = (yielded.next(), yielded.next()) else {
+        let (Some(Some(value)), None) = (yields.next(), yields.next()) else {
             return None;
         };
-        let defs: FxHashMap<VarId, &Inst> = insts(f)
-            .filter_map(|inst| Some((inst.kind.dst()?, inst)))
-            .collect();
-        let def = |v: VarId| defs.get(&v).copied();
-        // The body's own values are not inferred: a key it takes from a namespace of its own
-        // (`for k in vars(src)` past the first `for`) names no attribute here.
-        let types = FxHashMap::default();
-        let constant = |v: VarId| self.cx.str_constant_with(v, &def, &types);
-        let passed = || self.items(outer_iter);
-        let inner = Iterated {
-            cx: self.cx,
-            f,
-            def: &def,
-            types: &types,
-            constant: &constant,
-            passed: Some(&passed),
-        };
-        match &inner.def(value)?.kind {
+        let item = insts(f).find_map(|inst| match &inst.kind {
+            InstKind::IterNext { dst, iter, .. } => match &source(*iter)?.1.kind {
+                InstKind::MakeIter { iterable, .. } if f.var_name(*iterable) == Some(".0") => {
+                    Some(*dst)
+                }
+                _ => None,
+            },
+            _ => None,
+        });
+        let is_item = |v: VarId| source(v).is_some_and(|(root, _)| Some(root) == item);
+        let (_, yielded) = source(value)?;
+        match &yielded.kind {
             InstKind::AllocBuiltin {
                 dst,
                 kind: BuiltinKind::Tuple,
                 elems,
             } if elems.len() == 2 && !(0..2).any(|i| f.is_starred(*dst, i)) => {
-                let key = elems[0];
-                let keys = match constant(key) {
-                    Some(name) => Items::Constants(vec![name]),
-                    None => inner.key_items(key)?,
-                };
-                Some(Items::Pairs(Box::new(keys)))
-            }
-            _ => inner.loop_items(value),
-        }
-    }
-
-    /// What the key `key` names when it is no string constant: one of the items of the display,
-    /// the namespace, or the fields a loop takes it from ([`key_name`]).
-    fn key_items(&self, key: VarId) -> Option<Items> {
-        let items = match &self.def(key)?.kind {
-            InstKind::IterNext { .. } => self.loop_items(key),
-            // The first of the pair a loop unpacks (`for key, value in ...`).
-            InstKind::SubscriptLoad {
-                obj,
-                index,
-                key_const: None,
-                is_slice: false,
-                ..
-            } if is_int(self.def(*index), 0) => match self.loop_items(*obj)? {
-                Items::Pairs(keys) => Some(*keys),
-                _ => None,
-            },
-            // The name of the field a loop takes (`for field in dataclasses.fields(obj)`).
-            InstKind::AttrLoad { obj, attr, .. } if attr == "name" => {
-                match self.loop_items(*obj)? {
-                    Items::Fields(classes) => Some(Items::Keys(classes)),
-                    _ => None,
+                if is_item(elems[0]) {
+                    return Some(Yielded::Items(Wrapper::Keyed));
                 }
+                let def = |v: VarId| defs.get(&v).copied();
+                let types = FxHashMap::default();
+                let name = self.cx.str_constant_with(elems[0], &def, &types)?;
+                Some(Yielded::PairsOf(name))
             }
-            _ => None,
-        };
-        items.filter(|i| matches!(i, Items::Constants(_) | Items::Keys(_)))
+            _ => is_item(value).then_some(Yielded::Items(Wrapper::Same)),
+        }
     }
 
     /// The fields of a class that the instruction `kind` reads (`type(obj).model_fields`,
@@ -1882,6 +1869,14 @@ impl<'i> Iterated<'_, 'i> {
     }
 }
 
+/// What a generator expression yields, by its outermost iterable ([`Iterated::yielded`]).
+enum Yielded {
+    /// What the wrapper makes of the items of the iterable.
+    Items(Wrapper),
+    /// `(key, value)` pairs, each keyed by this string constant.
+    PairsOf(String),
+}
+
 /// What a call around an iterable gives a loop over its result ([`Iterated::items`]).
 #[derive(Debug, Clone, Copy)]
 enum Wrapper {
@@ -1893,6 +1888,9 @@ enum Wrapper {
     Dict,
     /// `list`, `tuple`, `sorted`: the same items.
     Same,
+    /// A generator of `(key, value)` pairs keyed by each item: string constants, or the keys of
+    /// a mapping.
+    Keyed,
 }
 
 impl Wrapper {
@@ -1904,6 +1902,9 @@ impl Wrapper {
             }
             (Self::Dict, Items::Pairs(keys)) => Some(*keys),
             (Self::Same, items) => Some(items),
+            (Self::Keyed, keys @ (Items::Constants(_) | Items::Keys(_))) => {
+                Some(Items::Pairs(Box::new(keys)))
+            }
             _ => None,
         }
     }
@@ -1938,12 +1939,33 @@ pub(crate) fn key_name<'i>(
         def,
         types,
         constant: &constant,
-        passed: None,
     };
-    match loops.key_items(key) {
+    let items = match loops.def(key).map(|i| &i.kind) {
+        Some(InstKind::IterNext { .. }) => loops.loop_items(key),
+        // The first of the pair a loop unpacks (`for key, value in ...`).
+        Some(InstKind::SubscriptLoad {
+            obj,
+            index,
+            key_const: None,
+            is_slice: false,
+            ..
+        }) if is_int(loops.def(*index), 0) => match loops.loop_items(*obj) {
+            Some(Items::Pairs(keys)) => Some(*keys),
+            _ => None,
+        },
+        // The name of the field a loop takes (`for field in dataclasses.fields(obj)`).
+        Some(InstKind::AttrLoad { obj, attr, .. }) if attr == "name" => {
+            match loops.loop_items(*obj) {
+                Some(Items::Fields(classes)) => Some(Items::Keys(classes)),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    match items {
         Some(Items::Constants(names)) => AttrName::OneOf(names),
         Some(Items::Keys(classes)) => AttrName::KeyOf(classes),
-        _ => AttrName::Unknown,
+        Some(Items::Pairs(_) | Items::Fields(_)) | None => AttrName::Unknown,
     }
 }
 
@@ -1966,7 +1988,6 @@ pub(crate) fn update_keys<'i>(
         def,
         types,
         constant: &constant,
-        passed: None,
     };
     match loops.items(other) {
         Some(Items::Keys(classes)) => AttrName::KeyOf(classes),

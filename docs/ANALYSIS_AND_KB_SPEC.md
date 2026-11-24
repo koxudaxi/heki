@@ -385,10 +385,11 @@ the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores
   (`for key in ("a", "b")`; a list or set only while nothing but loops, copies, and `list`,
   `tuple`, `sorted`, or `dict` reads it) or of a module's tuple constant (`for key in RECORDS`,
   `ProjectDecls::str_tuple`), which stores each (`stores::key_name`, the one decision of the
-  names these stores and the ownership facts read). A generator expression yields what a loop
-  of its body takes, or pairs whose keys `key_name` decides there, its `.0` being the outermost
-  iterable its creator passes (`Iterated::generated`): the keys `ns.update(pairs)` stores
-  (`stores::update_keys`), and those of `dict(pairs)` or of a loop unpacking them.
+  names these stores and the ownership facts read). A generator expression is one more wrapper
+  around its outermost iterable, which its creator evaluates and passes as `.0`
+  (`Iterated::yielded`): it yields each item of its first `for` clause, or `(key, value)` pairs
+  keyed by that item or by a string constant, whose keys `ns.update(pairs)` stores
+  (`stores::update_keys`), as do `dict(pairs)` and a loop unpacking them.
 - **What a store binds.** A store of `None` adds nothing (a call on it raises). A store of a value
   of unknown type, or values no tracked type covers, leaves the name untyped. `obj.attr += v`
   binds what the operator gives on the attribute's own value: nothing new when the name holds a

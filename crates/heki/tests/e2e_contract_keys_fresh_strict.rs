@@ -3353,9 +3353,10 @@ def inner_loop(target: Field, rows: list) -> None:
 /// A key a loop takes from a module-level tuple of string constants, of the module or imported
 /// (by name or as a module attribute), names each of them, as a loop over the display does, and
 /// so does the key of each pair a generator yields to `update`, `dict`, or a loop unpacking it,
-/// or a key it yields itself. A list, a name bound twice, a tuple holding a value that is no
-/// constant, a key computed from the item, strings handed to `update` as pairs, and the pairs
-/// of a namespace (its own keys) name no key.
+/// keyed by the item of its first `for` clause or by a constant, or a key it yields itself. A
+/// list, a name bound twice, a tuple holding a value that is no constant, a key computed from
+/// the item, strings handed to `update` as pairs, a key a later `for` clause takes, and the
+/// pairs of a namespace name no key.
 #[test]
 fn a_tuple_constant_and_a_generator_of_pairs_name_each_key() {
     let p = Project::new("keys_tuple_constants");
@@ -3391,7 +3392,7 @@ fn a_tuple_constant_and_a_generator_of_pairs_name_each_key() {
             d(u, 59, "MUT205", "pairs_of_namespace", field),
             d(u, 64, "MUT201", "dict_of_pairs", origin),
             d(u, 69, "MUT201", "unpacked", origin),
-            d(u, 73, "MUT201", "inner_loop", origin),
+            d(u, 73, "MUT205", "inner_loop", field),
         ]
     );
 }
