@@ -5,6 +5,195 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
+## [0.3.0] - Unreleased
+
+### Breaking changes
+
+- A file given to `heki check` is checked in its project. `heki check app/api.py` analyzed that
+  file as if it were the whole project: reports that need other files were missing, an exact
+  report could be wrong for the project, with `report-unused-suppressions` a valid suppression
+  was reported and removed by `--fix`, and `--update-baseline` on a file dropped the entries of
+  every other file. It now analyzes the project root heki finds for the file and shows and fails
+  on the reports that touch the file: `heki check app/api.py` is
+  `heki check <project root> --touched app/api.py`, and the summary says how many files were
+  analyzed. Several files make one run over the project of the first; with directories, the
+  directories are analyzed and the files select what is shown. A file that `exclude`, an ignore
+  file, or its extension leaves out of the project is named in a warning and no longer analyzed.
+  A file outside any project (no configuration file and no Git working tree above it) is still
+  analyzed alone. `--update-baseline` and `--watch` take directories: a file is an error.
+  `heki recommend`, `heki inspect`, and `heki snapshot` take a file as its project. Such a run
+  takes as long as a run over the project. Directories keep their meaning. Rule messages and
+  baseline keys do not change.
+- `--touched`: `--fix` and `--diff` rewrite only the touched files (and the files given as
+  paths). 0.2.7 applied the fix of every report shown, so a report in another file whose call
+  chain reaches a touched file could have its file rewritten, which a pre-commit hook must never
+  do to an unstaged file. Such a fix is now left, and the run says how many it left. No rule of
+  this release has a fix on a report with a hop in another file, so no run changes yet.
+- `heki check --profile` is removed. It was experimental: it read a recorded sampling profile,
+  applied the proven size-dependent rewrites in the functions the profile showed hot, and added
+  the sample share to `OPT` reports. `--include-size-dependent` applies those rewrites in every
+  function. A command line with `--profile` is now an error (exit code 2). No report, message,
+  or baseline key changes.
+- `OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, and `OPT130` are opt-in. A run without
+  configuration no longer shows them, and a prefix (`OPT`), `ALL`, and `--heuristic` no longer
+  select them: name them in `select` or `extend-select`. Their rewrites are proven, but the loops
+  they report were rarely large enough to matter: of their exact reports, 2 of the 203 the census
+  classified and 1 of the 233 of the holdout run were of real harm, and a run of this release on
+  the holdout has 126, all benign (Rule precision, "Harm of the exact reports").
+  `--include-size-dependent` now also runs the five rules whose rewrites it applies (`OPT110`,
+  `OPT111`, `OPT120`, `OPT121`, `OPT130`), as if `extend-select` named them: it applies every
+  proven rewrite of theirs with `--fix`, also over a loop whose trip count the data does not
+  decide, and a run with it lists their other reports. `OPT101`, `OPT102`, and `OPT113` still run
+  by default. Messages and baseline keys do not change; a baseline entry of one of the six rules
+  is judged only in a run that selects its rule. On the 378 packages heki is measured on, the
+  default run loses exactly these rules' reports (259 to 248).
+- `MUT109` (`write-without-invalidation`) is now `MUT208`: every contract rule has a 2xx code, so
+  `MUT2` selects the contract rules of the family. Its name, messages, help, and targets do not
+  change. The old code is not kept: `MUT109` in `select`, `extend-select`, `ignore`,
+  `per-file-ignores`, or `severity` is an unknown rule (exit code 2), a `# heki: ignore[MUT109]`
+  or `# noqa: MUT109` comment no longer suppresses the report, and a baseline entry with
+  `rule_code = "MUT109"` allows nothing: rename the code in the configuration and the comments to
+  `MUT208`, and replace `MUT109` with `MUT208` in the baseline (or record it again). JSON, SARIF,
+  and GitHub output carry the new code. A project without an `invalidation` contract is not
+  affected.
+- Owner contracts: a write under a key read from a module-level tuple of string constants, or
+  from the pairs a generator expression gives to `__dict__.update(...)`, is a `MUT201` report of
+  the target instead of a `MUT205` report, and the constants of a module whose `__getattr__`
+  caches what it serves are known again, so writes keyed by them move the same way (see
+  Changed and Fixed). Baseline entries of the moved reports change rule.
+
+### Added
+
+- `IMP102` (`circular-import-failure`, opt-in, experimental): a `from M import name` that raises
+  `ImportError` when a module of its import cycle is imported first, because `M` is still
+  loading and has not bound `name`. heki imports each module of each group of modules importing
+  each other first in turn (and each package holding one whose `__init__.py` loads the group),
+  runs the module bodies in order through their imports, and reports each failing statement
+  once, naming the modules whose import fails there, with the imports of the chain as related
+  locations; the baseline target is `M.name`. A report rests on established premises only: each
+  import of the chain runs whenever its module loads, no handler may take the `ImportError`,
+  the project has no module `M.name`, `M` binds neither `name`, nor `__getattr__`, nor any name
+  before the import it is paused at, no other module stores into `M.name`, and nothing else may
+  load a module of the cycle out of the order shown. Its reports are heuristic until a review
+  certifies the claim. `--select ALL` does not select it; on the measured corpus, `--select
+  IMP102` reports 2 statements in 2 of 378 packages, both in test inputs.
+- `IMP104` (`development-code-import`, opt-in, experimental): a module of the package the project
+  distributes imports development code, by an import that runs (in the module body, lazily, or in
+  a function), not under `TYPE_CHECKING` and with no handler that may take its `ImportError`.
+  Development code is a test module outside the package's tree (`tests/` beside the package) and,
+  in a src layout, a module outside the source roots (`scripts/`, `tools/`); an installed
+  package does not have it. One report per function and module imported. Its reports are
+  heuristic until a review certifies the claim.
+- `IMP301` (`development-dependency-at-import-time`, opt-in, experimental): a package module loads,
+  while it loads, a module whose distributions the project declares only in development groups
+  (`[dependency-groups]`, `[tool.uv] dev-dependencies`, Poetry's groups and `dev-dependencies`,
+  `[tool.pdm.dev-dependencies]`), in none of its dependencies and extras. Every import on the way
+  runs whenever its module loads, and no handler may take its `ImportError`. Reported at the
+  import, once per module and set of distributions, with the chain of imports from the package
+  module whose load runs it; the baseline target is the distributions.
+- `IMP302` (`optional-dependency-at-import-time`, opt-in, experimental): importing a top-level
+  package or an entry point's module loads, while it loads, a module whose distributions the
+  project declares only in extras, so that import needs the extra. Reported as `IMP301` is, with
+  the chain from the base module.
+- `[tool.heki.imports] module-distributions`: the distributions that may provide a module (and the
+  modules below it) for `IMP301` and `IMP302`. Without it, a module's distributions are the
+  catalog's `provides` rows (`PyYAML` provides `yaml`) and the declared distributions named like
+  the module or a package holding it (PEP 503 names); the project's own name is none, and a module
+  the project holds a copy of in a directory without `__init__.py` (a vendored package put on
+  `sys.path`) has none. A project whose `pyproject.toml` computes its dependencies or extras
+  (`[project] dynamic`) gets no report. `--select ALL` does not select `IMP104`, `IMP301`, or
+  `IMP302`.
+- `relative-imports` on `[[tool.heki.import-owners]]` (experimental): the modules the importers
+  may import only through a relative import, for a package copied into other packages under
+  another name. An import naming one relative to the importer (`from . import b`,
+  `importlib.import_module(".b", __package__)`) is allowed, also when `forbidden-imports` names
+  it; one naming it by its full name (`from pkg._runtime import b`, or a relative name anchored at
+  a package the code spells) is an `IMP201` report, also when `allowed-imports` names it. With
+  `reach`, only the importer's own imports are judged for it. `heki inspect --imports` shows how
+  each import names its modules (`spelling`).
+
+### Changed
+
+- A text run of `heki check` that shows nothing ends with one line pointing to `heki recommend`
+  ("hint: `heki recommend` (experimental) lists the rules and contracts that fit this project,
+  and what heki could not see"). It is printed only for a run without `--touched` or a file as
+  a path, without a baseline, when the configuration declares no contract; never in the json,
+  github, or sarif output or in `--watch`.
+- `from pkg import name`, where the project package `pkg` binds `name` to an object of its
+  submodule `pkg.name` after importing it (`from .name import name`), may import the submodule:
+  while the package is still loading, Python takes the submodule. `heki inspect --imports` shows
+  the package with the submodule possible, an `import-owners` contract with `unresolved =
+  "report"` may report the submodule under `IMP202`, `IMP201` judges the package as before, and
+  `IMP101` no longer counts such an import in a module of `pkg` as a step into `pkg`.
+- `heki inspect --imports` shows a test module inside the tree of a package the project
+  distributes (`src/acme/tests/test_io.py`, `acme/test_io.py`) as `package_test` code, which
+  installs with the package, instead of `development` code.
+- A loop over a module-level tuple of string constants (`for key in RECORDS`, also imported or
+  read as `keys.RECORDS`, also a tuple of another module's constants) names each item, as a loop
+  over the tuple display does, and so does the key of each pair a generator expression yields
+  to `__dict__.update(...)`, `dict(...)`, or a loop unpacking it, keyed by the item of its first
+  `for` clause or by a string constant
+  (`copy.__dict__.update((key, src.__dict__[key]) for key in RECORDS)`): contract writes that
+  were attributes named at run time (`MUT205`) are now writes of those targets (`MUT201`).
+- The certifications publish the harm classes of the `OPT` rules' census and holdout run
+  (`heki rule --output-format json`: `certification.census.harm` and
+  `certification.holdout.harm`), and docs/precision.md shows them with a holdout run of this
+  release.
+
+### Fixed
+
+- `MUT201`, `EFF201` (`writes-targets`), and `MUT208`: a project method that changes its own
+  `self` in place (in its body, through its calls on `self`, or through `super()`), called on a
+  guarded attribute's value (`holder.bag.add(x)`), is the caller's in-place write of the
+  attribute, as a builtin container's changing method is, also when the contract allows the
+  method; a helper calling such a method on the value it is handed changes it itself. Such a
+  call was a write through the method, and none at all when the method was allowed. A method
+  that only reads its receiver, or changes only an object it builds, writes nothing.
+- `EFF101` and `EFF103`: a local or a module global annotated with the library class of the
+  value assigned keeps what heki knows of the value (`cur: sqlite3.Cursor = conn.execute(...)`
+  on a connection opened on a file waits as `conn.execute(...).fetchone()` does; one opened in
+  memory gives no report), also through an `isinstance` test of that class; an annotation
+  naming another class, or on a value heki cannot type, types the name as before. A call of a
+  local bound once to a bound method (`execute = conn.execute`, `getattr(conn, "execute")`) or
+  to a `functools.partial` object runs every implementation calling the method or the function
+  runs, so it is exact where the call written out is; `getattr` with a default is not.
+- A module `__getattr__` that caches what it serves (`globals()[name] = value`, `name` its
+  parameter) no longer makes every constant of its module unknown: Python calls it only for a
+  name the module lacks, so the names the module body binds on every path keep their values,
+  and a `__dict__` key, `getattr` / `setattr` name, or contract argument imported from such a
+  module is named again. `globals().setdefault(key, value)` is read the same way. A hook that a
+  decorator wraps, or that another module loads (`keys.__getattr__("KEY")`, `from keys import
+  __getattr__`), may bind any name, `Final` ones too, so its module's constants stay unknown
+  there.
+- A name bound to another module's constant (`KEY = keys.OTHER`) is no constant where its module
+  does not fix the name: in a loop, before a star import, or where `exec` or another change
+  through `globals()` may bind it, as a literal already was not.
+- A function of thousands of lists extending each other (`a.extend(b)`, `b.extend(c)`, ...) no
+  longer aborts `heki check`, `heki check --watch`, or the language server with a stack overflow
+  on macOS: the sizes heki follows through such a chain are decided a bounded depth at a time on
+  the native stack, with the same answers as before. The decisions a deeper question makes heki
+  run again take their steps from one budget per function, past which the sizes are unknown.
+- A run over part of the project (`heki check pkg_a --baseline b.toml`) judged the baseline
+  entries of files it did not analyze, and `--update-baseline` removed them. It now compares and
+  updates only the entries of the files under its paths; the others stay as they are. A
+  baseline that still counts diagnostics (version 1) is updated whole first.
+- A run below the project root (a subdirectory given, or `heki check` run in one) prints a note
+  naming the project modules its files import that it left out, whose code the run does not
+  know.
+- `lint.unmatched-contract-entries` no longer takes time growing with the entries times the
+  project's functions when it suggests names for entries that match nothing: an entry past a
+  budget of comparisons is still reported, without suggested names.
+
+### Documentation
+
+- The `collections.deque` example of the README, the documentation home, and Fixes and Safety
+  printed `Would fix 0 issue(s)`; with `--include-size-dependent` selecting its rule it prints
+  what the pages show, and a test runs it.
+- `heki recommend` is the next step in "What a first run shows", Getting Started, and the first
+  step of "Rolling out rules"; Getting Started lists the rules a run without configuration runs;
+  the documented local pre-commit hooks set `verbose: true` so warnings are shown; the comparison
+  with Ruff, the type checkers, and tach / import-linter follows the examples.
+
 ## [0.2.7] - 2026-11-24
 
 ### Breaking changes
@@ -1887,6 +2076,7 @@ The first public preview.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
+[0.3.0]: https://github.com/koxudaxi/heki/compare/v0.2.7...HEAD
 [0.2.7]: https://github.com/koxudaxi/heki/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/koxudaxi/heki/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/koxudaxi/heki/compare/v0.2.4...v0.2.5
