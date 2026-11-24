@@ -179,6 +179,35 @@ pub(crate) fn decide(fact: &ArgFact, test: &GuardTest) -> Option<bool> {
     }
 }
 
+/// What a test of a [`crate::MustExec::given`] chain comes to at a call binding `b`.
+pub(crate) enum Given {
+    Holds,
+    Fails,
+    /// The caller's own parameter decides it: its callers do.
+    Caller(u8),
+}
+
+/// [`Given`] of `test` at a call binding `b`: the caller's own parameter hands it on to its
+/// callers, as a value computed from its parameters leaves a case to them (R6); any other value
+/// passes a test of cases as the call decides its own argument, one heki cannot evaluate passing
+/// none of them (R6), and a test of states by its class.
+pub(crate) fn given(b: &ArgBinding, test: &ValueTest) -> Given {
+    let caller = match &b.input {
+        Some(GuardSubject { param, attr: None }) => Some(*param),
+        _ => None,
+    };
+    let decided = match test {
+        ValueTest::Cases { .. } if caller.is_some() || b.from_params => None,
+        ValueTest::Cases { .. } => test.decide(b.fact.as_deref().unwrap_or(&ArgFact::default())),
+        ValueTest::States(_) => b.fact.as_deref().and_then(|f| test.decide(f)),
+    };
+    match (decided, caller) {
+        (Some(true), _) => Given::Holds,
+        (Some(false), _) | (None, None) => Given::Fails,
+        (None, Some(q)) => Given::Caller(q),
+    }
+}
+
 impl ValueTest {
     /// The outcome on a value `fact` describes: the first case it passes, or `otherwise`; the
     /// one of its class among the states.
@@ -1168,6 +1197,7 @@ impl LocalGuards {
                 .iter()
                 .filter(|lp| !d.fresh || !self.fresh_in_loop(cx, var, lp).open_means(true))
                 .fold(0, |m, lp| m | loop_bit(lp)),
+            from_params: false,
         }
     }
 

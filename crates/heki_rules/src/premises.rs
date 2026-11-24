@@ -195,11 +195,13 @@ pub const DEFINED_TWICE: OpenCause = OpenCause {
 
 pub const WAITS: Premise = Premise {
     name: "Waits",
-    states: "the last call waits for the network, a database, a child process, or a sleep on every call, as the ecosystem catalog describes it (R3), for every argument heki cannot evaluate (R6)",
+    states: "the last call waits for the network, a database, a child process, or a sleep on every call, as the ecosystem catalog describes it (R3), for every argument heki cannot evaluate (R6); a call in a helper whose case or receiver state depends on the helper's parameter, by the value each call of the helper passes there",
     decided_in: &[
         "heki_kb::EcosystemEntry::case_for",
         "heki_effect::resolver::arg_fact",
         "heki_effect::summary::Extractor::unconditional",
+        "heki_effect::summary::Extractor::given_waits",
+        "heki_effect::guards::given",
     ],
 };
 
