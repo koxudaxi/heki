@@ -8,7 +8,7 @@
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
 //!   `OPT112`, `OPT113`, `OPT120`, `OPT121`, `OPT130`); `OPT112` / `OPT113` are Advisory-lane
 //!   reports without a rewrite.
-//! - Family 4 (`IMP`): Imports (`IMP101`, `IMP201`, `IMP202`)
+//! - Family 4 (`IMP`): Imports (`IMP101`, `IMP102`, `IMP201`, `IMP202`)
 
 pub mod blind_spots;
 pub mod census;
@@ -36,7 +36,7 @@ pub use contracts::{
 };
 pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
 pub use heki_diagnostics::Certainty;
-pub use imp_rules::{import_cycle_files, walking_importers, walks_imports};
+pub use imp_rules::{circular_failure_files, import_cycle_files, walking_importers, walks_imports};
 pub use mut_rules::{
     CHAIN_RULES, ChainFacts, EXAMPLE_RULES, ExampleOwners, SentinelTestKey, StaleWriteKey,
     chain_facts, deep_copy_files, example_digest, family_readers, kept_removals_in,
@@ -668,6 +668,18 @@ pub const CORE_RULES: &[RuleMeta] = &[
         doc: include_str!("../rule-docs/IMP101.md"),
     },
     RuleMeta {
+        code: "IMP102",
+        slug: "circular-import-failure",
+        family: RuleFamily::Imp,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Opt-in: a `from M import name` that raises `ImportError` when a module of its import cycle is imported before the others, because `M` is still loading and has not bound `name`.",
+        doc: include_str!("../rule-docs/IMP102.md"),
+    },
+    RuleMeta {
         code: "IMP201",
         slug: "import-owner-violation",
         family: RuleFamily::Imp,
@@ -1185,6 +1197,7 @@ pub fn check_project(
     mut_rules::mut203(&cx, &mut out)?;
     mut_rules::mut204(&cx, &mut out)?;
     imp_rules::imp101(&cx, &mut out)?;
+    imp_rules::imp102(&cx, &mut out);
     imp_rules::imp201_imp202(&cx, &mut out)?;
     eff_rules::eff101_105(&cx, &mut out);
     eff_rules::eff201(&cx, &mut out)?;

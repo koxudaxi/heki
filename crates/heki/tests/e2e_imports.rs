@@ -208,7 +208,7 @@ fn import_sites_say_what_they_load_and_when_they_run() {
             "33 by_name body always -> shlex",
             "34 from gone body always -> - ! app.missing",
             "35 from nothing body always -> - ! ",
-            "36 from parse body always -> app",
+            "36 from parse body always -> app | app.parse",
             "37 from util body always -> app.util",
             "38 from opened body always -> app | app.opened",
             "39 star body always -> os.path",

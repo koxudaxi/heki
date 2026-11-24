@@ -1338,9 +1338,9 @@ the installed release changed, and the changelog on GitHub lists every release.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   says how many.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
-  `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `IMP101`, `MUT101`, `MUT103`, `MUT106`,
-  `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`, `MUT115`, `MUT120`): they need their exact
-  code or name. In `ignore`, a prefix covers every rule it matches.
+  `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `IMP101`, `IMP102`, `MUT101`, `MUT103`,
+  `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`, `MUT115`, `MUT120`): they need
+  their exact code or name. In `ignore`, a prefix covers every rule it matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
 
@@ -2002,7 +2002,10 @@ or a glob whose `*` spans dots, never a suffix (`pkg.*` names `pkg.facts` and
   imports the submodule `a.b.c` when the package has one and binds no `c` before importing it,
   and `a.b` otherwise. An import of a module the project lacks below one of its packages fails,
   and is no import; `from a.b import c` of a name `a.b` binds nowhere still imports `a.b`, and
-  may import a module `a.b.c` outside the project's files (a compiled extension module).
+  may import a module `a.b.c` outside the project's files (a compiled extension module). When
+  the package binds `c` to an object of its submodule after importing it (`from .c import c`),
+  `from a.b import c` imports `a.b`, and also `a.b.c` while the package has not run that binding
+  yet.
 - One report per import and module. A report's target, which a
   [baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) counts it by, is the module imported.
 - With `reach`, each module reached is reported once per importer, at the import of the importer
@@ -3075,7 +3078,7 @@ Rules worth enabling here
   rule    reports  exact  consequence  right about the code (published)  real harm  block
   MUT106        1      -  bug          not measured                      -          yes
   OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
-  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF112, EFF113, EFF114, EFF115, EFF116, IMP101, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, OPT112
+  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF112, EFF113, EFF114, EFF115, EFF116, IMP101, IMP102, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, OPT112
   MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it.
 
 Contract candidates
@@ -3759,7 +3762,7 @@ Source: https://heki.koxudaxi.dev/rules/
 
 # Rules
 
-heki has 51 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
+heki has 52 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
 
 - The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report of an exact rule that did not establish every premise (an `OPT` report whose rewrite is not proven) is shown where a heuristic rule would run.
 - A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
@@ -3858,6 +3861,7 @@ Imports a contract does not allow, wherever they run, counted as Python loads th
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
 | IMP101 | [import-cycle](https://heki.koxudaxi.dev/rules/import-cycle/) | Opt-in: project modules that import each other while they load (an import cycle), reported once per group at the import closing a shortest cycle. | ≈ 🔌 🧪 |
+| IMP102 | [circular-import-failure](https://heki.koxudaxi.dev/rules/circular-import-failure/) | Opt-in: a `from M import name` that raises `ImportError` when a module of its import cycle is imported before the others, because `M` is still loading and has not bound `name`. | ≈ 🔌 🧪 |
 | IMP201 | [import-owner-violation](https://heki.koxudaxi.dev/rules/import-owner-violation/) | An import that an `import-owners` contract does not allow: a forbidden module, or one outside the allowed imports. | ≈ 📜 🧪 |
 | IMP202 | [unresolved-guarded-import](https://heki.koxudaxi.dev/rules/unresolved-guarded-import/) | Strict mode of an `import-owners` contract (`unresolved = "report"`): an import whose module heki cannot name, which may be one the contract does not allow. | ≈ 📜 🧪 |
 
@@ -4104,6 +4108,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `rule.EFF115` | rule | [`EFF115`](https://heki.koxudaxi.dev/rules/async-def-as-sync-callback/) | 0.2.5 | - |
 | `rule.EFF116` | rule | [`EFF116`](https://heki.koxudaxi.dev/rules/generator-never-iterated/) | 0.2.6 | - |
 | `rule.IMP101` | rule | [`IMP101`](https://heki.koxudaxi.dev/rules/import-cycle/) | 0.2.7 | - |
+| `rule.IMP102` | rule | [`IMP102`](https://heki.koxudaxi.dev/rules/circular-import-failure/) | 0.2.8 | - |
 | `rule.IMP201` | rule | [`IMP201`](https://heki.koxudaxi.dev/rules/import-owner-violation/) | 0.2.7 | - |
 | `rule.IMP202` | rule | [`IMP202`](https://heki.koxudaxi.dev/rules/unresolved-guarded-import/) | 0.2.7 | - |
 | `rule.MUT101` | rule | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | 0.1.0 | - |
@@ -4207,6 +4212,14 @@ The development corpus has few reports of it, and its premises are not yet certi
 - **Since:** 0.2.7
 
 It is new: its reports are heuristic until a review of its reports on real code bases certifies its claim, and which imports count can still change.
+
+## `rule.IMP102`
+
+- **Kind:** rule
+- **Target:** [`IMP102`](https://heki.koxudaxi.dev/rules/circular-import-failure/)
+- **Since:** 0.2.8
+
+It is new: every report rests on established premises only, but its reports are heuristic until a review of its reports on real code bases certifies its claim, and which imports and code stop a run can still change.
 
 ## `rule.IMP201`
 
@@ -4404,7 +4417,7 @@ On a save, the edit reaches other files only through what it changes:
 | a function's own in-place changes, attribute rebindings, or calls, while its effects stay the same | the files with `MUT108` / `MUT110` / `MUT120` reports above it: a report's call chain ends at the first function whose body makes the change |
 | the position of a call site, also when its bytes stay where they were | the files whose call chains show that call site |
 | the position of a method's own change of a container | the files whose `MUT113` reports show it |
-| the position of an import | the files whose `import-owners` chains or `IMP101` cycles show it |
+| the position of an import | the files whose `import-owners` chains, `IMP101` cycles, or `IMP102` chains show it |
 
 Contracts reach further when a function changes its calls:
 
@@ -4415,6 +4428,7 @@ Contracts reach further when a function changes its calls:
 | an effect boundary, when the function changes its calls of library APIs, or the calls, module attribute reads, and import probes outside the project that a boundary forbids | every function above it | a boundary may allow one API and forbid another of the same effect, counts every call it reaches, and no summary records an access outside the project |
 | an `import-owners` contract with `reach`, when a file's imports change | every module the contract judges | an importer's report follows the imports of every module its walk reaches, and the walks share one budget |
 | `IMP101` selected, when a file's imports change | the files reporting a cycle before and after the change | which modules import each other, and which import closes a group's cycle, depend on the imports of every module |
+| `IMP102` selected, when a file's imports, or what its body binds and runs between them, change | the files reporting a failing import before and after the change | which import fails, and for which modules imported first, depends on the imports and the order of the module bodies of every module of the cycle |
 
 Edits that change none of these, such as most comments, stop at the edited file.
 
@@ -6815,6 +6829,151 @@ def child_env(home):
   `isinstance` is taken to keep nothing: a project `__eq__`, `__contains__`, or metaclass
   `__instancecheck__` that stored the operand it is handed would keep it. These hooks answer a
   test, and code that stores their operand is not known.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/circular-import-failure/
+
+# circular-import-failure (IMP102)
+
+Family: Imports (IMP) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+
+Opt-in: a `from M import name` that raises `ImportError` when a module of its import cycle is imported before the others, because `M` is still loading and has not bound `name`.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+
+!!! warning "Experimental"
+
+    It is new: every report rests on established premises only, but its reports are heuristic until a review of its reports on real code bases certifies its claim, and which imports and code stop a run can still change. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
+
+## What it does
+Reports a `from M import name` that raises `ImportError` when a module of its import cycle is
+imported before the other modules of the cycle have loaded. Importing that module runs its body,
+and the imports in module bodies lead from it to the statement while `M` is still loading: `M`
+is paused at the import that started the chain, and has not bound `name` yet. Python then raises
+`ImportError: cannot import name 'name' from partially initialized module 'M' (most likely due to
+a circular import)`.
+
+heki finds it without configuration. For each group of the project's modules that import each
+other while they load, it imports each module of the group first in turn, and each package
+holding one whose `__init__.py` imports the group: the module's parent packages load first, then
+the module bodies run in order through their imports, and each import of a module that has not
+loaded yet runs that module's body before the import goes on. One report is given per failing
+statement, naming the modules whose import fails there, with the imports of the chain from the
+first of them as related locations.
+
+Only `from M import name` fails this way. `import M` and `import M as m` take the module while
+it is still loading and do not fail there, and neither does `from pkg import sub` of a submodule
+`pkg.sub`, which Python finds in `sys.modules`.
+
+## What a report states
+
+A report states that importing one of the modules it names, while no module of the import cycle
+has been imported in the process, does not complete: unless code that runs before raises first,
+the chain of imports shown reaches the reported statement while `M` is loading and has not bound
+`name`, and the statement raises `ImportError`.
+
+Its premises, each established or no report:
+
+- **Chain**: each import of the chain is in a module body (or a class body it runs, or a constant
+  by-name import there), runs on every path through the body, is no lazy import, and loads the
+  module shown: its name resolved against the project's modules, a `from` import split between a
+  submodule and an attribute as Python splits it, and the parent packages of a module loading
+  first. The reported statement is such an import too, and takes the name from `M` itself.
+- **Not loaded before**: each module the chain enters has not loaded yet. A module of the cycle
+  has not, by the claim; a module outside it has not when its import imports a module of the
+  cycle whenever it runs, and every way from its imports to the cycle is an import in a module
+  body that heki names. Otherwise an import of a module outside the cycle that may load one of
+  the cycle stops the run.
+- **No handler**: no handler takes the `ImportError` on the way: no `except` clause naming
+  `ImportError`, `Exception`, `BaseException`, a type heki cannot tell is another builtin
+  exception, or a bare `except`, and no `with` block or `finally` body around an import of the
+  chain or the statement.
+- **Not a submodule**: the project has no module `M.name` (Python falls back to a submodule of
+  that name once it is loaded), and `name` is not a dunder the import system sets
+  (`__name__`, `__path__`).
+- **Not bound yet**: before the import `M` is paused at, `M`'s body has no statement that may
+  bind `name` (an assignment, a definition, an import, also on a branch), binds no
+  `__getattr__`, which a `from` import falls back to, and runs no star import; `M` has no
+  `exec`, no change through `globals()`, no `vars()` or `locals()` in its body, and no function
+  or class body binding `name` under `global`.
+- **Not bound elsewhere**: no other module of the project stores into or deletes `M.name`, by
+  name or with `setattr` under a name heki cannot read.
+- **Nothing else loads the cycle**: nothing that runs before the statement may load a module of
+  the cycle out of the order shown. An import heki cannot place there (on a branch, behind a
+  handler, lazy) of a module of the cycle that has not loaded yet, an import of a module heki
+  cannot name, and a module outside the cycle whose own load may load one of the cycle stop the
+  run. When some function or lazy import of the project may load a module of the cycle, so does
+  any code that runs before the statement other than imports and stores of names (a call, a
+  class statement, a decorator, an operator, an attribute or item access): it may call that
+  function.
+
+A report says which module, imported first, fails: importing another module of the cycle first
+may load them in an order that works.
+
+## Why is this bad?
+A package whose modules import names from each other works only while it is imported through
+the module that loads them in a working order. Importing another of its modules first, as a
+test, a script, a plugin loader, or a user of the library may do, fails with an `ImportError`
+that names a module that exists and a name it defines. The failure depends on the order modules
+are imported in, so it can appear only in one environment or one test run. A type checker, which
+reads the names a module defines but not the order statements run in, does not see it.
+
+## Example
+```python
+# pkg/a.py
+from pkg.b import helper_b  # IMP102 when `pkg.b` is imported first
+
+
+def helper_a() -> int:
+    return helper_b() + 1
+```
+
+```python
+# pkg/b.py
+from pkg.a import helper_a  # IMP102 when `pkg.a` is imported first
+
+
+def helper_b() -> int:
+    return 1
+
+
+def uses_a() -> int:
+    return helper_a()
+```
+
+Importing `pkg.a` first runs `pkg/a.py`, which imports `pkg.b` before it defines `helper_a`;
+`pkg/b.py` then asks `pkg.a` for `helper_a`, which it has not bound yet.
+
+Use instead:
+```python
+# pkg/b.py
+def helper_b() -> int:
+    return 1
+
+
+def uses_a() -> int:
+    from pkg.a import helper_a
+
+    return helper_a()
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- Its reports are errors: `lint.severity = { IMP102 = "warning" }` makes them warnings.
+
+## Known limitations
+- Imports heki does not see (`exec`, `runpy`, a module loaded from a file path, an import a
+  library function makes, such as a plugin manager loading entry points) are not followed, and
+  neither is a write to `sys.modules` or a module object given another class.
+- A run stops, and reports nothing from that point on, at the first code that may load a module
+  of the cycle out of order. An import under `if __name__ == "__main__":`, which never runs when
+  the module is imported, counts as an import on a branch.
 
 
 ---
@@ -11170,10 +11329,11 @@ the module they load, when that module may be one the contract does not allow:
   (`pkg.plugins.*`);
 - a by-name import of one of several names, some breaking the contract and some not;
 - `from a import c` where heki cannot tell whether `c` is the submodule `a.c`: a package outside
-  the project, one whose `__init__.py` binds `c` before the submodule may be imported, or one
-  that binds no `c` while the project has no module `a.c`, which Python then looks for outside the
-  project's files (a compiled extension module). The package `a` loads either way, and `IMP201`
-  judges it.
+  the project, one whose `__init__.py` binds `c` before the submodule may be imported, one that
+  binds `c` to an object of the submodule after importing it (`from .c import c`), which the
+  import takes the submodule instead of while the package is still loading, or one that binds no
+  `c` while the project has no module `a.c`, which Python then looks for outside the project's
+  files (a compiled extension module). The package `a` loads either way, and `IMP201` judges it.
 
 With `reach`, the sites of the modules a walk reaches are judged too, and reported at the import
 of the importer that starts the chain to them.

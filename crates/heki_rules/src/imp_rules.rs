@@ -1,10 +1,13 @@
 //! `IMP201` import ownership (`[[tool.heki.import-owners]]`): which modules a module may import,
 //! and `IMP202`, its strict sibling for the imports whose module heki cannot name; `IMP101`,
-//! import cycles ([`cycles`]). Which module an import loads is decided by `heki_effect::imports`
-//! alone.
+//! import cycles ([`cycles`]); `IMP102`, circular imports that fail ([`circular`]). Which module
+//! an import loads is decided by `heki_effect::imports` alone.
 
+mod circular;
 mod cycles;
 
+pub use circular::circular_failure_files;
+pub(crate) use circular::imp102;
 pub(crate) use cycles::imp101;
 pub use cycles::import_cycle_files;
 
