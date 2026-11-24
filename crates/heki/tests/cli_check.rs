@@ -1299,6 +1299,17 @@ fn runs_over_given_files_fail_only_on_their_own_file_errors() {
         stderr.contains("All checks passed (2 file(s))."),
         "{stderr}"
     );
+    // The note names the first three of the files it counts.
+    p.write("tests/data/bad3.py", "y = = 2\n")
+        .write("tests/data/bad4.py", "z = = 3\n");
+    let (code, _, stderr) = p.heki(&["src/p/a.py"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains(
+            "note: 4 file(s) the run does not report on could not be analyzed: `tests/data/bad1.py`, `tests/data/bad2.py`, `tests/data/bad3.py`, ...; reports"
+        ),
+        "{stderr}"
+    );
 }
 
 #[test]

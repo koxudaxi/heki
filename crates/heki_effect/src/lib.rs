@@ -231,7 +231,7 @@ pub struct MustExec {
     pub alternatives: EffectChains,
     /// The effects the function has run whenever it returns when its callers pass values that
     /// pass tests of its parameters ([`GivenChains`]); none of them is one of [`Self::effects`].
-    #[serde(default, skip_serializing_if = "GivenChains::is_empty")]
+    #[serde(default)]
     pub given: GivenChains,
 }
 
@@ -267,10 +267,6 @@ pub const MAX_GIVEN_TESTS: usize = 4;
 pub const MAX_GIVEN_CHAINS: usize = 4;
 
 impl GivenChains {
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
     /// The chains of `e`.
     pub fn of(&self, e: ExecEffectKind) -> impl Iterator<Item = &GivenChain> {
         self.0.iter().filter(move |c| c.effect == e)
