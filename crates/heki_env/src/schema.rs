@@ -53,6 +53,7 @@ fn tables() -> &'static [Table] {
             table("invalidation", keys_of::<InvalidationRule>()),
             table("import-owners", keys_of::<ImportOwnerRule>()),
             table("imports", keys_of::<ImportsConfig>()),
+            table("imports.module-distributions", None),
             table("ecosystem", keys_of::<EcosystemOverride>()),
             table(
                 "ecosystem.writes-in-order",
@@ -166,6 +167,8 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("import-owners.type-checking", r#""report""#),
     ("import-owners.reach", r#""import-time""#),
     ("imports.cycle-edges", r#"["body", "lazy"]"#),
+    ("imports.module-distributions", r#"{ yaml = ["PyYAML"] }"#),
+    ("imports.module-distributions.*", r#"["PyYAML"]"#),
     ("ecosystem.symbol", r#""mypkg.db.run_query""#),
     ("ecosystem.effects", r#"["blocking_db", "db_query"]"#),
     ("ecosystem.async-safe", "true"),

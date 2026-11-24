@@ -8,7 +8,8 @@
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
 //!   `OPT112`, `OPT113`, `OPT120`, `OPT121`, `OPT130`); `OPT112` / `OPT113` are Advisory-lane
 //!   reports without a rewrite.
-//! - Family 4 (`IMP`): Imports (`IMP101`, `IMP102`, `IMP201`, `IMP202`)
+//! - Family 4 (`IMP`): Imports (`IMP101`, `IMP102`, `IMP104`, `IMP201`, `IMP202`, `IMP301`,
+//!   `IMP302`)
 
 pub mod blind_spots;
 pub mod census;
@@ -36,7 +37,10 @@ pub use contracts::{
 };
 pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
 pub use heki_diagnostics::Certainty;
-pub use imp_rules::{circular_failure_files, import_cycle_files, walking_importers, walks_imports};
+pub use imp_rules::{
+    circular_failure_files, dependency_report_files, import_cycle_files, walking_importers,
+    walks_imports,
+};
 pub use mut_rules::{
     CHAIN_RULES, ChainFacts, EXAMPLE_RULES, ExampleOwners, SentinelTestKey, StaleWriteKey,
     chain_facts, deep_copy_files, example_digest, family_readers, kept_removals_in,
@@ -48,6 +52,7 @@ pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};
 use globset::{Glob, GlobMatcher};
 use heki_ast::{LineIndex, Span};
 use heki_diagnostics::{Diagnostic, RelatedLocation};
+use heki_effect::code_kind::CodeKind;
 use heki_effect::{
     CallHop, CallSite, ContractClass, EffectSummary, FileSummary, FuncKey, ModuleInput,
     ProjectDecls, ProjectIndex,
@@ -680,6 +685,18 @@ pub const CORE_RULES: &[RuleMeta] = &[
         doc: include_str!("../rule-docs/IMP102.md"),
     },
     RuleMeta {
+        code: "IMP104",
+        slug: "development-code-import",
+        family: RuleFamily::Imp,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Opt-in: a module of the package the project distributes imports test code, or a module outside the source roots of a src layout, by an import that runs.",
+        doc: include_str!("../rule-docs/IMP104.md"),
+    },
+    RuleMeta {
         code: "IMP201",
         slug: "import-owner-violation",
         family: RuleFamily::Imp,
@@ -702,6 +719,30 @@ pub const CORE_RULES: &[RuleMeta] = &[
         auto_fix_default: false,
         summary: "Strict mode of an `import-owners` contract (`unresolved = \"report\"`): an import whose module heki cannot name, which may be one the contract does not allow.",
         doc: include_str!("../rule-docs/IMP202.md"),
+    },
+    RuleMeta {
+        code: "IMP301",
+        slug: "development-dependency-at-import-time",
+        family: RuleFamily::Imp,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Opt-in: a package module loads, while it loads, a module whose distribution the project declares only for development (a dependency group), not in its dependencies or extras.",
+        doc: include_str!("../rule-docs/IMP301.md"),
+    },
+    RuleMeta {
+        code: "IMP302",
+        slug: "optional-dependency-at-import-time",
+        family: RuleFamily::Imp,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Opt-in: importing a top-level package or an entry point's module loads, while it loads, a module whose distribution the project declares only in extras, so the import fails without them.",
+        doc: include_str!("../rule-docs/IMP302.md"),
     },
     RuleMeta {
         code: "OPT101",
@@ -1064,6 +1105,24 @@ pub struct CheckExtras<'a> {
     /// of the exact tier that are no premise ([`premises::ConditionCause`]). Off, nothing more
     /// is computed than the tiers need.
     pub open_premises: bool,
+    /// Where the project's files are, which decides the kind of code of each module
+    /// ([`heki_effect::code_kind`]).
+    pub layout: ProjectLayout<'a>,
+}
+
+/// The project root and how module names derive from the paths below it.
+#[derive(Debug, Clone, Copy)]
+pub struct ProjectLayout<'a> {
+    pub root: &'a Path,
+    pub modules: &'a heki_effect::resolver::ModuleLayout,
+}
+
+impl ProjectLayout<'_> {
+    /// The kind of code of the project module `module` in the file `path`, under `config`.
+    pub fn code_kind(&self, path: &Path, module: &str, config: &HekiConfig) -> CodeKind {
+        let rel = project::rel_posix(path, self.root);
+        heki_effect::code_kind::code_kind(&rel, module, self.modules, config)
+    }
 }
 
 /// Reads the text of a file by path.
@@ -1132,6 +1191,9 @@ pub(crate) struct CheckContext<'a> {
     /// Why must-facts do not hold, shared by the rules that record open premises (built only
     /// when the run records them).
     pub must_explainer: Option<heki_effect::MustExplainer<'a>>,
+    /// [`CheckExtras::layout`]; `None` in a context over the declarations alone, which runs no
+    /// rule.
+    layout: Option<ProjectLayout<'a>>,
 }
 
 /// Whether [`check_project`] runs the rule `code` on the file at the project-relative `rel_path`:
@@ -1184,6 +1246,7 @@ pub fn check_project(
         must_explainer: extras
             .open_premises
             .then(|| heki_effect::MustExplainer::new(index)),
+        layout: Some(extras.layout),
     };
     let mut out = Vec::new();
     mut_rules::mut101_mut111(&cx, &mut out);
@@ -1198,6 +1261,8 @@ pub fn check_project(
     mut_rules::mut204(&cx, &mut out)?;
     imp_rules::imp101(&cx, &mut out)?;
     imp_rules::imp102(&cx, &mut out);
+    imp_rules::imp104(&cx, &mut out);
+    imp_rules::imp301_imp302(&cx, &mut out);
     imp_rules::imp201_imp202(&cx, &mut out)?;
     eff_rules::eff101_105(&cx, &mut out);
     eff_rules::eff201(&cx, &mut out)?;
@@ -1317,6 +1382,7 @@ impl<'a> CheckContext<'a> {
             text_of: None,
             open_premises: false,
             must_explainer: None,
+            layout: None,
         }
     }
 
@@ -1343,6 +1409,33 @@ impl<'a> CheckContext<'a> {
         }
         fixed.comprehensions.clear();
         Cow::Owned(fixed)
+    }
+
+    /// The kind of code of the project module `module`, defined in the file `path`.
+    pub fn code_kind(&self, path: &Path, module: &str) -> CodeKind {
+        let layout = self
+            .layout
+            .expect("the rules run with the project's layout");
+        match self.unit(path) {
+            Some(unit) => heki_effect::code_kind::code_kind(
+                &unit.rel_path,
+                module,
+                layout.modules,
+                self.config,
+            ),
+            None => layout.code_kind(path, module, self.config),
+        }
+    }
+
+    /// The project-relative POSIX path of the file `path`.
+    pub fn rel_path(&self, path: &Path) -> String {
+        let layout = self
+            .layout
+            .expect("the rules run with the project's layout");
+        match self.unit(path) {
+            Some(unit) => unit.rel_path.clone(),
+            None => project::rel_posix(path, layout.root),
+        }
     }
 
     pub fn unit(&self, path: &Path) -> Option<&'a ModuleUnit<'a>> {

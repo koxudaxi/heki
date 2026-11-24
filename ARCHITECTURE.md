@@ -33,9 +33,11 @@ ownership boundaries) semantic checker**.
 *(Which modules may import which, and import cycles, are walls in heki's scope
 ([ADR-022](docs/DESIGN_HISTORY_AND_ADR.md#adr-022)): `import-owners` contracts check which
 modules a module may import (`IMP201`, `IMP202`), an opt-in rule reports the modules that
-import each other while they load (`IMP101`), and another the `from` imports of such modules
-that fail when one of them is imported first (`IMP102`); the other import rules are planned, and
-until they ship tach and import-linter check layers.)*
+import each other while they load (`IMP101`), another the `from` imports of such modules that
+fail when one of them is imported first (`IMP102`), and others package code importing
+development code (`IMP104`) and dependencies declared only for development or in an extra that
+loading the package loads (`IMP301`, `IMP302`); the other import rules are planned, and until
+they ship tach and import-linter check layers.)*
 
 ### 1.1 What the product is: semantic checks first, speedups as a by-product
 
@@ -85,9 +87,10 @@ by crate boundaries, carrying three rule families and a planned fourth, imports.
      (`IMP201`, `IMP202`, experimental), the groups of modules importing each other through
      the imports of chosen timing classes (`IMP101`, opt-in, experimental), and, without
      configuration, the circular imports that fail: a `from` import that raises `ImportError`
-     when a module of its cycle is imported first (`IMP102`, opt-in, experimental). Planned:
-     package code importing test or development code, and development or extra dependencies
-     loaded while a package module loads; the import contracts of import-linter, tach, and
+     when a module of its cycle is imported first (`IMP102`), package code importing test or
+     development code (`IMP104`), and distributions declared only for development or only in
+     extras that a package module or a base module loads while it loads (`IMP301`, `IMP302`)
+     (all opt-in, experimental). Planned: the import contracts of import-linter, tach, and
      Ruff's bans.
 2. **Soundness / Alias lane (`heki_soundness`)**: conservative abstract interpretation that never
    trusts type annotations (zero unsafe rewrites).

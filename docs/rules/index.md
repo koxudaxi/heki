@@ -2,7 +2,7 @@
 
 # Rules
 
-heki has 52 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](../precision.md) says how a rule is certified and what each one measured. Each rule's page says what a report states.
+heki has 55 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](../precision.md) says how a rule is certified and what each one measured. Each rule's page says what a report states.
 
 - The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report of an exact rule that did not establish every premise (an `OPT` report whose rewrite is not proven) is shown where a heuristic rule would run.
 - A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
@@ -96,11 +96,14 @@ Quadratic patterns heki can rewrite, each proven safe by the alias analysis befo
 
 ## Imports (IMP)
 
-Imports a contract does not allow, wherever they run, counted as Python loads them.
+Imports a contract does not allow, modules importing each other, and code or dependencies the package loads that installing it does not provide, each counted as Python loads them.
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
 | IMP101 | [import-cycle](import-cycle.md) | Opt-in: project modules that import each other while they load (an import cycle), reported once per group at the import closing a shortest cycle. | ≈ 🔌 🧪 |
 | IMP102 | [circular-import-failure](circular-import-failure.md) | Opt-in: a `from M import name` that raises `ImportError` when a module of its import cycle is imported before the others, because `M` is still loading and has not bound `name`. | ≈ 🔌 🧪 |
+| IMP104 | [development-code-import](development-code-import.md) | Opt-in: a module of the package the project distributes imports test code, or a module outside the source roots of a src layout, by an import that runs. | ≈ 🔌 🧪 |
 | IMP201 | [import-owner-violation](import-owner-violation.md) | An import that an `import-owners` contract does not allow: a forbidden module, or one outside the allowed imports. | ≈ 📜 🧪 |
 | IMP202 | [unresolved-guarded-import](unresolved-guarded-import.md) | Strict mode of an `import-owners` contract (`unresolved = "report"`): an import whose module heki cannot name, which may be one the contract does not allow. | ≈ 📜 🧪 |
+| IMP301 | [development-dependency-at-import-time](development-dependency-at-import-time.md) | Opt-in: a package module loads, while it loads, a module whose distribution the project declares only for development (a dependency group), not in its dependencies or extras. | ≈ 🔌 🧪 |
+| IMP302 | [optional-dependency-at-import-time](optional-dependency-at-import-time.md) | Opt-in: importing a top-level package or an entry point's module loads, while it loads, a module whose distribution the project declares only in extras, so the import fails without them. | ≈ 🔌 🧪 |

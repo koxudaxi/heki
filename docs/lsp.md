@@ -133,7 +133,7 @@ On a save, the edit reaches other files only through what it changes:
 | a function's own in-place changes, attribute rebindings, or calls, while its effects stay the same | the files with `MUT108` / `MUT110` / `MUT120` reports above it: a report's call chain ends at the first function whose body makes the change |
 | the position of a call site, also when its bytes stay where they were | the files whose call chains show that call site |
 | the position of a method's own change of a container | the files whose `MUT113` reports show it |
-| the position of an import | the files whose `import-owners` chains, `IMP101` cycles, or `IMP102` chains show it |
+| the position of an import | the files whose `import-owners` chains, `IMP101` cycles, or `IMP102`, `IMP301`, or `IMP302` chains show it |
 
 Contracts reach further when a function changes its calls:
 
@@ -145,6 +145,7 @@ Contracts reach further when a function changes its calls:
 | an `import-owners` contract with `reach`, when a file's imports change | every module the contract judges | an importer's report follows the imports of every module its walk reaches, and the walks share one budget |
 | `IMP101` selected, when a file's imports change | the files reporting a cycle before and after the change | which modules import each other, and which import closes a group's cycle, depend on the imports of every module |
 | `IMP102` selected, when a file's imports, or what its body binds and runs between them, change | the files reporting a failing import before and after the change | which import fails, and for which modules imported first, depends on the imports and the order of the module bodies of every module of the cycle |
+| `IMP301` or `IMP302` selected, when a file's imports change | the files reporting an import of such a distribution before and after the change | whether a package or base module loads the import depends on the imports of every module on the way |
 
 Edits that change none of these, such as most comments, stop at the edited file.
 

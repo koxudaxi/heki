@@ -233,9 +233,10 @@ the installed release changed, and the changelog on GitHub lists every release.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   says how many.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
-  `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `IMP101`, `IMP102`, `MUT101`, `MUT103`,
-  `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`, `MUT115`, `MUT120`): they need
-  their exact code or name. In `ignore`, a prefix covers every rule it matches.
+  `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `IMP101`, `IMP102`, `IMP104`, `IMP301`,
+  `IMP302`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`,
+  `MUT115`, `MUT120`): they need their exact code or name. In `ignore`, a prefix covers every
+  rule it matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
 
@@ -1085,11 +1086,12 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
 
 ## Imports: `[tool.heki.imports]`
 
-Which imports the import rules count.
+Which imports the import rules count, and which distributions provide the modules they import.
 
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `cycle-edges` | `["body"]` | The timing classes of the imports [`IMP101`](rules/import-cycle.md) follows when it looks for modules importing each other: `"body"`, `"lazy"`, `"function"`, and `"type-checking"`. |
+| `module-distributions` | `{}` | The distributions that may provide a module outside the project, by the module: [`IMP301`](rules/development-dependency-at-import-time.md) and [`IMP302`](rules/optional-dependency-at-import-time.md) take them for the module and the modules below it, instead of the catalog's and the distributions named like the module. |
 
 ```toml
 [tool.heki.lint]
@@ -1108,6 +1110,23 @@ cycle-edges = ["body", "lazy"]   # also the lazy imports the module body does no
 - `"type-checking"`: an import under `if TYPE_CHECKING:`, which never runs.
 - An import whose class heki cannot tell (a lazy import whose reads it cannot place) counts for
   no class.
+
+`IMP301` and `IMP302` compare the modules a package loads with the distributions its
+`pyproject.toml` declares. A distribution provides the modules named like it (PEP 503 names:
+`ruamel.yaml` and `ruamel_yaml` are both `ruamel-yaml`), and the catalog knows the common ones
+named otherwise (`PyYAML` provides `yaml`, `Pillow` provides `PIL`). For any other,
+`module-distributions` says it, and it also settles a module several declared distributions may
+provide:
+
+```toml
+[tool.heki.imports]
+module-distributions = { cv2 = ["opencv-python-headless"], "google.cloud.storage" = ["google-cloud-storage"] }
+```
+
+- Each key is a module name; it covers the module and every module below it, and the longest key
+  naming a module decides it.
+- Distribution names are compared as PEP 503 normalizes them. A module the map gives only
+  distributions the project does not declare is not judged.
 
 ## Ecosystem knowledge: `[[tool.heki.ecosystem]]`
 

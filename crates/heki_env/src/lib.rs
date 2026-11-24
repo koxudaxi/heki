@@ -294,13 +294,18 @@ pub struct ImportOwnerRule {
     pub message: Option<String>,
 }
 
-/// `[tool.heki.imports]`: which imports the import rules count.
+/// `[tool.heki.imports]`: which imports the import rules count, and which distributions
+/// provide the modules they import.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct ImportsConfig {
     /// The timing classes of the imports `IMP101` follows (`"body"`, `"lazy"`, `"function"`,
     /// `"type-checking"`); `None` for `["body"]`, the imports that run while a module loads.
     pub cycle_edges: Option<Vec<String>>,
+    /// The distributions that may provide a module outside the project, by the module (it and
+    /// the modules below it): `IMP301` and `IMP302` take them instead of the catalog's and of
+    /// the distributions named like the module.
+    pub module_distributions: BTreeMap<String, Vec<String>>,
 }
 
 /// `[[tool.heki.effect-boundaries]]` contract for `EFF201`: effects that must not be reached,
