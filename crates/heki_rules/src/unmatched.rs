@@ -5,7 +5,9 @@
 //! classes, the names the classes declare (their own and their project bases'), and the
 //! attributes and constant `__dict__` keys the code reads or writes on objects typed with them
 //! or on objects heki cannot type, which may be of any class. A class the code gives attributes
-//! named at run time may have any attribute.
+//! named at run time may have any attribute: an entry naming none of its known ones is reported
+//! only under `"error"`, as one that may name nothing. A name a copy takes from the namespace
+//! of an instance of the class family, or a deletion removes, is one the class has already.
 //! Only the keys whose entries name project code alone are judged: the read and call targets and
 //! the allowed callees of an effect boundary, and the producers of `readonly-returns`, may name
 //! symbols outside the project.
@@ -19,8 +21,8 @@ use crate::{
     CheckContext, DottedPattern, RuleConfigError, def_spellings, has_glob_syntax, last_name,
     split_last_dot,
 };
-use heki_effect::{ContractClass, FuncKey, Unresolved};
-use heki_env::HekiConfig;
+use heki_effect::{AccessKind, ContractClass, FuncKey, Unresolved};
+use heki_env::{HekiConfig, UnmatchedEntries};
 use rustc_hash::{FxHashMap, FxHashSet};
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -49,6 +51,11 @@ pub struct UnmatchedEntry {
     /// Existing names like the entry, written as the entry is, the closest first (at most
     /// three).
     pub nearest: Vec<String>,
+    /// The class family gets attributes named at run time, which may include the entry's:
+    /// heki cannot tell whether it names one (judged only with
+    /// `unmatched-contract-entries = "error"`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub named_at_run_time: bool,
 }
 
 impl UnmatchedEntry {
@@ -75,6 +82,9 @@ impl UnmatchedEntry {
             "`{}` entry `{}` of {} {contracts} names no {} in the analyzed files",
             self.key, self.entry, self.kind, self.names_no
         );
+        if self.named_at_run_time {
+            out.push_str(", unless it is one the code names at run time");
+        }
         let quoted: Vec<String> = self.nearest.iter().map(|n| format!("`{n}`")).collect();
         match quoted.as_slice() {
             [] => {}
@@ -334,8 +344,20 @@ struct ProjectNames<'a> {
     on_unknown: FxHashSet<&'a str>,
     /// The classes (fqn) the code writes attributes named at run time on.
     computed: FxHashSet<&'a str>,
+    /// `unmatched-contract-entries = "error"`: an entry naming none of the known names of a
+    /// class the code gives attributes named at run time is reported too.
+    strict: bool,
     /// The names each class has ([`Self::names_of`]), found once.
     names: FxHashMap<String, FxHashSet<&'a str>>,
+    /// The top-level modules of the analyzed files.
+    project_modules: FxHashSet<&'a str>,
+    /// The top-level modules outside the project heki knows the analyzed files to use: those
+    /// their module-level imports name.
+    imported_outside: FxHashSet<&'a str>,
+    /// The symbols outside the project the analyzed files call and read that a contract names
+    /// ([`heki_effect::FileSummary::external_accesses`]).
+    outside_calls: FxHashSet<&'a str>,
+    outside_reads: FxHashSet<&'a str>,
 }
 
 impl<'a> ProjectNames<'a> {
@@ -357,6 +379,8 @@ impl<'a> ProjectNames<'a> {
                     }
                     // Any attribute of any class: counting it would leave no entry judged.
                     Unresolved::Anything => {}
+                    // A name the instance has already: it adds none.
+                    Unresolved::Existing(_) => {}
                 }
             }
             let mut parts: Vec<Cow<'a, str>> = key.module.split('.').map(Cow::Borrowed).collect();
@@ -393,7 +417,30 @@ impl<'a> ProjectNames<'a> {
                 classes_by_last.entry(last).or_default().push(i);
             }
         }
+        let (mut outside_calls, mut outside_reads) = (FxHashSet::default(), FxHashSet::default());
+        for &(key, _) in &defined {
+            for (_, a) in cx.external_accesses(key) {
+                match a.kind {
+                    AccessKind::Call => outside_calls.insert(a.name.as_str()),
+                    AccessKind::Read => outside_reads.insert(a.name.as_str()),
+                    AccessKind::ImportProbe => false,
+                };
+            }
+        }
+        let top_level = |module: &'a str| module.split('.').next().unwrap_or(module);
+        let project_modules: FxHashSet<&str> = (cx.index.files.values())
+            .map(|f| top_level(&f.module_name))
+            .collect();
+        let imported_outside = (cx.index.files.values())
+            .flat_map(|f| f.decls.imports.values())
+            .map(|fqn| top_level(fqn))
+            .filter(|m| !project_modules.contains(m))
+            .collect();
         Self {
+            project_modules,
+            imported_outside,
+            outside_calls,
+            outside_reads,
             functions: defined.into_iter().map(|(key, _)| key).collect(),
             functions_by_last,
             functions_within,
@@ -402,8 +449,35 @@ impl<'a> ProjectNames<'a> {
             accessed,
             on_unknown,
             computed,
+            strict: cx.config.lint.unmatched_contract_entries == Some(UnmatchedEntries::Error),
             names: FxHashMap::default(),
         }
+    }
+
+    /// Whether `entry` of the `call-owners` or `read-owners` targets (`context`) names code
+    /// outside the project: a symbol outside the project the analyzed files call or read, or any
+    /// symbol of a module outside the project, which heki cannot list. An `<external>` entry, or
+    /// one whose first name is a module of the standard library or a module the analyzed files
+    /// import from outside the project (`sys._getframe`), is a rule about any use of that code,
+    /// now or later. An entry whose first name is a module of the project names project code,
+    /// also where the analyzed files leave out the module defining it.
+    fn names_outside(&self, context: &'static str, entry: &str) -> Result<bool, RuleConfigError> {
+        let used = match context {
+            "call-owners.targets" => &self.outside_calls,
+            "read-owners.targets" => &self.outside_reads,
+            _ => return Ok(false),
+        };
+        // A call target with an argument list names project functions only.
+        let (name, arguments) = split_arguments(entry, context)?;
+        let first = name.split('.').next().unwrap_or(name);
+        if arguments.is_some() || name.contains(':') || self.project_modules.contains(first) {
+            return Ok(false);
+        }
+        let matcher = FunctionMatcher::named(name, context)?;
+        Ok(matcher.names_outside_only()
+            || used.iter().any(|s| matcher.names_external(s))
+            || name.contains('.')
+                && (heki_env::is_stdlib_module(first) || self.imported_outside.contains(first)))
     }
 
     /// The functions a pattern whose last part is literal may name: those whose qualname ends
@@ -434,7 +508,7 @@ impl<'a> ProjectNames<'a> {
     fn has_unnamed(&self, cx: &CheckContext<'a>, class: &str) -> bool {
         std::iter::once(class.to_owned())
             .chain(cx.decls.ancestors_of(class))
-            .any(|c| self.computed.contains(c.as_str()) || cx.decls.stores_unnamed_attrs(&c))
+            .any(|c| self.computed.contains(c.as_str()) || cx.decls.adds_unnamed_attrs(&c))
     }
 
     /// The names `class` has: those it and its project bases declare, and those the code
@@ -487,14 +561,15 @@ pub(crate) fn unmatched_entries(
                 Some(at) => *at,
                 None => {
                     let unmatched = judge(cx, &mut names, key.shape, (kind, key.context), entry)?;
-                    let at = unmatched.map(|(names_no, nearest)| {
+                    let at = unmatched.map(|missing| {
                         found.push(UnmatchedEntry {
                             kind: kind.to_owned(),
                             key: name.to_owned(),
                             entry: entry.clone(),
                             contracts: Vec::new(),
-                            names_no,
-                            nearest,
+                            names_no: missing.names_no,
+                            nearest: missing.nearest,
+                            named_at_run_time: missing.named_at_run_time,
                         });
                         found.len() - 1
                     });
@@ -512,6 +587,23 @@ pub(crate) fn unmatched_entries(
     Ok(found)
 }
 
+/// What an entry that matches nothing names none of ([`UnmatchedEntry`]).
+struct Missing {
+    names_no: String,
+    nearest: Vec<String>,
+    named_at_run_time: bool,
+}
+
+impl Missing {
+    fn new(names_no: String, nearest: Vec<String>) -> Self {
+        Self {
+            names_no,
+            nearest,
+            named_at_run_time: false,
+        }
+    }
+}
+
 /// `None` when `entry` (of `shape`, under `context` of `section`) names something in the
 /// analyzed files, else what it names none of and the existing names like it. An entry whose
 /// last part is a glob is a rule about every name it may match, now or later: it names
@@ -523,7 +615,10 @@ fn judge<'a>(
     shape: Shape,
     (section, context): (&'static str, &'static str),
     entry: &str,
-) -> Result<Option<(String, Vec<String>)>, RuleConfigError> {
+) -> Result<Option<Missing>, RuleConfigError> {
+    if names.names_outside(context, entry)? {
+        return Ok(None);
+    }
     let definition = match shape {
         Shape::Attribute => return judge_attribute(cx, names, (section, context), entry),
         Shape::Definition(definition) => definition,
@@ -546,7 +641,10 @@ fn judge<'a>(
             .collect(),
         _ => nearest_functions(names, name),
     };
-    Ok(Some((definition.names_no().to_owned(), nearest)))
+    Ok(Some(Missing::new(
+        definition.names_no().to_owned(),
+        nearest,
+    )))
 }
 
 /// Whether the matcher the rule of a `definition` entry compiles from `name` matches a project definition: a
@@ -630,13 +728,15 @@ fn glob_holder_named(
 /// [`judge`] of a `Class.attr` (or `Class.attr["key"]`) entry: its class part must name a
 /// project class, and its attribute part a name of the class family ([`ProjectNames::names_of`]).
 /// A glob attribute part needs the class only, and a glob class part what holds it
-/// ([`glob_holder_named`]). An entry target is judged by its attribute.
+/// ([`glob_holder_named`]). An entry target is judged by its attribute. A family the code gives
+/// attributes named at run time ([`ProjectNames::has_unnamed`]) may have any: the entry names
+/// something unless the contracts are strict ([`ProjectNames::strict`]).
 fn judge_attribute<'a>(
     cx: &CheckContext<'a>,
     names: &mut ProjectNames<'a>,
     (section, context): (&'static str, &'static str),
     entry: &str,
-) -> Result<Option<(String, Vec<String>)>, RuleConfigError> {
+) -> Result<Option<Missing>, RuleConfigError> {
     let (base, item) = match split_item(entry) {
         Some((base, _)) => (base, &entry[base.len()..]),
         None => (entry, ""),
@@ -665,31 +765,34 @@ fn judge_attribute<'a>(
                 nearest.push(format!("{class}.{attr}{item}"));
             }
         }
-        return Ok(Some(("class".to_owned(), nearest)));
+        return Ok(Some(Missing::new("class".to_owned(), nearest)));
     }
     if names.on_unknown.contains(attr) {
         return Ok(None);
     }
     let mut known: Vec<&str> = Vec::new();
+    let mut named_at_run_time = false;
     for class in family {
-        if names.has_unnamed(cx, class) {
-            return Ok(None);
-        }
         let has = names.names_of(cx, class);
         if has.iter().any(|n| target.matches_attr(n)) {
             return Ok(None);
         }
         known.extend(has.iter().copied());
+        named_at_run_time |= names.has_unnamed(cx, class);
+    }
+    if named_at_run_time && !names.strict {
+        return Ok(None);
     }
     known.sort_unstable();
     known.dedup();
     let nearest = (heki_env::problem::nearest(attr, known).into_iter())
         .map(|n| format!("{class_part}.{n}{item}"))
         .collect();
-    Ok(Some((
-        format!("attribute, method, or `__dict__` key of `{class_part}`"),
+    Ok(Some(Missing {
+        names_no: format!("attribute, method, or `__dict__` key of `{class_part}`"),
         nearest,
-    )))
+        named_at_run_time,
+    }))
 }
 
 /// The forms a class may be written in: its qualname, its fqn, and `module:qualname`.

@@ -367,6 +367,12 @@ pub struct EcosystemEntry {
     pub effects: Vec<ExecEffectKind>,
     pub async_safe: bool,
     pub offloads_blocking_arg: Option<u8>,
+    /// The object the call returns gives, awaited or by its `result()`, what a call of a
+    /// callable it is handed returns (`asyncio.to_thread(f, *args, **kwargs)`,
+    /// `loop.run_in_executor(executor, f, *args)`, `executor.submit(f, *args, **kwargs)`): it is
+    /// the future the entry's `return_type` names, or the coroutine of an `async def` without
+    /// one.
+    pub result_of: Option<ResultOf>,
     pub excluded: bool,
     /// The call returns a copy of its operand (`MUT202`), this deep.
     pub copy_sanitizer: Option<CopyDepth>,
@@ -514,6 +520,17 @@ pub struct UnawaitedCall {
     /// future, `executor.map`'s results, a `weakref.finalize` object called by hand), where it
     /// may still be iterated or awaited (`EFF116`).
     pub hands_back: bool,
+}
+
+/// The call whose result a call hands back (`EcosystemEntry::result_of`): of the callable at
+/// position `arg` (the receiver not counted), with the positional arguments after it and, with
+/// `keywords`, the call's keyword arguments (`asyncio.to_thread` passes them on;
+/// `anyio.to_thread.run_sync` takes its own).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResultOf {
+    pub arg: u8,
+    pub keywords: bool,
 }
 
 /// What a call writes in the order of its elements (`EcosystemEntry::writes_in_order`): a
@@ -3821,6 +3838,40 @@ mod tests {
         ),
     ];
 
+    /// The calls handing back what a callable they are handed returns: `(arg, keywords,
+    /// symbols)` of [`ResultOf`].
+    const RESULTS_OF: &[(u8, bool, &[&str])] = &[
+        (
+            0,
+            true,
+            &[
+                "asyncio.to_thread",
+                "starlette.concurrency.run_in_threadpool",
+                "fastapi.concurrency.run_in_threadpool",
+                "concurrent.futures.ThreadPoolExecutor.submit",
+                "concurrent.futures.ProcessPoolExecutor.submit",
+            ],
+        ),
+        (
+            0,
+            false,
+            &[
+                "anyio.to_thread.run_sync",
+                "anyio.to_process.run_sync",
+                "anyio.to_interpreter.run_sync",
+                "trio.to_thread.run_sync",
+            ],
+        ),
+        (
+            1,
+            false,
+            &[
+                "asyncio.AbstractEventLoop.run_in_executor",
+                "asyncio.BaseEventLoop.run_in_executor",
+            ],
+        ),
+    ];
+
     /// The classes and factories whose context manager's exit returns a false value on every
     /// path.
     const EXITS_NEVER_SUPPRESS: &[&str] = &[
@@ -3875,6 +3926,13 @@ mod tests {
                     .iter()
                     .find(|(_, symbols)| symbols.contains(&symbol.as_str()))
                     .map(|(items, _)| *items);
+                let result_of = RESULTS_OF
+                    .iter()
+                    .find(|(.., symbols)| symbols.contains(&symbol.as_str()))
+                    .map(|(arg, keywords, _)| ResultOf {
+                        arg: *arg,
+                        keywords: *keywords,
+                    });
                 // The methods of the classes of what `sqlite3.connect` returns are the library's.
                 let api = [SQLITE3_MEMORY, SQLITE3_FILE].iter().find_map(|class| {
                     let method = symbol.strip_prefix(&format!("{class}."))?;
@@ -3901,6 +3959,7 @@ mod tests {
                     items,
                     api,
                     writes_in_order,
+                    result_of,
                     ..expected.clone()
                 };
                 assert_eq!(kb.lookup(&symbol), Some(&expected), "{symbol}");
@@ -3978,6 +4037,29 @@ mod tests {
                 let name = symbol.rsplit('.').next().unwrap_or(symbol);
                 assert!(!name.starts_with(char::is_uppercase), "{symbol}");
             }
+        }
+    }
+
+    /// A call handing back what its callable returns returns a future holding it, or is an
+    /// `async def` returning it (no `return_type`, and no case naming another class); an
+    /// offloading API hands back what the callable it offloads returns.
+    #[test]
+    fn layer2_results_of_come_in_a_future_or_a_coroutine() {
+        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        for (symbol, e) in &kb.entries {
+            let Some(of) = e.result_of else {
+                continue;
+            };
+            assert!(
+                e.return_type_in(None)
+                    .is_none_or(|class| FUTURE_CLASSES.contains(&class)),
+                "{symbol}"
+            );
+            assert!(e.cases.iter().all(|c| c.return_type.is_none()), "{symbol}");
+            assert!(
+                e.offloads_blocking_arg.is_none_or(|k| k == of.arg),
+                "{symbol}"
+            );
         }
     }
 

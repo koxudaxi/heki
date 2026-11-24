@@ -3,7 +3,7 @@
 //! by the protocol, not by the classes implementing it, and what an implementation's private
 //! method does inside stays with it. A write is one of the implementations either way. With
 //! `allowed-protocols`, an access through a protocol the key names that declares the member is
-//! allowed.
+//! allowed, also through a class object typed `type[P]` of it.
 
 mod common;
 
@@ -873,4 +873,224 @@ fn protocol_subclasses_false_names_the_matching_protocols_only() {
     let (code, stdout, stderr) = p.check(&[]);
     assert_eq!(code, 2, "{stdout}{stderr}");
     assert!(stderr.contains("protocol-subclasses"), "{stderr}");
+}
+
+const KEYWORDS_BASE: &str = r#"class Parser:
+    _kind: str = ""
+
+    @classmethod
+    def _items_constraints(cls, obj: dict) -> dict:
+        return obj
+
+    @classmethod
+    def _other(cls, obj: dict) -> dict:
+        return obj
+
+    def _instance_helper(self, obj: dict) -> dict:
+        return obj
+"#;
+
+const KEYWORDS: &str = r#"from typing import Optional, Protocol
+
+from pkg.parser.base import Parser
+
+
+class KeywordsHost(Protocol):
+    _kind: str
+
+    @classmethod
+    def _items_constraints(cls, obj: dict) -> dict: ...
+
+    def _instance_helper(self, obj: dict) -> dict: ...
+
+
+class OtherShape(Protocol):
+    @classmethod
+    def _items_constraints(cls, obj: dict) -> dict: ...
+
+
+def through_class_object(cls: type[KeywordsHost], obj: dict) -> dict:
+    return cls._items_constraints(obj)
+
+
+def through_optional(cls: Optional[type[KeywordsHost]], obj: dict) -> dict:
+    assert cls is not None
+    return cls._items_constraints(obj)
+
+
+def through_instance(host: KeywordsHost, obj: dict) -> dict:
+    return host._instance_helper(obj)
+
+
+def through_the_class(obj: dict) -> dict:
+    return Parser._items_constraints(obj)
+
+
+def protocol_not_allowed(cls: type[OtherShape], obj: dict) -> dict:
+    return cls._items_constraints(obj)
+
+
+def member_not_declared(cls: type[KeywordsHost], obj: dict) -> dict:
+    return cls._other(obj)
+
+
+def through_local(make, obj: dict) -> dict:
+    cls: type[KeywordsHost] = make()
+    return cls._items_constraints(obj)
+
+
+class Holder:
+    host: type[KeywordsHost]
+
+    def through_attribute(self, obj: dict) -> dict:
+        return self.host._items_constraints(obj)
+
+
+def reads_through_class_object(cls: type[KeywordsHost]) -> str:
+    return cls._kind
+
+
+def writes_through_class_object(cls: type[KeywordsHost]) -> None:
+    cls._kind = "x"
+"#;
+
+/// The three owner contracts on `Parser._*`, strict, judging the code where it is written, with
+/// `allowed-protocols` set to `allowed`.
+fn class_object_project(name: &str, allowed: &str) -> Project {
+    let contract = |section: &str, who: &str| {
+        format!(
+            "[[tool.heki.{section}]]\nname = \"{section}\"\ntargets = [\"pkg.parser.base.Parser._*\"]\nforbidden-{who} = [\"pkg.parser._keywords:*\"]\nattribution = \"lexical\"\nallowed-protocols = {allowed}\nprotocol-subclasses = false\nunresolved = \"report\"\n\n"
+        )
+    };
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT203\", \"MUT204\", \"MUT205\", \"MUT206\", \"MUT207\"]\n\n{}{}{}",
+            contract("call-owners", "callers"),
+            contract("read-owners", "readers"),
+            contract("write-owners", "writers"),
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/parser/__init__.py", "")
+    .write("pkg/parser/base.py", KEYWORDS_BASE)
+    .write("pkg/parser/_keywords.py", KEYWORDS);
+    p
+}
+
+/// A class object typed `type[P]` of a protocol is of a class heki cannot tell (any
+/// implementation's), so its accesses are the strict rules' (`MUT205`, `MUT206`, `MUT207`); with
+/// `allowed-protocols` naming the protocol, those of a member it declares are allowed as through a
+/// value typed `P`: a parameter (also `Optional`), a local, or an attribute annotated so. The
+/// call through the class itself, through a protocol the key does not name, and of a member the
+/// protocol does not declare stay reported.
+#[test]
+fn allowed_protocols_allow_the_accesses_through_a_class_object_of_a_named_protocol() {
+    let at = |line: u64, code: &str, func: &str, target: &str| {
+        (line, code.to_owned(), func.to_owned(), target.to_owned())
+    };
+    let kept = || {
+        vec![
+            at(
+                34,
+                "MUT204",
+                "through_the_class",
+                "pkg.parser.base.Parser._items_constraints",
+            ),
+            at(38, "MUT207", "protocol_not_allowed", "_items_constraints"),
+            at(42, "MUT207", "member_not_declared", "_other"),
+        ]
+    };
+    let allowed = class_object_project("class_object_allowed", "[\"*Host\"]");
+    assert_eq!(named(&allowed), kept());
+    let mut without = kept();
+    without.extend([
+        at(21, "MUT207", "through_class_object", "_items_constraints"),
+        at(26, "MUT207", "through_optional", "_items_constraints"),
+        at(47, "MUT207", "through_local", "_items_constraints"),
+        at(
+            54,
+            "MUT207",
+            "Holder.through_attribute",
+            "_items_constraints",
+        ),
+        at(58, "MUT206", "reads_through_class_object", "_kind"),
+        at(62, "MUT205", "writes_through_class_object", "_kind"),
+    ]);
+    without.sort();
+    assert_eq!(
+        named(&class_object_project("class_object_unset", "[]")),
+        without
+    );
+}
+
+/// The shape datamodel-code-generator reported: a module function taking `cls:
+/// type[KeywordsHost]` calls the class method the protocol declares, which is allowed as the call
+/// through an instance typed `KeywordsHost` is; the call through the class stays reported.
+#[test]
+fn a_class_object_of_an_allowed_protocol_calls_its_class_method() {
+    let p = Project::new("class_object_repro");
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "h1"
+version = "0"
+requires-python = ">=3.11"
+
+[tool.heki.lint]
+select = ["MUT203", "MUT204", "MUT206", "MUT207"]
+
+[[tool.heki.call-owners]]
+name = "host-private-call"
+targets = ["pkg.parser.base.Parser._*"]
+forbidden-callers = ["pkg.parser._keywords:*"]
+attribution = "lexical"
+own-receiver = "allow"
+allowed-protocols = ["*Host"]
+protocol-subclasses = false
+unresolved = "report"
+"#,
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/parser/__init__.py", "")
+    .write(
+        "pkg/parser/base.py",
+        "class Parser:\n    @classmethod\n    def _items_constraints(cls, obj: dict) -> dict:\n        return obj\n\n    def _instance_helper(self, obj: dict) -> dict:\n        return obj\n",
+    )
+    .write(
+        "pkg/parser/_keywords.py",
+        r#"from typing import Protocol
+
+from pkg.parser.base import Parser
+
+
+class KeywordsHost(Protocol):
+    @classmethod
+    def _items_constraints(cls, obj: dict) -> dict: ...
+
+    def _instance_helper(self, obj: dict) -> dict: ...
+
+
+def through_class_object(cls: type[KeywordsHost], obj: dict) -> dict:
+    return cls._items_constraints(obj)
+
+
+def through_instance(host: KeywordsHost, obj: dict) -> dict:
+    return host._instance_helper(obj)
+
+
+def through_the_class(obj: dict) -> dict:
+    return Parser._items_constraints(obj)
+"#,
+    );
+    assert_eq!(
+        named(&p),
+        vec![(
+            22,
+            "MUT204".to_owned(),
+            "through_the_class".to_owned(),
+            "pkg.parser.base.Parser._items_constraints".to_owned()
+        )]
+    );
 }

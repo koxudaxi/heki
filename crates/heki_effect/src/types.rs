@@ -4,7 +4,8 @@
 //! unpacked have a class too. Types are hints for finding call targets and the classes of
 //! accessed attributes; they never reach the Soundness lane (ADR-004).
 
-use heki_ir::BinOpKind;
+use heki_ir::walk::Join;
+use heki_ir::{BinOpKind, BuiltinKind, InstKind, VarId};
 use serde::{Deserialize, Serialize};
 
 /// Deepest nesting of tracked type arguments (`dict[str, list[Model]]` nests 2 deep); deeper
@@ -65,6 +66,8 @@ pub enum Args {
     Map(Box<Elem>, Box<Elem>),
     /// A tuple of known length, by position.
     Tuple(Vec<Elem>),
+    /// A future (`FUTURE_CLASSES`): what awaiting it, or its `result()`, gives.
+    Result(Box<Elem>),
 }
 
 /// The type of the items in one slot of a container.
@@ -289,6 +292,32 @@ impl Ty {
         .unwrap_or_else(|| self.clone())
     }
 
+    /// The type once changes in place have added `added` to the value: each list, deque, set,
+    /// or dict joins the items, or the keys and values, of its kind; any other instance keeps no
+    /// items.
+    pub(crate) fn with_added(&self, added: &Added) -> Ty {
+        self.map_members(|o| {
+            let args = match (Container::of_class(&o.class), &o.args) {
+                (Some(Container::Sequence), Args::Items(e)) => Args::items(e.join(&added.sequence)),
+                (Some(Container::Set), Args::Items(e)) => Args::items(e.join(&added.set)),
+                (Some(Container::Map), Args::Map(k, v)) => {
+                    Args::map(k.join(&added.keys), v.join(&added.values))
+                }
+                _ => Args::None,
+            };
+            let args = if args.depth() > MAX_DEPTH {
+                Args::None
+            } else {
+                args
+            };
+            Some(Obj {
+                class: o.class.clone(),
+                args,
+            })
+        })
+        .unwrap_or_else(|| self.clone())
+    }
+
     /// The declared type with `Self` bound to the receiver type `recv`, or `None` when it
     /// mentions `Self` without a receiver; an item mentioning it is then unknown.
     pub(crate) fn bind_self(&self, recv: Option<&Ty>) -> Option<Ty> {
@@ -382,6 +411,14 @@ impl Args {
         }
     }
 
+    /// `Result(result)`, without tracking an unknown result.
+    pub(crate) fn result(result: Elem) -> Self {
+        match result {
+            Elem::Unknown => Args::None,
+            result => Args::Result(Box::new(result)),
+        }
+    }
+
     /// The arguments with `f` applied to every tracked type (an item `f` gives none for is
     /// unknown).
     pub(crate) fn map_elems(&self, f: impl Fn(&Ty) -> Option<Ty>) -> Args {
@@ -394,13 +431,15 @@ impl Args {
             Args::Items(e) => Args::Items(Box::new(elem(e))),
             Args::Map(k, v) => Args::Map(Box::new(elem(k)), Box::new(elem(v))),
             Args::Tuple(es) => Args::Tuple(es.iter().map(elem).collect()),
+            Args::Result(e) => Args::Result(Box::new(elem(e))),
         }
     }
 
-    /// The items iterating an instance with these arguments yields.
+    /// The items iterating an instance with these arguments yields (none tracked for a future,
+    /// which yields itself while it waits).
     pub(crate) fn item(&self) -> Elem {
         match self {
-            Args::None => Elem::Unknown,
+            Args::None | Args::Result(_) => Elem::Unknown,
             Args::Items(e) | Args::Map(e, _) => (**e).clone(),
             Args::Tuple(es) => es.iter().fold(Elem::Empty, |acc, e| acc.join(e)),
         }
@@ -417,6 +456,7 @@ impl Args {
             (Args::Items(_) | Args::Tuple(_), Args::Items(_) | Args::Tuple(_)) => {
                 Args::items(self.item().join(&other.item()))
             }
+            (Args::Result(a), Args::Result(b)) => Args::result(a.join(b)),
             _ => Args::None,
         }
     }
@@ -424,7 +464,7 @@ impl Args {
     fn depth(&self) -> usize {
         match self {
             Args::None => 0,
-            Args::Items(e) => e.depth(),
+            Args::Items(e) | Args::Result(e) => e.depth(),
             Args::Map(k, v) => k.depth().max(v.depth()),
             Args::Tuple(es) => es.iter().map(Elem::depth).max().unwrap_or(0),
         }
@@ -450,6 +490,268 @@ impl Elem {
             Elem::Of(t) => t.depth(),
             Elem::Empty | Elem::Unknown => 0,
         }
+    }
+}
+
+/// The kinds of builtin container whose changes in place heki types item by item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Container {
+    /// A list or a deque.
+    Sequence,
+    Set,
+    /// A dict, also an ordered one or one with a default.
+    Map,
+}
+
+/// A change in place of an object (`heki_ir::FnIndex::changes_in_place`).
+pub(crate) enum Change<'i> {
+    /// `obj.method(...)`; `starred` when an argument is unpacked (`*xs`, `**kw`).
+    Method {
+        method: &'i str,
+        args: &'i [VarId],
+        kwargs: &'i [(Option<String>, VarId)],
+        starred: bool,
+    },
+    /// An in-place operator, with its right operand (`obj += xs`).
+    Operator(BinOpKind, VarId),
+    /// `obj[index] = value`.
+    ItemStore { index: VarId, value: VarId },
+}
+
+impl<'i> Change<'i> {
+    /// The change `kind` makes, with the variable holding the object it changes.
+    pub(crate) fn of(kind: &'i InstKind) -> Option<(VarId, Self)> {
+        Some(match kind {
+            InstKind::MethodCall {
+                recv,
+                method,
+                args,
+                kwargs,
+                star_from,
+                ..
+            } => {
+                let starred = star_from.is_some() || kwargs.iter().any(|(k, _)| k.is_none());
+                let change = Change::Method {
+                    method,
+                    args,
+                    kwargs,
+                    starred,
+                };
+                (*recv, change)
+            }
+            InstKind::BinOp {
+                op,
+                lhs,
+                rhs,
+                in_place: true,
+                ..
+            } => (*lhs, Change::Operator(*op, *rhs)),
+            InstKind::SubscriptStore {
+                obj, index, value, ..
+            } => (
+                *obj,
+                Change::ItemStore {
+                    index: *index,
+                    value: *value,
+                },
+            ),
+            _ => return None,
+        })
+    }
+}
+
+/// The types of the operands of a [`Change`], as the code typing it knows them.
+pub(crate) trait Operands {
+    /// The type of the value `v` holds, as an item.
+    fn elem(&self, v: VarId) -> Elem;
+
+    /// The items iterating the value `v` holds yields.
+    fn items(&self, v: VarId) -> Elem {
+        match self.elem(v) {
+            Elem::Of(Ty::Inst(o)) if o.args != Args::None => o.args.item(),
+            Elem::Empty => Elem::Empty,
+            _ => Elem::Unknown,
+        }
+    }
+
+    /// The keys and values of the mapping `v` holds.
+    fn entries(&self, v: VarId) -> (Elem, Elem) {
+        match self.elem(v) {
+            Elem::Of(Ty::Inst(Obj {
+                args: Args::Map(k, v),
+                ..
+            })) => (*k, *v),
+            Elem::Empty => (Elem::Empty, Elem::Empty),
+            _ => (Elem::Unknown, Elem::Unknown),
+        }
+    }
+}
+
+impl Container {
+    /// The kind of an instance of `class`, when it is one.
+    pub(crate) fn of_class(class: &str) -> Option<Self> {
+        match class {
+            "builtins.list" | "collections.deque" => Some(Self::Sequence),
+            "builtins.set" => Some(Self::Set),
+            "builtins.dict" | "collections.OrderedDict" | "collections.defaultdict" => {
+                Some(Self::Map)
+            }
+            _ => None,
+        }
+    }
+
+    /// The kind of a display of `kind` (`[...]`, `{...}`), when it is one.
+    pub(crate) fn of_display(kind: BuiltinKind) -> Option<Self> {
+        match kind {
+            BuiltinKind::List => Some(Self::Sequence),
+            BuiltinKind::Set => Some(Self::Set),
+            BuiltinKind::Dict => Some(Self::Map),
+            _ => None,
+        }
+    }
+
+    /// What `change` adds to a container of this kind (`of` types its operands): the items of a
+    /// sequence or a set (and `Empty`), or the keys and values of a mapping. An unpacked
+    /// argument adds what heki cannot type. `None` when the kind has no such method or operator,
+    /// or the call passes arguments the method does not take: the change raises, unless a
+    /// subclass defines it.
+    pub(crate) fn added(self, change: &Change<'_>, of: &impl Operands) -> Option<(Elem, Elem)> {
+        use Container::{Map, Sequence, Set};
+        let items = |e: Elem| Some((e, Elem::Empty));
+        match *change {
+            Change::Method {
+                method,
+                args,
+                kwargs,
+                starred,
+            } => {
+                let methods: &[&str] = match self {
+                    Sequence => &["append", "appendleft", "extend", "extendleft", "insert"],
+                    Set => &["add", "update", "symmetric_difference_update"],
+                    Map => &["setdefault", "update"],
+                };
+                if !methods.contains(&method) {
+                    return None;
+                }
+                if starred {
+                    return Some((Elem::Unknown, Elem::Unknown));
+                }
+                match (self, method, args) {
+                    (Map, "update", [] | [_]) => {
+                        let (mut keys, mut values) = args
+                            .first()
+                            .map_or((Elem::Empty, Elem::Empty), |m| of.entries(*m));
+                        for (_, v) in kwargs {
+                            keys = keys.join(&Elem::Of(Ty::inst("builtins.str")));
+                            values = values.join(&of.elem(*v));
+                        }
+                        Some((keys, values))
+                    }
+                    _ if !kwargs.is_empty() => None,
+                    (Sequence, "append" | "appendleft", [v])
+                    | (Sequence, "insert", [_, v])
+                    | (Set, "add", [v]) => items(of.elem(*v)),
+                    (Sequence, "extend" | "extendleft", [xs])
+                    | (Set, "symmetric_difference_update", [xs]) => items(of.items(*xs)),
+                    (Set, "update", xss) => items(
+                        xss.iter()
+                            .fold(Elem::Empty, |acc, xs| acc.join(&of.items(*xs))),
+                    ),
+                    (Map, "setdefault", [k, v]) => Some((of.elem(*k), of.elem(*v))),
+                    // The value is `None`, which types nothing.
+                    (Map, "setdefault", [k]) => Some((of.elem(*k), Elem::Empty)),
+                    _ => None,
+                }
+            }
+            Change::Operator(op, rhs) => match (self, op) {
+                (Sequence, BinOpKind::Add) | (Set, BinOpKind::BitOr | BinOpKind::BitXor) => {
+                    items(of.items(rhs))
+                }
+                (Sequence, BinOpKind::Mult) | (Set, BinOpKind::BitAnd | BinOpKind::Sub) => {
+                    Some((Elem::Empty, Elem::Empty))
+                }
+                (Map, BinOpKind::BitOr) => Some(of.entries(rhs)),
+                _ => None,
+            },
+            Change::ItemStore { index, value } => match self {
+                // A list takes an integer or a slice (a tuple of its bounds, or `slice(...)`),
+                // which stores the items of the value.
+                Sequence => {
+                    let sliced = matches!(
+                        of.elem(index),
+                        Elem::Of(Ty::Inst(o)) if matches!(o.class.as_str(), "builtins.tuple" | "builtins.slice")
+                    );
+                    items(if sliced {
+                        of.items(value)
+                    } else {
+                        of.elem(value)
+                    })
+                }
+                Map => Some((of.elem(index), of.elem(value))),
+                Set => None,
+            },
+        }
+    }
+}
+
+/// What changes in place add to an object, for each kind of container it may be
+/// ([`Container::added`], `Unknown` where the kind has no such change).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Added {
+    pub sequence: Elem,
+    pub set: Elem,
+    pub keys: Elem,
+    pub values: Elem,
+}
+
+impl Added {
+    /// What changes heki cannot type add.
+    pub(crate) fn unknown() -> Self {
+        Self {
+            sequence: Elem::Unknown,
+            set: Elem::Unknown,
+            keys: Elem::Unknown,
+            values: Elem::Unknown,
+        }
+    }
+
+    /// What `change` adds, to whichever kind of container its object is.
+    pub(crate) fn of(change: &Change<'_>, of: &impl Operands) -> Self {
+        let unknown = (Elem::Unknown, Elem::Unknown);
+        let added = |kind: Container| kind.added(change, of).unwrap_or(unknown.clone());
+        let (keys, values) = added(Container::Map);
+        Self {
+            sequence: added(Container::Sequence).0,
+            set: added(Container::Set).0,
+            keys,
+            values,
+        }
+    }
+}
+
+/// What no change adds.
+impl Default for Added {
+    fn default() -> Self {
+        Self {
+            sequence: Elem::Empty,
+            set: Elem::Empty,
+            keys: Elem::Empty,
+            values: Elem::Empty,
+        }
+    }
+}
+
+impl Join for Added {
+    fn join(&mut self, other: &Self) -> bool {
+        let joined = Added {
+            sequence: self.sequence.join(&other.sequence),
+            set: self.set.join(&other.set),
+            keys: self.keys.join(&other.keys),
+            values: self.values.join(&other.values),
+        };
+        let grew = joined != *self;
+        *self = joined;
+        grew
     }
 }
 
@@ -535,9 +837,28 @@ mod tests {
         assert_eq!(
             map(&model).join(&Ty::container(
                 "builtins.dict",
-                Args::items(Elem::Of(model))
+                Args::items(Elem::Of(model.clone()))
             )),
             Some(Ty::inst("builtins.dict"))
+        );
+        // Futures join their results; one whose result is not tracked, or not known, has none.
+        let future = |result: Elem| Ty::container("asyncio.Future", Args::result(result));
+        assert_eq!(
+            future(Elem::Of(model.clone())).join(&future(Elem::Of(field.clone()))),
+            Some(future(Elem::Of(model.join(&field).unwrap())))
+        );
+        assert_eq!(
+            future(Elem::Empty).join(&future(Elem::Of(model.clone()))),
+            Some(future(Elem::Of(model.clone())))
+        );
+        assert_eq!(future(Elem::Unknown), Ty::inst("asyncio.Future"));
+        assert_eq!(
+            future(Elem::Of(model.clone())).join(&Ty::inst("asyncio.Future")),
+            Some(Ty::inst("asyncio.Future"))
+        );
+        assert_eq!(
+            future(Elem::Of(Ty::SelfType)).bind_self(Some(&model)),
+            Some(future(Elem::Of(model)))
         );
     }
 

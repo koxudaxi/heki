@@ -9,7 +9,7 @@ use crate::{AnalysisArgs, CheckArgs, ColorChoice, OutputFormat, SnapshotArgs};
 use anyhow::Result;
 use heki_ast::LineIndex;
 use heki_diagnostics::{
-    BASELINE_VERSION, CountUnit, Diagnostic, FileFailure, RatchetBaseline, Stylesheet,
+    BASELINE_VERSION, BaselineKey, CountUnit, Diagnostic, FileFailure, RatchetBaseline, Stylesheet,
     baseline_counts, fix_python_source, github_escape, path_text, render, unified_diff,
 };
 use heki_effect::{ProjectIndex, func_qualname};
@@ -17,13 +17,13 @@ use heki_env::{Docs, LintConfig, Problem, Severity, UnmatchedEntries};
 use heki_profile::{HotFunctions, ProfileData, ProfiledFunction};
 use heki_rules::project::{
     Facts, FileError, IndexFacts, Indexed, ParsedFile, Project, ProjectEnv, ProjectOptions,
-    RulesRun, baseline_key, canonical, paths_leave_out,
+    RulesRun, baseline_key, canonical, paths_leave_out, rel_posix,
 };
 use heki_rules::{
     RuleSelection, SNAPSHOT_FILE, Selectors, SummarySnapshot, find_rule, fixes_unconditionally,
     fold_root_causes, recommend,
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeMap;
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
@@ -163,6 +163,8 @@ struct Analyzed {
     selection: RuleSelection,
     /// Whether the run compared with a summary snapshot.
     snapshot: bool,
+    /// The files of `--touched`, when it is given.
+    touched: Option<Touched>,
 }
 
 impl Analyzed {
@@ -196,6 +198,7 @@ fn analyze(
     } = indexed;
     let hot = profile.map(|p| p.attribute(profiled_functions(&project)));
     annotate_hot(&mut diags, hot.as_ref());
+    let touched = Touched::of(&args.touched, &project);
     Ok(Analyzed {
         project,
         index,
@@ -205,6 +208,7 @@ fn analyze(
         withheld,
         selection,
         snapshot: snapshot.is_some(),
+        touched,
     })
 }
 
@@ -286,6 +290,144 @@ pub(crate) fn shown_failures<'a>(
         .collect()
 }
 
+/// The files `--touched` names, among the files the run analyzed. A run with it shows, fixes,
+/// and fails on only the reports that touch one of them: in the file, or with a hop of the call
+/// chain (`related`) in it. The analysis still covers the whole of PATHS, since a report in a
+/// file the change left alone can come from a callee it changed.
+pub(crate) struct Touched {
+    /// Keyed like [`ParsedFile::path`], as reports name files.
+    files: FxHashSet<PathBuf>,
+    /// The baseline paths of `files`.
+    baseline_paths: FxHashSet<String>,
+    /// The given paths that name no analyzed file.
+    unknown: Vec<PathBuf>,
+}
+
+impl Touched {
+    /// The files `given` names in `project`, or `None` when nothing is given (no `--touched`).
+    /// Paths are compared as the file system resolves them, so `./a.py`, an absolute path, and a
+    /// link name the same file.
+    pub(crate) fn of(given: &[PathBuf], project: &Project) -> Option<Self> {
+        if given.is_empty() {
+            return None;
+        }
+        let wanted: FxHashSet<PathBuf> = given.iter().filter_map(|p| canonical(p).ok()).collect();
+        let root = &project.env.root;
+        // A file that could not be parsed is touched too: its error is the report.
+        let analyzed = project
+            .files
+            .iter()
+            .map(|f| (&f.path, f.rel.clone()))
+            .chain(
+                project
+                    .errors
+                    .iter()
+                    .map(|e| (&e.path, rel_posix(&e.path, root))),
+            );
+        let mut found = FxHashSet::default();
+        let (mut files, mut baseline_paths) = (FxHashSet::default(), FxHashSet::default());
+        for (path, rel) in analyzed {
+            let Some(resolved) = canonical(path).ok().filter(|p| wanted.contains(p)) else {
+                continue;
+            };
+            found.insert(resolved);
+            files.insert(path.clone());
+            baseline_paths.insert(rel);
+        }
+        let unknown = given
+            .iter()
+            .filter(|p| canonical(p).map_or(true, |p| !found.contains(&p)))
+            .cloned()
+            .collect();
+        Some(Self {
+            files,
+            baseline_paths,
+            unknown,
+        })
+    }
+
+    /// How many analyzed files are touched.
+    pub(crate) fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Whether `d` is in a touched file or has a hop of its call chain in one.
+    fn touches(&self, d: &Diagnostic) -> bool {
+        self.files.contains(&d.path) || d.related.iter().any(|r| self.files.contains(&r.path))
+    }
+
+    /// Whether a run with `touched` shows `d`.
+    pub(crate) fn shows(touched: Option<&Self>, d: &Diagnostic) -> bool {
+        touched.is_none_or(|t| t.touches(d))
+    }
+
+    /// How many of `diags` a run with `touched` shows.
+    pub(crate) fn shown(touched: Option<&Self>, diags: &[Diagnostic]) -> usize {
+        diags.iter().filter(|d| Self::shows(touched, d)).count()
+    }
+
+    /// Drop the reports of `diags` that touch no touched file.
+    pub(crate) fn keep(&self, diags: &mut Vec<Diagnostic>) {
+        diags.retain(|d| self.touches(d));
+    }
+
+    /// The touched files as reports print them, in order.
+    pub(crate) fn shown_files(&self) -> Vec<String> {
+        let mut shown: Vec<String> = self.files.iter().map(|p| shown_text(p)).collect();
+        shown.sort_unstable();
+        shown
+    }
+
+    /// The baseline entries a run with these files judges, of the reports `diags` before the
+    /// comparison.
+    fn baseline_view(
+        &self,
+        diags: &[Diagnostic],
+        key_path: &dyn Fn(&Path) -> String,
+    ) -> BaselineView<'_> {
+        BaselineView {
+            touched: self,
+            keys: diags
+                .iter()
+                .filter(|d| self.touches(d))
+                .map(|d| heki_diagnostics::baseline_key(d, key_path(&d.path)))
+                .collect(),
+        }
+    }
+
+    /// Warn once about the given paths that name no analyzed file.
+    pub(crate) fn warn(&self, format: OutputFormat) {
+        if self.unknown.is_empty() {
+            return;
+        }
+        let paths: Vec<String> = self
+            .unknown
+            .iter()
+            .map(|p| format!("`{}`", path_text(p)))
+            .collect();
+        log!(
+            format,
+            "warning: `--touched` names {} path(s) that are not among the analyzed files (missing, not a Python file under PATHS, or excluded): {}",
+            paths.len(),
+            paths.join(", ")
+        );
+    }
+}
+
+/// The baseline entries a `--touched` run judges: an entry of a touched file, and an entry with a
+/// report that touches one. The reports of the other entries are not shown, so a grown or
+/// stale count there is not this run's to report.
+struct BaselineView<'t> {
+    touched: &'t Touched,
+    keys: FxHashSet<BaselineKey>,
+}
+
+impl BaselineView<'_> {
+    fn shows(&self, key: &BaselineKey) -> bool {
+        self.keys.contains(key) || self.touched.baseline_paths.contains(&key.path)
+    }
+}
+
 /// What `--fix` / `--diff` would do.
 struct FixRun {
     fixes: usize,
@@ -294,6 +436,8 @@ struct FixRun {
     errors: Vec<FileError>,
     /// Files whose fixes would not parse, left unchanged.
     refused: Vec<String>,
+    /// The files of `--touched` in the last pass.
+    touched: Option<Touched>,
 }
 
 /// Apply fixes in memory until nothing more applies.
@@ -303,14 +447,17 @@ fn fix_in_memory(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<FixRun> 
     let mut applied_to: FxHashMap<PathBuf, usize> = FxHashMap::default();
     let mut total = 0;
     let mut errors;
+    let mut touched;
     let mut passes = 0;
     let mut refused: Vec<String> = Vec::new();
     loop {
         let a = analyze(args, hot, Some(&overrides))?;
         errors = a.project.errors;
+        touched = a.touched;
         let mut by_path: BTreeMap<&Path, Vec<&[heki_diagnostics::TextEdit]>> = BTreeMap::new();
         for d in &a.diags {
             if applicable(d, args, a.hot.as_ref())
+                && Touched::shows(touched.as_ref(), d)
                 && let Some(edits) = &d.fix
             {
                 by_path.entry(d.path.as_path()).or_default().push(edits);
@@ -357,6 +504,7 @@ fn fix_in_memory(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<FixRun> 
         files,
         errors,
         refused,
+        touched,
     })
 }
 
@@ -399,6 +547,9 @@ fn run_check(args: &CheckArgs) -> Result<ExitCode> {
     }
     if args.diff {
         let run = fix_in_memory(args, hot.as_ref())?;
+        if let Some(touched) = &run.touched {
+            touched.warn(args.output_format);
+        }
         for f in &run.files {
             print!(
                 "{}",
@@ -489,6 +640,10 @@ fn report(
     let key_path = baseline_key(&project.files);
     let baseline_path = baseline_path(&args.analysis, &project.env);
     let fmt = args.output_format;
+    let touched = analyzed.touched.as_ref();
+    if let Some(touched) = touched {
+        touched.warn(fmt);
+    }
     if args.update_baseline && baseline_path.is_none() {
         return Err(Problem::new("`--update-baseline` needs a baseline file")
             .help("name it with `--baseline <path>`, or set `baseline` in the configuration")
@@ -509,6 +664,10 @@ fn report(
     // A baseline entry matched no report (`lint.report-unused-suppressions`): an error.
     let mut unused_entries = false;
     if let (Some(bp), Some(baseline)) = (&baseline_path, &recorded) {
+        // An entry counts every report of its key, so the baseline compares all of them; a
+        // `--touched` run judges only the entries in view.
+        let in_view = touched.map(|t| t.baseline_view(&diags, &key_path));
+        let judged = |key: &BaselineKey| in_view.as_ref().is_none_or(|v| v.shows(key));
         let unit = baseline.unit;
         if unit == CountUnit::Diagnostics && !args.update_baseline {
             log!(
@@ -523,7 +682,7 @@ fn report(
             let run = analyzed.rules_run();
             let checked = project.files.iter().map(|f| f.rel.as_str()).collect();
             let withheld = baseline_counts(&analyzed.withheld, &key_path, unit);
-            for (key, allowed, cur) in &cmp.stale_entries {
+            for (key, allowed, cur) in cmp.stale_entries.iter().filter(|(k, ..)| judged(k)) {
                 let found = cur + withheld.get(key).copied().unwrap_or(0);
                 if run.unused_entry(key, found, &checked) {
                     log!(
@@ -547,7 +706,7 @@ fn report(
                 );
             }
         }
-        for (key, allowed, cur) in &cmp.regressions {
+        for (key, allowed, cur) in cmp.regressions.iter().filter(|(k, ..)| judged(k)) {
             log!(
                 fmt,
                 "note: baseline entry {}::{} {} `{}` allows {allowed} {}, found {cur}",
@@ -588,7 +747,11 @@ fn report(
     }
 
     let unmatched_entries = report_unmatched_entries(args, analyzed)?;
-    // Suppressions and the baseline saw every report; only output folds them.
+    if let Some(touched) = touched {
+        touched.keep(&mut diags);
+    }
+    // Suppressions and the baseline saw every report; only output folds them, among the ones
+    // it shows.
     fold_root_causes(&mut diags);
     // Every format prints the paths `--diff` prints.
     show_paths(&mut diags);
@@ -617,8 +780,16 @@ fn report(
         args.output_format,
         OutputFormat::Full | OutputFormat::Concise
     ) {
-        summary(&diags, project.files.len(), baseline_path.is_some());
-        heuristic_hint(analyzed.heuristic_off, analyzed.withheld.len());
+        summary(
+            &diags,
+            project.files.len(),
+            baseline_path.is_some(),
+            touched.map(Touched::file_count),
+        );
+        heuristic_hint(
+            analyzed.heuristic_off,
+            Touched::shown(touched, &analyzed.withheld),
+        );
     }
     if matches!(args.output_format, OutputFormat::Full) {
         rule_pages(&diags);
@@ -737,16 +908,22 @@ fn not_written(what: &str, path: &Path, failed: usize) -> Problem {
     .docs(docs)
 }
 
-fn summary(diags: &[Diagnostic], files: usize, baseline: bool) {
+/// The last line of a text run; `touched` is the number of analyzed files `--touched` names.
+fn summary(diags: &[Diagnostic], files: usize, baseline: bool, touched: Option<usize>) {
     let what = if baseline {
         "Ratchet regression(s)"
     } else {
         "diagnostic(s)"
     };
-    if diags.is_empty() {
-        eprintln!("All checks passed ({files} file(s)).");
-    } else {
-        eprintln!("Found {} {what} in {files} file(s).", diags.len());
+    match (diags.len(), touched) {
+        (0, None) => eprintln!("All checks passed ({files} file(s))."),
+        (found, None) => eprintln!("Found {found} {what} in {files} file(s)."),
+        (0, Some(touched)) => {
+            eprintln!("All checks passed for {touched} touched file(s) ({files} file(s) analyzed).")
+        }
+        (found, Some(touched)) => eprintln!(
+            "Found {found} {what} for {touched} touched file(s) ({files} file(s) analyzed)."
+        ),
     }
 }
 

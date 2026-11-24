@@ -14,7 +14,10 @@ Strict mode of a `read-owners` contract (`unresolved = "report"`): reading an at
 The strict mode of a `[[tool.heki.read-owners]]` contract that sets `unresolved = "report"`:
 reports the reads outside the read owners that `MUT203` cannot tie to a target class, so a clean
 `MUT203` run says how much it did not check. A read of an attribute named like a target attribute
-(`children` for `Reference.children`, any name for `Reference.*`) is reported once, at the read,
+(`children` for `Reference.children`; for `Reference.*`, a name `Reference`, a project subclass,
+or a project base gives its instances in project code, not one only a base outside the project
+gives them, [configuration](../configuration.md#globs-on-objects-of-unknown-class)) is reported
+once, at the read,
 when its object is of unknown class: an unannotated parameter, a loop variable, the result of a
 call heki does not resolve, a value annotated `Any` or `object` (unless an `isinstance` test
 around the read narrows it to a class), a protocol whose implementations heki cannot list (one
@@ -24,7 +27,10 @@ function that a nested scope rebinds (`nonlocal`). `obj.children`, a local alias
 `vars(obj)["children"]`) count, as for `MUT203`.
 
 The rules of `MUT203` for what is allowed apply: allowed readers, exempt methods, functions that
-only run inside allowed readers, and `forbidden-readers` (the reading function must be one).
+only run inside allowed readers, `forbidden-readers` (the reading function must be one), and
+`allowed-protocols`, also for an object heki cannot tie to a class that is typed with a named
+protocol declaring the attribute: a class object typed `type[P]` (a parameter, a local, or an
+attribute annotated so), or an instance of a protocol whose implementations heki cannot list.
 `MUT203` does not follow a read into a parameter that its function does not type, so the callers
 decide for such a parameter: the read is reported unless every caller path binds an instance of
 a project class outside the targets' classes to it. A parameter some caller binds to an instance

@@ -2,7 +2,7 @@
 //!
 //! - Family 1 (`MUT`): Mutation & State Effect (`MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`,
 //!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT114`, `MUT115`, `MUT118`, `MUT119`,
-//!   `MUT201`, `MUT202`, `MUT203`, `MUT204`, `MUT205`, `MUT206`, `MUT207`)
+//!   `MUT120`, `MUT201`, `MUT202`, `MUT203`, `MUT204`, `MUT205`, `MUT206`, `MUT207`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
 //!   `EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
@@ -31,8 +31,8 @@ pub mod snapshot;
 pub mod unmatched;
 
 pub use contracts::{
-    MAX_INVALIDATIONS, declares_ownership, import_facts, inspect_facts, opt_in_facts,
-    recommend_facts, summary_contracts, typed_writes,
+    ContractRoles, MAX_INVALIDATIONS, declares_ownership, import_facts, inspect_facts,
+    opt_in_facts, recommend_facts, summary_contracts, typed_writes,
 };
 pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
 pub use heki_diagnostics::Certainty;
@@ -366,6 +366,18 @@ pub const CORE_RULES: &[RuleMeta] = &[
         auto_fix_default: false,
         summary: "An in-place change of a builtin container applied to a new object that nothing else holds and no name keeps (`list(xs).sort()`, `env = os.environ.copy().update(...)`, `obj.settings[k] = v` with a getter returning a new dict): the change is lost when the statement ends.",
         doc: include_str!("../rule-docs/MUT119.md"),
+    },
+    RuleMeta {
+        code: "MUT120",
+        slug: "readonly-view-mutation",
+        family: RuleFamily::Mut,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Opt-in: changing a value held through a read-only view (a protocol or class whose members are all properties without a setter) where a type checker does not see it: a helper that does not see the view's type rebinds one of its properties, or code changes in place the container a property returns.",
+        doc: include_str!("../rule-docs/MUT120.md"),
     },
     RuleMeta {
         code: "MUT201",
@@ -896,6 +908,14 @@ pub enum RuleConfigError {
         context: &'static str,
         cause: globset::Error,
     },
+    /// An entry naming `<external>` other than as `<external>.<name>`.
+    #[error(
+        "invalid {context} entry `{target}`: `<external>` stands for every module and class outside the project, followed by one name (`<external>._*`)"
+    )]
+    ExternalMembers {
+        target: String,
+        context: &'static str,
+    },
     /// A `module:qualname` pattern with more than one colon or an empty part.
     #[error(
         "invalid pattern `{pattern}` in {context} (expected `module:qualname`, one colon with a name on each side)"
@@ -984,6 +1004,10 @@ impl Explain for RuleConfigError {
             Self::ImportPair { pattern, context } => (
                 problem.help("write the importing module, an arrow, and the imported one: `\"pkg.cli -> pkg.db\"`"),
                 Setting::of_context(context, Some(pattern)),
+            ),
+            Self::ExternalMembers { target, context } => (
+                problem.help("write `<external>.` and the last name of the symbols, a glob or a name: `\"<external>._*\"`"),
+                Setting::of_context(context, Some(target)),
             ),
             Self::ModulePattern { pattern, context } => (
                 problem.help("write the module, one colon, and the name in it: `\"pkg.db:Session.commit\"`"),
@@ -1153,7 +1177,7 @@ pub fn check_project(
     mut_rules::mut101_mut111(&cx, &mut out);
     mut_rules::mut107(&cx, &mut out);
     mut_rules::mut113(&cx, &mut out);
-    mut_rules::mut108_mut110(&cx, &mut out);
+    mut_rules::readonly_rules(&cx, &mut out);
     mut_rules::mut112(&cx, &mut out);
     mut_rules::mut118(&cx, &mut out);
     mut_rules::mut109(&cx, &mut out)?;
@@ -1218,19 +1242,18 @@ pub fn check_project(
     Ok(out)
 }
 
-/// The roles `key` has in the contracts of `config` and in the ecosystem catalog
-/// (`heki inspect`), from the matchers the rules compile.
-pub fn contract_roles(
-    config: &HekiConfig,
-    kb: &EffectiveEcosystemKb,
-    soundness_kb: &EffectiveSoundnessKb,
-    index: &ProjectIndex,
-    decls: &ProjectDecls,
-    selection: &RuleSelection,
-    key: &FuncKey,
-) -> Result<Vec<inspect::ContractRole>, RuleConfigError> {
+/// The matchers of the contracts of `config`, for the roles functions have in them and in the
+/// ecosystem catalog (`heki inspect`), compiled as the rules compile them.
+pub fn contract_roles<'a>(
+    config: &'a HekiConfig,
+    kb: &'a EffectiveEcosystemKb,
+    soundness_kb: &'a EffectiveSoundnessKb,
+    index: &'a ProjectIndex,
+    decls: &'a ProjectDecls,
+    selection: &'a RuleSelection,
+) -> Result<ContractRoles<'a>, RuleConfigError> {
     let cx = CheckContext::of_declarations(config, kb, soundness_kb, index, decls, selection);
-    contracts::roles_of(&cx, key)
+    ContractRoles::new(&cx)
 }
 
 /// The entries of the contracts of `env`'s configuration that match nothing in the files of
@@ -1339,6 +1362,20 @@ impl<'a> CheckContext<'a> {
                 .push(site);
         }
         out
+    }
+
+    /// What `func` accesses outside the project that a contract names, in its own body and in
+    /// the class bodies it runs ([`heki_effect::FileSummary::external_accesses`]), with the
+    /// file defining it.
+    pub(crate) fn external_accesses<'f>(
+        &self,
+        func: &'f FuncKey,
+    ) -> impl Iterator<Item = (&'a Path, &'a heki_effect::ExternalAccess)> + use<'a, 'f> {
+        let index = self.index;
+        index.file_of(func).into_iter().flat_map(move |path| {
+            let own = index.files[path].external_accesses.get(func);
+            own.into_iter().flatten().map(move |a| (path, a))
+        })
     }
 
     /// Every summarized function once, from its defining file, sorted by key.

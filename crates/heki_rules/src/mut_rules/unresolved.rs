@@ -12,8 +12,9 @@
 
 use super::call_owners::CallOwnerRule;
 use super::{
-    Allowance, AllowedExamples, ContractTarget, MergedReports, Named, NamedDictKeys, OwnerRule,
-    ReadOwnerRule, place_functions, runs_inside_allowed, write_hits,
+    Allowance, AllowedExamples, ClassMembers, ContractTarget, FamilyMembers, MergedReports, Named,
+    NamedDictKeys, OwnerRule, ReadOwnerRule, place_functions, project_classes, runs_inside_allowed,
+    write_hits,
 };
 use crate::{CheckContext, SitesByCaller};
 use heki_ast::Span;
@@ -51,12 +52,19 @@ pub(super) fn mut205(
     for (key, s) in cx.defined_functions() {
         for w in &s.unresolved_write_sites {
             for (r, &(contract, rule)) in strict.iter().enumerate() {
+                if let Unresolved::Receiver(attr) = &w.what
+                    && through_allowed_protocol(cx, &rule.allowance, w.protocol.as_deref(), attr)
+                {
+                    continue;
+                }
                 let hits: Vec<_> = rule
                     .targets
                     .iter()
                     .filter(|t| match &w.what {
                         Unresolved::Receiver(attr) => t.matches_attr(attr),
-                        Unresolved::Name(class) => t.classes.contains(class),
+                        Unresolved::Name(class) | Unresolved::Existing(class) => {
+                            t.classes.contains(class)
+                        }
                         Unresolved::Anything => true,
                     })
                     .collect();
@@ -95,7 +103,7 @@ pub(super) fn mut205(
                 let name_family;
                 let (family, callers): (&FxHashSet<String>, _) = match (&w.what, unlisted) {
                     (_, Some(classes)) => (classes, Callers::LeaveTargetClasses(&may_get_key)),
-                    (Unresolved::Name(_), None) => {
+                    (Unresolved::Name(_) | Unresolved::Existing(_), None) => {
                         name_family = families(&hits);
                         (&name_family, Callers::Ignored)
                     }
@@ -117,7 +125,7 @@ pub(super) fn mut205(
                 }
                 let target = match &w.what {
                     Unresolved::Receiver(attr) => attr.clone(),
-                    Unresolved::Name(class) => {
+                    Unresolved::Name(class) | Unresolved::Existing(class) => {
                         cx.decls.class_qualname(class).unwrap_or(class).to_owned()
                     }
                     Unresolved::Anything => "*".to_owned(),
@@ -140,7 +148,7 @@ pub(super) fn mut205(
                         "writes `{attr}` ({}) on an object of unknown class",
                         w.kind.describe()
                     ),
-                    Unresolved::Name(_) => format!(
+                    Unresolved::Name(_) | Unresolved::Existing(_) => format!(
                         "writes an attribute named at run time ({}) on `{target}`",
                         w.kind.describe()
                     ),
@@ -256,6 +264,7 @@ pub(super) fn mut206(
     // The targets of each rule an attribute name matches, and the classes they cover, found once
     // per rule and name rather than once per read.
     let mut matched: FxHashMap<(usize, &str), MatchedTargets<'_>> = FxHashMap::default();
+    let mut globs = GlobFamilies::default();
     let mut classified: Classified<'_, &str> = Classified::default();
     let mut reports = MergedReports::default();
     for (key, s) in cx.defined_functions() {
@@ -264,11 +273,18 @@ pub(super) fn mut206(
                 continue;
             };
             for (r, &(contract, rule)) in strict.iter().enumerate() {
+                if through_allowed_protocol(cx, &rule.allowance, a.protocol.as_deref(), &a.name) {
+                    continue;
+                }
                 let (hits, family) = matched.entry((r, a.name.as_str())).or_insert_with(|| {
-                    let hits: Vec<&ContractTarget> = rule
-                        .targets
-                        .iter()
-                        .filter(|t| t.matches_attr(&a.name))
+                    let hits: Vec<&ContractTarget> = (rule.targets.iter().enumerate())
+                        .filter(|(k, t)| {
+                            t.matches_on_unknown(&a.name, || {
+                                let family = t.classes.iter().map(String::as_str);
+                                globs.of(cx, (r, *k), family).has(&a.name)
+                            })
+                        })
+                        .map(|(_, t)| t)
                         .collect();
                     let family = hits
                         .iter()
@@ -348,6 +364,10 @@ pub(super) fn mut207(
     // An object of unknown class is no class's own `self`.
     let no_class = FxHashSet::default();
     let mut classified: Classified<'_, &str> = Classified::default();
+    // The targets of each rule a method name matches, found once per rule and name.
+    let mut matched: FxHashMap<(usize, &str), Vec<usize>> = FxHashMap::default();
+    let mut globs = GlobFamilies::default();
+    let mut every_class: Option<Vec<String>> = None;
     let mut reports = MergedReports::default();
     for (key, s) in cx.defined_functions() {
         for a in s
@@ -356,9 +376,28 @@ pub(super) fn mut207(
             .filter(|a| a.access == Access::Call)
         {
             for (r, &(contract, rule)) in strict.iter().enumerate() {
-                let hits: Vec<usize> = (0..rule.targets.patterns.len())
-                    .filter(|&i| rule.targets.patterns[i].name.matches(&a.name))
-                    .collect();
+                if through_allowed_protocol(cx, &rule.allowance, a.protocol.as_deref(), &a.name) {
+                    continue;
+                }
+                let hits = matched.entry((r, a.name.as_str())).or_insert_with(|| {
+                    let patterns = rule.targets.patterns.iter().enumerate();
+                    let matching = patterns.filter(|(i, p)| {
+                        p.name.matches_on_unknown(&a.name, || {
+                            // A text naming no class names members of any.
+                            let family: Box<dyn Iterator<Item = &str>> = if p.name.names_any_class()
+                            {
+                                let every = every_class.get_or_insert_with(|| {
+                                    project_classes(cx).into_iter().map(|c| c.fqn).collect()
+                                });
+                                Box::new(every.iter().map(String::as_str))
+                            } else {
+                                Box::new(p.family().iter().map(String::as_str))
+                            };
+                            globs.of(cx, (r, *i), family).has(&a.name)
+                        })
+                    });
+                    matching.map(|(i, _)| i).collect()
+                });
                 let calls_target = |class: &str| {
                     hits.iter()
                         .any(|&i| rule.targets.calls_on(cx, i, class, &a.name))
@@ -419,6 +458,41 @@ pub(super) fn mut207(
             }
         }
     });
+}
+
+/// The member names of the class families of the glob targets of strict rules
+/// ([`ClassMembers::of_family`]), found the first time an access on an object of unknown class
+/// needs a target's, by rule and target.
+#[derive(Default)]
+struct GlobFamilies<'a> {
+    members: Option<ClassMembers<'a>>,
+    families: FxHashMap<(usize, usize), FamilyMembers<'a>>,
+}
+
+impl<'a> GlobFamilies<'a> {
+    fn of<'f>(
+        &mut self,
+        cx: &CheckContext<'a>,
+        target: (usize, usize),
+        family: impl Iterator<Item = &'f str>,
+    ) -> &FamilyMembers<'a> {
+        let members = self.members.get_or_insert_with(|| ClassMembers::new(cx));
+        self.families
+            .entry(target)
+            .or_insert_with(|| members.of_family(cx, family))
+    }
+}
+
+/// Whether `allowance` allows an access of `member` through an object typed with `protocol`
+/// although its class is unknown ([`heki_effect::UnresolvedAccessSite::protocol`]), as through
+/// a value of the protocol whose class heki knows ([`Allowance::allows_protocol`]).
+fn through_allowed_protocol(
+    cx: &CheckContext<'_>,
+    allowance: &Allowance,
+    protocol: Option<&str>,
+    member: &str,
+) -> bool {
+    protocol.is_some_and(|p| allowance.allows_protocol(cx.decls, p, member))
 }
 
 /// The rules of `rules` that `strict` holds for, each with its contract's place in the

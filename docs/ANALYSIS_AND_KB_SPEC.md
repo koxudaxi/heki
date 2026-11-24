@@ -50,7 +50,12 @@ comprehension before 3.12), per class body, and for the module's top level. The 
 nested class (its `__init__` in particular) are kept apart from the methods of the outer class
 (against the `MUT101` false positives found in Stage 0-A). Qualnames are Python's
 `__qualname__`: a class defined in a function is `factory.<locals>.Worker`, so its methods never
-share a summary with a module-level `Worker`.
+share a summary with a module-level `Worker`. A `class` or `def` statement in a function or a
+class body that declares its name `global` binds the module's name, and CPython names it as a
+module-level definition (`Worker`, `Worker.run`), as heki does; it is no method of the class body
+holding it. Since such a qualname does not name the functions around the definition,
+`IrFunction::enclosing` records the scope whose code makes each one, and the closure cells a
+scope reads belong to the functions along that chain (`ModuleIr::enclosing_functions`).
 
 Names follow Python's private name mangling (`heki_semantic::mangling`). Inside a class, at any
 depth of nested functions, an attribute name that starts with two underscores and does not end
@@ -370,7 +375,10 @@ the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores
 - **The stores.** `obj.attr = v`, `setattr(obj, "attr", v)`, `object.__setattr__(obj, "attr", v)`,
   `super().__setattr__("attr", v)`, the same calls through an alias (`_set = object.__setattr__`),
   and writes of the namespace (`obj.__dict__["attr"] = v`, `vars(obj).setdefault("attr", v)`).
-  The name may be a literal or a string constant of a module or a class (`KEY: Final`).
+  The name may be a literal or a string constant of a module or a class (`KEY: Final`), or one
+  of the string constants of the tuple, list, or set display a loop takes it from
+  (`for key in ("a", "b")`), which stores each (`stores::key_name`, the one decision of the
+  names these stores and the ownership facts read).
 - **What a store binds.** A store of `None` adds nothing (a call on it raises). A store of a value
   of unknown type, or values no tracked type covers, leaves the name untyped. `obj.attr += v`
   binds what the operator gives on the attribute's own value: nothing new when the name holds a
@@ -385,6 +393,11 @@ the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores
   `__reduce__` / `__reduce_ex__` and no `__getstate__` building the state from anything but the
   instance's own attributes (`FunctionDecl::state_of_self`, which holds only when every
   definition of the method does).
+  A store under a key of the namespace of an instance of the class or a subclass
+  (`for key, value in other.__dict__.items()`, `vars(other)`, their keys, a `list`, `tuple`,
+  `sorted`, or copy of them, `update(other.__dict__)`) binds any value too, but adds no
+  attribute an instance did not have: only the others set `ClassDecl::adds_unnamed_attrs`,
+  which the unmatched contract entries read.
 - **Globals the module may rebind.** In a module whose globals `globals()` or `exec` may change,
   every store of a global binds a value of unknown type. A module-body store does too when a star
   import that runs (not one under `if TYPE_CHECKING:`) may bind the name after it: the store comes
@@ -419,14 +432,27 @@ the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores
   (`ProjectDecls::elsewhere`).
 - **Changes in place.** A change the module's code makes to the object a global or an
   attribute holds, through a load of it (an item store `HANDLERS[kind] = run`, a method that may
-  add items such as `append`, `update`, or `setdefault`; `heki_ir::FnIndex::changed_vars`,
-  through copies and phis), is a store of the object's class with its items unknown (of an
-  annotated global's declaration): a name holding `{"noop": noop}` keeps `dict` and no item
-  type the code may replace. A change through the module's own object (a module importing
-  itself, `tables.HANDLERS[kind] = run`), whose read types the global by its name alone, leaves
-  the global its declaration or no type. Another module's change marks the name
-  (`StoredElsewhere::changed`), whose type then keeps no items where it is read. What a call the object is handed to does is not
-  followed (the assumption on objects of unknown origin).
+  add items such as `append`, `update`, or `setdefault`, an in-place operator `ITEMS += more`;
+  `heki_ir::FnIndex::changes_in_place`, through copies and phis), is a store of the loaded type
+  joined with what the changes add (`types::Container::added`, `Ty::with_added`; of an
+  annotated global's declaration). A list or a deque gets the items `append`, `insert`,
+  `appendleft`, `extend`, `extendleft`, `+=`, and item stores add (of a slice, the value's
+  items), a set those of `add`, `update`, `symmetric_difference_update`, `|=`, and `^=`, a dict
+  the keys and values of item stores, `setdefault`, `update` (also by keyword), and `|=`. An
+  argument of unknown type, an unpacked one, a method the container does not have, and a change
+  of what a change gave (`d.setdefault(k, []).append(x)`, `xs += ys` then `xs.append(x)`) add
+  items of unknown type: a name holding `{"noop": noop}` that `HANDLERS[kind] = run` changes
+  with `run` of unknown type keeps `dict` and no item type, and `HANDLERS["require"] = require`
+  gives its values the type of either function. Any other class keeps no items. A change
+  through the module's own object (a module importing itself, `tables.HANDLERS[kind] = run`),
+  whose read types the global by its name alone, leaves the global its declaration or no type.
+  Another module's change records what it adds (`StoredElsewhere::changed`, typed against pass
+  1), joined into the name's type where it is read. A local display joins what the function's
+  changes add the same way (`infer::Engine::add_contents`; a method a display does not have
+  raises and adds nothing), and an in-place operator on a container of known class gives its
+  type with what the operator adds. What a call the object
+  is handed to does is not followed (the assumption on objects of unknown origin), nor a change
+  of an item it holds (`d[k].append(x)`).
 - **Annotations.** An annotation types every store of the name it declares (Priority 2): an
   annotated global holds its declaration, refined by what the value says beyond it
   (`ProjectDecls::refine`: a narrower value, or for an instance of the declared container class
@@ -481,7 +507,17 @@ all). An async client sharing a command mixin with a sync one runs the async imp
 Calling an `async def` that no decorator replaces gives a coroutine (`Ty::Coroutine`): its return
 annotation is what awaiting it gives (`await`, and the target of `async with`), and awaiting a
 future or a task gives an untracked result. The catalog types an external awaitable by what
-awaiting it gives.
+awaiting it gives. A catalog API that runs a callable it is handed and hands back what the
+callable returns (`result_of`: `asyncio.to_thread(f, *args, **kwargs)`,
+`loop.run_in_executor(executor, f, *args)`, `anyio.to_thread.run_sync(f, *args)`,
+`executor.submit(f, *args, **kwargs)`) returns the coroutine of that result, or the future its
+`return_type` names holding it (`Args::Result`, which `await` and the future's `result()` give):
+what the call `f(*args, **kwargs)` returns, with the arguments the API passes on, as certain as
+that call written out. A call of a value the function makes is typed as the call written where
+the value is made: a bound method (`m = obj.method`) as `obj.method(...)`, a lambda by the value
+of its body (inferred as a child scope reading the function's cells), and a `functools.partial`
+object as a call of its callable with the arguments the object holds first (`partial.rs`, shared
+with the call targets).
 
 A scope nested in a function (a comprehension or generator expression with a scope of its own, a
 lambda, a nested function or class) reads the function's variables through their closure cells.
@@ -588,6 +624,19 @@ in the same way what binds it last (`ModuleDecls::aliases`), or one of the objec
 that may be last bind (`ModuleDecls::alias_paths`): a call through the name, in the module, from
 another one, or imported, runs each of them. An alias of the definition bound before the
 rebinding (`_original = fetch`) keeps the definition (`ProjectDecls::follow`).
+
+A class or function whose statement a function or a class body runs under a `global` declaration
+of its name (`global Config`, then `class Config(Base): ...` in `_define`) is a definition of the
+module under that name (`ModuleDecls::made_in`), with its bases, methods, and attributes: contract
+targets, annotations, imports, and subclasses in other modules name it as one defined at module
+level. The module body binds it where it calls such a function, a plain module-level `def`
+binding the name once on every path through it, or runs such a class body (`BodyBindings`), as it
+binds a name by a store. Bound so on every path, the name holds the definition; when the module
+body may not run that binding (no call, a call on a branch, a function nested in another), a read
+of the name may find it unbound, so a call through it may run another object than the definition
+(`ModuleDecls::rebound_definitions`); a later binding on some paths makes it one of the objects
+(`ModuleDecls::alias_paths`). The code of the definition's class body is that function's for
+`attribution = "lexical"`.
 
 A value bound to one of several named objects (a branch `f = a if c else b`, the values of a
 table) is one of them (`Ty::OneOf`, at most `MAX_NAMED`, eight): a call runs every one, which must
@@ -1174,8 +1223,8 @@ Early Cutoff compares summaries without their source positions, so an edit that 
 changes no caller's facts. The positions callers copy (call chains, write sites) are still
 re-propagated into their summaries, so that the incremental index always equals a full build, and
 the language server re-checks the files whose diagnostics show a moved call site. The call chains
-of `MUT108` / `MUT110` reports are no summary facts: the rule walks the own summaries and project
-calls of the functions below the call (`FileSummary::local_functions` and `call_sites`) down to
+of `MUT108` / `MUT110` / `MUT120` reports are no summary facts: the rule walks the own summaries
+and project calls of the functions below the call (`FileSummary::local_functions` and `call_sites`) down to
 the first function whose body makes the change. A heuristic `MUT110` report, whose chain names no
 line, records "Changed at the line" open when the run asks (`CheckExtras::open_premises`): no
 function on the chain makes the change in its own body (a generator another function returns is
@@ -1818,7 +1867,11 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      `heki_effect::with_paths`: the module's bindings, the members of modules, and the context
      managers whose exit never suppresses, `exit_suppresses`) say whether the function has made
      the call whenever it returns normally (`CallSite::on_every_return`: made, returned, or
-     reachable at all).
+     reachable at all). A call of a class body the function runs is made or returned whenever
+     the function returns only when the body's own paths say so and the function has run the
+     `class` statement to its end whenever it returns (a nested class's statement through the
+     statements around it; a statement a `finally` body repeats, through one of its copies), and
+     reachable only when the statement is.
    - A call's targets are complete (`CallSite::complete`) when they are every implementation
      the call can run under R2 and R5: for each of the receiver's class and its project
      subclasses (at most `DISPATCH_CLASS_LIMIT`, 64), the definition its MRO finds is a target;
@@ -2439,7 +2492,11 @@ field validates it: pydantic 2's `BaseModel`), `return_type` (factories such as
 argument a call writes or serializes in the order of its elements, with the keyword that sorts
 mapping keys first and whether it sorts by default: `json.dumps`, `yaml.safe_dump`,
 `pprint.pprint`, `pathlib.Path.write_text`, `print`: `EFF112`),
-`waits_until_done` / `done_when_awaited` (futures), `bounded_by` / `waits_while_full` (queues:
+`waits_until_done` / `done_when_awaited` (futures), `result_of` (the call hands back, awaited or
+by the future's `result()`, what calling the callable at position `arg` returns, with the
+positional arguments after it and, with `keywords`, the call's keywords: `asyncio.to_thread`,
+`loop.run_in_executor`, `anyio.to_thread.run_sync`, `executor.submit`; section 2.1),
+`bounded_by` / `waits_while_full` (queues:
 section 2.2), `environment` (`"call"`: calling the function reads the environment the program runs
 in, `os.getenv`, `platform.system`, `shutil.which`; `"read"`: reading the module attribute does,
 `os.environ`, `sys.platform`, `sys.version_info`; `"import"`: calling the function imports or

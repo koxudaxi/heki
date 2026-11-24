@@ -15,12 +15,15 @@ use super::{
 };
 use crate::ModuleInput;
 use crate::infer::Inferred;
-use crate::types::Ty;
+use crate::types::{Added, Change, Ty};
 
 use heki_ir::walk::{
-    Answer, Budget, Def, Facts, FnShape, Join, Sparse, Use, Visit, fixpoint, reach,
+    Answer, Budget, Closure, Def, Facts, FnShape, Join, Sparse, Use, Visit, fixpoint, reach,
 };
-use heki_ir::{BlockId, BuiltinKind, Inst, InstKind, IrFunction, LastBindings, Terminator, VarId};
+use heki_ir::{
+    BlockId, BuiltinKind, InPlaceChanges, Inst, InstKind, IrFunction, LastBindings, Terminator,
+    VarId,
+};
 use heki_kb::EffectiveEcosystemKb;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::{Borrow, Cow};
@@ -253,6 +256,9 @@ struct Joins {
     establishing: BTreeMap<StoreTarget, Stored>,
     /// The classes, by qualname, whose instances get attributes heki cannot name.
     any: BTreeSet<String>,
+    /// The classes of `any` whose instances may get an attribute they did not have: a store
+    /// under a name heki cannot read, not one under a key of an instance's namespace.
+    adding: BTreeSet<String>,
     /// The classes whose `__setstate__` restores attributes heki cannot name from its state.
     restoring: BTreeSet<String>,
     /// A store binds a global of the module heki cannot name.
@@ -273,6 +279,9 @@ impl Join for Joins {
         for class in &other.any {
             grew |= self.any.insert(class.clone());
         }
+        for class in &other.adding {
+            grew |= self.adding.insert(class.clone());
+        }
         for class in &other.restoring {
             grew |= self.restoring.insert(class.clone());
         }
@@ -287,6 +296,7 @@ impl Join for Joins {
         1 + self.every.len()
             + self.establishing.len()
             + self.any.len()
+            + self.adding.len()
             + self.restoring.len()
             + self.in_place.len()
     }
@@ -318,6 +328,8 @@ impl Joins {
                 out.push(Key::Class(class.clone()));
             }
         }
+        // What reading an attribute gives does not depend on whether a store adds one.
+        self.adding.extend(other.adding.iter().cloned());
         for class in &other.restoring {
             if self.restoring.insert(class.clone()) {
                 out.push(Key::Class(class.clone()));
@@ -360,6 +372,7 @@ impl Joins {
     fn decide(&self, decls: &ModuleDecls) -> Decided {
         let mut out = Decided {
             any: self.any.clone(),
+            adding: self.adding.clone(),
             restoring: self.restoring.difference(&self.any).cloned().collect(),
             ..Decided::default()
         };
@@ -417,6 +430,7 @@ struct Decided {
     globals: BTreeMap<String, Ty>,
     attrs: BTreeMap<String, BTreeMap<String, AttrStore>>,
     any: BTreeSet<String>,
+    adding: BTreeSet<String>,
     restoring: BTreeSet<String>,
     in_place: BTreeMap<String, BTreeSet<String>>,
 }
@@ -436,6 +450,11 @@ impl Decided {
         for qualname in self.any {
             if let Some(class) = decls.classes.get_mut(&qualname) {
                 class.stores_any_attr = true;
+            }
+        }
+        for qualname in self.adding {
+            if let Some(class) = decls.classes.get_mut(&qualname) {
+                class.adds_unnamed_attrs = true;
             }
         }
         for qualname in self.restoring {
@@ -559,6 +578,8 @@ struct StoringFn<'f> {
     /// The loads of a global or an attribute whose object the function changes in place
     /// ([`changed_loads`]).
     changed: Box<[ChangedLoad<'f>]>,
+    /// The changes in place of the function, `None` when heki cannot list them all.
+    changes: Option<InPlaceChanges<'f>>,
     /// The class whose instance the function stores into as `self` (qualname), and the
     /// variables holding it ([`self_of`]).
     selfs: Option<(&'f str, FxHashSet<VarId>)>,
@@ -568,22 +589,20 @@ struct StoringFn<'f> {
     state: Option<VarId>,
 }
 
-/// A load whose object a function changes in place ([`changed_loads`]), with the variable it
-/// binds.
-#[derive(Clone, Copy)]
-enum ChangedLoad<'f> {
-    /// Of a name of the module (`HANDLERS[kind] = run`).
-    Name(VarId, &'f str),
-    /// Of attribute `attr` of `obj` (`self.items.append(x)`): `(dst, obj, attr)`.
-    Attr(VarId, VarId, &'f str),
+/// A load whose object a function changes in place ([`changed_loads`]): the variable it binds
+/// and what it reads.
+struct ChangedLoad<'f> {
+    dst: VarId,
+    of: LoadOf<'f>,
 }
 
-impl ChangedLoad<'_> {
-    fn dst(self) -> VarId {
-        match self {
-            Self::Name(dst, _) | Self::Attr(dst, ..) => dst,
-        }
-    }
+/// What a [`ChangedLoad`] reads.
+#[derive(Clone, Copy)]
+enum LoadOf<'f> {
+    /// A name of the module (`HANDLERS[kind] = run`).
+    Name(&'f str),
+    /// Attribute `attr` of `obj` (`self.items.append(x)`): `(obj, attr)`.
+    Attr(VarId, &'f str),
 }
 
 /// What the stores of a function bind in other modules, by name.
@@ -601,15 +620,32 @@ struct ForeignStore {
     stored: Stored,
     /// A store rebinds the name to what an in-place operator gives on its own value.
     in_place: bool,
-    /// The function changes the object the name holds in place ([`StoringFn::changed`]).
-    changed: bool,
+    /// What the function's changes in place of the object the name holds add to it
+    /// ([`StoringFn::changed`]).
+    changed: Option<Added>,
+}
+
+impl ForeignStore {
+    fn changed_by(&mut self, added: &Added) {
+        join_added(&mut self.changed, added);
+    }
+}
+
+/// Join `added` into what changes in place add to a name (`None`: no change).
+fn join_added(changed: &mut Option<Added>, added: &Added) {
+    match changed {
+        Some(before) => {
+            before.join(added);
+        }
+        None => *changed = Some(added.clone()),
+    }
 }
 
 impl Foreign {
     fn into_decl(self) -> Option<StoresElsewhere> {
         let stored = |s: ForeignStore| {
             let ty = s.stored.elsewhere();
-            (ty.is_some() || s.in_place || s.changed).then_some(StoredElsewhere {
+            (ty.is_some() || s.in_place || s.changed.is_some()).then_some(StoredElsewhere {
                 ty,
                 in_place: s.in_place,
                 changed: s.changed,
@@ -1266,27 +1302,44 @@ fn insts(f: &IrFunction) -> impl Iterator<Item = &Inst> {
 }
 
 /// The loads of `f` of a global or an attribute whose object `f` changes in place itself
-/// ([`heki_ir::FnIndex::changed_vars`]: `HANDLERS[kind] = run`, `self.items.append(x)`), in
-/// the order of the function's instructions.
-fn changed_loads<'f>(input: &ModuleInput<'_>, f: &'f IrFunction) -> Box<[ChangedLoad<'f>]> {
+/// ([`heki_ir::FnIndex::changes_in_place`]: `HANDLERS[kind] = run`, `self.items.append(x)`,
+/// `self.items += more`), in the order of the function's instructions, and the changes (`None`
+/// when heki cannot list them all, and every load may be changed).
+fn changed_loads<'f>(
+    input: &'f ModuleInput<'_>,
+    f: &'f IrFunction,
+) -> (Box<[ChangedLoad<'f>]>, Option<InPlaceChanges<'f>>) {
     let changes = insts(f).any(|inst| {
         matches!(
             inst.kind,
-            InstKind::SubscriptStore { .. } | InstKind::MethodCall { .. }
+            InstKind::SubscriptStore { .. }
+                | InstKind::MethodCall { .. }
+                | InstKind::BinOp { in_place: true, .. }
         )
     });
     if !changes {
-        return Box::default();
+        return (Box::default(), None);
     }
-    let changed = heki_ir::FnIndex::new(f, &input.ir.constants).changed_vars();
-    let loads = insts(f).filter_map(|inst| match &inst.kind {
-        InstKind::LoadGlobal { dst, name, .. } | InstKind::LoadName { dst, name } => {
-            Some(ChangedLoad::Name(*dst, name))
-        }
-        InstKind::AttrLoad { dst, obj, attr } => Some(ChangedLoad::Attr(*dst, *obj, attr)),
-        _ => None,
+    let changes = match heki_ir::FnIndex::new(f, &input.ir.constants).changes_in_place() {
+        Answer::Known(changes) => Some(changes),
+        Answer::Open => None,
+    };
+    let changed = |dst: &VarId| {
+        changes
+            .as_ref()
+            .is_none_or(|c| c.aliased_by.contains_key(dst))
+    };
+    let loads = insts(f).filter_map(|inst| {
+        let (dst, of) = match &inst.kind {
+            InstKind::LoadGlobal { dst, name, .. } | InstKind::LoadName { dst, name } => {
+                (*dst, LoadOf::Name(name))
+            }
+            InstKind::AttrLoad { dst, obj, attr } => (*dst, LoadOf::Attr(*obj, attr)),
+            _ => return None,
+        };
+        changed(&dst).then_some(ChangedLoad { dst, of })
     });
-    loads.filter(|load| changed.contains(&load.dst())).collect()
+    (loads.collect(), changes)
 }
 
 /// The functions of the module that may store into a global or into an attribute of an
@@ -1312,7 +1365,7 @@ fn storing_functions<'f>(input: &'f ModuleInput<'_>, cx: &TypeCtx<'f>) -> Vec<St
             budget: &budget,
             names_builtin: &names_builtin,
         };
-        let changed = changed_loads(input, f);
+        let (changed, changes) = changed_loads(input, f);
         if changed.is_empty() && !insts(f).any(|inst| calls.may_store(&inst.kind)) {
             continue;
         }
@@ -1322,6 +1375,7 @@ fn storing_functions<'f>(input: &'f ModuleInput<'_>, cx: &TypeCtx<'f>) -> Vec<St
             f,
             shape,
             changed,
+            changes,
             at_init: method && (f.name == "__init__" || f.name == "__post_init__"),
             state: (method && f.name == "__setstate__")
                 .then(|| f.params.get(1).map(|p| p.var))
@@ -1464,12 +1518,267 @@ enum Holder<'h> {
     Module(String),
 }
 
-/// The name an attribute operation names: one a string constant gives, or one heki cannot
-/// read.
+/// The name an attribute operation names ([`key_name`] for one computed at run time).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AttrName<'f> {
+    /// The one a string constant gives.
     Named(Cow<'f, str>),
+    /// One of the string constants of the tuple, list, or set display a loop takes the name
+    /// from (`for key in ("a", "b")`).
+    OneOf(Vec<String>),
+    /// A key of the namespace of an instance of one of these project classes (canonical;
+    /// `for key, value in src.__dict__.items()`): a name that instance has already
+    /// ([`ProjectDecls::keys_exist_in`]).
+    KeyOf(Vec<String>),
+    /// One heki cannot read: any name.
     Unknown,
+}
+
+/// What a loop over a value takes from it, when heki can name it ([`Iterated::items`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Items {
+    /// The string constants of a display.
+    Constants(Vec<String>),
+    /// The keys of the namespace of the object the variable holds.
+    Keys(VarId),
+    /// The `(key, value)` pairs of the namespace of the object the variable holds.
+    Pairs(VarId),
+}
+
+/// The values a loop iterates, followed through the function of `f`: `def` gives each
+/// variable's defining instruction, `types` the inferred values, `constant` the string constant
+/// a variable holds.
+struct Iterated<'a, 'i> {
+    f: &'a IrFunction,
+    def: &'a dyn Fn(VarId) -> Option<&'i Inst>,
+    types: &'a FxHashMap<VarId, crate::resolver::Val>,
+    constant: &'a dyn Fn(VarId) -> Option<String>,
+}
+
+impl<'i> Iterated<'_, 'i> {
+    /// The most wrappers (`list(src.__dict__.items())`) followed to the namespace.
+    const MAX_WRAPPERS: usize = 4;
+    /// The most copies followed to a defining instruction, as [`TypeCtx::str_constant_with`]
+    /// follows them.
+    const MAX_COPIES: u32 = 16;
+
+    /// The instruction defining what `var` holds, through copies.
+    fn def(&self, var: VarId) -> Option<&'i Inst> {
+        let mut cur = var;
+        for _ in 0..Self::MAX_COPIES {
+            let inst = (self.def)(cur)?;
+            match &inst.kind {
+                InstKind::Copy { src, .. } => cur = *src,
+                _ => return Some(inst),
+            }
+        }
+        None
+    }
+
+    /// What the loop whose iterator `iter` holds takes ([`Self::items`] of what it iterates).
+    fn items_of_iter(&self, iter: VarId) -> Option<Items> {
+        match &self.def(iter)?.kind {
+            InstKind::MakeIter { iterable, .. } => self.items(*iterable),
+            _ => None,
+        }
+    }
+
+    /// What a loop over `iterable` takes: the items of a display of string constants, or the
+    /// keys or the pairs of a namespace (`vars(src)`, `src.__dict__`), its copy (`.copy()`,
+    /// `dict(...)`), its `keys()` or `items()`, or a `list`, `tuple`, or `sorted` of one of
+    /// these. Each wrapper holds one value, so the walk follows one chain to the display or the
+    /// namespace, then applies the wrappers from the inside out.
+    fn items(&self, iterable: VarId) -> Option<Items> {
+        const WRAPPERS: &[&str] = &[
+            "builtins.list",
+            "builtins.tuple",
+            "builtins.sorted",
+            "builtins.dict",
+        ];
+        let mut wrappers: Vec<Wrapper> = Vec::new();
+        let mut cur = iterable;
+        for _ in 0..=Self::MAX_WRAPPERS {
+            let inst = self.def(cur)?;
+            if let Some((_, obj)) = super::namespace_load(&inst.kind, |v| self.types.get(&v)) {
+                let inner = Items::Keys(obj);
+                return (wrappers.iter().rev()).try_fold(inner, |items, w| w.apply(items));
+            }
+            match &inst.kind {
+                InstKind::AllocBuiltin {
+                    dst,
+                    kind: BuiltinKind::Tuple | BuiltinKind::List | BuiltinKind::Set,
+                    elems,
+                } => {
+                    let names = elems.iter().enumerate().map(|(i, e)| {
+                        (!self.f.is_starred(*dst, i))
+                            .then(|| (self.constant)(*e))
+                            .flatten()
+                    });
+                    let inner = Items::Constants(names.collect::<Option<_>>()?);
+                    return (wrappers.iter().rev()).try_fold(inner, |items, w| w.apply(items));
+                }
+                InstKind::MethodCall {
+                    recv,
+                    method,
+                    args,
+                    kwargs,
+                    star_from: None,
+                    ..
+                } if args.is_empty() && kwargs.is_empty() => {
+                    wrappers.push(match method.as_str() {
+                        "keys" | "copy" => Wrapper::Keys,
+                        "items" => Wrapper::Pairs,
+                        _ => return None,
+                    });
+                    cur = *recv;
+                }
+                kind => {
+                    let (wrapper, _, [arg]) =
+                        super::plain_call(kind, WRAPPERS, |v| self.types.get(&v))?
+                    else {
+                        return None;
+                    };
+                    wrappers.push(match wrapper {
+                        "builtins.dict" => Wrapper::Dict,
+                        _ => Wrapper::Same,
+                    });
+                    cur = *arg;
+                }
+            }
+        }
+        None
+    }
+}
+
+/// What a call around an iterable gives a loop over its result ([`Iterated::items`]).
+#[derive(Debug, Clone, Copy)]
+enum Wrapper {
+    /// `ns.keys()`, `ns.copy()`: the keys of a namespace.
+    Keys,
+    /// `ns.items()`: its pairs.
+    Pairs,
+    /// `dict(...)` of a namespace or its pairs: its keys.
+    Dict,
+    /// `list`, `tuple`, `sorted`: the same items.
+    Same,
+}
+
+impl Wrapper {
+    fn apply(self, inner: Items) -> Option<Items> {
+        match (self, inner) {
+            (Self::Keys, Items::Keys(obj)) => Some(Items::Keys(obj)),
+            (Self::Pairs, Items::Keys(obj)) => Some(Items::Pairs(obj)),
+            (Self::Dict, Items::Keys(obj) | Items::Pairs(obj)) => Some(Items::Keys(obj)),
+            (Self::Same, items) => Some(items),
+            _ => None,
+        }
+    }
+}
+
+/// What the key `key` of a store into an object's attributes names (`obj.__dict__[key] = v`,
+/// `setattr(obj, key, v)`, `vars(obj).setdefault(key, v)`): the one decision of the names those
+/// stores make, for the types of the attributes and for the facts of the ownership contracts.
+/// A string constant ([`TypeCtx::str_constant_with`]; `def` gives each variable's defining
+/// instruction in the function of `f`, `types` the inferred values) names itself. A key a loop
+/// takes from a display of string constants names one of them; one it takes from the namespace
+/// of an object (`for key in vars(src)`, `src.__dict__.keys()`, the first of each pair of
+/// `src.__dict__.items()`, also through a copy, `list`, `tuple`, or `sorted`) names an attribute
+/// that object has. Any other key may be any name.
+pub(crate) fn key_name<'i>(
+    cx: &TypeCtx<'_>,
+    f: &IrFunction,
+    key: VarId,
+    def: &dyn Fn(VarId) -> Option<&'i Inst>,
+    types: &FxHashMap<VarId, crate::resolver::Val>,
+) -> AttrName<'static> {
+    let constant = |v: VarId| cx.str_constant_with(v, def, types);
+    if let Some(name) = constant(key) {
+        return AttrName::Named(Cow::Owned(name));
+    }
+    let loops = Iterated {
+        f,
+        def,
+        types,
+        constant: &constant,
+    };
+    let items = match loops.def(key).map(|i| &i.kind) {
+        Some(InstKind::IterNext { iter, .. }) => loops.items_of_iter(*iter),
+        // The first of the pair a loop unpacks (`for key, value in ...`).
+        Some(InstKind::SubscriptLoad {
+            obj,
+            index,
+            key_const: None,
+            is_slice: false,
+            ..
+        }) if is_int(loops.def(*index), 0) => match loops.def(*obj).map(|i| &i.kind) {
+            Some(InstKind::IterNext { iter, .. }) => match loops.items_of_iter(*iter) {
+                Some(Items::Pairs(obj)) => Some(Items::Keys(obj)),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    };
+    match items {
+        Some(Items::Constants(names)) => AttrName::OneOf(names),
+        Some(Items::Keys(obj)) => keys_of(cx, obj, types),
+        Some(Items::Pairs(_)) | None => AttrName::Unknown,
+    }
+}
+
+/// The name a key of the namespace of what `obj` holds names: one of an instance of the project
+/// classes heki knows it may be ([`AttrName::KeyOf`]), else any name.
+fn keys_of(
+    cx: &TypeCtx<'_>,
+    obj: VarId,
+    types: &FxHashMap<VarId, crate::resolver::Val>,
+) -> AttrName<'static> {
+    use crate::resolver::Val;
+    let project = cx.project;
+    let instance = |class: &String| {
+        (project.is_project_class(class) && project.protocol(class).is_none())
+            .then(|| project.canonical(class))
+    };
+    let classes = match types.get(&obj) {
+        Some(Val::Inst(class)) => instance(class).map(|c| vec![c]),
+        Some(Val::Union(classes)) => classes.iter().map(instance).collect(),
+        _ => None,
+    };
+    classes.map_or(AttrName::Unknown, AttrName::KeyOf)
+}
+
+/// What the keys of `other` name, stored by `ns.update(other)` (as for [`key_name`]): those of
+/// the namespace of an object, of its copy, or of its `items()`, name attributes that object
+/// has ([`AttrName::KeyOf`]); any others may be any names.
+pub(crate) fn update_keys<'i>(
+    cx: &TypeCtx<'_>,
+    f: &IrFunction,
+    other: VarId,
+    def: &dyn Fn(VarId) -> Option<&'i Inst>,
+    types: &FxHashMap<VarId, crate::resolver::Val>,
+) -> AttrName<'static> {
+    let constant = |v: VarId| cx.str_constant_with(v, def, types);
+    let loops = Iterated {
+        f,
+        def,
+        types,
+        constant: &constant,
+    };
+    match loops.items(other) {
+        Some(Items::Keys(obj) | Items::Pairs(obj)) => keys_of(cx, obj, types),
+        Some(Items::Constants(_)) | None => AttrName::Unknown,
+    }
+}
+
+/// Whether `inst` is the integer constant `n`.
+fn is_int(inst: Option<&Inst>, n: i64) -> bool {
+    matches!(
+        inst.map(|i| &i.kind),
+        Some(InstKind::Const {
+            literal: heki_ir::ConstLiteral::Int(k),
+            ..
+        }) if *k == n
+    )
 }
 
 /// An operation on the attributes of an object, however it is spelled.
@@ -1495,16 +1804,15 @@ pub(crate) enum AttrOp<'f> {
 
 /// What `kind` does to the attributes of an object: the one recognition of the stores and
 /// deletions of attributes through every spelling. `val` gives what a variable holds (the
-/// builtins by their symbol, as call resolution names them); `name` the string constant a
-/// variable holds ([`TypeCtx::str_constant_with`]). A method `__setattr__` or `__delattr__`
+/// builtins by their symbol, as call resolution names them); `named` the name a variable
+/// holding an attribute name names ([`key_name`]). A method `__setattr__` or `__delattr__`
 /// takes the object first when called on a class (`object.__setattr__(obj, name, v)`), as its
 /// number of arguments tells.
 pub(crate) fn attr_op<'f, 'v>(
     kind: &'f InstKind,
     val: impl Fn(VarId) -> Option<&'v crate::resolver::Val>,
-    name: impl Fn(VarId) -> Option<String>,
+    named: impl Fn(VarId) -> AttrName<'static>,
 ) -> Option<AttrOp<'f>> {
-    let named = |v: VarId| name(v).map_or(AttrName::Unknown, |n| AttrName::Named(Cow::Owned(n)));
     let stored = |v: VarId| replacing_all(named(v));
     const ATTR_BUILTINS: &[&str] = &[
         "builtins.setattr",
@@ -1573,8 +1881,10 @@ pub(crate) fn attr_op<'f, 'v>(
 /// The name a store binds: one replacing the namespace or the class (`__dict__`, `__class__`)
 /// stores every attribute, whichever spelling stores it.
 fn replacing_all(name: AttrName<'_>) -> AttrName<'_> {
+    let replaces = |n: &str| n == "__dict__" || n == "__class__";
     match name {
-        AttrName::Named(n) if n == "__dict__" || n == "__class__" => AttrName::Unknown,
+        AttrName::Named(n) if replaces(&n) => AttrName::Unknown,
+        AttrName::OneOf(names) if names.iter().any(|n| replaces(n)) => AttrName::Unknown,
         name => name,
     }
 }
@@ -1621,13 +1931,12 @@ const NAMESPACE_READS: &[&str] = &[
 ];
 
 /// What the instruction `kind`, which reads a namespace held by the variables `ns`, does
-/// through it (`name` as for [`attr_op`]).
+/// through it (`named` as for [`attr_op`]).
 pub(crate) fn namespace_op<'f>(
     kind: &'f InstKind,
     ns: &FxHashSet<VarId>,
-    name: impl Fn(VarId) -> Option<String>,
+    named: impl Fn(VarId) -> AttrName<'static>,
 ) -> NamespaceOp<'f> {
-    let named = |v: VarId| name(v).map_or(AttrName::Unknown, |n| AttrName::Named(Cow::Owned(n)));
     match kind {
         InstKind::Copy { .. }
         | InstKind::Compare { .. }
@@ -1734,7 +2043,7 @@ impl<'c, 'f> Classifier<'c, 'f> {
                 out.own.store(target, f.is_module_body, value);
                 continue;
             }
-            let op = attr_op(&inst.kind, |v| self.vals.get(&v), |v| self.name_of(v));
+            let op = attr_op(&inst.kind, |v| self.vals.get(&v), |v| self.key_name(v));
             match op {
                 Some(AttrOp::Store {
                     obj,
@@ -1751,9 +2060,18 @@ impl<'c, 'f> Classifier<'c, 'f> {
                 }
                 Some(AttrOp::Store {
                     obj,
-                    name: AttrName::Unknown,
+                    name: AttrName::OneOf(names),
                     value,
-                }) => self.unnamed(&mut out, obj, Some(value)),
+                }) => {
+                    for attr in &names {
+                        self.named(&mut out, obj, attr, value);
+                    }
+                }
+                Some(AttrOp::Store {
+                    obj,
+                    name: name @ (AttrName::KeyOf(_) | AttrName::Unknown),
+                    value,
+                }) => self.unnamed(&mut out, obj, Some(value), &name),
                 Some(AttrOp::Namespace { dst, obj }) => namespaces.push((dst, obj)),
                 // A deletion binds no value: a read after it raises, or finds what the class
                 // holds.
@@ -1763,8 +2081,22 @@ impl<'c, 'f> Classifier<'c, 'f> {
         for (ns, obj) in namespaces {
             self.namespace(&mut out, ns, obj);
         }
-        for &load in &self.s.changed {
-            self.changed_in_place(&mut out, load);
+        let budget = Budget::of_function("store additions", f);
+        let additions: Closure<VarId, Added> = Closure::new();
+        for load in &self.s.changed {
+            let added = match &self.s.changes {
+                Some(changes) => additions.ask(
+                    &budget,
+                    load.dst,
+                    |v| self.added_by(changes, v),
+                    |v, out| out.extend(changes.aliased_by.get(&v).into_iter().flatten()),
+                ),
+                None => Answer::Open,
+            };
+            // Past the budget, or when heki cannot list the changes, they add what heki cannot
+            // type.
+            let added = added.open_means(Rc::new(Added::unknown()));
+            self.changed_in_place(&mut out, load, &added);
         }
     }
 
@@ -1778,35 +2110,36 @@ impl<'c, 'f> Classifier<'c, 'f> {
             (self.holders(obj).iter()).any(|h| matches!(h, Holder::Module(m) if m == module))
         };
         (self.s.changed.iter())
-            .filter_map(|load| match *load {
-                ChangedLoad::Name(_, name) => Some(name),
-                ChangedLoad::Attr(_, obj, attr) => own_module(obj).then_some(attr),
+            .filter_map(|load| match load.of {
+                LoadOf::Name(name) => Some(name),
+                LoadOf::Attr(obj, attr) => own_module(obj).then_some(attr),
             })
             .collect()
     }
 
     /// A change in place of the object the load `load` gives (an item store, a method call
-    /// that may add items): a store, into the name the load reads, of the
-    /// object's class with its items unknown, or of an annotated global's declaration. The name
-    /// keeps its class and no items the code may add or replace (`HANDLERS = {"a": run}`, then
-    /// `HANDLERS[kind] = other`). A global read through the module's own object, which types it
-    /// by its name alone (`tables.HANDLERS[kind] = other` in a module importing itself), keeps
-    /// its declaration or no type.
-    fn changed_in_place(&self, out: &mut Sink<'_>, load: ChangedLoad<'_>) {
-        // The loaded value's class with its items unknown, when it has items; another module's
-        // names are marked instead, decided by their own module's stores.
-        let loaded = self.types.ty(load.dst());
-        let without_items = loaded
-            .map(|t| (t.without_items(), t))
+    /// that may add items, an in-place operator): a store, into the name the load reads, of
+    /// the loaded type with what the changes add ([`Ty::with_added`]), or of an annotated
+    /// global's declaration. The name keeps its class, and its items only where every change
+    /// adds items heki types (`HANDLERS = {"a": run}`, then `HANDLERS[kind] = other` with
+    /// `other` of unknown type, keeps no item type). A global read through the module's own
+    /// object, which types it by its name alone (`tables.HANDLERS[kind] = other` in a module
+    /// importing itself), keeps its declaration or no type.
+    fn changed_in_place(&self, out: &mut Sink<'_>, load: &ChangedLoad<'_>, added: &Added) {
+        // The loaded value's type with what the changes add, when that changes it; another
+        // module's names are marked instead, decided by their own module's stores.
+        let loaded = self.types.ty(load.dst);
+        let with_added = loaded
+            .map(|t| (t.with_added(added), t))
             .and_then(|(changed, t)| (changed != *t).then_some(changed));
-        let value = without_items.as_ref().map(Some);
+        let value = with_added.as_ref().map(Some);
         let module = self.cx.module_name();
-        match load {
-            ChangedLoad::Name(_, name) => {
+        match load.of {
+            LoadOf::Name(name) => {
                 if let Some(fqn) = self.decls.fixed_import(name) {
                     if let Some(foreign) = out.foreign.as_deref_mut() {
                         let fqn = self.cx.project.canonical(fqn);
-                        foreign.globals.entry(fqn).or_default().changed = true;
+                        foreign.globals.entry(fqn).or_default().changed_by(added);
                     }
                 } else if self.decls.unknown_globals.contains(name) {
                     // An annotation types the items any change adds, as it types every store.
@@ -1817,7 +2150,7 @@ impl<'c, 'f> Classifier<'c, 'f> {
                     }
                 }
             }
-            ChangedLoad::Attr(_, obj, attr) => {
+            LoadOf::Attr(obj, attr) => {
                 for holder in self.holders(obj) {
                     match holder {
                         Holder::Own { class, own_self } => {
@@ -1840,19 +2173,37 @@ impl<'c, 'f> Classifier<'c, 'f> {
                         Holder::Module(m) => {
                             if let Some(foreign) = out.foreign.as_deref_mut() {
                                 let fqn = format!("{m}.{attr}");
-                                foreign.globals.entry(fqn).or_default().changed = true;
+                                foreign.globals.entry(fqn).or_default().changed_by(added);
                             }
                         }
                         Holder::Class(class) => {
                             if let Some(foreign) = out.foreign.as_deref_mut() {
                                 let attrs = foreign.attrs.entry(class).or_default();
-                                attrs.entry(attr.to_owned()).or_default().changed = true;
+                                attrs.entry(attr.to_owned()).or_default().changed_by(added);
                             }
                         }
                     }
                 }
             }
         }
+    }
+
+    /// What the changes of `changes` on the variable `v` itself add to its object
+    /// ([`Added::of`]), as this function's types type their operands. A change whose result the
+    /// function changes in place again (`d.setdefault(k, []).append(x)`, `xs += ys` and then
+    /// `xs.append(x)`) adds items heki does not follow.
+    fn added_by(&self, changes: &InPlaceChanges<'_>, v: VarId) -> Added {
+        let mut added = Added::default();
+        for inst in changes.by_receiver.get(&v).into_iter().flatten() {
+            let changed_again = matches!(
+                inst.kind,
+                InstKind::MethodCall { dst, .. } | InstKind::BinOp { dst, .. }
+                    if changes.aliased_by.contains_key(&dst)
+            );
+            let change = Change::of(&inst.kind).filter(|_| !changed_again);
+            added.join(&change.map_or_else(Added::unknown, |(_, c)| Added::of(&c, self.types)));
+        }
+        added
     }
 
     /// Whether `value` is what an in-place operator gives on the value a load `loads_it`
@@ -1923,13 +2274,32 @@ impl<'c, 'f> Classifier<'c, 'f> {
         out
     }
 
-    /// The string constant `var` holds ([`TypeCtx::str_constant_in`]: a literal, a string
-    /// constant of a module or a class).
-    fn name_of(&self, var: VarId) -> Option<String> {
+    /// The name the variable `var` holding an attribute name names ([`key_name`]).
+    fn key_name(&self, var: VarId) -> AttrName<'static> {
         if !self.budget.take(1) {
-            return None;
+            return AttrName::Unknown;
         }
-        self.cx.str_constant_in(&self.s.shape, var, &self.vals)
+        key_name(
+            self.cx,
+            self.s.f,
+            var,
+            &|v| self.s.shape.inst(v),
+            &self.vals,
+        )
+    }
+
+    /// The names the keys of `other` name, stored by `ns.update(other)` ([`update_keys`]).
+    fn update_keys(&self, other: VarId) -> AttrName<'static> {
+        if !self.budget.take(1) {
+            return AttrName::Unknown;
+        }
+        update_keys(
+            self.cx,
+            self.s.f,
+            other,
+            &|v| self.s.shape.inst(v),
+            &self.vals,
+        )
     }
 
     /// What the receiver `obj` holds.
@@ -2036,17 +2406,31 @@ impl<'c, 'f> Classifier<'c, 'f> {
         }
     }
 
-    /// A store of an attribute heki cannot name of what `obj` holds, binding `value` when one
-    /// value is known (`__setstate__` restores from its state).
-    fn unnamed(&self, out: &mut Sink<'_>, obj: VarId, value: Option<VarId>) {
+    /// A store of an attribute heki cannot name (`name`: [`AttrName::KeyOf`] or
+    /// [`AttrName::Unknown`]) of what `obj` holds, binding `value` when one value is known
+    /// (`__setstate__` restores from its state). One under a key of the namespace of an
+    /// instance of the class or a subclass (a copy) adds no attribute the class's instances do
+    /// not have ([`ProjectDecls::keys_exist_in`]).
+    fn unnamed(&self, out: &mut Sink<'_>, obj: VarId, value: Option<VarId>, name: &AttrName<'_>) {
+        let sources = match name {
+            AttrName::KeyOf(sources) => Some(sources),
+            _ => None,
+        };
         for holder in self.holders(obj) {
             match holder {
                 Holder::Own { class, own_self } => {
                     let restores = own_self && value.is_some_and(|v| self.holds_state(v));
                     if restores {
                         out.own.restoring.insert(class.to_owned());
-                    } else {
-                        out.own.any.insert(class.to_owned());
+                        continue;
+                    }
+                    out.own.any.insert(class.to_owned());
+                    let fqn = format!("{}.{class}", self.cx.module_name());
+                    let copies = sources.is_some_and(|sources| {
+                        (sources.iter()).all(|source| self.cx.project.keys_exist_in(source, &fqn))
+                    });
+                    if !copies {
+                        out.own.adding.insert(class.to_owned());
                     }
                 }
                 Holder::Module(m) if m == self.cx.module_name() => out.own.any_global = true,
@@ -2087,29 +2471,29 @@ impl<'c, 'f> Classifier<'c, 'f> {
             Visit::<()>::Expand
         });
         if complete.is_open() {
-            return self.unnamed(out, obj, None);
+            return self.unnamed(out, obj, None, &AttrName::Unknown);
         }
         let mut named: Vec<(String, VarId)> = Vec::new();
-        let mut unnamed: Vec<Option<VarId>> = Vec::new();
+        let mut unnamed: Vec<(Option<VarId>, AttrName<'static>)> = Vec::new();
         let mut sorted: Vec<VarId> = held.iter().copied().collect();
         sorted.sort_unstable();
         for v in &sorted {
             for u in shape.readers(*v) {
                 if !self.budget.take(1) {
-                    return self.unnamed(out, obj, None);
+                    return self.unnamed(out, obj, None, &AttrName::Unknown);
                 }
                 match *u {
                     Use::Phi(b, i) => {
                         let phi = &f.blocks[b.0 as usize].phis[i as usize];
                         if !phi.incoming.iter().all(|(_, x)| held.contains(x)) {
-                            unnamed.push(None);
+                            unnamed.push((None, AttrName::Unknown));
                         }
                     }
                     Use::Terminator(b) => {
                         let branch =
                             matches!(f.blocks[b.0 as usize].terminator, Terminator::Branch { .. });
                         if !branch {
-                            unnamed.push(None);
+                            unnamed.push((None, AttrName::Unknown));
                         }
                     }
                     Use::Inst(b, i) => {
@@ -2122,8 +2506,8 @@ impl<'c, 'f> Classifier<'c, 'f> {
         for (attr, value) in named {
             self.named(out, obj, &attr, value);
         }
-        for value in unnamed {
-            self.unnamed(out, obj, value);
+        for (value, name) in unnamed {
+            self.unnamed(out, obj, value, &name);
         }
     }
 
@@ -2133,28 +2517,36 @@ impl<'c, 'f> Classifier<'c, 'f> {
         kind: &InstKind,
         held: &FxHashSet<VarId>,
         named: &mut Vec<(String, VarId)>,
-        unnamed: &mut Vec<Option<VarId>>,
+        unnamed: &mut Vec<(Option<VarId>, AttrName<'static>)>,
     ) {
-        match namespace_op(kind, held, |v| self.name_of(v)) {
+        match namespace_op(kind, held, |v| self.key_name(v)) {
             NamespaceOp::Reads | NamespaceOp::Removes(_) | NamespaceOp::RemovesAll => {}
             NamespaceOp::Stores {
                 name: AttrName::Named(attr),
                 value,
             } => named.push((attr.into_owned(), value)),
             NamespaceOp::Stores {
-                name: AttrName::Unknown,
+                name: AttrName::OneOf(attrs),
                 value,
-            } => unnamed.push(Some(value)),
+            } => named.extend(attrs.into_iter().map(|attr| (attr, value))),
+            NamespaceOp::Stores {
+                name: AttrName::KeyOf(sources),
+                value,
+            } => unnamed.push((Some(value), AttrName::KeyOf(sources))),
+            NamespaceOp::Stores { value, .. } => unnamed.push((Some(value), AttrName::Unknown)),
             NamespaceOp::Updates(keywords) => {
                 for (keyword, value) in keywords {
                     match keyword {
                         Some(attr) => named.push((attr.clone(), *value)),
-                        None => unnamed.push(Some(*value)),
+                        None => unnamed.push((Some(*value), self.update_keys(*value))),
                     }
                 }
             }
-            NamespaceOp::StoresAny { value } => unnamed.push(value),
-            NamespaceOp::HandsOn => unnamed.push(None),
+            NamespaceOp::StoresAny { value } => {
+                let name = value.map_or(AttrName::Unknown, |other| self.update_keys(other));
+                unnamed.push((value, name));
+            }
+            NamespaceOp::HandsOn => unnamed.push((None, AttrName::Unknown)),
         }
     }
 
@@ -2508,7 +2900,9 @@ impl StoredElsewhere {
     /// Join what another module's stores bind.
     fn join(&mut self, other: &StoredElsewhere) {
         self.in_place |= other.in_place;
-        self.changed |= other.changed;
+        if let Some(added) = &other.changed {
+            join_added(&mut self.changed, added);
+        }
         self.ty = match (self.ty.take(), &other.ty) {
             (t, None) => t,
             (None, t) => t.clone(),
@@ -2517,14 +2911,17 @@ impl StoredElsewhere {
         };
     }
 
-    /// The join of `own` and what these stores bind: `None` when it is unknown or rebinding in
-    /// place may change it.
+    /// The join of `own` and what these stores bind, with what the changes in place add:
+    /// `None` when it is unknown or rebinding in place may change it.
     fn joined_with(&self, own: &Ty) -> Option<Ty> {
         let t = match &self.ty {
             Some(other) => own.join(other.as_ref()?)?,
             None => own.clone(),
         };
-        let t = if self.changed { t.without_items() } else { t };
+        let t = match &self.changed {
+            Some(added) => t.with_added(added),
+            None => t,
+        };
         Some(t).filter(|t| kept_in_declarations(t) && (!self.in_place || keeps_in_place(t)))
     }
 }
@@ -2617,10 +3014,10 @@ impl ProjectDecls {
         match self.elsewhere.globals.get(&fqn) {
             None => Some(own.clone()),
             // Another module's change in place leaves an annotated global its declaration.
-            Some(stored) if stored.changed && m.declared_items.contains_key(name) => {
+            Some(stored) if stored.changed.is_some() && m.declared_items.contains_key(name) => {
                 let declared = &m.declared_items[name];
                 StoredElsewhere {
-                    changed: false,
+                    changed: None,
                     ..stored.clone()
                 }
                 .joined_with(declared)
@@ -2687,7 +3084,7 @@ impl ProjectDecls {
         let mut out = Stored::Nothing;
         let mut restoring = false;
         let mut in_place = false;
-        let mut changed = false;
+        let mut changed: Option<Added> = None;
         for (class, decl) in family
             .iter()
             .filter_map(|class| Some((class, self.class(class)?)))
@@ -2708,7 +3105,9 @@ impl ProjectDecls {
             }
             if let Some(stored) = self.elsewhere.attrs.get(class).and_then(|a| a.get(attr)) {
                 in_place |= stored.in_place;
-                changed |= stored.changed;
+                if let Some(added) = &stored.changed {
+                    join_added(&mut changed, added);
+                }
                 if let Some(t) = &stored.ty {
                     out.add(Some(t.as_ref()));
                 }
@@ -2719,9 +3118,10 @@ impl ProjectDecls {
         if restoring && !self.restores_hold(family, of_self) {
             return None;
         }
-        let t = out
-            .type_of()
-            .map(|t| if changed { t.without_items() } else { t });
+        let t = out.type_of().map(|t| match &changed {
+            Some(added) => t.with_added(added),
+            None => t,
+        });
         t.filter(|t| !in_place || keeps_in_place(t))
     }
 

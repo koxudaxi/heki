@@ -2099,7 +2099,9 @@ impl<'a> Reach<'a> {
                 .chain(&b.write_universe)
                 .filter(|t| match &w.what {
                     Unresolved::Receiver(attr) => t.matches_attr(attr),
-                    Unresolved::Name(class) => t.classes.contains(class),
+                    Unresolved::Name(class) | Unresolved::Existing(class) => {
+                        t.classes.contains(class)
+                    }
                     Unresolved::Anything => true,
                 })
                 .peekable();
@@ -2114,7 +2116,7 @@ impl<'a> Reach<'a> {
             }
             let attr = match &w.what {
                 Unresolved::Receiver(attr) => Some(attr.clone()),
-                Unresolved::Name(_) | Unresolved::Anything => None,
+                Unresolved::Name(_) | Unresolved::Existing(_) | Unresolved::Anything => None,
             };
             let nodes = &self.nodes;
             note(
@@ -2138,11 +2140,7 @@ impl<'a> Reach<'a> {
         i: usize,
         func: &FuncKey,
     ) {
-        let accesses = cx.index.file_of(func).into_iter().flat_map(|path| {
-            let own = cx.index.files[path].external_accesses.get(func);
-            own.into_iter().flatten().map(move |a| (path, a))
-        });
-        for (path, a) in accesses {
+        for (path, a) in cx.external_accesses(func) {
             let call = a.kind == AccessKind::Call;
             if call && b.allows_symbol(&a.name) {
                 continue;

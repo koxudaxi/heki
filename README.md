@@ -316,7 +316,9 @@ for `heki inspect` and [Configuration advice](https://heki.koxudaxi.dev/recommen
 
 ## 🪜 pre-commit and CI
 
-A pre-commit hook (heki follows calls across files, so it checks the whole project). The
+A pre-commit hook. heki follows calls across files, so the hook analyzes the whole project and
+passes the staged files to `--touched`: it shows and fails on the reports in those files and the
+reports whose call chain reaches them, so old findings elsewhere do not block a commit. The
 [heki-pre-commit](https://github.com/koxudaxi/heki-pre-commit) repository installs heki from its PyPI
 wheel, so there is no compile and no Rust toolchain:
 
@@ -324,7 +326,7 @@ wheel, so there is no compile and no Rust toolchain:
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.2.3
+    rev: v0.2.7
     hooks:
       - id: heki
 ```
@@ -343,10 +345,11 @@ repos:
     hooks:
       - id: heki
         name: heki
-        entry: uvx heki check
+        entry: uvx heki check --touched
         language: system   # needs uv on PATH
         types: [python]
-        pass_filenames: false
+        pass_filenames: true
+        require_serial: true
 ```
 
 A GitHub Actions workflow with code-scanning alerts (SARIF) and annotations:

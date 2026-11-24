@@ -8,19 +8,21 @@
 
 use super::{
     AccessGroups, Allowance, AllowanceKeys, DelegatedReport, FunctionMatcher, InsideAllowed,
-    MemberPattern, MergedReports, Named, References, allows_own_receiver, attribution,
-    binds_receiver, counts_references, delegated_reports, escaping_for, named_protocols,
-    place_functions, project_classes, reports_unresolved,
+    MemberPattern, MergedReports, Named, References, Sites, allows_own_receiver, attribution,
+    binds_receiver, counts_references, delegated_reports, escaping_for, matched_name,
+    named_protocols, place_functions, project_classes, reports_unresolved,
 };
 use crate::patterns::{ModuleIndex, PartIndex};
 use crate::{
     CheckContext, DottedPattern, RuleConfigError, SitesByCaller, def_spellings, last_name,
     module_of, split_last_dot,
 };
+use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
-use heki_effect::{ArgValue, CallHop, CallSite, ContractClass, FuncKey, SiteRole};
+use heki_effect::{AccessKind, ArgValue, CallHop, CallSite, ContractClass, FuncKey, SiteRole};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -255,6 +257,13 @@ impl<'t> ContractCalls<'t> {
         })
     }
 
+    /// The `(contract, target)` pairs naming `symbol`, a function or class outside the project
+    /// ([`FunctionMatchers::naming_external`]), ascending.
+    fn naming_external(&self, symbol: &str) -> Vec<(usize, usize)> {
+        let found = self.functions.naming_external(symbol).into_iter();
+        found.map(|m| self.owners[m]).collect()
+    }
+
     /// [`CallTargets::called`] of every contract `site` calls a target of, by contract.
     fn called(&self, site: &CallSite) -> Vec<(usize, Vec<Vec<usize>>)> {
         if site.role != SiteRole::Call {
@@ -307,6 +316,8 @@ pub(crate) struct FunctionMatchers {
     modules: ModuleIndex,
     /// The classes of each `Class.method` matcher's class family, and the matchers of each.
     methods: FxHashMap<String, Vec<usize>>,
+    /// The `<external>.<name>` matchers, which no name of the symbols they match holds.
+    outside: Vec<usize>,
 }
 
 impl FunctionMatchers {
@@ -314,7 +325,13 @@ impl FunctionMatchers {
         matchers: Vec<FunctionMatcher>,
         context: &'static str,
     ) -> Result<Self, RuleConfigError> {
-        let wholes = || matchers.iter().map(FunctionMatcher::whole).enumerate();
+        let outside: Vec<usize> = (0..matchers.len())
+            .filter(|&i| matchers[i].names_outside_only())
+            .collect();
+        let wholes = || {
+            (matchers.iter().map(FunctionMatcher::whole).enumerate())
+                .filter(|(i, _)| outside.binary_search(i).is_err())
+        };
         let names = wholes()
             .filter(|(_, w)| w.module().is_none())
             .map(|(i, w)| (i, w.name()));
@@ -330,6 +347,7 @@ impl FunctionMatchers {
             modules: ModuleIndex::new(modules, context)?,
             matchers,
             methods,
+            outside,
         })
     }
 
@@ -371,8 +389,8 @@ impl FunctionMatchers {
     /// project ([`FunctionMatcher::names_external`]), ascending: looked up by the whole name,
     /// never by its suffixes.
     pub(crate) fn naming_external(&self, symbol: &str) -> Vec<usize> {
-        let mut found = Vec::new();
         // A text with a module part names project definitions only.
+        let mut found = self.outside.clone();
         self.names.find(symbol, &mut found);
         found.sort_unstable();
         found.dedup();
@@ -461,6 +479,12 @@ impl CallTargetPattern {
     /// The text without its argument list: the name of what it calls.
     fn name_part(&self) -> &str {
         &self.text[..self.text.len() - self.list.len()]
+    }
+
+    /// The classes whose methods the text names, with their subclasses, and the classes it
+    /// names.
+    pub(crate) fn family(&self) -> &FxHashSet<String> {
+        &self.family
     }
 }
 
@@ -672,6 +696,75 @@ fn receiver_params(site: &CallSite) -> u64 {
         .map_or(0, |o| o.may_params)
 }
 
+/// A call (or a reference) of targets of a `call-owners` contract, made in `caller`, as its
+/// reports name it ([`add_call_report`]).
+struct CallMade<'s> {
+    caller: &'s FuncKey,
+    /// The file and the span of the call.
+    at: (&'s Path, Span),
+    /// The contract, and the first target of the group called (the rank of its reports).
+    group: (usize, usize),
+    /// The diagnostic target, and the message's name of what is called ([`group_texts`]).
+    texts: (&'s str, &'s str),
+    /// What the call does with the target ([`call_verb`]).
+    verb: &'static str,
+    /// What the call calls, as a call chain shows it.
+    callee: &'s dyn Fn() -> String,
+}
+
+/// Add the report `r` of `call` of a target of `rule`, standing for `sites`.
+fn add_call_report<'c>(
+    cx: &CheckContext<'c>,
+    reports: &mut MergedReports<'c, usize>,
+    rule: &CallOwnerRule<'_>,
+    call: &CallMade<'_>,
+    r: &DelegatedReport,
+    sites: Sites,
+) {
+    let Some(unit) = cx.index.file_of(&r.func).and_then(|p| cx.unit(p)) else {
+        return;
+    };
+    let ((path, span), (contract, rank), (target, called)) = (call.at, call.group, call.texts);
+    let name = Named {
+        target,
+        named: called,
+        rank,
+        contract,
+    };
+    let message = || {
+        let via = if r.chain.is_empty() {
+            String::new()
+        } else {
+            format!(" via `{}`", call.caller.fqn())
+        };
+        let place = (rule.allowance).where_text("call owners", "forbidden callers", &rule.label);
+        format!("`{}` {} {called}{via} {place}", r.func.qualname, call.verb)
+    };
+    // A delegated report ends its chain at the call itself.
+    let chain = || {
+        let mut chain = r.chain.clone();
+        if !chain.is_empty() {
+            chain.push(CallHop {
+                caller: call.caller.clone(),
+                callee: (call.callee)(),
+                span,
+                path: path.to_path_buf(),
+            });
+        }
+        chain
+    };
+    reports.add(
+        unit,
+        &r.func,
+        r.span(span),
+        (contract, name),
+        sites,
+        rule.note,
+        message,
+        chain,
+    );
+}
+
 pub(super) struct CallOwnerRule<'r> {
     /// How a report names the contract ([`heki_env::contract_label`]).
     pub(super) label: String,
@@ -786,57 +879,19 @@ pub(crate) fn mut204<'c>(
                             inside,
                         )
                     };
-                    let add = |reports: &mut MergedReports<'c, usize>,
-                               r: &DelegatedReport,
-                               sites| {
-                        let Some(unit) = cx.index.file_of(&r.func).and_then(|p| cx.unit(p)) else {
-                            return;
-                        };
-                        let name = Named {
-                            target: &target,
-                            named: &called,
-                            rank: group[0],
-                            contract: c,
-                        };
-                        reports.add(
-                            unit,
-                            &r.func,
-                            r.span(site.span),
-                            (c, name),
-                            sites,
-                            rule.note,
-                            || {
-                                let what = call_verb(site, reference);
-                                let via = if r.chain.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!(" via `{caller}`")
-                                };
-                                format!(
-                                    "`{}` {what} {called}{via} {}",
-                                    r.func.qualname,
-                                    rule.allowance.where_text(
-                                        "call owners",
-                                        "forbidden callers",
-                                        &rule.label
-                                    )
-                                )
-                            },
-                            || {
-                                // A delegated report ends its chain at the call itself.
-                                let mut chain = r.chain.clone();
-                                if !chain.is_empty() {
-                                    chain.push(CallHop {
-                                        caller: key.clone(),
-                                        callee: site_callee(site),
-                                        span: site.span,
-                                        path: path.to_path_buf(),
-                                    });
-                                }
-                                chain
-                            },
-                        );
+                    let callee = || site_callee(site);
+                    let call = CallMade {
+                        caller: key,
+                        at: (path, site.span),
+                        group: (c, group[0]),
+                        texts: (&target, &called),
+                        verb: call_verb(site, reference),
+                        callee: &callee,
                     };
+                    let add =
+                        |reports: &mut MergedReports<'c, usize>, r: &DelegatedReport, sites| {
+                            add_call_report(cx, reports, rule, &call, r, sites);
+                        };
                     let access = (obj, looked_up, c, family_id, target.clone(), called.clone());
                     let site_id = (caller.clone(), site.span);
                     access_groups.report(&mut reports, access, site_id, walk, add);
@@ -844,9 +899,71 @@ pub(crate) fn mut204<'c>(
             }
         }
     }
+    // A call of a symbol outside the project is judged in the function making it, as a call of
+    // a project target is: it has no receiver of the caller, and no class initializes itself
+    // through it.
+    let mut outside: Vec<InsideAllowed> = rules.iter().map(|_| InsideAllowed::default()).collect();
+    let no_family = FxHashSet::default();
+    for (key, _) in cx.defined_functions() {
+        let mut access_groups = AccessGroups::new();
+        for (path, a) in cx.external_accesses(key) {
+            if a.kind != AccessKind::Call {
+                continue;
+            }
+            for (c, t) in contracts.naming_external(&a.name) {
+                let rule = &rules[c];
+                let target = rule.targets.patterns[t].text.as_str();
+                let called = format!("`{}`", matched_name(target, || a.name.clone()));
+                let callee = || a.name.clone();
+                let call = CallMade {
+                    caller: key,
+                    at: (path, a.span),
+                    group: (c, t),
+                    texts: (target, &called),
+                    verb: "calls",
+                    callee: &callee,
+                };
+                let inside = &mut outside[c];
+                let walk = || {
+                    delegated_reports(
+                        cx,
+                        &sites,
+                        (&rule.allowance, &no_family),
+                        (key, 0, 0),
+                        inside,
+                    )
+                };
+                let add = |reports: &mut MergedReports<'c, usize>, r: &DelegatedReport, sites| {
+                    add_call_report(cx, reports, rule, &call, r, sites);
+                };
+                let site_id = (key.fqn(), a.span);
+                access_groups.report(&mut reports, (c, t, called.clone()), site_id, walk, add);
+            }
+        }
+    }
     reports.emit(cx, ("MUT204", "allowed callers"), out, |examples| {
         let owners = |k: &FuncKey| rules.iter().any(|r| r.allowance.names_place(k));
         for (key, path, _) in place_functions(cx, owners) {
+            for (_, a) in cx.external_accesses(key) {
+                if a.kind != AccessKind::Call {
+                    continue;
+                }
+                for (c, t) in contracts.naming_external(&a.name) {
+                    let rule = &rules[c];
+                    if !rule.allowance.names_place(key) {
+                        continue;
+                    }
+                    let target = rule.targets.patterns[t].text.as_str();
+                    let called = format!("`{}`", matched_name(target, || a.name.clone()));
+                    let name = Named {
+                        target,
+                        named: &called,
+                        rank: t,
+                        contract: c,
+                    };
+                    examples.add((&c, name), key, path);
+                }
+            }
             for &(_, site) in sites.get(key).into_iter().flatten() {
                 for (c, groups) in contracts.called(site) {
                     let rule = &rules[c];

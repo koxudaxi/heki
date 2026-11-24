@@ -105,6 +105,7 @@ pub fn build_module_ir(
         end: source.len() as u32,
     };
     let module_fn = ctx.lower_function_body(FunctionSpec {
+        enclosing: None,
         name: "<module>".to_string(),
         qualname: "<module>".to_string(),
         owner_class: None,
@@ -288,6 +289,8 @@ impl CompKind {
 }
 
 struct FunctionSpec<'a> {
+    /// The scope whose code makes this one ([`IrFunction::enclosing`]).
+    enclosing: Option<FunctionId>,
     name: String,
     qualname: String,
     owner_class: Option<ClassId>,
@@ -474,6 +477,7 @@ impl<'a> ModuleLowerer<'a> {
             is_module_body: spec.is_module_body,
             is_class_body: spec.is_class_body,
             passed_from: None,
+            enclosing: spec.enclosing,
         };
         let fn_id = self.alloc_function_slot(placeholder);
         // The module body is no definition, and its span (the whole source) is also the span of
@@ -570,7 +574,10 @@ impl<'a> ModuleLowerer<'a> {
         }
 
         let lowered = builder.finish();
-        self.functions[fn_id.0 as usize] = lowered.function;
+        self.functions[fn_id.0 as usize] = IrFunction {
+            enclosing: spec.enclosing,
+            ..lowered.function
+        };
         self.class_bases.extend(
             lowered
                 .class_bases
@@ -1639,12 +1646,15 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         let annotations = function_annotations(&func.parameters, func.returns.as_deref());
         let lazily_read = self.lower_annotations(&annotations, &mut retained);
 
-        let (owner_class, owner_class_qualname) = if self.is_class_body {
+        // A `def` under a `global` declaration of its name binds the module's name: neither a
+        // local nor a member of the class, and named as a module-level function.
+        let binds_global = self.binds_global(&func.name);
+        let (owner_class, owner_class_qualname) = if self.is_class_body && !binds_global {
             (self.owner_class, self.owner_class_qualname.clone())
         } else {
             (None, None)
         };
-        let qualname = if self.is_module_body {
+        let qualname = if self.is_module_body || binds_global {
             func.name.to_string()
         } else if self.is_class_body {
             format!("{}.{}", self.qualname, func.name)
@@ -1659,6 +1669,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         let child_outer = self.child_outer_locals();
 
         let child_id = self.module.lower_function_body(FunctionSpec {
+            enclosing: Some(self.id),
             name: func.name.to_string(),
             qualname,
             owner_class,
@@ -1767,6 +1778,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         let child_outer = self.child_outer_locals();
 
         let child_id = self.module.lower_function_body(FunctionSpec {
+            enclosing: Some(self.id),
             name: cls.name.to_string(),
             qualname: class_qualname.clone(),
             owner_class: Some(class_id),
@@ -3205,6 +3217,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 let child_outer = self.child_outer_locals();
                 let qualname = format!("{}.<locals>.<lambda>", self.qualname);
                 let child_id = self.module.lower_function_body(FunctionSpec {
+                    enclosing: Some(self.id),
                     name: "<lambda>".to_string(),
                     qualname,
                     owner_class: None,
@@ -3244,6 +3257,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 let child_outer = self.child_outer_locals();
                 let qualname = format!("{}.<locals>.<genexpr>", self.qualname);
                 let child_id = self.module.lower_function_body(FunctionSpec {
+                    enclosing: Some(self.id),
                     name: "<genexpr>".to_string(),
                     qualname,
                     owner_class: None,
@@ -3673,6 +3687,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             let child_outer = self.child_outer_locals();
             let qualname = format!("{}.<locals>.{comp_name}", self.qualname);
             let child_id = self.module.lower_function_body(FunctionSpec {
+                enclosing: Some(self.id),
                 name: comp_name.to_string(),
                 qualname,
                 owner_class: None,
@@ -3909,6 +3924,11 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         }
     }
 
+    /// Whether this scope declares `name` `global`, so that binding it binds the module's name.
+    fn binds_global(&self, name: &str) -> bool {
+        self.scope.globals.contains(self.scope_name(name).as_ref())
+    }
+
     /// Whether a read of `name` here resolves to a module global or a builtin.
     fn resolves_to_global(&self, name: &str) -> bool {
         if self.resolve_comp_rename(name).is_some() {
@@ -4121,6 +4141,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             is_module_body: self.is_module_body,
             is_class_body: self.is_class_body,
             passed_from: None,
+            enclosing: None,
         };
         Lowered {
             function: f,
