@@ -6,8 +6,8 @@
 use crate::problem::{settings_root, table_items, table_name};
 use crate::{
     CallOwnerRule, ConfigError, ConfigLayout, EcosystemOverride, EffectBoundaryRule, HekiConfig,
-    ImportOwnerRule, InvalidationRule, LintConfig, OrderedOutputSetting, ReadOnlyReturnRule,
-    ReadOwnerRule, WriteOwnerRule,
+    ImportOwnerRule, ImportsConfig, InvalidationRule, LintConfig, OrderedOutputSetting,
+    ReadOnlyReturnRule, ReadOwnerRule, WriteOwnerRule,
 };
 use crate::{Docs, Problem};
 use serde::Serialize;
@@ -52,6 +52,7 @@ fn tables() -> &'static [Table] {
             table("readonly-returns", keys_of::<ReadOnlyReturnRule>()),
             table("invalidation", keys_of::<InvalidationRule>()),
             table("import-owners", keys_of::<ImportOwnerRule>()),
+            table("imports", keys_of::<ImportsConfig>()),
             table("ecosystem", keys_of::<EcosystemOverride>()),
             table(
                 "ecosystem.writes-in-order",
@@ -164,6 +165,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ),
     ("import-owners.type-checking", r#""report""#),
     ("import-owners.reach", r#""import-time""#),
+    ("imports.cycle-edges", r#"["body", "lazy"]"#),
     ("ecosystem.symbol", r#""mypkg.db.run_query""#),
     ("ecosystem.effects", r#"["blocking_db", "db_query"]"#),
     ("ecosystem.async-safe", "true"),
@@ -190,10 +192,10 @@ const EXAMPLES: &[(&str, &str)] = &[
 fn example(layout: ConfigLayout, table: &str, key: &str) -> Option<(String, &'static str)> {
     let path = child(table, key);
     if table.is_empty() && self::table(&path).is_some() {
-        let kind = if key == "lint" {
-            "a table"
-        } else {
+        let kind = if HekiConfig::CONTRACT_KEYS.contains(&key) || key == "ecosystem" {
             "an array of tables"
+        } else {
+            "a table"
         };
         return Some((table_name(layout, key), kind));
     }
@@ -435,7 +437,7 @@ mod tests {
                     "ecosystem.writes-in-order" => {
                         format!("[[ecosystem]]\n[ecosystem.writes-in-order]\n{line}\n")
                     }
-                    "lint" => format!("[lint]\n{line}\n"),
+                    "lint" | "imports" => format!("[{}]\n{line}\n", t.path),
                     contract => format!("[[{contract}]]\n{line}\n"),
                 };
                 let parsed = ConfigLayout::TopLevel.parse(Path::new("heki.toml"), &text);

@@ -2242,6 +2242,18 @@ an import itself.
   the modules and share one `Budget::of_graph`; past it they answer open and report nothing. A
   check without such a contract resolves only the checked modules' sites
   (`ImportGraph::resolving`), so the language server records only the declarations they read.
+- **Cycle groups** (`ImportGraph::cycle_groups`, for `IMP101`): a site of the classes asked
+  steps into the module it certainly loads and into the parent packages that load first, except
+  the packages holding its own module, which loaded before it ran (`ImportGraph::hops`,
+  `ImportGraph::holds`); an import naming such a package itself is a step. Per module, one hop
+  into each module, chosen by when its site runs and then by source order. The groups are the
+  strongly connected components of two or more modules (`scc::tarjan_scc`), and each gets a
+  shortest cycle through its smallest module, breadth first over the hops in the order of the
+  modules they enter (`walk::reach_breadth_first`). Both are linear in the modules and sites and
+  unmetered: Tarjan takes each hop once, and each search walks the modules of its own group,
+  which no other group shares (one step per module, owner `import_cycles`).
+  The language server re-checks the files whose groups close a cycle, before and after an
+  import changes (`Workspace::note_import_cycles`).
 - **Early Cutoff**: `IncrementalUpdate::imports_changed` tells whether a file's sites changed,
   without positions (`ModuleImports::same_facts`), or appeared or disappeared with the file.
 - **Kinds of code** (`heki_effect::code_kind`): a test module (under `tests/` or `test/`,

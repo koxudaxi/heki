@@ -519,7 +519,8 @@ pub fn typed_writes(config: &HekiConfig, selection: &RuleSelection) -> TypedWrit
 /// The opt-in facts the rules `selection` runs read: `MUT112`'s return origins, `MUT113`'s
 /// iteration facts, `EFF109`'s lock facts, `EFF110`'s one-at-a-time uses, the must-facts of
 /// the effect rules whose reports are split by them, the kept-value facts of `MUT101` and
-/// `MUT111`, `MUT119`'s new returned containers, and the callables `EFF115` and `EFF116` read, each only with their rules. The readers assert it
+/// `MUT111`, `MUT119`'s new returned containers, the callables `EFF115` and `EFF116` read, and
+/// the import facts of `IMP101`, each only with their rules. The readers assert it
 /// ([`heki_effect::ProjectIndex::opt_in_facts`]).
 pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
     OptInFacts {
@@ -544,7 +545,7 @@ pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
         fresh_returns: selection.is_enabled("MUT119"),
         shared_state: false,
         blind_spots: false,
-        imports: false,
+        imports: selection.is_enabled("IMP101"),
     }
 }
 

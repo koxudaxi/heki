@@ -231,7 +231,8 @@ through helpers, effects behind a call, stale shared state, and quadratic patter
 Ruff models syntax, and type checkers model declared types. heki models effects and aliases,
 what code does, so use it next to them: the second example passes `mypy --strict` and pyright's
 strict mode, yet sends one query per order. Import contracts (experimental) know when each import
-runs: in a function, lazily, by a constant name, or never under `TYPE_CHECKING`. Reading the
+runs: in a function, lazily, by a constant name, or never under `TYPE_CHECKING`, and so does the
+opt-in import cycle rule, which counts only the imports that run while modules load. Reading the
 contracts of tach and import-linter is planned. See the
 [comparison](https://heki.koxudaxi.dev/#how-heki-differs).
 

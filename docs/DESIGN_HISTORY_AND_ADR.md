@@ -614,7 +614,9 @@ that need no configuration, the import contracts of other tools, and heki's own 
   7. A report states where an import is written, its timing class, and the module it loads; it
      does not claim that a branch is taken. An open target stops an exact report; a contract's
      strict sibling (`IMP202`) reports it with `unresolved = "report"`.
-  8. A cycle is reported once per strongly connected group. Parent-package loads are no edges.
+  8. A cycle is reported once per strongly connected group. Loading the packages that hold the
+     importing module is no edge, since Python loaded them before the module ran; loading any
+     other parent package is (`import pkg.sub.leaf` runs `pkg/sub/__init__.py`).
   9. Definitions are not import targets: `call-owners` and `read-owners` keep them.
   10. Ruff and isort keep what one import statement decides: order (`I001`), required imports
       (`I002`), import conventions (`ICN`), relative style (`TID252`), and the `lazy` policy of
@@ -623,11 +625,11 @@ that need no configuration, the import contracts of other tools, and heki's own 
   11. Import facts are compared with CPython both ways, and imported contracts with the tools
       they come from.
 - *Rejected*: leaving imports to tach and import-linter; a resolver inside the rules; one report
-  per elementary cycle (their number can be exponential); parent packages as edges (every
-  submodule would close a cycle with its `__init__`); a rule for unused declared dependencies
-  (plugins, entry points, and tools are used without an import); reporting the sites Ruff's own
-  bans report; translating other tools' files into `[tool.heki]` tables (two declarations of one
-  contract).
+  per elementary cycle (their number can be exponential); the packages holding a module as
+  edges of its imports (every submodule would close a cycle with its `__init__`); a rule for
+  unused declared dependencies (plugins, entry points, and tools are used without an import);
+  reporting the sites Ruff's own bans report; translating other tools' files into `[tool.heki]`
+  tables (two declarations of one contract).
 
 ---
 

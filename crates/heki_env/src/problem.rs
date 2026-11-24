@@ -65,6 +65,7 @@ docs_pages! {
     ReadonlyReturns => "configuration/#readonly-returns",
     Invalidation => "configuration/#invalidation",
     ImportOwners => "configuration/#import-owners",
+    Imports => "configuration/#imports-toolhekiimports",
     Ecosystem => "configuration/#ecosystem-knowledge-toolhekiecosystem",
     Rules => "rules/",
     Baselines => "adoption/#ratchet-baselines",
@@ -100,6 +101,7 @@ impl Docs {
             "readonly-returns" => Self::ReadonlyReturns,
             "invalidation" => Self::Invalidation,
             "import-owners" => Self::ImportOwners,
+            "imports" => Self::Imports,
             "ecosystem" => Self::Ecosystem,
             _ => Self::TopLevel,
         }
@@ -517,6 +519,7 @@ mod tests {
             ("readonly-returns", "deep", Docs::ReadonlyReturns),
             ("invalidation", "invalidators", Docs::Invalidation),
             ("import-owners", "reach", Docs::ImportOwners),
+            ("imports", "cycle-edges", Docs::Imports),
             ("lint.severity", "MUT101", Docs::Lint),
         ] {
             assert_eq!(Docs::of_key(table, key), docs, "{table}.{key}");
