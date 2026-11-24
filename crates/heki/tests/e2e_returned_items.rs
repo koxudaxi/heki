@@ -195,6 +195,11 @@ def tp_lines(p: pathlib.Path) -> None:
 def tn_characters(p: pathlib.Path) -> None:
     for c in db.notes(p):
         book(int(c))
+
+
+def tn_counted_filtered() -> None:
+    for i in [i for i in db.ids() if i > 0]:
+        book(i)
 "#;
 
 /// What every return of a helper gives decides the origin of a loop over its result.
@@ -261,6 +266,8 @@ fn rows_a_function_returns_are_the_datas_and_rows_the_code_fixes_are_not() {
         (102, "EFF103", text_of("note_lines")),
         // Iterating text gives its characters.
         (107, "EFF103 [heuristic]", heuristic.to_owned()),
+        // One item per row, then some of them: no count of the rows follows.
+        (112, "EFF103 [heuristic]", heuristic.to_owned()),
     ];
     let expected: Vec<(u64, String, String)> = expected
         .into_iter()
