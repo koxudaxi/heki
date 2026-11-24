@@ -564,7 +564,9 @@ changes in an exact rule.
    section heading to `## [<version>] - <publish date>` (the UTC date), and makes the
    `[<version>]` compare link end at the release tag instead of `HEAD` (a missing link compares
    the previous release with the tag). When a section is headed `[Unreleased]`, its link compares
-   the tag with `HEAD`. The entries stay as they were written.
+   the tag with `HEAD`. The entries stay as they were written. The release builds date the
+   section the same way in the tree they build, so `heki version --changelog` of a released
+   binary prints it as the sync writes it.
 4. GitHub creates the CI runs of a pull request that a workflow opens with `GITHUB_TOKEN` in an
    approval-required state, and the checks of a run started with `workflow_dispatch` do not
    count for the required checks of `main`. Close and reopen the pull request to start CI

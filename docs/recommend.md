@@ -141,9 +141,10 @@ Candidates are drawn from what the code does, never from names:
 - `read-owners`: a private attribute (`_name`) read only by functions of its class's module,
   whose class is used in at least two modules. The entry allows the readers as above.
 - `effect-boundaries`: a module whose functions reach no blocking call, with
-  `forbid = ["blocking"]`; a package whose every module qualifies is one scope. A scope has at
-  least three functions. A package holding test code names its other modules one by one, not by
-  a wildcard.
+  `forbid = ["blocking"]`; a package whose every module qualifies is one scope, which names the
+  package's own module and the modules below it (`["pkg:*", "pkg.*:*"]`), also when it has no
+  `__init__.py` yet. A scope has at least three functions. A package holding test code names its
+  other modules one by one, not by a wildcard.
 
 No candidate is drawn from a module holding test code, as `relax-async-in-tests` finds it: a
 test file, or a file defining a `test_*` function or method (a test class in Django's

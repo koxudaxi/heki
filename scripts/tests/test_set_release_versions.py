@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -92,6 +95,50 @@ def test_the_changelog_section_is_dated_and_its_link_points_to_the_tag(checkout:
     assert (checkout / "CHANGELOG.md").read_text(encoding="utf-8") == (
         DATA / "dated-CHANGELOG.md"
     ).read_text(encoding="utf-8")
+
+
+def test_a_release_build_dates_the_changelog_as_the_sync_does(
+    checkout: Path, tmp_path: Path
+) -> None:
+    """The step that writes the release into a build's tree and the Release Sync step leave the
+    same CHANGELOG, so `heki version --changelog` of the released binary prints what `main`
+    gets; without a date (a pre-release, a manual build) the section stays as it is."""
+    yaml = pytest.importorskip("yaml")
+    workflows = ROOT / ".github" / "workflows"
+    build = yaml.safe_load((workflows / "release.yml").read_text(encoding="utf-8"))
+    sync = yaml.safe_load((workflows / "release-sync.yml").read_text(encoding="utf-8"))
+    build_step = next(
+        s for s in build["jobs"]["sdist"]["steps"] if "set_release_versions.py" in s.get("run", "")
+    )
+    sync_step = next(
+        s for s in sync["jobs"]["patch"]["steps"] if "set_release_versions.py" in s.get("run", "")
+    )
+    script = f'"{sys.executable}" "{ROOT / "scripts" / "set_release_versions.py"}"'
+
+    def run(step: dict, root: Path, env: dict[str, str]) -> str:
+        command = step["run"].replace(
+            "uv run --no-project --python 3.14 scripts/set_release_versions.py", script
+        )
+        result = subprocess.run(
+            ["bash", "-c", f'{command} --root "{root}"'],
+            env={**os.environ, **env},
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        return (root / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    synced = tmp_path / "main"
+    shutil.copytree(checkout, synced)
+    built = run(build_step, checkout, {"RELEASE_VERSION": "0.1.2", "RELEASE_DATE": "2026-11-25"})
+    assert built == run(sync_step, synced, {"VERSION": "0.1.2", "DATE": "2026-11-25"})
+    assert "## [0.1.2] - 2026-11-25" in built
+    undated = tmp_path / "undated"
+    shutil.copytree(synced, undated)
+    shutil.copy(DATA / "CHANGELOG.md", undated / "CHANGELOG.md")
+    unchanged = run(build_step, undated, {"RELEASE_VERSION": "0.1.2", "RELEASE_DATE": ""})
+    assert unchanged == (DATA / "CHANGELOG.md").read_text(encoding="utf-8")
 
 
 def test_a_second_run_changes_nothing(checkout: Path, capsys) -> None:

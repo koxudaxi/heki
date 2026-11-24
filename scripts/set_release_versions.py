@@ -6,8 +6,9 @@ Usage:
 
 The release tag (``v`` + the version) is the only source of the version. `release.yml` runs the
 script with it right after checking out the tag, so that every distribution declares it, and the
-Release Sync workflow runs it on `main` with ``--changelog <publish date>`` after the release is
-published, in the pull request that brings `main` to the release. It writes:
+Release Sync workflow runs it on `main` after the release is published, in the pull request that
+brings `main` to the release. Both pass ``--changelog <publish date>`` for a final release, so the
+CHANGELOG a binary embeds (`heki version --changelog`) has the section `main` gets. It writes:
 
 - `Cargo.toml`: ``workspace.package.version``, and the ``version`` next to the ``path`` of every
   internal crate under ``workspace.dependencies`` (crates.io needs both to agree);
