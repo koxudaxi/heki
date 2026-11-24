@@ -1,13 +1,14 @@
-//! Rule registry spanning all 3 families derived from the single Effect & Alias theory.
+//! Rule registry spanning the families of heki's checks.
 //!
 //! - Family 1 (`MUT`): Mutation & State Effect (`MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`,
 //!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT114`, `MUT115`, `MUT118`, `MUT119`,
-//!   `MUT201`, `MUT202`, `MUT203`, `MUT204`, `MUT205`, `MUT206`, `MUT207`)
+//!   `MUT120`, `MUT201`, `MUT202`, `MUT203`, `MUT204`, `MUT205`, `MUT206`, `MUT207`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
 //!   `EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
 //!   `OPT112`, `OPT113`, `OPT120`, `OPT121`, `OPT130`); `OPT112` / `OPT113` are Advisory-lane
 //!   reports without a rewrite.
+//! - Family 4 (`IMP`): Imports (`IMP201`, `IMP202`)
 
 pub mod blind_spots;
 pub mod census;
@@ -15,9 +16,12 @@ mod contracts;
 mod data_rules;
 mod eff_rules;
 pub mod experimental;
+mod imp_rules;
+pub mod import_view;
 pub mod inspect;
 mod mut_rules;
 mod opt_rules;
+mod patterns;
 pub mod precision;
 pub mod premises;
 pub mod project;
@@ -27,11 +31,12 @@ pub mod snapshot;
 pub mod unmatched;
 
 pub use contracts::{
-    MAX_INVALIDATIONS, declares_ownership, inspect_facts, opt_in_facts, recommend_facts,
-    summary_contracts, typed_writes,
+    ContractRoles, MAX_INVALIDATIONS, declares_ownership, import_facts, inspect_facts,
+    opt_in_facts, recommend_facts, summary_contracts, typed_writes,
 };
 pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
 pub use heki_diagnostics::Certainty;
+pub use imp_rules::{walking_importers, walks_imports};
 pub use mut_rules::{
     CHAIN_RULES, ChainFacts, EXAMPLE_RULES, ExampleOwners, SentinelTestKey, StaleWriteKey,
     chain_facts, deep_copy_files, example_digest, family_readers, kept_removals_in,
@@ -64,6 +69,7 @@ pub enum RuleFamily {
     Eff,
     Data,
     Opt,
+    Imp,
 }
 
 /// What happens in the code a rule reports, which sets its default severity.
@@ -362,6 +368,18 @@ pub const CORE_RULES: &[RuleMeta] = &[
         doc: include_str!("../rule-docs/MUT119.md"),
     },
     RuleMeta {
+        code: "MUT120",
+        slug: "readonly-view-mutation",
+        family: RuleFamily::Mut,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Opt-in: changing a value held through a read-only view (a protocol or class whose members are all properties without a setter) where a type checker does not see it: a helper that does not see the view's type rebinds one of its properties, or code changes in place the container a property returns.",
+        doc: include_str!("../rule-docs/MUT120.md"),
+    },
+    RuleMeta {
         code: "MUT201",
         slug: "write-owner-violation",
         family: RuleFamily::Mut,
@@ -638,6 +656,30 @@ pub const CORE_RULES: &[RuleMeta] = &[
         doc: include_str!("../rule-docs/DATA101.md"),
     },
     RuleMeta {
+        code: "IMP201",
+        slug: "import-owner-violation",
+        family: RuleFamily::Imp,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Contract,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "An import that an `import-owners` contract does not allow: a forbidden module, or one outside the allowed imports.",
+        doc: include_str!("../rule-docs/IMP201.md"),
+    },
+    RuleMeta {
+        code: "IMP202",
+        slug: "unresolved-guarded-import",
+        family: RuleFamily::Imp,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Contract,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Strict mode of an `import-owners` contract (`unresolved = \"report\"`): an import whose module heki cannot name, which may be one the contract does not allow.",
+        doc: include_str!("../rule-docs/IMP202.md"),
+    },
+    RuleMeta {
         code: "OPT101",
         slug: "list-quadratic-concat",
         family: RuleFamily::Opt,
@@ -825,6 +867,20 @@ pub enum RuleConfigError {
         expected: &'static str,
         values: &'static [&'static str],
     },
+    /// A module pattern of an import contract naming a group heki does not know.
+    #[error(
+        "unknown group `{pattern}` in {context} (expected `<stdlib>`, `<project>`, or `<third-party>`)"
+    )]
+    ImportGroup {
+        pattern: String,
+        context: &'static str,
+    },
+    /// An `ignored-imports` entry that is not `importer -> imported`.
+    #[error("invalid pair `{pattern}` in {context} (expected `\"importer -> imported\"`)")]
+    ImportPair {
+        pattern: String,
+        context: &'static str,
+    },
     #[error("invalid glob `{pattern}` in {context}: {cause}")]
     Glob {
         pattern: String,
@@ -906,6 +962,14 @@ impl Explain for RuleConfigError {
             ),
             Self::Glob { pattern, context, .. } => (
                 problem.help("a pattern is a dotted name with `*`, `?`, or `[...]`: `\"pkg.parser.*\"`, `\"*.render\"`"),
+                Setting::of_context(context, Some(pattern)),
+            ),
+            Self::ImportGroup { pattern, context } => (
+                problem.help("name a module, a glob, or one of the groups `<stdlib>`, `<project>`, and `<third-party>`"),
+                Setting::of_context(context, Some(pattern)),
+            ),
+            Self::ImportPair { pattern, context } => (
+                problem.help("write the importing module, an arrow, and the imported one: `\"pkg.cli -> pkg.db\"`"),
                 Setting::of_context(context, Some(pattern)),
             ),
             Self::ModulePattern { pattern, context } => (
@@ -1076,13 +1140,14 @@ pub fn check_project(
     mut_rules::mut101_mut111(&cx, &mut out);
     mut_rules::mut107(&cx, &mut out);
     mut_rules::mut113(&cx, &mut out);
-    mut_rules::mut108_mut110(&cx, &mut out);
+    mut_rules::readonly_rules(&cx, &mut out);
     mut_rules::mut112(&cx, &mut out);
     mut_rules::mut118(&cx, &mut out);
     mut_rules::mut109(&cx, &mut out)?;
     mut_rules::mut201(&cx, &mut out)?;
     mut_rules::mut203(&cx, &mut out)?;
     mut_rules::mut204(&cx, &mut out)?;
+    imp_rules::imp201_imp202(&cx, &mut out)?;
     eff_rules::eff101_105(&cx, &mut out);
     eff_rules::eff201(&cx, &mut out)?;
     if let Some(snap) = extras.snapshot {
@@ -1139,19 +1204,18 @@ pub fn check_project(
     Ok(out)
 }
 
-/// The roles `key` has in the contracts of `config` and in the ecosystem catalog
-/// (`heki inspect`), from the matchers the rules compile.
-pub fn contract_roles(
-    config: &HekiConfig,
-    kb: &EffectiveEcosystemKb,
-    soundness_kb: &EffectiveSoundnessKb,
-    index: &ProjectIndex,
-    decls: &ProjectDecls,
-    selection: &RuleSelection,
-    key: &FuncKey,
-) -> Result<Vec<inspect::ContractRole>, RuleConfigError> {
+/// The matchers of the contracts of `config`, for the roles functions have in them and in the
+/// ecosystem catalog (`heki inspect`), compiled as the rules compile them.
+pub fn contract_roles<'a>(
+    config: &'a HekiConfig,
+    kb: &'a EffectiveEcosystemKb,
+    soundness_kb: &'a EffectiveSoundnessKb,
+    index: &'a ProjectIndex,
+    decls: &'a ProjectDecls,
+    selection: &'a RuleSelection,
+) -> Result<ContractRoles<'a>, RuleConfigError> {
     let cx = CheckContext::of_declarations(config, kb, soundness_kb, index, decls, selection);
-    contracts::roles_of(&cx, key)
+    ContractRoles::new(&cx)
 }
 
 /// The entries of the contracts of `env`'s configuration that match nothing in the files of
@@ -1777,7 +1841,7 @@ mod registry_tests {
             match r.family {
                 RuleFamily::Opt => assert_eq!(r.consequence, Consequence::Slowdown, "{}", r.code),
                 RuleFamily::Mut => assert_ne!(r.consequence, Consequence::Slowdown, "{}", r.code),
-                RuleFamily::Eff | RuleFamily::Data => {}
+                RuleFamily::Eff | RuleFamily::Data | RuleFamily::Imp => {}
             }
         }
     }
@@ -1823,13 +1887,19 @@ mod registry_tests {
             // `heki rule` and the pages put the reason between other sentences.
             assert!(f.reason.ends_with('.'), "{}", f.id);
         }
-        // An experimental rule runs only where a configuration names it.
+        // An experimental rule runs only where a configuration names it or declares its
+        // contract.
         for f in EXPERIMENTAL_FEATURES
             .iter()
             .filter(|f| f.kind == ExperimentalKind::Rule)
         {
             let rule = find_rule(f.target).unwrap();
-            assert_eq!((rule.code, rule.activation), (f.target, Activation::OptIn));
+            assert_eq!(rule.code, f.target);
+            assert!(
+                matches!(rule.activation, Activation::OptIn | Activation::Contract),
+                "{}",
+                rule.code
+            );
             assert_eq!(experimental_rule(rule.code), Some(f));
         }
         assert_eq!(experimental_rule("MUT107"), None);

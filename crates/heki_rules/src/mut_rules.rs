@@ -1,6 +1,6 @@
 //! Family 1 rules: `MUT101`, `MUT106`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT112`,
-//! `MUT113`, `MUT119`, `MUT201`, `MUT202`, `MUT203`, `MUT204` (docs/ANALYSIS_AND_KB_SPEC.md
-//! section 2.3).
+//! `MUT113`, `MUT119`, `MUT120`, `MUT201`, `MUT202`, `MUT203`, `MUT204`
+//! (docs/ANALYSIS_AND_KB_SPEC.md section 2.3).
 
 use crate::premises::{self, OpenCause, Told};
 use crate::{
@@ -2527,7 +2527,7 @@ pub(crate) fn reports_import_probes(
 }
 
 /// The value of a contract's mode key, one of `values` (the first when unset).
-fn mode(
+pub(crate) fn mode(
     value: Option<&str>,
     values: &'static [&'static str],
     expected: &'static str,
@@ -4220,16 +4220,17 @@ fn private_methods_named_in_initializers<'m>(
         .collect()
 }
 
-// ============================================================================ MUT108 / MUT110
+// ================================================================== MUT108 / MUT110 / MUT120
 
 mod readonly_mutation;
 
 pub use readonly_mutation::{CHAIN_RULES, ChainFacts, chain_facts};
 
 /// `MUT108` (in-place changes of frozen dataclass / `NamedTuple` / `dataclass_transform` fields,
-/// `Final` / `ReadOnly` attributes, and `ReadOnly` `TypedDict` keys) and `MUT110` (`Sequence` /
-/// `Mapping` parameters handed to functions that change them), through one analysis.
-pub(crate) fn mut108_mut110(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
+/// `Final` / `ReadOnly` attributes, and `ReadOnly` `TypedDict` keys), `MUT110` (`Sequence` /
+/// `Mapping` parameters handed to functions that change them), and `MUT120` (read-only views
+/// changed where a type checker does not see it), through one analysis.
+pub(crate) fn readonly_rules(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     readonly_mutation::run(cx, out);
 }
 

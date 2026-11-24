@@ -5,7 +5,8 @@ description: >
   pyproject.toml, a heki.toml, or heki among its development dependencies or pre-commit hooks),
   or when the user asks to check Python code for side effects, changes to shared state, blocking
   calls in async code, queries in loops, or quadratic patterns. After the edit, run
-  `heki check --output-format json` and act on the reports the edit caused.
+  `heki check --touched <edited files> --output-format json` and act on the reports the edit
+  caused.
 license: MIT
 metadata:
   status: experimental
@@ -21,12 +22,11 @@ Run `heki`, or `uv run heki` when the project lists it as a development dependen
 
 ## After an edit
 
-1. Run `heki check --output-format json` on the project (the default `.`), not on the edited
-   file: a report sits where the problem shows, often in a caller's file.
-2. Act on the reports whose `path` or a `related[].path` is an edited file: a filter on `path`
-   alone drops the reports in callers' files. On a project with old findings, record them once
-   before editing with
-   `heki check --baseline <file outside the project> --update-baseline` and add
+1. Run `heki check --touched <edited files> --output-format json` in the project: heki analyzes
+   the project and shows the reports whose `path` or a `related[].path` is an edited file, as a
+   report sits where the problem shows, often in a caller's file.
+2. Act on the reports it shows. On a project with old findings, record them once before editing
+   with `heki check --baseline <file outside the project> --update-baseline` and add
    `--baseline <file>` to each check: it then reports only new findings.
 3. Follow `related` to the root cause, read `heki rule <CODE>`, and fix it there as `help` says.
 4. A `heuristic` report can be wrong: confirm from the code what its message says before

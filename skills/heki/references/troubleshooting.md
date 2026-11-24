@@ -20,9 +20,9 @@ interpreter to run.
 ## A diagnostic disappears when one file is checked
 
 `heki check path/to/file.py` analyzes that file alone and misses what its callees in other files
-do. Check the project (`heki check`, the default `.`). A diagnostic sits where the problem shows,
-which is often a caller's file: keep the ones whose `path` or a `related[].path` is a file you
-edited, not only those whose `path` is.
+do. Check the project (`heki check`, the default `.`), and pass the edited files to `--touched`:
+a diagnostic sits where the problem shows, which is often a caller's file, and `--touched` keeps
+the ones whose `path` or a `related[].path` is an edited file.
 
 ## `heki inspect` exits with 2
 
@@ -30,7 +30,8 @@ The symbol names no single function: it is ambiguous, unknown, a class, or a mod
 says what to do (`error.help` with `--output-format json`; a misspelled name gets the functions
 whose names look like it) and lists the functions to choose from (`error.candidates`,
 `error.suggestions`, `error.methods`, or `error.functions`); inspect one of them, by its dotted
-name, `path.py:LINE`, or `path.py::NAME`.
+name, `path.py:LINE`, or `path.py::NAME`. With `-`, that error object stands in the array in the
+name's place, after and before the reports of the other names.
 
 ## A command exits with 2 before checking anything
 

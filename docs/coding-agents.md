@@ -13,10 +13,18 @@ its callees do: run heki on the project (the default `.`).
 A diagnostic sits where the problem shows, which is often not the file that was edited. In the
 [first example](index.md#a-blocking-call-two-helpers-below-an-async-def) of the overview, adding
 `requests.get` to `app/users.py` makes `EFF101` report at `app/api.py`, in the `async def` that
-reaches it through two helpers. To find the diagnostics an edit caused, keep those whose `path`
-or any `related[].path` is an edited file: a filter on `path` alone drops the ones in callers'
-files. Or compare with the run before the edit: record the findings once in a baseline outside
-the project, and each check with it reports only the new ones.
+reaches it through two helpers. To see the diagnostics an edit can have caused, pass the edited
+files to `--touched`: heki still analyzes the project, and shows only the diagnostics whose `path`
+or any `related[].path` is one of them, so the report in `app/api.py` stays while `app/users.py`
+is the only edited file. The summary, the exit code, and every output format follow the
+diagnostics shown.
+
+```console
+$ heki check --touched app/users.py --output-format json
+```
+
+Or compare with the run before the edit: record the findings once in a baseline outside the
+project, and each check with it reports only the new ones.
 
 ```console
 $ heki check --baseline /tmp/heki-before.toml --update-baseline   # before the first edit
@@ -27,16 +35,16 @@ $ heki check --baseline /tmp/heki-before.toml --output-format json   # after eac
 
 A typical instruction for the agent:
 
-> After changing Python files, run `heki check --output-format json` on the project. Act on the
-> diagnostics whose `path` or a `related[].path` is a file you changed. For each, read its `help`
-> and `heki rule <rule_code>`, follow `related` to the root cause, and fix it there. A
-> diagnostic whose `certainty` is `heuristic` can be wrong about the code: confirm what its
-> message says before changing anything. Apply `heki check --fix` for the safe rewrites. Never
-> silence a diagnostic with `# heki: ignore` unless the rule's documentation describes the case
-> as intended. When unsure, run `heki check --generate-prompt "<question>"`.
+> After changing Python files, run `heki check --touched <the files you changed> --output-format
+> json` in the project: it shows the diagnostics whose `path` or a `related[].path` is a file you
+> changed. For each, read its `help` and `heki rule <rule_code>`, follow `related` to the root
+> cause, and fix it there. A diagnostic whose `certainty` is `heuristic` can be wrong about the
+> code: confirm what its message says before changing anything. Apply `heki check --fix` for the
+> safe rewrites. Never silence a diagnostic with `# heki: ignore` unless the rule's documentation
+> describes the case as intended. When unsure, run `heki check --generate-prompt "<question>"`.
 
 ```console
-$ heki check --output-format json
+$ heki check --touched app/users.py app/api.py --output-format json
 ```
 
 The configuration decides which rules run; `--heuristic` also runs the heuristic rules that are
@@ -162,6 +170,7 @@ function's effects are in question, not before every edit.
 $ heki inspect app.users.load_user --output-format json
 $ heki inspect app/users.py:42
 $ heki inspect app/users.py::load_user --callers --depth 3
+$ printf '%s\n' app.users.load_user 'app.orders.*' | heki inspect - --output-format json
 ```
 
 | Field | Content |
@@ -180,6 +189,13 @@ $ heki inspect app/users.py::load_user --callers --depth 3
   says what to do (in JSON, `error.help`; a misspelled name gets the functions whose names look
   like it) and lists the functions to choose from (`error.candidates`, `error.suggestions`,
   `error.methods`, or `error.functions`).
+- With `-` for the name, the names are read from standard input, one per line, and heki analyzes
+  the project once for all of them: the JSON output is an array of the objects, in the order of
+  the names, and the text output one section per function. Here a glob names each function it
+  matches, in the order of their full names (on the command line, a glob matching several is
+  ambiguous). A name that names no single function takes its place in the array as the error
+  object it prints alone, the others are still reported, and the exit code is 2. No names give
+  an empty array.
 - `pure` means heki found no effect and no change of an input or of shared state, and resolved
   every call below. Libraries the [catalog](configuration.md#ecosystem-knowledge-toolhekiecosystem)
   does not list count as having no effects.
@@ -192,8 +208,8 @@ $ heki inspect app/users.py::load_user --callers --depth 3
   100; `truncated` says there are more. `purity.unknown_at` is the first of them. Both are given
   for an `impure` function too: what it changes may then be incomplete.
 - A field the configuration does not compute is `null`, with the setting that computes it.
-- Exit code 0 when the function was inspected, 2 otherwise or when a file could not be analyzed
-  (the report is still printed, with `complete: false`).
+- Exit code 0 when every function was inspected, 2 otherwise or when a file could not be
+  analyzed (the reports are still printed, with `complete: false`).
 
 To see what an edit changed in a function, inspect it before and after the edit and compare
 `effects`, `changes`, `retains`, and `returns`: a new entry is new behavior. Fact keys carry no line

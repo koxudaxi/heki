@@ -15,7 +15,7 @@
 
 use crate::capacity::CapacityOf;
 use crate::decorators;
-use crate::types::{Args, Elem, Generic, Ty, generic, typing_generic};
+use crate::types::{Added, Args, Elem, Generic, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
 use heki_env::HekiConfig;
@@ -462,10 +462,10 @@ pub struct StoredElsewhere {
     /// (`obj.items += [x]`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_place: bool,
-    /// The module's code changes the object the name holds in place (`cfg.HANDLERS[kind] =
-    /// run`, `obj.items.append(x)`): its items are unknown.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub changed: bool,
+    /// What the module's code changing the object the name holds in place adds to it
+    /// (`cfg.HANDLERS[kind] = run`, `obj.items.append(x)`): its items join what they add.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed: Option<Added>,
 }
 
 /// A module's global and attribute types decided without what reading them gives, where they
@@ -604,6 +604,17 @@ pub struct ClassDecl {
     /// own attribute ([`ProjectDecls::attr_write_runs_code`]).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub properties: BTreeSet<String>,
+    /// The `@property` getters whose return annotation is a container type, as for
+    /// `container_fields`, with the access the type promises: reading the attribute gives a
+    /// container, which a type checker stops changing in place when the type is read-only
+    /// (`Sequence`, `Mapping`) (`MUT120`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub container_properties: BTreeMap<String, ParamAccess>,
+    /// Every name the class defines (`members`), at least one, is a property without a setter
+    /// or deleter: a `properties` name whose getter is a `FunctionDecl::is_property`
+    /// ([`ProjectDecls::is_readonly_view`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub only_getters: bool,
     /// The attributes its module stores on the class object or deletes outside the class body
     /// (`Keys.KEY = "x"`, `cls.KEY = "x"`, [`class_attrs_rebound`]): the class's own value of
     /// the name from then on, which no string constant of the class or its bases fixes.
@@ -1606,16 +1617,17 @@ pub(crate) fn qualifiers<'t>(
 fn container_annotation(
     text: &str,
     resolve: &impl Fn(&str) -> Option<String>,
-) -> (Qualifiers, bool) {
+) -> (Qualifiers, Option<ParamAccess>) {
     let (q, inner) = qualifiers(text, resolve);
-    let container =
-        !q.class_var && !q.pseudo_field && inner.and_then(|t| param_access(t, resolve)).is_some();
+    let container = inner
+        .filter(|_| !q.class_var && !q.pseudo_field)
+        .and_then(|t| param_access(t, resolve));
     (q, container)
 }
 
 /// What a parameter annotation promises about changing the argument (`MUT108`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ParamAccess {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ParamAccess {
     /// `Sequence[...]` / `Mapping[...]` / `ReadOnly[...]`: the argument is only read.
     ReadOnly,
     /// A mutable container type: the argument may be changed in place.
@@ -2034,7 +2046,7 @@ pub struct ProjectDecls {
     catalog_attributes: SharedMemo<(String, String), Option<String>, DeclKeys>,
 }
 
-/// Why an attribute (or `TypedDict` key) of a project class is read-only (`MUT108`).
+/// Why an attribute (or `TypedDict` key) of a project class is read-only (`MUT108`, `MUT120`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadOnlyKind {
     /// A field of a frozen class: a frozen dataclass, a `NamedTuple`, or a class that a
@@ -2042,6 +2054,9 @@ pub enum ReadOnlyKind {
     Frozen,
     /// Declared `Final[...]` or `ReadOnly[...]` (`ClassDecl::readonly_attrs`).
     Declared,
+    /// A property of a read-only view ([`ProjectDecls::is_readonly_view`]): the class declares
+    /// the whole value read-only, not one field (`MUT120`).
+    View,
 }
 
 /// The declaration that makes an attribute read-only: the first class along the MRO that
@@ -2050,7 +2065,26 @@ pub enum ReadOnlyKind {
 pub struct ReadOnlyAttr {
     pub class: String,
     pub kind: ReadOnlyKind,
+    /// The attribute holds a container. Fields and declarations are read-only only when they
+    /// do (`ClassDecl::container_fields`, `readonly_attrs`); a view's property holds one when
+    /// its getter's return annotation is a container type (`ClassDecl::container_properties`).
+    pub holds_container: bool,
+    /// A view's property annotated with a read-only container type (`Sequence`, `Mapping`): a
+    /// type checker stops changing in place what it returns, through the view.
+    pub typed_read_only: bool,
 }
+
+/// The bases outside the project a read-only view may have: they define no attribute of its
+/// instances ([`ProjectDecls::is_readonly_view`]).
+const VIEW_BASES: &[&str] = &[
+    "object",
+    "builtins.object",
+    "abc.ABC",
+    "typing.Generic",
+    "typing_extensions.Generic",
+    "typing.Protocol",
+    "typing_extensions.Protocol",
+];
 
 /// Where an import looks for the modules under a package ([`ProjectDecls::search_under`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -3545,22 +3579,68 @@ impl ProjectDecls {
         m.classes.contains_key(rest).then_some(rest)
     }
 
-    /// Why attribute `attr` of an instance of `class` is read-only (`MUT108`): the first class
-    /// along the MRO that has it as a field of a frozen class, or declares it `Final` /
-    /// `ReadOnly`.
+    /// Why attribute `attr` of an instance of `class` is read-only (`MUT108`, `MUT120`): the
+    /// first class along the MRO that has it as a field of a frozen class, or declares it
+    /// `Final` / `ReadOnly`; or, when `class` is a read-only view, the class along its MRO that
+    /// defines the property.
     pub fn readonly_attr(&self, class: &str, attr: &str) -> Option<ReadOnlyAttr> {
-        self.mro(class).into_iter().find_map(|c| {
-            let decl = self.class(&c)?;
-            self.read(|k| note(&mut k.class_facts, &c));
-            let kind = if self.frozen.contains(&c) && decl.container_fields.contains(attr) {
+        let mro = self.mro(class);
+        let declared = mro.iter().find_map(|c| {
+            let decl = self.class(c)?;
+            self.read(|k| note(&mut k.class_facts, c));
+            let kind = if self.frozen.contains(c) && decl.container_fields.contains(attr) {
                 ReadOnlyKind::Frozen
             } else if decl.readonly_attrs.contains(attr) {
                 ReadOnlyKind::Declared
             } else {
                 return None;
             };
-            Some(ReadOnlyAttr { class: c, kind })
+            let class = c.clone();
+            Some(ReadOnlyAttr {
+                class,
+                kind,
+                holds_container: true,
+                typed_read_only: false,
+            })
+        });
+        declared.or_else(|| {
+            if !self.is_view_along(&mro) {
+                return None;
+            }
+            let (c, decl) = mro
+                .iter()
+                .find_map(|c| Some((c, self.class(c).filter(|d| d.members.contains(attr))?)))?;
+            let access = decl.container_properties.get(attr);
+            Some(ReadOnlyAttr {
+                class: c.clone(),
+                kind: ReadOnlyKind::View,
+                holds_container: access.is_some(),
+                typed_read_only: access == Some(&ParamAccess::ReadOnly),
+            })
         })
+    }
+
+    /// Whether `class` is a read-only view: a project class, a protocol or not, that defines,
+    /// with every project class along its MRO, nothing but properties without a setter or
+    /// deleter (`@property` getters), at least one; no plain attribute, method, or
+    /// `__setattr__`, no metaclass heki does not know, and no other base than those defining no
+    /// attribute ([`VIEW_BASES`]). Code holding a value through such a class can only read it.
+    pub fn is_readonly_view(&self, class: &str) -> bool {
+        self.is_view_along(&self.mro(class))
+    }
+
+    /// [`Self::is_readonly_view`] of the class whose MRO is `mro`.
+    fn is_view_along(&self, mro: &[String]) -> bool {
+        let mut getters = false;
+        let views = mro.iter().all(|c| {
+            self.read(|k| note(&mut k.class_facts, c));
+            let Some(decl) = self.class(c) else {
+                return VIEW_BASES.contains(&c.as_str());
+            };
+            getters |= decl.only_getters;
+            !decl.custom_metaclass && (decl.only_getters || decl.members.is_empty())
+        });
+        views && getters
     }
 
     /// Whether a project class along the MRO of `class` names a metaclass other than `type` and
@@ -7212,7 +7292,8 @@ fn param_accesses(f: &IrFunction, decls: &ModuleDecls) -> (u64, u64) {
 }
 
 /// `MUT108` metadata of the module's classes (`ClassDecl::is_frozen`, `container_fields`,
-/// `readonly_attrs`, `decorators`, and `transform`), resolved through the module's imports.
+/// `readonly_attrs`, `decorators`, and `transform`), resolved through the module's imports, and
+/// `MUT120`'s `ClassDecl::only_getters`.
 fn readonly_metadata(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
     struct Found {
         qualname: String,
@@ -7240,7 +7321,7 @@ fn readonly_metadata(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
         let shape = FnShape::new(body);
         for ann in &body.local_annotations {
             let (q, container) = container_annotation(&ann.annotation, &resolve);
-            if ann.target.contains('.') || !container {
+            if ann.target.contains('.') || container.is_none() {
                 continue;
             }
             if !compares_false(&shape, ann.span, &resolve) {
@@ -7292,7 +7373,8 @@ fn readonly_metadata(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
                 .filter_map(|a| {
                     let (q, container) = container_annotation(&a.annotation, &resolve);
                     let attr = a.target.strip_prefix(&prefix)?;
-                    (!attr.contains('.') && q.is_final && container).then(|| attr.to_owned())
+                    (!attr.contains('.') && q.is_final && container.is_some())
+                        .then(|| attr.to_owned())
                 })
                 .collect();
             found.push(Found {
@@ -7316,17 +7398,42 @@ fn readonly_metadata(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
             c.transform = c.transform.max(f.transform);
         }
     }
+    // `MUT120`: the classes defining nothing but property getters.
+    let only_getters: Vec<String> = decls
+        .classes
+        .iter()
+        .filter(|(qualname, c)| {
+            !c.members.is_empty()
+                && c.members.iter().all(|m| {
+                    let getter = decls
+                        .definition_path(&format!("{qualname}.{m}"))
+                        .into_owned();
+                    c.properties.contains(m)
+                        && decls.functions.get(&getter).is_some_and(|f| f.is_property)
+                })
+        })
+        .map(|(qualname, _)| qualname.clone())
+        .collect();
+    for qualname in only_getters {
+        if let Some(c) = decls.classes.get_mut(&qualname) {
+            c.only_getters = true;
+        }
+    }
 }
 
 /// `ClassDecl::properties` of the module's classes: their methods decorated with `property`
 /// (`abc.abstractproperty`) or with an accessor of one (`@x.setter`, `@x.deleter`,
 /// `@x.getter`), and the class-body names bound to a call of the builtin `property`.
 /// `functools.cached_property` is no data descriptor: a store sets the instance's attribute.
+/// Also `ClassDecl::container_properties`: the getters among them annotated to return a
+/// container.
 fn class_properties(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
     let builtin_property = !decls.imports.contains_key("property")
         && !decls.functions.contains_key("property")
         && !decls.classes.contains_key("property");
+    let resolve = |name: &str| decls.resolve_dotted(name, true);
     let mut found: Vec<(String, String)> = Vec::new();
+    let mut containers: Vec<(String, String, ParamAccess)> = Vec::new();
     for f in &input.ir.functions {
         if f.is_class_body {
             let calls: FxHashSet<VarId> = f
@@ -7361,20 +7468,36 @@ fn class_properties(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
         let Some((owner, name)) = method else {
             continue;
         };
-        let is_property = f.decorators.iter().any(|d| {
-            let (head, _) = decorator_parts(d);
-            decls.decorator_is(d, &["property", "abstractproperty"])
-                || head
-                    .rsplit_once('.')
-                    .is_some_and(|(_, a)| matches!(a, "setter" | "deleter" | "getter"))
+        let getter = f
+            .decorators
+            .iter()
+            .any(|d| decls.decorator_is(d, &["property", "abstractproperty"]));
+        let accessor = f.decorators.iter().any(|d| {
+            decorator_parts(d)
+                .0
+                .rsplit_once('.')
+                .is_some_and(|(_, a)| matches!(a, "setter" | "deleter" | "getter"))
         });
-        if is_property {
+        let container = f
+            .return_annotation
+            .as_deref()
+            .filter(|_| getter)
+            .and_then(|a| container_annotation(a, &resolve).1);
+        if let Some(access) = container {
+            containers.push((owner.to_owned(), name.clone().into_owned(), access));
+        }
+        if getter || accessor {
             found.push((owner.to_owned(), name.into_owned()));
         }
     }
     for (class, name) in found {
         if let Some(c) = decls.classes.get_mut(&class) {
             c.properties.insert(name);
+        }
+    }
+    for (class, name, access) in containers {
+        if let Some(c) = decls.classes.get_mut(&class) {
+            c.container_properties.insert(name, access);
         }
     }
 }
