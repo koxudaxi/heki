@@ -272,12 +272,12 @@ pub struct CallOwnerRule {
     pub protocol_subclasses: Option<bool>,
 }
 
-/// `[[tool.heki.import-owners]]` contract for `IMP201`: which modules the modules of
+/// `[[tool.heki.import-boundaries]]` contract for `IMP201`: which modules the modules of
 /// `importers` may import. Module patterns are whole module names or globs; `<stdlib>`,
 /// `<project>`, and `<third-party>` name groups.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
-pub struct ImportOwnerRule {
+pub struct ImportBoundaryRule {
     pub name: String,
     /// The modules judged; `None` for every module.
     pub importers: Option<Vec<String>>,
@@ -478,7 +478,7 @@ pub struct HekiConfig {
     pub readonly_returns: Vec<ReadOnlyReturnRule>,
     pub invalidation: Vec<InvalidationRule>,
     pub effect_boundaries: Vec<EffectBoundaryRule>,
-    pub import_owners: Vec<ImportOwnerRule>,
+    pub import_boundaries: Vec<ImportBoundaryRule>,
     pub imports: ImportsConfig,
     pub ecosystem: Vec<EcosystemOverride>,
     /// The version `project.requires-python` of the project's `pyproject.toml` selects
@@ -1030,7 +1030,7 @@ impl HekiConfig {
         "readonly-returns",
         "invalidation",
         "effect-boundaries",
-        "import-owners",
+        "import-boundaries",
         "imports",
         "ecosystem",
     ];
@@ -1043,7 +1043,7 @@ impl HekiConfig {
         "effect-boundaries",
         "readonly-returns",
         "invalidation",
-        "import-owners",
+        "import-boundaries",
     ];
 
     /// Whether a contract is declared: a table of one of [`Self::CONTRACT_KEYS`].
@@ -1054,7 +1054,7 @@ impl HekiConfig {
             && self.effect_boundaries.is_empty()
             && self.readonly_returns.is_empty()
             && self.invalidation.is_empty()
-            && self.import_owners.is_empty())
+            && self.import_boundaries.is_empty())
     }
 
     /// Load an explicit configuration file ([`ConfigLayout`]): the `[tool.heki]` table of a
@@ -1480,7 +1480,7 @@ writes-in-order = { arg = 0, param = "data", sorted-by = "sort_keys" }
             readonly_returns: Vec::new(),
             invalidation: Vec::new(),
             effect_boundaries: Vec::new(),
-            import_owners: Vec::new(),
+            import_boundaries: Vec::new(),
             imports: ImportsConfig::default(),
             ecosystem: Vec::new(),
             requires_python: None,

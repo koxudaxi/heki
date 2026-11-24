@@ -176,7 +176,7 @@ time. Each kind of rule has its own contract:
 | No caller changes the settings `load_settings` returns to everyone | `readonly-returns` | `producers = ["app.config.load_settings"]`, `deep = true` |
 | Every change of `Order.items` is followed by `order_changed()` | `invalidation` | `targets = ["Order.items"]`, `invalidators = ["app.cache.order_changed"]` |
 | Code in `app.render` makes no blocking call | `effect-boundaries` | `scopes = ["app.render.*"]`, `forbid = ["blocking"]` |
-| `app.domain` imports nothing from `app.web`, even lazily or inside a function | `import-owners` | `importers = ["app.domain.*"]`, `forbidden-imports = ["app.web", "app.web.*"]` |
+| `app.domain` imports nothing from `app.web`, even lazily or inside a function | `import-boundaries` | `importers = ["app.domain.*"]`, `forbidden-imports = ["app.web", "app.web.*"]` |
 
 See [Contracts](https://heki.koxudaxi.dev/configuration/#contracts) for every key.
 

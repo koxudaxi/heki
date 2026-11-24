@@ -151,7 +151,7 @@ fn watch_exits_with_the_last_reports_status() {
     assert_eq!(out.status.code(), Some(2));
 }
 
-/// A walking `import-owners` contract no selected rule judges is never read: with only `IMP101`
+/// A walking `import-boundaries` contract no selected rule judges is never read: with only `IMP101`
 /// reading the import facts, an edit changing imports re-checks the file without the contract,
 /// whose invalid pattern `heki check` does not read either.
 #[test]
@@ -159,7 +159,7 @@ fn watch_reads_no_walking_contract_its_rules_do_not_judge() {
     let p = Project::new("watch_unjudged_import_walks");
     p.write(
         "heki.toml",
-        "[lint]\nselect = [\"IMP101\"]\n\n[[import-owners]]\nreach = \"all\"\nforbidden-imports = [\"[\"]\n",
+        "[lint]\nselect = [\"IMP101\"]\n\n[[import-boundaries]]\nreach = \"all\"\nforbidden-imports = [\"[\"]\n",
     )
     .write("pkg/__init__.py", "")
     .write("pkg/app.py", "def run():\n    return 1\n");

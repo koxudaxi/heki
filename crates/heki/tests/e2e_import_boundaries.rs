@@ -1,4 +1,4 @@
-//! `import-owners` contracts end to end (`IMP201`, and `IMP202` with `unresolved = "report"`):
+//! `import-boundaries` contracts end to end (`IMP201`, and `IMP202` with `unresolved = "report"`):
 //! which modules a module may import, wherever the import runs (module body, class body,
 //! function, by a constant name), with a `from` import of a submodule counted as an import of
 //! the submodule, `TYPE_CHECKING` imports only with the key, with `reach` the modules a chain of
@@ -76,17 +76,17 @@ fn project(name: &str, contracts: &str) -> Project {
 }
 
 const H6_CONTRACTS: &str = r#"
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "facts-leaf"
 importers = ["pkg.facts"]
 allowed-imports = ["<stdlib>", "pkg._records"]
 
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "shared-model-backends"
 importers = ["pkg.model.shared"]
 forbidden-imports = ["pkg.model.backend", "pkg.model.backend.*"]
 
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "no-root-import"
 importers = ["pkg.*"]
 forbidden-imports = ["pkg"]
@@ -162,7 +162,7 @@ fn modules_outside_a_package_import_only_its_entry() {
     let p = project(
         "imp_entry",
         r#"
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "billing-entry"
 exempt-importers = ["app.billing", "app.billing.*"]
 forbidden-imports = ["app.billing.*"]
@@ -199,22 +199,22 @@ fn groups_name_the_standard_library_the_project_and_the_rest() {
     let p = project(
         "imp_groups",
         r#"
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "stdlib-only"
 importers = ["pkg.leaf"]
 allowed-imports = ["<stdlib>"]
 
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "no-third-party"
 importers = ["pkg.core"]
 forbidden-imports = ["<third-party>"]
 
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "inside"
 importers = ["pkg.inner"]
 allowed-imports = ["<project>"]
 
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "sealed"
 importers = ["pkg.sealed"]
 unresolved = "report"
@@ -265,7 +265,7 @@ fn allowed_imports_and_ignored_pairs_carve_out_of_forbidden_ones() {
     let p = project(
         "imp_carve",
         r#"
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "views"
 importers = ["pkg.views.*"]
 exempt-importers = ["pkg.views.admin"]
@@ -296,7 +296,7 @@ ignored-imports = ["pkg.views.legacy -> pkg.db.session", "pkg.views.* -> <stdlib
 fn every_import_that_runs_counts_and_type_checking_ones_with_the_key() {
     let contract = |key: &str| {
         format!(
-            "[tool.heki]\ntarget-version = \"py315\"\n\n[[tool.heki.import-owners]]\nname = \"no-db\"\nimporters = [\"pkg.user\", \"pkg.opened\"]\nforbidden-imports = [\"pkg.db\"]\n{key}\n"
+            "[tool.heki]\ntarget-version = \"py315\"\n\n[[tool.heki.import-boundaries]]\nname = \"no-db\"\nimporters = [\"pkg.user\", \"pkg.opened\"]\nforbidden-imports = [\"pkg.db\"]\n{key}\n"
         )
     };
     let user = r#"from typing import TYPE_CHECKING
@@ -365,7 +365,7 @@ fn a_from_import_of_a_name_the_package_binds_imports_the_package() {
     let p = project(
         "imp_from",
         r#"
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "no-parse-module"
 importers = ["app"]
 forbidden-imports = ["pkg.parse", "pkg.lex"]
@@ -435,7 +435,7 @@ fn by_name_imports_are_exact_only_when_every_name_breaks_the_contract() {
     let contract = |unresolved: &str| {
         format!(
             r#"
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "app-imports"
 importers = ["app"]
 forbidden-imports = ["pkg.db", "pkg.cache", "pkg.plugins.*", "yaml.loader", "requests"]
@@ -501,7 +501,7 @@ forbidden-imports = ["pkg.db", "pkg.cache", "pkg.plugins.*", "yaml.loader", "req
 fn a_head_is_open_unless_the_allowed_imports_cover_it() {
     let contract = |allowed: &str| {
         format!(
-            "[[tool.heki.import-owners]]\nname = \"plugins\"\nimporters = [\"app\"]\nallowed-imports = [{allowed}]\nunresolved = \"report\"\n"
+            "[[tool.heki.import-boundaries]]\nname = \"plugins\"\nimporters = [\"app\"]\nallowed-imports = [{allowed}]\nunresolved = \"report\"\n"
         )
     };
     for (allowed, expected) in [
@@ -542,7 +542,7 @@ fn a_head_no_forbidden_pattern_can_match_is_no_report() {
         let p = project(
             "imp_head_forbidden",
             &format!(
-                "[[tool.heki.import-owners]]\nname = \"plugins\"\nimporters = [\"app\"]\nforbidden-imports = [{forbidden}]\nunresolved = \"report\"\n"
+                "[[tool.heki.import-boundaries]]\nname = \"plugins\"\nimporters = [\"app\"]\nforbidden-imports = [{forbidden}]\nunresolved = \"report\"\n"
             ),
         );
         p.write("pkg/__init__.py", "");
@@ -575,7 +575,7 @@ def run() -> None:
 fn reach_follows_the_chains_of_imports() {
     let contract = |reach: &str| {
         format!(
-            "[[tool.heki.import-owners]]\nname = \"startup\"\nimporters = [\"pkg.cli\"]\nforbidden-imports = [\"torch\", \"pkg.heavy\"]\nreach = \"{reach}\"\n"
+            "[[tool.heki.import-boundaries]]\nname = \"startup\"\nimporters = [\"pkg.cli\"]\nforbidden-imports = [\"torch\", \"pkg.heavy\"]\nreach = \"{reach}\"\n"
         )
     };
     let write = |p: &Project| {
@@ -650,7 +650,7 @@ fn reach_skips_accepted_imports_and_reports_open_sites_on_the_way() {
     let p = project(
         "imp_reach_open",
         r#"
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "startup"
 importers = ["pkg.cli"]
 forbidden-imports = ["pkg", "pkg.heavy", "pkg.plugins.*", "yaml.loader"]
@@ -704,41 +704,41 @@ fn invalid_contracts_are_configuration_errors() {
     for (contract, expected) in [
         (
             "allowed-imports = [\"<django>\"]",
-            "unknown group `<django>` in import-owners.allowed-imports",
+            "unknown group `<django>` in import-boundaries.allowed-imports",
         ),
         (
             "ignored-imports = [\"pkg.a pkg.b\"]",
-            "invalid pair `pkg.a pkg.b` in import-owners.ignored-imports",
+            "invalid pair `pkg.a pkg.b` in import-boundaries.ignored-imports",
         ),
         (
             "reach = \"far\"",
-            "unknown `reach` value `far` in import-owners `bad`",
+            "unknown `reach` value `far` in import-boundaries `bad`",
         ),
         (
             "type-checking = \"maybe\"",
-            "unknown `type-checking` value `maybe` in import-owners `bad`",
+            "unknown `type-checking` value `maybe` in import-boundaries `bad`",
         ),
         (
             "unresolved = \"yes\"",
-            "unknown `unresolved` value `yes` in import-owners `bad`",
+            "unknown `unresolved` value `yes` in import-boundaries `bad`",
         ),
         (
             "forbidden-imports = [\"pkg.[\"]",
-            "invalid glob `pkg.[` in import-owners.forbidden-imports",
+            "invalid glob `pkg.[` in import-boundaries.forbidden-imports",
         ),
         (
             "relative-imports = [\"<stdlib>\"]",
-            "group `<stdlib>` in import-owners.relative-imports: a relative import reaches only \
+            "group `<stdlib>` in import-boundaries.relative-imports: a relative import reaches only \
              the modules of the importer's own top-level package",
         ),
         (
             "relative-imports = [\"<django>\"]",
-            "group `<django>` in import-owners.relative-imports",
+            "group `<django>` in import-boundaries.relative-imports",
         ),
     ] {
         let p = project(
             "imp_invalid",
-            &format!("[[tool.heki.import-owners]]\nname = \"bad\"\n{contract}\n"),
+            &format!("[[tool.heki.import-boundaries]]\nname = \"bad\"\n{contract}\n"),
         );
         p.write("app.py", "import json\n");
         let (code, out, err) = p.check(&[]);
@@ -779,7 +779,7 @@ fn relative_imports_allow_a_module_only_through_a_relative_import() {
         let p = project(
             "imp_relative",
             &format!(
-                "[[tool.heki.import-owners]]\nname = \"runtime-leaf\"\nimporters = [\"pkg._runtime\", \"pkg._runtime.*\"]\nallowed-imports = [{allowed}]\nrelative-imports = [\"pkg._runtime\", \"pkg._runtime.*\"]\n"
+                "[[tool.heki.import-boundaries]]\nname = \"runtime-leaf\"\nimporters = [\"pkg._runtime\", \"pkg._runtime.*\"]\nallowed-imports = [{allowed}]\nrelative-imports = [\"pkg._runtime\", \"pkg._runtime.*\"]\n"
             ),
         );
         runtime_package(&p);
@@ -836,7 +836,7 @@ def by_name(flag: bool, name: str) -> object:
 fn relative_imports_judge_every_spelling_of_an_import() {
     let contract = |keys: &str| {
         format!(
-            "[tool.heki]\ntarget-version = \"py315\"\n\n[[tool.heki.import-owners]]\nname = \"runtime-leaf\"\nimporters = [\"pkg._runtime\", \"pkg._runtime.*\"]\nallowed-imports = [\"<stdlib>\"]\nrelative-imports = [\"pkg\", \"pkg.*\"]\n{keys}\n"
+            "[tool.heki]\ntarget-version = \"py315\"\n\n[[tool.heki.import-boundaries]]\nname = \"runtime-leaf\"\nimporters = [\"pkg._runtime\", \"pkg._runtime.*\"]\nallowed-imports = [\"<stdlib>\"]\nrelative-imports = [\"pkg\", \"pkg.*\"]\n{keys}\n"
         )
     };
     let exact = [
@@ -944,7 +944,7 @@ fn relative_imports_combine_with_the_other_lists() {
         let p = project(
             "imp_relative_lists",
             &format!(
-                "[[tool.heki.import-owners]]\nname = \"rt\"\nimporters = [\"pkg._runtime.a\"]\n{keys}\n"
+                "[[tool.heki.import-boundaries]]\nname = \"rt\"\nimporters = [\"pkg._runtime.a\"]\n{keys}\n"
             ),
         );
         runtime_package(&p);
@@ -978,7 +978,7 @@ def by_name(flag: bool, name: str) -> object:
 fn a_by_name_import_keeps_the_reason_of_each_alternative() {
     let p = project(
         "imp_relative_reasons",
-        "[[tool.heki.import-owners]]\nname = \"rt\"\nimporters = [\"pkg._runtime.a\"]\nallowed-imports = [\"<stdlib>\"]\nrelative-imports = [\"pkg._runtime.*\"]\nunresolved = \"report\"\n",
+        "[[tool.heki.import-boundaries]]\nname = \"rt\"\nimporters = [\"pkg._runtime.a\"]\nallowed-imports = [\"<stdlib>\"]\nrelative-imports = [\"pkg._runtime.*\"]\nunresolved = \"report\"\n",
     );
     runtime_package(&p);
     p.write("pkg/plugins/__init__.py", "__path__ = [\"/opt/plugins\"]\n");
@@ -1019,7 +1019,7 @@ fn a_by_name_import_keeps_the_reason_of_each_alternative() {
 fn an_importer_outside_the_package_cannot_import_its_modules() {
     let p = project(
         "imp_relative_outside",
-        "[[tool.heki.import-owners]]\nname = \"rt\"\nimporters = [\"app\"]\nallowed-imports = [\"<stdlib>\"]\nrelative-imports = [\"pkg._runtime.*\"]\n",
+        "[[tool.heki.import-boundaries]]\nname = \"rt\"\nimporters = [\"app\"]\nallowed-imports = [\"<stdlib>\"]\nrelative-imports = [\"pkg._runtime.*\"]\n",
     );
     runtime_package(&p);
     p.write("app.py", "import json\nfrom pkg._runtime import b\n");
@@ -1059,7 +1059,7 @@ fn reach_judges_how_only_the_importer_names_its_imports() {
         let p = project(
             "imp_relative_reach",
             &format!(
-                "[[tool.heki.import-owners]]\nname = \"rt\"\nimporters = [\"pkg._runtime.a\"]\nforbidden-imports = [\"torch\"]\nrelative-imports = [\"pkg._runtime.*\"]\nreach = \"{reach}\"\n"
+                "[[tool.heki.import-boundaries]]\nname = \"rt\"\nimporters = [\"pkg._runtime.a\"]\nforbidden-imports = [\"torch\"]\nrelative-imports = [\"pkg._runtime.*\"]\nreach = \"{reach}\"\n"
             ),
         );
         runtime_package(&p);

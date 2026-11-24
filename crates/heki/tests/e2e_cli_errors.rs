@@ -59,6 +59,26 @@ fn configuration_errors_name_the_fix_and_the_section() {
                 &lint,
             ],
         ),
+        // A key of other contracts in a contract: the tables it belongs in, and the keys this
+        // one takes.
+        (
+            "[[tool.heki.import-boundaries]]\nname = \"x\"\ntargets = [\"pkg\"]\n",
+            &[
+                "error: pyproject.toml:6:1: unknown key `targets` in [[tool.heki.import-boundaries]]",
+                "  = help: `targets` is a key of [[tool.heki.write-owners]], [[tool.heki.read-owners]], [[tool.heki.call-owners]], [[tool.heki.invalidation]]: move it there",
+                "  = help: [[tool.heki.import-boundaries]] takes `allowed-imports`, `exempt-importers`, `forbidden-imports`, `ignored-imports`, `importers`, `message`, `name`, `reach`, `relative-imports`, `type-checking`, `unresolved`",
+                &docs("configuration/#write-owners"),
+            ],
+        ),
+        // A renamed table has no alias: the error names the new table.
+        (
+            "[[tool.heki.import-owners]]\nname = \"x\"\nimporters = [\"pkg.*\"]\n",
+            &[
+                "error: pyproject.toml:4:13: unknown key `import-owners` in [tool.heki]",
+                "  = help: `[[tool.heki.import-owners]]` is now `[[tool.heki.import-boundaries]]`: rename the table, its keys are the same",
+                &docs("configuration/#import-boundaries"),
+            ],
+        ),
         // A misspelled key: the nearest key of its table.
         (
             "[tool.heki.lint]\nselct = [\"MUT\"]\n",
@@ -82,7 +102,7 @@ fn configuration_errors_name_the_fix_and_the_section() {
             "[tool.heki]\nnope = 1\n",
             &[
                 "error: pyproject.toml:5:1: unknown key `nope` in [tool.heki]",
-                "  = help: expected one of `baseline`, `call-owners`, `ecosystem`, `effect-boundaries`, `exclude`, `extend-exclude`, `import-owners`, `imports`, `invalidation`, `lint`, `read-owners`, `readonly-returns`, `required-version`, `src`, `target-version`, `write-owners`",
+                "  = help: expected one of `baseline`, `call-owners`, `ecosystem`, `effect-boundaries`, `exclude`, `extend-exclude`, `import-boundaries`, `imports`, `invalidation`, `lint`, `read-owners`, `readonly-returns`, `required-version`, `src`, `target-version`, `write-owners`",
                 &docs("configuration/#top-level-settings"),
             ],
         ),
@@ -173,6 +193,19 @@ fn configuration_errors_name_the_fix_and_the_section() {
         &[
             "error: heki.toml:1:1: unknown key `select` in the top level",
             "  = help: `select` is a key of [lint]: move it there",
+        ],
+    );
+    // The top level's keys are its tables: the help names the one to move the key to, and
+    // lists nothing else.
+    let (_, _, stderr) = p.heki(&["check"]);
+    assert!(!stderr.contains("takes"), "{stderr}");
+    p.write("heki.toml", "[[import-owners]]\nname = \"x\"\n");
+    fails_with(
+        &p,
+        &["check"],
+        &[
+            "error: heki.toml:1:3: unknown key `import-owners` in the top level",
+            "  = help: `[[import-owners]]` is now `[[import-boundaries]]`: rename the table, its keys are the same",
         ],
     );
 }

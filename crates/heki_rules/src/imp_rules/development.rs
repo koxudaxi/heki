@@ -22,7 +22,7 @@ pub(crate) fn imp104(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     let checked: FxHashSet<&str> = (cx.units.iter())
         .map(|u| u.input.module_name.as_str())
         .collect();
-    // The statements of the checked modules only, as `import-owners` resolves them: a check
+    // The statements of the checked modules only, as `import-boundaries` resolves them: a check
     // reads the declarations their imports name, and no others.
     let graph = ImportGraph::resolving(cx.index.files.values(), cx.decls, |m| checked.contains(m));
     // The checked package modules, each with its unit; a module several files define is

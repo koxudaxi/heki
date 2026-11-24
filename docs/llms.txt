@@ -46,8 +46,8 @@
 - [generator-never-iterated (EFF116)](https://heki.koxudaxi.dev/rules/generator-never-iterated/): Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
 - [hash-attr-mutation (MUT107)](https://heki.koxudaxi.dev/rules/hash-attr-mutation/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity error (a bug) · No automatic fix
 - [immutable-quadratic-concat (OPT103)](https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/): Family: Complexity Rewrites (OPT) · Exact · Opt-in · Severity warning (slower code) · No automatic fix
+- [import-boundary-violation (IMP201)](https://heki.koxudaxi.dev/rules/import-boundary-violation/): Family: Imports (IMP) · Heuristic · Runs when its contract is declared · Experimental · Severity error (a bug) · No automatic fix
 - [import-cycle (IMP101)](https://heki.koxudaxi.dev/rules/import-cycle/): Family: Imports (IMP) · Heuristic · Opt-in · Experimental · Severity warning (a bug that is rarely harmful) · No automatic fix
-- [import-owner-violation (IMP201)](https://heki.koxudaxi.dev/rules/import-owner-violation/): Family: Imports (IMP) · Heuristic · Runs when its contract is declared · Experimental · Severity error (a bug) · No automatic fix
 - [iterated-container-mutation (MUT113)](https://heki.koxudaxi.dev/rules/iterated-container-mutation/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
 - [iterator-double-consumption (MUT106)](https://heki.koxudaxi.dev/rules/iterator-double-consumption/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity error (a bug) · No automatic fix
 - [list-front-insert (OPT121)](https://heki.koxudaxi.dev/rules/list-front-insert/): Family: Complexity Rewrites (OPT) · Exact · Opt-in · Severity warning (slower code) · Proven-safe suggestion (--fix --include-size-dependent)
