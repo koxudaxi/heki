@@ -456,8 +456,9 @@ pub struct EcosystemEntry {
     pub builds_receiver: Option<FieldValues>,
     /// Calling the function imports the module its arguments name, with its parent packages
     /// (`importlib.import_module`, `__import__`): an import site of the caller
-    /// (`heki_effect::imports`). `importlib.util.find_spec` only finds one.
-    pub loads_module: Option<LoadsModule>,
+    /// (`heki_effect::imports`). `importlib.util.find_spec` only finds one. Boxed: a few of the
+    /// catalog's entries have one, and every entry holds the field.
+    pub loads_module: Option<Box<LoadsModule>>,
 }
 
 /// Where a call building an instance of its receiver's class takes the values of the fields
@@ -1043,6 +1044,10 @@ pub struct EffectiveEcosystemKb {
     pub distributions: Vec<Distribution>,
     /// The modules distributions install under other names than their own ([`Provides`]).
     pub provides: Vec<Provides>,
+    /// The last name of every symbol with a [`EcosystemEntry::result_of`] (`to_thread`,
+    /// `run_in_executor`), so a call of another name is known to hand nothing back without
+    /// resolving it ([`Self::may_hand_back`]).
+    pub result_of_names: BTreeSet<String>,
     pub digest: String,
 }
 
@@ -1062,6 +1067,11 @@ impl EffectiveEcosystemKb {
         )
         .to_hex()
         .to_string();
+        let result_of_names = entries
+            .values()
+            .filter(|e| e.result_of.is_some())
+            .map(|e| e.symbol.rsplit('.').next().unwrap_or(&e.symbol).to_owned())
+            .collect();
         Self {
             entries,
             opaque_packages,
@@ -1073,6 +1083,7 @@ impl EffectiveEcosystemKb {
             attributes: BTreeMap::new(),
             distributions: Vec::new(),
             provides: Vec::new(),
+            result_of_names,
             digest,
         }
     }
@@ -1266,6 +1277,12 @@ impl EffectiveEcosystemKb {
                     ..UnawaitedCall::default()
                 })
             })
+    }
+
+    /// Whether a call of a function or method named `name` may be one of an entry with a
+    /// [`EcosystemEntry::result_of`].
+    pub fn may_hand_back(&self, name: &str) -> bool {
+        self.result_of_names.contains(name)
     }
 
     /// Whether a row of the catalog types an attribute named `attr`, on any class.
@@ -2111,22 +2128,22 @@ mod tests {
             (
                 s(&["importlib.import_module"]),
                 EcosystemEntry {
-                    loads_module: Some(LoadsModule {
+                    loads_module: Some(Box::new(LoadsModule {
                         name: slot(0, "name"),
                         package: Some(slot(1, "package")),
                         level: None,
-                    }),
+                    })),
                     ..tagged(EnvironmentAccess::Import)
                 },
             ),
             (
                 s(&["builtins.__import__"]),
                 EcosystemEntry {
-                    loads_module: Some(LoadsModule {
+                    loads_module: Some(Box::new(LoadsModule {
                         name: slot(0, "name"),
                         package: None,
                         level: Some(slot(4, "level")),
-                    }),
+                    })),
                     ..entry(&[])
                 },
             ),
@@ -4142,7 +4159,12 @@ mod tests {
                 e.offloads_blocking_arg.is_none_or(|k| k == of.arg),
                 "{symbol}"
             );
+            assert!(
+                kb.may_hand_back(symbol.rsplit('.').next().unwrap()),
+                "{symbol}"
+            );
         }
+        assert!(!kb.may_hand_back("execute"));
     }
 
     /// Every case names its argument, tests it, and changes something; a case's return type
@@ -5034,7 +5056,10 @@ mod tests {
     #[test]
     fn module_loads_and_providing_distributions() {
         let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
-        let loads = |symbol: &str| kb.lookup(symbol).and_then(|e| e.loads_module.clone());
+        let loads = |symbol: &str| {
+            kb.lookup(symbol)
+                .and_then(|e| e.loads_module.as_deref().cloned())
+        };
         assert_eq!(
             loads("importlib.import_module"),
             Some(LoadsModule {
