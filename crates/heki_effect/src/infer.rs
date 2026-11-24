@@ -835,6 +835,28 @@ impl HandedArgs {
         }
     }
 
+    /// The callable a call of a `functools.partial` object calls, and what it passes it: the
+    /// arguments the object holds, then the call's ([`crate::partial::Partial::called_with`]).
+    pub(crate) fn held(held: crate::partial::PartialCall) -> (VarId, Self) {
+        let args = Self {
+            args: held.args,
+            kwargs: held.kwargs,
+            star_from: held.star_from,
+        };
+        (held.callable, args)
+    }
+
+    /// [`Self::held`] for a call of `partial` passing these arguments; `None` when a mapping
+    /// unpacked may replace a keyword it holds.
+    pub(crate) fn through_partial(
+        &self,
+        partial: crate::partial::Partial,
+    ) -> Option<(VarId, Self)> {
+        partial
+            .called_with(&self.args, &self.kwargs, self.star_from)
+            .map(Self::held)
+    }
+
     /// The callable a call of a catalog API runs ([`ResultOf`]), at position `of.arg`, and what
     /// it passes it: the positional arguments after it and, with `of.keywords`, the call's
     /// keywords. `None` when it is not passed by position, or `*` unpacking may move it.
@@ -1961,12 +1983,9 @@ impl<'e, 'a> Engine<'e, 'a> {
                 else {
                     break;
                 };
-                called = Called::Value(held.callable);
-                handed = Some(HandedArgs {
-                    args: held.args,
-                    kwargs: held.kwargs,
-                    star_from: held.star_from,
-                });
+                let (callable, args) = HandedArgs::held(held);
+                called = Called::Value(callable);
+                handed = Some(args);
             }
             let passed = handed.as_ref().map_or(call, HandedArgs::passed);
             let Some((symbol, of)) = self.hands_back(called) else {
