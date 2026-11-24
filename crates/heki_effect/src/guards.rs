@@ -34,14 +34,14 @@ use crate::capacity::{ParamCapacities, bound_capacity};
 use crate::resolver::{ProjectDecls, Val, aliases_of};
 use crate::{
     ArgBinding, BoundCallee, CallSite, ConstArg, ConstClass, EffectGuards, EffectSummary,
-    GuardSubject, GuardTest, InputGuard, SiteRole, Slot,
+    GuardSubject, GuardTest, InputGuard, SiteRole, Slot, ValueTest,
 };
 use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, Or, Visit, reach};
 use heki_ir::{
     BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, Inst, InstKind, IrFunction,
     NaturalLoop, PhiNode, Terminator, UnaryOpKind, VarId,
 };
-use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
+use heki_kb::{ArgFact, EffectiveEcosystemKb, ExecEffectKind, LiteralValue};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::OnceCell;
 use std::collections::BTreeMap;
@@ -133,11 +133,70 @@ impl ConstArg {
         })
     }
 
+    /// The constant view of `fact`, when its class is exact and one of [`ConstClass`].
+    pub fn of_fact(fact: &ArgFact) -> Option<Self> {
+        if !fact.exact {
+            return None;
+        }
+        Some(Self {
+            class: ConstClass::of_name(fact.class.as_deref()?)?,
+            truthy: fact.truthy,
+            positive: match fact.literal {
+                Some(LiteralValue::Int(n)) => Some(n > 0),
+                _ => None,
+            },
+        })
+    }
+
     /// The outcome of `test` on this value, when the value decides it.
     fn decide(&self, test: &GuardTest) -> Option<bool> {
         match test {
             GuardTest::Truthy => self.truthy.or_else(|| self.class.decide(test)),
             _ => self.class.decide(test),
+        }
+    }
+}
+
+/// The fact of a literal: the argument a literal default binds ([`crate::FunctionDecl`]'s
+/// `defaults`), as a call passing the literal knows it.
+pub(crate) fn literal_fact(literal: &ConstLiteral) -> Option<ArgFact> {
+    let c = ConstArg::of_literal(literal)?;
+    Some(ArgFact {
+        literal: crate::resolver::literal_value(literal),
+        names_file: matches!(literal, ConstLiteral::Str(text) if !crate::resolver::in_memory_name(text)),
+        class: Some(c.class.name().to_owned()),
+        exact: true,
+        truthy: c.truthy,
+        ..ArgFact::default()
+    })
+}
+
+/// The outcome of `test` on a value `fact` describes, when the value decides it.
+pub(crate) fn decide(fact: &ArgFact, test: &GuardTest) -> Option<bool> {
+    match test {
+        GuardTest::Value(t) => t.decide(fact),
+        _ => ConstArg::of_fact(fact)?.decide(test),
+    }
+}
+
+impl ValueTest {
+    /// The outcome on a value `fact` describes: the first case it passes, or `otherwise`; the
+    /// one of its class among the states.
+    pub(crate) fn decide(&self, fact: &ArgFact) -> Option<bool> {
+        match self {
+            Self::Cases { cases, otherwise } => Some(
+                cases
+                    .iter()
+                    .find(|(case, _)| case.holds(fact))
+                    .map_or(*otherwise, |(_, outcome)| *outcome),
+            ),
+            Self::States(states) => {
+                let class = fact.class.as_deref()?;
+                states
+                    .iter()
+                    .find(|(state, _)| state == class)
+                    .map(|(_, outcome)| *outcome)
+            }
         }
     }
 }
@@ -189,6 +248,23 @@ const FILE_PROTOCOL: &[&str] = &[
     "writelines",
 ];
 
+/// Every [`ConstClass`].
+const CONST_CLASSES: [ConstClass; 13] = [
+    ConstClass::None,
+    ConstClass::Bool,
+    ConstClass::Int,
+    ConstClass::Float,
+    ConstClass::Str,
+    ConstClass::Bytes,
+    ConstClass::List,
+    ConstClass::Tuple,
+    ConstClass::Set,
+    ConstClass::Dict,
+    ConstClass::StringIo,
+    ConstClass::BytesIo,
+    ConstClass::Other,
+];
+
 /// The builtin kinds of displays and comprehensions, with their classes.
 const DISPLAY_CLASSES: [(BuiltinKind, ConstClass); 4] = [
     (BuiltinKind::List, ConstClass::List),
@@ -215,6 +291,19 @@ impl ConstClass {
         }
     }
 
+    /// The class's name ([`ArgFact::class`]).
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Other => "builtins.ellipsis",
+            _ => self.mro()[0],
+        }
+    }
+
+    /// The class named `name` ([`Self::name`]).
+    fn of_name(name: &str) -> Option<Self> {
+        CONST_CLASSES.into_iter().find(|c| c.name() == name)
+    }
+
     /// The outcome of `test` on every value of this class: truthiness only for the buffers,
     /// which define neither `__bool__` nor `__len__`.
     fn decide(self, test: &GuardTest) -> Option<bool> {
@@ -223,6 +312,7 @@ impl ConstClass {
             GuardTest::IsNone => Some(self == Self::None),
             GuardTest::IsInstance(classes) => self.is_instance(classes),
             GuardTest::HasAttr(name) => self.has_attr(name),
+            GuardTest::Value(_) => None,
         }
     }
 
@@ -367,7 +457,7 @@ pub(crate) fn through_call(
             continue;
         };
         if g.subject.attr.is_none()
-            && let Some(outcome) = b.constant.and_then(|c| c.decide(&g.test))
+            && let Some(outcome) = b.fact.as_deref().and_then(|f| decide(f, &g.test))
         {
             if outcome != g.holds {
                 return None;
@@ -1070,7 +1160,7 @@ impl LocalGuards {
         // the walks did not decide may be an object the caller constructs, in every loop.
         let d = self.derived(cx, var).open_means(Derived::ANY);
         ArgBinding {
-            constant: const_arg(cx, self.classes(cx), var),
+            fact: None,
             input: cx.subject(var),
             derived_params: d.params,
             derived_fresh: d.fresh,
@@ -1078,8 +1168,12 @@ impl LocalGuards {
                 .iter()
                 .filter(|lp| !d.fresh || !self.fresh_in_loop(cx, var, lp).open_means(true))
                 .fold(0, |m, lp| m | loop_bit(lp)),
-            text: None,
         }
+    }
+
+    /// What the caller knows of the argument `var` as a constant ([`const_arg`]).
+    pub(crate) fn constant(&self, cx: &GuardInputs<'_, '_>, var: VarId) -> Option<ConstArg> {
+        const_arg(cx, self.classes(cx), var)
     }
 
     fn walks(&self, f: &IrFunction) -> &Budget {

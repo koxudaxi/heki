@@ -344,10 +344,10 @@ impl Form {
 /// The forms that report otherwise than the inline form of their row today, with what they
 /// report (`-`: nothing). Each closes with the fact named above its group.
 const GAPS: &[(&str, &str, &str)] = &[
-    // A parameter is typed by its annotation only, and the argument's state (opened on a file,
-    // a literal the catalog decides on, a queue's capacity) is not decided at the call: the
-    // use in the helper is heuristic, also where the argument rules the effect out. An
-    // unannotated parameter gives no class, so nothing is reported.
+    // A parameter is typed by its annotation only. The argument decides at the call only what
+    // rules the effect out (a connection in memory, a literal a catalog case takes): the use in
+    // the helper of an argument that keeps the effect (opened on a file, a literal no case
+    // takes) is heuristic. An unannotated parameter gives no class, so nothing is reported.
     ("sqlite-file", "annotated-helper", "EFF101 [heuristic]"),
     ("sqlite-file", "two-helpers", "EFF101 [heuristic]"),
     ("sqlite-file", "unannotated-helper", "-"),
@@ -358,14 +358,6 @@ const GAPS: &[(&str, &str, &str)] = &[
     ),
     ("sqlite-file-global", "two-helpers", "EFF101 [heuristic]"),
     ("sqlite-file-global", "unannotated-helper", "-"),
-    ("sqlite-memory", "annotated-helper", "EFF101 [heuristic]"),
-    ("sqlite-memory", "two-helpers", "EFF101 [heuristic]"),
-    (
-        "sqlite-memory-global",
-        "annotated-helper",
-        "EFF101 [heuristic]",
-    ),
-    ("sqlite-memory-global", "two-helpers", "EFF101 [heuristic]"),
     (
         "sqlite-file-name-constant",
         "annotated-helper",
@@ -396,15 +388,9 @@ const GAPS: &[(&str, &str, &str)] = &[
         "unannotated-helper",
         "EFF101 [heuristic]",
     ),
-    ("sleep-zero", "annotated-helper", "EFF101 [heuristic]"),
-    ("sleep-zero", "two-helpers", "EFF101 [heuristic]"),
-    ("sleep-zero", "unannotated-helper", "EFF101 [heuristic]"),
     ("urlopen", "annotated-helper", "EFF101 [heuristic]"),
     ("urlopen", "two-helpers", "EFF101 [heuristic]"),
     ("urlopen", "unannotated-helper", "EFF101 [heuristic]"),
-    ("urlopen-data", "annotated-helper", "EFF101 [heuristic]"),
-    ("urlopen-data", "two-helpers", "EFF101 [heuristic]"),
-    ("urlopen-data", "unannotated-helper", "EFF101 [heuristic]"),
     ("bounded-queue-put", "unannotated-helper", "-"),
     // A call's result is typed by the function's return annotation only, and carries neither
     // the state of the value returned nor the literal it is: a connection's file is not known

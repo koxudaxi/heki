@@ -2432,3 +2432,48 @@ fn cached_property_decorators_the_catalog_lists_keep_their_value_in_the_instance
     // Werkzeug keeps the value of an instance without a `__dict__` in a slot.
     assert_eq!(of("A.in_slot"), (true, listed(true)));
 }
+
+/// A chain of catalog methods on a state resolves as the calls written on an instance do: by the
+/// class each step returns (its receiver's for a fluent method), to nothing the catalog knows
+/// where a step has no entry or no class, and to no answer where a case changes the class.
+#[test]
+fn state_calls_follow_the_classes_the_catalog_returns() {
+    let entry = |symbol: &str, return_type: Option<&str>, effects: Vec<ExecEffectKind>| {
+        heki_kb::EcosystemEntry {
+            symbol: symbol.to_owned(),
+            return_type: return_type.map(str::to_owned),
+            effects,
+            ..heki_kb::EcosystemEntry::default()
+        }
+    };
+    let cased = heki_kb::EcosystemEntry {
+        cases: vec![heki_kb::ArgCase {
+            arg: Some(0),
+            return_type: Some("S2".to_owned()),
+            ..heki_kb::ArgCase::default()
+        }],
+        ..entry("S.cased", Some("S"), Vec::new())
+    };
+    let kb = EffectiveEcosystemKb::materialize(
+        vec![
+            entry("S.step", Some("S2"), Vec::new()),
+            entry("S.fluent", Some(heki_kb::SELF_RETURN_TYPE), Vec::new()),
+            entry("S.untyped", None, Vec::new()),
+            entry("S2.last", None, vec![BlockingDb]),
+            entry("S.last", None, Vec::new()),
+            cased,
+        ],
+        Vec::new(),
+    );
+    let call = |methods: &[&str]| {
+        let methods: Vec<String> = methods.iter().map(|m| (*m).to_owned()).collect();
+        summary::state_call(&kb, "S", &methods).map(|c| c.has(BlockingDb))
+    };
+    assert_eq!(call(&["step", "last"]), Some(true));
+    assert_eq!(call(&["fluent", "last"]), Some(false));
+    assert_eq!(call(&["fluent", "step", "last"]), Some(true));
+    assert_eq!(call(&["untyped", "last"]), Some(false));
+    assert_eq!(call(&["missing", "last"]), Some(false));
+    assert_eq!(call(&["step", "missing"]), Some(false));
+    assert_eq!(call(&["cased", "last"]), None);
+}

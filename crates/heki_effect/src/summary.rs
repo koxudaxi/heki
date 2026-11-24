@@ -33,7 +33,7 @@ use crate::resolver::{
 };
 use crate::{
     Access, ArgBinding, ArgOrigin, ArgTargets, ArgValue, AttrKeyPath, BoundCallee, CallHop,
-    CallSite, CallTarget, CellChange, ConstArg, Construction, ContractClass, Contracts, Dispatch,
+    CallSite, CallTarget, CellChange, Construction, ContractClass, Contracts, Dispatch,
     EffectSummary, EntryKey, FileSummary, FuncKey, GuardSubject, HandedState, Implementers, Items,
     KeptFacts, ListedCache, ModuleInput, MustExec, NewArg, NewCond, NewKind, OnEveryReturn,
     OptInFacts, PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SharedState,
@@ -1364,11 +1364,42 @@ impl<'a> Extractor<'a> {
 
     /// [`ArgBinding`] of the argument `var` of a call inside `loops`.
     fn binding(&self, var: VarId, loops: &[&NaturalLoop]) -> ArgBinding {
-        let mut b = self.guards.binding(&self.guard_inputs(), var, loops);
-        if self.ownership {
-            b.text = self.resolved_str(var).map(String::into_boxed_str);
+        let cx = self.guard_inputs();
+        let mut b = self.guards.binding(&cx, var, loops);
+        let mut fact = self.arg_fact(var);
+        // The string constants of classes are resolved for the keys ownership contracts read;
+        // looking them up for every argument would make every call depend on the classes of
+        // its arguments.
+        if self.ownership && fact.literal.is_none() {
+            fact.literal = self.resolved_str(var).map(heki_kb::LiteralValue::Str);
         }
+        let kb = self.cx.kb;
+        if let Some(c) = self.guards.constant(&cx, var) {
+            fact.class = Some(c.class.name().to_owned());
+            fact.exact = true;
+            fact.truthy = c.truthy;
+        } else if fact.class.as_deref().is_some_and(|c| !kb.decides_class(c)) {
+            fact.class = None;
+        }
+        fact.flags.retain(|f| kb.decides_flag(f));
+        b.fact = (fact != heki_kb::ArgFact::default()).then(|| Box::new(fact));
         b
+    }
+
+    /// What the function knows of `var` as an argument of a catalogued call
+    /// ([`resolver::arg_fact`]).
+    fn arg_fact(&self, var: VarId) -> heki_kb::ArgFact {
+        let name_of = |n| match self.val(n)? {
+            Val::Ref(fqn) => Some(fqn.clone()),
+            _ => None,
+        };
+        resolver::arg_fact(
+            |d| self.defs.get(&d).copied(),
+            |c| self.instance_of(c),
+            name_of,
+            &|inst| self.cx.module_constant(inst, &name_of),
+            var,
+        )
     }
 
     /// `(callee, parameter, capacity)` of the argument `var` a call binds exactly to parameter
@@ -6746,7 +6777,7 @@ impl<'a> Extractor<'a> {
                             params.resize(pos + 1, ArgOrigin::default());
                         }
                         params[pos].binding = Some(ArgBinding {
-                            constant: Some(*c),
+                            fact: Some(Box::new(c.clone())),
                             ..ArgBinding::default()
                         });
                     }
@@ -7198,9 +7229,8 @@ impl<'a> Extractor<'a> {
                 .iter()
                 .filter(|_| !open)
                 .map(|it| ArgBinding {
-                    constant: None,
+                    fact: None,
                     input: None,
-                    text: None,
                     ..self.binding(*it, loops)
                 })
                 .collect(),
@@ -7763,17 +7793,7 @@ impl<'a> Extractor<'a> {
         }
         let case = entry.case_for(|i, k| {
             resolver::passed_arg(passed.args, passed.kwargs, passed.star_from, (i, k), |v| {
-                let name_of = |n| match self.val(n)? {
-                    Val::Ref(fqn) => Some(fqn.clone()),
-                    _ => None,
-                };
-                resolver::arg_fact(
-                    |d| self.defs.get(&d).copied(),
-                    |c| self.instance_of(c),
-                    name_of,
-                    &|inst| self.cx.module_constant(inst, &name_of),
-                    v,
-                )
+                self.arg_fact(v)
             })
         });
         // Stage 0-A filters: an awaited call never blocks the loop itself; loop-sensitive
@@ -7864,11 +7884,21 @@ impl<'a> Extractor<'a> {
             }
         });
         let guarded = own_param.and(while_full.as_ref()).map(|w| &w.effects);
+        let by_value = match case {
+            Some(_) => Vec::new(),
+            None => self.value_guards(&symbol, entry, passed, &effects),
+        };
         for e in effects.iter().chain(guarded.into_iter().flatten()) {
-            let guards = crate::EffectGuards {
+            let mut guards = crate::EffectGuards {
                 bounded_queue: own_param.filter(|_| !effects.contains(e)),
                 ..occurrence_of(e)
             };
+            guards.inputs.extend(
+                by_value
+                    .iter()
+                    .filter(|(of, _)| of == e)
+                    .map(|(_, g)| g.clone()),
+            );
             let had = !self.summary.direct_exec_effects.insert(*e);
             guards::add_occurrence(&mut self.summary.exec_guards, *e, had, &guards);
             let chain = vec![Arc::new(self.hop(api.clone(), span))];
@@ -8040,6 +8070,101 @@ impl<'a> Extractor<'a> {
         })
     }
 
+    /// The tests of a parameter of the function the catalog sets on `effects` of a call of
+    /// `entry` (`symbol`) that selects no case ([`GuardTest::Value`]): the parameter is the
+    /// argument every case of the entry tests, or the receiver the call (or the catalog calls
+    /// whose results it is made on) is made on, and some case, or some state of the receiver's
+    /// library class, lacks the effect. A caller decides each from the value it binds there.
+    fn value_guards(
+        &self,
+        symbol: &str,
+        entry: &heki_kb::EcosystemEntry,
+        passed: Passed<'_>,
+        effects: &BTreeSet<ExecEffectKind>,
+    ) -> Vec<(ExecEffectKind, crate::InputGuard)> {
+        let guard = |param, test| crate::InputGuard {
+            subject: GuardSubject { param, attr: None },
+            test: crate::GuardTest::Value(Box::new(test)),
+            holds: true,
+        };
+        let mut out = Vec::new();
+        if let Some(param) = entry
+            .case_slot()
+            .and_then(|at| resolver::passed_var(passed.args, passed.kwargs, passed.star_from, at))
+            .and_then(|v| self.own_param(v))
+        {
+            for &e in effects {
+                let mut cases: Vec<(heki_kb::ArgCase, bool)> = entry
+                    .cases
+                    .iter()
+                    .map(|c| (case_tests(c), entry.effects_in(Some(c)).contains(&e)))
+                    .collect();
+                // Cases after the last one without the effect give what passing none does.
+                while cases.last().is_some_and(|(_, keeps)| *keeps) {
+                    cases.pop();
+                }
+                if !cases.is_empty() {
+                    let test = crate::ValueTest::Cases {
+                        cases,
+                        otherwise: true,
+                    };
+                    out.push((e, guard(param, test)));
+                }
+            }
+        }
+        let method = symbol.rsplit('.').next().unwrap_or(symbol);
+        if let Some((param, library, methods)) =
+            passed.recv.and_then(|r| self.receiver_root(r, method))
+        {
+            let kb = self.cx.kb;
+            for &e in effects {
+                let states: Option<Vec<(String, bool)>> = kb
+                    .states_of(&library)
+                    .map(|state| Some((state.to_owned(), state_call(kb, state, &methods)?.has(e))))
+                    .collect();
+                if let Some(states) = states.filter(|s| s.iter().any(|(_, keeps)| !keeps)) {
+                    out.push((e, guard(param, crate::ValueTest::States(states))));
+                }
+            }
+        }
+        out
+    }
+
+    /// The function's own parameter `var` is on every path, itself (through copies).
+    fn own_param(&self, var: VarId) -> Option<u8> {
+        let alias = self.param_alias.get(&var);
+        match alias.or_else(|| self.param_alias.get(&self.shape.copy_root(var)))? {
+            (p, None) => Some(*p),
+            _ => None,
+        }
+    }
+
+    /// The parameter a method call's receiver `recv` is made from by catalog method calls, the
+    /// library class it is an instance of, and the methods called in turn from it, `method`
+    /// last (`c.execute(sql).fetchone()`: `c`, `execute`, `fetchone`), when the class has
+    /// states the catalog knows.
+    fn receiver_root(&self, recv: VarId, method: &str) -> Option<(u8, String, Vec<String>)> {
+        let mut methods = vec![method.to_owned()];
+        let mut cur = recv;
+        for _ in 0..MAX_RECEIVER_CALLS {
+            if let Some(p) = self.own_param(cur) {
+                let class = self.instance_of(cur)?;
+                self.cx.kb.states_of(&class).next()?;
+                methods.reverse();
+                return Some((p, class, methods));
+            }
+            let root = self.shape.copy_root(cur);
+            let Some(InstKind::MethodCall { recv, method, .. }) =
+                self.defs.get(&root).map(|i| &i.kind)
+            else {
+                return None;
+            };
+            methods.push(method.clone());
+            cur = *recv;
+        }
+        None
+    }
+
     /// The function returns (through `step`) the result of the read-only producer `producer`
     /// it calls or reads at `span` (`MUT202` return flow; `deep` as the producer is declared).
     fn seed_protected(&mut self, producer: String, deep: bool, step: ReturnStep, span: Span) {
@@ -8052,6 +8177,73 @@ impl<'a> Extractor<'a> {
             step,
             chain,
         );
+    }
+}
+
+/// The method calls [`Extractor::receiver_root`] follows back from a receiver, at most.
+const MAX_RECEIVER_CALLS: usize = 8;
+
+/// A case of a catalog entry with its tests only ([`crate::ValueTest::Cases`]).
+fn case_tests(case: &heki_kb::ArgCase) -> heki_kb::ArgCase {
+    heki_kb::ArgCase {
+        effects: None,
+        return_type: None,
+        emits: None,
+        ..case.clone()
+    }
+}
+
+/// What calling the catalog methods `methods` in turn on an instance of the catalog class
+/// `class` ends in, as the calls written on such an instance resolve: the entry of the last
+/// one, or [`StateCall::Uncatalogued`] when a step names no entry or the class of no result.
+/// `None` when a step's result depends on its arguments (a case changes the class).
+pub(crate) fn state_call<'k>(
+    kb: &'k heki_kb::EffectiveEcosystemKb,
+    class: &str,
+    methods: &[String],
+) -> Option<StateCall<'k>> {
+    let mut class = class.to_owned();
+    let (last, steps) = methods.split_last()?;
+    for m in steps {
+        let Some(entry) = kb.lookup(&format!("{class}.{m}")) else {
+            return Some(StateCall::Uncatalogued);
+        };
+        if entry.cases.iter().any(|c| c.return_type.is_some()) {
+            return None;
+        }
+        if !entry.returns_receiver_in(None) {
+            match entry.return_type_in(None) {
+                Some(returned) => class = returned.to_owned(),
+                None => return Some(StateCall::Uncatalogued),
+            }
+        }
+    }
+    Some(
+        kb.lookup(&format!("{class}.{last}"))
+            .map_or(StateCall::Uncatalogued, StateCall::Entry),
+    )
+}
+
+/// [`state_call`].
+pub(crate) enum StateCall<'k> {
+    Entry(&'k heki_kb::EcosystemEntry),
+    /// The calls run nothing the catalog knows of.
+    Uncatalogued,
+}
+
+impl StateCall<'_> {
+    /// Whether the call may have effect `e`, in some case.
+    pub(crate) fn has(&self, e: ExecEffectKind) -> bool {
+        match self {
+            Self::Entry(entry) => {
+                entry.effects.contains(&e)
+                    || entry
+                        .cases
+                        .iter()
+                        .any(|c| entry.effects_in(Some(c)).contains(&e))
+            }
+            Self::Uncatalogued => false,
+        }
     }
 }
 
@@ -8179,7 +8371,7 @@ impl Bindings<'_> {
         call: &Call<'_>,
         decl: &'d FunctionDecl,
         offset: usize,
-    ) -> impl Iterator<Item = (usize, &'d ConstArg)> {
+    ) -> impl Iterator<Item = (usize, &'d heki_kb::ArgFact)> {
         let unpacks = self.unpacks;
         let passed =
             offset + call.args.len() + call.per_item.and_then(|p| p.positions).unwrap_or(0);
