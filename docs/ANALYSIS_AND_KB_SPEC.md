@@ -1051,9 +1051,9 @@ body where it is called), once from every `async def` (not through a worker thre
 the calls inside a loop or once per item, giving the functions on an event loop and below a loop; `heki_rules::blind_spots` counts the calls by package and name and by function and reason,
 and the hidden `heki dump-recommend-facts` prints them. `heki recommend` lists them
 (`heki_rules::recommend::blind_spots`), after two trials that build no fact of their own: a run
-of `EFF101`, `EFF111`, `EFF103`, and `EFF113` with a hypothetical catalog entry
-(`blocking_net`, `db_query`) for each of the 64 library names with the most reach, whose
-reports count for the name at the end of their chain; and the module names of the files with a
+of `EFF101` and `EFF103`, named so that their heuristic reports are printed too, with a
+hypothetical catalog entry (`blocking_net`, `db_query`) for each of the 64 library names with the
+most reach, whose reports count for the name at the end of their chain, by certainty; and the module names of the files with a
 candidate directory added to `src`, by which it resolves the imports again.
 
 The census contract candidates are drawn from (`heki_rules::census`) is a pass over the index and
@@ -1886,9 +1886,9 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   callers, with the same initializer and allowed-context rules as `MUT201`. Reads through
   parameters without a project-class type are not seen.
 
-### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF111`, `EFF112`, `EFF113`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
 0. **Must-facts and the exact tier** (`EffectSummary::must_exec`, computed only when `EFF101`,
-   `EFF111`, `EFF103`, or `EFF113` runs: `OptInFacts::must_effects`):
+   `EFF103`, `DATA101`, or `EFF114` runs: `OptInFacts::must_effects`):
    - Per call instruction, the path facts (`heki_ir::Paths`, with the reader of
      `heki_effect::with_paths`: the module's bindings, the members of modules, and the context
      managers whose exit never suppresses, `exit_suppresses`) say whether the function has made
@@ -1926,10 +1926,12 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      (`ProjectIndex::site_must`); `EFF103` when the call runs on every iteration that completes
      of a loop over a parameter, a part of one, or a catalog call's `items`, whose trip count the
      code does not fix (`heki_ir::ItemOrigins`, `FnIndex::fixed_trips`), and has sent a statement
-     whenever it returns. Everything else the heuristic tier finds is `EFF111` / `EFF113`.
+     whenever it returns. Everything else the rules find is their heuristic tier, under the same
+     code: the report's certainty is heuristic.
    - Open premises (`CheckExtras::open_premises`, off in `heki check` and the language server,
-     on in `heki recommend` and the hidden `heki dump-open-premises`): an `EFF111` / `EFF113` report records which
-     premises of its claim's row (`heki_rules::premises`) it left open, each with a cause. The
+     on in `heki recommend` and the hidden `heki dump-open-premises`): a heuristic `EFF101` /
+     `EFF103` report records which premises of its claim's row (`heki_rules::premises`) it left
+     open, each with a cause. The
      decisions above tell each step that does not hold (`MustGap`) to whoever asks: a decision
      stops at the first, an explanation goes on. Along the reported chain each call is evaluated
      (`MustExplainer::gaps_along`): its targets' completeness, whether they run there as
@@ -2507,7 +2509,7 @@ Every candidate also needs `A1HazardFree` (no frame introspection in the functio
 | **OPT120** / **OPT121** | `size-dependent` | `Unique(q)` (no escape, not returned), `ExactType(q, list)`, only operations `deque` supports equally (`DequeEquivalentOps`: no `list(*a)` / `list(**kw)`, no iterator live at a change or consumed by it, iterators used only for their elements, `q = q[1:]` exactly, no other object bound to a variable it reaches) | `NotConstSmall`, **no index `q[i]` other than the ends (`0`, `-1`)** | S12, `sort()`, $O(n)$ middle indexes, `q.extend(reversed(q))`, `type(iter(q))` |
 | **OPT130** | `size-dependent` | Every argument `ValueLoopInvariant`, `SideEffectFree` (no method arguments), `ZeroTripExceptionSafe` (no `*` arguments), the built container used by the membership test only (`ValueLoopInvariant(call)`) | `NotConstSmall` (100 times slower when the loop runs zero times: A.8), not a `ConstSmall` / retry loop, not `tuple(t)` of a tuple | S22, S28, A.8 |
 
-Open premises (`CheckExtras::open_premises`, as for `EFF111` / `EFF113` in section 2.4): a
+Open premises (`CheckExtras::open_premises`, as for `EFF101` / `EFF103` in section 2.4): a
 heuristic report of an `OPT` rewrite records "Rewrite proven safe" once for each obligation of
 its verdict that is not established, with the obligation's kind as the cause
 (`heki_rules::premises::OBLIGATION_CAUSES`, one row per `ObligationKind`) and its description

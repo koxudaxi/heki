@@ -20,7 +20,7 @@ fn found(p: &Project) -> Vec<(String, u64, u64, String, String)> {
                 d["path"].as_str().unwrap().to_owned(),
                 d["line"].as_u64().unwrap(),
                 d["column"].as_u64().unwrap(),
-                d["rule_code"].as_str().unwrap().to_owned(),
+                common::tiered_code(d).to_owned(),
                 d["qualname"].as_str().unwrap().to_owned(),
             )
         })
@@ -230,7 +230,7 @@ fn rules_on(name: &str, rules: &str, source: &str) -> Vec<(u64, String)> {
         .map(|d| {
             (
                 d["line"].as_u64().unwrap(),
-                d["rule_code"].as_str().unwrap().to_owned(),
+                common::tiered_code(d).to_owned(),
             )
         })
         .collect();
@@ -320,16 +320,16 @@ async def handle_branch(flag: bool) -> None:
 #[test]
 fn a_class_body_call_runs_on_every_return_only_with_its_class_statement() {
     assert_eq!(
-        rules_on("class_bodies_every_return", "EFF101,EFF111", WAITS),
+        rules_on("class_bodies_every_return", "EFF101", WAITS),
         vec![
-            (56, "EFF111".to_owned()),
+            (56, "EFF101 [heuristic]".to_owned()),
             (57, "EFF101".to_owned()),
-            (58, "EFF111".to_owned()),
+            (58, "EFF101 [heuristic]".to_owned()),
             (59, "EFF101".to_owned()),
-            (60, "EFF111".to_owned()),
+            (60, "EFF101 [heuristic]".to_owned()),
             (61, "EFF101".to_owned()),
             // No path reaches the class statement.
-            (67, "EFF111".to_owned()),
+            (67, "EFF101 [heuristic]".to_owned()),
             // The reported call is the class body's own: it waits whenever it returns.
             (73, "EFF101".to_owned()),
         ]
@@ -360,15 +360,15 @@ def process(db: sqlite3.Cursor, items: list[str], flag: bool) -> None:
         query(db, x, flag)
 "#;
     assert_eq!(
-        rules_on("class_bodies_query_branch", "EFF103,EFF113", open),
-        vec![(18, "EFF113".to_owned())]
+        rules_on("class_bodies_query_branch", "EFF103", open),
+        vec![(18, "EFF103 [heuristic]".to_owned())]
     );
     let closed = open.replace(
         "    if flag:\n        class Row:\n            value = fetch(db, x)\n",
         "    class Row:\n        value = fetch(db, x)\n",
     );
     assert_eq!(
-        rules_on("class_bodies_query_always", "EFF103,EFF113", &closed),
+        rules_on("class_bodies_query_always", "EFF103", &closed),
         vec![(17, "EFF103".to_owned())]
     );
 }

@@ -39,7 +39,7 @@ fn reported(p: &Project, rules: &[&str]) -> Vec<(String, u64, String)> {
             (
                 d["path"].as_str().unwrap().to_owned(),
                 d["line"].as_u64().unwrap(),
-                d["rule_code"].as_str().unwrap().to_owned(),
+                common::tiered_code(d).to_owned(),
             )
         })
         .filter(|(_, _, r)| rules.contains(&r.as_str()))
@@ -65,7 +65,7 @@ fn marked(files: &[(&str, &str)], rules: &[&str]) -> Vec<(String, u64, String)> 
 }
 
 fn check_marks(name: &str, files: &[(&str, &str)], rules: &[&str]) {
-    let rules = common::with_siblings(rules);
+    let rules = common::with_tiers(rules);
     let rules = rules.as_slice();
     let p = Project::new(name);
     p.write("pyproject.toml", CONFIG);
@@ -154,7 +154,7 @@ async def through_slow(obj):
 
 
 async def through_cls():
-    Base.make()  # EFF111
+    Base.make()  # EFF101 [heuristic]
 "#;
 
 #[test]
@@ -1015,16 +1015,16 @@ async def on_async(c: AsyncClient):
 
 
 async def on_sync(c: SyncClient):
-    c.masters()  # EFF111
-    c.relay()  # EFF111
+    c.masters()  # EFF101 [heuristic]
+    c.relay()  # EFF101 [heuristic]
 
 
 async def on_sync_subclass(c: SyncPipeline):
-    c.masters()  # EFF111
+    c.masters()  # EFF101 [heuristic]
 
 
 async def on_any(c: Commands):
-    c.masters()  # EFF111
+    c.masters()  # EFF101 [heuristic]
 
 
 class Sentinel:
@@ -1085,8 +1085,8 @@ async def on_quiet(q: Quiet):
 
 
 async def on_file(f: FileSink):
-    f.run_short_first()  # EFF111
-    f.run_long_first()  # EFF111
+    f.run_short_first()  # EFF101 [heuristic]
+    f.run_long_first()  # EFF101 [heuristic]
 "#;
 
 #[test]
@@ -1094,7 +1094,7 @@ fn an_effect_through_self_and_a_plain_call_runs_for_every_receiver() {
     check_marks("self_hooks", &[("pkg/hooks.py", HOOKS)], &["EFF101"]);
     let p = Project::new("self_hooks_chains");
     p.write("pkg/__init__.py", "").write("pkg/hooks.py", HOOKS);
-    let (_, stdout, _) = p.check(&["--select", "EFF101,EFF111", "--output-format", "json"]);
+    let (_, stdout, _) = p.check(&["--select", "EFF101", "--output-format", "json"]);
     let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
     // `(line of the report, line of the hop into `FileSink.flush`)`.
     let hops: Vec<(u64, u64)> = diags
@@ -1202,7 +1202,7 @@ class Slow(Model):
 
 
 async def make():
-    Slow.build(False)  # EFF111
+    Slow.build(False)  # EFF101 [heuristic]
     Slow.plain()
 "#;
 
@@ -1437,7 +1437,7 @@ def overriding_the_module_class():
 
 
 async def through_calm(c: Calm):
-    c.parse()  # EFF111
+    c.parse()  # EFF101 [heuristic]
 "#;
 
 /// A function too large to model holding a class statement: heki does not know the value it

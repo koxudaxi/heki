@@ -58,8 +58,8 @@ def supports_open_premises(heki):
 
 
 def run_open_premises(tools, root, code):
-    """The reports `heki dump-open-premises` prints for the project, with `code` (the code of a
-    claim's heuristic reports) selected besides the configuration's rules."""
+    """The reports `heki dump-open-premises` prints for the project, with the rule `code` named
+    besides the configuration's rules, so that its heuristic reports are printed."""
     command = [tools.heki, "dump-open-premises", "--config", "heki.toml", "--extend-select", code, "app"]
     proc = subprocess.run(
         command, cwd=root, capture_output=True, text=True, timeout=tools.heki_timeout, env=_env()
@@ -202,30 +202,30 @@ def _check_stripped_premise(premise, exact, out):
 
 def _check_recorded_premise(tools, root, premise, entries, out):
     """Runs `heki dump-open-premises` for a program from the premise table whose rule records
-    open premises (`premise_generator.OPEN_PREMISE_CODES`) and checks the reports in its entry
+    open premises (`premise_generator.OPEN_PREMISE_RULES`) and checks the reports in its entry
     points (`_check_open_premises`)."""
     import premise_generator
 
-    code = premise_generator.OPEN_PREMISE_CODES.get(premise["rule"])
-    if not tools.open_premises or code is None or premise["stripped"] is None:
+    rule = premise["rule"]
+    if not tools.open_premises or rule not in premise_generator.OPEN_PREMISE_RULES or premise["stripped"] is None:
         return
     try:
-        reports = run_open_premises(tools, root, code)
+        reports = run_open_premises(tools, root, rule)
     except (HekiError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
         out["errors"].append(["heki-open-premises", str(exc)[:2000]])
         return
-    _check_open_premises(premise, code, reports, {e["func"] for e in entries}, out)
+    _check_open_premises(premise, reports, {e["func"] for e in entries}, out)
 
 
-def _check_open_premises(premise, code, reports, entry_points, out):
-    """With a premise stripped, each heuristic report of the claim (rule `code`) in one of the
-    program's `entry_points`, the functions the claim is built in, names that premise among the
+def _check_open_premises(premise, reports, entry_points, out):
+    """With a premise stripped, each heuristic report of the claim (the premise's rule) in one of
+    the program's `entry_points`, the functions the claim is built in, names that premise among the
     premises it leaves open: one that does not is a finding of its own kind (`unrecorded`), as
     the causes it records come from the decision that made it heuristic. A report in a helper is
     about another claim (a loop that a way of stripping "Every return" adds is one)."""
     rule, stripped = premise["rule"], premise["stripped"]
     for report in reports:
-        if report["rule"] != code or report["certainty"] != "heuristic":
+        if report["rule"] != rule or report["certainty"] != "heuristic":
             continue
         if report["qualname"] not in entry_points:
             continue
@@ -239,7 +239,7 @@ def _check_open_premises(premise, code, reports, entry_points, out):
                 "rule": rule,
                 "claim": "stripped",
                 "kind": "stripped-premise-not-recorded",
-                "premise": f"{stripped}: stripped, and the {code} report records {named} as open",
+                "premise": f"{stripped}: stripped, and the {rule} report records {named} as open",
                 "entry": None,
                 "input": None,
                 "detail": {"stripped": stripped, "recorded": report["open_premises"]},

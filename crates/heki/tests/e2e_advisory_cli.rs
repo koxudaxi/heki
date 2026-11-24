@@ -20,7 +20,7 @@ fn hits(stdout: &str) -> Vec<(String, u64, String)> {
             (
                 d["path"].as_str().unwrap().to_owned(),
                 d["line"].as_u64().unwrap(),
-                d["rule_code"].as_str().unwrap().to_owned(),
+                common::tiered_code(d).to_owned(),
             )
         })
         .collect()
@@ -64,7 +64,7 @@ fn target_version_defaults_to_the_lower_bound_of_requires_python() {
     // Python 3.11 runs the comprehension in a frame of its own, so `EFF101` names
     // `<listcomp>`; 3.12+ inlines it (PEP 709).
     let as_py311 = |args: &[&str]| {
-        let mut all = vec!["--output-format", "json", "--select", "EFF101,EFF111"];
+        let mut all = vec!["--output-format", "json", "--select", "EFF101"];
         all.extend_from_slice(args);
         let (code, stdout, stderr) = p.check(&all);
         assert_eq!(code, 1, "{stdout}{stderr}");

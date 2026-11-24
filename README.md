@@ -63,7 +63,7 @@ app/api.py:5:12: EFF101 (async-blocking-call) [warning] `app.users.load_user` al
   = help: offload it with `asyncio.to_thread`, or use an async client
 
 Found 1 diagnostic(s) in 2 file(s).
-note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+note: 3 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 EFF101 (async-blocking-call): `heki rule EFF101`, https://heki.koxudaxi.dev/rules/async-blocking-call/
 ```
 
@@ -95,7 +95,7 @@ app/orders.py:11:37: EFF103 (loop-db-query) [warning] every iteration over param
   = help: batch the queries, or load the data once before the loop
 
 Found 1 diagnostic(s) in 1 file(s).
-note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+note: 3 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 EFF103 (loop-db-query): `heki rule EFF103`, https://heki.koxudaxi.dev/rules/loop-db-query/
 ```
 
@@ -403,7 +403,7 @@ step keeps findings as alerts and fails only on a configuration, read, or syntax
 - 🚀 [Getting started](https://heki.koxudaxi.dev/getting-started/) - run heki on a project, read a diagnostic, apply a fix
 - 🎯 [Scope and limitations](https://heki.koxudaxi.dev/scope/) - what heki checks and what it leaves to other tools
 - ⚙️ [Configuration](https://heki.koxudaxi.dev/configuration/) - rule selection, contracts, the Python version
-- 📏 [Rules](https://heki.koxudaxi.dev/rules/) - all 46 rules
+- 📏 [Rules](https://heki.koxudaxi.dev/rules/) - all 53 rules
 - 📐 [Rule precision](https://heki.koxudaxi.dev/precision/) - exact and heuristic rules, and how they are measured
 - 🔧 [Fixes and safety](https://heki.koxudaxi.dev/fixes/) - how rewrites are proven safe
 - 🪜 [Adopting heki](https://heki.koxudaxi.dev/adoption/) - Ratchet baselines, pre-commit, CI

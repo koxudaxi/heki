@@ -164,25 +164,43 @@ pub fn run_python(dir: &Path, script: &str) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
-/// `rules` with the heuristic sibling of each effect rule among them (`EFF111` for `EFF101`,
-/// `EFF113` for `EFF103`): a report of the claim the exact rule does not establish is its
-/// sibling's.
-#[allow(dead_code)]
-pub fn with_siblings<'r>(rules: &[&'r str]) -> Vec<&'r str> {
+/// The code of the report `d` (`heki check --output-format json`) with its certainty where the
+/// effect tests tell the tiers of one rule apart ([`with_tier`]).
+pub fn tiered_code(d: &serde_json::Value) -> &str {
+    with_tier(
+        d["rule_code"].as_str().expect("a report has a code"),
+        d["certainty"].as_str().expect("a report has a certainty"),
+    )
+}
+
+/// `code` followed by ` [heuristic]`, as the concise output labels the report, for a heuristic
+/// report of `EFF101` or `EFF103`, whose two tiers the effect tests tell apart; `code` alone
+/// otherwise.
+pub fn with_tier<'c>(code: &'c str, certainty: &str) -> &'c str {
+    match (code, certainty) {
+        ("EFF101", "heuristic") => "EFF101 [heuristic]",
+        ("EFF103", "heuristic") => "EFF103 [heuristic]",
+        _ => code,
+    }
+}
+
+/// The code of a label [`with_tier`] writes: `EFF101` for `EFF101 [heuristic]`.
+pub fn code_of(label: &str) -> &str {
+    label.trim_end_matches(" [heuristic]")
+}
+
+/// `rules` with the label of the heuristic tier of `EFF101` and `EFF103` after each of them
+/// ([`with_tier`]): the marks of a fixture name the tier its report must have
+/// (`# EFF101 [heuristic]`).
+pub fn with_tiers<'r>(rules: &[&'r str]) -> Vec<&'r str> {
     let mut out = Vec::new();
     for rule in rules {
         out.push(*rule);
         match *rule {
-            "EFF101" => out.push("EFF111"),
-            "EFF103" => out.push("EFF113"),
+            "EFF101" => out.push("EFF101 [heuristic]"),
+            "EFF103" => out.push("EFF103 [heuristic]"),
             _ => {}
         }
     }
     out
-}
-
-/// [`with_siblings`] of a comma-separated selection.
-#[allow(dead_code)]
-pub fn select_with_siblings(select: &str) -> String {
-    with_siblings(&select.split(',').collect::<Vec<_>>()).join(",")
 }

@@ -21,8 +21,7 @@ use std::path::Path;
 #[schemars(deny_unknown_fields)]
 pub struct OpenPremises {
     /// The heuristic reports of exact claims, as `heki check` prints them with every rule
-    /// selected: the heuristic reports of exact rules, and the reports of the heuristic rules
-    /// that report an exact rule's claim with a premise open (`EFF111`, `EFF113`).
+    /// selected: the heuristic reports of the exact rules.
     pub reports: usize,
     /// Those reports by the code they are reported under, the most first.
     pub by_rule: Vec<RuleReports>,
@@ -74,21 +73,18 @@ pub struct CauseRow {
     pub reports: usize,
     /// The reports it is the only open premise or condition of.
     pub only_open: usize,
-    /// The reports by the exact rule whose claim they report and the code they are reported
-    /// under.
+    /// The reports by the exact rule whose claim they report.
     pub rules: Vec<CauseRule>,
     /// The first 50 reports, in report order.
     pub examples: Vec<ReportAt>,
 }
 
-/// The reports of one rule's claim under one code that leave a cause open.
+/// The reports of one rule's claim that leave a cause open.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct CauseRule {
     /// The exact rule whose claim the reports state.
     pub rule: String,
-    /// The code they are reported under: the rule's own, or its heuristic side's.
-    pub reported_as: String,
     pub reports: usize,
     pub only_open: usize,
 }
@@ -137,8 +133,8 @@ type CauseKey = (OpenKind, &'static str, &'static str);
 
 /// Whether `d` is a heuristic report of an exact claim, and of which rule's claim.
 pub(super) fn claim_of(d: &Diagnostic) -> Option<&str> {
-    let exact = premises::exact_side_of(&d.rule_code).unwrap_or(&d.rule_code);
-    (d.certainty == Certainty::Heuristic && !premises::of_rule(exact).is_empty()).then_some(exact)
+    (d.certainty == Certainty::Heuristic && !premises::of_rule(&d.rule_code).is_empty())
+        .then_some(&d.rule_code)
 }
 
 /// The causes `d` leaves open, each once, in the order it records them.
@@ -231,18 +227,13 @@ fn aggregate(heuristic: &[Diagnostic], shown: &dyn Fn(&Path) -> String) -> OpenP
             });
             row.reports += 1;
             row.only_open += usize::from(only);
-            match row
-                .rules
-                .iter_mut()
-                .find(|r| r.rule == claim && r.reported_as == d.rule_code)
-            {
+            match row.rules.iter_mut().find(|r| r.rule == claim) {
                 Some(r) => {
                     r.reports += 1;
                     r.only_open += usize::from(only);
                 }
                 None => row.rules.push(CauseRule {
                     rule: claim.to_owned(),
-                    reported_as: d.rule_code.clone(),
                     reports: 1,
                     only_open: usize::from(only),
                 }),
@@ -271,8 +262,7 @@ fn aggregate(heuristic: &[Diagnostic], shown: &dyn Fn(&Path) -> String) -> OpenP
     });
     for (_, row) in &mut by_cause {
         row.examples.truncate(MAX_LISTED);
-        row.rules
-            .sort_by(|a, b| (&a.rule, &a.reported_as).cmp(&(&b.rule, &b.reported_as)));
+        row.rules.sort_by(|a, b| a.rule.cmp(&b.rule));
     }
     let mut combinations: Vec<(Vec<CauseKey>, usize)> = combinations.into_iter().collect();
     combinations.sort_by_key(|(_, reports)| std::cmp::Reverse(*reports));
@@ -481,8 +471,8 @@ mod tests {
             // One cause each: every report counts it as its only open one.
             (
                 vec![
-                    report("EFF111", 1, &[RETURN]),
-                    report("EFF111", 2, &[RETURN]),
+                    report("EFF101", 1, &[RETURN]),
+                    report("EFF101", 2, &[RETURN]),
                 ],
                 vec![("Every return", "not-made-on-every-return", 2, 2)],
                 0,
@@ -491,8 +481,8 @@ mod tests {
             // row of more reports leaving it alone open comes first.
             (
                 vec![
-                    report("EFF111", 1, &[RETURN, TARGETS]),
-                    report("EFF111", 2, &[TARGETS]),
+                    report("EFF101", 1, &[RETURN, TARGETS]),
+                    report("EFF101", 2, &[TARGETS]),
                 ],
                 vec![
                     ("Every implementation", "incomplete-targets", 2, 1),
@@ -522,7 +512,7 @@ mod tests {
             (
                 vec![
                     report("OPT110", 1, &[UNIQUE]),
-                    report("EFF111", 2, &[RETURN]),
+                    report("EFF101", 2, &[RETURN]),
                 ],
                 vec![
                     ("Every return", "not-made-on-every-return", 1, 1),
@@ -568,15 +558,11 @@ mod tests {
     }
 
     #[test]
-    fn a_heuristic_side_counts_under_the_claim_of_its_exact_rule() {
-        let section = aggregate(&[report("EFF111", 1, &[RETURN])], &|p| {
+    fn only_the_heuristic_reports_of_exact_rules_are_claims() {
+        let section = aggregate(&[report("EFF101", 1, &[RETURN])], &|p| {
             p.display().to_string()
         });
-        let rule = &section.by_cause[0].rules[0];
-        assert_eq!(
-            (rule.rule.as_str(), rule.reported_as.as_str()),
-            ("EFF101", "EFF111")
-        );
+        assert_eq!(section.by_cause[0].rules[0].rule, "EFF101");
         let mut exact_tier = report("OPT110", 1, &[]);
         assert_eq!(claim_of(&exact_tier), Some("OPT110"));
         exact_tier.certainty = Certainty::Exact;
