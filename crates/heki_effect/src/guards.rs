@@ -198,8 +198,8 @@ pub(crate) fn given(b: &ArgBinding, test: &ValueTest) -> Given {
     };
     let decided = match test {
         ValueTest::Cases { .. } if caller.is_some() || b.from_params => None,
-        ValueTest::Cases { .. } => test.decide(b.fact.as_deref().unwrap_or(&ArgFact::default())),
-        ValueTest::States(_) => b.fact.as_deref().and_then(|f| test.decide(f)),
+        ValueTest::Cases { .. } => test.outcome(b.fact.as_deref().unwrap_or(&ArgFact::default())),
+        ValueTest::States(_) => b.fact.as_deref().and_then(|f| test.outcome(f)),
     };
     match (decided, caller) {
         (Some(true), _) => Given::Holds,

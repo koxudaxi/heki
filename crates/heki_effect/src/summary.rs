@@ -8177,7 +8177,12 @@ impl<'a> Extractor<'a> {
             for &e in effects {
                 let states: Option<Vec<(String, bool)>> = kb
                     .states_of(&library)
-                    .map(|state| Some((state.to_owned(), state_call(kb, state, &methods)?.has(e))))
+                    .map(|state| {
+                        Some((
+                            state.to_owned(),
+                            state_call(kb, state, &methods)?.may_have(e),
+                        ))
+                    })
                     .collect();
                 if let Some(states) = states.filter(|s| s.iter().any(|(_, keeps)| !keeps)) {
                     out.push((e, guard(param, crate::ValueTest::States(states))));
@@ -8303,7 +8308,7 @@ pub(crate) enum StateCall<'k> {
 
 impl StateCall<'_> {
     /// Whether the call may have effect `e`, in some case.
-    pub(crate) fn has(&self, e: ExecEffectKind) -> bool {
+    pub(crate) fn may_have(&self, e: ExecEffectKind) -> bool {
         match self {
             Self::Entry(entry) => {
                 entry.effects.contains(&e)
