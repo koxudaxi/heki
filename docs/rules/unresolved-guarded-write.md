@@ -45,8 +45,10 @@ write:
 
 The rules of `MUT201` for what is allowed apply: allowed writers, exempt methods, a class's own
 initialization (`setattr(self, name, v)` in `__init__`), functions that only run inside allowed
-writers, `forbidden-writers`, and, with `fresh-objects = "allow"`, writes that construct the object
-they write. A parameter that every caller path binds to an object of a project class is not
+writers, `forbidden-writers`, `allowed-protocols` (also for an object of unknown class typed with
+a named protocol declaring the attribute: a class object typed `type[P]`, or an instance of a
+protocol whose implementations heki cannot list), and, with `fresh-objects = "allow"`, writes that
+construct the object they write. A parameter that every caller path binds to an object of a project class is not
 reported: `MUT201` reports the write at those callers. For a computed name on a parameter, a
 caller binding an object of a target class leaves the write to `MUT205` (`MUT201` has no name to
 report at that caller), unless it is that class's own initialization handing over its `self`,

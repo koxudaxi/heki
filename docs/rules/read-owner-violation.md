@@ -183,7 +183,7 @@ No automatic fix.
     method it is judged in (`self`, `cls`, `super()`) is allowed.
   - `allowed-protocols`: project protocols (class patterns, their subclasses included): a read
     through a value typed with one that declares the attribute, itself or through its protocol
-    bases, is allowed.
+    bases, is allowed, also through a class object typed `type[P]` of one (`MUT206`).
   - `protocol-subclasses`: `true` (default) or `false`: whether an `allowed-protocols` pattern
     names the subprotocols of the protocols it matches, or those protocols only.
 

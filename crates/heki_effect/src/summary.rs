@@ -5589,6 +5589,7 @@ impl<'a> Extractor<'a> {
             return;
         }
         let obj_params = self.exact_param(obj);
+        let protocol = self.unknown_protocol(obj);
         self.summary
             .unresolved_access_sites
             .insert(UnresolvedAccessSite {
@@ -5596,7 +5597,52 @@ impl<'a> Extractor<'a> {
                 access,
                 span,
                 obj_params,
+                protocol,
             });
+    }
+
+    /// The project protocol `var`'s object is typed with although heki cannot tie it to a class
+    /// ([`UnresolvedAccessSite::protocol`]): an instance of a protocol whose implementations
+    /// heki cannot list, or a class object whose annotation is `type[P]`
+    /// ([`ProjectDecls::protocol_class`]).
+    fn unknown_protocol(&self, var: VarId) -> Option<String> {
+        match self.val(var) {
+            Some(Val::Inst(c)) if self.cx.project.protocol(c) == Some(None) => Some(c.clone()),
+            Some(_) => None,
+            None => self.cx.project.protocol_class(&self.declared_type(var)?),
+        }
+    }
+
+    /// What the annotation of the place `var`'s value comes from declares, as its module
+    /// resolves it: the parameter it is on every path, the local it is bound to, or the
+    /// attribute it is read from (along the MRO of the object's class).
+    fn declared_type(&self, var: VarId) -> Option<crate::types::Ty> {
+        let resolve = |text: &str| self.cx.module.resolve_annotation_ty(text);
+        if let Some((i, None)) = self.param_alias.get(&var) {
+            return resolve(self.f.params.get(usize::from(*i))?.annotation.as_deref()?);
+        }
+        // The annotated local is any name along the copies the value went through.
+        let mut cur = var;
+        loop {
+            let name = self
+                .f
+                .var_names
+                .get(cur.0 as usize)
+                .and_then(Option::as_deref);
+            let annotated =
+                name.and_then(|name| self.f.local_annotations.iter().find(|a| a.target == name));
+            if let Some(local) = annotated {
+                return resolve(&local.annotation);
+            }
+            match self.shape.inst(cur).map(|i| &i.kind) {
+                Some(InstKind::Copy { src, .. }) => cur = *src,
+                Some(InstKind::AttrLoad { obj, attr, .. }) => {
+                    let class = self.instance_of(*obj)?;
+                    return self.cx.project.member_type(&class, attr, false);
+                }
+                _ => return None,
+            }
+        }
     }
 
     /// Record a write heki cannot tie to a class (`MUT205`) of the object `obj` holds (`None`:
@@ -5607,12 +5653,17 @@ impl<'a> Extractor<'a> {
             return;
         }
         let obj_params = obj.map_or(0, |o| self.exact_param(o));
+        let protocol = match (&what, obj) {
+            (Unresolved::Receiver(_), Some(obj)) => self.unknown_protocol(obj),
+            _ => None,
+        };
         let site = UnresolvedWriteSite {
             what,
             kind,
             span,
             obj_params,
             construction: Construction::No,
+            protocol,
         };
         if let Some(obj) = obj.filter(|o| self.track && self.trackable(*o)) {
             let query = self.rec.query(self.at(), obj);

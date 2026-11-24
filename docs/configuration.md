@@ -431,7 +431,8 @@ judged by the protocol, the type the code uses it through: `def f(h: Host): h._m
 `Host._m`, not `_m` of the classes implementing `Host`, and a private method of an
 implementation called through the protocol keeps what it reads and calls. A write through such
 a value still writes the implementations' attribute. `allowed-protocols` allows the reads, calls,
-and writes through the protocols it names (see [How contracts report](#how-contracts-report)).
+and writes through the protocols it names, also through a class object typed `type[P]` of such a
+protocol (see [How contracts report](#how-contracts-report)).
 
 | Key | Default | Meaning |
 | --- | ------- | ------- |
@@ -918,7 +919,11 @@ holds for `invalidation` too:
 - **`allowed-protocols` allows the accesses through the protocols it names.** A read, call, or
   write through a value typed with a project protocol a pattern names (or a subprotocol of one)
   that declares the member, itself or through its protocol bases, is allowed wherever it is
-  judged, and so is a reference that `references` counts (`return h._helper`): `allowed-protocols = ["*Host"]` allows `parser._flag` with `parser: RenderHost` and
+  judged, and so is a reference that `references` counts (`return h._helper`). So is one through
+  a class object typed `type[P]` of such a protocol (a parameter, a local, or an attribute
+  annotated so: `cls._items_constraints(obj)` with `cls: type[KeywordsHost]`), and one through a
+  protocol whose implementations heki cannot list, though heki cannot tie either to a class
+  (`MUT205`, `MUT206`, `MUT207`): `allowed-protocols = ["*Host"]` allows `parser._flag` with `parser: RenderHost` and
   `class RenderHost(RuntimeFlags, Protocol)` when `RuntimeFlags` declares `_flag`, while the same
   read through `flags: RuntimeFlags` stays reported. With `protocol-subclasses = false`, a
   pattern names the protocols it matches only, not their subprotocols: with
@@ -928,9 +933,9 @@ holds for `invalidation` too:
   protocol is allowed for the protocol's member and for each implementation's attribute alike.
   Accesses through a
   protocol that does not declare the member, through an implementation's class, through a value
-  of unknown class (`unresolved = "report"`, also a protocol whose implementations heki cannot
-  list), and a protocol-typed value handed to a helper that changes it without typing its
-  parameter stay reported. By the call graph, a private method of an implementation that a call
+  of unknown class that no annotation types with such a protocol (`unresolved = "report"`), and a
+  protocol-typed value handed to a helper that changes it without typing its parameter stay
+  reported. By the call graph, a private method of an implementation that a call
   through the protocol runs still hands its writes of its own `self` to the caller.
 - **The help names the allowed code that does it today.** After the contract's `message`, the
   help of a report names up to three public functions and methods whose own body does what the

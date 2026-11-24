@@ -575,6 +575,10 @@ pub struct UnresolvedWriteSite {
     /// Whether the write constructs the object it writes (`fresh-objects`; a parameter is left
     /// to the callers, `Construction::No`).
     pub construction: Construction,
+    /// The project protocol the object is typed with although its class is unknown
+    /// ([`UnresolvedAccessSite::protocol`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -607,6 +611,12 @@ pub struct UnresolvedAccessSite {
     pub span: Span,
     /// Parameters of the accessing function the object is on every path (bit 0: `self`).
     pub obj_params: u64,
+    /// The project protocol the object is typed with although its class is unknown: an
+    /// instance of a protocol whose implementations heki cannot list, or a class object typed
+    /// `type[P]`, whose class may be any implementation's. `allowed-protocols` allows the
+    /// access when it names the protocol and the protocol declares the member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
 }
 
 /// What an [`UnresolvedAccessSite`] does with its name.

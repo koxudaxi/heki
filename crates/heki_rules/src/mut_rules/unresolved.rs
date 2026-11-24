@@ -51,6 +51,11 @@ pub(super) fn mut205(
     for (key, s) in cx.defined_functions() {
         for w in &s.unresolved_write_sites {
             for (r, &(contract, rule)) in strict.iter().enumerate() {
+                if let Unresolved::Receiver(attr) = &w.what
+                    && through_allowed_protocol(cx, &rule.allowance, w.protocol.as_deref(), attr)
+                {
+                    continue;
+                }
                 let hits: Vec<_> = rule
                     .targets
                     .iter()
@@ -266,6 +271,9 @@ pub(super) fn mut206(
                 continue;
             };
             for (r, &(contract, rule)) in strict.iter().enumerate() {
+                if through_allowed_protocol(cx, &rule.allowance, a.protocol.as_deref(), &a.name) {
+                    continue;
+                }
                 let (hits, family) = matched.entry((r, a.name.as_str())).or_insert_with(|| {
                     let hits: Vec<&ContractTarget> = rule
                         .targets
@@ -358,6 +366,9 @@ pub(super) fn mut207(
             .filter(|a| a.access == Access::Call)
         {
             for (r, &(contract, rule)) in strict.iter().enumerate() {
+                if through_allowed_protocol(cx, &rule.allowance, a.protocol.as_deref(), &a.name) {
+                    continue;
+                }
                 let hits: Vec<usize> = (0..rule.targets.patterns.len())
                     .filter(|&i| rule.targets.patterns[i].name.matches(&a.name))
                     .collect();
@@ -421,6 +432,18 @@ pub(super) fn mut207(
             }
         }
     });
+}
+
+/// Whether `allowance` allows an access of `member` through an object typed with `protocol`
+/// although its class is unknown ([`heki_effect::UnresolvedAccessSite::protocol`]), as through
+/// a value of the protocol whose class heki knows ([`Allowance::allows_protocol`]).
+fn through_allowed_protocol(
+    cx: &CheckContext<'_>,
+    allowance: &Allowance,
+    protocol: Option<&str>,
+    member: &str,
+) -> bool {
+    protocol.is_some_and(|p| allowance.allows_protocol(cx.decls, p, member))
 }
 
 /// The rules of `rules` that `strict` holds for, each with its contract's place in the
