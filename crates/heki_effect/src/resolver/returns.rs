@@ -41,6 +41,11 @@ pub struct ReturnFact {
     /// annotated with the class keeps it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ty: Option<Ty>,
+    /// The module globals the definitions read (fqns), which `ty` is inferred from as their
+    /// module binds them: once another module rebinds one, `ty` says nothing
+    /// ([`super::FunctionDecl::declared_return`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ty_globals: Vec<String>,
 }
 
 /// Items whose number the data decides ([`ReturnFact::items`], [`CallItems`]).
@@ -423,7 +428,9 @@ pub(super) fn record_return_facts(
     }
     for (qualname, definitions) in &typed {
         if let Some(ty) = facts.returned_type(definitions) {
-            decided.entry(qualname).or_default().ty = Some(ty);
+            let fact = decided.entry(qualname).or_default();
+            fact.ty = Some(ty);
+            fact.ty_globals = globals_read(decls, definitions);
         }
     }
     for (qualname, fact) in decided {
@@ -431,6 +438,28 @@ pub(super) fn record_return_facts(
             d.returns = Some(Box::new(fact));
         }
     }
+}
+
+/// The module globals `definitions` read, by the fqn each name reads ([`ReturnFact::ty_globals`]):
+/// what an import binds, or the module's own global.
+fn globals_read(decls: &ModuleDecls, definitions: &[TypedReturns<'_>]) -> Vec<String> {
+    let mut out: Vec<String> = definitions
+        .iter()
+        .flat_map(|d| d.f.blocks.iter().flat_map(|b| &b.insts))
+        .filter_map(|i| match &i.kind {
+            InstKind::LoadGlobal { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .map(|name| {
+            decls
+                .fixed_import(name)
+                .cloned()
+                .unwrap_or_else(|| format!("{}.{name}", decls.module_name))
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// One definition whose returned values may be of a class narrower than its annotation: the

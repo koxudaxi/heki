@@ -879,7 +879,10 @@ impl FunctionDecl {
         let declared = self
             .returns
             .as_ref()
-            .and_then(|r| r.ty.as_ref())
+            .and_then(|r| {
+                let rebound = r.ty_globals.iter().any(|g| project.rebound_elsewhere(g));
+                r.ty.as_ref().filter(|_| !rebound)
+            })
             .or(self.return_type.as_ref())
             .and_then(|t| project.declared_ty(t))
             .and_then(|t| t.bind_self(None));
