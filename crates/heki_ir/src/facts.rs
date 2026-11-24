@@ -709,7 +709,8 @@ impl<'a> FnIndex<'a> {
             return known.clone();
         }
         if self.sizes.outermost() {
-            self.sizes.settle(q, |q| self.ask_again(q));
+            let replays = || Budget::of_function("heki_ir::facts::FnIndex::sizes", self.f);
+            self.sizes.settle(q, replays, |q| self.ask_again(q));
             return memo.borrow().get(&key).cloned().flatten();
         }
         if !self.sizes.enter(q) {
@@ -722,6 +723,15 @@ impl<'a> FnIndex<'a> {
         }
         memo.borrow_mut().insert(key, answer.clone());
         answer
+    }
+
+    /// `walk` with the budget of one walk of a size decision, named `owner`: its own, or the one
+    /// of the decisions run after a question waited ([`Recursion::replays`]).
+    fn with_walk_budget<T>(&self, owner: &'static str, walk: impl FnOnce(&Budget) -> T) -> T {
+        match self.sizes.replays() {
+            Some(replays) => walk(replays),
+            None => walk(&Budget::of_function(owner, self.f)),
+        }
     }
 
     /// Ask `q` as [`Recursion::settle`] does: an open question's mark is removed first.
@@ -1053,16 +1063,21 @@ impl<'a> FnIndex<'a> {
         // The methods of a container of unknown kind may add any number of items.
         let counted = !origins.shared && !origins.opaque;
         // Aliases past the walk's budget may be grown any number of times. A step per alias and
-        // per instruction reading one is at most three per IR unit, which the budget counts
-        // without ever reaching.
-        let budget = Budget::of_function("heki_ir::facts::FnIndex::growth", self.f);
-        let alias = self
-            .aliases(&origins.roots, &budget)
-            .map(Some)
-            .open_means(None)?;
-        if self.captured(&alias) {
-            return None;
-        }
+        // per instruction reading one is at most three per IR unit, which the budget of one walk
+        // counts without ever reaching.
+        let (alias, reading) =
+            self.with_walk_budget("heki_ir::facts::FnIndex::growth", |budget| {
+                let alias = self
+                    .aliases(&origins.roots, budget)
+                    .map(Some)
+                    .open_means(None)?;
+                if self.captured(&alias) {
+                    return None;
+                }
+                // Only what reads an alias can grow it.
+                let reading = self.reading(&alias, within);
+                budget.take(reading.len()).then_some((alias, reading))
+            })?;
         let kinds = &origins.kinds;
         let list_only =
             !origins.opaque && !kinds.is_empty() && kinds.iter().all(|k| *k == BuiltinKind::List);
@@ -1070,9 +1085,6 @@ impl<'a> FnIndex<'a> {
             !origins.opaque && !kinds.is_empty() && kinds.iter().all(|k| *k == BuiltinKind::Dict);
         let mut added: u32 = 0;
         let mut ops = Vec::new();
-        // Only what reads an alias can grow it.
-        let reading = self.reading(&alias, within);
-        budget.take(reading.len()).then_some(())?;
         for (b, at) in reading {
             let bb = self.f.block(b);
             let Some(i) = at else {
@@ -2096,30 +2108,34 @@ impl<'a> FnIndex<'a> {
                 .collect();
             let mut ops = Vec::new();
             // A root whose aliases are past the walk's budget may be changed on the way. A step
-            // per alias is at most one per IR unit, which the budget counts without ever reaching.
-            let budget = Budget::of_function("heki_ir::facts::FnIndex::guarded_len", self.f);
-            let root_changed = self.aliases(&[p.root], &budget).map(|root| {
-                self.f
-                    .blocks
-                    .iter()
-                    .filter(|bb| on_the_way[bb.id.0 as usize])
-                    .flat_map(|bb| &bb.insts)
-                    .any(|i| match &i.kind {
-                        InstKind::AttrLoad { .. } => false,
-                        InstKind::AttrStore { obj, .. }
-                        | InstKind::AttrDelete { obj, .. }
-                        | InstKind::SubscriptDelete { obj, .. }
-                            if root.contains(obj) =>
-                        {
-                            true
-                        }
-                        _ => {
-                            ops.clear();
-                            self.grown_operands(i, false, &mut ops);
-                            ops.iter().any(|o| root.contains(o))
-                        }
-                    })
-            });
+            // per alias is at most one per IR unit, which the budget of one walk counts without
+            // ever reaching.
+            let root_changed = self
+                .with_walk_budget("heki_ir::facts::FnIndex::guarded_len", |budget| {
+                    self.aliases(&[p.root], budget)
+                })
+                .map(|root| {
+                    self.f
+                        .blocks
+                        .iter()
+                        .filter(|bb| on_the_way[bb.id.0 as usize])
+                        .flat_map(|bb| &bb.insts)
+                        .any(|i| match &i.kind {
+                            InstKind::AttrLoad { .. } => false,
+                            InstKind::AttrStore { obj, .. }
+                            | InstKind::AttrDelete { obj, .. }
+                            | InstKind::SubscriptDelete { obj, .. }
+                                if root.contains(obj) =>
+                            {
+                                true
+                            }
+                            _ => {
+                                ops.clear();
+                                self.grown_operands(i, false, &mut ops);
+                                ops.iter().any(|o| root.contains(o))
+                            }
+                        })
+                });
             let root_changed = root_changed.open_means(true);
             let mut values = vec![v];
             values.extend(linked.iter().map(|g| g.var));

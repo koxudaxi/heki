@@ -269,7 +269,10 @@ the call graph, or the class hierarchy goes through them:
   decisions at a time. A question asked deeper waits while the decisions under way unwind, and
   is decided first with the same questions open: the answers are those of the whole recursion,
   whose depth would otherwise follow a chain in the source past a thread's stack (2 MiB for the
-  threads analyzing the files of a project).
+  threads analyzing the files of a project). The questions open are then decided again, so a
+  question with many deep ones below it runs once per deep one: from the first wait on, the
+  decisions take their steps from one budget of the owner, and past it the questions still open
+  are unknown.
 - A `Budget` per owner (a rule run on one function, the summary of one function, the store
   types of one module) counts the steps of all the owner's walks, and the weight of every fact
   they join, which bounds both the work of joining and the memory of the facts kept: 64 per IR

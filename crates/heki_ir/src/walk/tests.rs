@@ -261,6 +261,8 @@ struct Heights<'g> {
     graph: &'g [Vec<u32>],
     kept: RefCell<FxHashMap<u32, Option<u32>>>,
     recursion: Option<Recursion<u32>>,
+    /// The steps of the recursion's budget for the questions asked again.
+    replays: usize,
     /// The decisions on the native stack now, and the most there were.
     nested: Cell<usize>,
     deepest: Cell<usize>,
@@ -268,10 +270,19 @@ struct Heights<'g> {
 
 impl<'g> Heights<'g> {
     fn new(graph: &'g [Vec<u32>], recursion: Option<Recursion<u32>>) -> Self {
+        Self::with_replays(graph, recursion, 1 << 20)
+    }
+
+    fn with_replays(
+        graph: &'g [Vec<u32>],
+        recursion: Option<Recursion<u32>>,
+        replays: usize,
+    ) -> Self {
         Self {
             graph,
             kept: RefCell::default(),
             recursion,
+            replays,
             nested: Cell::new(0),
             deepest: Cell::new(0),
         }
@@ -283,10 +294,14 @@ impl<'g> Heights<'g> {
         }
         if let Some(r) = &self.recursion {
             if r.outermost() {
-                r.settle(n, |q| {
-                    self.kept.borrow_mut().remove(&q);
-                    self.height(q);
-                });
+                r.settle(
+                    n,
+                    || budget(self.replays),
+                    |q| {
+                        self.kept.borrow_mut().remove(&q);
+                        self.height(q);
+                    },
+                );
                 return self.kept.borrow()[&n];
             }
             if !r.enter(n) {
@@ -368,6 +383,48 @@ fn a_chain_past_the_limit_is_decided_to_its_end() {
     let heights = Heights::new(&cycle, Some(Recursion::default()));
     assert_eq!(heights.height(0), None);
     assert!(heights.kept.borrow().values().all(Option::is_none));
+}
+
+/// A node pointing to `chains` chains, each one node longer than the limit: it is asked again
+/// after each chain, which it reaches too deep.
+fn fan_of_chains(chains: u32) -> Vec<Vec<u32>> {
+    let length = u32::try_from(MAX_NATIVE_NESTING).unwrap() + 1;
+    let mut graph = vec![(0..chains).map(|c| 1 + c * length).collect::<Vec<u32>>()];
+    for c in 0..chains {
+        for i in 0..length {
+            let n = 1 + c * length + i;
+            graph.push((i + 1 < length).then_some(n + 1).into_iter().collect());
+        }
+    }
+    graph
+}
+
+#[test]
+fn the_questions_asked_again_take_their_steps_from_one_budget() {
+    let chains = 8;
+    let graph = fan_of_chains(chains);
+    let plain = Heights::new(&graph, None);
+    assert_eq!(plain.height(0), Some(MAX_NATIVE_NESTING as u32 + 1));
+    let last = u32::try_from(graph.len()).unwrap() - 1;
+    let last_chain = last - u32::try_from(MAX_NATIVE_NESTING).unwrap();
+    // Each chain asks the fan again: three chains' worth of steps run out halfway through.
+    for (steps, decided) in [(1 << 20, true), (MAX_NATIVE_NESTING * 3, false)] {
+        let bounded = Heights::with_replays(&graph, Some(Recursion::default()), steps);
+        assert_eq!(bounded.height(0).is_some(), decided, "{steps} steps");
+        let replays = bounded.recursion.as_ref().unwrap().replays.get().unwrap();
+        assert_eq!(replays.spent(), !decided, "{steps} steps");
+        // The budget is the owner's: a later outermost question stops at its first wait.
+        assert_eq!(
+            bounded.height(last_chain).is_some(),
+            decided,
+            "{steps} steps"
+        );
+        // Past the budget an answer is unknown, never another one.
+        for n in 0..=last {
+            let found = bounded.height(n);
+            assert!(found.is_none() || found == plain.height(n), "node {n}");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------- closure

@@ -233,6 +233,35 @@ impl ImportContract<'_> {
         }
     }
 
+    /// The text of a report naming the `broken` modules, each with why it breaks the contract:
+    /// the modules of one reason together, `after` following the first of them.
+    fn breaks_text(&self, broken: &[(String, Why)], after: &str) -> String {
+        let mut reasons: Vec<(Vec<String>, Why)> = Vec::new();
+        for (name, why) in broken {
+            match reasons.iter_mut().find(|(_, w)| w == why) {
+                Some((names, _)) => names.push(name.clone()),
+                None => reasons.push((vec![name.clone()], *why)),
+            }
+        }
+        let texts: Vec<String> = (reasons.iter().enumerate())
+            .map(|(i, (names, why))| {
+                let after = if i == 0 { after } else { "" };
+                format!(
+                    "{}{after}, {}",
+                    quoted(names, "or"),
+                    self.why_text(*why, false)
+                )
+            })
+            .collect();
+        texts.join(", or ")
+    }
+
+    /// The text of a report saying why the import may break it, for one of `whys`.
+    fn may_break_text(&self, whys: &[Why]) -> String {
+        let texts: Vec<String> = whys.iter().map(|why| self.why_text(*why, true)).collect();
+        texts.join(", or ")
+    }
+
     /// The text of a report saying why the import breaks it.
     fn why_text(&self, why: Why, may: bool) -> String {
         let label = &self.label;
@@ -477,28 +506,33 @@ impl<'c> ImportContracts<'c> {
             .flatten()
     }
 
-    /// Why importing some module whose name starts with `head` may break contract `c`, the
-    /// importer naming it by its full name when `absolute` ([`Self::judge`]); `None` when no
-    /// such import can.
-    fn may_break_under(&self, c: usize, head: &str, absolute: bool) -> Option<Why> {
+    /// Every reason for which importing some module whose name starts with `head` may break
+    /// contract `c`, the importer naming it by its full name when `absolute` ([`Self::judge`]):
+    /// a name of `relative-imports` written in full, and a module the contract does not allow.
+    /// Empty when no such import can.
+    fn may_break_under(&self, c: usize, head: &str, absolute: bool) -> Vec<Why> {
         let contract = &self.contracts[c];
         let (allowed, forbidden, relative) =
             (&contract.allowed, &contract.forbidden, &contract.relative);
-        if absolute && (relative.patterns.iter()).any(|p| p.may_match_under(head)) {
-            return Some(Why::Absolute);
-        }
-        if !contract.lists_allowed() && !forbidden.is_set() {
-            return Some(Why::AllowsNone);
-        }
-        if (allowed.patterns.iter().chain(&relative.patterns)).any(|p| p.matches_all_under(head)) {
-            return None;
-        }
-        if !forbidden.is_set() {
-            return Some(Why::NotAllowed);
-        }
-        (forbidden.patterns.iter())
-            .any(|p| p.may_match_under(head))
-            .then_some(Why::Forbidden)
+        let spelled = absolute && (relative.patterns.iter()).any(|p| p.may_match_under(head));
+        let loaded = if !contract.lists_allowed() && !forbidden.is_set() {
+            Some(Why::AllowsNone)
+        } else if (allowed.patterns.iter().chain(&relative.patterns))
+            .any(|p| p.matches_all_under(head))
+        {
+            None
+        } else if !forbidden.is_set() {
+            Some(Why::NotAllowed)
+        } else {
+            (forbidden.patterns.iter())
+                .any(|p| p.may_match_under(head))
+                .then_some(Why::Forbidden)
+        };
+        spelled
+            .then_some(Why::Absolute)
+            .into_iter()
+            .chain(loaded)
+            .collect()
     }
 }
 
@@ -551,18 +585,18 @@ fn quoted(names: &[String], word: &str) -> String {
 enum Verdict {
     Fine,
     /// The site imports these modules (several for a by-name import of one of them), each
-    /// breaking the contract.
-    Breaks(Vec<String>, Why),
-    /// The site may import a module that breaks the contract.
-    Open(OpenImport, Why),
+    /// breaking the contract for its reason.
+    Breaks(Vec<(String, Why)>),
+    /// The site may import a module that breaks the contract, for one of these reasons.
+    Open(OpenImport, Vec<Why>),
 }
 
 /// One answer of a part of a by-name import: whether the module it names breaks the contract.
 enum Part {
     Breaks(String, Why),
     Fine,
-    /// It may break the contract, for this reason.
-    Open(Why),
+    /// It may break the contract, for one of these reasons.
+    Open(Vec<Why>),
 }
 
 /// The step of a walk into a module: from the module and site importing it, which loads the
@@ -700,12 +734,12 @@ impl<'r, 'g> Run<'r, '_, 'g> {
         };
         match target {
             Target::Module(module) => match one(*module, 0, !walked) {
-                Some(why) => Verdict::Breaks(vec![graph.name(*module).to_owned()], why),
+                Some(why) => Verdict::Breaks(vec![(graph.name(*module).to_owned(), why)]),
                 None => Verdict::Fine,
             },
             Target::PackageOrSubmodule { package, submodule } => {
                 if let Some(why) = one(*package, 0, !walked) {
-                    return Verdict::Breaks(vec![graph.name(*package).to_owned()], why);
+                    return Verdict::Breaks(vec![(graph.name(*package).to_owned(), why)]);
                 }
                 let imported = Imported {
                     name: submodule,
@@ -717,7 +751,7 @@ impl<'r, 'g> Run<'r, '_, 'g> {
                             package: graph.name(*package).to_owned(),
                             submodule: submodule.clone(),
                         },
-                        why,
+                        vec![why],
                     ),
                     None => Verdict::Fine,
                 }
@@ -730,10 +764,15 @@ impl<'r, 'g> Run<'r, '_, 'g> {
                             None => Part::Fine,
                         },
                         Target::Missing(_) => Part::Fine,
-                        Target::Under(head) => contracts
-                            .may_break_under(c, head, absolute(i))
-                            .map_or(Part::Fine, Part::Open),
-                        _ => Part::Open(contract.open_why()),
+                        Target::Under(head) => {
+                            let whys = contracts.may_break_under(c, head, absolute(i));
+                            if whys.is_empty() {
+                                Part::Fine
+                            } else {
+                                Part::Open(whys)
+                            }
+                        }
+                        _ => Part::Open(vec![contract.open_why()]),
                     })
                     .collect();
                 let broken: Vec<(String, Why)> = (parts.iter())
@@ -743,15 +782,25 @@ impl<'r, 'g> Run<'r, '_, 'g> {
                     })
                     .collect();
                 if !broken.is_empty() && broken.len() == parts.len() {
-                    let why = broken[0].1;
-                    return Verdict::Breaks(broken.into_iter().map(|(n, _)| n).collect(), why);
+                    return Verdict::Breaks(broken);
                 }
-                let Some(why) = parts.iter().find_map(|p| match p {
-                    Part::Breaks(_, why) | Part::Open(why) => Some(*why),
-                    Part::Fine => None,
-                }) else {
+                // Each reason once, in the order of the parts giving it.
+                let mut whys: Vec<Why> = Vec::new();
+                for part in &parts {
+                    let given = match part {
+                        Part::Breaks(_, why) => std::slice::from_ref(why),
+                        Part::Open(whys) => whys.as_slice(),
+                        Part::Fine => &[],
+                    };
+                    for why in given {
+                        if !whys.contains(why) {
+                            whys.push(*why);
+                        }
+                    }
+                }
+                if whys.is_empty() {
                     return Verdict::Fine;
-                };
+                }
                 let names = (targets.iter())
                     .map(|t| match t {
                         Target::Under(head) => format!("{head}*"),
@@ -761,13 +810,16 @@ impl<'r, 'g> Run<'r, '_, 'g> {
                             .map_or_else(|| "*".to_owned(), |m| graph.name(m).to_owned()),
                     })
                     .collect();
-                Verdict::Open(OpenImport::AnyOf(names), why)
+                Verdict::Open(OpenImport::AnyOf(names), whys)
             }
-            Target::Under(head) => match contracts.may_break_under(c, head, absolute(0)) {
-                Some(why) => Verdict::Open(OpenImport::Under(head.clone()), why),
-                None => Verdict::Fine,
-            },
-            Target::Open => Verdict::Open(OpenImport::Unknown, contract.open_why()),
+            Target::Under(head) => {
+                let whys = contracts.may_break_under(c, head, absolute(0));
+                if whys.is_empty() {
+                    return Verdict::Fine;
+                }
+                Verdict::Open(OpenImport::Under(head.clone()), whys)
+            }
+            Target::Open => Verdict::Open(OpenImport::Unknown, vec![contract.open_why()]),
             Target::Missing(_) => Verdict::Fine,
         }
     }
@@ -843,7 +895,7 @@ impl<'r, 'g> Run<'r, '_, 'g> {
             };
             let chain = chain_to(module);
             let site = first_site(&chain).expect("a module reached has a chain to it");
-            let verdict = Verdict::Breaks(vec![imported.name.to_owned()], why);
+            let verdict = Verdict::Breaks(vec![(imported.name.to_owned(), why)]);
             self.emit(c, m, site, &chain[1..], verdict);
         }
         // The sites whose module a walk cannot take: judged where the chain to them ends. The
@@ -859,7 +911,10 @@ impl<'r, 'g> Run<'r, '_, 'g> {
                 }
                 let verdict = self.verdict(c, r, site, target, own, true);
                 let what = match &verdict {
-                    Verdict::Breaks(names, _) => quoted(names, "or"),
+                    Verdict::Breaks(broken) => {
+                        let names: Vec<String> = broken.iter().map(|(n, _)| n.clone()).collect();
+                        quoted(&names, "or")
+                    }
                     Verdict::Open(import, _) => import.text(),
                     Verdict::Fine => continue,
                 };
@@ -899,26 +954,27 @@ impl<'r, 'g> Run<'r, '_, 'g> {
         };
         let (code, target, message) = match verdict {
             Verdict::Fine => return,
-            Verdict::Breaks(names, why) => {
-                let named = quoted(&names, "or");
-
-                let why = contract.why_text(why, false);
+            Verdict::Breaks(broken) => {
+                let names: Vec<String> = broken.iter().map(|(n, _)| n.clone()).collect();
                 let message = match first {
-                    Some(first) if first != names[0] => {
-                        format!(
-                            "`{}` imports `{first}`{when}, and {named} through it, {why}",
-                            site.qualname
-                        )
-                    }
-                    _ => format!("`{}` imports {named}{when}, {why}", site.qualname),
+                    Some(first) if first != names[0] => format!(
+                        "`{}` imports `{first}`{when}, and {}",
+                        site.qualname,
+                        contract.breaks_text(&broken, " through it")
+                    ),
+                    _ => format!(
+                        "`{}` imports {}",
+                        site.qualname,
+                        contract.breaks_text(&broken, &when)
+                    ),
                 };
                 ("IMP201", names.join("|"), message)
             }
-            Verdict::Open(import, why) => {
+            Verdict::Open(import, whys) => {
                 if !contract.report_unresolved {
                     return;
                 }
-                let why = contract.why_text(why, true);
+                let why = contract.may_break_text(&whys);
                 let message = match first {
                     Some(first) => format!(
                         "`{}` imports `{first}`{when}, and through it {}, {why}",

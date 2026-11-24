@@ -233,7 +233,7 @@ unresolved = "report"
     p.write("pkg/inner.py", "import json\nimport pkg.util\n");
     p.write(
         "pkg/sealed.py",
-        "import json\n\n\ndef load(name: str) -> object:\n    return __import__(f\"pkg.{name}\")\n",
+        "import json\n\n\ndef load(name: str) -> object:\n    return __import__(f\"pkg.{name}\")\n\n\ndef load_any(name: str) -> object:\n    return __import__(name)\n",
     );
     assert_eq!(
         reports(&p),
@@ -244,11 +244,17 @@ unresolved = "report"
             "pkg/leaf.py:4 IMP201 <module> pkg.util",
             "pkg/sealed.py:1 IMP201 <module> json",
             "pkg/sealed.py:5 IMP202 load pkg.*",
+            "pkg/sealed.py:9 IMP202 load_any *",
         ]
     );
     assert_eq!(
         message(&p, "pkg/sealed.py:1"),
         "`<module>` imports `json` while `pkg.sealed` loads, and `sealed` allows no imports"
+    );
+    assert_eq!(
+        message(&p, "pkg/sealed.py:9"),
+        "`load_any` imports a module heki cannot name by name when it runs, and `sealed` allows \
+         no imports"
     );
 }
 
@@ -822,7 +828,7 @@ def by_name(flag: bool, name: str) -> object:
 
 /// What names a module relatively: leading dots, and a relative name anchored at the module's
 /// own `__package__` or `__name__`. A full name, a relative name anchored at a package the code
-/// spells, and a by-name import whose names include the full name of the module are reported;
+/// spells (also in a module constant), and a by-name import whose names include the full name of the module are reported;
 /// with `unresolved = "report"`, so are a by-name import some of whose names break the contract,
 /// a head that may name a module of the key, and `__import__` with a `level`, whose module heki
 /// cannot name. Lazy imports count, and those under `TYPE_CHECKING` only with the key.
@@ -841,6 +847,7 @@ fn relative_imports_judge_every_spelling_of_an_import() {
         "pkg/_runtime/a.py:20 IMP201 by_name pkg._runtime.b",
         "pkg/_runtime/a.py:21 IMP201 by_name pkg._runtime.c",
         "pkg/_runtime/a.py:23 IMP201 by_name pkg._runtime.b",
+        "pkg/_runtime/anchored.py:7 IMP201 anchored pkg._runtime.b",
     ];
     let open = [
         "pkg/_runtime/a.py:22 IMP202 by_name *",
@@ -868,6 +875,10 @@ fn relative_imports_judge_every_spelling_of_an_import() {
             "import importlib\n\nimportlib.import_module(\".c\", __name__)\n",
         );
         p.write("pkg/_runtime/a.py", SPELLINGS);
+        p.write(
+            "pkg/_runtime/anchored.py",
+            "import importlib\n\nPACKAGE = \"pkg._runtime\"\n\n\ndef anchored() -> object:\n    return importlib.import_module(\".b\", PACKAGE)\n",
+        );
         let mut found = reports(&p);
         found.sort();
         let mut expected = expected;
@@ -943,6 +954,58 @@ fn relative_imports_combine_with_the_other_lists() {
             );
         }
     }
+}
+
+const REASONS: &str = r#"import importlib
+
+
+def by_name(flag: bool, name: str) -> object:
+    importlib.import_module("pkg._runtime.b" if flag else "torch")
+    importlib.import_module("pkg._runtime.b" if flag else f"pkg.x{name}")
+    importlib.import_module("pkg._runtime.b" if flag else "pkg.plugins.x")
+    return importlib.import_module(f"pkg.{name}")
+"#;
+
+/// The alternatives of a by-name import keep their own reasons: a module the contract allows only
+/// relatively and one it does not allow however it is named, an alternative heki cannot name,
+/// whose package's search path the project replaces, and a head that may name either kind.
+#[test]
+fn a_by_name_import_keeps_the_reason_of_each_alternative() {
+    let p = project(
+        "imp_relative_reasons",
+        "[[tool.heki.import-owners]]\nname = \"rt\"\nimporters = [\"pkg._runtime.a\"]\nallowed-imports = [\"<stdlib>\"]\nrelative-imports = [\"pkg._runtime.*\"]\nunresolved = \"report\"\n",
+    );
+    runtime_package(&p);
+    p.write("pkg/plugins/__init__.py", "__path__ = [\"/opt/plugins\"]\n");
+    p.write("pkg/plugins/x.py", "");
+    p.write("pkg/_runtime/a.py", REASONS);
+    assert_eq!(
+        reports(&p),
+        [
+            "pkg/_runtime/a.py:5 IMP201 by_name pkg._runtime.b|torch",
+            "pkg/_runtime/a.py:6 IMP202 by_name pkg._runtime.b|pkg.x*",
+            "pkg/_runtime/a.py:7 IMP202 by_name pkg._runtime.b|*",
+            "pkg/_runtime/a.py:8 IMP202 by_name pkg.*",
+        ]
+    );
+    assert_eq!(
+        message(&p, "pkg/_runtime/a.py:5"),
+        "`by_name` imports `pkg._runtime.b` by name when it runs, which `rt` allows only through \
+         a relative import, or `torch`, not among the allowed imports of `rt`"
+    );
+    let either = "which may be a module `rt` allows only through a relative import, or which may \
+                  be outside the allowed imports of `rt`";
+    assert_eq!(
+        message(&p, "pkg/_runtime/a.py:6"),
+        format!("`by_name` imports `pkg._runtime.b` or `pkg.x*` by name when it runs, {either}")
+    );
+    assert_eq!(
+        message(&p, "pkg/_runtime/a.py:8"),
+        format!(
+            "`by_name` imports a module whose name starts with `pkg.` by name when it runs, \
+             {either}"
+        )
+    );
 }
 
 /// A relative import reaches only the importer's own top-level package: an importer outside the
