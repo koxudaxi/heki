@@ -24,7 +24,8 @@ is the wall time and the peak (the heap of the memory gate's counting build, or 
 reports, see `check_memory.py`) minus those of an empty module; the time limit is scaled to the
 machine by fixed linear shapes of calls and of loops (and, for a project shape, of a module of
 many functions), timed on a fixed release of heki (from PyPI, through pip), not on the binary
-under test.
+under test. A run through the `--watch` engine has its own empty module and its own limits,
+scaled by the same shapes timed through the watch engine.
 
 `heki check --walk-steps` gives the steps each owner's walks took per function. They must grow
 at most 2.5 times from n / 2 to n (quadratic growth inside the budget shows without timing
@@ -79,15 +80,21 @@ LIMIT_MIB = 1024.0
 # in one function does calls and loops. A project shape also does the work of many functions,
 # whose heap of tens to hundreds of MiB slows down more on a CI runner than calls and loops in one
 # function do, so the reference of functions (the last field) scales project shapes only.
+# Each mode of `TIMED_MODES` has its own seconds, its own empty module, and so its own limits:
+# a run through the `--watch` engine also starts the engine and builds its index, which slow
+# down on a CI runner more than a `heki check` run does, so a watch run is compared with the
+# references and the empty module timed through the watch engine. The other runs (`heki
+# dump-recommend-facts`, `heki dump-open-premises`) load and analyze once, as `heki check` does.
 # The references never run on the binary under test, whose changes would move every limit: a
 # reference made cheaper tightens them all, one made dearer loosens them all. Another
 # `REFERENCE_HEKI` or `reference_source` needs these seconds measured again on that machine (the
 # gate prints them).
 REFERENCE_HEKI = "0.2.4"
+TIMED_MODES = ("check", "watch")
 REFERENCES = (
-    ("calls", 3104, 0.225, False),
-    ("loops", 2000, 0.105, False),
-    ("functions", 8000, 0.165, True),
+    ("calls", 3104, {"check": 0.225, "watch": 0.228}, False),
+    ("loops", 2000, {"check": 0.105, "watch": 0.113}, False),
+    ("functions", 8000, {"check": 0.165, "watch": 0.187}, True),
 )
 # A run past this is over the limits whatever it would have taken.
 TIMEOUT_SECONDS = 10.0
@@ -1167,12 +1174,8 @@ class Runner:
     def check(
         self, text: str, watch: bool, steps: Path | None = None, timeout: float = TIMEOUT_SECONDS
     ) -> tuple[float, float, int]:
-        args = ["check", "--select", self.select, "--config", "shapes.toml"]
-        args += ["--output-format", "json", "m.py"]
-        env = {}
-        if watch:
-            args.insert(1, "--watch")
-            env["HEKI_WATCH_MAX_RUNS"] = "0"
+        args = ["--select", self.select, "--config", "shapes.toml"]
+        args, env = check_command([*args, "--output-format", "json", "m.py"], watch)
         if steps is not None:
             args[1:1] = ["--walk-steps", str(steps)]
         return self.measure(text, args, env, timeout)
@@ -1211,6 +1214,14 @@ class Runner:
         return out
 
 
+def check_command(args: list[str], watch: bool) -> tuple[list[str], dict[str, str]]:
+    """The arguments and environment of `heki check` with `args`, or of the `--watch` engine
+    stopping after its first check."""
+    if watch:
+        return ["check", "--watch", *args], {"HEKI_WATCH_MAX_RUNS": "0"}
+    return ["check", *args], {}
+
+
 def shard(text: str) -> tuple[int, int]:
     """`k/n` with 1 <= k <= n."""
     k, _, n = text.partition("/")
@@ -1219,32 +1230,45 @@ def shard(text: str) -> tuple[int, int]:
     return int(k), int(n)
 
 
-def time_limits(root: Path) -> tuple[float, float] | None:
+def time_limits(root: Path) -> dict[str, tuple[float, float]] | None:
     """`LIMIT_SECONDS` scaled to this machine by `REFERENCES`, run on the release
-    `REFERENCE_HEKI` in `root`: the limit of a shape in one function and that of a project shape.
-    `None` when no run of a reference or of its empty module ended cleanly (a crash or a stopped
-    run says nothing, or would inflate the limit)."""
+    `REFERENCE_HEKI` in `root`, per mode of `TIMED_MODES`: the limit of a shape in one function
+    and that of a project shape. `None` when no run of a reference or of its empty module ended
+    cleanly (a crash or a stopped run says nothing, or would inflate the limit)."""
     root.mkdir()
     released = Runner(released_heki(root), root)
-    args = ["check", "--select", released.select, "--output-format", "json", "m.py"]
+    limits: dict[str, tuple[float, float]] = {}
+    for mode in TIMED_MODES:
+        least = least_reference_seconds(released, mode)
+        if least is None:
+            return None
+        in_function, project = 1.0, 1.0
+        for kind, n, seconds, project_only in REFERENCES:
+            took = least[kind] - least["empty"]
+            print(f"reference {kind} n={n} on heki {REFERENCE_HEKI} ({mode}): {took:.3f} s "
+                  f"({seconds[mode]:.3f} s on the machine of the limits)", flush=True)
+            project = max(project, took / seconds[mode])
+            if not project_only:
+                in_function = max(in_function, took / seconds[mode])
+        limits[mode] = LIMIT_SECONDS * in_function, LIMIT_SECONDS * project
+    return limits
+
+
+def least_reference_seconds(released: Runner, mode: str) -> dict[str, float] | None:
+    """The least of three `mode` runs of the empty module and of each reference, or `None` when
+    none of one ended cleanly."""
+    command, env = check_command(["--select", released.select, "--output-format", "json", "m.py"],
+                                 mode == "watch")
     least: dict[str, float] = {}
     for kind, text in [("empty", ""), *((r[0], reference_source(r[0], r[1])) for r in REFERENCES)]:
-        runs = [released.measure(text, args, {}, TIMEOUT_SECONDS) for _ in range(3)]
+        runs = [released.measure(text, command, env, TIMEOUT_SECONDS) for _ in range(3)]
         clean = [seconds for seconds, _, code in runs if code in (0, 1)]
         if not clean:
-            print(f"calibration failed: no run of the {kind} reference ended cleanly",
+            print(f"calibration failed: no {mode} run of the {kind} reference ended cleanly",
                   file=sys.stderr)
             return None
         least[kind] = min(clean)
-    in_function, project = 1.0, 1.0
-    for kind, n, seconds, project_only in REFERENCES:
-        took = least[kind] - least["empty"]
-        print(f"reference {kind} n={n} on heki {REFERENCE_HEKI}: {took:.3f} s ({seconds:.3f} s "
-              "on the machine of the limits)", flush=True)
-        project = max(project, took / seconds)
-        if not project_only:
-            in_function = max(in_function, took / seconds)
-    return LIMIT_SECONDS * in_function, LIMIT_SECONDS * project
+    return least
 
 
 def main() -> int:
@@ -1264,22 +1288,25 @@ def main() -> int:
         runner = Runner(heki, Path(tmp))
         # Only runs that end cleanly measure anything: a crash or a stopped run would make the
         # baseline or a reference say nothing, or inflate the limit.
-        empty = [runner.check(HELPERS, watch=False) for _ in range(3)]
-        empty = [run for run in empty if run[2] in (0, 1)]
-        if not empty:
-            print("calibration failed: no run of the empty module ended cleanly", file=sys.stderr)
-            return 1
-        base_seconds = min(run[0] for run in empty)
-        base_peak = min(run[1] for run in empty)
-        print(f"empty module: {base_seconds:.2f} s, {base_peak:.0f} MiB", flush=True)
+        base: dict[str, tuple[float, float]] = {}
+        for mode in TIMED_MODES:
+            empty = [runner.run(HELPERS, mode) for _ in range(3)]
+            empty = [run for run in empty if run[2] in (0, 1)]
+            if not empty:
+                print(f"calibration failed: no {mode} run of the empty module ended cleanly",
+                      file=sys.stderr)
+                return 1
+            base[mode] = min(run[0] for run in empty), min(run[1] for run in empty)
+            print(f"empty module ({mode}): {base[mode][0]:.2f} s, {base[mode][1]:.0f} MiB",
+                  flush=True)
         limits = time_limits(Path(tmp) / "reference")
         if limits is None:
             return 1
-        print(f"time limits on this machine: {limits[0]:.2f} s in one function, {limits[1]:.2f} s "
-              "for a project", flush=True)
+        for mode, (in_function, project) in limits.items():
+            print(f"time limits on this machine ({mode}): {in_function:.2f} s in one function, "
+                  f"{project:.2f} s for a project", flush=True)
         for family, placement in shapes:
             shape = (family.name, placement)
-            limit_seconds = limits[placement == "project"]
             runner.contracts("" if family.contracts is None else family.contracts(family.size))
             # A shape the IR budget leaves unmodeled measures the cutoff, not the walks it gates.
             if family.size:
@@ -1302,6 +1329,9 @@ def main() -> int:
                 modes = ("check",) if listed else ("check", "watch")
                 modes += ("facts",) * family.facts
             for mode in () if failed is not None else modes:
+                timed_as = mode if mode in TIMED_MODES else "check"
+                base_seconds, base_peak = base[timed_as]
+                limit_seconds = limits[timed_as][placement == "project"]
                 # A listed shape only has to show when it drops under the limits.
                 timeout = base_seconds + 2 * limit_seconds if listed else TIMEOUT_SECONDS
                 seconds, peak, code = runner.run(text, mode, timeout=timeout)
@@ -1319,14 +1349,15 @@ def main() -> int:
                     spent = f"crashed (exit code {code})"
                 else:
                     spent = f"{cost[0]:.2f} s, {cost[1]:.0f} MiB"
-                print(f"{family.name}/{placement} n={n} {mode}: {spent}", flush=True)
+                print(f"{family.name}/{placement} n={n} {mode}: {spent} "
+                      f"(limit {limit_seconds:.2f} s)", flush=True)
                 if cost[0] > limit_seconds or cost[1] > LIMIT_MIB or code not in (0, 1):
-                    over.append(mode)
+                    over.append(f"{mode}: {limit_seconds:.2f} s or {LIMIT_MIB:.0f} MiB")
                 if cost[0] > limit_seconds / 4 or cost[1] > LIMIT_MIB / 4 or code not in (0, 1):
                     well_under = False
             if over and not listed:
-                problems.append(f"{family.name}/{placement} at n={n} costs more than "
-                                f"{limit_seconds:.1f} s or {LIMIT_MIB:.0f} MiB ({', '.join(over)})")
+                problems.append(f"{family.name}/{placement} at n={n} costs more than its limits "
+                                f"({'; '.join(over)})")
             if listed and well_under:
                 problems.append(f"{family.name}/{placement} costs less than a quarter of the limits: "
                                 "remove it from KNOWN_OVER")
