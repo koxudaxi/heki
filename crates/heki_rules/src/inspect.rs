@@ -801,6 +801,8 @@ impl<'a, 'i> Inspector<'a, 'i> {
         let returns = returns(b, summary, &params);
         let callers = callers(b, key, query);
         let reports = reports(b, key, path, query, &callers);
+        let shown: Vec<&Diagnostic> = reports.iter().map(|r| &r.diagnostic).collect();
+        let contracts = inputs.contracts.of(key, &shown);
         let purity = purity(b, key, summary, &effects, &changes, function.stub);
         InspectReport {
             version: INSPECT_VERSION,
@@ -818,7 +820,7 @@ impl<'a, 'i> Inspector<'a, 'i> {
             returns,
             callers: callers.info,
             reports,
-            contracts: inputs.contracts.of(key),
+            contracts,
         }
     }
 }

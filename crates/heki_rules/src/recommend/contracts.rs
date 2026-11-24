@@ -90,9 +90,8 @@ impl ContractKind {
 
     /// The kind whose contracts `code` reports for.
     fn of_rule(code: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|k| k.rule() == code || k.strict_rule() == Some(code))
+        let table = crate::contracts::contract_table_of_rule(code)?;
+        Self::ALL.into_iter().find(|k| k.key() == table)
     }
 
     /// How many contracts of the kind `cfg` declares: the candidates of a trial come after them.

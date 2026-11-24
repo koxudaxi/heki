@@ -194,4 +194,4 @@ writes to stderr are not colored.
 | ---- | ------- |
 | `0` | no diagnostics, or only warnings and heuristic reports (they are printed) |
 | `1` | an exact error found, or any report with `--fail-on warning` (`lint.fail-on = "warning"`), among the Ratchet regressions when a baseline is used; also when `--update-baseline` refuses a grown entry, a baseline entry matched nothing with [`report-unused-suppressions`](configuration.md#unused-suppressions), or `--diff` would change files |
-| `2` | configuration error, unreadable file, unknown rule, or syntax error |
+| `2` | configuration error, unknown rule, or a file that cannot be read or has a syntax error; with files given (`heki check src/app.py`, `--touched`), only one of those files fails the run, and the others are named in a note |

@@ -17,6 +17,7 @@ use crate::mut_rules::{
 use crate::{
     CheckContext, DottedPattern, RuleConfigError, RuleSelection, last_name, split_last_dot,
 };
+use heki_diagnostics::Diagnostic;
 use heki_effect::{BLOCKING_EFFECTS, ContractClass, Contracts, FuncKey, OptInFacts, TypedWrites};
 use heki_env::HekiConfig;
 use heki_kb::{EffectiveEcosystemKb, EnvironmentAccess};
@@ -785,6 +786,20 @@ pub(crate) fn configured_names(config: &HekiConfig) -> Vec<ConfiguredName<'_>> {
     out
 }
 
+/// The table of the contracts a report of the rule `code` is of, whose places in that table
+/// the report carries ([`Diagnostic::contracts`]).
+pub(crate) fn contract_table_of_rule(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "MUT201" | "MUT205" => "write-owners",
+        "MUT203" | "MUT206" => "read-owners",
+        "MUT204" | "MUT207" => "call-owners",
+        "EFF201" => "effect-boundaries",
+        "MUT208" => "invalidation",
+        "IMP201" | "IMP202" => "import-boundaries",
+        _ => return None,
+    })
+}
+
 /// The matchers of the declared contracts, compiled once as the rules compile them, for the
 /// roles of each function `heki inspect` reports on ([`Self::of`]).
 pub struct ContractRoles<'c> {
@@ -873,19 +888,31 @@ impl<'c> ContractRoles<'c> {
     }
 
     /// The roles `key` has in the declared contracts, in configuration order, and in the
-    /// ecosystem catalog.
-    pub fn of(&self, key: &FuncKey) -> Vec<ContractRole> {
+    /// ecosystem catalog. A contract one of `reports` (the reports shown with `key`) is of has
+    /// the role `reported`, also when it names nothing of `key`: a write of a guarded target
+    /// outside its owners is reported where it happens.
+    pub fn of(&self, key: &FuncKey, reports: &[&Diagnostic]) -> Vec<ContractRole> {
         let config = self.config;
         let mut out = Vec::new();
-        let mut add = |kind: &'static str, name: &str, roles: Vec<&'static str>| {
-            if !roles.is_empty() {
-                out.push(ContractRole {
-                    kind,
-                    name: name.to_owned(),
-                    roles,
-                });
-            }
+        let reported = |kind: &str, place: usize| {
+            reports.iter().any(|d| {
+                contract_table_of_rule(&d.rule_code) == Some(kind)
+                    && u32::try_from(place).is_ok_and(|p| d.contracts.contains(&p))
+            })
         };
+        let mut add =
+            |kind: &'static str, place: usize, name: &str, mut roles: Vec<&'static str>| {
+                if reported(kind, place) {
+                    roles.push("reported");
+                }
+                if !roles.is_empty() {
+                    out.push(ContractRole {
+                        kind,
+                        name: name.to_owned(),
+                        roles,
+                    });
+                }
+            };
         let owner_roles = |a: &Allowance, allowed: &'static str, forbidden: &'static str| {
             let mut roles = Vec::new();
             if a.names_allowed(key) {
@@ -899,30 +926,39 @@ impl<'c> ContractRoles<'c> {
             }
             roles
         };
-        for (rule, a) in config.write_owners.iter().zip(&self.write_owners) {
+        for (place, (rule, a)) in config
+            .write_owners
+            .iter()
+            .zip(&self.write_owners)
+            .enumerate()
+        {
             add(
                 "write-owners",
+                place,
                 &rule.name,
                 owner_roles(a, "allowed-writer", "forbidden-writer"),
             );
         }
-        for (rule, a) in config.read_owners.iter().zip(&self.read_owners) {
+        for (place, (rule, a)) in config.read_owners.iter().zip(&self.read_owners).enumerate() {
             add(
                 "read-owners",
+                place,
                 &rule.name,
                 owner_roles(a, "allowed-reader", "forbidden-reader"),
             );
         }
-        for (rule, (targets, a)) in config.call_owners.iter().zip(&self.call_owners) {
+        for (place, (rule, (targets, a))) in
+            config.call_owners.iter().zip(&self.call_owners).enumerate()
+        {
             let mut roles = Vec::new();
             if targets.iter().any(|t| t.matches(key)) {
                 roles.push("call-target");
             }
             roles.extend(owner_roles(a, "allowed-caller", "forbidden-caller"));
-            add("call-owners", &rule.name, roles);
+            add("call-owners", place, &rule.name, roles);
         }
-        for (rule, (scopes, callees)) in
-            config.effect_boundaries.iter().zip(&self.effect_boundaries)
+        for (place, (rule, (scopes, callees))) in
+            (config.effect_boundaries.iter().zip(&self.effect_boundaries)).enumerate()
         {
             let mut roles = Vec::new();
             if key.qualname != "<module>" && names_function(scopes, key) {
@@ -931,21 +967,22 @@ impl<'c> ContractRoles<'c> {
             if names_function(callees, key) {
                 roles.push("allowed-callee");
             }
-            add("effect-boundaries", &rule.name, roles);
+            add("effect-boundaries", place, &rule.name, roles);
         }
         let fqn = key.fqn();
-        for (rule, producers) in config.readonly_returns.iter().zip(&self.readonly_returns) {
+        for (place, (rule, producers)) in
+            (config.readonly_returns.iter().zip(&self.readonly_returns)).enumerate()
+        {
             let roles = if producers.iter().any(|p| p.matches(&fqn)) {
                 vec!["read-only-producer"]
             } else {
                 Vec::new()
             };
-            add("readonly-returns", &rule.name, roles);
+            add("readonly-returns", place, &rule.name, roles);
         }
-        for (rule, names) in config
-            .invalidation
-            .iter()
+        for (place, (rule, names)) in (config.invalidation.iter())
             .zip(&self.contracts.invalidations)
+            .enumerate()
         {
             let mut roles = Vec::new();
             if names.names_invalidator(&fqn, &key.qualname) {
@@ -954,10 +991,13 @@ impl<'c> ContractRoles<'c> {
             if names.names_exempt_writer(&fqn, &key.qualname) {
                 roles.push("exempt-writer");
             }
-            add("invalidation", &rule.name, roles);
+            add("invalidation", place, &rule.name, roles);
+        }
+        for (place, rule) in config.import_boundaries.iter().enumerate() {
+            add("import-boundaries", place, &rule.name, Vec::new());
         }
         if self.kb.lookup(&fqn).is_some() {
-            add("ecosystem", &fqn, vec!["catalog-entry"]);
+            add("ecosystem", 0, &fqn, vec!["catalog-entry"]);
         }
         out
     }

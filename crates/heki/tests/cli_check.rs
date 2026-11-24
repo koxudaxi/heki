@@ -1155,7 +1155,7 @@ fn touched_runs_show_and_fail_on_the_reports_that_touch_the_files() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("All checks passed for 1 touched file(s) (4 file(s) analyzed)."),
+        stderr.contains("Found 0 diagnostic(s) for 1 touched file(s) (4 file(s) analyzed); 1 file(s) could not be analyzed."),
         "{stderr}"
     );
     assert!(!stderr.contains("warning:"), "{stderr}");
@@ -1232,6 +1232,73 @@ fn touched_runs_show_and_fail_on_the_reports_that_touch_the_files() {
         assert_eq!((code, stdout.as_str()), (2, ""), "{option}: {stderr}");
         assert!(stderr.contains("cannot be used with"), "{option}: {stderr}");
     }
+}
+
+/// A project that keeps files heki cannot parse on purpose (the fixtures of a parser): a run
+/// over given files exits with whether those files could be analyzed, and names the others in a
+/// note; a run over directories reports every file it could not analyze and fails. No run that
+/// reports a file error says that all checks passed.
+#[test]
+fn runs_over_given_files_fail_only_on_their_own_file_errors() {
+    let p = Project::new("fixture_errors");
+    p.write("src/p/__init__.py", "")
+        .write("src/p/a.py", "def f():\n    return 1\n")
+        .write("tests/data/bad1.py", "def f(:\n")
+        .write("tests/data/bad2.py", "x = = 1\n");
+    let note = "note: 2 file(s) the run does not report on could not be analyzed: `tests/data/bad1.py`, `tests/data/bad2.py`; reports that need their code are missing: name a file to see its error, or exclude it with `extend-exclude`";
+    for args in [&["src/p/a.py"][..], &["--touched", "src/p/a.py"]] {
+        let (code, stdout, stderr) = p.heki(args);
+        assert_eq!((code, stdout.as_str()), (0, ""), "{args:?}: {stderr}");
+        assert!(stderr.contains(note), "{args:?}: {stderr}");
+        assert!(!stderr.contains("error:"), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("All checks passed for 1 touched file(s)"),
+            "{args:?}: {stderr}"
+        );
+    }
+    let (code, stdout, stderr) = p.heki(&["src/p/a.py", "--diff"]);
+    assert_eq!((code, stdout.as_str()), (0, ""), "{stderr}");
+    assert!(stderr.contains(note), "{stderr}");
+    assert!(!stderr.contains("error:"), "{stderr}");
+    // A given file that does not parse fails the run; the other one is a note.
+    let (code, _, stderr) = p.heki(&["src/p/a.py", "tests/data/bad1.py"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("error: tests/data/bad1.py:1:7: syntax error"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "note: 1 file(s) the run does not report on could not be analyzed: `tests/data/bad2.py`"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Found 0 diagnostic(s) for 2 touched file(s) (2 file(s) analyzed); 1 file(s) could not be analyzed."),
+        "{stderr}"
+    );
+    // Directories: every file below them is asked for.
+    for dirs in [&["."][..], &["src", "tests"]] {
+        let (code, _, stderr) = p.heki(dirs);
+        assert_eq!(code, 2, "{dirs:?}: {stderr}");
+        assert!(!stderr.contains("All checks passed"), "{dirs:?}: {stderr}");
+        assert!(!stderr.contains("note: 2 file(s)"), "{dirs:?}: {stderr}");
+        assert!(
+            stderr.contains("Found 0 diagnostic(s) in 2 file(s); 2 file(s) could not be analyzed."),
+            "{dirs:?}: {stderr}"
+        );
+        assert_eq!(
+            stderr.matches("error: tests/data/").count(),
+            2,
+            "{dirs:?}: {stderr}"
+        );
+    }
+    let (code, _, stderr) = p.heki(&["src"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("All checks passed (2 file(s))."),
+        "{stderr}"
+    );
 }
 
 #[test]

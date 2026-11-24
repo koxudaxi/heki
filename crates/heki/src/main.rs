@@ -38,7 +38,7 @@ use std::process::ExitCode;
 #[command(
     name = "heki",
     version,
-    about = "Experimental static checker for Python that tracks side effects and mutations across function calls",
+    about = "heki (壁, \"wall\") is a static checker for Python. It tracks side effects and mutations across function calls, and checks imports and the contracts you declare.",
     after_long_help = help::HEKI.render()
 )]
 struct Cli {
@@ -87,7 +87,7 @@ impl From<FailOn> for heki_env::Severity {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Run semantic checks across Python files or directories (Ruff-aligned).
+    /// Check Python files or directories for blocking calls, mutations, imports, and broken contracts.
     #[command(after_long_help = help::CHECK.render())]
     Check(CheckArgs),
     /// Start the incremental Language Server Protocol (LSP) server.

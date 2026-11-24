@@ -4,17 +4,17 @@
 
 Exit codes: `0` no diagnostic that fails the run (warnings and heuristic reports are reported without failing it), `1` an exact `error` diagnostic, or any diagnostic with `--fail-on warning` (`lint.fail-on`), among the Ratchet regressions when a baseline is used (or a refused `--update-baseline`, or pending `--diff` changes), `2` configuration / I/O / syntax errors.
 
-A file that cannot be read or does not parse does not stop the run: `heki check` reports its error, checks and reports the other files, and exits with `2`, also when it reports diagnostics. A file that does not parse cannot run either, so nothing it would do is assumed; the names under its module resolve to nothing. SARIF output lists such files as `error` notifications of a run that did not execute successfully (`invocations[0].toolExecutionNotifications`, `executionSuccessful: false`); JSON output holds the diagnostics only.
+A file that cannot be read or does not parse does not stop the run: `heki check` reports its error, checks and reports the other files, and exits with `2`, also when it reports diagnostics. A run over given files (file PATHS, or `--touched`) reports and fails on only the errors of those files, as it does with diagnostics, and names the other files it could not analyze in a note. A file that does not parse cannot run either, so nothing it would do is assumed; the names under its module resolve to nothing. SARIF output lists such files as `error` notifications of a run that did not execute successfully (`invocations[0].toolExecutionNotifications`, `executionSuccessful: false`); JSON output holds the diagnostics only.
 
 ## `heki`
 
 ```text
-Experimental static checker for Python that tracks side effects and mutations across function calls
+heki (壁, "wall") is a static checker for Python. It tracks side effects and mutations across function calls, and checks imports and the contracts you declare.
 
 Usage: heki <COMMAND>
 
 Commands:
-  check        Run semantic checks across Python files or directories (Ruff-aligned)
+  check        Check Python files or directories for blocking calls, mutations, imports, and broken contracts
   server       Start the incremental Language Server Protocol (LSP) server [alias: lsp]
   rule         Explain a rule, its Proof Obligations, and counterexamples (`ruff rule` style) [alias: explain]
   snapshot     Manage interprocedural effect summary snapshots (`MUT103`)
@@ -70,7 +70,7 @@ Output for programs:
 ## `heki check`
 
 ```text
-Run semantic checks across Python files or directories (Ruff-aligned)
+Check Python files or directories for blocking calls, mutations, imports, and broken contracts
 
 Usage: heki check [OPTIONS] [PATHS]...
 
