@@ -176,6 +176,22 @@ fn touched_runs_fix_only_the_reports_they_show() {
     // The fix left nothing in `b.py`; `a.py` still fails the whole run.
     assert_eq!(p.check(&["--touched", "b.py"]).0, 0);
     assert_eq!(p.check(&[]).0, 1);
+
+    // A file given as a path is touched: the same rewrites, of that file only.
+    p.write("b.py", src);
+    let (code, stdout, stderr) = p.check(&["--diff", "b.py"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stdout.starts_with("--- a/b.py\n+++ b/b.py\n"), "{stdout}");
+    assert!(!stdout.contains("a.py"), "{stdout}");
+    assert!(!stderr.contains("not applied"), "{stderr}");
+    let (code, _, stderr) = p.check(&["--fix", "b.py"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("Fixed 1 issue(s) in 1 file(s)."),
+        "{stderr}"
+    );
+    assert_eq!(p.read("a.py"), src);
+    assert!(p.read("b.py").contains("x.append(i)"));
 }
 
 #[test]

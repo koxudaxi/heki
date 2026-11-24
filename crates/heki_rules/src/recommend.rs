@@ -86,7 +86,7 @@ pub struct Request<'a> {
     pub snapshot: Option<SummarySnapshot>,
     /// The Ratchet baseline the current configuration compares with.
     pub baseline: Option<RatchetBaseline>,
-    /// The paths the project was loaded from.
+    /// The paths given on the command line.
     pub paths: &'a [PathBuf],
     /// A path as the output writes it: relative to the working directory when inside it, as
     /// `heki check` writes paths.
@@ -256,7 +256,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         .as_deref()
         .map_or(ConfigLayout::PyProject, ConfigLayout::of);
     let config_file = env.config_file.as_deref().map(shown);
-    let (left_out, left_out_paths) = left_out(&project, paths, shown)?;
+    let (left_out, left_out_paths) = left_out(&project, shown)?;
     let functions = project.files.iter().map(|f| f.ir.functions.len()).sum();
     let files = project.files.len();
     let selection = discovery_selection(&env.cfg.lint, &current)?;
@@ -557,14 +557,13 @@ fn printed(diags: impl IntoIterator<Item = Diagnostic>) -> Vec<Diagnostic> {
 }
 
 /// The Python files that discovery from the project root finds (with the same ignore files and
-/// `exclude`) and the paths given leave out, as the output writes them, then as paths. Paths
+/// `exclude`) and the paths analyzed leave out, as the output writes them, then as paths. Paths
 /// that hold the root leave nothing out.
 fn left_out(
     project: &Project,
-    paths: &[PathBuf],
     shown: &dyn Fn(&Path) -> String,
 ) -> Result<(LeftOut, Vec<PathBuf>), ProjectError> {
-    let (found, complete) = paths_leave_out(project, paths, MAX_LISTED, MAX_CENSUS_ENTRIES)?;
+    let (found, complete) = paths_leave_out(project, MAX_LISTED, MAX_CENSUS_ENTRIES)?;
     let left_out = LeftOut {
         python_files: found.len(),
         files: found.iter().map(|p| shown(p)).collect(),

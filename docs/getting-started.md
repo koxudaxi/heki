@@ -40,11 +40,13 @@ reports it left out. `--heuristic` adds them; they can be wrong about the code, 
 labels them.
 
 heki checks every Python file under the current directory, except the
-[excluded and ignored ones](configuration.md#which-files-are-checked). Pass files or directories
-to narrow it:
+[excluded and ignored ones](configuration.md#which-files-are-checked). Pass directories to narrow
+it, or files to look at: a file is checked in its project, so heki still analyzes the whole
+project and shows the reports that touch the file.
 
 ```console
-$ heki check src/ tests/test_api.py
+$ heki check src/
+$ heki check app/api.py
 ```
 
 ## Ask what fits the project

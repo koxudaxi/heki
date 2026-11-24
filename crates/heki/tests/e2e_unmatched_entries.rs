@@ -557,6 +557,10 @@ class Copied:
     kind: str = "str"
 
 
+class ListCopied:
+    kind: str = "str"
+
+
 class Wrapped:
     kind: str = "str"
 
@@ -566,7 +570,7 @@ class Picked:
 "#;
 
 const WRAPPED_COPIES: &str = r#"from pkg.model import (
-    Config, Copied, DictPairs, Dicted, FromClass, Picked, Updated, Values, Wrapped,
+    Config, Copied, DictPairs, Dicted, FromClass, ListCopied, Picked, Updated, Values, Wrapped,
 )
 
 
@@ -599,6 +603,11 @@ def copied(new: Copied) -> None:
         setattr(new, name, None)
 
 
+def list_copied(new: ListCopied) -> None:
+    for name in list(("kind",)).copy():
+        setattr(new, name, None)
+
+
 def wrapped(new: Wrapped, old: Wrapped) -> None:
     for name in list(list(list(list(list(vars(old)))))):
         setattr(new, name, getattr(old, name))
@@ -610,48 +619,62 @@ def picked(new: Picked, old: Picked) -> None:
 "#;
 
 /// The classes of [`WRAPPED_MODEL`] the contract names.
-const WRAPPED_CLASSES: [&str; 8] = [
+const WRAPPED_CLASSES: [&str; 9] = [
     "Dicted",
     "DictPairs",
     "Updated",
     "Values",
     "FromClass",
     "Copied",
+    "ListCopied",
     "Wrapped",
     "Picked",
 ];
 
 /// A `dict` of the namespace of an instance or of its pairs gives its keys, to a loop and to
 /// `update`. The values of a namespace, the namespace of a class object, a copy of a display of
-/// constants (only the keys of a namespace or a mapping go through `copy()`), more than four
-/// wrappers around a namespace, and the first of a pair no loop takes may give any name.
+/// constants or of a `list` of one (only the keys of a namespace or a mapping go through
+/// `copy()`), more than four wrappers around a namespace, and the first of a pair no loop takes
+/// may give any name.
 #[test]
 fn a_dict_of_a_namespace_gives_its_keys() {
     assert_stale(
         "unmatched_wrapped",
         (WRAPPED_MODEL, WRAPPED_COPIES),
         (&WRAPPED_CLASSES, &[]),
-        &["Values", "FromClass", "Copied", "Wrapped", "Picked"],
+        &[
+            "Values",
+            "FromClass",
+            "Copied",
+            "ListCopied",
+            "Wrapped",
+            "Picked",
+        ],
     );
 }
 
 /// Without the key, a run over some files of the project judges nothing: an entry naming code
 /// in a file the paths leave out would look unmatched. With the key, the files given are the
-/// project.
+/// project. A file given alone is checked in its project, which the run analyzes whole.
 #[test]
 fn a_run_over_some_files_judges_only_with_the_key() {
     let p = repro("unmatched_some_files", "");
-    let (code, stdout, stderr) = p.heki(&["check", "pkg/store.py"]);
-    assert_eq!(code, 0, "{stdout}{stderr}");
+    p.write("pkg/stores/__init__.py", "")
+        .write("pkg/stores/store.py", &p.read("pkg/store.py"));
+    let (_, _, stderr) = p.heki(&["check", "pkg/stores"]);
     assert!(lines(&stderr, "warning: ").is_empty(), "{stderr}");
     let (_, _, stderr) = p.heki(&["check", "."]);
+    assert_eq!(lines(&stderr, "warning: ").len(), 3, "{stderr}");
+    let (_, _, stderr) = p.heki(&["check", "pkg/store.py"]);
     assert_eq!(lines(&stderr, "warning: ").len(), 3, "{stderr}");
 
     let p = repro(
         "unmatched_some_files_set",
         "unmatched-contract-entries = \"warning\"\n",
     );
-    let (_, _, stderr) = p.heki(&["check", "pkg/store.py"]);
+    p.write("pkg/stores/__init__.py", "")
+        .write("pkg/stores/store.py", &p.read("pkg/store.py"));
+    let (_, _, stderr) = p.heki(&["check", "pkg/stores"]);
     let warned = lines(&stderr, "warning: ");
     assert!(
         warned.contains(&"`targets` entry `pkg.model.Field.replace_type` of call-owners `store-calls` names no function, method, or class in the analyzed files"),

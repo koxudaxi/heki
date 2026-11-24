@@ -682,13 +682,13 @@ fn watch_rechecks_a_caller_saved_in_the_same_poll_as_its_callee() {
 fn watch_survives_a_deleted_input_and_a_broken_configuration() {
     let p = Project::new("watch_recovers");
     let blocking = "import time\n\n\nasync def handler():\n    time.sleep(1)\n";
-    p.write("api.py", blocking);
-    let (child, rx) = spawn_watch(&p, &["api.py", "--output-format", "concise"], "4");
+    p.write("app/api.py", blocking);
+    let (child, rx) = spawn_watch(&p, &["app", "--output-format", "concise"], "4");
     wait_for(&rx, "[heki watch] 1 diagnostic(s) in 1 file(s)");
-    // The watched file is gone for a while (a checkout, an editor's atomic save), then back.
-    std::fs::remove_file(p.dir.join("api.py")).unwrap();
+    // The watched directory is gone for a while (a checkout), then back.
+    std::fs::remove_dir_all(p.dir.join("app")).unwrap();
     wait_for(&rx, "[heki watch] 0 diagnostic(s) in 0 file(s)");
-    p.write("api.py", blocking);
+    p.write("app/api.py", blocking);
     wait_for(&rx, "[heki watch] 1 diagnostic(s) in 1 file(s)");
     // The configuration is malformed for a while: reported once, then fixed.
     p.write("pyproject.toml", "[project\n");

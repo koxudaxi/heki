@@ -735,6 +735,7 @@ heki/
 ### 9.1 Commands (exit codes: `0` clean or only warnings / `1` errors, and warnings with `--fail-on warning` / `2` configuration, I/O, or syntax errors)
 ```bash
 heki check [PATHS...]                         # semantic diagnostics (MUT, EFF / DATA, OPT)
+heki check FILE...                            # the project of the files, showing what touches them (as ROOT --touched FILE...)
 heki check --fix [PATHS...]                   # apply safe and unconditional fixes (OPT101 / OPT102)
 heki check --fix --include-size-dependent     # also the proven size-dependent rewrites
 heki check --diff [PATHS...]                  # preview the fixes
@@ -744,7 +745,7 @@ heki check --fail-on warning                  # warnings fail the run too (lint.
 heki check --output-format full|concise|json|github|sarif   # default: HEKI_OUTPUT_FORMAT, github in GitHub Actions, full
 heki check --color auto|always|never          # colored full / concise / --diff output (NO_COLOR, FORCE_COLOR, as in Ruff)
 heki check --baseline heki-baseline.toml      # Ratchet: more findings fail, fewer ask to shrink the file
-heki check --update-baseline                  # record a new baseline or shrink an existing one (growth is refused)
+heki check --update-baseline                  # record a new baseline or shrink an existing one (growth is refused; entries of files PATHS leave out stay)
 heki check [PATHS...] --touched FILE...       # analyze PATHS, show and fail on the reports in FILEs or whose call chain reaches one
 heki check --watch [PATHS...]                 # re-check on file changes
 

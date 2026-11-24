@@ -26,6 +26,9 @@ $ heki check --fix --include-size-dependent      # also the proven-safe size-dep
   the fixes, the run lists their reports it could not rewrite, each with the obligation that
   blocks it.
 - `--diff` takes the same flags as `--fix` and writes nothing.
+- With `--touched`, or files given as paths, `--fix` and `--diff` rewrite only those files. A
+  shown report in another file (one whose call chain reaches a touched file) keeps its fix, and
+  the run says how many it left: a pre-commit hook never rewrites a file the commit left alone.
 
 ## What each finding offers
 

@@ -111,7 +111,7 @@
           "type": ["string", "null"]
         },
         "touched": {
-          "description": "The analyzed files --touched names: the diagnostics are only those in one of them or with a hop of their call chain (related) in one; absent without --touched.",
+          "description": "The analyzed files --touched names, and the files PATHS name in a project: the diagnostics are only those in one of them or with a hop of their call chain (related) in one; absent without either.",
           "$ref": "#/$defs/string_list"
         },
         "contracts": {

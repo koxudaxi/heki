@@ -13,7 +13,7 @@ use crate::{CheckArgs, JsonSchemaTarget, OutputFormat};
 use anyhow::Result;
 use heki_diagnostics::{Diagnostic, RatchetBaseline, Stylesheet, render};
 use heki_env::{HekiConfig, Severity};
-use heki_rules::project::{Facts, ProjectEnv, baseline_key};
+use heki_rules::project::{CommandPaths, Facts, ProjectEnv, baseline_key};
 use heki_rules::{
     Activation, CORE_RULES, Certainty, EffectiveSelectors, RuleMeta, fold_root_causes,
     heuristic_hint,
@@ -97,7 +97,8 @@ struct Configuration {
     member_packages: Vec<String>,
     selection: Selection,
     baseline: Option<String>,
-    /// The analyzed files `--touched` names; absent without it.
+    /// The analyzed files `--touched` names, and the files PATHS name in a project; absent
+    /// without either.
     #[serde(skip_serializing_if = "Option::is_none")]
     touched: Option<Vec<String>>,
     /// Each contract key with its tables, each table with the keys it sets.
@@ -152,8 +153,9 @@ struct ShownDiagnostic {
 }
 
 pub(crate) fn run(args: &CheckArgs, question: &str) -> Result<ExitCode> {
+    let paths = CommandPaths::of(&args.paths);
     let indexed = load_and_index(
-        &args.paths,
+        &paths.analyzed,
         &args.analysis,
         &check_selectors(args),
         args.output_format,
@@ -166,7 +168,7 @@ pub(crate) fn run(args: &CheckArgs, question: &str) -> Result<ExitCode> {
     if let Some(path) = &baseline {
         RatchetBaseline::load(path)?.keep_regressions(&mut diags, &baseline_key(&project.files));
     }
-    let touched = Touched::of(&args.touched, project);
+    let touched = Touched::of(&args.touched, &paths.files, project);
     if let Some(touched) = &touched {
         touched.warn(args.output_format);
         touched.keep(&mut diags);

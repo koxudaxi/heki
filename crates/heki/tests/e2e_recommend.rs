@@ -1553,14 +1553,20 @@ targets = ["Model.x"]
 invalidators = ["Index.refresh"]
 "#,
     )
+    .write("backend/api/main.py", &p.read("backend/main.py"))
     .write("backend/jobs.py", "def run():\n    pass\n")
     .write("backend/broken.py", "def broken(:\n")
     .write("scripts/broken.py", "def broken(:\n");
-    let paths = ["backend/main.py", "backend/config", "backend/broken.py"];
+    let paths = ["backend/api", "backend/config"];
     let (_, report, _) = recommend_json(&p, &paths);
     assert_eq!(
         report["analyzed"]["left_out"]["files"],
-        json!(["backend/jobs.py", "scripts/broken.py"])
+        json!([
+            "backend/broken.py",
+            "backend/jobs.py",
+            "backend/main.py",
+            "scripts/broken.py"
+        ])
     );
     assert_eq!(
         report["config"]["src"],
