@@ -1791,6 +1791,16 @@ def words(xs: list[Row], text: str):
     return out
 
 
+def constant_words(xs: list[Row]):
+    out = []
+    text = "a b c d e f g h i j k l m n o p q r"
+    for a in xs:
+        for w in text.split():
+            if a.k == w:
+                out.append(w)
+    return out
+
+
 def rekeyed(xs: list[Row], ys: list[Row]):
     for a in xs:
         for b in ys:
@@ -1980,6 +1990,7 @@ fn opt113_states_its_exact_claim_only_when_every_premise_holds() {
             ("aliased", false, tier(false)),
             ("prefiltered", true, tier(true)),
             ("words", true, tier(true)),
+            ("constant_words", false, tier(false)),
             ("rekeyed", false, tier(false)),
             ("item_rekeyed", false, tier(false)),
             ("marks", true, tier(true)),
@@ -2013,6 +2024,11 @@ fn opt113_states_its_exact_claim_only_when_every_premise_holds() {
     assert!(help("inner_changed").starts_with(
         "if `events` is the same collection, with the same keys, on every iteration of the outer loop, "
     ));
+    // The pieces of a string constant are a new list of `str` on every outer iteration.
+    assert!(
+        help("constant_words")
+            .starts_with("if the keys are hashable, group the elements of `text.split()`")
+    );
     // A store into the compared key of an inner item would leave an index built once stale.
     assert!(help("rekeyed").starts_with(
         "if `ys` is the same collection, with the same keys, on every iteration of the outer loop"
