@@ -2140,11 +2140,7 @@ impl<'a> Reach<'a> {
         i: usize,
         func: &FuncKey,
     ) {
-        let accesses = cx.index.file_of(func).into_iter().flat_map(|path| {
-            let own = cx.index.files[path].external_accesses.get(func);
-            own.into_iter().flatten().map(move |a| (path, a))
-        });
-        for (path, a) in accesses {
+        for (path, a) in cx.external_accesses(func) {
             let call = a.kind == AccessKind::Call;
             if call && b.allows_symbol(&a.name) {
                 continue;

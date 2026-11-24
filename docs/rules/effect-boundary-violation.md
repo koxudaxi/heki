@@ -54,8 +54,9 @@ count for a read.
     constant name), or a class (constructing it); a call is one only when every function it may
     call is a target. An entry with an argument list names only the calls passing its
     constants, as for `MUT204`. An entry also names a function or class outside the project by
-    its full dotted name (`os.getenv`, `platform.*`); a dotted suffix, a leading glob, a module
-    part, or an argument list does not. With `references = "calls"`, a reached function handing a target on to be called
+    its full dotted name (`os.getenv`, `platform.*`), or every private member outside the project
+    (`<external>._*`, as for `MUT204`); a dotted suffix, a leading glob, a module part, or an
+    argument list does not. With `references = "calls"`, a reached function handing a target on to be called
     later (passed, stored, returned, yielded, raised, or held by such a display) counts too, as
     for `MUT204` ("`render` hands on `pkg.core.decide`"), with `"calls-and-bases"` a class
     statement naming a class target among its bases ("`render` subclasses `pkg.core.Rule`"), and

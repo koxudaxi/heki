@@ -437,7 +437,7 @@ protocol (see [How contracts report](#how-contracts-report)).
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `name` | `""` | The contract's name in reports. |
-| `targets` | `[]` | `Class.attr` attributes. A container entry (`Class.attr["key"]`) is a write target only, and a configuration error here. |
+| `targets` | `[]` | `Class.attr` attributes. A container entry (`Class.attr["key"]`) is a write target only, and a configuration error here. An entry can also name attributes of modules outside the project ([below](#symbols-outside-the-project)). |
 | `allowed-readers` | `[]` | Functions allowed to read the targets. |
 | `forbidden-readers` | `[]` | When set, only reads by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to read the targets, matched as in `write-owners`. |
@@ -469,7 +469,7 @@ The call side of `write-owners`.
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `name` | `""` | The contract's name in reports. |
-| `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass, also through a `functools.partial` object holding it and through a library method building an instance of its receiver's class (a pydantic model's `model_construct`, `model_validate` of a dict, `model_copy`). A target may end in an argument list (`DataType(is_dict=True)`, below). |
+| `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass, also through a `functools.partial` object holding it and through a library method building an instance of its receiver's class (a pydantic model's `model_construct`, `model_validate` of a dict, `model_copy`). A target may end in an argument list (`DataType(is_dict=True)`, below). An entry can also name functions and classes outside the project ([below](#symbols-outside-the-project)). |
 | `subclasses` | `true` | `false`: a class target means constructing exactly the class, not a subclass (an exception class whose subclasses anyone may raise). `Class.method` targets keep covering overrides. |
 | `allowed-callers` | `[]` | Functions allowed to call the targets. |
 | `forbidden-callers` | `[]` | When set, only calls by these functions are reported. |
@@ -564,6 +564,50 @@ The call side of `write-owners`.
   statement). A load handing a target on is reported as a hand-on only. A read is matched as a
   construction is, so a subclass counts unless `subclasses = false`; an instance of the class is
   no read of it.
+
+### Symbols outside the project
+
+The `targets` of `call-owners` and `read-owners` can also name functions, classes, and module
+attributes outside the project, as an effect boundary's `call-targets` and `read-targets` do, so
+one contract guards the private members of both:
+
+```toml
+[[tool.heki.call-owners]]
+name = "no-private-calls"
+targets = ["pkg.*._*", "<external>._*"]
+forbidden-callers = ["pkg.parser.*"]
+
+[[tool.heki.read-owners]]
+name = "no-private-reads"
+targets = ["sys._getframe"]
+forbidden-readers = ["pkg.parser.*"]
+```
+
+- A dotted name starting with the top-level module names that symbol: `sys._getframe` matches a
+  call of `sys._getframe`, also through `from sys import _getframe`, an alias, or a project
+  module re-exporting it (an access is judged at the symbol heki resolves it to). A glob in the
+  last name names the members it matches (`sys._*`). A dotted suffix (`_getframe`), a leading
+  glob (`*._getframe`), a module part, or an argument list names project code only.
+- `<external>.<name>` names the members of every module and class outside the project whose last
+  name `<name>` matches: `<external>._*` the private ones. A glob there leaves out the names that
+  are public API although they start with an underscore: dunder (`__name__`) and sunder
+  (`_missing_`) names, and `_asdict`, `_field_defaults`, `_fields`, `_make`, and `_replace` of
+  `collections.namedtuple`, the names ruff's `flake8-self` does not report either. A name written
+  out (`<external>._replace`) matches as written. `<external>` takes one name after it; any other
+  spelling is a configuration error.
+- A `call-owners` target counts the calls of the symbol, a `read-owners` target every other load
+  of it: `return sys._getframe`, `getframe = sys._getframe`, and an import binding it (`from sys
+  import _getframe`, at the import, in the function or the module body running it). A name
+  loaded only to be called there (`_getframe(1)`) is a call, not a read, as `sys._getframe(1)` is.
+  A reference handing an outside symbol on is no call of it, whatever `references` says.
+- Only a call or a read heki resolves counts: a name of unknown origin, or an attribute read by
+  name (`getattr(sys, name)`), is not reported. With `unresolved = "report"`, an `<external>`
+  entry matches nothing on an object of unknown class; a written last name (`sys._getframe`)
+  matches its name there, as any target's last name does.
+- The rest of the contract applies as for project targets: the allowed and forbidden functions,
+  the exempt methods, `attribution`, and the reports of private helpers at their callers. A
+  class's own initialization and `own-receiver` allow none of these accesses: an outside symbol
+  is no member of the class making them.
 
 ### Globs on objects of unknown class
 
@@ -676,7 +720,10 @@ name, starting with the top-level module: `os.getenv` matches a call of `os.gete
 `from os import getenv`, `import os as o`), `platform.*` every function of `platform`, and
 `sys.platform` a read of `sys.platform` (also `from sys import platform`, or `import sys as s`
 and `s.platform`). A dotted suffix (`getenv`), a leading glob (`*.getenv`), or a module part (`os:getenv`) never
-names a symbol outside the project, so an entry for project functions keeps its meaning. Only a call or a read
+names a symbol outside the project, so an entry for project functions keeps its meaning.
+`<external>._*` names the private members of every module and class outside the project, as for
+the [owner contracts](#symbols-outside-the-project), whose rules for calls and reads these
+entries follow. Only a call or a read
 heki resolves counts: an attribute read by name (`getattr(sys, name)`) or on an object of unknown
 origin is not reported.
 
@@ -986,6 +1033,14 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   `exempt-writers` of `invalidation`. The `read-targets`, `call-targets`, and
   `allowed-callees` of an effect boundary and the `producers` of `readonly-returns` may name
   symbols outside the project, and are not judged.
+- A `call-owners` or `read-owners` target whose first name is no module of the project may name
+  code outside it. It is matched when the analyzed files call or read a symbol outside the
+  project it names, and it is not judged when it is an `<external>` entry or its first name is a
+  module outside the project (one of the standard library, or one a module of the analyzed files
+  imports at module level): it is a rule about any use of that code, now or later, and heki
+  cannot list what such a module has. Any other entry is judged as above, so a misspelled class
+  (`Feild.removed`) is still reported, and so is an entry naming project code a run over some
+  files leaves out.
 - Each entry is matched as its rule matches it, against the definitions of the analyzed files:
   a function pattern names a function, method, class, or module body; a call target a function,
   method, or class; an exempt method a method's name; a scope a module, class, or function; a

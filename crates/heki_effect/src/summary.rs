@@ -3746,10 +3746,11 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// Record `inst` when it reads an attribute of a module outside the project that an effect
-    /// boundary forbids reading (`sys.platform`, or `platform` bound by `from sys import
-    /// platform`). The value read must be that object by name: a value of unknown origin
-    /// reads nothing, nor does a closure cell (`LoadDeref`), whose value is not typed.
+    /// Record `inst` when it reads an attribute of a module outside the project that a contract
+    /// names (`sys.platform`, or `platform` bound by `from sys import platform`). The value
+    /// read must be that object by name: a value of unknown origin reads nothing, nor does a
+    /// closure cell (`LoadDeref`), whose value is not typed. A name loaded only to be called
+    /// there (`getframe(1)` of an imported function) is the call's, as `sys._getframe(1)` is.
     fn external_read(&mut self, inst: &InstKind, span: Span) {
         let (InstKind::AttrLoad { dst, .. }
         | InstKind::LoadGlobal { dst, .. }
@@ -3761,6 +3762,7 @@ impl<'a> Extractor<'a> {
         if let Some(Val::Ref(fqn)) = self.types.get(dst)
             && self.contracts.is_some_and(|c| c.external_read(fqn))
             && matches!(self.cx.project.symbol(fqn), resolver::Symbol::External)
+            && (matches!(inst, InstKind::Import { .. }) || !self.only_called(*dst))
         {
             self.external.push(ExternalAccess {
                 kind: AccessKind::Read,
@@ -3769,6 +3771,24 @@ impl<'a> Extractor<'a> {
                 imports_project_module: false,
             });
         }
+    }
+
+    /// Whether every use of `var` calls it, passing it nowhere.
+    fn only_called(&self, var: VarId) -> bool {
+        let readers = self.shape.readers(var);
+        !readers.is_empty()
+            && readers.iter().all(|u| {
+                let Use::Inst(bb, i) = *u else {
+                    return false;
+                };
+                matches!(
+                    &self.f.block(bb).insts[i as usize].kind,
+                    InstKind::Call { callee_var: Some(callee), args, kwargs, .. }
+                        if *callee == var
+                            && !args.contains(&var)
+                            && kwargs.iter().all(|(_, k)| *k != var)
+                )
+            })
     }
 
     /// Record the imports that probe whether their module is installed

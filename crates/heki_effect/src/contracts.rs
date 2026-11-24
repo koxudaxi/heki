@@ -141,17 +141,18 @@ pub trait Contracts: Debug + Send + Sync {
     /// looking up the names of the parameters the call binds.
     fn marked_params(&self) -> &FxHashSet<String>;
 
-    /// Whether an effect boundary forbids calling `symbol`, a function or class outside the
-    /// project (a `call-targets` entry names it, or `reads-environment` with the ecosystem
-    /// catalog): its calls are kept (`FileSummary::external_accesses`).
+    /// Whether a contract names calling `symbol`, a function or class outside the project (a
+    /// `call-owners` target or a boundary's `call-targets` entry names it, or a boundary forbids
+    /// `reads-environment` with the ecosystem catalog): its calls are kept
+    /// (`FileSummary::external_accesses`).
     fn external_call(&self, symbol: &str) -> bool;
 
-    /// Whether some effect boundary forbids reading module attributes outside the project:
-    /// without one, no read is looked at.
+    /// Whether some contract names reads of module attributes outside the project: without
+    /// one, no read is looked at.
     fn reads_external(&self) -> bool;
 
-    /// Whether an effect boundary forbids reading `fqn`, an attribute of a module outside the
-    /// project (`sys.platform`).
+    /// Whether a contract names reading `fqn`, an attribute of a module outside the project
+    /// (`sys.platform`): a `read-owners` target or a boundary's `read-targets` entry.
     fn external_read(&self, fqn: &str) -> bool;
 
     /// Whether an effect boundary reports the imports that probe whether a module is installed

@@ -2511,6 +2511,42 @@ fn steps_contract_extensions() -> Vec<Step> {
     ]
 }
 
+/// Owner-contract targets naming symbols outside the project (`FileSummary::external_accesses`):
+/// a module calls and hands on a private function of `sys` another module re-exports, so which
+/// symbol the call and the read are of follows what the re-export binds, in another file.
+fn steps_outside_targets() -> Vec<Step> {
+    let contract = format!(
+        "{CONFIG}\n[[tool.heki.call-owners]]\nname = \"outside-calls\"\ntargets = [\"<external>._*\"]\nforbidden-callers = [\"pkg.frames:*\"]\n\n[[tool.heki.read-owners]]\nname = \"outside-reads\"\ntargets = [\"sys._getframe\"]\nforbidden-readers = [\"pkg.frames:*\"]\n"
+    );
+    let compat = "from sys import _getframe\n";
+    let frames = "from pkg.frame_compat import _getframe\n\n\ndef caller():\n    return _getframe(1)\n\n\ndef handed():\n    return _getframe\n";
+    vec![
+        Step::new(
+            "a module calls and hands on a private function of `sys` another module re-exports",
+            vec![
+                Action::Configure(contract),
+                Action::Create("pkg/frame_compat.py", compat.to_owned()),
+                Action::Create("pkg/frames.py", frames.to_owned()),
+            ],
+        )
+        .present(&[("pkg/frames.py", "MUT204"), ("pkg/frames.py", "MUT203")])
+        .absent(&[("pkg/frame_compat.py", "MUT203")]),
+        Step::new(
+            "the re-export binds a public function instead",
+            vec![save(
+                "pkg/frame_compat.py",
+                "from os import getcwd as _getframe\n",
+            )],
+        )
+        .absent(&[("pkg/frames.py", "MUT204"), ("pkg/frames.py", "MUT203")]),
+        Step::new(
+            "it binds the private function again",
+            vec![save("pkg/frame_compat.py", compat)],
+        )
+        .present(&[("pkg/frames.py", "MUT204"), ("pkg/frames.py", "MUT203")]),
+    ]
+}
+
 /// Step 5c: environment reads below an effect boundary. No summary records them, so the report
 /// of the scope function above, and of the module body the boundary names, follows the helper's
 /// own accesses: a read of `sys.platform`, a call of `os.getenv` (whose call site the report's
@@ -5809,6 +5845,7 @@ sessions!(editing, Session::start, {
     bases_and_attribution: steps_bases_and_attribution,
     argument_lists: steps_argument_lists,
     environment: steps_environment,
+    outside_targets: steps_outside_targets,
     keys_fresh_strict: steps_keys_fresh_strict,
     files: steps_files,
     configuration: steps_configuration,

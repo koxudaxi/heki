@@ -2254,9 +2254,9 @@ pub struct FileSummary {
     /// The `MUT101` facts of the file's methods that write a `self` attribute themselves, one
     /// per definition in source order (local, IR-free).
     pub cache_flows: FxHashMap<FuncKey, Vec<CacheFlow>>,
-    /// What each function of the file accesses outside the project that an effect boundary
-    /// forbids, in its own body and in the class bodies it runs (local, IR-free; empty unless a
-    /// boundary names such an access, [`Contracts::external_call`]).
+    /// What each function of the file accesses outside the project that a contract names, in
+    /// its own body and in the class bodies it runs (local, IR-free; empty unless a contract
+    /// names such an access, [`Contracts::external_call`]).
     #[serde(default, skip_serializing_if = "FxHashMap::is_empty")]
     pub external_accesses: FxHashMap<FuncKey, Vec<ExternalAccess>>,
     /// The facts of the file's functions that only opt-in readers ask for (IR-free; `None`

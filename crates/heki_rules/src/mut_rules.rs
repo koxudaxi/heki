@@ -11,8 +11,8 @@ use heki_ast::Span;
 use heki_diagnostics::{Certainty, Diagnostic, OpenPremise, OpenRecord};
 use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
-    AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite, CallTarget, Callee,
-    Construction, ContractClass, Delivery, EffectSummary, Facts, FuncKey, ProjectDecls,
+    AccessKind, AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite, CallTarget,
+    Callee, Construction, ContractClass, Delivery, EffectSummary, Facts, FuncKey, ProjectDecls,
     ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx, TypedFieldReadSite,
     TypedFieldWriteSite, Unresolved, Val, WriteKind, attr_writes, container_mutator,
     initializes_own_self, is_initializer, self_attr_writes,
@@ -1238,9 +1238,27 @@ pub(crate) struct FunctionMatcher {
     /// part: what holds the member (none for a text without a dot), and the member's name.
     member: Option<(Option<DottedPattern>, DottedPattern)>,
     method: Option<(FxHashSet<String>, DottedPattern)>,
+    /// `<external>.<name>`: the last name of the symbols outside the project the text names,
+    /// whatever module or class holds them ([`Self::names_external`]).
+    outside: Option<DottedPattern>,
     /// The text names nothing outside the project ([`Self::names_external`]): the target had an
     /// argument list, which heki binds only for project functions.
     project_only: bool,
+}
+
+/// The holder standing for every module and class outside the project (`<external>._*`).
+pub(crate) const EXTERNAL: &str = "<external>";
+
+/// Whether `name` is public API although it starts with an underscore: a dunder (`__len__`) or
+/// sunder (`_missing_`) name, or a member of the `collections.namedtuple` API (`_replace`). A
+/// glob under [`EXTERNAL`] leaves these out of the private members it names.
+fn is_public_underscore_name(name: &str) -> bool {
+    // The names ruff's `flake8-self` (`SLF001`) does not report: dunder and sunder names, and
+    // the default of its `ignore-names` setting, whose `_name_` and `_value_` are sunder names.
+    const NAMEDTUPLE_API: [&str; 5] =
+        ["_asdict", "_field_defaults", "_fields", "_make", "_replace"];
+    let inner = name.strip_prefix('_').and_then(|n| n.strip_suffix('_'));
+    inner.is_some_and(|n| !n.is_empty()) || NAMEDTUPLE_API.contains(&name)
 }
 
 impl FunctionMatcher {
@@ -1266,6 +1284,23 @@ impl FunctionMatcher {
     pub(crate) fn named(text: &str, context: &'static str) -> Result<Self, RuleConfigError> {
         // The whole text first, so that a bad glob is reported as configured.
         let whole = DottedPattern::new(text, context)?;
+        if text.contains(EXTERNAL) {
+            let last = text
+                .strip_prefix(EXTERNAL)
+                .and_then(|rest| rest.strip_prefix('.'))
+                .filter(|last| !last.is_empty() && !last.contains(['.', ':']))
+                .ok_or_else(|| RuleConfigError::ExternalMembers {
+                    target: text.to_owned(),
+                    context,
+                })?;
+            return Ok(Self {
+                whole,
+                member: None,
+                method: None,
+                outside: Some(DottedPattern::new(last, context)?),
+                project_only: false,
+            });
+        }
         let (holder, last) = match split_last_dot(text) {
             Some((holder, last)) => (Some(DottedPattern::new(holder, context)?), last),
             None => (None, text),
@@ -1279,6 +1314,7 @@ impl FunctionMatcher {
             whole,
             member,
             method: None,
+            outside: None,
             project_only: false,
         })
     }
@@ -1299,6 +1335,9 @@ impl FunctionMatcher {
     /// A glob in the last segment matches the last name only, and the rest of the text what
     /// holds it: `pkg.api_*` names `pkg.api_commit`, not `pkg.api_helpers.api_reset`.
     pub(crate) fn names_def(&self, fqn: &str, qualname: &str) -> bool {
+        if self.outside.is_some() {
+            return false;
+        }
         let Some((holder, member)) = &self.member else {
             return self.whole.matches_def(fqn, qualname);
         };
@@ -1319,8 +1358,17 @@ impl FunctionMatcher {
     /// project, by its full dotted name: as [`Self::names_def`], but never by a dotted suffix
     /// ([`DottedPattern::matches_whole`]), and only when its first name is not a glob. An entry
     /// naming project functions by a suffix (`reset`, `*.reset`) or by a module part
-    /// (`pkg:reset`) names nothing outside the project.
+    /// (`pkg:reset`) names nothing outside the project. `<external>.<name>` names every symbol
+    /// whose last name `<name>` matches; a glob there leaves out the names that are public API
+    /// although they start with an underscore ([`is_public_underscore_name`]).
     pub(crate) fn names_external(&self, symbol: &str) -> bool {
+        if let Some(last) = &self.outside {
+            return !self.project_only
+                && symbol.rsplit_once('.').is_some_and(|(_, name)| {
+                    last.matches_whole(name)
+                        && (last.name().glob().is_none() || !is_public_underscore_name(name))
+                });
+        }
         let text = self.whole.name().text();
         !self.project_only
             && !has_glob_syntax(text.split('.').next().unwrap_or(text))
@@ -1350,6 +1398,11 @@ impl FunctionMatcher {
     /// The class family of `Class.method` (empty for a function).
     pub(crate) fn method_family(&self) -> Option<&FxHashSet<String>> {
         self.method.as_ref().map(|(family, _)| family)
+    }
+
+    /// Whether the text is `<external>.<name>`, which names symbols outside the project only.
+    pub(crate) fn names_outside_only(&self) -> bool {
+        self.outside.is_some()
     }
 }
 
@@ -2195,9 +2248,10 @@ pub(crate) fn matched_name(text: &str, member: impl FnOnce() -> String) -> Strin
 }
 
 /// Whether a report of the target `text` names the members it matched ([`matched_name`]): it
-/// is a glob (the key of an entry target, `Class.attr["key"]`, is no glob).
+/// is a glob (the key of an entry target, `Class.attr["key"]`, is no glob), or names the members
+/// of every module and class outside the project ([`EXTERNAL`]).
 pub(crate) fn names_members(text: &str) -> bool {
-    has_glob_syntax(split_item(text).map_or(text, |(base, _)| base))
+    text.starts_with(EXTERNAL) || has_glob_syntax(split_item(text).map_or(text, |(base, _)| base))
 }
 
 struct MergedReport<'u> {
@@ -4393,6 +4447,8 @@ struct ReadOwnerRule<'r> {
     /// How a report names the contract ([`heki_env::contract_label`]).
     label: String,
     targets: Vec<ContractTarget>,
+    /// The targets as names of symbols outside the project, by the same index.
+    external: FunctionMatchers,
     allowance: Allowance,
     note: Option<&'r str>,
     /// `unresolved = "report"`: reads heki cannot tie to a class are reported (`MUT206`).
@@ -4496,15 +4552,17 @@ pub(crate) fn mut203<'c>(
     for (index, rule) in cx.config.read_owners.iter().enumerate() {
         let report_unresolved =
             reports_unresolved(rule.unresolved.as_deref(), "read-owners", &rule.name)?;
+        let context = "read-owners.targets";
+        // The targets as `Class.attr` first, whose errors name the part of a target that is
+        // wrong.
+        let targets = parse_read_targets(cx, &all_classes, &rule.targets, "read-owners", context)?;
+        let external = (rule.targets.iter())
+            .map(|t| FunctionMatcher::named(t, context))
+            .collect::<Result<_, _>>()?;
         rules.push(ReadOwnerRule {
             label: heki_env::contract_label("read-owners", index, &rule.name),
-            targets: parse_read_targets(
-                cx,
-                &all_classes,
-                &rule.targets,
-                "read-owners",
-                "read-owners.targets",
-            )?,
+            targets,
+            external: FunctionMatchers::new(external, context)?,
             allowance: Allowance::new(&AllowanceKeys {
                 allowed: (&rule.allowed_readers, "read-owners.allowed-readers"),
                 forbidden: (&rule.forbidden_readers, "read-owners.forbidden-readers"),
@@ -4573,48 +4631,53 @@ pub(crate) fn mut203<'c>(
                             inside,
                         )
                     };
-                    let add = |reports: &mut MergedReports<'c, usize>,
-                               r: &DelegatedReport,
-                               sites| {
-                        let Some(unit) = cx.index.file_of(&r.func).and_then(|p| cx.unit(p)) else {
-                            return;
+                    let add =
+                        |reports: &mut MergedReports<'c, usize>, r: &DelegatedReport, sites| {
+                            let made = ReadMade {
+                                reader: key,
+                                span: read.span,
+                                kind: read.kind.describe(),
+                                target: (contract, k, &t.text),
+                                named: &named,
+                            };
+                            add_read_report(cx, reports, rule, &made, r, sites);
                         };
-                        let quoted = format!("`{named}`");
-                        let name = Named {
-                            target: &t.text,
-                            named: &quoted,
-                            rank: k,
-                            contract,
-                        };
-                        reports.add(
-                            unit,
-                            &r.func,
-                            r.span(read.span),
-                            (contract, name),
-                            sites,
-                            rule.note,
-                            || {
-                                let via = if r.chain.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!(" via `{reader}`")
-                                };
-                                format!(
-                                    "`{}` reads `{named}` ({}){via} {}",
-                                    r.func.qualname,
-                                    read.kind.describe(),
-                                    rule.allowance.where_text(
-                                        "read owners",
-                                        "forbidden readers",
-                                        &rule.label
-                                    )
-                                )
-                            },
-                            || r.chain.clone(),
-                        );
-                    };
                     let group = (read.obj_params, contract, k, named.clone());
                     groups.report(&mut reports, group, (reader.clone(), read.span), walk, add);
+                }
+            }
+        }
+        // A read of a symbol outside the project, judged where it is made as a typed read is.
+        for (_, a) in cx.external_accesses(key) {
+            if a.kind != AccessKind::Read {
+                continue;
+            }
+            for (contract, (rule, inside)) in rules.iter().zip(&mut inside).enumerate() {
+                for k in rule.external.naming_external(&a.name) {
+                    let (t, inside) = (&rule.targets[k], &mut inside[k]);
+                    let named = matched_name(&t.text, || a.name.clone());
+                    let walk = || {
+                        delegated_reports(
+                            cx,
+                            &sites,
+                            (&rule.allowance, &t.classes),
+                            (key, 0, 0),
+                            inside,
+                        )
+                    };
+                    let add =
+                        |reports: &mut MergedReports<'c, usize>, r: &DelegatedReport, sites| {
+                            let read = ReadMade {
+                                reader: key,
+                                span: a.span,
+                                kind: a.kind.describe(),
+                                target: (contract, k, &t.text),
+                                named: &named,
+                            };
+                            add_read_report(cx, reports, rule, &read, r, sites);
+                        };
+                    let group = (0, contract, k, named.clone());
+                    groups.report(&mut reports, group, (reader.clone(), a.span), walk, add);
                 }
             }
         }
@@ -4622,6 +4685,24 @@ pub(crate) fn mut203<'c>(
     reports.emit(cx, ("MUT203", "allowed readers"), out, |examples| {
         let owners = |k: &FuncKey| rules.iter().any(|r| r.allowance.names_place(k));
         for (key, path, s) in place_functions(cx, owners) {
+            for (_, a) in cx.external_accesses(key) {
+                for (contract, rule) in rules.iter().enumerate() {
+                    if a.kind != AccessKind::Read || !rule.allowance.names_place(key) {
+                        continue;
+                    }
+                    for k in rule.external.naming_external(&a.name) {
+                        let t = &rule.targets[k];
+                        let named = format!("`{}`", matched_name(&t.text, || a.name.clone()));
+                        let name = Named {
+                            target: &t.text,
+                            named: &named,
+                            rank: k,
+                            contract,
+                        };
+                        examples.add((&contract, name), key, path);
+                    }
+                }
+            }
             let own = s.typed_field_read_sites.iter();
             for read in own.filter(|r| r.counts_for_contracts()) {
                 for (contract, rule) in rules.iter().enumerate() {
@@ -4645,6 +4726,64 @@ pub(crate) fn mut203<'c>(
         }
     });
     Ok(())
+}
+
+/// A read of a `read-owners` target made in `reader`, as its reports name it
+/// ([`add_read_report`]).
+struct ReadMade<'s> {
+    reader: &'s FuncKey,
+    span: Span,
+    /// How it reads, in words (`ReadKind::describe`, `AccessKind::describe`).
+    kind: &'static str,
+    /// The contract, the target's place among its targets, and its text.
+    target: (usize, usize, &'s str),
+    /// The name the report gives the target ([`matched_name`]).
+    named: &'s str,
+}
+
+/// Add the report `r` of `read` of a target of `rule`, standing for `sites`.
+fn add_read_report<'c>(
+    cx: &CheckContext<'c>,
+    reports: &mut MergedReports<'c, usize>,
+    rule: &ReadOwnerRule<'_>,
+    read: &ReadMade<'_>,
+    r: &DelegatedReport,
+    sites: Sites,
+) {
+    let Some(unit) = cx.index.file_of(&r.func).and_then(|p| cx.unit(p)) else {
+        return;
+    };
+    let (contract, rank, target) = read.target;
+    let quoted = format!("`{}`", read.named);
+    let name = Named {
+        target,
+        named: &quoted,
+        rank,
+        contract,
+    };
+    let message = || {
+        let via = if r.chain.is_empty() {
+            String::new()
+        } else {
+            format!(" via `{}`", read.reader.fqn())
+        };
+        let place = (rule.allowance).where_text("read owners", "forbidden readers", &rule.label);
+        format!(
+            "`{}` reads {quoted} ({}){via} {place}",
+            r.func.qualname, read.kind
+        )
+    };
+    let chain = || r.chain.clone();
+    reports.add(
+        unit,
+        &r.func,
+        r.span(read.span),
+        (contract, name),
+        sites,
+        rule.note,
+        message,
+        chain,
+    );
 }
 
 /// The name a report of the read `read` of the target `t` gives the target ([`matched_name`]).

@@ -40,7 +40,14 @@ the allowed callers and resolves to a target:
 - a private method by the name Python's name mangling gives it (`parser._Parser__run()` with
   `parser: Parser`, `Parser._Parser__run(p)`, `self._Parser__run()` in a subclass): a target
   names it `Parser.__run` or `Parser._Parser__run`. A subclass's own `__run` is another method
-  (`_JsonParser__run`), no override of the target.
+  (`_JsonParser__run`), no override of the target;
+- a function or class outside the project a target names by its full dotted name
+  (`sys._getframe`), or every private member outside the project (`<external>._*`, leaving out
+  the names that are public API though they start with an underscore: dunder and sunder names
+  and the `collections.namedtuple` API): a call heki resolves to the symbol, also through
+  `from sys import _getframe`, an alias, or a project module re-exporting it
+  ([configuration](../configuration.md#symbols-outside-the-project)). A reference handing such a
+  symbol on is no call of it; a `read-owners` target counts it as a read.
 
 A target ending in an argument list names only the calls passing those constants:
 `DataType(is_dict=True)` is `DataType(is_dict=True)`, not `DataType(is_list=True)`, and
@@ -283,7 +290,9 @@ No automatic fix.
     subclasses; a class target covers constructing the class and its subclasses; a target
     naming no class (`reset`) covers every project function and method of that name. A target
     may end in an argument list of `parameter=value` entries (`DataType(is_dict=True)`), each
-    value `True`, `False`, `None`, an integer, or a quoted string.
+    value `True`, `False`, `None`, an integer, or a quoted string. A target can also name
+    functions and classes outside the project by their full name (`sys._getframe`, `os._*`), or
+    `<external>.<name>` for the members of every module and class outside the project.
   - `allowed-callers`: functions allowed to call the targets, as dotted names or globs matched
     against the function's qualified name and its `Class.method` qualname (`pkg.store.*`). A
     module part names one module without its submodules: `pkg:*` allows what `pkg/__init__.py`

@@ -887,6 +887,14 @@ pub enum RuleConfigError {
         context: &'static str,
         cause: globset::Error,
     },
+    /// An entry naming `<external>` other than as `<external>.<name>`.
+    #[error(
+        "invalid {context} entry `{target}`: `<external>` stands for every module and class outside the project, followed by one name (`<external>._*`)"
+    )]
+    ExternalMembers {
+        target: String,
+        context: &'static str,
+    },
     /// A `module:qualname` pattern with more than one colon or an empty part.
     #[error(
         "invalid pattern `{pattern}` in {context} (expected `module:qualname`, one colon with a name on each side)"
@@ -971,6 +979,10 @@ impl Explain for RuleConfigError {
             Self::ImportPair { pattern, context } => (
                 problem.help("write the importing module, an arrow, and the imported one: `\"pkg.cli -> pkg.db\"`"),
                 Setting::of_context(context, Some(pattern)),
+            ),
+            Self::ExternalMembers { target, context } => (
+                problem.help("write `<external>.` and the last name of the symbols, a glob or a name: `\"<external>._*\"`"),
+                Setting::of_context(context, Some(target)),
             ),
             Self::ModulePattern { pattern, context } => (
                 problem.help("write the module, one colon, and the name in it: `\"pkg.db:Session.commit\"`"),
@@ -1324,6 +1336,20 @@ impl<'a> CheckContext<'a> {
                 .push(site);
         }
         out
+    }
+
+    /// What `func` accesses outside the project that a contract names, in its own body and in
+    /// the class bodies it runs ([`heki_effect::FileSummary::external_accesses`]), with the
+    /// file defining it.
+    pub(crate) fn external_accesses<'f>(
+        &self,
+        func: &'f FuncKey,
+    ) -> impl Iterator<Item = (&'a Path, &'a heki_effect::ExternalAccess)> + use<'a, 'f> {
+        let index = self.index;
+        index.file_of(func).into_iter().flat_map(move |path| {
+            let own = index.files[path].external_accesses.get(func);
+            own.into_iter().flatten().map(move |a| (path, a))
+        })
     }
 
     /// Every summarized function once, from its defining file, sorted by key.
