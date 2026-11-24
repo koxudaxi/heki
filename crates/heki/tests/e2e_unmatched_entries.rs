@@ -86,7 +86,10 @@ fn a_run_warns_about_the_entries_that_match_nothing() {
     assert_eq!(lines(&stderr, "error: "), REPRO_ENTRIES, "{stderr}");
     // A run these errors fail does not say that all checks passed.
     assert!(!stderr.contains("All checks passed"), "{stderr}");
-    assert!(stderr.contains("; the errors above fail the run."), "{stderr}");
+    assert!(
+        stderr.contains("; the errors above fail the run."),
+        "{stderr}"
+    );
 
     let p = repro(
         "unmatched_ignore",
