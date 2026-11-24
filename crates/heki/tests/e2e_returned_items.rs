@@ -209,6 +209,12 @@ def tn_counted_filtered() -> None:
 def tp_size_not_a_number() -> None:
     for r in db.fetch_some_text():
         book(r[0])
+
+
+async def tp_partial_to_thread() -> None:
+    run = functools.partial(asyncio.to_thread, authors)
+    for r in await run(CONN):
+        book(r[0])
 "#;
 
 /// What every return of a helper gives decides the origin of a loop over its result.
@@ -284,6 +290,9 @@ fn rows_a_function_returns_are_the_datas_and_rows_the_code_fixes_are_not() {
         (112, "EFF103 [heuristic]", heuristic.to_owned()),
         // A size that is no number fixes no count of rows.
         (117, "EFF103", fetchmany_of("fetch_some_text")),
+        // A partial object holding the callable `asyncio.to_thread` runs: the call's arguments
+        // come after the ones it holds.
+        (123, "EFF103", fetchall_of("authors")),
     ];
     let expected: Vec<(u64, String, String)> = expected
         .into_iter()
