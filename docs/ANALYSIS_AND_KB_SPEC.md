@@ -257,7 +257,10 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     the module writes, which aliases and items share), whose length gives its display. It is
     the one view of a module name bound once (a star import that runs, not one under
     `if TYPE_CHECKING:`, rebinds every name not bound after it for good, also one with an
-    underscore, which the imported module's `__all__` may list; `LastBindings`). A change
+    underscore, which the imported module's `__all__` may list; `LastBindings`). Reading the
+    dict `globals()` returns binds nothing, iterating it included, also as the outermost
+    iterable of a comprehension (`InstKind::comprehension_operands`: the enclosing scope calls
+    `iter()` on it and hands the comprehension the iterator). A change
     through `globals()` leaves no name fixed unless it binds only a name the namespace lacks
     (`globals().setdefault(k, v)`, or `globals()[name] = v` in the module's `__getattr__`, keyed
     by the parameter Python passes the missing name in, which only Python calls: an undecorated
