@@ -116,6 +116,7 @@
           "required": [
             "call-owners",
             "effect-boundaries",
+            "import-owners",
             "invalidation",
             "read-owners",
             "readonly-returns",
@@ -127,6 +128,9 @@
               "$ref": "#/$defs/contract_tables"
             },
             "effect-boundaries": {
+              "$ref": "#/$defs/contract_tables"
+            },
+            "import-owners": {
               "$ref": "#/$defs/contract_tables"
             },
             "invalidation": {

@@ -23,7 +23,8 @@ broken contract) and `warning` for slower code or a bug that is rarely harmful.
 
 ## `heki inspect --output-format json` (experimental)
 
-One versioned object about one function:
+One versioned object about one function (with `-` and the names on standard input, one per
+line, an array of them from one analysis, in the order of the names):
 
 | Field | Content |
 | ----- | ------- |

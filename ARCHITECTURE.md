@@ -31,8 +31,9 @@ ownership boundaries) semantic checker**.
 | **3: Effect & Alias semantic checking (this project)** | **heki** | **Effects and aliases over an SSA control-flow graph and the call graph** | **State corruption across function and class boundaries, write-ownership violations, stale caches, blocking calls, and $O(n^2)$ complexity regressions** |
 
 *(Which modules may import which, and import cycles, are walls in heki's scope
-([ADR-022](docs/DESIGN_HISTORY_AND_ADR.md#adr-022)); the import rules are planned, and until
-they ship tach and import-linter check them.)*
+([ADR-022](docs/DESIGN_HISTORY_AND_ADR.md#adr-022)): `import-owners` contracts check which
+modules a module may import (`IMP201`, `IMP202`); the other import rules are planned, and until
+they ship tach and import-linter check layers and cycles.)*
 
 ### 1.1 What the product is: semantic checks first, speedups as a by-product
 
@@ -75,12 +76,14 @@ by crate boundaries, carrying three rule families and a planned fourth, imports.
      library call that never awaits what it returns (`EFF115`), a generator function called where
      nothing iterates its generator (`EFF116`) (all opt-in), and **effect
      boundaries** declared in `pyproject.toml` (`EFF201`).
-   - **Family 4: Imports (`IMP`, planned in [ADR-022](docs/DESIGN_HISTORY_AND_ADR.md#adr-022))**:
-     import facts with the time each import runs (while its module loads, lazily, inside a
-     function, or never under `TYPE_CHECKING`); without configuration, circular imports that
+   - **Family 4: Imports (`IMP`, [ADR-022](docs/DESIGN_HISTORY_AND_ADR.md#adr-022))**: import
+     facts with the time each import runs (while its module loads, lazily, inside a function, or
+     never under `TYPE_CHECKING`), and heki's own import contracts, `import-owners`: which
+     modules a module may import, wherever the import runs, or what loading it may load
+     (`IMP201`, `IMP202`, experimental). Planned: without configuration, circular imports that
      fail, package code importing test or development code, and development or extra
      dependencies loaded while a package module loads; the import contracts of import-linter,
-     tach, and Ruff's bans; and heki's own import contracts.
+     tach, and Ruff's bans.
 2. **Soundness / Alias lane (`heki_soundness`)**: conservative abstract interpretation that never
    trusts type annotations (zero unsafe rewrites).
    - **Family 3: Complexity Rewrite (`OPT`)**: behavior-preserving $O(n^2) \to O(n)$ rewrites

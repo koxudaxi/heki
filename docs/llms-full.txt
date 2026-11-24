@@ -463,7 +463,7 @@ checker cover most of what matters, and heki reports little.
 | ------ | ------------------ | -------------- |
 | Its own analysis | an SSA form of every function; aliases (copies, attributes, and the iterators and views derived from an object); what each function mutates and which effects it reaches, propagated over the project's call graph until nothing changes | - |
 | A catalog of library behavior | `requests.get` blocks on the network; `asyncio.to_thread(fn)` and `@sync_to_async` run a function on another thread; `logging` calls are never reported; `sqlite3.connect()` returns a `Connection`; `threading.Lock` is a synchronous lock | [`[[tool.heki.ecosystem]]`](https://heki.koxudaxi.dev/configuration/#ecosystem-knowledge-toolhekiecosystem) |
-| Contracts you declare | who may write, read, or call (`write-owners`, `read-owners`, `call-owners`); which returned objects are shared (`readonly-returns`); which changes must be announced (`invalidation`); which functions must not reach I/O or writes (`effect-boundaries`) | [contracts](https://heki.koxudaxi.dev/configuration/#contracts) in the configuration |
+| Contracts you declare | who may write, read, or call (`write-owners`, `read-owners`, `call-owners`); which returned objects are shared (`readonly-returns`); which changes must be announced (`invalidation`); which functions must not reach I/O or writes (`effect-boundaries`); which modules a module may import (`import-owners`) | [contracts](https://heki.koxudaxi.dev/configuration/#contracts) in the configuration |
 | Type annotations, as hints only | which class an object has and which method a call reaches: `session: Session` makes `session.execute(...)` a database call | annotations in your code |
 
 - heki does not analyze the source of the standard library or of installed packages: the
@@ -1358,11 +1358,13 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 | [`effect-boundaries`](https://heki.koxudaxi.dev/configuration/#effect-boundaries) | what a scope must not reach: I/O, writes, reads, or calls | `EFF201` | heuristic |
 | [`readonly-returns`](https://heki.koxudaxi.dev/configuration/#readonly-returns) | results every caller shares | `MUT202` | heuristic |
 | [`invalidation`](https://heki.koxudaxi.dev/configuration/#invalidation) | writes that must be announced | `MUT109` | heuristic |
+| [`import-owners`](https://heki.koxudaxi.dev/configuration/#import-owners) | which modules a module may import (experimental) | `IMP201`; `IMP202` with `unresolved = "report"` | heuristic |
 
 - These rules report nothing until a contract exists. The results of `functools.lru_cache` /
   `functools.cache` functions are checked without one by `MUT114` (`cached-result-mutation`).
 - Declaring a contract selects its rule, whatever its certainty.
-- Every name in a contract is a dotted pattern. It matches the full name or any dotted suffix
+- Every name in a contract but `import-owners`, whose names are
+  [module patterns](https://heki.koxudaxi.dev/configuration/#import-owners), is a dotted pattern. It matches the full name or any dotted suffix
   (`DataModel.fields` matches `pkg.model.DataModel.fields`, not `pkg.BigModel.fields`), and it
   may be a glob (`*`, `?`, `[...]`, `{a,b}`).
 - A glob's `*` spans dots (`pkg.parser.*` covers the functions of every module under
@@ -1403,9 +1405,10 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, a name with more than one colon or an empty module or qualified name, call
   targets whose globs are too many to match together (tens of thousands of complex ones), an
-  argument list heki cannot read, an invalid glob in `allowed-protocols`, or an unknown value of
-  `forbid`, `fresh-objects`, `unresolved`, `references`, `attribution`, `own-receiver`, or
-  `unlisted-dict-keys`.
+  argument list heki cannot read, an invalid glob in `allowed-protocols`, an unknown group or an
+  `ignored-imports` entry without `->` in `import-owners`, or an unknown value of `forbid`,
+  `fresh-objects`, `unresolved`, `references`, `attribution`, `own-receiver`,
+  `unlisted-dict-keys`, `type-checking`, or `reach`.
 - With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
   method named like a target, accessed on an object of unknown class (an unannotated parameter,
@@ -1880,6 +1883,88 @@ A write is followed through local aliases (also in the scopes nested in the func
 container methods, `setattr` / `__dict__`, and helpers. A helper changing an argument it does
 not type writes the field or instance its caller binds to it. At most 64 `invalidation`
 contracts can be declared.
+
+### `import-owners`
+
+```toml
+[[tool.heki.import-owners]]
+name = "facts-leaf"
+importers = ["pkg.facts"]
+allowed-imports = ["<stdlib>", "pkg._records"]
+
+[[tool.heki.import-owners]]
+name = "shared-model-backends"
+importers = ["pkg.model.shared"]
+forbidden-imports = ["pkg.model.backend", "pkg.model.backend.*"]
+
+[[tool.heki.import-owners]]
+name = "no-root-import"
+importers = ["pkg.*"]
+forbidden-imports = ["pkg"]
+```
+
+Which modules the modules of `importers` may import, checked by
+[`IMP201`](https://heki.koxudaxi.dev/rules/import-owner-violation/). Its names are module patterns: a whole module name
+or a glob whose `*` spans dots, never a suffix (`pkg.*` names `pkg.facts` and
+`pkg.model.shared`, not `pkg`), or one of the groups `<stdlib>` (the standard library),
+`<project>` (the project's modules), and `<third-party>` (every other module).
+
+| Key | Default | Meaning |
+| --- | ------- | ------- |
+| `name` | `""` | The contract's name in reports. |
+| `importers` | every module | The modules judged. |
+| `exempt-importers` | `[]` | Modules of `importers` that are not judged. |
+| `allowed-imports` | `[]` | The modules the importers may import: every other import is reported. |
+| `forbidden-imports` | `[]` | When set, only imports of these modules are reported, less the allowed ones, as in [Allowed and forbidden functions](https://heki.koxudaxi.dev/configuration/#allowed-and-forbidden-functions). A contract setting neither list allows no imports. |
+| `ignored-imports` | `[]` | `"importer -> imported"` pairs of module patterns whose imports the contract accepts (`"pkg.cli -> pkg.db"`). |
+| `type-checking` | `"ignore"` | `"ignore"` or `"report"`: whether the imports under `if TYPE_CHECKING:`, which never run, count. |
+| `reach` | `"statement"` | `"statement"`: each import of an importer is judged. `"import-time"`: every module loading an importer loads while it loads. `"all"`: every module a chain of imports that run leads to. |
+| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the imports whose module heki cannot name are reported under [`IMP202`](https://heki.koxudaxi.dev/rules/unresolved-guarded-import/). |
+| `message` | none | The help of every report of the contract. |
+
+- An import counts wherever it runs: in the module body, a class body, a function, or lazily,
+  with or without an `ImportError` handler around it. `importlib.import_module` and
+  `__import__` with a constant name count as imports of that module.
+- `import a.b.c` imports `a.b.c`, not `a` or `a.b`, which it loads first. `from a.b import c`
+  imports the submodule `a.b.c` when the package has one and binds no `c` before importing it,
+  and `a.b` otherwise. An import of a module the project lacks below one of its packages fails,
+  and is no import.
+- One report per import and module. A report's target, which a
+  [baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) counts it by, is the module imported.
+- With `reach`, each module reached is reported once per importer, at the import of the importer
+  that starts a shortest chain to it, with the other steps as related locations. A step through
+  a parent package counts: loading `pkg.models.base` runs `pkg/models/__init__.py` first. The
+  packages holding the importer load before it and are never reached. The walks of one contract
+  share a budget proportional to the import graph, in the order of the modules; past it, the
+  importers left get no report.
+- Definitions are not import targets: who may use a class or a function is a
+  [`call-owners`](https://heki.koxudaxi.dev/configuration/#call-owners) or [`read-owners`](https://heki.koxudaxi.dev/configuration/#read-owners) contract.
+
+Outside a package, only its public entry: every module but the package's own may import
+`app.billing`, and none of the modules under it.
+
+```toml
+[[tool.heki.import-owners]]
+name = "billing-entry"
+exempt-importers = ["app.billing", "app.billing.*"]
+forbidden-imports = ["app.billing.*"]
+message = "import `app.billing` and use what it exports"
+```
+
+`from app.billing import Invoice` imports the package, while `from app.billing import invoice`,
+`import app.billing.invoice`, and `from app.billing.invoice import Invoice` import the
+submodule.
+
+A start-up contract: loading `pkg.cli` must not load `torch`, however many modules lie between
+them.
+
+```toml
+[[tool.heki.import-owners]]
+name = "startup"
+importers = ["pkg.cli"]
+forbidden-imports = ["torch", "torch.*"]
+reach = "import-time"
+```
 
 ### How contracts report
 
@@ -3269,7 +3354,7 @@ Usage: heki inspect [OPTIONS] <SYMBOL> [PATHS]...
 
 Arguments:
   <SYMBOL>
-          A dotted name (`pkg.mod.Class.method`, a dotted suffix such as `Class.method`, or a glob), `path.py:LINE`, or `path.py::NAME`
+          A dotted name (`pkg.mod.Class.method`, a dotted suffix such as `Class.method`, or a glob), `path.py:LINE`, or `path.py::NAME`. `-` reads such symbols from standard input, one per line, and reports on every function they name, a glob on each function it matches, from one analysis: a JSON array, or one text section per function
 
   [PATHS]...
           The project to analyze, as for `heki check`
@@ -3290,6 +3375,9 @@ Options:
           How many caller levels `--callers` lists
           
           [default: 3]
+
+      --imports
+          Show the imports of the project modules SYMBOL names (a module name or a glob over module names): each import with when it runs and what it loads, and what loading the module loads while it loads
 
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
@@ -3329,18 +3417,22 @@ Documentation:
   Agent Skill      https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental
 
 Exit codes:
-  0  the function's report is printed
-  2  the symbol names no single function (the error lists the candidates), or a file could not be analyzed
+  0  the report of each function is printed
+  2  a symbol names no single function (the error lists the candidates), or a file could not be analyzed
 
 Examples:
   heki inspect pkg.users.fetch
       a function by its full name
   heki inspect src/pkg/users.py:42 --callers
       the function at a line, with its callers
+  printf '%s\n' pkg.users.fetch 'pkg.orders.*' | heki inspect -
+      every function the symbols name, from one analysis
 
 Output for programs:
   heki inspect <SYMBOL> --output-format json
       the report as one object; on exit code 2, `error` with the candidates
+  heki inspect - --output-format json
+      an array: the object of each function the symbols on standard input name, in their order
 ```
 
 ## `heki recommend`
@@ -3507,7 +3599,7 @@ Source: https://heki.koxudaxi.dev/rules/
 
 # Rules
 
-heki has 48 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
+heki has 50 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
 
 - The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report of an exact rule that did not establish every premise (an `OPT` report whose rewrite is not proven) is shown where a heuristic rule would run.
 - A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
@@ -3598,6 +3690,15 @@ Quadratic patterns heki can rewrite, each proven safe by the alias analysis befo
 | OPT120 | [list-front-pop](https://heki.koxudaxi.dev/rules/list-front-pop/) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 |
 | OPT121 | [list-front-insert](https://heki.koxudaxi.dev/rules/list-front-insert/) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 |
 | OPT130 | [loop-invariant-container-rebuild](https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 |
+
+## Imports (IMP)
+
+Imports a contract does not allow, wherever they run, counted as Python loads them.
+
+| Code | Name | Message | |
+| ---- | ---- | ------- | ------: |
+| IMP201 | [import-owner-violation](https://heki.koxudaxi.dev/rules/import-owner-violation/) | An import that an `import-owners` contract does not allow: a forbidden module, or one outside the allowed imports. | ≈ 📜 🧪 |
+| IMP202 | [unresolved-guarded-import](https://heki.koxudaxi.dev/rules/unresolved-guarded-import/) | Strict mode of an `import-owners` contract (`unresolved = "report"`): an import whose module heki cannot name, which may be one the contract does not allow. | ≈ 📜 🧪 |
 
 
 ---
@@ -3841,6 +3942,8 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `rule.EFF114` | rule | [`EFF114`](https://heki.koxudaxi.dev/rules/recursion-error-as-value/) | 0.2.4 | - |
 | `rule.EFF115` | rule | [`EFF115`](https://heki.koxudaxi.dev/rules/async-def-as-sync-callback/) | 0.2.5 | - |
 | `rule.EFF116` | rule | [`EFF116`](https://heki.koxudaxi.dev/rules/generator-never-iterated/) | 0.2.6 | - |
+| `rule.IMP201` | rule | [`IMP201`](https://heki.koxudaxi.dev/rules/import-owner-violation/) | 0.2.7 | - |
+| `rule.IMP202` | rule | [`IMP202`](https://heki.koxudaxi.dev/rules/unresolved-guarded-import/) | 0.2.7 | - |
 | `rule.MUT101` | rule | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | 0.1.0 | - |
 | `rule.MUT111` | rule | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | 0.2.0 | - |
@@ -3934,6 +4037,22 @@ The development corpus has no report of it, so its precision is not measured, an
 - **Since:** 0.2.6
 
 The development corpus has few reports of it, and its premises are not yet certified.
+
+## `rule.IMP201`
+
+- **Kind:** rule
+- **Target:** [`IMP201`](https://heki.koxudaxi.dev/rules/import-owner-violation/)
+- **Since:** 0.2.7
+
+It is new: its reports are heuristic until a review of its reports on real code bases certifies its claim.
+
+## `rule.IMP202`
+
+- **Kind:** rule
+- **Target:** [`IMP202`](https://heki.koxudaxi.dev/rules/unresolved-guarded-import/)
+- **Since:** 0.2.7
+
+It is the strict mode of `IMP201`, which is experimental.
 
 ## `rule.MUT101`
 
@@ -4115,6 +4234,7 @@ On a save, the edit reaches other files only through what it changes:
 | a function's own in-place changes, attribute rebindings, or calls, while its effects stay the same | the files with `MUT108` / `MUT110` / `MUT120` reports above it: a report's call chain ends at the first function whose body makes the change |
 | the position of a call site, also when its bytes stay where they were | the files whose call chains show that call site |
 | the position of a method's own change of a container | the files whose `MUT113` reports show it |
+| the position of an import | the files whose `import-owners` chains show it |
 
 Contracts reach further when a function changes its calls:
 
@@ -4123,6 +4243,7 @@ Contracts reach further when a function changes its calls:
 | an ownership or `invalidation` contract | every function below it | whether a function only runs inside allowed callers, or whether its callers announce its writes, depends on all callers above it |
 | a contract on calls (`call-owners`, an effect boundary forbidding `calls`) | every function above it | a call of a target is reported at the callers of the private helper making it, and at the scope functions reaching it |
 | an effect boundary, when the function changes its calls of library APIs, or the calls, module attribute reads, and import probes outside the project that a boundary forbids | every function above it | a boundary may allow one API and forbid another of the same effect, counts every call it reaches, and no summary records an access outside the project |
+| an `import-owners` contract with `reach`, when a file's imports change | every module the contract judges | an importer's report follows the imports of every module its walk reaches, and the walks share one budget |
 
 Edits that change none of these, such as most comments, stop at the edited file.
 
@@ -4340,6 +4461,7 @@ function's effects are in question, not before every edit.
 $ heki inspect app.users.load_user --output-format json
 $ heki inspect app/users.py:42
 $ heki inspect app/users.py::load_user --callers --depth 3
+$ printf '%s\n' app.users.load_user 'app.orders.*' | heki inspect - --output-format json
 ```
 
 | Field | Content |
@@ -4358,6 +4480,13 @@ $ heki inspect app/users.py::load_user --callers --depth 3
   says what to do (in JSON, `error.help`; a misspelled name gets the functions whose names look
   like it) and lists the functions to choose from (`error.candidates`, `error.suggestions`,
   `error.methods`, or `error.functions`).
+- With `-` for the name, the names are read from standard input, one per line, and heki analyzes
+  the project once for all of them: the JSON output is an array of the objects, in the order of
+  the names, and the text output one section per function. Here a glob names each function it
+  matches, in the order of their full names (on the command line, a glob matching several is
+  ambiguous). A name that names no single function takes its place in the array as the error
+  object it prints alone, the others are still reported, and the exit code is 2. No names give
+  an empty array.
 - `pure` means heki found no effect and no change of an input or of shared state, and resolved
   every call below. Libraries the [catalog](https://heki.koxudaxi.dev/configuration/#ecosystem-knowledge-toolhekiecosystem)
   does not list count as having no effects.
@@ -4370,8 +4499,8 @@ $ heki inspect app/users.py::load_user --callers --depth 3
   100; `truncated` says there are more. `purity.unknown_at` is the first of them. Both are given
   for an `impure` function too: what it changes may then be incomplete.
 - A field the configuration does not compute is `null`, with the setting that computes it.
-- Exit code 0 when the function was inspected, 2 otherwise or when a file could not be analyzed
-  (the report is still printed, with `complete: false`).
+- Exit code 0 when every function was inspected, 2 otherwise or when a file could not be
+  analyzed (the reports are still printed, with `complete: false`).
 
 To see what an edit changed in a function, inspect it before and after the edit and compare
 `effects`, `changes`, `retains`, and `returns`: a new entry is new behavior. Fact keys carry no line
@@ -4551,6 +4680,7 @@ $ cargo nextest run --workspace --cargo-profile ci
 ```console
 $ cargo build
 $ python3 tests/symtable_verify/verify_symtable.py --heki target/debug/heki tests/symtable_verify/fixtures/ tests/corpus/
+$ python3 tests/import_verify/verify_imports.py --heki target/debug/heki tests/import_verify/fixtures/
 $ python3 tests/sentinel/verify_soundness_kb.py
 $ python3 tests/difftest/counterexamples.py
 $ python3 tests/difftest/soundness_e2e_counterexamples.py
@@ -4562,6 +4692,7 @@ CI runs them on CPython 3.11 to 3.15 (`ir_counterexamples.py` on 3.15 only).
 | Script | Checks |
 | ------ | ------ |
 | `verify_symtable.py` | heki's scope analysis against CPython's `symtable`: the scope tree (kind, name, definition line, parent), bindings, parameters, `global` / `nonlocal` declarations, and every read. Every target must exist and every file must parse on the running CPython, except fixtures marked for a newer one in their name (`312_315`, `313_315`, `_314`, `pep810`); a run that compares no file fails. |
+| `verify_imports.py` | heki's import facts (`heki inspect --imports`) against CPython: each fixture module is imported first in a fresh interpreter that records the imports the module bodies run, and the `body` edges are compared both ways (every recorded import is one of heki's `body` sites, and every unconditional one heki lists that no `ImportError` handler guards is recorded); an `ast` reader checks the function, `TYPE_CHECKING`, and `lazy` classes. The fixtures under `py315` need CPython 3.15. |
 | `verify_soundness_kb.py` | every claim of the Layer 1 knowledge base (`kb/soundness/builtins.toml`), on the running interpreter |
 | `counterexamples.py` | that the naive rewrites heki refuses really change behavior |
 | `soundness_e2e_counterexamples.py` | that the rewrites earlier versions of heki made of these shapes change behavior; the end-to-end tests check that heki now blocks or disproves each |
@@ -4810,7 +4941,8 @@ once it costs under a quarter of the limits. `KNOWN_STEPS` lists, the same way, 
 steps are known to grow faster than linearly or to spend a budget.
 
 Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without it.
-The test counts the steps of the walks (`heki check --walk-steps`) on the shape and on the same
+The test counts the steps of the walks (`heki check --walk-steps`, and `heki inspect --imports
+--walk-steps` for the import graph) on the shape and on the same
 shape eight times smaller, and compares the counts, not times, so the result does not depend on the
 machine's speed or load: each owner's steps may grow at most sixteen times, and no owner may spend
 its budget on the full shape unless the test names it (`check_past_budgets`: a shape made to pass
@@ -4891,7 +5023,14 @@ key, each after reads of other mappings by the same key, and, for the call cycle
 follows, thousands of `try` statements in one function calling into one recursion, a call cycle
 through thousands of functions each calling the next inside a `try`, a lattice of calls thirty
 levels deep with a `try` at each level above a recursion, and a ladder of thousands of helpers
-above a recursion with a `try` calling each.
+above a recursion with a `try` calling each, and, for the import graph (`heki inspect
+--imports`), a chain of ten thousand modules each importing the next, every module of a chain
+of two thousand asked at once (made to pass the budget the walks share), three hundred modules
+each importing every other, a package importing two thousand submodules, two thousand reads of
+a lazy name bound on two branches, each after a branch, and five hundred lazy names each bound
+on two branches and read after five hundred branches (made to pass the budget the walks to the
+bindings share), and, for the declarations, forty layers of dependency groups each including
+both groups of the next layer.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
@@ -7357,6 +7496,135 @@ def encode(parts: list[bytes]) -> bytes:
 No automatic fix (the rewrite needs a buffer before the loop and a join after it). The
 diagnostic still lists the proof obligations: the accumulator must not be read inside the loop
 or by an exception handler, and its intermediate values must not escape.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/import-owner-violation/
+
+# import-owner-violation (IMP201)
+
+Family: Imports (IMP) · Heuristic · Runs when its contract is declared · Experimental · Severity `error` (a bug) · No automatic fix
+
+An import that an `import-owners` contract does not allow: a forbidden module, or one outside the allowed imports.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+
+!!! warning "Experimental"
+
+    It is new: its reports are heuristic until a review of its reports on real code bases certifies its claim. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
+
+## What it does
+Checks the imports of the modules a `[[tool.heki.import-owners]]` contract judges against the
+modules it allows or forbids. An import counts wherever it runs: in the module body, in a class
+body, inside a function, or lazily (`lazy import`, PEP 810), with or without an `ImportError`
+handler around it. An import under `if TYPE_CHECKING:` never runs, and counts only with
+`type-checking = "report"`.
+
+What an import loads is decided as Python decides it:
+
+- `import a.b.c` imports `a.b.c`. It loads `a` and `a.b` first, but it is no import of them.
+- `from a.b import c` imports the submodule `a.b.c` when the package `a.b` has it and binds no
+  name `c` before importing it, and `a.b` otherwise: `from pkg import parse` imports the
+  function when `pkg/__init__.py` re-exports it (`from .parse import parse`).
+- Relative imports are made absolute from the importing module.
+- `importlib.import_module("pkg.db")` and `__import__("pkg.db")` with a constant name, or a name
+  heki establishes, import that module. With several possible names, the call is reported only
+  when every one of them breaks the contract.
+- An import of a module the project lacks below one of its packages fails, and is no import.
+
+A module pattern is a whole module name or a glob whose `*` spans dots (`pkg.backend.*` names
+every module below `pkg.backend`, not `pkg.backend` itself), or a group: `<stdlib>`,
+`<project>`, `<third-party>`.
+
+With `reach = "import-time"`, the contract judges every module that loading the importer loads
+while it loads, through the module bodies of the project's modules and the parent `__init__`
+files each import loads first. With `reach = "all"`, it follows every import that runs. Each
+module reached is reported once per importer, at the import that starts a shortest chain to it,
+with the rest of the chain as related locations. The packages holding the importer load before
+it, so they are never reached.
+
+## What a report states
+
+A report states that the importer imports the module, where the import is written and when it
+runs, or, with `reach`, that an import of it leads to the module.
+
+Its premises:
+
+- **Judged importer**: the module holding the import is one the contract's `importers` names
+  (every module without the key) and `exempt-importers` does not. Established from the contract.
+- **Module loaded**: the import loads that module: the name it gives, made absolute and resolved
+  against the project's modules, a `from` import of a name the package binds before any import of
+  the submodule taken as an import of the package; with `reach`, a chain of imports of the
+  classes the contract counts leads to it, each step loading the next module or, first, its
+  parent package. An import whose module heki cannot name gives no report (`IMP202` reports it
+  with `unresolved = "report"`).
+- **Breaks the contract**: the module matches `forbidden-imports` and not `allowed-imports`, or
+  misses `allowed-imports` when only it is set, and no `ignored-imports` pair accepts the import;
+  a by-name import gives names heki knows whole, and every one of them does. Established from the
+  contract.
+
+A report says where an import is written, never that a branch around it is taken.
+
+## Why is this bad?
+An import is how one part of a program comes to depend on another. A leaf module that imports a
+backend, shared code that imports a concrete implementation, or a command whose start-up loads a
+heavy library undoes a layering the project relies on, and a type checker or a linter does not
+see it: the import is valid Python. Unlike tools that read only the import statements, heki
+counts an import kept only for its effect, an import inside a function, and an import by a
+constant name, and it knows whether `from a import b` loads the submodule `a.b`.
+
+## Example
+```toml
+[[tool.heki.import-owners]]
+name = "shared-model-backends"
+importers = ["pkg.model.shared"]
+forbidden-imports = ["pkg.model.backend", "pkg.model.backend.*"]
+```
+
+```python
+# pkg/model/shared.py
+import importlib
+
+
+def load() -> object:
+    return importlib.import_module("pkg.model.backend")  # IMP201
+```
+
+Use instead:
+```python
+# pkg/model/shared.py
+from pkg.model import registry
+
+
+def load() -> object:
+    return registry.backend()
+```
+
+Outside a package, only its public entry:
+
+```toml
+[[tool.heki.import-owners]]
+name = "billing-entry"
+exempt-importers = ["app.billing", "app.billing.*"]
+forbidden-imports = ["app.billing.*"]
+```
+
+```python
+# app/orders.py
+from app.billing import Invoice  # the package's own export: allowed
+from app.billing import invoice  # IMP201: the submodule `app.billing.invoice`
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `[[tool.heki.import-owners]]`: `importers`, `exempt-importers`, `allowed-imports`,
+  `forbidden-imports`, `ignored-imports`, `type-checking`, `reach`, `unresolved`, `message`
+  ([configuration](https://heki.koxudaxi.dev/configuration/#import-owners)).
 
 
 ---
@@ -10531,6 +10799,77 @@ No automatic fix.
   - `unresolved`: `"ignore"` (default) or `"report"`.
   - `targets`, `allowed-callers`, `forbidden-callers`, `exempt-methods`, `attribution`,
     `message`: as for `MUT204`.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/unresolved-guarded-import/
+
+# unresolved-guarded-import (IMP202)
+
+Family: Imports (IMP) · Heuristic · Runs when its contract is declared · Experimental · Severity `error` (a bug) · No automatic fix
+
+Strict mode of an `import-owners` contract (`unresolved = "report"`): an import whose module heki cannot name, which may be one the contract does not allow.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+
+!!! warning "Experimental"
+
+    It is the strict mode of `IMP201`, which is experimental. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
+
+## What it does
+The strict mode of a `[[tool.heki.import-owners]]` contract that sets `unresolved = "report"`:
+reports the imports of the judged modules that `IMP201` cannot judge because heki cannot name
+the module they load, when that module may be one the contract does not allow:
+
+- a by-name import (`importlib.import_module`, `__import__`) of a name the code does not fix;
+- a by-name import of a name built from a known start (`f"pkg.plugins.{name}"`), unless no
+  forbidden pattern can match a module under it, or an allowed glob covers every one
+  (`pkg.plugins.*`);
+- a by-name import of one of several names, some breaking the contract and some not;
+- `from a import c` where heki cannot tell whether `c` is the submodule `a.c`: a package outside
+  the project, or one whose `__init__.py` binds `c` before the submodule may be imported. The
+  package `a` loads either way, and `IMP201` judges it.
+
+With `reach`, the sites of the modules a walk reaches are judged too, and reported at the import
+of the importer that starts the chain to them.
+
+## What a report states
+
+A report states that the importer has an import whose module heki cannot name, that may be one
+the contract forbids or does not allow.
+
+## Why is this bad?
+A contract that passes says nothing about the imports heki cannot follow. `IMP202` reports them
+under their own code, so they can be counted, kept in a baseline, and reduced by writing the
+module name out, without mixing them with the violations `IMP201` proves.
+
+## Example
+```toml
+[[tool.heki.import-owners]]
+name = "core-plugins"
+importers = ["pkg.core.*"]
+forbidden-imports = ["pkg.plugins.*"]
+unresolved = "report"
+```
+
+```python
+import importlib
+
+
+def plugin(name: str) -> object:
+    return importlib.import_module(f"pkg.plugins.{name}")  # IMP202
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `[[tool.heki.import-owners]]`:
+  - `unresolved`: `"ignore"` (default) or `"report"`.
+  - the other keys: as for `IMP201`.
 
 
 ---

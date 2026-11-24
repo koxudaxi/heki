@@ -5297,6 +5297,104 @@ symbol = "google.genai.Client"
 effects = ["unpooled_client_alloc"]
 opaque_to_layer3 = true
 
+# The modules a distribution installs under names other than its own: a dependency's other
+# modules are those whose top-level name, normalized like a distribution name, is its own.
+[[provides]]
+distribution = "PyYAML"
+modules = ["yaml", "_yaml"]
+
+[[provides]]
+distribution = "Pillow"
+modules = ["PIL"]
+
+[[provides]]
+distribution = "beautifulsoup4"
+modules = ["bs4"]
+
+[[provides]]
+distribution = "scikit-learn"
+modules = ["sklearn"]
+
+[[provides]]
+distribution = "python-dateutil"
+modules = ["dateutil"]
+
+[[provides]]
+distribution = "pytest"
+modules = ["pytest", "_pytest", "py"]
+
+[[provides]]
+distribution = "attrs"
+modules = ["attr", "attrs"]
+
+[[provides]]
+distribution = "setuptools"
+modules = ["setuptools", "pkg_resources", "_distutils_hack"]
+
+[[provides]]
+distribution = "opencv-python"
+modules = ["cv2"]
+
+[[provides]]
+distribution = "opencv-python-headless"
+modules = ["cv2"]
+
+[[provides]]
+distribution = "protobuf"
+modules = ["google.protobuf"]
+
+[[provides]]
+distribution = "pyzmq"
+modules = ["zmq"]
+
+[[provides]]
+distribution = "python-dotenv"
+modules = ["dotenv"]
+
+[[provides]]
+distribution = "PyJWT"
+modules = ["jwt"]
+
+[[provides]]
+distribution = "pyserial"
+modules = ["serial"]
+
+[[provides]]
+distribution = "psycopg2-binary"
+modules = ["psycopg2"]
+
+[[provides]]
+distribution = "mysqlclient"
+modules = ["MySQLdb"]
+
+[[provides]]
+distribution = "grpcio"
+modules = ["grpc"]
+
+[[provides]]
+distribution = "google-genai"
+modules = ["google.genai"]
+
+[[provides]]
+distribution = "PyGithub"
+modules = ["github"]
+
+[[provides]]
+distribution = "pycryptodome"
+modules = ["Crypto"]
+
+[[provides]]
+distribution = "websocket-client"
+modules = ["websocket"]
+
+[[provides]]
+distribution = "ruamel.yaml"
+modules = ["ruamel.yaml"]
+
+[[provides]]
+distribution = "discord.py"
+modules = ["discord"]
+
 [[distributions]]
 name = "openai"
 packages = ["openai"]

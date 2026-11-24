@@ -23,6 +23,7 @@ pub mod cache_flow;
 mod callgraph;
 pub use callgraph::{HopGap, MustExplainer, MustGap, SiteMust};
 pub mod capacity;
+pub mod code_kind;
 mod paths;
 pub use paths::with_paths;
 mod construction;
@@ -33,6 +34,7 @@ mod environment;
 pub mod fresh;
 pub mod guards;
 pub mod held;
+pub mod imports;
 mod infer;
 mod invalidation;
 mod invokes;
@@ -2274,6 +2276,11 @@ pub struct OptInTables {
     /// ([`OptInFacts::fresh_returns`]). Read through [`ProjectIndex::fresh_return`].
     #[serde(default)]
     pub fresh_returns: fresh::FreshReturns,
+    /// The file's import sites ([`imports::ModuleImports`]; local, IR-free; `None` unless
+    /// [`OptInFacts::imports`], and for a typing stub, whose imports never run). Read through
+    /// [`FileSummary::imports`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imports: Option<Box<imports::ModuleImports>>,
 }
 
 /// A project function handed to a library call that calls it as a plain function and never
@@ -2334,6 +2341,11 @@ impl FileSummary {
             .iter()
             .flat_map(|t| &t.kept_removals)
             .map(String::as_str)
+    }
+
+    /// The file's import sites ([`OptInTables::imports`]; none while the facts are not computed).
+    pub fn imports(&self) -> Option<&imports::ModuleImports> {
+        self.opt_in_tables.as_ref()?.imports.as_deref()
     }
 
     /// The final facts as the local ones, where propagation starts.
@@ -2405,6 +2417,10 @@ pub struct IncrementalUpdate {
     /// The functions of the file (and of call cycles through it) whose facts changed or that
     /// disappeared, and the callers whose facts changed with them, sorted.
     pub changed: Vec<FuncKey>,
+    /// The file's import facts changed, wherever its sites are written
+    /// ([`imports::ModuleImports::same_facts`]), or it appeared or disappeared with some: the
+    /// import graph changed.
+    pub imports_changed: bool,
 }
 
 /// A file of the project that heki could not read or parse, by the module it would define.
@@ -2539,8 +2555,9 @@ pub enum TypedWrites {
 /// `CallSite::under_lock`), `EFF112`'s set-order flows (`EffectSummary::set_order`), `EFF114`'s
 /// call cycles (`EffectSummary::call_cycle`), and the shared state functions change
 /// (`EffectSummary::shared_state`), which only `heki inspect` reads, the calls heki is blind to
-/// (`OptInTables::blind_spots`), which only `heki recommend` reads, and `MUT119`'s new returned
-/// containers (`OptInTables::fresh_returns`).
+/// (`OptInTables::blind_spots`), which only `heki recommend` reads, `MUT119`'s new returned
+/// containers (`OptInTables::fresh_returns`), and the import facts (`OptInTables::imports`),
+/// which `heki inspect --imports` reads.
 /// `CallSite::returned`, which `MUT202` reads too, is always computed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OptInFacts {
@@ -2563,6 +2580,8 @@ pub struct OptInFacts {
     pub unawaited_handoffs: bool,
     /// [`OptInTables::fresh_returns`].
     pub fresh_returns: bool,
+    /// [`OptInTables::imports`].
+    pub imports: bool,
 }
 
 impl OptInFacts {
@@ -2581,6 +2600,7 @@ impl OptInFacts {
         call_cycles: true,
         unawaited_handoffs: true,
         fresh_returns: true,
+        imports: true,
     };
 
     /// Whether the call sites carry [`CallSite::complete`] and [`CallSite::on_every_return`].
@@ -2928,6 +2948,11 @@ impl ProjectIndex {
     pub fn update_file(&mut self, mut new_file: FileSummary) -> IncrementalUpdate {
         let path = new_file.path.clone();
         let old_file = self.files.remove(&path);
+        let old_imports = old_file.as_ref().and_then(|f| f.imports());
+        let imports_changed = match (old_imports, new_file.imports()) {
+            (Some(old), Some(new)) => !old.same_facts(new),
+            (old, new) => old.is_some() != new.is_some(),
+        };
         let mut previous: FxHashMap<FuncKey, FinalFacts> = FxHashMap::default();
         let mut owned_before: FxHashSet<FuncKey> = FxHashSet::default();
         if let Some(old) = &old_file {
@@ -3060,6 +3085,7 @@ impl ProjectIndex {
                 summary_changed,
                 affected_callers: Vec::new(),
                 changed,
+                imports_changed,
             };
         }
         // Whole SCCs, as a full build computes them: an edited function sharing one with a caller
@@ -3093,6 +3119,7 @@ impl ProjectIndex {
             summary_changed,
             affected_callers: affected,
             changed,
+            imports_changed,
         }
     }
 

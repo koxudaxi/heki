@@ -161,6 +161,23 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         tracking: None,
     },
     ExperimentalFeature {
+        id: "rule.IMP201",
+        kind: ExperimentalKind::Rule,
+        target: "IMP201",
+        since: "0.2.7",
+        reason: "It is new: its reports are heuristic until a review of its reports on real code \
+            bases certifies its claim.",
+        tracking: None,
+    },
+    ExperimentalFeature {
+        id: "rule.IMP202",
+        kind: ExperimentalKind::Rule,
+        target: "IMP202",
+        since: "0.2.7",
+        reason: "It is the strict mode of `IMP201`, which is experimental.",
+        tracking: None,
+    },
+    ExperimentalFeature {
         id: "rule.MUT120",
         kind: ExperimentalKind::Rule,
         target: "MUT120",
