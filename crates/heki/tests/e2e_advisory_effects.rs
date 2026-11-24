@@ -382,7 +382,7 @@ fn eff101_resolves_pipe_and_optional_annotations_super_returns_and_overrides() {
     // (`CHA_CANDIDATE_LIMIT` = 8), so `b.go()` stays unresolved. With 7 overrides it is not.
     p.write("pkg/many.py", &overrides(7));
     assert_eq!(
-        found(&diagnostics(&p, &["pkg/many.py", "pkg/util.py"])),
+        found(&diagnostics(&p, &["pkg/many.py"])),
         vec![d("pkg/many.py", 45, "EFF111", "pkg.many.Sub0.go")]
     );
 }

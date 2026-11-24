@@ -7,17 +7,20 @@ inspect` says what one function does, so an agent does not read its callees to f
 
 ## Analyze the project, not one file
 
-heki follows calls across files. `heki check app/api.py` analyzes that file alone and misses what
-its callees do: run heki on the project (the default `.`).
+heki follows calls across files, so it analyzes a project, never one file alone: `heki check
+app/api.py` analyzes the project the file is in and shows the diagnostics that touch the file.
+A directory below the project root is analyzed as given and misses what its callees elsewhere do
+(heki notes the project modules its files import that it left out): run heki from the project
+root.
 
 A diagnostic sits where the problem shows, which is often not the file that was edited. In the
 [first example](index.md#a-blocking-call-two-helpers-below-an-async-def) of the overview, adding
 `requests.get` to `app/users.py` makes `EFF101` report at `app/api.py`, in the `async def` that
 reaches it through two helpers. To see the diagnostics an edit can have caused, pass the edited
-files to `--touched`: heki still analyzes the project, and shows only the diagnostics whose `path`
-or any `related[].path` is one of them, so the report in `app/api.py` stays while `app/users.py`
-is the only edited file. The summary, the exit code, and every output format follow the
-diagnostics shown.
+files to `--touched`, or name them as paths: heki still analyzes the project, and shows only the
+diagnostics whose `path` or any `related[].path` is one of them, so the report in `app/api.py`
+stays while `app/users.py` is the only edited file. The summary, the exit code, and every output
+format follow the diagnostics shown.
 
 ```console
 $ heki check --touched app/users.py --output-format json

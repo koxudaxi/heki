@@ -21,6 +21,9 @@ $ heki check --fix --profile profile.txt         # size-dependent rewrites in ho
   another loop it is heuristic, and its fix applies with `--heuristic` or when its rule is
   selected.
 - `--diff` takes the same flags as `--fix` and writes nothing.
+- With `--touched`, or files given as paths, `--fix` and `--diff` rewrite only those files. A
+  shown report in another file (one whose call chain reaches a touched file) keeps its fix, and
+  the run says how many it left: a pre-commit hook never rewrites a file the commit left alone.
 - `--include-size-dependent` applies the size-dependent rewrites in every function, with or
   without `--profile`.
 - `--profile` alone applies them only in the functions a [profile](#profiles) shows hot.

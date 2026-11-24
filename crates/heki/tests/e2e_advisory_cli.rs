@@ -319,14 +319,18 @@ fn discovery_of_explicit_files_outside_paths_and_excluded_directories() {
         vec![hit("a.py", 5, "EFF101"), hit("b.py", 5, "EFF101")],
         "`generated/` is excluded and `tool` is not a Python file"
     );
-    // Named files are always checked (Ruff semantics), whatever their extension.
-    let (_, stdout, _) = p.check(&["a.py", "tool", "--output-format", "json"]);
-    assert_eq!(
-        hits(&stdout),
-        vec![hit("a.py", 5, "EFF101"), hit("tool", 5, "EFF101")]
+    // A named file is checked in its project: a file the project leaves out, excluded or not
+    // a Python file, is named in a warning.
+    let (_, stdout, stderr) = p.check(&["a.py", "tool", "--output-format", "json"]);
+    assert_eq!(hits(&stdout), vec![hit("a.py", 5, "EFF101")]);
+    assert!(
+        stderr.contains("PATHS name 1 file(s) that are not among the analyzed files"),
+        "{stderr}"
     );
-    let (_, stdout, _) = p.check(&["generated/g.py", "--output-format", "json"]);
-    assert_eq!(hits(&stdout), vec![hit("generated/g.py", 5, "EFF101")]);
+    assert!(stderr.contains("`tool`"), "{stderr}");
+    let (_, stdout, stderr) = p.check(&["generated/g.py", "--output-format", "json"]);
+    assert_eq!(hits(&stdout), vec![]);
+    assert!(stderr.contains("`generated/g.py`"), "{stderr}");
     // A second directory outside the project root keeps its own path.
     let other = outside.dir.to_str().unwrap();
     let (_, stdout, _) = p.check(&[".", other, "--output-format", "json"]);

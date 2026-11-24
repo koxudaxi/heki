@@ -48,6 +48,12 @@ The recorded set can only shrink:
 
 To record new findings on purpose, delete the baseline and record it again.
 
+A run over part of the project (`heki check pkg_a --baseline heki-baseline.toml`) compares and
+updates only the entries of the files below its paths: the entries of the other files stay as
+they are, since the run did not analyze them. A baseline written before version 2 is updated
+whole first. `--update-baseline` takes directories: a file given to `heki check` selects what is
+shown, and a baseline records every report of what a run covers.
+
 ### What an entry counts
 
 Each entry counts violation sites, not reports (`sites` in JSON output):
@@ -76,7 +82,10 @@ and the reports whose call chain reaches one of them: after a change to `app/use
 files the commit left alone are not. A project can run the hook from its first commit, without a
 baseline. A change can also make a report appear in a file the commit left alone without a call chain
 through the change, for example when a type annotation that another module relied on is removed;
-such a report is not shown here, so run the whole project in continuous integration.
+such a report is not shown here, so run the whole project in continuous integration. A local hook
+may also pass the files as paths (`entry: heki check`): a file given to `heki check` is checked in
+its project, as with `--touched`. With `--fix`, the hook rewrites only the staged files: the fix
+of a shown report in another file is left, and the run says how many were.
 
 ```yaml
 # .pre-commit-config.yaml

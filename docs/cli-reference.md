@@ -76,7 +76,7 @@ Usage: heki check [OPTIONS] [PATHS]...
 
 Arguments:
   [PATHS]...
-          Files or directories to check
+          Directories to analyze, and files to report on: a file is checked in its project, as `--touched` does from the project root (with directories, the directories are analyzed). A file outside any project is analyzed alone
           
           [default: .]
 
@@ -91,7 +91,7 @@ Options:
           Preview fixes as a unified diff without writing files
 
       --touched <FILE>...
-          Show, fix, and fail on only the diagnostics in one of these files or with a hop of their call chain (`related`) in one, such as the files a commit or a pull request changed; the analysis still covers PATHS (put PATHS before the option). A path that is not an analyzed file is named in a warning
+          Show and fail on only the diagnostics in one of these files or with a hop of their call chain (`related`) in one, such as the files a commit or a pull request changed, and let `--fix` and `--diff` rewrite only these files; the analysis still covers PATHS (put PATHS before the option). A path that is not an analyzed file is named in a warning
 
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
@@ -134,13 +134,13 @@ Options:
           [possible values: auto, always, never]
 
       --update-baseline
-          Generate or shrink-update the Ratchet baseline file
+          Generate or shrink-update the Ratchet baseline file, from directories: the entries of files the paths leave out stay as they are
 
       --profile <PROFILE>
           Experimental: offline profile dump (collapsed stacks of CPython 3.15's profiler or py-spy, or `--gecko` JSON): apply the `size-dependent` fixes in its hot functions (in every function with `--include-size-dependent`)
 
       --watch
-          Watch for file changes and re-run incrementally
+          Watch the directories given for file changes and re-run incrementally
 
       --generate-prompt [<QUESTION>]
           Experimental: print a prompt for consulting a language model about this run instead of the report: the configuration, the rules that apply, the diagnostics, how to answer, and QUESTION when given (put PATHS before the option). `--output-format json` prints it as JSON. Writes no file and exits with 0
@@ -171,6 +171,8 @@ Exit codes:
 Examples:
   heki check src tests
       check two directories
+  heki check app/api.py
+      analyze the file's project, report only what touches the file
   heki check --select EFF,MUT101 --ignore OPT110
       choose the rules for one run
   heki check --touched app/users.py app/api.py
@@ -288,7 +290,7 @@ Usage: heki snapshot [OPTIONS] [PATHS]...
 
 Arguments:
   [PATHS]...
-          Files or directories to summarize
+          Directories to summarize; a file names its project, as for `heki check`
           
           [default: .]
 

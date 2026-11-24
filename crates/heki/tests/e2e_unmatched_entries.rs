@@ -637,21 +637,26 @@ fn a_dict_of_a_namespace_gives_its_keys() {
 
 /// Without the key, a run over some files of the project judges nothing: an entry naming code
 /// in a file the paths leave out would look unmatched. With the key, the files given are the
-/// project.
+/// project. A file given alone is checked in its project, which the run analyzes whole.
 #[test]
 fn a_run_over_some_files_judges_only_with_the_key() {
     let p = repro("unmatched_some_files", "");
-    let (code, stdout, stderr) = p.heki(&["check", "pkg/store.py"]);
-    assert_eq!(code, 0, "{stdout}{stderr}");
+    p.write("pkg/stores/__init__.py", "")
+        .write("pkg/stores/store.py", &p.read("pkg/store.py"));
+    let (_, _, stderr) = p.heki(&["check", "pkg/stores"]);
     assert!(lines(&stderr, "warning: ").is_empty(), "{stderr}");
     let (_, _, stderr) = p.heki(&["check", "."]);
+    assert_eq!(lines(&stderr, "warning: ").len(), 3, "{stderr}");
+    let (_, _, stderr) = p.heki(&["check", "pkg/store.py"]);
     assert_eq!(lines(&stderr, "warning: ").len(), 3, "{stderr}");
 
     let p = repro(
         "unmatched_some_files_set",
         "unmatched-contract-entries = \"warning\"\n",
     );
-    let (_, _, stderr) = p.heki(&["check", "pkg/store.py"]);
+    p.write("pkg/stores/__init__.py", "")
+        .write("pkg/stores/store.py", &p.read("pkg/store.py"));
+    let (_, _, stderr) = p.heki(&["check", "pkg/stores"]);
     let warned = lines(&stderr, "warning: ");
     assert!(
         warned.contains(&"`targets` entry `pkg.model.Field.replace_type` of call-owners `store-calls` names no function, method, or class in the analyzed files"),
