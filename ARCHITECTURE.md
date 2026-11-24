@@ -142,7 +142,7 @@ by crate boundaries, carrying three rule families and a planned fourth, imports.
 - **Framework-specific heuristics** (`__getattr__` proxies, Pydantic model construction,
   `-X importtime` tuning, and other application-architecture topics).
 - **Profiler runs, profile dumps, or instrumenting processes** (the optional reader of recorded
-  dumps was removed in 0.2.8: ADR-013).
+  dumps was removed in 0.3.0: ADR-013).
 - Changing CPython, its bytecode, or its VM; run-time hooks; being a judge for Ruff's unsafe
   fixes; a general type checker.
 

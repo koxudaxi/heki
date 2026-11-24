@@ -238,7 +238,7 @@ heki 0.1 ran every rule that is not opt-in by default. Since rules have a certai
 exact ones that are not opt-in do ([Getting Started](getting-started.md#run-it) lists them).
 
 - `lint.heuristic = true` restores the rules of 0.1, now labelled `heuristic` in every output,
-  except the size-dependent `OPT` rules, which are opt-in since 0.2.8: name them in
+  except the size-dependent `OPT` rules, which are opt-in since 0.3.0: name them in
   `extend-select` (`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`).
 - A baseline keeps its entries: their keys (file, function, rule, target) do not change.
 - `heki check --fix` applies the proven fixes of `OPT101` and `OPT102` by default, as in 0.1.

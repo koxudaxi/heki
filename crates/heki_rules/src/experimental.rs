@@ -173,7 +173,7 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         id: "rule.IMP102",
         kind: ExperimentalKind::Rule,
         target: "IMP102",
-        since: "0.2.8",
+        since: "0.3.0",
         reason: "It is new: every report rests on established premises only, but its reports are \
             heuristic until a review of its reports on real code bases certifies its claim, and \
             which imports and code stop a run can still change.",
@@ -183,7 +183,7 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         id: "rule.IMP104",
         kind: ExperimentalKind::Rule,
         target: "IMP104",
-        since: "0.2.8",
+        since: "0.3.0",
         reason: "It is new: every report rests on established premises only, but its reports are \
             heuristic until a review of its reports on real code bases certifies its claim, and \
             which modules count as package and development code can still change.",
@@ -210,7 +210,7 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         id: "rule.IMP301",
         kind: ExperimentalKind::Rule,
         target: "IMP301",
-        since: "0.2.8",
+        since: "0.3.0",
         reason: "It is new: every report rests on established premises only, but its reports are \
             heuristic until a review of its reports on real code bases certifies its claim, and \
             which distributions provide a module can still change.",
@@ -220,7 +220,7 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         id: "rule.IMP302",
         kind: ExperimentalKind::Rule,
         target: "IMP302",
-        since: "0.2.8",
+        since: "0.3.0",
         reason: "It is new: every report rests on established premises only, but its reports are \
             heuristic until a review of its reports on real code bases certifies its claim, and \
             which distributions provide a module and which modules are base modules can still \
