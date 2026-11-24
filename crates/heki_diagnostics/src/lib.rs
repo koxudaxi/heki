@@ -235,6 +235,19 @@ impl Diagnostic {
             &self.target,
         )
     }
+
+    /// Whether the report makes a run fail (exit code 1) when `fail_on` is the least severity
+    /// that does: an exact `error`, or any report at `warning`. A heuristic report counts as a
+    /// warning whatever its severity: it can be wrong about the code, and only a certain bug
+    /// that can be critical stops a run by default (ADR-019).
+    pub fn fails_run(&self, fail_on: Severity) -> bool {
+        match fail_on {
+            Severity::Warning => true,
+            Severity::Error => {
+                self.severity == Severity::Error && self.certainty == Certainty::Exact
+            }
+        }
+    }
 }
 
 /// Sort diagnostics into report order.

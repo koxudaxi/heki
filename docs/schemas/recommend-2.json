@@ -315,7 +315,7 @@
       "oneOf": [
         {
           "const": "bug",
-          "description": "A bug that can be critical: a wrong result, an exception, a lost update, a deadlock, or a\nbroken contract.",
+          "description": "A bug that can be critical: a wrong result, an exception, a lost update, a deadlock, an\nevent loop held up for every other task, or a broken contract.",
           "type": "string"
         },
         {
@@ -906,6 +906,12 @@
           "minimum": 0,
           "type": "integer"
         },
+        "failing": {
+          "description": "The reports `heki check` judges, those shown or with a baseline the regressions, that\nmake it fail (exit code 1) at the configuration's `fail-on`: the exact errors, or every\none at `fail-on = \"warning\"`.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
         "heuristic": {
           "format": "uint",
           "minimum": 0,
@@ -935,7 +941,8 @@
         "exact",
         "heuristic",
         "withheld_heuristic",
-        "heuristic_rules_off"
+        "heuristic_rules_off",
+        "failing"
       ],
       "type": "object"
     },

@@ -86,6 +86,24 @@ fn recommend_json(p: &Project, args: &[&str]) -> (i32, Value, String) {
     (code, value, err)
 }
 
+/// The notes on what makes `heki check` fail: `failing` reports shown now fail it, `passing`
+/// do not.
+fn exit_notes(failing: usize, passing: usize) -> Vec<String> {
+    vec![
+        format!(
+            "heki check fails on {failing} report(s) shown now (exit code 1): a Ratchet baseline \
+             records them, so that it fails only on new ones (`heki check --baseline \
+             heki-baseline.toml --update-baseline`, then `baseline = \"heki-baseline.toml\"` in \
+             the configuration)."
+        ),
+        format!(
+            "heki check does not fail on {passing} report(s) shown now: warnings, and heuristic \
+             reports, which can be wrong about the code and count as warnings; `fail-on = \
+             \"warning\"` in the lint settings makes them fail it."
+        ),
+    ]
+}
+
 /// The diagnostics `heki check --output-format json <args>` prints.
 fn checked(p: &Project, args: &[&str]) -> Vec<Value> {
     let mut all = vec!["check", "--output-format", "json"];
@@ -155,7 +173,19 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
          \x20 For every candidate, accesses inside code heki cannot follow (unresolved calls, \
          libraries without a catalog) are not seen.\n\
          \n\
+         Notes\n\
+         \x20 - heki check fails on 1 report(s) shown now (exit code 1): a Ratchet baseline \
+         records them, so that it fails only on new ones (`heki check --baseline \
+         heki-baseline.toml --update-baseline`, then `baseline = \"heki-baseline.toml\"` in the \
+         configuration).\n\
+         \x20 - heki check does not fail on 1 report(s) shown now: warnings, and heuristic \
+         reports, which can be wrong about the code and count as warnings; `fail-on = \
+         \"warning\"` in the lint settings makes them fail it.\n\
+         \n\
          pyproject.toml: keys to add or change\n\
+         \x20 [tool.heki.lint]\n\
+         \x20 extend-select = [\"EFF111\"]  # adds EFF111\n\
+         \n\
          \x20 [[tool.heki.effect-boundaries]]\n\
          \x20 name = \"app.lists without blocking calls\"\n\
          \x20 scopes = [\"app.lists:*\"]\n\
@@ -179,22 +209,34 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
         let now = &report["reports_now"];
         let shown = checked(&p, args);
         let exact = shown.iter().filter(|d| d["certainty"] == "exact").count();
+        let failing = (shown.iter())
+            .filter(|d| d["certainty"] == "exact" && d["severity"] == "error")
+            .count();
         assert_eq!(
-            (&now["shown"], &now["exact"], &now["heuristic"]),
+            (
+                &now["shown"],
+                &now["exact"],
+                &now["heuristic"],
+                &now["failing"]
+            ),
             (
                 &json!(shown.len()),
                 &json!(exact),
-                &json!(shown.len() - exact)
+                &json!(shown.len() - exact),
+                &json!(failing)
             ),
             "{args:?}"
         );
+        // The reports that fail the run are those that make `heki check` exit with 1.
+        let (check_code, _, _) = p.heki(&[&["check"][..], args].concat());
+        assert_eq!(check_code, i32::from(failing > 0), "{args:?}");
         assert_follows_the_schema(&report);
     }
     let (_, heuristic, _) = recommend_json(&p, &["--heuristic"]);
     assert_eq!(
         heuristic["reports_now"],
         json!({"shown": 4, "exact": 2, "heuristic": 2, "withheld_heuristic": 0,
-               "heuristic_rules_off": 0, "baseline": null})
+               "heuristic_rules_off": 0, "baseline": null, "failing": 1})
     );
     // Naming the exact rule shows its heuristic report; `EFF101`'s, not named, stays withheld.
     let (_, named, _) = recommend_json(&p, &["--extend-select", "OPT101"]);
@@ -253,11 +295,13 @@ fn the_json_object_names_the_project_and_its_run() {
     assert_eq!(
         (&report["notes"], &report["config"], &report["config_toml"]),
         (
-            &json!([]),
-            &json!({"effect-boundaries": [{"name": "app.lists without blocking calls",
+            &json!(exit_notes(1, 1)),
+            &json!({"lint": {"extend-select": ["EFF111"]},
+                    "effect-boundaries": [{"name": "app.lists without blocking calls",
                                            "scopes": ["app.lists:*"], "forbid": ["blocking"]}]}),
             &json!(
-                "[[tool.heki.effect-boundaries]]\nname = \"app.lists without blocking calls\"\n\
+                "[tool.heki.lint]\nextend-select = [\"EFF111\"]  # adds EFF111\n\n\
+                 [[tool.heki.effect-boundaries]]\nname = \"app.lists without blocking calls\"\n\
                  scopes = [\"app.lists:*\"]\nforbid = [\"blocking\"]\n"
             )
         )
@@ -265,16 +309,15 @@ fn the_json_object_names_the_project_and_its_run() {
     let (_, text, _) = p.heki(&["recommend"]);
     assert_eq!(report["content"], json!(text));
     // Without a contract or rule to add, the discovery run is the only one.
-    let (_, ignoring, _) = recommend_json(&p, &["--ignore", "EFF201"]);
+    let (_, ignoring, _) = recommend_json(&p, &["--heuristic", "--ignore", "EFF201"]);
     assert_eq!(ignoring["runs"], json!([{"label": "discovery"}]));
+    let mut notes = exit_notes(1, 3);
+    notes.push(
+        "the configuration ignores EFF201, so no effect-boundaries contract is proposed".to_owned(),
+    );
     assert_eq!(
         (&ignoring["config"], &ignoring["notes"]),
-        (
-            &json!({}),
-            &json!([
-                "the configuration ignores EFF201, so no effect-boundaries contract is proposed"
-            ])
-        )
+        (&json!({}), &json!(notes))
     );
 }
 
@@ -326,6 +369,15 @@ fn a_baseline_splits_the_reports_into_allowed_and_regressions() {
         json!({"allowed": 2, "regressions": regressions})
     );
     assert_eq!(regressions, 1);
+    // The regression is an exact error: `heki check` fails on it, and on nothing else, so no
+    // note proposes a baseline or `fail-on`.
+    assert_eq!(report["reports_now"]["failing"], json!(1));
+    assert_eq!(p.heki(&["check", "--baseline", "b.toml"]).0, 1);
+    assert!(
+        (report["notes"].as_array().unwrap().iter())
+            .all(|note| !note.as_str().unwrap().starts_with("heki check")),
+        "{report:#}"
+    );
     assert_follows_the_schema(&report);
     // The baseline of the configuration, relative to the project root.
     p.write(
@@ -390,7 +442,10 @@ fn a_file_that_does_not_parse_exits_2_after_the_report() {
 fn the_configuration_file_decides_where_the_keys_go() {
     let p = shop("recommend_config_file");
     std::fs::remove_file(p.dir.join("pyproject.toml")).unwrap();
-    p.write("heki.toml", "[lint]\nextend-select = [\"EFF105\"]\n");
+    p.write(
+        "heki.toml",
+        "[lint]\nextend-select = [\"EFF105\"]\nheuristic = true\n",
+    );
     let (_, report, _) = recommend_json(&p, &[]);
     assert_eq!(
         (&report["config_file"], &report["table_prefix"]),
@@ -417,10 +472,10 @@ fn the_configuration_file_decides_where_the_keys_go() {
         (&none["config_file"], &none["table_prefix"]),
         (&Value::Null, &json!("tool.heki"))
     );
+    let content = none["content"].as_str().unwrap();
     assert!(
-        none["content"].as_str().unwrap().contains(
-            "\npyproject.toml: keys to add or change\n  [[tool.heki.effect-boundaries]]\n"
-        ),
+        content.contains("\npyproject.toml: keys to add or change\n  [tool.heki.lint]\n")
+            && content.contains("\n  [[tool.heki.effect-boundaries]]\n"),
         "{none}"
     );
     assert_follows_the_schema(&none);
@@ -654,6 +709,7 @@ fn rules_worth_enabling_follow_the_policy() {
         section,
         "  rule    reports  exact  consequence  right about the code (published)  real harm  block\n\
         \x20 EFF107        1      -  bug          not measured                      -          yes\n\
+        \x20 EFF111        1      -  bug          not measured                      -          yes\n\
         \x20 MUT106        1      -  bug          not measured                      -          yes\n\
         \x20 EFF101        1      0  slowdown     82% (69-90%), n=50, 2026-11-21    32%        no: slower code, not a bug\n\
         \x20 MUT107        1      -  bug          78% (65-87%), n=50, 2026-11-21    4%         no: real harm below 10%\n\
@@ -668,7 +724,7 @@ fn rules_worth_enabling_follow_the_policy() {
     assert!(
         out.contains(
             "\npyproject.toml: keys to add or change\n  [tool.heki.lint]\n  extend-select = \
-             [\"EFF107\", \"MUT106\"]  # adds EFF107, MUT106\n"
+             [\"EFF107\", \"EFF111\", \"MUT106\"]  # adds EFF107, EFF111, MUT106\n"
         ),
         "{out}"
     );
@@ -720,7 +776,7 @@ fn rules_worth_enabling_follow_the_policy() {
     assert_eq!(rule(&report, "MUT103")["reports"], Value::Null);
     assert_eq!(
         report["config"]["lint"],
-        json!({"extend-select": ["EFF107", "MUT106"]})
+        json!({"extend-select": ["EFF107", "EFF111", "MUT106"]})
     );
     // Rules the current selection runs in full, and contract rules, are not listed.
     for code in ["EFF103", "OPT102", "MUT201", "EFF201"] {
@@ -743,7 +799,7 @@ fn rules_worth_enabling_follow_the_policy() {
     );
     assert_eq!(
         ignoring["config"]["lint"],
-        json!({"extend-select": ["EFF107"]})
+        json!({"extend-select": ["EFF107", "EFF111"]})
     );
     // A selected `MUT103` is not advice.
     let (_, selected, _) = recommend_json(&p, &["--extend-select", "MUT103"]);
@@ -1060,8 +1116,16 @@ fn heuristic_reports_are_counted_by_the_premise_they_leave_open_and_why() {
         (&section["not_recorded"], &section["truncated"]),
         (&json!([]), &json!(false))
     );
-    // Nothing of this section enters the block.
-    assert_eq!(report["config"], json!({}));
+    // Nothing of this section enters the block: it holds the rules the rules section enables.
+    let enabled: Vec<&Value> = (report["rules"].as_array().unwrap().iter())
+        .filter(|r| r["in_block"] == true)
+        .map(|r| &r["code"])
+        .collect();
+    assert_eq!(
+        report["config"],
+        json!({"lint": {"extend-select": enabled}}),
+        "{report:#}"
+    );
     assert_follows_the_schema(&report);
     let (_, out, _) = p.heki(&["recommend"]);
     let text = out

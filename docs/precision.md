@@ -26,6 +26,10 @@ default, and only those of the exact rules that are not opt-in.
 - A contract rule runs when its contract is declared, whatever its certainty.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   ends with a note saying how many.
+- Only an exact report fails a run by default: a heuristic report counts as a warning for
+  [`fail-on`](configuration.md#rule-selection-toolhekilint), whatever its rule's severity, and
+  fails the run only with `fail-on = "warning"`. A false heuristic report never stops a CI or a
+  hook that keeps the default.
 
 See [Rule selection](configuration.md#rule-selection-toolhekilint). `EFF101`, `EFF103`,
 `DATA101`, `MUT101`, `MUT110`, `MUT111`, `MUT114`, `MUT119`, the proven tier of the eight `OPT`

@@ -46,7 +46,7 @@ use std::rc::Rc;
 
 /// The arguments a call passes, as written (for the catalog's argument cases).
 #[derive(Clone, Copy, Default)]
-struct Passed<'c> {
+pub(crate) struct Passed<'c> {
     args: &'c [VarId],
     kwargs: &'c [(Option<String>, VarId)],
     star_from: Option<u8>,
@@ -797,25 +797,38 @@ type Narrowed = FxHashMap<VarId, Ty>;
 
 /// The catalog APIs handing back what a callable returns (`asyncio.to_thread(f, x)`) that one
 /// call is followed through, each running the next (`to_thread(run_in_threadpool, f)`).
-const MAX_HANDED_CALLS: usize = 4;
+pub(crate) const MAX_HANDED_CALLS: usize = 4;
 
 /// What a call is of: the value a variable holds, or a method of a receiver.
 #[derive(Clone, Copy)]
-enum Called<'m> {
+pub(crate) enum Called<'m> {
     Value(VarId),
     Method(VarId, &'m str),
 }
 
 /// The arguments a call passes on to the call it makes: of the callable a `functools.partial`
 /// object holds, or of the one a catalog API runs ([`ResultOf`]).
-struct HandedArgs {
+pub(crate) struct HandedArgs {
     args: Vec<VarId>,
     kwargs: Vec<(Option<String>, VarId)>,
     star_from: Option<u8>,
 }
 
 impl HandedArgs {
-    fn passed(&self) -> Passed<'_> {
+    /// The arguments a call passes, as its own.
+    pub(crate) fn new(
+        args: &[VarId],
+        kwargs: &[(Option<String>, VarId)],
+        star_from: Option<u8>,
+    ) -> Self {
+        Self {
+            args: args.to_vec(),
+            kwargs: kwargs.to_vec(),
+            star_from,
+        }
+    }
+
+    pub(crate) fn passed(&self) -> Passed<'_> {
         Passed {
             args: &self.args,
             kwargs: &self.kwargs,
@@ -826,7 +839,7 @@ impl HandedArgs {
     /// The callable a call of a catalog API runs ([`ResultOf`]), at position `of.arg`, and what
     /// it passes it: the positional arguments after it and, with `of.keywords`, the call's
     /// keywords. `None` when it is not passed by position, or `*` unpacking may move it.
-    fn of(of: ResultOf, call: Passed<'_>) -> Option<(VarId, HandedArgs)> {
+    pub(crate) fn of(of: ResultOf, call: Passed<'_>) -> Option<(VarId, HandedArgs)> {
         let k = usize::from(of.arg);
         if call.star_from.is_some_and(|s| usize::from(s) <= k) {
             return None;
