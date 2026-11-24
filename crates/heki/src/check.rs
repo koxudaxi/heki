@@ -906,6 +906,7 @@ fn report(
         summary(
             &diags,
             errors.len(),
+            refused_update || unused_entries || unmatched_entries,
             project.files.len(),
             baseline_path.is_some(),
             touched.map(Touched::file_count),
@@ -1082,12 +1083,14 @@ fn not_written(what: &str, path: &Path, failed: usize) -> Problem {
     .docs(docs)
 }
 
-/// The last line of a text run, with the number of file errors it reports; `touched` is the
-/// number of analyzed files `--touched` names. A run that reports a file error never says that
-/// all checks passed: the file was not checked.
+/// The last line of a text run, with the number of file errors it reports and whether an error
+/// it printed above fails it (a contract entry that matches nothing, a baseline entry that
+/// matches no report, a refused baseline update); `touched` is the number of analyzed files
+/// `--touched` names. Only a run that passes says that all checks passed.
 fn summary(
     diags: &[Diagnostic],
     errors: usize,
+    failed: bool,
     files: usize,
     baseline: bool,
     touched: Option<usize>,
@@ -1102,11 +1105,12 @@ fn summary(
         None => format!("in {files} file(s)"),
         Some(touched) => format!("for {touched} touched file(s) ({files} file(s) analyzed)"),
     };
-    let line = match (found, errors, touched) {
-        (0, 0, None) => format!("All checks passed ({files} file(s))."),
-        (0, 0, Some(_)) => format!("All checks passed {scope}."),
-        (found, 0, _) => format!("Found {found} {what} {scope}."),
-        (found, errors, _) => {
+    let line = match (found, errors, failed, touched) {
+        (0, 0, false, None) => format!("All checks passed ({files} file(s))."),
+        (0, 0, false, Some(_)) => format!("All checks passed {scope}."),
+        (0, 0, true, _) => format!("Found 0 {what} {scope}; the errors above fail the run."),
+        (found, 0, _, _) => format!("Found {found} {what} {scope}."),
+        (found, errors, _, _) => {
             format!("Found {found} {what} {scope}; {errors} file(s) could not be analyzed.")
         }
     };
