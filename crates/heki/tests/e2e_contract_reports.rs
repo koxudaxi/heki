@@ -1,4 +1,4 @@
-//! Contract rules (`MUT109`, `MUT201`, `MUT203`, `MUT204`, `EFF201`): which configured names
+//! Contract rules (`MUT208`, `MUT201`, `MUT203`, `MUT204`, `EFF201`): which configured names
 //! match, which violations are reported, and what each report counts (end to end, through the
 //! real binary).
 
@@ -98,7 +98,7 @@ fn two_invalidation_contracts_on_one_write_are_two_reports() {
     );
     p.write("app.py", &src);
     assert_eq!(
-        reports(&p, "MUT109"),
+        reports(&p, "MUT208"),
         vec![
             (13, "one:Model.value".to_owned(), 1),
             (13, "two:Model.value".to_owned(), 1),
@@ -110,7 +110,7 @@ fn two_invalidation_contracts_on_one_write_are_two_reports() {
         &src.replace("    m.value = 1\n", "    m.value = 1\n    notify_b()\n"),
     );
     assert_eq!(
-        reports(&p, "MUT109"),
+        reports(&p, "MUT208"),
         vec![(13, "one:Model.value".to_owned(), 1)]
     );
 }

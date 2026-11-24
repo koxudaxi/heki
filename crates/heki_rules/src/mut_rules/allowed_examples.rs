@@ -25,7 +25,7 @@ const NAMED: usize = 3;
 /// The rules whose reports name allowed functions: an edit of the functions a contract allows
 /// can change their help in every other file ([`example_digest`]).
 pub const EXAMPLE_RULES: &[&str] = &[
-    "MUT109", "MUT201", "MUT203", "MUT204", "MUT205", "MUT206", "MUT207",
+    "MUT208", "MUT201", "MUT203", "MUT204", "MUT205", "MUT206", "MUT207",
 ];
 
 /// One function found doing what a report shows, with its file.

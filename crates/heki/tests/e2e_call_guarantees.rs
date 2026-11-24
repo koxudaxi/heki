@@ -1,13 +1,13 @@
 //! What a call guarantees, end to end through the real binary: a fact that must hold on every
-//! path (an announcement of `MUT109`, a consumption of `MUT106`) holds at a call only when
+//! path (an announcement of `MUT208`, a consumption of `MUT106`) holds at a call only when
 //! every implementation the call may run guarantees it (an abstract method never runs). And
-//! which written objects existed before a call (`MUT109`): a value merged from a new object and
+//! which written objects existed before a call (`MUT208`): a value merged from a new object and
 //! an existing one may be the existing one, and `super()` is the method's own `self`. A write
 //! reached on one path through an allowed writer and on another around it (`MUT201`) is
 //! reported for the other path.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
-//! (`# MUT109`); every other line must not be.
+//! (`# MUT208`); every other line must not be.
 
 mod common;
 
@@ -121,7 +121,7 @@ class IndexNotifier(Notifier):
 
 
 def through_any_hook(m: Model, hook: Hook):
-    m.x = 1  # MUT109
+    m.x = 1  # MUT208
     hook.done()
 
 
@@ -140,7 +140,7 @@ fn an_announcement_through_a_call_needs_every_implementation_to_announce() {
     check_marks(
         "announcing_implementations",
         &[("pkg/model.py", MODEL), ("pkg/hooks.py", HOOKS)],
-        &["MUT109"],
+        &["MUT208"],
     );
 }
 
@@ -211,7 +211,7 @@ const MERGED: &str = r#"from pkg.model import Model
 
 def either(existing: Model, flag):
     xs = Model().items if flag else existing.items
-    xs.append(1)  # MUT109
+    xs.append(1)  # MUT208
 
 
 def both_new(flag):
@@ -224,7 +224,7 @@ fn a_merged_field_alias_may_be_an_existing_objects_field() {
     check_marks(
         "merged_field_aliases",
         &[("pkg/model.py", MODEL), ("pkg/merged.py", MERGED)],
-        &["MUT109"],
+        &["MUT208"],
     );
 }
 
@@ -243,7 +243,7 @@ class Child(Base):
         super()._set()
 
     def update(self):
-        super()._set()  # MUT109
+        super()._set()  # MUT208
 "#;
 
 #[test]
@@ -251,7 +251,7 @@ fn super_is_the_methods_own_self() {
     check_marks(
         "super_receivers",
         &[("pkg/model.py", MODEL), ("pkg/children.py", CHILDREN)],
-        &["MUT109"],
+        &["MUT208"],
     );
 }
 

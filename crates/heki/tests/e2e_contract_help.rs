@@ -386,7 +386,7 @@ def relayed(index: Index, node: Node, kid: int) -> None:
 fn invalidation_reports_name_the_writers_that_announce_the_change() {
     let p = project("help_announcers", INVALIDATION_CONFIG);
     p.write("pkg/tree.py", TREE);
-    let diags = diagnostics(&p, "MUT109");
+    let diags = diagnostics(&p, "MUT208");
     // An exempt writer and a function announcing its write on every path; the writes no path
     // announces (`careless`, the private `_quiet`) are not named, nor the functions that announce
     // one write of the target and leave another, their own (`twice`) or a helper's (`relayed`),
@@ -396,11 +396,11 @@ fn invalidation_reports_name_the_writers_that_announce_the_change() {
         example("pkg.tree.attach", "pkg/tree.py"),
     ]);
     for qualname in ["careless", "through", "twice", "relayed"] {
-        let d = of(&diags, "MUT109", qualname);
+        let d = of(&diags, "MUT208", qualname);
         assert_eq!(d["allowed_examples"], named, "{d:#}");
     }
     assert_eq!(
-        of(&diags, "MUT109", "careless")["help"],
+        of(&diags, "MUT208", "careless")["help"],
         "tell the index; announcing writers of `Node.kids`: `pkg.tree.Builder.graft`, \
          `pkg.tree.attach`"
     );

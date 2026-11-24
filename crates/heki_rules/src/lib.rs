@@ -1,8 +1,8 @@
 //! Rule registry spanning the families of heki's checks.
 //!
 //! - Family 1 (`MUT`): Mutation & State Effect (`MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`,
-//!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT114`, `MUT115`, `MUT118`, `MUT119`,
-//!   `MUT120`, `MUT201`, `MUT202`, `MUT203`, `MUT204`, `MUT205`, `MUT206`, `MUT207`)
+//!   `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT114`, `MUT115`, `MUT118`, `MUT119`, `MUT120`,
+//!   `MUT201`, `MUT202`, `MUT203`, `MUT204`, `MUT205`, `MUT206`, `MUT207`, `MUT208`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
 //!   `EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
@@ -266,18 +266,6 @@ pub const CORE_RULES: &[RuleMeta] = &[
         doc: include_str!("../rule-docs/MUT108.md"),
     },
     RuleMeta {
-        code: "MUT109",
-        slug: "write-without-invalidation",
-        family: RuleFamily::Mut,
-        certainty: Certainty::Heuristic,
-        activation: Activation::Contract,
-        consequence: Consequence::Bug,
-        size_dependent_fix: false,
-        auto_fix_default: false,
-        summary: "Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return.",
-        doc: include_str!("../rule-docs/MUT109.md"),
-    },
-    RuleMeta {
         code: "MUT110",
         slug: "readonly-param-mutation",
         family: RuleFamily::Mut,
@@ -468,6 +456,18 @@ pub const CORE_RULES: &[RuleMeta] = &[
         auto_fix_default: false,
         summary: "Strict mode of a `call-owners` contract (`unresolved = \"report\"`): calling a method named like a target on an object of unknown class.",
         doc: include_str!("../rule-docs/MUT207.md"),
+    },
+    RuleMeta {
+        code: "MUT208",
+        slug: "write-without-invalidation",
+        family: RuleFamily::Mut,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Contract,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return.",
+        doc: include_str!("../rule-docs/MUT208.md"),
     },
     RuleMeta {
         code: "EFF101",
@@ -1256,7 +1256,7 @@ pub fn check_project(
     mut_rules::readonly_rules(&cx, &mut out);
     mut_rules::mut112(&cx, &mut out);
     mut_rules::mut118(&cx, &mut out);
-    mut_rules::mut109(&cx, &mut out)?;
+    mut_rules::mut208(&cx, &mut out)?;
     mut_rules::mut201(&cx, &mut out)?;
     mut_rules::mut203(&cx, &mut out)?;
     mut_rules::mut204(&cx, &mut out)?;
@@ -2002,6 +2002,28 @@ mod registry_tests {
                 RuleFamily::Mut => assert_ne!(r.consequence, Consequence::Slowdown, "{}", r.code),
                 RuleFamily::Eff | RuleFamily::Data | RuleFamily::Imp => {}
             }
+        }
+    }
+
+    #[test]
+    fn a_rules_hundreds_digit_says_what_it_needs() {
+        // In every family, 1xx rules need no configuration and 2xx rules a declared contract,
+        // so `MUT2` selects the contract rules of `MUT`; `IMP3xx` rules read the dependencies
+        // the project declares.
+        for r in CORE_RULES {
+            let number = r.code.trim_start_matches(|c: char| c.is_ascii_uppercase());
+            let band = number.chars().next().unwrap();
+            let bands = match (r.activation, r.family) {
+                (Activation::Contract, _) => "2",
+                (_, RuleFamily::Imp) => "13",
+                _ => "1",
+            };
+            assert!(
+                number.len() == 3 && bands.contains(band),
+                "{}: {:?}",
+                r.code,
+                r.activation
+            );
         }
     }
 

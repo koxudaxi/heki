@@ -1,6 +1,6 @@
 //! The declared contracts the summaries depend on ([`heki_effect::Contracts`]), built from the
 //! configuration: the `readonly-returns` producers (`MUT202`), the `invalidation` contracts
-//! (`MUT109`), whether any ownership contract is declared, the names the strict
+//! (`MUT208`), whether any ownership contract is declared, the names the strict
 //! `read-owners` and `call-owners` contracts count unresolved accesses of (`MUT206`, `MUT207`),
 //! whether a call contract counts references as calls (`MUT204`, `EFF201`), and what the effect
 //! boundaries forbid outside the project (`EFF201`).

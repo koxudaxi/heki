@@ -204,7 +204,7 @@ For custom tooling, `--output-format json` gives every field: see
    ([Rule Precision](precision.md)).
 2. Declare [contracts](configuration.md#contracts) for the shared state and the operations you
    care about, and effect boundaries for the code that must stay pure. `MUT201`, `MUT203`,
-   `MUT204`, `MUT109`, and `EFF201` report nothing until a contract exists.
+   `MUT204`, `MUT208`, and `EFF201` report nothing until a contract exists.
 3. Enable the opt-in rules where they matter:
 
     | Rule | Certainty | Turn it on for |

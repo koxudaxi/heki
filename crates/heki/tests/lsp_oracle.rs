@@ -421,7 +421,7 @@ const DRAIN: &str = "def drain(g):\n    for _ in g:\n        pass\n";
 const DRAIN_RETURNING: &str = "def drain(g):\n    return g\n";
 const HANDOFF: &str = "from pkg.drain import drain\nfrom pkg.fills import _fill\nfrom pkg.model import Registry\n\n\ndef hand(r: Registry):\n    drain(_fill(r))\n";
 // `MUT202` / `MUT114`: a wrapper in another module starts returning a declared producer's value
-// (or an `@lru_cache` result), and stops again. `MUT109`: a helper in another module stops
+// (or an `@lru_cache` result), and stops again. `MUT208`: a helper in another module stops
 // announcing a change its caller makes, and a caller in another module stops announcing after
 // calling a public writer.
 const CATALOG: &str = "from functools import lru_cache\n\n\nclass Catalog:\n    def entry(self, key) -> dict:\n        return {}\n\n    def fresh(self, key) -> dict:\n        return {}\n\n\n@lru_cache\ndef defaults() -> dict:\n    return {}\n";
@@ -3515,10 +3515,10 @@ fn steps_item_changes() -> Vec<Step> {
     ]
 }
 
-/// `MUT202` / `MUT114` return flow and `MUT109`: facts of a function in another module that a
+/// `MUT202` / `MUT114` return flow and `MUT208`: facts of a function in another module that a
 /// caller's report reads (the wrapper's protected return, the helper's announcement), and a
 /// caller's announcement after a call that a callee's report reads.
-fn steps_mut114_mut202_mut109() -> Vec<Step> {
+fn steps_mut114_mut202_mut208() -> Vec<Step> {
     vec![
         Step::new(
             "a cached object's method in another module stops filling a memo and records",
@@ -3575,58 +3575,58 @@ fn steps_mut114_mut202_mut109() -> Vec<Step> {
             "a helper in another module stops calling the invalidator",
             vec![save("pkg/announce.py", ANNOUNCE_SILENT)],
         )
-        .present(&[("pkg/grow.py", "MUT109")]),
+        .present(&[("pkg/grow.py", "MUT208")]),
         Step::new(
             "the helper calls the invalidator again",
             vec![save("pkg/announce.py", ANNOUNCE)],
         )
-        .absent(&[("pkg/grow.py", "MUT109")]),
+        .absent(&[("pkg/grow.py", "MUT208")]),
         Step::new(
             "the only caller of a public writer in another module stops announcing",
             vec![save("pkg/grow.py", GROW_SILENT_ADOPT)],
         )
-        .present(&[("pkg/nodes.py", "MUT109")]),
+        .present(&[("pkg/nodes.py", "MUT208")]),
         Step::new(
             "the caller announces after the call again",
             vec![save("pkg/grow.py", GROW)],
         )
-        .absent(&[("pkg/nodes.py", "MUT109")]),
+        .absent(&[("pkg/nodes.py", "MUT208")]),
         Step::new(
             "the caller two calls above a public writer stops announcing",
             vec![save("pkg/planter.py", PLANTER_SILENT)],
         )
-        .present(&[("pkg/graft.py", "MUT109")]),
+        .present(&[("pkg/graft.py", "MUT208")]),
         Step::new(
             "the distant caller announces again",
             vec![save("pkg/planter.py", PLANTER)],
         )
-        .absent(&[("pkg/graft.py", "MUT109")]),
+        .absent(&[("pkg/graft.py", "MUT208")]),
         Step::new(
             "a helper in another module becomes a generator iterated after the invalidator",
             vec![save("pkg/kid_gen.py", KID_GEN_GENERATOR)],
         )
-        .present(&[("pkg/kid_user.py", "MUT109")]),
+        .present(&[("pkg/kid_user.py", "MUT208")]),
         Step::new(
             "the helper returns a list again",
             vec![save("pkg/kid_gen.py", KID_GEN)],
         )
-        .absent(&[("pkg/kid_user.py", "MUT109")]),
+        .absent(&[("pkg/kid_user.py", "MUT208")]),
         Step::new(
             "a helper in another module starts changing its untyped argument in place",
             vec![save("pkg/kid_count.py", KID_COUNT_APPENDING)],
         )
-        .present(&[("pkg/kid_stock.py", "MUT109")]),
+        .present(&[("pkg/kid_stock.py", "MUT208")]),
         Step::new(
             "the helper only reads its argument again",
             vec![save("pkg/kid_count.py", KID_COUNT)],
         )
-        .absent(&[("pkg/kid_stock.py", "MUT109")]),
+        .absent(&[("pkg/kid_stock.py", "MUT208")]),
     ]
 }
 
 /// An `invalidation` target names a class by its module (`pkg.dials:*.level`): the writes of a
 /// class that moves to another module behind a re-export are no longer its target, directly or
-/// through a helper (`MUT109`).
+/// through a helper (`MUT208`).
 fn steps_module_patterns() -> Vec<Step> {
     vec![
         Step::new(
@@ -3636,9 +3636,9 @@ fn steps_module_patterns() -> Vec<Step> {
                 save("pkg/dials.py", DIALS_REEXPORT),
             ],
         )
-        .absent(&[("pkg/dial_user.py", "MUT109")]),
+        .absent(&[("pkg/dial_user.py", "MUT208")]),
         Step::new("the class moves back", vec![save("pkg/dials.py", DIALS)])
-            .present(&[("pkg/dial_user.py", "MUT109")]),
+            .present(&[("pkg/dial_user.py", "MUT208")]),
     ]
 }
 
@@ -4963,18 +4963,18 @@ fn steps_allowed_examples() -> Vec<Step> {
             "a module writes an invalidation target no path announces",
             vec![Action::Create("pkg/careless.py", CARELESS.to_owned())],
         )
-        .present(&[("pkg/careless.py", "MUT109")]),
+        .present(&[("pkg/careless.py", "MUT208")]),
         Step::new(
             "the helper announcing an allowed writer's change in another module stops",
             vec![save("pkg/announce.py", ANNOUNCE_SILENT)],
         )
-        .present(&[("pkg/careless.py", "MUT109"), ("pkg/grow.py", "MUT109")]),
+        .present(&[("pkg/careless.py", "MUT208"), ("pkg/grow.py", "MUT208")]),
         Step::new(
             "the helper announces the change again",
             vec![save("pkg/announce.py", ANNOUNCE)],
         )
-        .present(&[("pkg/careless.py", "MUT109")])
-        .absent(&[("pkg/grow.py", "MUT109")]),
+        .present(&[("pkg/careless.py", "MUT208")])
+        .absent(&[("pkg/grow.py", "MUT208")]),
         Step::new(
             "a module writes and reads private owner targets of a class in another module",
             vec![
@@ -5921,7 +5921,7 @@ sessions!(editing, Session::start, {
     task_arguments: steps_task_arguments,
     small_displays: steps_small_displays,
     queue_capacity: steps_queue_capacity,
-    mut114_mut202_mut109: steps_mut114_mut202_mut109,
+    mut114_mut202_mut208: steps_mut114_mut202_mut208,
     mut115: steps_mut115,
     item_changes: steps_item_changes,
     module_patterns: steps_module_patterns,

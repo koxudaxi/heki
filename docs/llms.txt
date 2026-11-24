@@ -83,4 +83,4 @@
 - [unresolved-guarded-write (MUT205)](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/): Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity error (a bug) · No automatic fix
 - [unretained-async-task (EFF107)](https://heki.koxudaxi.dev/rules/unretained-async-task/): Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity error (a bug) · No automatic fix
 - [write-owner-violation (MUT201)](https://heki.koxudaxi.dev/rules/write-owner-violation/): Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity error (a bug) · No automatic fix
-- [write-without-invalidation (MUT109)](https://heki.koxudaxi.dev/rules/write-without-invalidation/): Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity error (a bug) · No automatic fix
+- [write-without-invalidation (MUT208)](https://heki.koxudaxi.dev/rules/write-without-invalidation/): Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity error (a bug) · No automatic fix

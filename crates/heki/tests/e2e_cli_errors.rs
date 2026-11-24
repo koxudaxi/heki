@@ -199,7 +199,7 @@ fn unknown_rules_offer_the_nearest_ones() {
         &["check", "--select", "MUT999"],
         &[
             "error: unknown rule selector `MUT999` in `--select`",
-            "  = help: did you mean `MUT109` (write-without-invalidation)?",
+            "  = help: did you mean `MUT119` (change-lost-on-new-object)?",
         ],
     );
     // Nothing is close to `NOPE1`: no guess, only the way to list the rules.
@@ -513,7 +513,7 @@ fn json_output_writes_the_error_object() {
         (&error["path"], &error["line"], &error["column"]),
         (&"pyproject.toml".into(), &5.into(), &11.into())
     );
-    assert_eq!(error["candidates"][0], "MUT109");
+    assert_eq!(error["candidates"][0], "MUT119");
     assert_eq!(
         error["docs"],
         format!("{SITE}configuration/#rule-selection-toolhekilint")

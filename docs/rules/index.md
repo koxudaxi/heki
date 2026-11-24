@@ -29,7 +29,6 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT106 | [iterator-double-consumption](iterator-double-consumption.md) | Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items). | ≈ 🔌 |
 | MUT107 | [hash-attr-mutation](hash-attr-mutation.md) | Opt-in: a method other than the initializers rebinds or changes in place an attribute that the `__hash__` of its instances reads. | ≈ 🔌 |
 | MUT108 | [readonly-type-mutation](readonly-type-mutation.md) | Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper. | ≈ 🔌 |
-| MUT109 | [write-without-invalidation](write-without-invalidation.md) | Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return. | ≈ 📜 |
 | MUT110 | [readonly-param-mutation](readonly-param-mutation.md) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter, as itself, to a function whose body (or a helper's) changes it in place at a named line. |  |
 | MUT111 | [cached-property-stale-read](cached-property-stale-read.md) | Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports). | 🔌 🧪 |
 | MUT112 | [conditional-ownership-mutation](conditional-ownership-mutation.md) | Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another. | ≈ 🔌 🧪 |
@@ -46,6 +45,7 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT205 | [unresolved-guarded-write](unresolved-guarded-write.md) | Strict mode of a `write-owners` contract (`unresolved = "report"`): writing an attribute named like a target on an object of unknown class, or a computed attribute name on a guarded class. | ≈ 📜 |
 | MUT206 | [unresolved-guarded-read](unresolved-guarded-read.md) | Strict mode of a `read-owners` contract (`unresolved = "report"`): reading an attribute named like a target on an object of unknown class. | ≈ 📜 |
 | MUT207 | [unresolved-guarded-call](unresolved-guarded-call.md) | Strict mode of a `call-owners` contract (`unresolved = "report"`): calling a method named like a target on an object of unknown class. | ≈ 📜 |
+| MUT208 | [write-without-invalidation](write-without-invalidation.md) | Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return. | ≈ 📜 |
 
 ## Execution Effects (EFF)
 

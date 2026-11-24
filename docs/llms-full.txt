@@ -238,7 +238,7 @@ once you declare a contract: see [Rules](https://heki.koxudaxi.dev/rules/) and [
 | --- | --- | --- |
 | Any code can change any object it reaches | ownership and borrowing (Rust), `const` / `readonly` | read-only parameters, fields, and views changed through helpers (`MUT110`, `MUT108`, `MUT120`); `write-owners` / `read-owners` contracts (`MUT201`, `MUT203`) |
 | A signature does not say what a function does | effect types, `IO` in the type (Haskell) | blocking calls reached from `async def`, and clients and queries in loops (`EFF101`–`EFF103`); `effect-boundaries` (`EFF201`); effect snapshots (`MUT103`) |
-| Shared mutable objects hide changes | value semantics, immutability by default | stale cached properties and hashes (`MUT101`, `MUT107`); changed shared return values (`MUT114`, `MUT202`); writes an `invalidation` contract must announce (`MUT109`) |
+| Shared mutable objects hide changes | value semantics, immutability by default | stale cached properties and hashes (`MUT101`, `MUT107`); changed shared return values (`MUT114`, `MUT202`); writes an `invalidation` contract must announce (`MUT208`) |
 | Dynamic dispatch blocks optimizations | static types let a compiler prove a rewrite | quadratic patterns (`OPT`), rewritten only when proven under CPython's semantics |
 
 ## 🔍 How heki differs
@@ -839,11 +839,11 @@ The proofs heki can make, on five axes:
 
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
-| Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT109`, `MUT113`, `EFF102`, `EFF103`, `EFF106`, `EFF109`, `EFF110`, `EFF114`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT120`, `MUT112`, `MUT113`, `MUT119`, `MUT201`–`MUT204` |
+| Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT113`, `MUT208`, `EFF102`, `EFF103`, `EFF106`, `EFF109`, `EFF110`, `EFF114`, `DATA101`, `OPT` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `MUT103`, `MUT108`, `MUT110`, `MUT120`, `MUT112`, `MUT113`, `MUT119`, `MUT201`–`MUT204`, `MUT208` |
 | Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `MUT120`, `MUT112`, `MUT119`, `EFF107`, `EFF109`, `EFF110`, `EFF112`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
-| State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT120`, `MUT111`, `MUT112`, `MUT113`, `MUT201`–`MUT204` |
+| State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT110`, `MUT120`, `MUT111`, `MUT112`, `MUT113`, `MUT201`–`MUT204`, `MUT208` |
 
 
 ---
@@ -1369,7 +1369,7 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 | [`call-owners`](https://heki.koxudaxi.dev/configuration/#call-owners) | who may call a function or construct a class | `MUT204`; `MUT207` with `unresolved = "report"` | heuristic |
 | [`effect-boundaries`](https://heki.koxudaxi.dev/configuration/#effect-boundaries) | what a scope must not reach: I/O, writes, reads, or calls | `EFF201` | heuristic |
 | [`readonly-returns`](https://heki.koxudaxi.dev/configuration/#readonly-returns) | results every caller shares | `MUT202` | heuristic |
-| [`invalidation`](https://heki.koxudaxi.dev/configuration/#invalidation) | writes that must be announced | `MUT109` | heuristic |
+| [`invalidation`](https://heki.koxudaxi.dev/configuration/#invalidation) | writes that must be announced | `MUT208` | heuristic |
 | [`import-owners`](https://heki.koxudaxi.dev/configuration/#import-owners) | which modules a module may import (experimental) | `IMP201`; `IMP202` with `unresolved = "report"` | heuristic |
 
 - These rules report nothing until a contract exists. The results of `functools.lru_cache` /
@@ -2738,7 +2738,7 @@ For custom tooling, `--output-format json` gives every field: see
    ([Rule Precision](https://heki.koxudaxi.dev/precision/)).
 2. Declare [contracts](https://heki.koxudaxi.dev/configuration/#contracts) for the shared state and the operations you
    care about, and effect boundaries for the code that must stay pure. `MUT201`, `MUT203`,
-   `MUT204`, `MUT109`, and `EFF201` report nothing until a contract exists.
+   `MUT204`, `MUT208`, and `EFF201` report nothing until a contract exists.
 3. Enable the opt-in rules where they matter:
 
     | Rule | Certainty | Turn it on for |
@@ -3795,7 +3795,6 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT106 | [iterator-double-consumption](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) | Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items). | ≈ 🔌 |
 | MUT107 | [hash-attr-mutation](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) | Opt-in: a method other than the initializers rebinds or changes in place an attribute that the `__hash__` of its instances reads. | ≈ 🔌 |
 | MUT108 | [readonly-type-mutation](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) | Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper. | ≈ 🔌 |
-| MUT109 | [write-without-invalidation](https://heki.koxudaxi.dev/rules/write-without-invalidation/) | Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return. | ≈ 📜 |
 | MUT110 | [readonly-param-mutation](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter, as itself, to a function whose body (or a helper's) changes it in place at a named line. |  |
 | MUT111 | [cached-property-stale-read](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports). | 🔌 🧪 |
 | MUT112 | [conditional-ownership-mutation](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another. | ≈ 🔌 🧪 |
@@ -3812,6 +3811,7 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT205 | [unresolved-guarded-write](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/) | Strict mode of a `write-owners` contract (`unresolved = "report"`): writing an attribute named like a target on an object of unknown class, or a computed attribute name on a guarded class. | ≈ 📜 |
 | MUT206 | [unresolved-guarded-read](https://heki.koxudaxi.dev/rules/unresolved-guarded-read/) | Strict mode of a `read-owners` contract (`unresolved = "report"`): reading an attribute named like a target on an object of unknown class. | ≈ 📜 |
 | MUT207 | [unresolved-guarded-call](https://heki.koxudaxi.dev/rules/unresolved-guarded-call/) | Strict mode of a `call-owners` contract (`unresolved = "report"`): calling a method named like a target on an object of unknown class. | ≈ 📜 |
+| MUT208 | [write-without-invalidation](https://heki.koxudaxi.dev/rules/write-without-invalidation/) | Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return. | ≈ 📜 |
 
 ## Execution Effects (EFF)
 
@@ -12463,7 +12463,7 @@ No automatic fix.
 
 Source: https://heki.koxudaxi.dev/rules/write-without-invalidation/
 
-# write-without-invalidation (MUT109)
+# write-without-invalidation (MUT208)
 
 Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` (a bug) · No automatic fix
 
@@ -12554,7 +12554,7 @@ message = "tell the store which models changed"
 
 ```python
 def narrow(store: GenerationStore, owner: DataModel, node: DataType, item: DataType) -> None:
-    node.data_types = [item]  # MUT109: the path where `owner.fields` is empty tells nobody
+    node.data_types = [item]  # MUT208: the path where `owner.fields` is empty tells nobody
     if owner.fields:
         store.note_changed_models(owner)
 ```

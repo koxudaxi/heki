@@ -769,7 +769,7 @@ EffectSummary(f) = {
     returns_protected:        Option<ProtectedReturn>,     // may return a protected value: producer, depth,
                                                            // call chain (MUT202)
     must_invalidate:          Bitset,                      // invalidation contracts announced on every
-                                                           // normal path (MUT109)
+                                                           // normal path (MUT208)
     unmet_invalidation:       Set<UnmetWrite>,             // target writes, own or passed up by private
                                                            // helpers, some normal path leaves unannounced
     retains_params:           Bitset,                      // parameters the function keeps (stores, returns)
@@ -1260,7 +1260,7 @@ differ); every file that read one of them is re-analyzed. This covers names reso
 re-exports, class hierarchy analysis across modules, and property getters, without depending on
 which module imports which.
 
-### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT109` / `MUT111` / `MUT112` / `MUT113` / `MUT118` / `MUT119` / `MUT201` / `MUT202` / `MUT203` / `MUT204`)
+### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT111` / `MUT112` / `MUT113` / `MUT118` / `MUT119` / `MUT201` / `MUT202` / `MUT203` / `MUT204` / `MUT208`)
 
 #### `MUT101`: mutation of attributes a `@cached_property` depends on, without invalidation (strict Stage 0-A version)
 1. For every `@cached_property` method `p` of a class `C` (with its subclasses; a nested class is
@@ -1839,7 +1839,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      Only plain functions are followed: a generator's `return` value is not what calling it
      returns.
 
-#### `MUT109`: announced changes
+#### `MUT208`: announced changes
 - `[[tool.heki.invalidation]]` (`targets`, `invalidators`, `exempt-writers`, `message`):
   extraction records the target writes whose object is reached from parameters or globals, and
   the direct invalidator calls. A greatest-fixpoint coverage dataflow over normal edges (raising

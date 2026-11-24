@@ -11,7 +11,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-select = ["MUT201", "MUT203", "MUT204", "MUT109"]
+select = ["MUT201", "MUT203", "MUT204", "MUT208"]
 
 [[tool.heki.read-owners]]
 name = "host-private"
@@ -182,7 +182,7 @@ fn a_glob_call_target_names_members_and_reports_name_what_they_matched() {
         "`writes` writes `pkg.types.DataType._flag` (by attribute) via `pkg.parser._concern._both` outside the write owners of `flags` (also `pkg.types.DataType._mark`)"
     );
     assert_eq!(
-        message(25, "MUT109"),
+        message(25, "MUT208"),
         "`writes` writes `pkg.types.DataType._flag` (by attribute) via `pkg.parser._concern._both` and returns on some path without calling an invalidator of `revisions` (also `pkg.types.DataType._mark`)"
     );
     assert_eq!(

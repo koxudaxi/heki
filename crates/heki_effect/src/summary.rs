@@ -583,7 +583,7 @@ struct Owner {
     may_params: u64,
     /// An instance the function constructs (`TypedFieldWriteSite::fresh`).
     fresh: bool,
-    /// Where the object comes from among the objects that existed before the call (`MUT109`).
+    /// Where the object comes from among the objects that existed before the call (`MUT208`).
     reach: Reach,
     /// The variable holding the object (`TypedFieldWriteSite::construction`).
     var: Option<VarId>,
@@ -628,7 +628,7 @@ struct ObjAttr {
     obj_params: u64,
     /// `obj` is an instance the function constructs (`TypedFieldWriteSite::fresh`).
     fresh: bool,
-    /// Where `obj` comes from (`MUT109`).
+    /// Where `obj` comes from (`MUT208`).
     reach: Reach,
     /// `obj` itself, unless phi inputs load the attribute from different objects.
     holder: Option<VarId>,
@@ -673,7 +673,7 @@ struct Written {
     params: u64,
     /// `TypedFieldWriteSite::fresh`.
     fresh: bool,
-    /// Where it comes from (`MUT109`).
+    /// Where it comes from (`MUT208`).
     reach: Reach,
     /// The variable holding it, for its construction query (`None`: no single variable).
     holder: Option<VarId>,
@@ -844,13 +844,13 @@ struct Extractor<'a> {
     own_line: OnceCell<Option<SharedLine>>,
     /// How many lambdas the function makes (`Self::shares_its_name`).
     lambdas: OnceCell<usize>,
-    /// The points `MUT109` describes (`Some` when an `invalidation` contract is configured).
+    /// The points `MUT208` describes (`Some` when an `invalidation` contract is configured).
     events: Option<Events>,
-    /// Contracts naming this function an exempt writer (`MUT109`), matched at its first write
+    /// Contracts naming this function an exempt writer (`MUT208`), matched at its first write
     /// to a contract target.
     exempt: Option<u64>,
     /// Where each variable's object comes from among the objects that existed before the call
-    /// (`MUT109`; empty unless an `invalidation` contract is configured).
+    /// (`MUT208`; empty unless an `invalidation` contract is configured).
     reach: FxHashMap<VarId, Reach>,
     /// The module globals and closure cells each value may be reached from
     /// ([`Self::global_roots`]), on the function's tables and budget.
@@ -3890,7 +3890,7 @@ impl<'a> Extractor<'a> {
                 .collect()
         };
         // Where each call's result is iterated.
-        // With the position of the iteration (for `MUT109`'s flow at the site).
+        // With the position of the iteration (for `MUT208`'s flow at the site).
         let mut iterated: Vec<Vec<(Span, u16, Position)>> =
             vec![Vec::new(); self.project_calls.len()];
         for e in &flow.events {
@@ -5481,7 +5481,7 @@ impl<'a> Extractor<'a> {
         obj: Written,
     ) {
         let (key, key_from) = key;
-        // `MUT109`: a write to a contract target of an object that existed before the call,
+        // `MUT208`: a write to a contract target of an object that existed before the call,
         // unless it is the class's own initialization of `self`.
         let reach = obj.reach;
         if let (Some(c), Some(events)) = (self.contracts, self.events.as_mut())

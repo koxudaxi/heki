@@ -1,4 +1,4 @@
-//! `MUT109` (`write-without-invalidation`): a write to a declared `invalidation` target that
+//! `MUT208` (`write-without-invalidation`): a write to a declared `invalidation` target that
 //! some normal path of the writing function leaves unannounced (docs/ANALYSIS_AND_KB_SPEC.md
 //! section 2.3).
 //!
@@ -21,7 +21,7 @@ use rustc_hash::FxHashSet;
 use std::collections::VecDeque;
 
 pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<(), RuleConfigError> {
-    if !cx.selection.is_enabled("MUT109") || cx.config.invalidation.is_empty() {
+    if !cx.selection.is_enabled("MUT208") || cx.config.invalidation.is_empty() {
         return Ok(());
     }
     let names = ConfigContracts::new(cx.config, cx.kb)?;
@@ -110,7 +110,7 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
         let rule = &cx.config.invalidation[c];
         let contract = &names.invalidations[c];
         let bit = u8::try_from(c).expect("at most `MAX_INVALIDATIONS` contracts");
-        m.emit(cx, ("MUT109", "announcing writers"), out, |examples| {
+        m.emit(cx, ("MUT208", "announcing writers"), out, |examples| {
             let reported = |class: &str, attr: &str| {
                 let classes = ContractClass::lineage(&names, cx.decls, class);
                 let target = contract.target(&classes, attr)?;

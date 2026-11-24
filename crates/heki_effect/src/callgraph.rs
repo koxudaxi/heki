@@ -1912,7 +1912,7 @@ pub(crate) fn changes_receiver(
 
 /// The typed field writes `callee` (bound by `bc`, with the facts `facts` that run at `site`
 /// with the `lead` hops) makes through the arguments, which the caller's argument binding ties
-/// to a class: the one home of that decision for the ownership rules and `MUT109`. A write the
+/// to a class: the one home of that decision for the ownership rules and `MUT208`. A write the
 /// callee records itself, on the same object, is its own: it reports or hands over that one.
 pub(crate) fn indirect_writes<'a>(
     index: &ProjectIndex,

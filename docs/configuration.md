@@ -260,7 +260,7 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 | [`call-owners`](#call-owners) | who may call a function or construct a class | `MUT204`; `MUT207` with `unresolved = "report"` | heuristic |
 | [`effect-boundaries`](#effect-boundaries) | what a scope must not reach: I/O, writes, reads, or calls | `EFF201` | heuristic |
 | [`readonly-returns`](#readonly-returns) | results every caller shares | `MUT202` | heuristic |
-| [`invalidation`](#invalidation) | writes that must be announced | `MUT109` | heuristic |
+| [`invalidation`](#invalidation) | writes that must be announced | `MUT208` | heuristic |
 | [`import-owners`](#import-owners) | which modules a module may import (experimental) | `IMP201`; `IMP202` with `unresolved = "report"` | heuristic |
 
 - These rules report nothing until a contract exists. The results of `functools.lru_cache` /
