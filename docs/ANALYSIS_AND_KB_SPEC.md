@@ -2382,7 +2382,7 @@ an import itself.
   gives every module the modules outside the project it loads that way. Both spend one budget of
   `Budget::STEPS_PER_UNIT` per module and site (`Budget::of_graph`), asked in the order of the
   modules, which `heki check` and the language server build alike; past it the answer is open.
-- **Contract walks** (`heki_rules::imp_rules`, `import-owners` with `reach`): from an importer,
+- **Contract walks** (`heki_rules::imp_rules`, `import-boundaries` with `reach`): from an importer,
   breadth first over the sites of the classes the contract counts (`walk::reach_breadth_first`),
   each certainly loaded module and its parent packages (`ImportGraph::parents`, which names the
   parents of every site's module, whatever its timing) a step, keeping the step into each module

@@ -277,8 +277,11 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 | [`effect-boundaries`](#effect-boundaries) | what a scope must not reach: I/O, writes, reads, or calls | `EFF201` | heuristic |
 | [`readonly-returns`](#readonly-returns) | results every caller shares | `MUT202` | heuristic |
 | [`invalidation`](#invalidation) | writes that must be announced | `MUT208` | heuristic |
-| [`import-owners`](#import-owners) | which modules a module may import (experimental) | `IMP201`; `IMP202` with `unresolved = "report"` | heuristic |
+| [`import-boundaries`](#import-boundaries) | which modules a module may import (experimental) | `IMP201`; `IMP202` with `unresolved = "report"` | heuristic |
 
+- An `*-owners` contract protects its `targets` and lists who may touch them. A
+  `*-boundaries` contract is drawn around the code it names (`scopes`, `importers`) and lists
+  what that code must not reach or import.
 - These rules report nothing until a contract exists. The results of `functools.lru_cache` /
   `functools.cache` functions are checked without one by `MUT114` (`cached-result-mutation`).
 - Declaring a contract selects its rule, whatever its certainty.
@@ -286,8 +289,8 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   [`fail-on`](#rule-selection-toolhekilint): to make a broken contract fail `heki check`, the
   pre-commit hook, and CI, set `fail-on = "warning"` next to the contracts (with a
   [baseline](adoption.md#ratchet-baselines), only new reports fail).
-- Every name in a contract but `import-owners`, whose names are
-  [module patterns](#import-owners), is a dotted pattern. It matches the full name or any dotted suffix
+- Every name in a contract but `import-boundaries`, whose names are
+  [module patterns](#import-boundaries), is a dotted pattern. It matches the full name or any dotted suffix
   (`DataModel.fields` matches `pkg.model.DataModel.fields`, not `pkg.BigModel.fields`), and it
   may be a glob (`*`, `?`, `[...]`, `{a,b}`).
 - A glob's `*` spans dots (`pkg.parser.*` covers the functions of every module under
@@ -329,7 +332,7 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   invalid glob, a name with more than one colon or an empty module or qualified name, call
   targets whose globs are too many to match together (tens of thousands of complex ones), an
   argument list heki cannot read, an invalid glob in `allowed-protocols`, an unknown group, a
-  group in `relative-imports`, or an `ignored-imports` entry without `->` in `import-owners`, or
+  group in `relative-imports`, or an `ignored-imports` entry without `->` in `import-boundaries`, or
   an unknown value of `forbid`,
   `fresh-objects`, `unresolved`, `references`, `attribution`, `own-receiver`,
   `unlisted-dict-keys`, `type-checking`, or `reach`.
@@ -879,27 +882,27 @@ container methods, `setattr` / `__dict__`, and helpers. A helper changing an arg
 not type writes the field or instance its caller binds to it. At most 64 `invalidation`
 contracts can be declared.
 
-### `import-owners`
+### `import-boundaries`
 
 ```toml
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "facts-leaf"
 importers = ["pkg.facts"]
 allowed-imports = ["<stdlib>", "pkg._records"]
 
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "shared-model-backends"
 importers = ["pkg.model.shared"]
 forbidden-imports = ["pkg.model.backend", "pkg.model.backend.*"]
 
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "no-root-import"
 importers = ["pkg.*"]
 forbidden-imports = ["pkg"]
 ```
 
 Which modules the modules of `importers` may import, checked by
-[`IMP201`](rules/import-owner-violation.md). Its names are module patterns: a whole module name
+[`IMP201`](rules/import-boundary-violation.md). Its names are module patterns: a whole module name
 or a glob whose `*` spans dots, never a suffix (`pkg.*` names `pkg.facts` and
 `pkg.model.shared`, not `pkg`), or one of the groups `<stdlib>` (the standard library),
 `<project>` (the project's modules), and `<third-party>` (every other module).
@@ -944,7 +947,7 @@ Outside a package, only its public entry: every module but the package's own may
 `app.billing`, and none of the modules under it.
 
 ```toml
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "billing-entry"
 exempt-importers = ["app.billing", "app.billing.*"]
 forbidden-imports = ["app.billing.*"]
@@ -959,7 +962,7 @@ A start-up contract: loading `pkg.cli` must not load `torch`, however many modul
 them.
 
 ```toml
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "startup"
 importers = ["pkg.cli"]
 forbidden-imports = ["torch", "torch.*"]
@@ -972,7 +975,7 @@ A package copied into other packages under another name works only while its mod
 each other relatively: `from pkg._runtime import b` names a package the copy does not have.
 
 ```toml
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "runtime-leaf"
 importers = ["pkg._runtime", "pkg._runtime.*"]
 allowed-imports = ["<stdlib>"]

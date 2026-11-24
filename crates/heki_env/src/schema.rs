@@ -6,7 +6,7 @@
 use crate::problem::{settings_root, table_items, table_name};
 use crate::{
     CallOwnerRule, ConfigError, ConfigLayout, EcosystemOverride, EffectBoundaryRule, HekiConfig,
-    ImportOwnerRule, ImportsConfig, InvalidationRule, LintConfig, OrderedOutputSetting,
+    ImportBoundaryRule, ImportsConfig, InvalidationRule, LintConfig, OrderedOutputSetting,
     ReadOnlyReturnRule, ReadOwnerRule, WriteOwnerRule,
 };
 use crate::{Docs, Problem};
@@ -51,7 +51,7 @@ fn tables() -> &'static [Table] {
             table("effect-boundaries", keys_of::<EffectBoundaryRule>()),
             table("readonly-returns", keys_of::<ReadOnlyReturnRule>()),
             table("invalidation", keys_of::<InvalidationRule>()),
-            table("import-owners", keys_of::<ImportOwnerRule>()),
+            table("import-boundaries", keys_of::<ImportBoundaryRule>()),
             table("imports", keys_of::<ImportsConfig>()),
             table("imports.module-distributions", None),
             table("ecosystem", keys_of::<EcosystemOverride>()),
@@ -153,20 +153,29 @@ const EXAMPLES: &[(&str, &str)] = &[
         "invalidation.exempt-writers",
         r#"["pkg.parser.generation.*"]"#,
     ),
-    ("import-owners.importers", r#"["pkg.model.*"]"#),
-    ("import-owners.exempt-importers", r#"["pkg.model.testing"]"#),
+    ("import-boundaries.importers", r#"["pkg.model.*"]"#),
     (
-        "import-owners.allowed-imports",
+        "import-boundaries.exempt-importers",
+        r#"["pkg.model.testing"]"#,
+    ),
+    (
+        "import-boundaries.allowed-imports",
         r#"["<stdlib>", "pkg.model.*"]"#,
     ),
-    ("import-owners.forbidden-imports", r#"["pkg.backends.*"]"#),
-    ("import-owners.relative-imports", r#"["pkg._runtime.*"]"#),
     (
-        "import-owners.ignored-imports",
+        "import-boundaries.forbidden-imports",
+        r#"["pkg.backends.*"]"#,
+    ),
+    (
+        "import-boundaries.relative-imports",
+        r#"["pkg._runtime.*"]"#,
+    ),
+    (
+        "import-boundaries.ignored-imports",
         r#"["pkg.model.legacy -> pkg.backends.sql"]"#,
     ),
-    ("import-owners.type-checking", r#""report""#),
-    ("import-owners.reach", r#""import-time""#),
+    ("import-boundaries.type-checking", r#""report""#),
+    ("import-boundaries.reach", r#""import-time""#),
     ("imports.cycle-edges", r#"["body", "lazy"]"#),
     ("imports.module-distributions", r#"{ yaml = ["PyYAML"] }"#),
     ("imports.module-distributions.*", r#"["PyYAML"]"#),
@@ -367,8 +376,13 @@ pub(crate) fn key_at(path: &str, t: &dyn TableLike, offset: usize) -> Option<(St
     None
 }
 
-/// `problem` about the key `key` that `table` does not have, with what to do: the table the key
-/// belongs in, the tables of a table it should not have opened, or the keys its table has.
+/// The tables a release renamed, by their old path: the old name is unknown, with no alias,
+/// and the error names the new one.
+const RENAMED_TABLES: &[(&str, &str)] = &[("import-owners", "import-boundaries")];
+
+/// `problem` about the key `key` that `table` does not have, with what to do: the new name of a
+/// renamed table, the table the key belongs in (and the keys its own table takes), the tables of
+/// a table it should not have opened, or the keys its table has.
 pub(crate) fn explain_unknown_key(
     problem: Problem,
     layout: ConfigLayout,
@@ -376,6 +390,16 @@ pub(crate) fn explain_unknown_key(
     key: &str,
     keys_inside: &[String],
 ) -> Problem {
+    let path = child(table, key);
+    if let Some((old, new)) = RENAMED_TABLES.iter().find(|(old, _)| *old == path) {
+        let header = table_name(layout, new);
+        return problem
+            .help(format!(
+                "`{}` is now `{header}`: rename the table, its keys are the same",
+                header.replacen(new, old, 1)
+            ))
+            .docs(Docs::of_table(new));
+    }
     let known = self::table(table)
         .and_then(|t| t.keys.as_deref())
         .unwrap_or_default();
@@ -405,6 +429,14 @@ pub(crate) fn explain_unknown_key(
         ));
         if let Some((line, _)) = example(layout, home.path, key) {
             problem = problem.help(format!("for example: `{line}`"));
+        }
+        if !table.is_empty() && !known.is_empty() {
+            let keys: Vec<String> = known.iter().map(|k| format!("`{k}`")).collect();
+            problem = problem.help(format!(
+                "{} takes {}",
+                table_name(layout, table),
+                keys.join(", ")
+            ));
         }
         return problem.docs(Docs::of_key(home.path, key));
     }

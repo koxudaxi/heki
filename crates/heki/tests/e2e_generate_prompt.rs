@@ -276,7 +276,7 @@ fn the_json_object_holds_the_same_content_and_follows_its_schema() {
             "contracts": {
                 "call-owners": [],
                 "effect-boundaries": [],
-                "import-owners": [],
+                "import-boundaries": [],
                 "invalidation": [],
                 "read-owners": [],
                 "readonly-returns": [

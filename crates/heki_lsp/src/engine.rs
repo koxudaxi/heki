@@ -454,7 +454,7 @@ struct ContractReach {
     /// `allowed-callees` may allow one by one) and counts them, while the summaries keep the
     /// effects with one chain each and no such access.
     ecosystem_calls: bool,
-    /// An `import-owners` contract walking what its importers import (`reach`), judged by a
+    /// An `import-boundaries` contract walking what its importers import (`reach`), judged by a
     /// selected rule: an importer's report reads the imports of every module its walk reaches,
     /// and the walks share a budget.
     import_walks: bool,
@@ -1190,7 +1190,7 @@ impl Workspace {
         affected
     }
 
-    /// The files of the modules an `import-owners` contract walking imports judges.
+    /// The files of the modules an `import-boundaries` contract walking imports judges.
     fn walking_importers(&self) -> Vec<PathBuf> {
         let modules = (self.files.iter()).map(|(path, meta)| (meta.module_name.as_str(), path));
         heki_rules::walking_importers(&self.env.cfg, modules)

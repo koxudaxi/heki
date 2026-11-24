@@ -99,18 +99,18 @@ name = "index"
 targets = ["Node.kids"]
 invalidators = ["Index.refresh"]
 
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "imports"
 importers = ["pkg.imp_user"]
 forbidden-imports = ["pkg.imp_db", "pkg.imp_pkg.sub"]
 
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "startup"
 importers = ["pkg.imp_cli"]
 forbidden-imports = ["pkg.imp_heavy"]
 reach = "import-time"
 
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "copied"
 importers = ["pkg.imp_rt.*"]
 allowed-imports = ["<stdlib>"]
@@ -5647,11 +5647,11 @@ fn steps_package_names() -> Vec<Step> {
     ]
 }
 
-/// `import-owners`: an import added to the importer, a module created that turns a `from`
+/// `import-boundaries`: an import added to the importer, a module created that turns a `from`
 /// import of a name into an import of the submodule, with `reach`, an import added to, moved
 /// in, and removed from a module the importer imports, and a relative import rewritten with the
 /// package's full name and back.
-fn steps_import_owners() -> Vec<Step> {
+fn steps_import_boundaries() -> Vec<Step> {
     vec![
         Step::new(
             "a module imports nothing forbidden",
@@ -6264,7 +6264,7 @@ sessions!(editing, Session::start, {
     re_exports: steps_re_exports,
     package_names: steps_package_names,
     star_imports: steps_star_imports,
-    import_owners: steps_import_owners,
+    import_boundaries: steps_import_boundaries,
 });
 
 // ------------------------------------------------------- files, layout, and buffers (session 2)

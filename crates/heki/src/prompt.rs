@@ -58,7 +58,7 @@ const GUIDANCE: &[&str] = &[
      call something, what a scope must not reach, or which modules a module may import), write \
      a contract: an array of tables under `[tool.heki]` in `pyproject.toml`, at the top level of \
      a `heki.toml` (`write-owners`, `read-owners`, `call-owners`, `effect-boundaries`, \
-     `readonly-returns`, `invalidation`, `import-owners`), whose names are dotted patterns or \
+     `readonly-returns`, `invalidation`, `import-boundaries`), whose names are dotted patterns or \
      globs. See https://heki.koxudaxi.dev/configuration/#contracts.",
     "Answer with the files and functions to change, the change itself, and the `heki check` \
      command that confirms it.",
