@@ -84,6 +84,10 @@ pub struct ItemOrigin {
     /// `strip`-like methods), which holds only when the source is text.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub text: bool,
+    /// Some of the source's items may be left out (a filter, a condition of a comprehension, a
+    /// set): no count of them follows.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dropped: bool,
 }
 
 /// Methods of `str` (and `bytes`) that cut their receiver's text into pieces.
@@ -184,6 +188,7 @@ impl Steps {
                 Carries::Items
             },
             text: source != ItemSource::Fixed && self.has(Self::TEXT | Self::PIECES),
+            dropped: self.has(Self::DROPS),
         })
     }
 }

@@ -45,6 +45,9 @@ pub struct ReturnedItems {
     /// They are the pieces `str.splitlines` cuts the call's text into.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pieces: bool,
+    /// Some of the call's items may be left out (a filter, a condition of a comprehension).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dropped: bool,
     /// Only their count follows the call's: one item for each of its items (`[f(r) for r in
     /// rows]`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -321,17 +324,22 @@ impl ReturnedItems {
         Self {
             kind,
             pieces: false,
+            dropped: false,
             counted: false,
             api,
         }
     }
 
     /// What a value made from these items gives: the pieces `str.splitlines` cuts their text
-    /// into (`text`), and only their count (`counted`). Pieces of pieces are none heki names.
-    pub fn read_through(self, text: bool, counted: bool) -> Option<Self> {
-        (!(self.pieces && text)).then_some(Self {
+    /// into (`text`), some of them (`dropped`), and only their count (`counted`). Pieces of
+    /// pieces, and a count of items some of which may be left out, are none heki names.
+    pub fn read_through(self, text: bool, dropped: bool, counted: bool) -> Option<Self> {
+        let dropped = self.dropped || dropped;
+        let counted = self.counted || counted;
+        (!(self.pieces && text) && !(dropped && counted)).then_some(Self {
             pieces: self.pieces || text,
-            counted: self.counted || counted,
+            dropped,
+            counted,
             ..self
         })
     }
@@ -421,6 +429,7 @@ struct ReturnedCall {
     block: heki_ir::BlockId,
     index: u32,
     text: bool,
+    dropped: bool,
     counted: bool,
 }
 
@@ -456,6 +465,7 @@ fn returned_origins(
                 block,
                 index,
                 text: o.text,
+                dropped: o.dropped,
                 counted: o.carries == heki_ir::Carries::Count,
             });
         }
@@ -540,6 +550,8 @@ impl<'f> ReturnFacts<'_, 'f> {
             .is_none()
             .then_some(())?;
         let called = self.cx.call_items(&types, &def, inst, returned).ok()?;
-        called.items.read_through(call.text, call.counted)
+        called
+            .items
+            .read_through(call.text, call.dropped, call.counted)
     }
 }
