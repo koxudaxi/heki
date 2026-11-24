@@ -251,6 +251,125 @@ fn asks_nested_past_the_guard_are_open_and_spend_the_budget() {
     assert!(b.spent());
 }
 
+// -------------------------------------------------------------------------------- recursion
+
+/// A memo written by hand over a graph, the way `FnIndex` keeps sizes: the height of a node is
+/// one more than the greatest height of the nodes it points to, unknown when one of theirs is;
+/// a node asked while it is being decided reads as unknown. With `recursion`, its questions are
+/// decided through it; without, by the plain recursion.
+struct Heights<'g> {
+    graph: &'g [Vec<u32>],
+    kept: RefCell<FxHashMap<u32, Option<u32>>>,
+    recursion: Option<Recursion<u32>>,
+    /// The decisions on the native stack now, and the most there were.
+    nested: Cell<usize>,
+    deepest: Cell<usize>,
+}
+
+impl<'g> Heights<'g> {
+    fn new(graph: &'g [Vec<u32>], recursion: Option<Recursion<u32>>) -> Self {
+        Self {
+            graph,
+            kept: RefCell::default(),
+            recursion,
+            nested: Cell::new(0),
+            deepest: Cell::new(0),
+        }
+    }
+
+    fn height(&self, n: u32) -> Option<u32> {
+        if let Some(known) = self.kept.borrow().get(&n) {
+            return *known;
+        }
+        if let Some(r) = &self.recursion {
+            if r.outermost() {
+                r.settle(n, |q| {
+                    self.kept.borrow_mut().remove(&q);
+                    self.height(q);
+                });
+                return self.kept.borrow()[&n];
+            }
+            if !r.enter(n) {
+                return None;
+            }
+        }
+        self.kept.borrow_mut().insert(n, None);
+        self.nested.set(self.nested.get() + 1);
+        self.deepest.set(self.deepest.get().max(self.nested.get()));
+        // Every node pointed to is asked, also after an unknown one.
+        let heights: Vec<Option<u32>> = self.graph[n as usize]
+            .iter()
+            .map(|m| self.height(*m))
+            .collect();
+        let height = heights
+            .into_iter()
+            .try_fold(0, |most: u32, h| Some(most.max(h? + 1)));
+        self.nested.set(self.nested.get() - 1);
+        if let Some(r) = &self.recursion
+            && !r.leave()
+        {
+            return None;
+        }
+        self.kept.borrow_mut().insert(n, height);
+        height
+    }
+}
+
+/// A chain many times deeper than the limit, with edges to random nodes ahead (more questions
+/// below one node) and behind (cycles, whose answers depend on the node asked first).
+fn deep_graph(seed: u64, nodes: u32) -> Vec<Vec<u32>> {
+    let mut state = seed;
+    let mut next = move |bound: u32| {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        u32::try_from((state >> 33) % u64::from(bound)).unwrap()
+    };
+    (0..nodes)
+        .map(|n| {
+            let mut out: Vec<u32> = (n + 1 < nodes).then_some(n + 1).into_iter().collect();
+            for _ in 0..next(3) {
+                out.push(next(nodes));
+            }
+            out
+        })
+        .collect()
+}
+
+#[test]
+fn a_recursion_answers_as_the_unbounded_one_a_bounded_depth_at_a_time() {
+    let nodes = u32::try_from(MAX_NATIVE_NESTING * 8).unwrap();
+    for seed in 0..20 {
+        let graph = deep_graph(seed, nodes);
+        let plain = Heights::new(&graph, None);
+        let bounded = Heights::new(&graph, Some(Recursion::default()));
+        // The outermost questions in the same order: inside a cycle, it decides the answers.
+        for n in (0..nodes).rev().step_by(7).chain(0..nodes) {
+            assert_eq!(bounded.height(n), plain.height(n), "seed {seed}, node {n}");
+        }
+        assert_eq!(*bounded.kept.borrow(), *plain.kept.borrow(), "seed {seed}");
+        assert!(plain.deepest.get() > MAX_NATIVE_NESTING, "seed {seed}");
+        assert_eq!(bounded.deepest.get(), MAX_NATIVE_NESTING, "seed {seed}");
+    }
+}
+
+#[test]
+fn a_chain_past_the_limit_is_decided_to_its_end() {
+    let nodes = u32::try_from(MAX_NATIVE_NESTING * 3 + 1).unwrap();
+    let chain: Vec<Vec<u32>> = (0..nodes)
+        .map(|n| (n + 1 < nodes).then_some(n + 1).into_iter().collect())
+        .collect();
+    let heights = Heights::new(&chain, Some(Recursion::default()));
+    assert_eq!(heights.height(0), Some(nodes - 1));
+    assert_eq!(heights.deepest.get(), MAX_NATIVE_NESTING);
+    // Closed into a cycle, the last node reads the first, still being decided, as unknown.
+    let mut cycle = chain;
+    cycle[nodes as usize - 1].push(0);
+    let heights = Heights::new(&cycle, Some(Recursion::default()));
+    assert_eq!(heights.height(0), None);
+    assert!(heights.kept.borrow().values().all(Option::is_none));
+}
+
 // ---------------------------------------------------------------------------------- closure
 
 fn singleton(n: u32) -> KeySet<u32> {

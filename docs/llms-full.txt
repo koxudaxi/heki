@@ -5258,6 +5258,12 @@ the call graph, or the class hierarchy goes through them:
   depth first, and `reach_breadth_first` nearest first (a shortest call chain to each node).
   `fixpoint` joins the facts of nodes that read each other, and visits a node again only when a
   fact it reads grows, up to a visit limit.
+- `Recursion` keeps a memo written by hand whose decisions ask each other on the native stack
+  (the size facts: the size of a list asks for the size of each list extending it) to 64 nested
+  decisions at a time. A question asked deeper waits while the decisions under way unwind, and
+  is decided first with the same questions open: the answers are those of the whole recursion,
+  whose depth would otherwise follow a chain in the source past a thread's stack (2 MiB for the
+  threads analyzing the files of a project).
 - A `Budget` per owner (a rule run on one function, the summary of one function, the store
   types of one module) counts the steps of all the owner's walks, and the weight of every fact
   they join, which bounds both the work of joining and the memory of the facts kept: 64 per IR
