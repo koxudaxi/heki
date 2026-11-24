@@ -260,9 +260,13 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     underscore, which the imported module's `__all__` may list; `LastBindings`). A change
     through `globals()` leaves no name fixed unless it binds only a name the namespace lacks
     (`globals().setdefault(k, v)`, or `globals()[name] = v` in the module's `__getattr__`, keyed
-    by the parameter Python passes the missing name in, which only Python calls): that acts as a
-    star import at the start of the body, so the names the body binds on every path stay
-    constants, and the builtins are still not trusted. The
+    by the parameter Python passes the missing name in, which only Python calls: an undecorated
+    hook no function of the module loads): that acts as a star import at the start of the body,
+    so the names the body binds on every path stay constants, and the builtins are still not
+    trusted. Such a hook another module loads (`keys.__getattr__("KEY")`, `from keys import
+    __getattr__`; `ModuleConstants::getattr_rebinds`, `ModuleDecls::getattr_loads`) may bind any
+    of its module's globals, also one declared `Final`: the declarations take each as rebound
+    elsewhere (`ProjectDecls::rebound_by_getattr`, a key the language server tracks). The
     effect lane's declarations read their number, boolean, and string constants from it, and `GlobalStores` is the one count of the stores
     and deletions of each module global that it, `ModuleBindings`, and the declarations read.
   - The Soundness lane reads these facts within one module only (`FnIndex`). The Advisory rules
@@ -876,7 +880,8 @@ module-level names bound once to a constant of another module where the module's
 name (`ModuleConstants::imported`: not in a loop, before a star import, or where `exec` or
 `globals()` may rebind it), each rebound by no other module
 unless declared `Final` (`StrConstant::rebindable`, checked against
-`ProjectDecls::rebound_elsewhere` where a constant is read), and class-body names declared `ClassVar` or `Final` and bound once, stored on the class or
+`ProjectDecls::rebound_elsewhere` where a constant is read, `ProjectDecls::constant_rebound`),
+nor through its module's `__getattr__`, and class-body names declared `ClassVar` or `Final` and bound once, stored on the class or
 an instance by no other code of their module (and, without `Final`, by no other module), read
 through the MRO when the MRO of every subclass finds the same definition (none defines the name
 again or lists another base defining it first); a class that code stores the name on

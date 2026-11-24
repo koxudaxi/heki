@@ -446,6 +446,12 @@ pub struct ModuleConstants {
     /// (A `from m import *` only rebinds the public names bound before it, and the builtins.)
     #[serde(default)]
     pub dynamic: bool,
+    /// The names the body binds stay fixed past the module's `__getattr__` only because Python
+    /// alone calls it, for a missing name: it binds the global its argument names
+    /// (`globals()[name] = value`), so a call by another module (`keys.__getattr__("KEY")`) may
+    /// rebind any of them, also one declared `Final`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub getattr_rebinds: bool,
 }
 
 impl ModuleConstants {
@@ -2949,9 +2955,11 @@ fn binds_only_missing(
 }
 
 /// The parameter Python passes the missing name in when `f` is the module's `__getattr__` (PEP
-/// 562): a plain function the module body defines under that name, which no function of the
-/// module (`functions`) loads, so only Python calls it, and only for a name the module's
-/// namespace lacks. A coroutine or generator body runs later, when the name may be bound.
+/// 562): a plain function the module body defines under that name, undecorated (a decorator may
+/// call the function it receives), which no function of the module (`functions`) loads, so only
+/// Python calls it, and only for a name the module's namespace lacks; a call from another module
+/// is the declarations' to see ([`ModuleConstants::getattr_rebinds`]). A coroutine or generator
+/// body runs later, when the name may be bound.
 fn missing_name_param(
     f: &IrFunction,
     module_fn: FunctionId,
@@ -2959,7 +2967,8 @@ fn missing_name_param(
 ) -> Option<VarId> {
     let hook = f.qualname == "__getattr__"
         && f.enclosing == Some(module_fn)
-        && f.kind == FunctionKind::Sync;
+        && f.kind == FunctionKind::Sync
+        && f.decorators.is_empty();
     let first = f.params.first().filter(|_| hook)?;
     let loads_hook = |kind: &InstKind| {
         matches!(kind, InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. }
@@ -3133,6 +3142,12 @@ fn module_constants(
     if !module.a1_hazards.is_empty() || writes == GlobalsWrites::Any {
         return out;
     }
+    // A hook whose change binds only a missing name because Python alone calls it.
+    out.getattr_rebinds = writes == GlobalsWrites::Missing
+        && functions.iter().any(|f| {
+            missing_name_param(f, module_fn, functions).is_some()
+                && globals_writes(f, &out, None) == GlobalsWrites::Any
+        });
     // Ints first: displays and later ints may use them (`range(N)` only through loads).
     let ix = FnIndex::new(module, &out);
     // Whether a store binds its name after every star import depends on the last one only. A

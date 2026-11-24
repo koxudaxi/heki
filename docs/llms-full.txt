@@ -2250,7 +2250,8 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   each of them, a list or set only while no code changes it, and so does the key of each pair a
   generator of them gives `update` (`ns.update((key, v) for key in RECORDS)`). A module
   `__getattr__` caching what it serves (`globals()[name] = value`) leaves its module's string
-  constants bound on every path known, since Python calls it only for a name the module lacks.
+  constants bound on every path known, since Python calls it only for a name the module lacks,
+  unless a decorator wraps it or another module loads it (`keys.__getattr__("KEY")`).
   A class whose module stores attributes heki
   cannot name (`setattr(self, name, v)`), or that the code gives a name computed at run time,
   may have any attribute: an entry naming none of its known ones is not reported, except with
@@ -12334,7 +12335,8 @@ allowed writers:
   also with a string constant for the name (`model.__dict__[FIELDS_KEY]`, imported or not):
   a module-level name declared `Final` or bound once in its module and rebound by no other (a
   module `__getattr__` caching what it serves, `globals()[name] = value`, leaves the names the
-  module body binds on every path, since Python calls it only for a missing name), or
+  module body binds on every path, since Python calls it only for a missing name, unless a
+  decorator wraps it or another module loads it), or
   a class-body name declared `ClassVar` or `Final` and bound once (`self.KEY`, `cls.KEY`,
   `Model.KEY`), which every subclass of the object's class finds along its MRO in the same
   class (none defines it again or lists another base defining it first,
