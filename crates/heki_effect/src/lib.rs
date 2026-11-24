@@ -43,6 +43,7 @@ pub mod locks;
 pub mod one_at_a_time;
 pub mod order_flow;
 pub mod ownership;
+mod partial;
 mod query;
 pub mod readonly;
 mod report;

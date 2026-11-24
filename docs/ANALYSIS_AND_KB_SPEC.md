@@ -508,7 +508,17 @@ all). An async client sharing a command mixin with a sync one runs the async imp
 Calling an `async def` that no decorator replaces gives a coroutine (`Ty::Coroutine`): its return
 annotation is what awaiting it gives (`await`, and the target of `async with`), and awaiting a
 future or a task gives an untracked result. The catalog types an external awaitable by what
-awaiting it gives.
+awaiting it gives. A catalog API that runs a callable it is handed and hands back what the
+callable returns (`result_of`: `asyncio.to_thread(f, *args, **kwargs)`,
+`loop.run_in_executor(executor, f, *args)`, `anyio.to_thread.run_sync(f, *args)`,
+`executor.submit(f, *args, **kwargs)`) returns the coroutine of that result, or the future its
+`return_type` names holding it (`Args::Result`, which `await` and the future's `result()` give):
+what the call `f(*args, **kwargs)` returns, with the arguments the API passes on, as certain as
+that call written out. A call of a value the function makes is typed as the call written where
+the value is made: a bound method (`m = obj.method`) as `obj.method(...)`, a lambda by the value
+of its body (inferred as a child scope reading the function's cells), and a `functools.partial`
+object as a call of its callable with the arguments the object holds first (`partial.rs`, shared
+with the call targets).
 
 A scope nested in a function (a comprehension or generator expression with a scope of its own, a
 lambda, a nested function or class) reads the function's variables through their closure cells.
@@ -2475,7 +2485,11 @@ field validates it: pydantic 2's `BaseModel`), `return_type` (factories such as
 argument a call writes or serializes in the order of its elements, with the keyword that sorts
 mapping keys first and whether it sorts by default: `json.dumps`, `yaml.safe_dump`,
 `pprint.pprint`, `pathlib.Path.write_text`, `print`: `EFF112`),
-`waits_until_done` / `done_when_awaited` (futures), `bounded_by` / `waits_while_full` (queues:
+`waits_until_done` / `done_when_awaited` (futures), `result_of` (the call hands back, awaited or
+by the future's `result()`, what calling the callable at position `arg` returns, with the
+positional arguments after it and, with `keywords`, the call's keywords: `asyncio.to_thread`,
+`loop.run_in_executor`, `anyio.to_thread.run_sync`, `executor.submit`; section 2.1),
+`bounded_by` / `waits_while_full` (queues:
 section 2.2), `environment` (`"call"`: calling the function reads the environment the program runs
 in, `os.getenv`, `platform.system`, `shutil.which`; `"read"`: reading the module attribute does,
 `os.environ`, `sys.platform`, `sys.version_info`; `"import"`: calling the function imports or

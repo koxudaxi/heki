@@ -6113,14 +6113,15 @@ const PLAIN_BASES: &[&str] = &[
 ];
 
 /// The classes a type names: the class of an instance or of each member of a union, and those
-/// of a generic container's items (one level: `list[Model]`, `dict[str, Model]`, `tuple[A, B]`,
-/// `list[A | B]`; `dict[str, list[Model]]` names `str` and `list`).
+/// of a generic container's items or a future's result (one level: `list[Model]`,
+/// `dict[str, Model]`, `tuple[A, B]`, `list[A | B]`; `dict[str, list[Model]]` names `str` and
+/// `list`).
 fn ty_classes(ty: &Ty, out: &mut Vec<String>) {
     for obj in ty.members() {
         out.push(obj.class.clone());
         let items: Vec<&Elem> = match &obj.args {
             Args::None => Vec::new(),
-            Args::Items(e) => vec![e.as_ref()],
+            Args::Items(e) | Args::Result(e) => vec![e.as_ref()],
             Args::Map(k, v) => vec![k.as_ref(), v.as_ref()],
             Args::Tuple(es) => es.iter().collect(),
         };

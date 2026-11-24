@@ -392,7 +392,9 @@ opaque_to_layer3 = true
 # `maxsize` bounds (`bounded_by`, a positive integer) can be.
 # `Executor.submit` returns the `concurrent.futures.Future` to wait on; waiting on one known to be
 # done (`waits_until_done`: under `if f.done():`, or once `await asyncio.wrap_future(f)`, which
-# completes with `f` (`done_when_awaited`), has returned) returns at once.
+# completes with `f` (`done_when_awaited`), has returned) returns at once. Its `result()` is what
+# `submit(fn, /, *args, **kwargs)` calls `fn` with returns (`result_of`): a process pool's, a copy
+# made by pickling, has the class of the object it copies, as `copy.copy`'s does.
 
 [[entries]]
 symbol = "threading.Lock.acquire"
@@ -609,6 +611,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "concurrent.futures.ThreadPoolExecutor.submit"
+result_of = { arg = 0, keywords = true }
 return_type = "concurrent.futures.Future"
 opaque_to_layer3 = true
 
@@ -622,6 +625,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "concurrent.futures.ProcessPoolExecutor.submit"
+result_of = { arg = 0, keywords = true }
 return_type = "concurrent.futures.Future"
 opaque_to_layer3 = true
 
@@ -635,16 +639,22 @@ opaque_to_layer3 = true
 
 # --- Offloads blocking work (argument index of the offloaded callable) ---
 
+# Awaiting what the offloading APIs return gives what their callable returns (`result_of`):
+# `to_thread(func, /, *args, **kwargs)` passes on its keywords too, `run_in_executor(executor,
+# func, *args)` takes none.
+
 [[entries]]
 symbol = "asyncio.to_thread"
 async_safe = true
 offloads_blocking_arg = 0
+result_of = { arg = 0, keywords = true }
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "asyncio.AbstractEventLoop.run_in_executor"
 async_safe = true
 offloads_blocking_arg = 1
+result_of = { arg = 1 }
 return_type = "asyncio.Future"
 opaque_to_layer3 = true
 
@@ -652,6 +662,7 @@ opaque_to_layer3 = true
 symbol = "asyncio.BaseEventLoop.run_in_executor"
 async_safe = true
 offloads_blocking_arg = 1
+result_of = { arg = 1 }
 return_type = "asyncio.Future"
 opaque_to_layer3 = true
 

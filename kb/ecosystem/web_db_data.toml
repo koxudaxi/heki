@@ -38,41 +38,52 @@ opaque_packages = [
 # `next(iterator)` through `anyio.to_thread.run_sync`) needs no entry: an iterator passed to a
 # function that is not a consuming call runs nothing where it is passed, and the argument is no
 # callable, so `offloads_blocking_arg` would not describe it.
+#
+# Awaiting what `run_sync(func, *args, ...)` and `run_in_threadpool(func, *args, **kwargs)`
+# return gives what `func` returns (`result_of`); `run_sync` takes keywords of its own. A process
+# or an interpreter hands back a copy made by pickling, of the class of the object it copies.
+# The decorators return a function to call, not an awaitable.
 
 [[entries]]
 symbol = "anyio.to_thread.run_sync"
 async_safe = true
 offloads_blocking_arg = 0
+result_of = { arg = 0 }
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "anyio.to_process.run_sync"
 async_safe = true
 offloads_blocking_arg = 0
+result_of = { arg = 0 }
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "anyio.to_interpreter.run_sync"
 async_safe = true
 offloads_blocking_arg = 0
+result_of = { arg = 0 }
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "trio.to_thread.run_sync"
 async_safe = true
 offloads_blocking_arg = 0
+result_of = { arg = 0 }
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "starlette.concurrency.run_in_threadpool"
 async_safe = true
 offloads_blocking_arg = 0
+result_of = { arg = 0, keywords = true }
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fastapi.concurrency.run_in_threadpool"
 async_safe = true
 offloads_blocking_arg = 0
+result_of = { arg = 0, keywords = true }
 opaque_to_layer3 = true
 
 # `sync_to_async(func=None, *, thread_sensitive=True, executor=None, context=None)`: returns

@@ -66,6 +66,8 @@ pub enum Args {
     Map(Box<Elem>, Box<Elem>),
     /// A tuple of known length, by position.
     Tuple(Vec<Elem>),
+    /// A future (`FUTURE_CLASSES`): what awaiting it, or its `result()`, gives.
+    Result(Box<Elem>),
 }
 
 /// The type of the items in one slot of a container.
@@ -409,6 +411,14 @@ impl Args {
         }
     }
 
+    /// `Result(result)`, without tracking an unknown result.
+    pub(crate) fn result(result: Elem) -> Self {
+        match result {
+            Elem::Unknown => Args::None,
+            result => Args::Result(Box::new(result)),
+        }
+    }
+
     /// The arguments with `f` applied to every tracked type (an item `f` gives none for is
     /// unknown).
     pub(crate) fn map_elems(&self, f: impl Fn(&Ty) -> Option<Ty>) -> Args {
@@ -421,13 +431,15 @@ impl Args {
             Args::Items(e) => Args::Items(Box::new(elem(e))),
             Args::Map(k, v) => Args::Map(Box::new(elem(k)), Box::new(elem(v))),
             Args::Tuple(es) => Args::Tuple(es.iter().map(elem).collect()),
+            Args::Result(e) => Args::Result(Box::new(elem(e))),
         }
     }
 
-    /// The items iterating an instance with these arguments yields.
+    /// The items iterating an instance with these arguments yields (none tracked for a future,
+    /// which yields itself while it waits).
     pub(crate) fn item(&self) -> Elem {
         match self {
-            Args::None => Elem::Unknown,
+            Args::None | Args::Result(_) => Elem::Unknown,
             Args::Items(e) | Args::Map(e, _) => (**e).clone(),
             Args::Tuple(es) => es.iter().fold(Elem::Empty, |acc, e| acc.join(e)),
         }
@@ -444,6 +456,7 @@ impl Args {
             (Args::Items(_) | Args::Tuple(_), Args::Items(_) | Args::Tuple(_)) => {
                 Args::items(self.item().join(&other.item()))
             }
+            (Args::Result(a), Args::Result(b)) => Args::result(a.join(b)),
             _ => Args::None,
         }
     }
@@ -451,7 +464,7 @@ impl Args {
     fn depth(&self) -> usize {
         match self {
             Args::None => 0,
-            Args::Items(e) => e.depth(),
+            Args::Items(e) | Args::Result(e) => e.depth(),
             Args::Map(k, v) => k.depth().max(v.depth()),
             Args::Tuple(es) => es.iter().map(Elem::depth).max().unwrap_or(0),
         }
@@ -824,9 +837,28 @@ mod tests {
         assert_eq!(
             map(&model).join(&Ty::container(
                 "builtins.dict",
-                Args::items(Elem::Of(model))
+                Args::items(Elem::Of(model.clone()))
             )),
             Some(Ty::inst("builtins.dict"))
+        );
+        // Futures join their results; one whose result is not tracked, or not known, has none.
+        let future = |result: Elem| Ty::container("asyncio.Future", Args::result(result));
+        assert_eq!(
+            future(Elem::Of(model.clone())).join(&future(Elem::Of(field.clone()))),
+            Some(future(Elem::Of(model.join(&field).unwrap())))
+        );
+        assert_eq!(
+            future(Elem::Empty).join(&future(Elem::Of(model.clone()))),
+            Some(future(Elem::Of(model.clone())))
+        );
+        assert_eq!(future(Elem::Unknown), Ty::inst("asyncio.Future"));
+        assert_eq!(
+            future(Elem::Of(model.clone())).join(&Ty::inst("asyncio.Future")),
+            Some(Ty::inst("asyncio.Future"))
+        );
+        assert_eq!(
+            future(Elem::Of(Ty::SelfType)).bind_self(Some(&model)),
+            Some(future(Elem::Of(model)))
         );
     }
 
