@@ -43,7 +43,7 @@ use heki_ast::Span;
 use heki_ir::walk::{
     Answer, Budget, Closure, Facts, FnShape, Join, KeySet, Sparse, Use, Visit, fixpoint, reach,
 };
-use heki_ir::{BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, Inst, InstKind};
+use heki_ir::{BinOpKind, BlockId, BuiltinKind, CompareOpKind, Inst, InstKind};
 use heki_ir::{IrFunction, Terminator, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -607,11 +607,6 @@ impl<'f, 'c> LocalFlow<'f, 'c> {
                 }
                 _ => self.typed_set(v),
             },
-            InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. }
-                if self.cx.string_set_global(name) =>
-            {
-                (true, true)
-            }
             InstKind::MethodCall { recv, method, .. } if method == "keys" => {
                 (false, self.text_keys(*recv))
             }
@@ -665,20 +660,12 @@ impl<'f, 'c> LocalFlow<'f, 'c> {
         !elems.is_empty() && elems.iter().all(|e| self.holds_text(*e))
     }
 
-    /// `v` is a `str` or `bytes` value: a constant, a formatted string, or of that type.
+    /// `v` is a `str` or `bytes` value.
     fn holds_text(&self, v: VarId) -> bool {
-        let root = self.shape.copy_root(v);
-        match self.shape.inst(root).map(|i| &i.kind) {
-            Some(InstKind::Const {
-                literal: ConstLiteral::Str(_) | ConstLiteral::Bytes,
-                ..
-            })
-            | Some(InstKind::BuildString { .. } | InstKind::Format { .. }) => true,
-            _ => matches!(
-                self.types.get(&root),
-                Some(Val::Inst(c)) if c == "builtins.str" || c == "builtins.bytes"
-            ),
-        }
+        matches!(
+            self.types.get(&v),
+            Some(Val::Inst(c)) if c == "builtins.str" || c == "builtins.bytes"
+        )
     }
 
     /// The set `set_var` (an empty display) is filled with text: each `add` on it or on a copy
@@ -1549,62 +1536,4 @@ pub(crate) fn propagate<'i>(
     facts.returns = returned.origin;
     facts.returns_params = returned.params;
     facts.writes_params = writes_params;
-}
-
-/// Whether `v` is a `str` or `bytes` constant.
-fn is_text_constant(shape: &FnShape<'_>, v: VarId) -> bool {
-    let kind = shape.inst(shape.copy_root(v)).map(|i| &i.kind);
-    matches!(
-        kind,
-        Some(InstKind::Const {
-            literal: ConstLiteral::Str(_) | ConstLiteral::Bytes,
-            ..
-        })
-    )
-}
-
-/// The module-level names bound once to a set of text constants (a display, or `set()` /
-/// `frozenset()` of one), for [`TypeCtx::string_set_global`].
-pub(crate) fn string_set_globals(ir: &heki_ir::ModuleIr) -> FxHashSet<String> {
-    let mut stores: FxHashMap<&str, u32> = FxHashMap::default();
-    for f in &ir.functions {
-        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
-            if let InstKind::StoreGlobal { name, .. } = &inst.kind {
-                *stores.entry(name).or_default() += 1;
-            }
-        }
-    }
-    let module = ir.function(ir.module_fn);
-    let shape = FnShape::new(module);
-    let text_display = |v: VarId| match shape.inst(shape.copy_root(v)).map(|i| &i.kind) {
-        Some(InstKind::AllocBuiltin { elems, .. }) => {
-            !elems.is_empty() && elems.iter().all(|e| is_text_constant(&shape, *e))
-        }
-        _ => false,
-    };
-    let mut out = FxHashSet::default();
-    for inst in module.blocks.iter().flat_map(|b| &b.insts) {
-        let InstKind::StoreGlobal { name, value } = &inst.kind else {
-            continue;
-        };
-        if stores.get(name.as_str()) != Some(&1) {
-            continue;
-        }
-        let set = match shape.inst(shape.copy_root(*value)).map(|i| &i.kind) {
-            Some(InstKind::AllocBuiltin {
-                kind: BuiltinKind::Set,
-                ..
-            }) => text_display(*value),
-            Some(InstKind::Call { callee, args, .. })
-                if matches!(callee.as_str(), "frozenset" | "set") =>
-            {
-                args.first().is_some_and(|a| text_display(*a))
-            }
-            _ => false,
-        };
-        if set {
-            out.insert(name.clone());
-        }
-    }
-    out
 }

@@ -1030,6 +1030,88 @@ fn calls_on_values_whose_type_says_nothing_are_unresolved() {
     assert_eq!(report(&p, "known")["purity"]["verdict"], "pure");
 }
 
+/// Methods called on constants, on locals and module names bound only to constants, and the
+/// shapes that typed their receivers already (an annotation, an f-string).
+const CONSTANTS: &str = r#"SEP = ", "
+
+
+def joined(xs: list[str]) -> str:
+    return ", ".join(xs)
+
+
+def stripped() -> str:
+    return "  hi  ".strip()
+
+
+def through_local(xs: list[str]) -> str:
+    sep = ", "
+    return sep.join(xs)
+
+
+def either_constant(c: bool, xs: list[str]) -> str:
+    sep = ", " if c else "; "
+    return sep.join(xs)
+
+
+def through_module_name(xs: list[str]) -> str:
+    return SEP.join(xs)
+
+
+def raw(xs: list[bytes]) -> bytes:
+    return b",".join(xs)
+
+
+def bits() -> int:
+    return (42).bit_length()
+
+
+def whole() -> bool:
+    return (1.5).is_integer()
+
+
+def flag() -> int:
+    return True.bit_length()
+
+
+def annotated(s: str) -> str:
+    return s.strip()
+
+
+def formatted(x: int) -> str:
+    return f"{x}".lower()
+
+
+def constant_or_unknown(c: bool, x):
+    v = "a" if c else x
+    return v.strip()
+"#;
+
+#[test]
+fn methods_of_constants_are_their_builtin_class_methods() {
+    let p = Project::new("inspect_constant_receivers");
+    p.write("m.py", CONSTANTS);
+    for name in [
+        "joined",
+        "stripped",
+        "through_local",
+        "either_constant",
+        "through_module_name",
+        "raw",
+        "bits",
+        "whole",
+        "flag",
+        "annotated",
+        "formatted",
+    ] {
+        let purity = &report(&p, name)["purity"];
+        assert_eq!(purity["verdict"], "pure", "{name}: {purity:#}");
+    }
+    // A local a constant binds on one path only has no class on the other.
+    let purity = &report(&p, "constant_or_unknown")["purity"];
+    assert_eq!(purity["verdict"], "unknown", "{purity:#}");
+    assert_eq!(purity["because"], serde_json::json!(["unresolved_calls"]));
+}
+
 /// A dispatch through a table heki does not resolve (another function adds to it), in functions
 /// that also write.
 const DISPATCH: &str = r#"from typing import Callable
