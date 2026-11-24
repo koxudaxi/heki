@@ -59,7 +59,7 @@ mod imports;
 mod keywords;
 mod references;
 mod sentinels;
-mod statements;
+pub(crate) mod statements;
 
 use keywords::agreed_marks;
 
@@ -7287,38 +7287,13 @@ impl<'a> Extractor<'a> {
         )
     }
 
-    /// The parts of a `functools.partial(f, ...)` call: `f`, the positional arguments after it
-    /// up to the first one `*` unpacks, the keywords, and whether one is unpacked.
+    /// The parts of a `functools.partial(f, ...)` call ([`TypeCtx::partial_parts`]).
     #[allow(clippy::type_complexity)]
     fn partial_call(
         &self,
         kind: &'a InstKind,
     ) -> Option<(VarId, &'a [VarId], &'a [(Option<String>, VarId)], bool)> {
-        let (callee, args, kwargs, star_from) = match kind {
-            InstKind::Call {
-                callee_var: Some(c),
-                args,
-                kwargs,
-                star_from,
-                ..
-            } => (self.cx.resolve_call(self.val(*c)), args, kwargs, star_from),
-            InstKind::MethodCall {
-                recv,
-                method,
-                args,
-                kwargs,
-                star_from,
-                ..
-            } => (
-                self.cx.resolve_method(self.val(*recv), method),
-                args,
-                kwargs,
-                star_from,
-            ),
-            _ => return None,
-        };
-        matches!(callee, Callee::External(s) if s == "functools.partial").then_some(())?;
-        crate::partial::parts(args, kwargs, *star_from)
+        self.cx.partial_parts(kind, &|v| self.val(v))
     }
 
     /// A call site in block `bb` with the caller's guards there.

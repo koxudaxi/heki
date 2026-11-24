@@ -443,20 +443,12 @@ const GAPS: &[(&str, &str, &str)] = &[
     // A `Path` module constant read inside a function is not known to name a file, while the
     // module body's own call on it is: here the inline form is the heuristic one.
     ("sqlite-file-path-constant", "module-constant", "EFF101"),
-    // The items a loop steps through are the data's ("Origin") only when they come from a
-    // parameter or a catalog call written in the function: the rows a project function returns,
-    // also through `asyncio.to_thread` or `functools.partial`, and the rows a module constant
-    // holds, leave "Origin" open.
-    ("query-rows", "factory", "EFF103 [heuristic]"),
-    ("query-rows", "unannotated-factory", "EFF103 [heuristic]"),
+    // The items a loop steps through are the data's ("Origin") when they come from a parameter,
+    // a catalog call, or a project function returning such items (also through
+    // `asyncio.to_thread` or `functools.partial`): the rows a module constant holds leave
+    // "Origin" open.
     ("query-rows", "module-constant", "EFF103 [heuristic]"),
-    ("query-rows", "to-thread", "EFF103 [heuristic]"),
-    ("query-rows", "partial", "EFF103 [heuristic]"),
-    ("query-cursor", "factory", "EFF103 [heuristic]"),
-    ("query-cursor", "unannotated-factory", "EFF103 [heuristic]"),
     ("query-cursor", "module-constant", "EFF103 [heuristic]"),
-    ("query-cursor", "to-thread", "EFF103 [heuristic]"),
-    ("query-cursor", "partial", "EFF103 [heuristic]"),
 ];
 
 /// What each form of `row` reports under the row's rule, apart from the calls making the value:

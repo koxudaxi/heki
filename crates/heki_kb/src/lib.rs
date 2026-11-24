@@ -427,6 +427,9 @@ pub struct EcosystemEntry {
     /// What the items of the call's result are, when the environment decides how many there
     /// are (the origin of a loop's items: `EFF103`).
     pub items: Option<ResultItems>,
+    /// The call gives at most as many of its [`Self::items`] as the integer passed here
+    /// (`fetchmany(size)`): a count the code passes fixes how many there are.
+    pub items_up_to: Option<ArgSlot>,
     /// The library API a method of a catalog class is, as reports name it: the class of what a
     /// call returns in one case (`sqlite3.connect(":memory:")`) has the methods of a library
     /// class (`sqlite3.Connection.execute`).

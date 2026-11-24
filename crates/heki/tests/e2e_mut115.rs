@@ -403,6 +403,55 @@ fn mut115_leaves_open_each_premise_heki_cannot_establish() {
     }
 }
 
+/// A comprehension over the copy only iterates it, as a `for` loop does, also before 3.12, where
+/// it is a function of its own called with the copy: the copy reaches no other code, so the
+/// change below it is a change of what the copied value holds.
+const ITERATED_BY_COMPREHENSIONS: &str = r#"def listed(options: dict[str, list[str]], base: str) -> list[str]:
+    result = options.copy()
+    names = [k for k in result]
+    result["bases"].append(base)
+    return names
+
+
+def generated(options: dict[str, list[str]], base: str) -> list[str]:
+    result = options.copy()
+    names = sorted(k for k in result)
+    result["bases"].append(base)
+    return names
+
+
+def captured(options: dict[str, list[str]], base: str) -> list[object]:
+    result = options.copy()
+    names = [result.pop(k) for k in list(result)]
+    result["bases"].append(base)
+    return names
+"#;
+
+#[test]
+fn mut115_reads_a_comprehension_over_the_copy_as_an_iteration() {
+    let p = Project::new("mut115_comprehensions");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/comprehensions.py", ITERATED_BY_COMPREHENSIONS);
+    for version in ["py311", "py312"] {
+        let (code, stdout, stderr) = p.check(&[
+            "--select",
+            "MUT115",
+            "--output-format",
+            "json",
+            "--target-version",
+            version,
+        ]);
+        assert!(code == 0 || code == 1, "{stdout}{stderr}");
+        let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+        // The copy a comprehension's body changes (`pop`) may hold another object there.
+        assert_eq!(
+            claims(&diags, "pkg/comprehensions.py"),
+            vec![(4, true), (11, true), (18, false)],
+            "{version}: {diags:#?}"
+        );
+    }
+}
+
 /// What is no report at all: a change of the copy itself, a copy of a value the function made,
 /// a deep copy, the elements of an iteration over the copy, a level rebound before the change
 /// on every path, and a memo filled on the shared object.
