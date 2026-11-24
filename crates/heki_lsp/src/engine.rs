@@ -422,8 +422,9 @@ struct ContractReach {
     /// `allowed-callees` may allow one by one) and counts them, while the summaries keep the
     /// effects with one chain each and no such access.
     ecosystem_calls: bool,
-    /// An `import-owners` contract walking what its importers import (`reach`): an importer's
-    /// report reads the imports of every module its walk reaches, and the walks share a budget.
+    /// An `import-owners` contract walking what its importers import (`reach`), judged by a
+    /// selected rule: an importer's report reads the imports of every module its walk reaches,
+    /// and the walks share a budget.
     import_walks: bool,
     /// A strict `read-owners` or `call-owners` contract with a glob target: whether it matches
     /// an access on an object of unknown class depends on the member names the code of every
@@ -528,7 +529,7 @@ impl Workspace {
                     .iter()
                     .any(|b| b.forbid.iter().any(|t| t == "calls")),
             ecosystem_calls: !env_cfg.effect_boundaries.is_empty(),
-            import_walks: heki_rules::walks_imports(env_cfg),
+            import_walks: heki_rules::walks_imports(env_cfg, &selection),
             class_members: heki_rules::reads_class_members(env_cfg),
         };
         let example_owners = ExampleOwners::new(env_cfg);

@@ -1606,6 +1606,25 @@ impl<'i> Iterated<'_, 'i> {
         }
     }
 
+    /// Whether the list or set display `display` still holds the items it was made with where a
+    /// loop reads it: nothing but copies, loops, and the `wrappers` reads it or a variable that
+    /// may be it, so no method adds, removes, or replaces an item, and no other call is handed
+    /// it (`keys = ["a"]; keys.append(name)` may hold any name).
+    fn holds_its_items(&self, display: VarId, wrappers: &'static [&'static str]) -> bool {
+        let held = aliases_of(self.f, [display]);
+        let phis_hold = self.f.blocks.iter().flat_map(|b| &b.phis).all(|phi| {
+            held.contains(&phi.dst) || !phi.incoming.iter().any(|(_, v)| held.contains(v))
+        });
+        phis_hold
+            && insts(self.f).all(|inst| match &inst.kind {
+                InstKind::Copy { .. } | InstKind::MakeIter { .. } => true,
+                kind => {
+                    !kind.operands().iter().any(|v| held.contains(v))
+                        || super::plain_call(kind, wrappers, |v| self.types.get(&v)).is_some()
+                }
+            })
+    }
+
     /// What a loop over `iterable` takes: the items of a display of string constants, or the
     /// keys or the pairs of a namespace (`vars(src)`, `src.__dict__`), its copy (`.copy()`,
     /// `dict(...)`), its `keys()` or `items()`, or a `list`, `tuple`, or `sorted` of one of
@@ -1629,9 +1648,12 @@ impl<'i> Iterated<'_, 'i> {
             match &inst.kind {
                 InstKind::AllocBuiltin {
                     dst,
-                    kind: BuiltinKind::Tuple | BuiltinKind::List | BuiltinKind::Set,
+                    kind: kind @ (BuiltinKind::Tuple | BuiltinKind::List | BuiltinKind::Set),
                     elems,
                 } => {
+                    if *kind != BuiltinKind::Tuple && !self.holds_its_items(*dst, WRAPPERS) {
+                        return None;
+                    }
                     let names = elems.iter().enumerate().map(|(i, e)| {
                         (!self.f.is_starred(*dst, i))
                             .then(|| (self.constant)(*e))
@@ -1703,7 +1725,8 @@ impl Wrapper {
 /// stores make, for the types of the attributes and for the facts of the ownership contracts.
 /// A string constant ([`TypeCtx::str_constant_with`]; `def` gives each variable's defining
 /// instruction in the function of `f`, `types` the inferred values) names itself. A key a loop
-/// takes from a display of string constants names one of them; one it takes from the namespace
+/// takes from a display of string constants names one of them (a tuple, or a list or set nothing
+/// changes, [`Iterated::holds_its_items`]); one it takes from the namespace
 /// of an object (`for key in vars(src)`, `src.__dict__.keys()`, the first of each pair of
 /// `src.__dict__.items()`, also through a copy, `list`, `tuple`, or `sorted`) names an attribute
 /// that object has. Any other key may be any name.
