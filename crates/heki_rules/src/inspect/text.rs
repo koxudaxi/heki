@@ -373,7 +373,8 @@ fn changes_text(out: &mut String, r: &InspectReport) {
         }
         None => lines.push((
             "other objects".to_owned(),
-            "not computed (an ownership contract, MUT108, or MUT112 propagates them)".to_owned(),
+            "not computed (an ownership contract, MUT108, MUT112, or MUT120 propagates them)"
+                .to_owned(),
         )),
     }
     if lines.is_empty() {

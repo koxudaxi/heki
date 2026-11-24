@@ -23,6 +23,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `rule.MUT111` | rule | [`MUT111`](rules/cached-property-stale-read.md) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](rules/conditional-ownership-mutation.md) | 0.2.0 | - |
 | `rule.MUT113` | rule | [`MUT113`](rules/iterated-container-mutation.md) | 0.2.0 | - |
+| `rule.MUT120` | rule | [`MUT120`](rules/readonly-view-mutation.md) | 0.2.7 | - |
 
 ## `cli-option.generate-prompt`
 
@@ -143,3 +144,11 @@ Its precision on real code bases is still low: much of what it reports is code t
 - **Since:** 0.2.0
 
 It has few reports, and most of them are still false.
+
+## `rule.MUT120`
+
+- **Kind:** rule
+- **Target:** [`MUT120`](rules/readonly-view-mutation.md)
+- **Since:** 0.2.7
+
+It is new: its reports are heuristic until a review of its reports on real code bases certifies its claim.

@@ -1,10 +1,12 @@
-//! `MUT108` (`readonly-type-mutation`) and `MUT110` (`readonly-param-mutation`): in-place
-//! changes of what standard types declare read-only, through one analysis. Type checkers stop
-//! the rebinding of a frozen dataclass or `NamedTuple` field, a `Final` / `ReadOnly` attribute,
-//! or a `ReadOnly` `TypedDict` key, but not an in-place change of the container it holds,
-//! directly, through an alias, or in a helper (`MUT108`); and they trust a helper's signature, so
-//! a `Sequence` / `Mapping` parameter handed to an unannotated or `Any` helper that changes it
-//! goes unnoticed (`MUT110`).
+//! `MUT108` (`readonly-type-mutation`), `MUT110` (`readonly-param-mutation`), and `MUT120`
+//! (`readonly-view-mutation`): changes of what standard types declare read-only, through one
+//! analysis. Type checkers stop the rebinding of a frozen dataclass or `NamedTuple` field, a
+//! `Final` / `ReadOnly` attribute, or a `ReadOnly` `TypedDict` key, but not an in-place change of
+//! the container it holds, directly, through an alias, or in a helper (`MUT108`); they trust a
+//! helper's signature, so a `Sequence` / `Mapping` parameter handed to an unannotated or `Any`
+//! helper that changes it goes unnoticed (`MUT110`); and they stop a write of a property without
+//! a setter, but not one in a helper that does not see the type, nor an in-place change of the
+//! container the property returns (`MUT120`, a read-only view: a class of such properties only).
 //!
 //! A change is reported where heki sees that the object is read-only: an own change at the
 //! change, a helper's change at the call that hands the attribute (the object holding it, or the
@@ -23,12 +25,9 @@ use rustc_hash::FxHashSet;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-/// What a function changes in place: its parameter itself (`None`) or a slot of it.
-type Changed = ParamChange;
-
-/// Write kinds that change an attribute's object in place, which `MUT108` reports and `MUT112`
-/// follows. Rebinding and deletion belong to type checkers; `setattr` / `object.__setattr__` and
-/// `__dict__` writes are deliberate bypasses.
+/// Write kinds that change an attribute's object in place, which `MUT108` and `MUT120` report
+/// and `MUT112` follows. Rebinding and deletion belong to type checkers; `setattr` /
+/// `object.__setattr__` and `__dict__` writes are deliberate bypasses.
 pub(super) const IN_PLACE: &[WriteKind] = &[
     WriteKind::ContainerMut,
     WriteKind::AliasContainerMut,
@@ -38,22 +37,29 @@ pub(super) const IN_PLACE: &[WriteKind] = &[
 /// The help of every `MUT108` report.
 const FIX: &str = "copy it first or store an immutable type such as `tuple` / `frozenset`";
 
+/// The help of a `MUT120` report of a change of the container a view's property returns.
+const VIEW_FIX: &str = "copy it first, or annotate the property with a read-only type such as \
+    `Sequence` / `Mapping` so that a type checker reports the change";
+
 pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
-    let (fields, params) = (
+    let (fields, params, views) = (
         cx.selection.is_enabled("MUT108"),
         cx.selection.is_enabled("MUT110"),
+        cx.selection.is_enabled("MUT120"),
     );
-    if !fields && !params {
+    if !fields && !params && !views {
         return;
     }
+    let attrs = fields || views;
     debug_assert!(
-        !fields || cx.index.propagates_typed_writes(),
-        "`typed_writes` decides for MUT108"
+        !attrs || cx.index.propagates_typed_writes(),
+        "`typed_writes` decides for MUT108 and MUT120"
     );
     let mut rule = Rule {
         cx,
         fields,
         params,
+        views,
         calls: cx.index.calls_by_caller(),
         sites: None,
         seen: FxHashSet::default(),
@@ -69,14 +75,15 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
         let mut funcs: Vec<(&FuncKey, &EffectSummary)> = file
             .functions
             .iter()
-            .filter(|(k, _)| fields && cx.index.file_of(k) == Some(path))
+            .filter(|(k, _)| attrs && cx.index.file_of(k) == Some(path))
             .map(|(k, s)| (k, &**s))
             .collect();
         funcs.sort_by(|a, b| a.0.cmp(b.0));
         for (key, s) in funcs {
             rule.own_changes(unit, key, s, out);
         }
-        // Without `MUT108`, only the calls of the functions with a read-only parameter matter.
+        // Without `MUT108` and `MUT120`, only the calls of the functions with a read-only
+        // parameter matter.
         // A call hands its arguments over; they are changed where the callee's facts run
         // (`facts_run_at`): at the call for a plain function, where the generator it returns is
         // iterated for a generator function (never, when it is discarded).
@@ -89,7 +96,7 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
             .map(|(q, _)| q.as_str())
             .collect();
         for site in file.call_sites.iter().filter(|s| {
-            (fields || readonly.contains(s.caller.qualname.as_str()))
+            (attrs || readonly.contains(s.caller.qualname.as_str()))
                 && cx.index.file_of(&s.caller) == Some(path)
         }) {
             rule.handed_over(unit, path, site, out);
@@ -124,6 +131,8 @@ struct Rule<'c, 'a> {
     fields: bool,
     /// `MUT110` (read-only parameters) runs.
     params: bool,
+    /// `MUT120` (read-only views) runs.
+    views: bool,
     /// The calls the reports' chains walk, indexed once for every report.
     calls: CallsByCaller<'a>,
     /// Built on the first need (`runs_inside_allowed`).
@@ -152,7 +161,9 @@ impl Rule<'_, '_> {
             let Some(ro) = self.protected(&w.class_qualname, &w.attr, w.kind) else {
                 continue;
             };
-            if self.initializes(key, &w.class_qualname, w.obj_params) {
+            // A property annotated with a read-only container type: a type checker reports the
+            // change made through the view.
+            if ro.typed_read_only || self.initializes(key, &w.class_qualname, w.obj_params) {
                 continue;
             }
             let (target, what) = self.what(&ro, &w.attr);
@@ -162,16 +173,30 @@ impl Rule<'_, '_> {
                 _ => "",
             };
             let message = format!("`{}` changes {what} in place{how}", key.qualname);
-            self.emit(out, "MUT108", unit, key, w.span, target, message, FIX, &[]);
+            let (code, fix) = reported_as(&ro);
+            self.emit(out, code, unit, key, w.span, target, message, fix, &[]);
         }
     }
 
-    /// `(class, attr)` is a read-only attribute and `kind` an in-place change.
+    /// `(class, attr)` is a read-only attribute holding a container, of a kind a selected rule
+    /// reports, and `kind` an in-place change.
     fn protected(&self, class: &str, attr: &str, kind: WriteKind) -> Option<ReadOnlyAttr> {
         IN_PLACE
             .contains(&kind)
-            .then(|| self.cx.decls.readonly_attr(class, attr))
+            .then(|| self.readonly(class, attr))
             .flatten()
+            .filter(|ro| ro.holds_container)
+    }
+
+    /// `(class, attr)` is read-only, of a kind a selected rule reports: a field or declaration
+    /// (`MUT108`), or a view's property (`MUT120`).
+    fn readonly(&self, class: &str, attr: &str) -> Option<ReadOnlyAttr> {
+        let ro = self.cx.decls.readonly_attr(class, attr)?;
+        let selected = match ro.kind {
+            ReadOnlyKind::View => self.views,
+            ReadOnlyKind::Frozen | ReadOnlyKind::Declared => self.fields,
+        };
+        selected.then_some(ro)
     }
 
     /// The class family's own initialization of `self` (`__init__`, `__post_init__`, ...),
@@ -199,6 +224,7 @@ impl Rule<'_, '_> {
             ReadOnlyKind::Declared => {
                 format!("`{target}`, declared read-only (`Final` / `ReadOnly`),")
             }
+            ReadOnlyKind::View => format!("`{target}`, a property of a read-only view,"),
         };
         (target, what)
     }
@@ -238,10 +264,10 @@ impl Rule<'_, '_> {
                 .map_or(0, |d| d.readonly_params | d.mutable_params);
             for (k, o) in bc.params.iter().enumerate().take(64) {
                 let k = u8::try_from(k).expect("at most 64 parameters");
-                let itself = callee.changes_param(k, &None);
+                let itself = callee.changes_param(k, &ParamChange::Itself);
                 // An instance the caller constructs (or an attribute of one) is filled before
                 // anyone else holds it.
-                let shared = self.fields && !o.fresh;
+                let shared = (self.fields || self.views) && !o.fresh;
                 if itself
                     && shared
                     && let Some((class, attr)) = &o.typed_field
@@ -251,7 +277,7 @@ impl Rule<'_, '_> {
                         Some((p, Some(a))) if a == attr => 1u64 << p,
                         _ => 0,
                     };
-                    self.handed_attr(&call, k, class, attr, None, obj, out);
+                    self.handed_attr(&call, k, class, attr, ParamChange::Itself, obj, out);
                 }
                 // `helper(obj)`: the slots of the object the callee changes (keys of a
                 // `TypedDict`, attributes of other classes).
@@ -260,9 +286,18 @@ impl Rule<'_, '_> {
                     for slot in callee.inplace_param_slots.get(&k).into_iter().flatten() {
                         let (Slot::Attr(name) | Slot::Key(name)) = slot;
                         if matches!(slot, Slot::Key(_)) == typed_dict {
-                            let what = Some(slot.clone());
+                            let what = ParamChange::InSlot(slot.clone());
                             self.handed_attr(&call, k, class, name, what, o.may_params, out);
                         }
+                    }
+                }
+                // `helper(view)`: the properties of a read-only view the callee rebinds.
+                if self.views
+                    && shared
+                    && let Some(class) = &o.typed_instance
+                {
+                    for attr in callee.rebound_param_attrs(k) {
+                        self.handed_view(&call, k, class, attr, o.may_params, out);
                     }
                 }
                 // A read-only parameter handed over as itself, to a parameter that no
@@ -281,8 +316,10 @@ impl Rule<'_, '_> {
                             (d.readonly_params | d.mutable_params) & (1u64 << j) == 0
                         })
                     };
-                    let (chain, (changer, j), found) = self.chain(&call, k, None, &unannotated);
-                    if !found && self.chain(&call, k, None, &|_, _| true).2 {
+                    let itself = ParamChange::Itself;
+                    let (chain, (changer, j), found) =
+                        self.chain(&call, k, itself.clone(), &unannotated);
+                    if !found && self.chain(&call, k, itself, &|_, _| true).2 {
                         continue;
                     }
                     // The line where the function at the end of the chain changes the object its
@@ -359,11 +396,11 @@ impl Rule<'_, '_> {
         k: u8,
         class: &str,
         attr: &str,
-        what: Changed,
+        what: ParamChange,
         obj: u64,
         out: &mut Vec<Diagnostic>,
     ) {
-        let Some(ro) = self.cx.decls.readonly_attr(class, attr) else {
+        let Some(ro) = self.readonly(class, attr).filter(|ro| ro.holds_container) else {
             return;
         };
         let recorded = call.callee.typed_field_writes.iter().any(|t| {
@@ -384,8 +421,54 @@ impl Rule<'_, '_> {
         );
         let (chain, _, _) = self.chain(call, k, what, &|_, _| true);
         let (unit, caller, span) = (call.unit, &call.site.caller, call.site.span);
+        let (code, fix) = reported_as(&ro);
+        self.emit(out, code, unit, caller, span, target, message, fix, &chain);
+    }
+
+    /// Report a read-only view that a call hands to a callee rebinding or deleting its property
+    /// `attr` (`MUT120`), unless the callee, or a function it calls, records the write on a
+    /// class it sees: the write is then a type checker's report there (through the view, or of
+    /// the argument at the call), or the call handing the view to a helper that does not see
+    /// its type is this rule's report there.
+    fn handed_view(
+        &mut self,
+        call: &Call<'_>,
+        k: u8,
+        class: &str,
+        attr: &str,
+        obj: u64,
+        out: &mut Vec<Diagnostic>,
+    ) {
+        let Some(ro) = self
+            .readonly(class, attr)
+            .filter(|ro| ro.kind == ReadOnlyKind::View)
+        else {
+            return;
+        };
+        let typed = call
+            .callee
+            .typed_field_writes
+            .iter()
+            .any(|t| t.attr == attr && t.obj_params & (1u64 << k) != 0);
+        if typed || self.initializes(&call.site.caller, class, obj) {
+            return;
+        }
+        let view = self.cx.decls.class_qualname(class).unwrap_or(class);
+        let (target, _) = self.what(&ro, attr);
+        let callee = call.bc.callee.fqn();
+        let message = format!(
+            "`{}` hands a `{view}`, a read-only view, to `{callee}`, which rebinds or deletes its property `{attr}`",
+            call.site.caller.qualname,
+        );
+        let help = format!(
+            "pass a changed copy instead, or annotate the helper's parameter with `{view}` so \
+             that a type checker reports the write"
+        );
+        let what = ParamChange::Rebinding(attr.to_owned());
+        let (chain, _, _) = self.chain(call, k, what, &|_, _| true);
+        let (unit, caller, span) = (call.unit, &call.site.caller, call.site.span);
         self.emit(
-            out, "MUT108", unit, caller, span, target, message, FIX, &chain,
+            out, "MUT120", unit, caller, span, target, message, &help, &chain,
         );
     }
 
@@ -399,7 +482,7 @@ impl Rule<'_, '_> {
         Some((path, *first))
     }
 
-    /// The hop of the call into its callee (whose parameter `k` changes `what` in place), then
+    /// The hop of the call into its callee (whose parameter `k` changes as `what` says), then
     /// the shortest chain of calls down to the function whose own body makes the change, entering
     /// only the parameters `enters` admits ([`ProjectIndex::param_change_chain_entering`]), and
     /// that function with its parameter (the callee and `k` when no body on the way makes it);
@@ -408,7 +491,7 @@ impl Rule<'_, '_> {
         &mut self,
         call: &Call<'_>,
         k: u8,
-        what: Changed,
+        what: ParamChange,
         enters: &dyn Fn(&FuncKey, u8) -> bool,
     ) -> (Vec<CallHop>, (FuncKey, u8), bool) {
         let into = CallHop {
@@ -461,27 +544,51 @@ impl Rule<'_, '_> {
     }
 }
 
-/// What the call chains of the reports read of the functions of one file besides their final
-/// summaries ([`ProjectIndex::param_change_chain`] walks the functions below the call that hands
-/// an object over, in any file): per function, the parameters its own body changes in place, the slots of them it
-/// changes in place, and its project calls without positions (the language server re-checks the
-/// files whose diagnostics show a call site that moved).
-pub type ChainFacts =
-    BTreeMap<FuncKey, (BTreeSet<u8>, BTreeMap<u8, BTreeSet<Slot>>, Vec<CallSite>)>;
+/// The code and the help of a report of an in-place change of the read-only attribute `ro`.
+fn reported_as(ro: &ReadOnlyAttr) -> (&'static str, &'static str) {
+    match ro.kind {
+        ReadOnlyKind::View => ("MUT120", VIEW_FIX),
+        ReadOnlyKind::Frozen | ReadOnlyKind::Declared => ("MUT108", FIX),
+    }
+}
+
+/// What the call chains of the reports read of one function besides its final summary: the
+/// parameters its own body changes in place, the slots of them it changes in place, the
+/// attributes of them it rebinds, and its project calls without positions (the language server
+/// re-checks the files whose diagnostics show a call site that moved).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChainStep {
+    pub own: BTreeSet<u8>,
+    pub slots: BTreeMap<u8, BTreeSet<Slot>>,
+    pub rebound: BTreeMap<u8, BTreeSet<String>>,
+    pub calls: Vec<CallSite>,
+}
+
+/// [`ChainStep`] of the functions of one file ([`ProjectIndex::param_change_chain`] walks the
+/// functions below the call that hands an object over, in any file).
+pub type ChainFacts = BTreeMap<FuncKey, ChainStep>;
 
 /// The rules whose reports carry the call chains that read [`ChainFacts`]. Only the chains
 /// (related locations) depend on them: whether a call is reported does not.
-pub const CHAIN_RULES: &[&str] = &["MUT108", "MUT110"];
+pub const CHAIN_RULES: &[&str] = &["MUT108", "MUT110", "MUT120"];
 
 /// [`ChainFacts`] of the functions defined in `path` that a chain can pass through: those whose
-/// final summary changes a parameter, or a slot of one, in place. A chain ends at the first
-/// function whose own body makes the change and walks the calls of the functions before it, so
-/// an edit that moves the change from one function to another, or changes those calls, changes
-/// the chains of the reports above them while every final summary stays the same.
+/// final summary changes a parameter, or a slot of one, in place, or rebinds an attribute of
+/// one. A chain ends at the first function whose own body makes the change and walks the calls
+/// of the functions before it, so an edit that moves the change from one function to another,
+/// or changes those calls, changes the chains of the reports above them while every final
+/// summary stays the same.
 pub fn chain_facts(index: &ProjectIndex, path: &Path) -> ChainFacts {
     let mut out = ChainFacts::new();
     let Some(file) = index.files.get(path) else {
         return out;
+    };
+    let rebound = |s: &EffectSummary| -> BTreeMap<u8, BTreeSet<String>> {
+        s.mutated_param_paths
+            .keys()
+            .map(|&j| (j, s.rebound_param_attrs(j).map(str::to_owned).collect()))
+            .filter(|(_, attrs): &(u8, BTreeSet<String>)| !attrs.is_empty())
+            .collect()
     };
     for (key, local) in &file.local_functions {
         let walked = index.file_of(key) == Some(path)
@@ -490,6 +597,9 @@ pub fn chain_facts(index: &ProjectIndex, path: &Path) -> ChainFacts {
                     || s.inplace_param_slots
                         .values()
                         .any(|slots| !slots.is_empty())
+                    || s.mutated_param_paths
+                        .keys()
+                        .any(|&j| s.rebound_param_attrs(j).next().is_some())
             });
         if walked {
             let own = local
@@ -498,8 +608,13 @@ pub fn chain_facts(index: &ProjectIndex, path: &Path) -> ChainFacts {
                 .filter(|(_, paths)| paths.contains(""))
                 .map(|(j, _)| *j)
                 .collect();
-            let slots = local.inplace_param_slots.clone();
-            out.insert(key.clone(), (own, slots, Vec::new()));
+            let step = ChainStep {
+                own,
+                slots: local.inplace_param_slots.clone(),
+                rebound: rebound(local),
+                calls: Vec::new(),
+            };
+            out.insert(key.clone(), step);
         }
     }
     for site in file
@@ -507,8 +622,8 @@ pub fn chain_facts(index: &ProjectIndex, path: &Path) -> ChainFacts {
         .iter()
         .filter(|s| s.role == SiteRole::Call && !s.project_callees().is_empty())
     {
-        if let Some((_, _, calls)) = out.get_mut(&site.caller) {
-            calls.push(site.unplaced());
+        if let Some(step) = out.get_mut(&site.caller) {
+            step.calls.push(site.unplaced());
         }
     }
     out
