@@ -968,6 +968,82 @@ impl MemberPattern {
     }
 }
 
+/// One fact of the code that [`ClassMembers`] reads: a member name written on an instance of a
+/// class, or on an object of unknown class, or a class given names computed at run time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MemberName<S> {
+    /// An attribute or constant `__dict__` key written on an object typed with the class (fqn).
+    Written(S, S),
+    /// An attribute written on an object heki cannot type.
+    OnUnknown(S),
+    /// A class (fqn) the code writes names computed at run time on.
+    Computed(S),
+}
+
+impl MemberName<&str> {
+    pub fn into_owned(self) -> MemberName<String> {
+        match self {
+            Self::Written(class, attr) => MemberName::Written(class.to_owned(), attr.to_owned()),
+            Self::OnUnknown(attr) => MemberName::OnUnknown(attr.to_owned()),
+            Self::Computed(class) => MemberName::Computed(class.to_owned()),
+        }
+    }
+}
+
+impl MemberName<String> {
+    pub fn as_str(&self) -> MemberName<&str> {
+        match self {
+            Self::Written(class, attr) => MemberName::Written(class, attr),
+            Self::OnUnknown(attr) => MemberName::OnUnknown(attr),
+            Self::Computed(class) => MemberName::Computed(class),
+        }
+    }
+}
+
+/// The facts of the functions of `index` (each from its defining file) that [`ClassMembers`]
+/// reads. They come from every file: an edit changing them may change whether a glob target
+/// matches an access on an object of unknown class anywhere.
+pub fn class_member_names(index: &ProjectIndex) -> BTreeSet<MemberName<&str>> {
+    let mut out = BTreeSet::new();
+    for (path, file) in &index.files {
+        let defined = (file.functions.iter())
+            .filter(|(k, _)| index.file_of(k) == Some(path.as_path()))
+            .map(|(_, s)| &**s);
+        for s in defined {
+            for w in &s.typed_field_write_sites {
+                out.insert(MemberName::Written(
+                    w.class_qualname.as_str(),
+                    w.attr.as_str(),
+                ));
+            }
+            for w in &s.unresolved_write_sites {
+                match &w.what {
+                    Unresolved::Receiver(attr) => {
+                        out.insert(MemberName::OnUnknown(attr.as_str()));
+                    }
+                    Unresolved::Name(class) => {
+                        out.insert(MemberName::Computed(class.as_str()));
+                    }
+                    // A name the instance has already adds none.
+                    Unresolved::Existing(_) | Unresolved::Anything => {}
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Whether a `read-owners` or `call-owners` contract of `config` reports what it cannot judge
+/// (`unresolved = "report"`) and has a glob target: its matches on objects of unknown class read
+/// [`ClassMembers`].
+pub fn reads_class_members(config: &HekiConfig) -> bool {
+    let strict_glob = |unresolved: Option<&str>, targets: &[String]| {
+        unresolved == Some("report") && targets.iter().any(|t| has_glob_syntax(t))
+    };
+    (config.read_owners.iter()).any(|r| strict_glob(r.unresolved.as_deref(), &r.targets))
+        || (config.call_owners.iter()).any(|r| strict_glob(r.unresolved.as_deref(), &r.targets))
+}
+
 /// The member names project code gives the instances of project classes, which a glob target
 /// matches on an object of unknown class ([`MemberPattern::matches_on_unknown`]): the names a
 /// class declares ([`ProjectDecls::declared_names`]) and those the code writes on objects typed
@@ -993,20 +1069,16 @@ impl<'a> ClassMembers<'a> {
             on_unknown: FxHashSet::default(),
             computed: FxHashSet::default(),
         };
-        for (_, s) in cx.defined_functions() {
-            for w in &s.typed_field_write_sites {
-                (out.written.entry(&w.class_qualname).or_default()).insert(&w.attr);
-            }
-            for w in &s.unresolved_write_sites {
-                match &w.what {
-                    Unresolved::Receiver(attr) => {
-                        out.on_unknown.insert(attr);
-                    }
-                    Unresolved::Name(class) => {
-                        out.computed.insert(class);
-                    }
-                    // A name the instance has already adds none.
-                    Unresolved::Existing(_) | Unresolved::Anything => {}
+        for name in class_member_names(cx.index) {
+            match name {
+                MemberName::Written(class, attr) => {
+                    (out.written.entry(class).or_default()).insert(attr);
+                }
+                MemberName::OnUnknown(attr) => {
+                    out.on_unknown.insert(attr);
+                }
+                MemberName::Computed(class) => {
+                    out.computed.insert(class);
                 }
             }
         }
