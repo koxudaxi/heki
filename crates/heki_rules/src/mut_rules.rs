@@ -1405,6 +1405,10 @@ impl Allowance {
             return std::borrow::Cow::Borrowed(func);
         }
         let mut qualname = func.qualname.as_str();
+        // `global` declarations in class bodies can make two classes each other's maker
+        // (`class A` holding `global B; class B`, whose body holds `global A; class A`): a maker
+        // passed already is not taken again, and the code goes to the class's holder instead.
+        let mut passed: Vec<&str> = Vec::new();
         loop {
             let (holder, last) = match qualname.rsplit_once('.') {
                 Some((holder, last)) => (Some(holder), last),
@@ -1414,9 +1418,10 @@ impl Allowance {
             if !synthetic && !decls.is_project_class(&format!("{}.{qualname}", func.module)) {
                 break;
             }
+            passed.push(qualname);
             let runner = (decls.module(&func.module))
                 .and_then(|m| m.made_in.as_deref()?.get(qualname))
-                .filter(|runner| !synthetic && *runner != qualname);
+                .filter(|runner| !synthetic && !passed.contains(&runner.as_str()));
             qualname = match runner {
                 Some(runner) => runner,
                 None => holder.map_or("<module>", |h| h.strip_suffix(".<locals>").unwrap_or(h)),
