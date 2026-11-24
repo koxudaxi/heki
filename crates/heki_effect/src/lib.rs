@@ -3173,6 +3173,24 @@ impl ProjectIndex {
         self.func_files.get(func).map(PathBuf::as_path)
     }
 
+    /// The declaration of a summarized function, from its file's declarations.
+    pub(crate) fn function_decl(&self, func: &FuncKey) -> Option<&FunctionDecl> {
+        let decls = &self.files.get(self.func_files.get(func)?)?.decls;
+        decls.functions.get(&func.qualname).map(Box::as_ref)
+    }
+
+    /// Whether the call `site` changes in place, through `bc`'s callee whose body runs at the
+    /// call, the receiver it is made on (`callgraph::changes_receiver`): the call is then that
+    /// change itself, as a builtin container's changing method is.
+    pub fn changes_receiver(&self, site: &CallSite, bc: &BoundCallee) -> bool {
+        self.summary(&bc.callee).is_some_and(|callee| {
+            self.delivery(site, callee)
+                .filter(|d| d.into == Facts::Body && d.via.is_none())
+                .and_then(|d| callee.facts(d.from))
+                .is_some_and(|facts| callgraph::changes_receiver(self, site, bc, facts))
+        })
+    }
+
     /// Drop a deleted file: its functions disappear and their callers are re-propagated (the
     /// update of an empty module, so Early Cutoff and `affected_callers` work as for edits;
     /// an unknown path changes nothing).

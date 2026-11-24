@@ -1331,7 +1331,7 @@ fn apply_edge(
                 .fold(0, |acc, k| acc | c.writer_contexts(k))
         });
         transfer_typed_writes(
-            target, caller, site, bc, callee, facts, &lead, rewrite, here, contexts,
+            index, target, caller, site, bc, callee, facts, &lead, rewrite, here, contexts,
         );
     }
     consumed
@@ -1650,6 +1650,7 @@ fn transfer(
 /// construct nothing).
 #[allow(clippy::too_many_arguments)]
 fn transfer_typed_writes(
+    index: &ProjectIndex,
     t: &mut EffectSummary,
     caller: &FuncKey,
     site: &CallSite,
@@ -1662,7 +1663,7 @@ fn transfer_typed_writes(
     contexts: u64,
 ) {
     let origin = |k: usize| bc.params.get(k);
-    for w in indirect_writes(bc, callee, facts) {
+    for w in indirect_writes(index, site, bc, callee, facts, lead) {
         // A new object the caller hands over and the helper does not keep is under
         // construction.
         let construction = match (w.through, here) {
@@ -1671,20 +1672,22 @@ fn transfer_typed_writes(
             }
             _ => Construction::No,
         };
+        let via_chain = w.via_chain(lead);
         insert_site(
             t,
             caller,
             TypedFieldWriteSite {
                 class_qualname: w.class.to_owned(),
                 attr: w.attr.to_owned(),
-                kind: WriteKind::IndirectHelper,
+                kind: w.kind,
                 span: site.span,
-                via_chain: lead.to_vec(),
                 obj_params: w.obj_params,
                 fresh: w.origin.fresh,
                 key: None,
                 construction,
-                contexts,
+                // The caller's own write gains no function of a chain.
+                contexts: if via_chain.is_empty() { 0 } else { contexts },
+                via_chain,
                 through_protocol: false,
                 key_from: EntryKey::Written,
                 passed: false,
@@ -1866,16 +1869,58 @@ pub(crate) struct IndirectWrite<'a> {
     /// The caller parameters the written object may be, as itself (for [`Through::Field`] the
     /// object holding the attribute: `p` when the argument is `p.attr`).
     pub obj_params: u64,
+    /// [`WriteKind::IndirectHelper`], a write through the callee reached by the `lead` hops; or
+    /// [`WriteKind::ContainerMut`] when the call is made on the field's value and the callee
+    /// changes that receiver in place ([`changes_receiver`]): the caller's own change at the
+    /// call, with no hops, as a builtin container's changing method makes it.
+    pub kind: WriteKind,
 }
 
-/// The typed field writes `callee` (bound by `bc`, with the facts `facts` that run here) makes
-/// through the arguments, which the caller's argument binding ties to a class: the one home of
-/// that decision for the ownership rules and `MUT109`. A write the callee records itself, on
-/// the same object, is its own: it reports or hands over that one.
+impl IndirectWrite<'_> {
+    /// The calls down to the write: `lead` for a write through the callee, none for the
+    /// caller's own.
+    pub fn via_chain(&self, lead: &[Arc<CallHop>]) -> SharedChain {
+        match self.kind {
+            WriteKind::IndirectHelper => lead.to_vec(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// Whether `facts` of `bc`'s callee, run at `site`, change in place the receiver the call is
+/// made on: a call of an instance method on an existing object (no constructor, class method,
+/// or static method, which bind no such receiver to their first parameter) whose `self` the
+/// method changes itself (`mutated_param_paths` path `""`), in its body, through its helpers,
+/// or through `super()`. The method's summary is the second source, beside the catalog of
+/// builtin container methods, of what changes its receiver in place.
+pub(crate) fn changes_receiver(
+    index: &ProjectIndex,
+    site: &CallSite,
+    bc: &BoundCallee,
+    facts: &EffectSummary,
+) -> bool {
+    site.binds_recv
+        && site.constructs.is_none()
+        && facts
+            .mutated_param_paths
+            .get(&0)
+            .is_some_and(|paths| paths.contains(""))
+        && index
+            .function_decl(&bc.callee)
+            .is_some_and(|d| d.is_method && !d.is_staticmethod && !d.is_classmethod)
+}
+
+/// The typed field writes `callee` (bound by `bc`, with the facts `facts` that run at `site`
+/// with the `lead` hops) makes through the arguments, which the caller's argument binding ties
+/// to a class: the one home of that decision for the ownership rules and `MUT109`. A write the
+/// callee records itself, on the same object, is its own: it reports or hands over that one.
 pub(crate) fn indirect_writes<'a>(
+    index: &ProjectIndex,
+    site: &CallSite,
     bc: &'a BoundCallee,
     callee: &EffectSummary,
     facts: &'a EffectSummary,
+    lead: &[Arc<CallHop>],
 ) -> Vec<IndirectWrite<'a>> {
     let mut out = Vec::new();
     for (&param, paths) in &facts.mutated_param_paths {
@@ -1891,6 +1936,9 @@ pub(crate) fn indirect_writes<'a>(
                 Some((p, Some(path))) if path == attr => 1u64 << p,
                 _ => 0,
             };
+            // The method's body runs at the call itself (no function iterating its generator
+            // in between).
+            let at_call = param == 0 && lead.len() == 1 && changes_receiver(index, site, bc, facts);
             out.push(IndirectWrite {
                 param,
                 origin,
@@ -1898,6 +1946,11 @@ pub(crate) fn indirect_writes<'a>(
                 class,
                 attr,
                 obj_params,
+                kind: if at_call {
+                    WriteKind::ContainerMut
+                } else {
+                    WriteKind::IndirectHelper
+                },
             });
         }
         if callee.typed_params >> param & 1 == 0 {
@@ -1913,6 +1966,7 @@ pub(crate) fn indirect_writes<'a>(
                             class,
                             attr,
                             obj_params: origin.may_params,
+                            kind: WriteKind::IndirectHelper,
                         }),
                 );
             }

@@ -3687,6 +3687,48 @@ fn steps_indirect_helpers() -> Vec<Step> {
     ]
 }
 
+/// A method that changes its receiver in place, called on a field's value, writes the field at
+/// the call, as a builtin container's changing method does, also in a helper handed the value:
+/// the method's summary, in another file, decides it.
+fn steps_receiver_changes() -> Vec<Step> {
+    let reading = "class Shelf(list):\n    def stock(self):\n        return len(self)\n\n\nclass Rack:\n    def __init__(self):\n        self.items = Shelf()\n";
+    let stocking = reading.replace("        return len(self)\n", "        self.append(1)\n");
+    let direct = "from pkg.rack import Rack\n\n\ndef show(s: Rack):\n    s.items.stock()\n";
+    let helper = "from pkg.rack import Shelf\n\n\ndef empty(xs):\n    xs.clear()\n\n\ndef refill(xs: Shelf):\n    xs.stock()\n    empty(xs)\n";
+    let writes = &[
+        ("pkg/rack_view.py", "EFF201"),
+        ("pkg/rack_view.py", "MUT201"),
+    ];
+    vec![
+        Step::new(
+            "a field holds an object whose method only reads it",
+            vec![
+                save("pkg/rack.py", reading),
+                save("pkg/rack_view.py", direct),
+            ],
+        )
+        .absent(writes),
+        Step::new(
+            "the method changes its receiver: calling it on the field writes the field",
+            vec![save("pkg/rack.py", &stocking)],
+        )
+        .present(writes),
+        Step::new(
+            "a helper handed the field calls the method before the allowed callee",
+            vec![
+                save("pkg/rack_view.py", RACK_VIEW),
+                save("pkg/rack_ops.py", helper),
+            ],
+        )
+        .present(writes),
+        Step::new(
+            "the method only reads its receiver again",
+            vec![save("pkg/rack.py", reading)],
+        )
+        .absent(writes),
+    ]
+}
+
 /// A class's family includes the methods it inherits: the inherited writer's report appears in
 /// the base class's file when a subclass in another module starts caching what it writes, and
 /// goes away when the subclass overrides the writer. A private writer of the base that a
@@ -5849,6 +5891,7 @@ sessions!(editing, Session::start, {
     item_changes: steps_item_changes,
     module_patterns: steps_module_patterns,
     indirect_helpers: steps_indirect_helpers,
+    receiver_changes: steps_receiver_changes,
     captured_parameters: steps_captured_parameters,
     inherited_writers: steps_inherited_writers,
     hash_writers: steps_hash_writers,

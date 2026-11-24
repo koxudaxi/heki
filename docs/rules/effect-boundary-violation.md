@@ -99,7 +99,9 @@ chain is a shortest one. The search does not enter:
 - `allowed-callees` (project functions or ecosystem symbols, matched like `scopes`): their
   effects are allowed, also when a helper hands them a field it was given
   (`helper(model.fields)` writes nothing when `helper` only passes `fields` to an allowed
-  callee that changes it);
+  callee that changes it). A method changing its own `self` in place, called on a field's
+  value (`model.bag.add(x)`), changes the field at the call, as `MUT201` counts it, also when
+  it is an allowed callee;
 - other functions of the scopes: each reports its own violations, so a violation is reported
   once, at the boundary, not again by every scope function above it;
 - `async def` functions called without `await` (calling one only creates a coroutine), and

@@ -2140,6 +2140,15 @@ fn changes_param<'s>(
                 if handed.is_empty() {
                     continue;
                 }
+                // Calling a method that changes its receiver in place on the parameter, or on
+                // a part of it, is the function's own change at the call, as calling a builtin
+                // container's changing method is, whatever the contract allows of the method.
+                let on_receiver = handed.iter().any(|(j, next)| {
+                    *j == 0 && matches!(next, ParamChange::Itself | ParamChange::Any)
+                });
+                if on_receiver && cx.index.changes_receiver(site, callee) {
+                    return true;
+                }
                 let (Some(summary), Some(d)) = (
                     cx.index.summary(&callee.callee),
                     delivers(site, &callee.callee),

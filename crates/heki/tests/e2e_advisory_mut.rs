@@ -852,3 +852,207 @@ class Cart:
         ]
     );
 }
+
+/// A project method whose summary changes its own `self` changes in place the receiver it is
+/// called on, as a builtin container's changing method does: called on a guarded attribute's
+/// value, it writes the attribute at the call, whatever the contract allows of the method.
+const RECEIVER_MODEL: &str = r#"class Bag(dict[str, int]):
+    def add(self, name: str) -> None:
+        self[name] = self.get(name, 0) + 1
+
+    def peek(self, name: str) -> int:
+        return self.get(name, 0)
+
+    def fresh(self, name: str) -> "Bag":
+        out = Bag()
+        out[name] = 1
+        return out
+
+    def maybe_add(self, name: str, flag: bool) -> None:
+        if flag:
+            self[name] = 1
+
+    def add_twice(self, name: str) -> None:
+        self.add(name)
+        self.add(name)
+
+    @staticmethod
+    def fill(other: "Bag") -> None:
+        other["k"] = 1
+
+
+class SubBag(Bag):
+    pass
+
+
+class Counted(Bag):
+    def add(self, name: str) -> None:
+        super().add(name)
+
+
+class Holder:
+    def __init__(self) -> None:
+        self.bag = Bag()
+        self.items: list[int] = []
+        self.sub = SubBag()
+        self.counted = Counted()
+        self.bag.add("init")
+
+
+def ledger_add(bag: Bag, name: str) -> None:
+    bag.add(name)
+"#;
+
+const RECEIVER_PASSES: &str = r#"from typing import Any, cast
+
+from pkg.model import Bag, Holder, ledger_add
+
+
+def _helper(bag: Bag) -> None:
+    bag.add("y")
+
+
+def run(holder: Holder, untyped: Any, rows: list[int]) -> None:
+    ledger_add(holder.bag, "ok")
+    holder.items.append(1)
+    holder.bag.add("x")
+    _helper(holder.bag)
+    cast("Any", holder).bag.add("z")
+    untyped.add("w")
+    rows.append(2)
+
+
+def shapes(holder: Holder, flag: bool) -> int:
+    holder.bag.fresh("x")
+    holder.bag.maybe_add("x", flag)
+    holder.sub.add("x")
+    holder.counted.add("x")
+    holder.bag.add_twice("x")
+    holder.sub.fill(holder.bag)
+    bag = holder.bag
+    bag.add("x")
+    return holder.bag.peek("x")
+"#;
+
+#[test]
+fn mut201_counts_a_method_changing_its_receiver_as_an_in_place_write() {
+    let p = Project::new("mut201_receiver_changes");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.write-owners]]\nname = \"through-ledger\"\ntargets = [\"pkg.model:Holder.bag\", \"pkg.model:Holder.items\", \"pkg.model:Holder.sub\", \"pkg.model:Holder.counted\"]\nallowed-writers = [\"pkg.model:ledger_add\", \"pkg.model:Holder.__init__\", \"pkg.model:Bag.*\"]\nunresolved = \"report\"\n\n[[tool.heki.effect-boundaries]]\nname = \"pure\"\nscopes = [\"pkg.passes.shapes\"]\nforbid = [\"writes-targets\"]\nwrite-targets = [\"pkg.model:Holder.counted\"]\nallowed-callees = [\"pkg.model:Counted.*\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", RECEIVER_MODEL)
+    .write("pkg/passes.py", RECEIVER_PASSES);
+    let diags = diagnostics(&p, &["--select", "MUT201,MUT205,EFF201"]);
+    let at = "pkg/passes.py";
+    // The ledger is allowed; the builtin `append`, the method of the bag's class, the helper
+    // calling it, and the method on a receiver of unknown class write the guarded attributes.
+    // A method that reads its receiver or changes only an object it builds writes nothing, the
+    // static method is a helper the contract allows, and the alias holds the attribute's value.
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(at, 12, "MUT201", "run"),
+            d(at, 13, "MUT201", "run"),
+            d(at, 14, "MUT201", "run"),
+            d(at, 15, "MUT205", "run"),
+            d(at, 22, "MUT201", "shapes"),
+            d(at, 23, "MUT201", "shapes"),
+            d(at, 24, "EFF201", "shapes"),
+            d(at, 24, "MUT201", "shapes"),
+            d(at, 25, "MUT201", "shapes"),
+            d(at, 28, "MUT201", "shapes"),
+        ],
+        "{diags:#?}"
+    );
+    let message = |line: u64, rule: &str| {
+        let d = diags
+            .iter()
+            .find(|d| d["line"] == line && d["rule_code"] == rule)
+            .unwrap();
+        assert_eq!(d["certainty"], "heuristic", "{d:#?}");
+        d["message"].as_str().unwrap().to_owned()
+    };
+    assert_eq!(
+        message(13, "MUT201"),
+        "`run` writes `pkg.model:Holder.bag` (in place) outside the write owners of `through-ledger`"
+    );
+    assert_eq!(
+        message(14, "MUT201"),
+        "`run` writes `pkg.model:Holder.bag` (through a helper) via `pkg.passes._helper` outside the write owners of `through-ledger`"
+    );
+    // A method changing its receiver on one path only, through a subclass's MRO, through
+    // `super()`, and through its own calls on `self`.
+    for line in [22, 23, 24, 25] {
+        assert!(message(line, "MUT201").contains("(in place)"), "{diags:#?}");
+    }
+    // The method the boundary allows still changes, at the call, the attribute it is called
+    // on.
+    assert_eq!(
+        message(24, "EFF201"),
+        "`shapes` writes `pkg.model:Holder.counted` (in place), which effect boundary `pure` forbids"
+    );
+}
+
+/// `MUT109` counts the same call as the caller's own in-place write of the target, also when a
+/// private helper hands it to its caller.
+const RECEIVER_INVALIDATION: &str = r#"class Bag(dict[str, int]):
+    def add(self, name: str) -> None:
+        self[name] = 1
+
+
+class Holder:
+    def __init__(self) -> None:
+        self.bag = Bag()
+
+    def refresh(self) -> None:
+        pass
+
+
+def run(h: Holder) -> None:
+    h.bag.add("x")
+
+
+def announced(h: Holder) -> None:
+    h.bag.add("x")
+    h.refresh()
+
+
+def _add(h: Holder) -> None:
+    h.bag.add("y")
+
+
+def outer(h: Holder) -> None:
+    _add(h)
+"#;
+
+#[test]
+fn mut109_counts_a_method_changing_its_receiver_as_an_in_place_write() {
+    let p = Project::new("mut109_receiver_changes");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.invalidation]]\nname = \"index\"\ntargets = [\"Holder.bag\"]\ninvalidators = [\"Holder.refresh\"]\n",
+    )
+    .write("app.py", RECEIVER_INVALIDATION);
+    let diags = diagnostics(&p, &["--select", "MUT109"]);
+    assert_eq!(
+        found(&diags),
+        vec![
+            d("app.py", 15, "MUT109", "run"),
+            d("app.py", 28, "MUT109", "outer")
+        ],
+        "{diags:#?}"
+    );
+    let messages: Vec<&str> = diags
+        .iter()
+        .map(|d| d["message"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "`run` writes `Holder.bag` (in place) and returns on some path without calling an invalidator of `index`",
+            "`outer` writes `Holder.bag` (in place) via `app._add` and returns on some path without calling an invalidator of `index`",
+        ]
+    );
+}
