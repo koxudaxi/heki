@@ -24,6 +24,7 @@ use crate::locks::{self, LockStep, ObjRef};
 use crate::one_at_a_time;
 use crate::order_flow;
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, ReturnOrigins, Source};
+use crate::partial::Partial;
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared, container_mutator};
 use crate::resolver::stores::{self, AttrName};
 use crate::resolver::{
@@ -304,11 +305,12 @@ fn extract_module(
 /// the bodies of the classes it makes.
 fn class_bodies_run_by<'m>(ir: &'m ModuleIr, f: &'m IrFunction) -> Vec<&'m IrFunction> {
     let mut out: Vec<&IrFunction> = Vec::new();
+    let mut made: FxHashSet<FunctionId> = FxHashSet::default();
     let mut stack = vec![f];
     while let Some(g) = stack.pop() {
         for inst in g.blocks.iter().flat_map(|b| &b.insts) {
             if let Some(id) = class_body_made(ir, &inst.kind)
-                && out.iter().all(|c| c.id != id)
+                && made.insert(id)
             {
                 out.push(ir.function(id));
                 stack.push(ir.function(id));
@@ -3747,10 +3749,11 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// Record `inst` when it reads an attribute of a module outside the project that an effect
-    /// boundary forbids reading (`sys.platform`, or `platform` bound by `from sys import
-    /// platform`). The value read must be that object by name: a value of unknown origin
-    /// reads nothing, nor does a closure cell (`LoadDeref`), whose value is not typed.
+    /// Record `inst` when it reads an attribute of a module outside the project that a contract
+    /// names (`sys.platform`, or `platform` bound by `from sys import platform`). The value
+    /// read must be that object by name: a value of unknown origin reads nothing, nor does a
+    /// closure cell (`LoadDeref`), whose value is not typed. A name loaded only to be called
+    /// there (`getframe(1)` of an imported function) is the call's, as `sys._getframe(1)` is.
     fn external_read(&mut self, inst: &InstKind, span: Span) {
         let (InstKind::AttrLoad { dst, .. }
         | InstKind::LoadGlobal { dst, .. }
@@ -3762,6 +3765,7 @@ impl<'a> Extractor<'a> {
         if let Some(Val::Ref(fqn)) = self.types.get(dst)
             && self.contracts.is_some_and(|c| c.external_read(fqn))
             && matches!(self.cx.project.symbol(fqn), resolver::Symbol::External)
+            && (matches!(inst, InstKind::Import { .. }) || !self.only_called(*dst))
         {
             self.external.push(ExternalAccess {
                 kind: AccessKind::Read,
@@ -3770,6 +3774,24 @@ impl<'a> Extractor<'a> {
                 imports_project_module: false,
             });
         }
+    }
+
+    /// Whether every use of `var` calls it, passing it nowhere.
+    fn only_called(&self, var: VarId) -> bool {
+        let readers = self.shape.readers(var);
+        !readers.is_empty()
+            && readers.iter().all(|u| {
+                let Use::Inst(bb, i) = *u else {
+                    return false;
+                };
+                matches!(
+                    &self.f.block(bb).insts[i as usize].kind,
+                    InstKind::Call { callee_var: Some(callee), args, kwargs, .. }
+                        if *callee == var
+                            && !args.contains(&var)
+                            && kwargs.iter().all(|(_, k)| *k != var)
+                )
+            })
     }
 
     /// Record the imports that probe whether their module is installed
@@ -4939,7 +4961,9 @@ impl<'a> Extractor<'a> {
                     recv: None,
                 };
                 if let Some(v) = callee_var.filter(|v| self.val(*v).is_none())
-                    && let Some(partial) = self.partial(v).and_then(|p| p.called_with(&passed))
+                    && let Some(partial) = self
+                        .partial(v)
+                        .and_then(|p| p.called_with(passed.args, passed.kwargs, passed.star_from))
                 {
                     let (target, recv_var) = self.callable_callee(partial.callable);
                     let (recv, recv_is_self) = match recv_var {
@@ -5590,6 +5614,7 @@ impl<'a> Extractor<'a> {
             return;
         }
         let obj_params = self.exact_param(obj);
+        let protocol = self.unknown_protocol(obj);
         self.summary
             .unresolved_access_sites
             .insert(UnresolvedAccessSite {
@@ -5597,7 +5622,52 @@ impl<'a> Extractor<'a> {
                 access,
                 span,
                 obj_params,
+                protocol,
             });
+    }
+
+    /// The project protocol `var`'s object is typed with although heki cannot tie it to a class
+    /// ([`UnresolvedAccessSite::protocol`]): an instance of a protocol whose implementations
+    /// heki cannot list, or a class object whose annotation is `type[P]`
+    /// ([`ProjectDecls::protocol_class`]).
+    fn unknown_protocol(&self, var: VarId) -> Option<String> {
+        match self.val(var) {
+            Some(Val::Inst(c)) if self.cx.project.protocol(c) == Some(None) => Some(c.clone()),
+            Some(_) => None,
+            None => self.cx.project.protocol_class(&self.declared_type(var)?),
+        }
+    }
+
+    /// What the annotation of the place `var`'s value comes from declares, as its module
+    /// resolves it: the parameter it is on every path, the local it is bound to, or the
+    /// attribute it is read from (along the MRO of the object's class).
+    fn declared_type(&self, var: VarId) -> Option<crate::types::Ty> {
+        let resolve = |text: &str| self.cx.module.resolve_annotation_ty(text);
+        if let Some((i, None)) = self.param_alias.get(&var) {
+            return resolve(self.f.params.get(usize::from(*i))?.annotation.as_deref()?);
+        }
+        // The annotated local is any name along the copies the value went through.
+        let mut cur = var;
+        loop {
+            let name = self
+                .f
+                .var_names
+                .get(cur.0 as usize)
+                .and_then(Option::as_deref);
+            let annotated =
+                name.and_then(|name| self.f.local_annotations.iter().find(|a| a.target == name));
+            if let Some(local) = annotated {
+                return resolve(&local.annotation);
+            }
+            match self.shape.inst(cur).map(|i| &i.kind) {
+                Some(InstKind::Copy { src, .. }) => cur = *src,
+                Some(InstKind::AttrLoad { obj, attr, .. }) => {
+                    let class = self.instance_of(*obj)?;
+                    return self.cx.project.member_type(&class, attr, false);
+                }
+                _ => return None,
+            }
+        }
     }
 
     /// Record a write heki cannot tie to a class (`MUT205`) of the object `obj` holds (`None`:
@@ -5608,12 +5678,17 @@ impl<'a> Extractor<'a> {
             return;
         }
         let obj_params = obj.map_or(0, |o| self.exact_param(o));
+        let protocol = match (&what, obj) {
+            (Unresolved::Receiver(_), Some(obj)) => self.unknown_protocol(obj),
+            _ => None,
+        };
         let site = UnresolvedWriteSite {
             what,
             kind,
             span,
             obj_params,
             construction: Construction::No,
+            protocol,
         };
         if let Some(obj) = obj.filter(|o| self.track && self.trackable(*o)) {
             let query = self.rec.query(self.at(), obj);
@@ -7153,49 +7228,17 @@ impl<'a> Extractor<'a> {
         cur
     }
 
-    /// What calling `var` calls when it holds a `functools.partial` object (`partial(f, a,
-    /// k=b)` calls `f(a, ..., k=b)`), through copies and at most 16 nested partials (the inner
-    /// one's arguments go first; past the bound, the call is not resolved).
+    /// What calling `var` calls when it holds a `functools.partial` object ([`Partial::of`]).
     fn partial(&self, var: VarId) -> Option<Partial> {
-        let mut found: Option<Partial> = None;
-        let mut cur = var;
-        for _ in 0..16 {
-            let made = self.copied(cur);
-            let Some((inner, held, kwargs, open)) = self
-                .defs
-                .get(&made)
-                .and_then(|i| self.partial_call(&i.kind))
-            else {
-                break;
-            };
-            let p = found.get_or_insert_with(|| Partial {
-                callable: inner,
-                calls: Vec::new(),
-                args: Vec::new(),
-                kwargs: Vec::new(),
-                open: false,
-            });
-            p.callable = inner;
-            p.calls.push((made, inner));
-            // The outer partials' arguments come after what this one unpacks with `*`.
-            if open {
-                p.args.clear();
-            }
-            p.args.splice(0..0, held.iter().copied());
-            // An outer partial's `**` unpacking may override any keyword this one holds.
-            let overridden = p.kwargs.iter().any(|(k, _)| k.is_none());
-            // A keyword an outer partial writes again replaces this one's.
-            let replaced: Vec<_> = kwargs
-                .iter()
-                .filter(|(k, _)| !overridden || k.is_none())
-                .filter(|(k, _)| k.is_none() || !p.kwargs.iter().any(|(o, _)| o == k))
-                .cloned()
-                .collect();
-            p.kwargs.splice(0..0, replaced);
-            p.open |= open;
-            cur = inner;
-        }
-        found
+        Partial::of(
+            var,
+            |v| self.copied(v),
+            |object| {
+                self.defs
+                    .get(&object)
+                    .and_then(|i| self.partial_call(&i.kind))
+            },
+        )
     }
 
     /// The parts of a `functools.partial(f, ...)` call: `f`, the positional arguments after it
@@ -7229,9 +7272,7 @@ impl<'a> Extractor<'a> {
             _ => return None,
         };
         matches!(callee, Callee::External(s) if s == "functools.partial").then_some(())?;
-        let known = star_from.map_or(args.len(), |s| usize::from(s).min(args.len()));
-        let (&inner, held) = args[..known].split_first()?;
-        Some((inner, held, kwargs, known < args.len()))
+        crate::partial::parts(args, kwargs, *star_from)
     }
 
     /// A call site in block `bb` with the caller's guards there.
@@ -8130,71 +8171,6 @@ impl Bindings<'_> {
             .map(|(p, c)| (usize::from(*p), c))
             .filter(move |(p, _)| !by_position(*p) && !by_keyword.contains(p))
     }
-}
-
-/// What calling a `functools.partial` object calls ([`Extractor::partial`]).
-struct Partial {
-    callable: VarId,
-    /// Each nested `functools.partial` call: the object it makes and the callable it holds.
-    calls: Vec<(VarId, VarId)>,
-    /// The positional arguments it passes first, up to the first one `*` unpacks.
-    args: Vec<VarId>,
-    /// Its keywords (`**` unpacking is a `None` keyword).
-    kwargs: Vec<(Option<String>, VarId)>,
-    /// It unpacks positional arguments with `*`: the positions after `args` are not known.
-    open: bool,
-}
-
-impl Partial {
-    /// What a call passing `passed` to the object passes the callable it holds: the positional
-    /// arguments it holds, then the call's up to the first one `*` unpacks; its keywords, which
-    /// a keyword the call writes replaces, then the call's. `None` when the call unpacks a
-    /// mapping with `**` while the object holds keywords: the mapping may replace any of them.
-    fn called_with(self, passed: &Passed<'_>) -> Option<PartialCall> {
-        let unpacks_mapping = passed.kwargs.iter().any(|(k, _)| k.is_none());
-        if unpacks_mapping && !self.kwargs.is_empty() {
-            return None;
-        }
-        let written = |k: &Option<String>| passed.kwargs.iter().any(|(w, _)| w == k);
-        let kwargs = self
-            .kwargs
-            .iter()
-            .filter(|(k, _)| k.is_none() || !written(k))
-            .chain(passed.kwargs)
-            .cloned()
-            .collect();
-        let known = passed
-            .star_from
-            .map_or(passed.args.len(), |s| usize::from(s).min(passed.args.len()));
-        let held = self.args.len();
-        let (args, star_from) = match self.open {
-            true => (self.args, Some(held)),
-            false => {
-                let after = passed.args[..known].iter().copied();
-                let star_from = passed.star_from.map(|_| held + known);
-                (self.args.into_iter().chain(after).collect(), star_from)
-            }
-        };
-        Some(PartialCall {
-            callable: self.callable,
-            calls: self.calls,
-            args,
-            kwargs,
-            star_from: star_from.map(|s| u8::try_from(s).unwrap_or(u8::MAX)),
-        })
-    }
-}
-
-/// A call of a `functools.partial` object, as a call of the callable it holds
-/// ([`Partial::called_with`]).
-struct PartialCall {
-    callable: VarId,
-    /// [`Partial::calls`].
-    calls: Vec<(VarId, VarId)>,
-    args: Vec<VarId>,
-    kwargs: Vec<(Option<String>, VarId)>,
-    /// Where `*` unpacking starts among `args`.
-    star_from: Option<u8>,
 }
 
 /// What a builtin calling a callable once per item passes it ([`Extractor::passed_items`]).

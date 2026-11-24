@@ -2511,6 +2511,42 @@ fn steps_contract_extensions() -> Vec<Step> {
     ]
 }
 
+/// Owner-contract targets naming symbols outside the project (`FileSummary::external_accesses`):
+/// a module calls and hands on a private function of `sys` another module re-exports, so which
+/// symbol the call and the read are of follows what the re-export binds, in another file.
+fn steps_outside_targets() -> Vec<Step> {
+    let contract = format!(
+        "{CONFIG}\n[[tool.heki.call-owners]]\nname = \"outside-calls\"\ntargets = [\"<external>._*\"]\nforbidden-callers = [\"pkg.frames:*\"]\n\n[[tool.heki.read-owners]]\nname = \"outside-reads\"\ntargets = [\"sys._getframe\"]\nforbidden-readers = [\"pkg.frames:*\"]\n"
+    );
+    let compat = "from sys import _getframe\n";
+    let frames = "from pkg.frame_compat import _getframe\n\n\ndef caller():\n    return _getframe(1)\n\n\ndef handed():\n    return _getframe\n";
+    vec![
+        Step::new(
+            "a module calls and hands on a private function of `sys` another module re-exports",
+            vec![
+                Action::Configure(contract),
+                Action::Create("pkg/frame_compat.py", compat.to_owned()),
+                Action::Create("pkg/frames.py", frames.to_owned()),
+            ],
+        )
+        .present(&[("pkg/frames.py", "MUT204"), ("pkg/frames.py", "MUT203")])
+        .absent(&[("pkg/frame_compat.py", "MUT203")]),
+        Step::new(
+            "the re-export binds a public function instead",
+            vec![save(
+                "pkg/frame_compat.py",
+                "from os import getcwd as _getframe\n",
+            )],
+        )
+        .absent(&[("pkg/frames.py", "MUT204"), ("pkg/frames.py", "MUT203")]),
+        Step::new(
+            "it binds the private function again",
+            vec![save("pkg/frame_compat.py", compat)],
+        )
+        .present(&[("pkg/frames.py", "MUT204"), ("pkg/frames.py", "MUT203")]),
+    ]
+}
+
 /// Step 5c: environment reads below an effect boundary. No summary records them, so the report
 /// of the scope function above, and of the module body the boundary names, follows the helper's
 /// own accesses: a read of `sys.platform`, a call of `os.getenv` (whose call site the report's
@@ -4957,8 +4993,8 @@ fn steps_configuration() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"EFF115\", \"EFF116\", \"MUT115\", \"MUT118\", \"MUT119\"]",
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"EFF115\", \"EFF116\", \"MUT115\", \"MUT118\", \"MUT119\"]\nselect = [\"NOPE1\"]",
+                "[tool.heki.lint]\n",
+                "[tool.heki.lint]\nselect = [\"NOPE1\"]\n",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),
@@ -5809,6 +5845,7 @@ sessions!(editing, Session::start, {
     bases_and_attribution: steps_bases_and_attribution,
     argument_lists: steps_argument_lists,
     environment: steps_environment,
+    outside_targets: steps_outside_targets,
     keys_fresh_strict: steps_keys_fresh_strict,
     files: steps_files,
     configuration: steps_configuration,
@@ -6531,6 +6568,146 @@ fn lsp_diagnostics_equal_a_full_check_through_bound_values_across_modules() {
             vec![save("pkg/register.py", BOUND_REGISTERING)],
         )
         .present(&[("pkg/use_table.py", "EFF201")]),
+    ];
+    run_steps(s, &steps);
+}
+
+// ------------------------------------------------------------------------------ import cycles
+
+const CYCLES_CONFIG: &str = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"IMP101\"]\n";
+const TYPED_F: &str = "from typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    import pkg.g\n";
+
+/// `IMP101` reads the imports of every module: an edit of one module's imports closes or breaks
+/// a cycle reported in another, also an import leaving `TYPE_CHECKING` and, once `cycle-edges`
+/// counts them, an import added inside a function, which changes no declaration of its module.
+/// The report's related location moves with the import, a package's `__init__` closes a cycle
+/// through the parent package an import loads first, a module created turns a `from` import of
+/// a name into an import of the submodule, which then closes a cycle, and a package binding the
+/// name (no import changes) takes it back.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_import_cycles() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/a.py", "import pkg.base\nimport pkg.b\n".to_owned()),
+        ("pkg/b.py", "import json\n".to_owned()),
+        ("pkg/base.py", String::new()),
+    ];
+    let s = Session::start_with("lsp_oracle_import_cycles", CYCLES_CONFIG, files, false);
+    let steps = [
+        Step::new("a module imports another", Vec::new()).absent(&[("pkg/b.py", "IMP101")]),
+        Step::new(
+            "the other module imports it back",
+            vec![save("pkg/b.py", "import json\nimport pkg.a\n")],
+        )
+        .present(&[("pkg/b.py", "IMP101")]),
+        Step::new(
+            "the first module's import moves down a line",
+            vec![save("pkg/a.py", "import pkg.base\n\nimport pkg.b\n")],
+        )
+        .present(&[("pkg/b.py", "IMP101")]),
+        Step::new(
+            "the first module imports the other only when a function runs",
+            vec![save("pkg/a.py", "import pkg.base\n\n\ndef load():\n    import pkg.b\n")],
+        )
+        .absent(&[("pkg/b.py", "IMP101")]),
+        Step::new(
+            "the configuration counts the imports in functions",
+            vec![Action::Configure(format!(
+                "{CYCLES_CONFIG}\n[tool.heki.imports]\ncycle-edges = [\"body\", \"function\"]\n"
+            ))],
+        )
+        .present(&[("pkg/b.py", "IMP101")]),
+        Step::new(
+            "the configuration counts only what runs while a module loads",
+            vec![Action::Configure(CYCLES_CONFIG.to_owned())],
+        )
+        .absent(&[("pkg/b.py", "IMP101")]),
+        Step::new(
+            "the first module imports the other while it loads again",
+            vec![save(
+                "pkg/a.py",
+                "import pkg.base\nimport pkg.b\n\n\ndef load():\n    pass\n",
+            )],
+        )
+        .present(&[("pkg/b.py", "IMP101")]),
+        Step::new(
+            "the module closing the cycle is deleted",
+            vec![Action::Delete("pkg/b.py")],
+        ),
+        Step::new(
+            "a module imports a module of a package",
+            vec![
+                Action::Create("app/__init__.py", String::new()),
+                Action::Create("app/sub/__init__.py", String::new()),
+                Action::Create("app/sub/leaf.py", String::new()),
+                Action::Create("app/a.py", "import app.sub.leaf\n".to_owned()),
+            ],
+        )
+        .absent(&[("app/sub/__init__.py", "IMP101")]),
+        Step::new(
+            "the package's __init__ imports the module back",
+            vec![save("app/sub/__init__.py", "from app import a\n")],
+        )
+        .present(&[("app/sub/__init__.py", "IMP101")]),
+        Step::new(
+            "the module imports a name of its own package",
+            vec![Action::Create("pkg/e.py", "from pkg import c\n".to_owned())],
+        )
+        .absent(&[("pkg/e.py", "IMP101")]),
+        Step::new(
+            "a submodule of that name is created",
+            vec![Action::Create("pkg/c.py", String::new())],
+        )
+        .absent(&[("pkg/e.py", "IMP101")]),
+        Step::new(
+            "the submodule imports the module back",
+            vec![save("pkg/c.py", "import pkg.e\n")],
+        )
+        .present(&[("pkg/e.py", "IMP101")]),
+        Step::new(
+            "the package binds the name, which the from-import may take instead",
+            vec![save("pkg/__init__.py", "c = None\n")],
+        )
+        .absent(&[("pkg/e.py", "IMP101")]),
+        Step::new(
+            "the package binds nothing again",
+            vec![save("pkg/__init__.py", "")],
+        )
+        .present(&[("pkg/e.py", "IMP101")]),
+        Step::new(
+            "the submodule no longer imports the module",
+            vec![save("pkg/c.py", "")],
+        )
+        .absent(&[("pkg/e.py", "IMP101")]),
+        Step::new(
+            "a module imports another only under TYPE_CHECKING, which imports it back",
+            vec![
+                Action::Create("pkg/f.py", TYPED_F.to_owned()),
+                Action::Create("pkg/g.py", "import pkg.f\n".to_owned()),
+            ],
+        )
+        .absent(&[("pkg/g.py", "IMP101")]),
+        Step::new(
+            "the import leaves TYPE_CHECKING",
+            vec![save("pkg/f.py", &TYPED_F.replace("if TYPE_CHECKING:\n    ", ""))],
+        )
+        .present(&[("pkg/g.py", "IMP101")]),
+        Step::new(
+            "the configuration counts the imports in functions, and a module's function imports nothing",
+            vec![
+                Action::Configure(format!(
+                    "{CYCLES_CONFIG}\n[tool.heki.imports]\ncycle-edges = [\"body\", \"function\"]\n"
+                )),
+                Action::Create("pkg/h.py", "def load():\n    pass\n".to_owned()),
+                Action::Create("pkg/i.py", "import pkg.h\n".to_owned()),
+            ],
+        )
+        .absent(&[("pkg/i.py", "IMP101")]),
+        Step::new(
+            "the function imports the module that imports its module",
+            vec![save("pkg/h.py", "def load():\n    import pkg.i\n")],
+        )
+        .present(&[("pkg/i.py", "IMP101")]),
     ];
     run_steps(s, &steps);
 }

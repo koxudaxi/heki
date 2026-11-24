@@ -10,9 +10,9 @@
 use crate::eff_rules::{forbidden_effects, names_function};
 use crate::inspect::ContractRole;
 use crate::mut_rules::{
-    Allowance, AllowanceKeys, ContractTarget, FunctionMatcher, FunctionMatchers, MemberPattern,
-    ReadOnlyProducers, References, parse_read_targets, parse_targets, patterns, project_classes,
-    split_arguments, split_item,
+    Allowance, AllowanceKeys, ContractTarget, EXTERNAL, FunctionMatcher, FunctionMatchers,
+    MemberPattern, ReadOnlyProducers, References, parse_read_targets, parse_targets, patterns,
+    project_classes, split_arguments, split_item,
 };
 use crate::{
     CheckContext, DottedPattern, RuleConfigError, RuleSelection, last_name, split_last_dot,
@@ -105,13 +105,15 @@ pub(crate) struct ConfigContracts {
     write_protocols: bool,
 }
 
-/// What the effect boundaries forbid outside the project ([`Contracts::external_call`],
+/// What the contracts name outside the project ([`Contracts::external_call`],
 /// [`Contracts::external_read`], [`Contracts::import_probes`]).
 #[derive(Debug)]
 struct ExternalNames {
-    /// The `call-targets` of the boundaries forbidding `calls` (`None`: too many globs).
+    /// The `call-targets` of the boundaries forbidding `calls`, and the `call-owners` targets
+    /// (`None`: too many globs).
     calls: Option<FunctionMatchers>,
-    /// The `read-targets` of the boundaries forbidding `reads-targets` (`None`: too many globs).
+    /// The `read-targets` of the boundaries forbidding `reads-targets`, and the `read-owners`
+    /// targets (`None`: too many globs).
     reads: Option<FunctionMatchers>,
     /// The catalog's environment calls and reads, when a boundary forbids `reads-environment`.
     environment: FxHashMap<String, EnvironmentAccess>,
@@ -119,8 +121,8 @@ struct ExternalNames {
 }
 
 impl ExternalNames {
-    /// A bad pattern is left out: it is a configuration error of `EFF201`, which parses every
-    /// boundary before it reports, and only when it runs, as for the other contracts.
+    /// A bad pattern is left out: it is a configuration error of the rule of its contract,
+    /// which parses every entry before it reports, and only when it runs.
     fn new(config: &HekiConfig, kb: &EffectiveEcosystemKb) -> Self {
         let forbidding = |token: &'static str| {
             config
@@ -145,14 +147,18 @@ impl ExternalNames {
         } else {
             FxHashMap::default()
         };
+        let call_owners = config.call_owners.iter().flat_map(|r| &r.targets);
+        let read_owners = config.read_owners.iter().flat_map(|r| &r.targets);
         Self {
             calls: matchers(
-                forbidding("calls").flat_map(|b| &b.call_targets).collect(),
+                (forbidding("calls").flat_map(|b| &b.call_targets))
+                    .chain(call_owners)
+                    .collect(),
                 "effect-boundaries.call-targets",
             ),
             reads: matchers(
-                forbidding("reads-targets")
-                    .flat_map(|b| &b.read_targets)
+                (forbidding("reads-targets").flat_map(|b| &b.read_targets))
+                    .chain(read_owners)
                     .collect(),
                 "effect-boundaries.read-targets",
             ),
@@ -165,6 +171,12 @@ impl ExternalNames {
     /// Whether the catalog tags `symbol` as an environment access of kind `access`.
     fn environment(&self, symbol: &str, access: EnvironmentAccess) -> bool {
         self.environment.get(symbol) == Some(&access)
+    }
+
+    /// Whether no access outside the project is kept.
+    fn is_empty(&self) -> bool {
+        let none = |m: &Option<FunctionMatchers>| m.as_ref().is_none_or(FunctionMatchers::is_empty);
+        none(&self.calls) && none(&self.reads) && self.environment.is_empty() && !self.probes
     }
 }
 
@@ -307,12 +319,14 @@ fn marked_params(config: &HekiConfig) -> FxHashSet<String> {
 }
 
 /// The patterns of the last dotted names of `targets` (`children` of `pkg.Reference.children`),
-/// as members of any class: an object of unknown class may be of any.
+/// as members of any class: an object of unknown class may be of any. A target naming symbols
+/// outside the project only (`<external>._*`) names no member of an object of unknown class.
 fn last_names(
     targets: impl Iterator<Item = impl AsRef<str>>,
     context: &'static str,
 ) -> Result<Vec<MemberPattern>, RuleConfigError> {
     targets
+        .filter(|t| !t.as_ref().starts_with(EXTERNAL))
         .map(|t| MemberPattern::new(last_name(t.as_ref()), None, &[], context))
         .collect()
 }
@@ -486,6 +500,7 @@ pub fn summary_contracts(
         && contracts.unresolved_calls.is_empty()
         && contracts.references == References::Ignored
         && contracts.marked_params.is_empty()
+        && contracts.external.is_empty()
     {
         return Ok(None);
     }
@@ -520,7 +535,8 @@ pub fn typed_writes(config: &HekiConfig, selection: &RuleSelection) -> TypedWrit
 /// The opt-in facts the rules `selection` runs read: `MUT112`'s return origins, `MUT113`'s
 /// iteration facts, `EFF109`'s lock facts, `EFF110`'s one-at-a-time uses, the must-facts of
 /// the effect rules whose reports are split by them, the kept-value facts of `MUT101` and
-/// `MUT111`, `MUT119`'s new returned containers, and the callables `EFF115` and `EFF116` read, each only with their rules. The readers assert it
+/// `MUT111`, `MUT119`'s new returned containers, the callables `EFF115` and `EFF116` read, and
+/// the import facts of `IMP101`, each only with their rules. The readers assert it
 /// ([`heki_effect::ProjectIndex::opt_in_facts`]).
 pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
     OptInFacts {
@@ -545,7 +561,7 @@ pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
         fresh_returns: selection.is_enabled("MUT119"),
         shared_state: false,
         blind_spots: false,
-        imports: false,
+        imports: selection.is_enabled("IMP101"),
     }
 }
 

@@ -262,3 +262,186 @@ fn a_last_segment_glob_names_no_member_of_a_nested_holder() {
         ]
     );
 }
+
+const CONTEXTS: &str = r#"from typing import NamedTuple
+
+
+class Context(NamedTuple):
+    module: str
+
+
+class Parser:
+    def _secret(self) -> int:
+        return 1
+
+
+class SubParser(Parser):
+    def _sub_only(self) -> int:
+        return 2
+"#;
+
+const RENDER: &str = r#"from pkg.parser.base import Context, Parser
+
+
+def typed(ctx: Context) -> Context:
+    return ctx._replace(module="m")
+
+
+def untyped(contexts):
+    return [ctx._replace(module="m") for ctx in contexts]
+
+
+def untyped_api(ctx):
+    return ctx._asdict(), ctx._fields
+
+
+def control(parser: Parser) -> int:
+    return parser._secret()
+
+
+def untyped_defined(parser):
+    return parser._secret()
+
+
+def untyped_subclass_member(parser):
+    return parser._sub_only()
+
+
+def untyped_written_elsewhere(parser):
+    return parser._cache
+
+
+def untyped_unknown_name(parser):
+    return parser._nobody_has_this()
+"#;
+
+/// Strict `call-owners` and `read-owners` contracts on `(calls, reads)` targets, over a
+/// `NamedTuple` and a class with a subclass, one of whose instances another module gives `_cache`.
+fn unknown_objects_project(name: &str, (calls, reads): (&str, &str)) -> Project {
+    let contract = |section: &str, targets: &str, who: &str| {
+        format!(
+            "[[tool.heki.{section}]]\nname = \"{section}\"\ntargets = {targets}\nforbidden-{who} = [\"pkg.parser._render:*\"]\nattribution = \"lexical\"\nunresolved = \"report\"\n\n"
+        )
+    };
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT203\", \"MUT204\", \"MUT206\", \"MUT207\"]\n\n{}{}",
+            contract("call-owners", calls, "callers"),
+            contract("read-owners", reads, "readers"),
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/parser/__init__.py", "")
+    .write("pkg/parser/base.py", CONTEXTS)
+    .write(
+        "pkg/parser/setup.py",
+        "from pkg.parser.base import Parser\n\n\ndef attach(parser: Parser) -> None:\n    parser._cache = {}\n",
+    )
+    .write("pkg/parser/_render.py", RENDER);
+    p
+}
+
+/// With `unresolved = "report"`, a glob target matches on an object of unknown class only the
+/// names a class it names (or a project subclass, or a project base) has from project code: what
+/// it defines, and what the code writes on objects typed with it. `_replace`, `_asdict`, and
+/// `_fields` of a `NamedTuple` are `tuple`'s API, and a name no class has is no target's. A
+/// written-out last name matches by name.
+#[test]
+fn a_glob_target_matches_on_an_object_of_unknown_class_the_members_its_classes_have() {
+    let codes = |found: Vec<(u64, String, String)>| -> Vec<(u64, String)> {
+        found
+            .into_iter()
+            .map(|(line, code, _)| (line, code))
+            .collect()
+    };
+    let globs = "[\"pkg.parser.base.Context._*\", \"pkg.parser.base.Parser._*\"]";
+    let globs = unknown_objects_project("unknown_objects_globs", (globs, globs));
+    let found = reports(&globs);
+    assert_eq!(
+        codes(found.clone()),
+        vec![
+            (17, "MUT204".to_owned()),
+            (21, "MUT207".to_owned()),
+            (25, "MUT207".to_owned()),
+            (29, "MUT206".to_owned()),
+        ],
+        "{found:#?}"
+    );
+    // The call matches the target of the class defining `_secret` only.
+    assert!(
+        found[1]
+            .2
+            .ends_with("heki cannot tell whether it calls `pkg.parser.base.Parser._*`"),
+        "{found:#?}"
+    );
+    let written = "[\"pkg.parser.base.Context._replace\"]";
+    let written = unknown_objects_project("unknown_objects_written", (written, written));
+    assert_eq!(codes(reports(&written)), vec![(9, "MUT207".to_owned())]);
+    // A glob naming no holder names the members of every project class; one naming module
+    // functions names no member of any object.
+    let every = ("[\"_*\"]", "[\"pkg.parser.base.Context.module\"]");
+    assert_eq!(
+        codes(reports(&unknown_objects_project(
+            "unknown_objects_every_class",
+            every
+        ))),
+        vec![
+            (17, "MUT204".to_owned()),
+            (21, "MUT207".to_owned()),
+            (25, "MUT207".to_owned()),
+        ]
+    );
+    let functions = (
+        "[\"pkg.parser.setup.*\"]",
+        "[\"pkg.parser.base.Context.module\"]",
+    );
+    let functions = unknown_objects_project("unknown_objects_functions", functions);
+    let (code, stdout, stderr) = functions.check(&[]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+}
+
+/// The shape datamodel-code-generator reported: `Context._*` and `Parser._*`, with an untyped
+/// `ctx._replace(...)` (no target class defines `_replace`) and a typed call of a private
+/// method of `Parser`.
+#[test]
+fn a_named_tuple_method_on_an_object_of_unknown_class_is_no_glob_target() {
+    let p = Project::new("unknown_objects_repro");
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "h2"
+version = "0"
+requires-python = ">=3.11"
+
+[tool.heki.lint]
+select = ["MUT203", "MUT204", "MUT206", "MUT207"]
+
+[[tool.heki.call-owners]]
+name = "host-private-call"
+targets = ["pkg.parser.base.Context._*", "pkg.parser.base.Parser._*"]
+forbidden-callers = ["pkg.parser._render:*"]
+attribution = "lexical"
+unresolved = "report"
+"#,
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/parser/__init__.py", "")
+    .write(
+        "pkg/parser/base.py",
+        "from typing import NamedTuple\n\n\nclass Context(NamedTuple):\n    module: str\n\n\nclass Parser:\n    def _secret(self) -> int:\n        return 1\n",
+    )
+    .write(
+        "pkg/parser/_render.py",
+        "from pkg.parser.base import Context, Parser\n\n\ndef typed(ctx: Context) -> Context:\n    return ctx._replace(module=\"m\")\n\n\ndef untyped(contexts):\n    return [ctx._replace(module=\"m\") for ctx in contexts]\n\n\ndef control(parser: Parser) -> int:\n    return parser._secret()\n",
+    );
+    assert_eq!(
+        reports(&p),
+        vec![(
+            13,
+            "MUT204".to_owned(),
+            "`control` calls `pkg.parser.base.Parser._secret` inside the forbidden callers of `host-private-call`".to_owned()
+        )]
+    );
+}

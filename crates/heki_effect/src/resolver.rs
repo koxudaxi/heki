@@ -4645,6 +4645,17 @@ impl ProjectDecls {
             .then(|| Ty::Class(class.to_owned()))
     }
 
+    /// The project protocol a class object type names (`type[P]` of an annotation), whose
+    /// class [`Self::class_object`] leaves unknown: the contracts still judge an access through
+    /// it by the protocol (`allowed-protocols`).
+    pub(crate) fn protocol_class(&self, ty: &Ty) -> Option<String> {
+        let Ty::Class(class) = ty else {
+            return None;
+        };
+        let class = self.object_named(class);
+        self.protocol(&class).is_some().then_some(class)
+    }
+
     /// Whether the inferred type `t` is narrower than the declared `declared`, so that a value
     /// keeps it: anything for a declaration of `Any` / `object`, an instance of a project
     /// subclass of the declared class (`x: Base = Sub()`), and for a declared class object, a
@@ -6160,14 +6171,15 @@ const PLAIN_BASES: &[&str] = &[
 ];
 
 /// The classes a type names: the class of an instance or of each member of a union, and those
-/// of a generic container's items (one level: `list[Model]`, `dict[str, Model]`, `tuple[A, B]`,
-/// `list[A | B]`; `dict[str, list[Model]]` names `str` and `list`).
+/// of a generic container's items or a future's result (one level: `list[Model]`,
+/// `dict[str, Model]`, `tuple[A, B]`, `list[A | B]`; `dict[str, list[Model]]` names `str` and
+/// `list`).
 fn ty_classes(ty: &Ty, out: &mut Vec<String>) {
     for obj in ty.members() {
         out.push(obj.class.clone());
         let items: Vec<&Elem> = match &obj.args {
             Args::None => Vec::new(),
-            Args::Items(e) => vec![e.as_ref()],
+            Args::Items(e) | Args::Result(e) => vec![e.as_ref()],
             Args::Map(k, v) => vec![k.as_ref(), v.as_ref()],
             Args::Tuple(es) => es.iter().collect(),
         };

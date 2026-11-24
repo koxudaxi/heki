@@ -22,7 +22,7 @@ use crate::{
     CheckContext, DottedPattern, RuleConfigError, def_spellings, has_glob_syntax, last_name,
     split_last_dot,
 };
-use heki_effect::{ContractClass, FuncKey, Unresolved};
+use heki_effect::{AccessKind, ContractClass, FuncKey, Unresolved};
 use heki_env::{HekiConfig, UnmatchedEntries};
 use rustc_hash::{FxHashMap, FxHashSet};
 use schemars::JsonSchema;
@@ -350,6 +350,15 @@ struct ProjectNames<'a> {
     strict: bool,
     /// The names each class has ([`Self::names_of`]), found once.
     names: FxHashMap<String, FxHashSet<&'a str>>,
+    /// The top-level modules of the analyzed files.
+    project_modules: FxHashSet<&'a str>,
+    /// The top-level modules outside the project heki knows the analyzed files to use: those
+    /// their module-level imports name.
+    imported_outside: FxHashSet<&'a str>,
+    /// The symbols outside the project the analyzed files call and read that a contract names
+    /// ([`heki_effect::FileSummary::external_accesses`]).
+    outside_calls: FxHashSet<&'a str>,
+    outside_reads: FxHashSet<&'a str>,
 }
 
 impl<'a> ProjectNames<'a> {
@@ -409,7 +418,30 @@ impl<'a> ProjectNames<'a> {
                 classes_by_last.entry(last).or_default().push(i);
             }
         }
+        let (mut outside_calls, mut outside_reads) = (FxHashSet::default(), FxHashSet::default());
+        for &(key, _) in &defined {
+            for (_, a) in cx.external_accesses(key) {
+                match a.kind {
+                    AccessKind::Call => outside_calls.insert(a.name.as_str()),
+                    AccessKind::Read => outside_reads.insert(a.name.as_str()),
+                    AccessKind::ImportProbe => false,
+                };
+            }
+        }
+        let top_level = |module: &'a str| module.split('.').next().unwrap_or(module);
+        let project_modules: FxHashSet<&str> = (cx.index.files.values())
+            .map(|f| top_level(&f.module_name))
+            .collect();
+        let imported_outside = (cx.index.files.values())
+            .flat_map(|f| f.decls.imports.values())
+            .map(|fqn| top_level(fqn))
+            .filter(|m| !project_modules.contains(m))
+            .collect();
         Self {
+            project_modules,
+            imported_outside,
+            outside_calls,
+            outside_reads,
             functions: defined.into_iter().map(|(key, _)| key).collect(),
             functions_by_last,
             functions_within,
@@ -421,6 +453,32 @@ impl<'a> ProjectNames<'a> {
             strict: cx.config.lint.unmatched_contract_entries == Some(UnmatchedEntries::Error),
             names: FxHashMap::default(),
         }
+    }
+
+    /// Whether `entry` of the `call-owners` or `read-owners` targets (`context`) names code
+    /// outside the project: a symbol outside the project the analyzed files call or read, or any
+    /// symbol of a module outside the project, which heki cannot list. An `<external>` entry, or
+    /// one whose first name is a module of the standard library or a module the analyzed files
+    /// import from outside the project (`sys._getframe`), is a rule about any use of that code,
+    /// now or later. An entry whose first name is a module of the project names project code,
+    /// also where the analyzed files leave out the module defining it.
+    fn names_outside(&self, context: &'static str, entry: &str) -> Result<bool, RuleConfigError> {
+        let used = match context {
+            "call-owners.targets" => &self.outside_calls,
+            "read-owners.targets" => &self.outside_reads,
+            _ => return Ok(false),
+        };
+        // A call target with an argument list names project functions only.
+        let (name, arguments) = split_arguments(entry, context)?;
+        let first = name.split('.').next().unwrap_or(name);
+        if arguments.is_some() || name.contains(':') || self.project_modules.contains(first) {
+            return Ok(false);
+        }
+        let matcher = FunctionMatcher::named(name, context)?;
+        Ok(matcher.names_outside_only()
+            || used.iter().any(|s| matcher.names_external(s))
+            || name.contains('.')
+                && (heki_env::is_stdlib_module(first) || self.imported_outside.contains(first)))
     }
 
     /// The functions a pattern whose last part is literal may name: those whose qualname ends
@@ -559,6 +617,9 @@ fn judge<'a>(
     (section, context): (&'static str, &'static str),
     entry: &str,
 ) -> Result<Option<Missing>, RuleConfigError> {
+    if names.names_outside(context, entry)? {
+        return Ok(None);
+    }
     let definition = match shape {
         Shape::Attribute => return judge_attribute(cx, names, (section, context), entry),
         Shape::Definition(definition) => definition,

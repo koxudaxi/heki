@@ -7,14 +7,15 @@
 //! check from them and the project declarations, and never kept in the index (ADR-017).
 
 use crate::resolver::{FromImport, ProjectDecls, resolve_relative_module};
-use crate::{FileSummary, ModuleInput, environment, is_stub};
+use crate::{FileSummary, ModuleInput, environment, is_stub, scc};
 use heki_ast::Span;
-use heki_ir::walk::{Answer, BitSet, Budget, Closure, FnShape, Visit, reach};
+use heki_ir::walk::{Answer, BitSet, Budget, Closure, FnShape, Visit, reach, reach_breadth_first};
 use heki_ir::{BlockId, FunctionId, Inst, InstKind, IrFunction, LastBindings, ModuleIr};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use std::cell::OnceCell;
-use std::collections::BTreeSet;
+use std::cell::{Cell, OnceCell};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::rc::Rc;
 
@@ -34,7 +35,17 @@ pub enum Timing {
 }
 
 impl Timing {
-    pub fn as_str(self) -> &'static str {
+    pub const ALL: [Self; 4] = [Self::Body, Self::Lazy, Self::Function, Self::TypeChecking];
+
+    /// [`Self::as_str`] of each of [`Self::ALL`]: how the configuration names the classes.
+    pub const NAMES: [&'static str; 4] = [
+        Self::ALL[0].as_str(),
+        Self::ALL[1].as_str(),
+        Self::ALL[2].as_str(),
+        Self::ALL[3].as_str(),
+    ];
+
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Body => "body",
             Self::Lazy => "lazy",
@@ -662,6 +673,16 @@ pub enum Target {
     Open,
 }
 
+impl ModuleRef {
+    /// The id of a project module, `None` for a module outside the project.
+    pub fn project(self) -> Option<u32> {
+        match self {
+            Self::Project(m) => Some(m),
+            Self::External(_) => None,
+        }
+    }
+}
+
 impl Target {
     /// The module the site certainly loads: its module, or the package of a `from` import.
     pub fn certain(&self) -> Option<ModuleRef> {
@@ -797,16 +818,19 @@ impl<'i> ImportGraph<'i> {
             Target::Module(ModuleRef::Project(p)) => {
                 let package_name = self.modules[p as usize].clone();
                 let full = format!("{package_name}.{name}");
-                if !decls.holds_module(&full) {
-                    return package;
-                }
+                let held = decls.holds_module(&full);
+                let either = || Target::PackageOrSubmodule {
+                    package: ModuleRef::Project(p),
+                    submodule: full.clone(),
+                };
                 match decls.from_import(&package_name, name) {
-                    FromImport::Submodule => self.module_target(&full, decls),
-                    FromImport::Attribute => package,
-                    FromImport::Open => Target::PackageOrSubmodule {
-                        package: ModuleRef::Project(p),
-                        submodule: full,
-                    },
+                    FromImport::Submodule if held => self.module_target(&full, decls),
+                    // A name the package binds nowhere is the submodule, which the project's
+                    // files lack: Python finds it elsewhere (a compiled extension module) or
+                    // not at all.
+                    FromImport::Submodule => either(),
+                    FromImport::Open if held => either(),
+                    FromImport::Attribute | FromImport::Open => package,
                 }
             }
             Target::Module(m @ ModuleRef::External(e)) => Target::PackageOrSubmodule {
@@ -876,6 +900,101 @@ impl<'i> ImportGraph<'i> {
                 .map(|&p| ModuleRef::External(p))
                 .collect(),
         }
+    }
+
+    /// Whether `package` is the project module `m` or a package holding it: Python loads it
+    /// before `m` runs, so no import in `m` loads it anew.
+    pub fn holds(&self, package: ModuleRef, m: u32) -> bool {
+        matches!(package, ModuleRef::Project(_))
+            && (self.modules[m as usize].strip_prefix(self.name(package)))
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+    }
+
+    /// The project modules site `j` of the project module `m` loads anew, each with the hop
+    /// into it: the parent packages of the module the site certainly loads
+    /// ([`Target::certain`]) that do not hold `m` ([`Self::holds`]), outermost first, then that
+    /// module unless it is `m` itself. A package holding `m` is a hop only when the site imports
+    /// it, or a name it binds ([`Target::Module`]: `from pkg import name` in `pkg.a`), and so
+    /// reads it while it may still be loading.
+    pub fn hops(&self, m: u32, j: usize) -> Vec<ImportHop> {
+        let target = &self.sites(m).expect("hops are of a module's sites")[j].1;
+        let Some(t) = target.certain().and_then(ModuleRef::project) else {
+            return Vec::new();
+        };
+        let hop = |to, parent| ImportHop {
+            from: m,
+            site: j,
+            to,
+            parent,
+        };
+        let parents = (self.parents(ModuleRef::Project(t)).into_iter())
+            .filter(|&p| !self.holds(p, m))
+            .filter_map(ModuleRef::project)
+            .map(|p| hop(p, true));
+        let steps_in = !self.holds(ModuleRef::Project(t), m) || matches!(target, Target::Module(_));
+        parents
+            .chain((t != m && steps_in).then(|| hop(t, false)))
+            .collect()
+    }
+
+    /// The groups of project modules importing each other through the sites `counts` takes:
+    /// every strongly connected component of two or more modules of their [`Self::hops`], in
+    /// the order of their smallest modules, each with a shortest cycle through that module.
+    /// Linear in the modules and sites, and unmetered: Tarjan's algorithm takes each hop once,
+    /// and the search for a cycle the modules of its own group, which no other group shares.
+    pub fn cycle_groups(&self, counts: impl Fn(&ImportSite) -> bool) -> Vec<CycleGroup> {
+        let hops: Vec<Vec<ImportHop>> = (0..self.modules.len() as u32)
+            .map(|m| self.counted_hops(m, &counts))
+            .collect();
+        let successors: Vec<Vec<usize>> = (hops.iter())
+            .map(|hs| hs.iter().map(|h| h.to as usize).collect())
+            .collect();
+        let mut groups: Vec<Vec<u32>> = scc::tarjan_scc(self.modules.len(), &successors)
+            .into_iter()
+            .filter(|component| component.len() > 1)
+            .map(|component| {
+                let mut members: Vec<u32> = component.into_iter().map(|m| m as u32).collect();
+                members.sort_unstable();
+                members
+            })
+            .collect();
+        groups.sort_unstable();
+        let budget = Budget::unmetered("import_cycles");
+        let mut member = vec![false; self.modules.len()];
+        groups
+            .into_iter()
+            .map(|members| {
+                members.iter().for_each(|&m| member[m as usize] = true);
+                let cycle = shortest_cycle(&budget, &hops, &member, members[0]);
+                members.iter().for_each(|&m| member[m as usize] = false);
+                CycleGroup { members, cycle }
+            })
+            .collect()
+    }
+
+    /// The hop of module `m` into each module the sites `counts` takes load anew, by the
+    /// module it enters, ascending. Of the sites loading one module, the hop is the first in
+    /// source order of those that run earliest ([`Timing`]), an import of the module before
+    /// a load of it as a parent package: which sites load a module, and when, chooses it, not
+    /// the order they are written in.
+    fn counted_hops(&self, m: u32, counts: &impl Fn(&ImportSite) -> bool) -> Vec<ImportHop> {
+        // A site whose timing is open ranks after every known one.
+        type Rank = ((bool, Timing), bool, usize);
+        let mut into: BTreeMap<u32, (Rank, ImportHop)> = BTreeMap::new();
+        for (j, (site, _)) in self.sites(m).into_iter().flatten().enumerate() {
+            if !counts(site) {
+                continue;
+            }
+            let timing = (site.timing.is_open(), site.timing.open_means(Timing::Body));
+            for hop in self.hops(m, j) {
+                let rank = (timing, hop.parent, j);
+                let kept = into.entry(hop.to).or_insert((rank, hop));
+                if rank < kept.0 {
+                    *kept = (rank, hop);
+                }
+            }
+        }
+        into.into_values().map(|(_, hop)| hop).collect()
     }
 
     /// The name of `m`.
@@ -986,4 +1105,71 @@ impl ImportTime {
             names
         })
     }
+}
+
+/// A step of an import chain: site `site` of the project module `from` (its index in
+/// [`ImportGraph::sites`]) loads the project module `to`, the module it imports or, first, a
+/// parent package of it (`parent`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportHop {
+    pub from: u32,
+    pub site: usize,
+    pub to: u32,
+    pub parent: bool,
+}
+
+/// A group of project modules importing each other ([`ImportGraph::cycle_groups`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CycleGroup {
+    /// Ascending, which is the order of their names.
+    pub members: Vec<u32>,
+    /// A shortest cycle from the smallest member back to it: each hop enters the module the
+    /// next one leaves, and the last hop, which closes the cycle, enters the first member.
+    pub cycle: Vec<ImportHop>,
+}
+
+/// A shortest cycle of `hops` from `start` back to it through the modules `member` marks,
+/// breadth first, each module's hops taken in the order of the modules they enter: the cycle
+/// closes at the first module the search reaches that imports `start`. One step of the
+/// unmetered `budget` per module reached.
+fn shortest_cycle(
+    budget: &Budget,
+    hops: &[Vec<ImportHop>],
+    member: &[bool],
+    start: u32,
+) -> Vec<ImportHop> {
+    let mut into: FxHashMap<u32, ImportHop> = FxHashMap::default();
+    let closing: Cell<Option<ImportHop>> = Cell::new(None);
+    let searched = reach_breadth_first::<_, ()>(
+        budget,
+        [start],
+        |m, next| {
+            for hop in hops[m as usize].iter().filter(|h| member[h.to as usize]) {
+                if hop.to == start {
+                    // The search stops at its next module: no other hop closes the cycle.
+                    closing.set(Some(*hop));
+                } else if let Entry::Vacant(entry) = into.entry(hop.to) {
+                    entry.insert(*hop);
+                    next.push(hop.to);
+                }
+            }
+        },
+        |_| match closing.get() {
+            Some(_) => Visit::Stop(()),
+            None => Visit::Expand,
+        },
+    );
+    searched.open_means(None);
+    let last = closing
+        .get()
+        .expect("a group of modules has a cycle through each");
+    let mut cycle = vec![last];
+    let mut at = last.from;
+    while at != start {
+        let hop = into[&at];
+        cycle.push(hop);
+        at = hop.from;
+    }
+    cycle.reverse();
+    cycle
 }
