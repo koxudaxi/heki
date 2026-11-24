@@ -265,6 +265,10 @@ struct Joins {
     any_global: bool,
     /// The names a store rebinds to what an in-place operator gives on their own value.
     in_place: BTreeSet<StoreTarget>,
+    /// What changes in place add to the objects of names the code changes through a load
+    /// typed by the name alone (a global read through the module's own object): joined into
+    /// their type once it is established.
+    added: BTreeMap<StoreTarget, Added>,
 }
 
 impl Join for Joins {
@@ -289,6 +293,9 @@ impl Join for Joins {
         for target in &other.in_place {
             grew |= self.in_place.insert(target.clone());
         }
+        for (target, added) in &other.added {
+            grew |= self.add(target.clone(), added);
+        }
         grew
     }
 
@@ -299,6 +306,7 @@ impl Join for Joins {
             + self.adding.len()
             + self.restoring.len()
             + self.in_place.len()
+            + self.added.len()
     }
 }
 
@@ -318,6 +326,11 @@ impl Joins {
         }
         for target in &other.in_place {
             if self.in_place.insert(target.clone()) {
+                out.push(Key::Name(target.clone()));
+            }
+        }
+        for (target, added) in &other.added {
+            if self.add(target.clone(), added) {
                 out.push(Key::Name(target.clone()));
             }
         }
@@ -352,8 +365,14 @@ impl Joins {
         self.every.entry(target).or_default().add(value);
     }
 
+    /// Join `added` into what changes in place add to `target` ([`Self::added`]); returns
+    /// whether it grew.
+    fn add(&mut self, target: StoreTarget, added: &Added) -> bool {
+        self.added.entry(target).or_default().join(added)
+    }
+
     /// The type of `target` when its establishing stores bind a value of known type and heki
-    /// can name every store of it: the join of every store.
+    /// can name every store of it: the join of every store, with what [`Self::added`] adds.
     fn established(&self, target: &StoreTarget) -> Option<Ty> {
         let named = match target {
             StoreTarget::Global(_) => !self.any_global,
@@ -364,6 +383,10 @@ impl Joins {
             return None;
         }
         let t = self.every.get(target)?.type_of()?;
+        let t = match self.added.get(target) {
+            Some(added) => t.with_added(added),
+            None => t,
+        };
         (!self.in_place.contains(target) || keeps_in_place(&t)).then_some(t)
     }
 
@@ -2124,7 +2147,8 @@ impl<'c, 'f> Classifier<'c, 'f> {
     /// adds items heki types (`HANDLERS = {"a": run}`, then `HANDLERS[kind] = other` with
     /// `other` of unknown type, keeps no item type). A global read through the module's own
     /// object, which types it by its name alone (`tables.HANDLERS[kind] = other` in a module
-    /// importing itself), keeps its declaration or no type.
+    /// importing itself), keeps its declaration, or its type joins what the changes add once
+    /// it is established ([`Joins::added`]).
     fn changed_in_place(&self, out: &mut Sink<'_>, load: &ChangedLoad<'_>, added: &Added) {
         // The loaded value's type with what the changes add, when that changes it; another
         // module's names are marked instead, decided by their own module's stores.
@@ -2161,13 +2185,13 @@ impl<'c, 'f> Classifier<'c, 'f> {
                             }
                         }
                         Holder::Module(m) if m == module => {
+                            let target = StoreTarget::Global(attr.to_owned());
                             let declared = (self.declared)(attr);
                             let named_only = loaded.is_none_or(|t| matches!(t, Ty::Ref(_)));
-                            let known = declared.as_ref().map(Some).or(value);
-                            let value = known.or(named_only.then_some(None));
-                            if let Some(value) = value {
-                                let target = StoreTarget::Global(attr.to_owned());
+                            if let Some(value) = declared.as_ref().map(Some).or(value) {
                                 out.own.store(target, false, Some(value));
+                            } else if named_only {
+                                out.own.add(target, added);
                             }
                         }
                         Holder::Module(m) => {
