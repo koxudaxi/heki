@@ -2958,6 +2958,12 @@ const GLOBALS_USES: &[(&str, &str, &str)] = &[
          def warm() -> None:\n    __getattr__(\"KEY\")\n",
     ),
     (
+        "write_getattr_decorated",
+        "    return None",
+        "def warm(hook: object) -> object:\n    hook(\"KEY\")\n    return hook\n\n\n\
+         @warm\ndef __getattr__(name: str) -> object:\n    globals()[name] = 1\n    return 1\n",
+    ),
+    (
         "write_getattr_update",
         "    return None",
         "def __getattr__(name: str) -> object:\n    globals().update({name: 1})\n    return 1\n",
@@ -3023,8 +3029,9 @@ fn globals_project(name: &str) -> Project {
 /// module's constants still name keys, and so does a change binding only a name the namespace
 /// lacks: `setdefault`, and a store in the module's `__getattr__` under the name Python passes
 /// it, which Python does only for a missing name. Storing into it otherwise (another key, the
-/// name rebound, through a helper, in a hook the module's code calls, in a coroutine, generator,
-/// nested function, or method, from a keyword-only parameter), deleting from it, a method
+/// name rebound, through a helper, in a hook the module's code calls or decorates, in a
+/// coroutine, generator, nested function, or method, from a keyword-only parameter), deleting
+/// from it, a method
 /// changing it, or handing it on may bind any name, even one declared `Final`. Handing it on
 /// includes the builtin `globals` itself, a call of a reading builtin's name that the module, an
 /// import, a parameter, or a local rebinds (`def len(ns)`; a class attribute does not rebind it
@@ -3184,8 +3191,10 @@ def keeps_records(copy: Field, source: Field) -> None:
 /// The keys another module imports from a module with a caching `__getattr__` are its
 /// constants: a write under one names the attribute, and so does a loop over its tuple of them
 /// or over a tuple of the imported names, also in a generator of pairs a namespace is updated
-/// with, so no target is left unmatched. A cache under another key may bind any name, and a key
-/// bound on one path only may be what the hook binds, as may a tuple holding it.
+/// with, so no target is left unmatched. Another module calling the hook itself, through the
+/// module or under the name it imports the hook by, may bind any of them, `Final` too. A cache
+/// under another key may bind any name, and a key bound on one path only may be what the hook
+/// binds, as may a tuple holding it.
 #[test]
 fn constants_of_a_module_with_a_caching_getattr_name_keys_in_other_modules() {
     let p = Project::new("keys_getattr_imported");
@@ -3224,19 +3233,25 @@ fn constants_of_a_module_with_a_caching_getattr_name_keys_in_other_modules() {
         message_at(&diags, r, 10).ends_with("(also `Field._number`)"),
         "{diags:#?}"
     );
+    let unknown = vec![
+        d(o, 12, "MUT205", "with_number", "Field"),
+        d(r, 10, "MUT205", "keeps_records", "Field"),
+        d(w, 6, "MUT205", "writes_imported_key", "Field"),
+        d(w, 12, "MUT205", "copies_records", "Field"),
+    ];
+    for warm in [
+        "from pkg import keys\n\n\ndef warm() -> None:\n    keys.__getattr__(\"ORIGIN_KEY\")\n",
+        "from pkg.keys import __getattr__ as load\n\n\ndef warm() -> None:\n    load(\"ORIGIN_KEY\")\n",
+    ] {
+        p.write("pkg/warm.py", warm);
+        assert_eq!(found(&diagnostics(&p, &[])), unknown, "{warm}");
+    }
+    p.write("pkg/warm.py", "");
     p.write(
         "pkg/keys.py",
         &GETATTR_KEYS.replace("globals()[name]", "globals()[name.lower()]"),
     );
-    assert_eq!(
-        found(&diagnostics(&p, &[])),
-        vec![
-            d(o, 12, "MUT205", "with_number", "Field"),
-            d(r, 10, "MUT205", "keeps_records", "Field"),
-            d(w, 6, "MUT205", "writes_imported_key", "Field"),
-            d(w, 12, "MUT205", "copies_records", "Field"),
-        ]
-    );
+    assert_eq!(found(&diagnostics(&p, &[])), unknown);
     p.write(
         "pkg/keys.py",
         &format!(
@@ -3282,7 +3297,7 @@ from pkg.keys import AGAIN, LISTED, MIXED, ORIGIN_KEY, RECORDS
 from pkg.model import Field
 
 OWN: Final = ("_origin", "_number")
-OWN_IMPORTED = (ORIGIN_KEY,)
+OWN_IMPORTED = (ORIGIN_KEY, "_number")
 
 
 def module_attr(target: Field) -> None:
@@ -3348,6 +3363,32 @@ def unpacked(target: Field, source: Field) -> None:
 
 def inner_loop(target: Field, rows: list) -> None:
     target.__dict__.update((key, row) for row in rows for key in RECORDS)
+
+
+class Holder:
+    KEYS = ("_origin",)
+
+
+def instance_attr(target: Field, holder: Holder) -> None:
+    for key in holder.KEYS:
+        target.__dict__[key] = None
+
+
+def namespace(target: Field, source: Field) -> None:
+    target.__dict__.update(source.__dict__)
+
+
+def namespace_items(target: Field, source: Field) -> None:
+    target.__dict__.update(source.__dict__.items())
+
+
+def tuple_as_key(target: Field) -> None:
+    target.__dict__[RECORDS] = None
+
+
+def characters(target: Field) -> None:
+    for key in ORIGIN_KEY:
+        target.__dict__[key] = None
 "#;
 
 /// A key a loop takes from a module-level tuple of string constants, of the module or imported
@@ -3355,8 +3396,9 @@ def inner_loop(target: Field, rows: list) -> None:
 /// so does the key of each pair a generator yields to `update`, `dict`, or a loop unpacking it,
 /// keyed by the item of its first `for` clause or by a constant, or a key it yields itself. A
 /// list, a name bound twice, a tuple holding a value that is no constant, a key computed from
-/// the item, strings handed to `update` as pairs, a key a later `for` clause takes, and the
-/// pairs of a namespace name no key.
+/// the item, strings handed to `update` as pairs, a key a later `for` clause takes, a class's
+/// tuple read on an instance, a namespace or its pairs, a tuple constant used as a key, and the
+/// characters of a string constant name no key.
 #[test]
 fn a_tuple_constant_and_a_generator_of_pairs_name_each_key() {
     let p = Project::new("keys_tuple_constants");
@@ -3393,6 +3435,11 @@ fn a_tuple_constant_and_a_generator_of_pairs_name_each_key() {
             d(u, 64, "MUT201", "dict_of_pairs", origin),
             d(u, 69, "MUT201", "unpacked", origin),
             d(u, 73, "MUT205", "inner_loop", field),
+            d(u, 82, "MUT205", "instance_attr", field),
+            d(u, 86, "MUT205", "namespace", field),
+            d(u, 90, "MUT205", "namespace_items", field),
+            d(u, 94, "MUT205", "tuple_as_key", field),
+            d(u, 99, "MUT205", "characters", field),
         ]
     );
 }

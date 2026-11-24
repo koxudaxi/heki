@@ -1125,7 +1125,8 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   each of them, a list or set only while no code changes it, and so does the key of each pair a
   generator of them gives `update` (`ns.update((key, v) for key in RECORDS)`). A module
   `__getattr__` caching what it serves (`globals()[name] = value`) leaves its module's string
-  constants bound on every path known, since Python calls it only for a name the module lacks.
+  constants bound on every path known, since Python calls it only for a name the module lacks,
+  unless a decorator wraps it or another module loads it (`keys.__getattr__("KEY")`).
   A class whose module stores attributes heki
   cannot name (`setattr(self, name, v)`), or that the code gives a name computed at run time,
   may have any attribute: an entry naming none of its known ones is not reported, except with

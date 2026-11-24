@@ -266,6 +266,8 @@ const EXTRAS_TRUSTED_PASS: &str = "from pkg.extras import Extras, relay_value, t
 const KEY_CONSTS: &str = "from typing import Final\n\nKEY: Final = \"entries\"\n";
 const KEY_WRITER: &str = "from pkg.key_consts import KEY\nfrom pkg.model import Registry\n\n\ndef mark(r: Registry):\n    r.__dict__[KEY] = []\n";
 const KEY_HOOK: &str = "\n\ndef __getattr__(name):\n    value = object()\n    globals()[name] = value\n    return value\n";
+const KEY_WARM: &str =
+    "from pkg import key_consts\n\n\ndef warm():\n    key_consts.__getattr__(\"KEY\")\n";
 const KEY_LOOP: &str = "from pkg.key_consts import KEYS\nfrom pkg.model import Registry\n\n\ndef mark_all(r: Registry):\n    for key in KEYS:\n        r.__dict__[key] = []\n";
 // A class constant names the guarded attribute for the class's own methods.
 const KEY_CLASS: &str = "from typing import ClassVar\n\nfrom pkg.model import Registry\n\n\nclass Keys:\n    KEY: ClassVar[str] = \"entries\"\n\n    def mark(self, r: Registry):\n        r.__dict__[self.KEY] = []\n";
@@ -2986,6 +2988,29 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
                 "pkg/key_consts.py",
                 format!("{KEY_CONSTS}{KEY_HOOK}"),
             )],
+        )
+        .present(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
+            "another module calls the hook itself, which may rebind the `Final` constant",
+            vec![Action::Create("pkg/key_warm.py", KEY_WARM.to_owned())],
+        )
+        .absent(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
+            "the key module drops its hook while the other module still calls it",
+            vec![save("pkg/key_consts.py", KEY_CONSTS)],
+        )
+        .present(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
+            "the hook is back while the other module calls it",
+            vec![Action::Save(
+                "pkg/key_consts.py",
+                format!("{KEY_CONSTS}{KEY_HOOK}"),
+            )],
+        )
+        .absent(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
+            "the module calling the hook is deleted",
+            vec![Action::Delete("pkg/key_warm.py")],
         )
         .present(&[("pkg/key_writer.py", "MUT201")]),
         Step::new(

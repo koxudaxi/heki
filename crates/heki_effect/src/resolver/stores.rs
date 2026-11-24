@@ -1750,40 +1750,26 @@ impl<'i> Iterated<'_, 'i> {
     /// takes, or any other value, is none heki names.
     fn yielded(&self, body: FunctionId) -> Option<Yielded> {
         let f = self.cx.ir().function(body);
-        let defs: FxHashMap<VarId, &Inst> = insts(f)
-            .filter_map(|inst| Some((inst.kind.dst()?, inst)))
-            .collect();
-        // The variable `v` copies, and the instruction defining it.
-        let source = |v: VarId| {
-            let mut cur = v;
-            for _ in 0..Self::MAX_COPIES {
-                let inst = defs.get(&cur)?;
-                match &inst.kind {
-                    InstKind::Copy { src, .. } => cur = *src,
-                    _ => return Some((cur, *inst)),
-                }
-            }
-            None
-        };
-        let mut yields = insts(f).filter_map(|inst| match &inst.kind {
-            InstKind::Yield { value, .. } => Some(*value),
-            InstKind::YieldFrom { .. } => Some(None),
+        let shape = FnShape::new(f);
+        // The instruction defining what `v` holds, through copies.
+        let source = |v: VarId| shape.inst(shape.copy_root(v));
+        // A generator expression yields its element once, and loops over `.0` first.
+        let value = insts(f).find_map(|inst| match &inst.kind {
+            InstKind::Yield { value, .. } => *value,
             _ => None,
-        });
-        let (Some(Some(value)), None) = (yields.next(), yields.next()) else {
-            return None;
+        })?;
+        let over_outermost = |iter: VarId| {
+            source(iter).is_some_and(|made| {
+                matches!(&made.kind, InstKind::MakeIter { iterable, .. }
+                    if f.var_name(*iterable) == Some(".0"))
+            })
         };
         let item = insts(f).find_map(|inst| match &inst.kind {
-            InstKind::IterNext { dst, iter, .. } => match &source(*iter)?.1.kind {
-                InstKind::MakeIter { iterable, .. } if f.var_name(*iterable) == Some(".0") => {
-                    Some(*dst)
-                }
-                _ => None,
-            },
+            InstKind::IterNext { dst, iter, .. } if over_outermost(*iter) => Some(*dst),
             _ => None,
         });
-        let is_item = |v: VarId| source(v).is_some_and(|(root, _)| Some(root) == item);
-        let (_, yielded) = source(value)?;
+        let is_item = |v: VarId| Some(shape.copy_root(v)) == item;
+        let yielded = source(value)?;
         match &yielded.kind {
             InstKind::AllocBuiltin {
                 dst,
@@ -1793,7 +1779,7 @@ impl<'i> Iterated<'_, 'i> {
                 if is_item(elems[0]) {
                     return Some(Yielded::Items(Wrapper::Keyed));
                 }
-                let def = |v: VarId| defs.get(&v).copied();
+                let def = |v: VarId| shape.inst(v);
                 let types = FxHashMap::default();
                 let name = self.cx.str_constant_with(elems[0], &def, &types)?;
                 Some(Yielded::PairsOf(name))
@@ -1989,15 +1975,17 @@ pub(crate) fn update_keys<'i>(
         types,
         constant: &constant,
     };
-    match loops.items(other) {
+    // A mapping gives its keys, pairs the keys they hold; strings are no pairs
+    // (`ns.update(["ab"])` stores `a`).
+    let keys = match loops.items(other) {
+        Some(Items::Pairs(keys)) => Some(*keys),
+        Some(keys @ Items::Keys(_)) => Some(keys),
+        _ => None,
+    };
+    match keys {
         Some(Items::Keys(classes)) => AttrName::KeyOf(classes),
-        Some(Items::Pairs(keys)) => match *keys {
-            Items::Keys(classes) => AttrName::KeyOf(classes),
-            Items::Constants(names) => AttrName::OneOf(names),
-            _ => AttrName::Unknown,
-        },
-        // Strings are no pairs (`ns.update(["ab"])` stores `a`).
-        Some(Items::Constants(_) | Items::Fields(_)) | None => AttrName::Unknown,
+        Some(Items::Constants(names)) => AttrName::OneOf(names),
+        _ => AttrName::Unknown,
     }
 }
 

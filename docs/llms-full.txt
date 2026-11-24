@@ -2251,7 +2251,8 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   each of them, a list or set only while no code changes it, and so does the key of each pair a
   generator of them gives `update` (`ns.update((key, v) for key in RECORDS)`). A module
   `__getattr__` caching what it serves (`globals()[name] = value`) leaves its module's string
-  constants bound on every path known, since Python calls it only for a name the module lacks.
+  constants bound on every path known, since Python calls it only for a name the module lacks,
+  unless a decorator wraps it or another module loads it (`keys.__getattr__("KEY")`).
   A class whose module stores attributes heki
   cannot name (`setattr(self, name, v)`), or that the code gives a name computed at run time,
   may have any attribute: an entry naming none of its known ones is not reported, except with
@@ -5279,7 +5280,10 @@ the call graph, or the class hierarchy goes through them:
   decisions at a time. A question asked deeper waits while the decisions under way unwind, and
   is decided first with the same questions open: the answers are those of the whole recursion,
   whose depth would otherwise follow a chain in the source past a thread's stack (2 MiB for the
-  threads analyzing the files of a project).
+  threads analyzing the files of a project). The questions open are then decided again, so a
+  question with many deep ones below it runs once per deep one: from the first wait on, the
+  decisions take their steps from one budget of the owner, and past it the questions still open
+  are unknown.
 - A `Budget` per owner (a rule run on one function, the summary of one function, the store
   types of one module) counts the steps of all the owner's walks, and the weight of every fact
   they join, which bounds both the work of joining and the memory of the facts kept: 64 per IR
@@ -8454,7 +8458,7 @@ What an import loads is decided as Python decides it:
 - Relative imports are made absolute from the importing module.
 - `importlib.import_module("pkg.db")` and `__import__("pkg.db")` with a constant name, or a name
   heki establishes, import that module. With several possible names, the call is reported only
-  when every one of them breaks the contract.
+  when every one of them breaks the contract, and the report gives each name's reason.
 - An import of a module the project lacks below one of its packages fails, and is no import.
 
 A module pattern is a whole module name or a glob whose `*` spans dots (`pkg.backend.*` names
@@ -11900,6 +11904,7 @@ the module they load, when that module may be one the contract does not allow:
   (`pkg.plugins.*`); a full name may also be one of a module `relative-imports` allows only
   through a relative import;
 - a by-name import of one of several names, some breaking the contract and some not;
+  the report gives every reason one of them may break it for;
 - `from a import c` where heki cannot tell whether `c` is the submodule `a.c`: a package outside
   the project, one whose `__init__.py` binds `c` before the submodule may be imported, one that
   binds `c` to an object of the submodule after importing it (`from .c import c`), which the
@@ -12337,7 +12342,8 @@ allowed writers:
   also with a string constant for the name (`model.__dict__[FIELDS_KEY]`, imported or not):
   a module-level name declared `Final` or bound once in its module and rebound by no other (a
   module `__getattr__` caching what it serves, `globals()[name] = value`, leaves the names the
-  module body binds on every path, since Python calls it only for a missing name), or
+  module body binds on every path, since Python calls it only for a missing name, unless a
+  decorator wraps it or another module loads it), or
   a class-body name declared `ClassVar` or `Final` and bound once (`self.KEY`, `cls.KEY`,
   `Model.KEY`), which every subclass of the object's class finds along its MRO in the same
   class (none defines it again or lists another base defining it first,

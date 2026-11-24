@@ -58,6 +58,7 @@ struct Indexes {
     protocols: FxHashMap<String, Option<Vec<String>>>,
     grown_elsewhere: FxHashSet<String>,
     rebound_elsewhere: FxHashSet<String>,
+    getattr_called: FxHashSet<String>,
     changed_paths: BTreeMap<String, PathChange>,
     copy_registered: FxHashSet<String>,
     setstate_called: bool,
@@ -1016,6 +1017,15 @@ pub struct ModuleDecls {
     /// ([`ProjectDecls::rebound_elsewhere`]).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub rebound_globals: BTreeSet<String>,
+    /// The `__getattr__` of other modules this module loads, by the fqn its imports give it
+    /// (`keys.__getattr__`, `from keys import __getattr__`): it may call the hook for a name
+    /// the hook's module binds ([`ProjectDecls::rebound_by_getattr`]).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub getattr_loads: BTreeSet<String>,
+    /// The names the module binds stay fixed past its `__getattr__` only while Python alone
+    /// calls it (`heki_ir::ModuleConstants::getattr_rebinds`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub getattr_rebinds: bool,
     /// The module's own functions and classes, by qualname (`f`, `C`, `C.m`), whose name its
     /// code binds to another object than their `def` or `class` statement: another store of
     /// the module global (also in a function after `global f`, and any name when `globals()`
@@ -1159,6 +1169,16 @@ pub enum StrValue {
     /// literals shares its texts with the module's constants
     /// (`heki_ir::ModuleConstants::str_tuples`).
     Tuple(Box<[StrValue]>),
+}
+
+impl StrValue {
+    /// The text of a literal, which a constant bound to a tuple or another name is not.
+    fn text(&self) -> Option<&str> {
+        match self {
+            Self::Literal(v) => Some(v),
+            _ => None,
+        }
+    }
 }
 
 impl ModuleDecls {
@@ -2023,6 +2043,10 @@ pub struct ProjectDecls {
     grown_elsewhere: FxHashSet<String>,
     /// Those another project module rebinds or deletes (`ModuleDecls::rebound_globals`).
     rebound_elsewhere: FxHashSet<String>,
+    /// The modules whose `__getattr__` binds the global its argument names
+    /// (`ModuleDecls::getattr_rebinds`) and another project module loads
+    /// (`ModuleDecls::getattr_loads`).
+    getattr_called: FxHashSet<String>,
     /// The dotted prefixes of the names in `rebound_elsewhere` (`pkg.mod.C` of
     /// `pkg.mod.C.run.__code__`): another module rebinds no attribute of a class not among them.
     rebound_owners: FxHashSet<String>,
@@ -2304,6 +2328,8 @@ impl ProjectDecls {
         out.grown_globals = differ(&before.grown_elsewhere, &self.grown_elsewhere);
         out.grown_globals
             .extend(differ(&before.rebound_elsewhere, &self.rebound_elsewhere));
+        out.grown_globals
+            .extend(differ(&before.getattr_called, &self.getattr_called));
         out.class_facts
             .extend(differ(&before.copy_registered, &self.copy_registered));
         if before.setstate_called != self.setstate_called {
@@ -2330,6 +2356,7 @@ impl ProjectDecls {
             protocols: self.protocols.clone(),
             grown_elsewhere: self.grown_elsewhere.clone(),
             rebound_elsewhere: self.rebound_elsewhere.clone(),
+            getattr_called: self.getattr_called.clone(),
             changed_paths: self.changed_paths.clone(),
             copy_registered: self.copy_registered.clone(),
             setstate_called: self.setstate_called,
@@ -2405,6 +2432,15 @@ impl ProjectDecls {
         self.protocols = self.protocol_implementations();
         self.grown_elsewhere = self.globals_changed_elsewhere(|m| &m.grown_globals);
         self.rebound_elsewhere = self.globals_changed_elsewhere(|m| &m.rebound_globals);
+        self.getattr_called = (self
+            .globals_changed_elsewhere(|m| &m.getattr_loads)
+            .into_iter())
+        .filter_map(|hook| {
+            let module = hook.strip_suffix(".__getattr__")?;
+            let rebinds = self.module(module).is_some_and(|m| m.getattr_rebinds);
+            rebinds.then(|| module.to_owned())
+        })
+        .collect();
         self.rebound_owners = (self.rebound_elsewhere.iter())
             .flat_map(|fqn| fqn.match_indices('.').map(|(dot, _)| fqn[..dot].to_owned()))
             .collect();
@@ -2462,7 +2498,7 @@ impl ProjectDecls {
     pub fn grown_elsewhere(&self, fqn: &str) -> bool {
         let fqn = self.canonical(fqn);
         self.read(|k| note(&mut k.grown_globals, &fqn));
-        self.grown_elsewhere.contains(&fqn)
+        self.grown_elsewhere.contains(&fqn) || self.rebound_by_getattr(&fqn)
     }
 
     /// Whether another project module rebinds or deletes the module global `fqn` (a string
@@ -2470,7 +2506,28 @@ impl ProjectDecls {
     pub fn rebound_elsewhere(&self, fqn: &str) -> bool {
         let fqn = self.canonical(fqn);
         self.read(|k| note(&mut k.grown_globals, &fqn));
-        self.rebound_elsewhere.contains(&fqn)
+        self.rebound_elsewhere.contains(&fqn) || self.rebound_by_getattr(&fqn)
+    }
+
+    /// Whether another project module may rebind the constant `fqn` of a module or a class:
+    /// it rebinds the name, which type checkers hold a constant declared `Final` to
+    /// (`rebindable`: not declared so), or calls the `__getattr__` of the constant's module,
+    /// which binds any global it is given ([`Self::rebound_by_getattr`]).
+    pub fn constant_rebound(&self, fqn: &str, rebindable: bool) -> bool {
+        if rebindable {
+            return self.rebound_elsewhere(fqn);
+        }
+        self.rebound_by_getattr(&self.canonical(fqn))
+    }
+
+    /// Whether the global `fqn` (canonical) of a module may be bound by the module's
+    /// `__getattr__`, which another project module loads and may call with the name, `Final`
+    /// or not ([`Self::getattr_called`]).
+    fn rebound_by_getattr(&self, fqn: &str) -> bool {
+        fqn.rsplit_once('.').is_some_and(|(module, _)| {
+            self.read(|k| note(&mut k.grown_globals, module));
+            self.getattr_called.contains(module)
+        })
     }
 
     /// Whether another project module may bind the global `name` of the project module
@@ -2491,7 +2548,7 @@ impl ProjectDecls {
     /// an MRO, of a module's function).
     fn rebound_elsewhere_canonical(&self, fqn: &str) -> bool {
         self.read(|k| note(&mut k.grown_globals, fqn));
-        self.rebound_elsewhere.contains(fqn)
+        self.rebound_elsewhere.contains(fqn) || self.rebound_by_getattr(fqn)
     }
 
     /// Whether calling the object the project name `fqn` names (a module's function or class,
@@ -3095,7 +3152,7 @@ impl ProjectDecls {
     fn alias_rebound(&self, module: &str, name: &str) -> bool {
         let fqn = format!("{module}.{name}");
         self.read(|k| note(&mut k.grown_globals, &fqn));
-        self.rebound_elsewhere.contains(&fqn)
+        self.rebound_elsewhere.contains(&fqn) || self.rebound_by_getattr(&fqn)
     }
 
     /// The object the name `fqn` stands for: through re-exports, as [`Self::canonical`], and
@@ -3177,7 +3234,7 @@ impl ProjectDecls {
         let fqn = self.canonical_value(fqn)?;
         let (m, rest) = self.split_module(&fqn)?;
         let constant = m.literal_constants.get(rest)?;
-        (!(constant.rebindable && self.rebound_elsewhere(&fqn)))
+        (!self.constant_rebound(&fqn, constant.rebindable))
             .then(|| literal_value(&constant.value))
             .flatten()
     }
@@ -3185,28 +3242,26 @@ impl ProjectDecls {
     /// The value of the string constant `fqn` (`pkg.keys.KEY`, `pkg.model.Model.KEY`), through
     /// re-exports and aliases ([`Self::constant_value`]).
     pub fn str_constant(&self, fqn: &str) -> Option<&str> {
-        match self.constant_value(fqn)? {
-            StrValue::Literal(v) => Some(v),
-            _ => None,
-        }
+        self.constant_value(fqn)?.text()
     }
 
     /// The texts of the items of the tuple constant `fqn` (`pkg.keys.RECORDS`), through
     /// re-exports and aliases ([`Self::constant_value`]), when each item is a string constant.
     pub fn str_tuple(&self, fqn: &str) -> Option<Vec<&str>> {
-        match self.constant_value(fqn)? {
-            StrValue::Tuple(items) => items.iter().map(|i| self.item_text(i)).collect(),
-            _ => None,
-        }
+        self.tuple_texts(self.constant_value(fqn)?)
     }
 
-    /// The text of the item `item` of a tuple constant.
-    fn item_text<'s>(&'s self, item: &'s StrValue) -> Option<&'s str> {
-        match item {
-            StrValue::Literal(v) => Some(v),
-            StrValue::Alias(fqn) => self.str_constant(fqn),
-            StrValue::Tuple(_) => None,
-        }
+    /// The texts of the items of `value` when it is a tuple of string constants.
+    fn tuple_texts<'s>(&'s self, value: &'s StrValue) -> Option<Vec<&'s str>> {
+        let StrValue::Tuple(items) = value else {
+            return None;
+        };
+        (items.iter())
+            .map(|item| match item {
+                StrValue::Alias(fqn) => self.str_constant(fqn),
+                item => item.text(),
+            })
+            .collect()
     }
 
     /// What the constant `fqn` is bound to, a text or a tuple, through re-exports
@@ -3217,7 +3272,7 @@ impl ProjectDecls {
         for _ in 0..MAX_ALIAS_CHASE {
             let (m, rest) = self.split_module(&cur)?;
             let constant = m.str_constants.get(rest)?;
-            if constant.rebindable && self.rebound_elsewhere(&cur) {
+            if self.constant_rebound(&cur, constant.rebindable) {
                 return None;
             }
             match &constant.value {
@@ -6007,7 +6062,12 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
         .filter_map(|star| star_import_module(input, star))
         .collect();
     decls.star_imports = (!star_imports.is_empty()).then_some(star_imports);
-    (decls.grown_globals, decls.rebound_globals) = foreign_grown_globals(input, &decls.imports);
+    (
+        decls.grown_globals,
+        decls.rebound_globals,
+        decls.getattr_loads,
+    ) = foreign_grown_globals(input, &decls.imports);
+    decls.getattr_rebinds = input.ir.constants.getattr_rebinds;
     let path_changes = package_paths::path_changes(input, &decls);
     decls.path_changes = (!path_changes.is_empty()).then(|| Box::new(path_changes));
     attr_displays(input, &mut decls);
@@ -6028,16 +6088,18 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
 /// `ModuleDecls::grown_globals`: the loads of an imported module's global (`cfg.QUEUE`, or
 /// `QUEUE` after `from cfg import QUEUE`) whose object a function may grow, and the globals
 /// it stores into or deletes on an imported module (`cfg.QUEUE = []`, also through a call:
-/// [`attr_calls`]), decided by the shared `heki_ir` facts ([`FnIndex::grown_vars`]); and
-/// those stores and deletes alone (`ModuleDecls::rebound_globals`).
+/// [`attr_calls`]), decided by the shared `heki_ir` facts ([`FnIndex::grown_vars`]); those
+/// stores and deletes alone (`ModuleDecls::rebound_globals`); and the loads of an imported
+/// module's `__getattr__` (`ModuleDecls::getattr_loads`).
 fn foreign_grown_globals(
     input: &ModuleInput<'_>,
     imports: &BTreeMap<String, String>,
-) -> (BTreeSet<String>, BTreeSet<String>) {
+) -> (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>) {
     let mut out = BTreeSet::new();
     let mut rebound = BTreeSet::new();
+    let mut getattr_loads = BTreeSet::new();
     if imports.is_empty() {
-        return (out, rebound);
+        return (out, rebound, getattr_loads);
     }
     for f in &input.ir.functions {
         let ix = FnIndex::new(f, &input.ir.constants);
@@ -6054,6 +6116,11 @@ fn foreign_grown_globals(
                         rebound.insert(format!("{module}.{attr}"));
                     }
                 }
+                InstKind::MethodCall { recv, method, .. } if method == "__getattr__" => {
+                    if let Some(module) = imported_fqn(&ix, imports, *recv, 0) {
+                        getattr_loads.insert(format!("{module}.__getattr__"));
+                    }
+                }
                 kind => {
                     if let Some(dst) = kind.dst()
                         && matches!(
@@ -6065,6 +6132,9 @@ fn foreign_grown_globals(
                         )
                         && let Some(fqn) = imported_fqn(&ix, imports, dst, 0)
                     {
+                        if fqn.ends_with(".__getattr__") {
+                            getattr_loads.insert(fqn.clone());
+                        }
                         loads.push((dst, fqn));
                     }
                 }
@@ -6082,7 +6152,7 @@ fn foreign_grown_globals(
         );
     }
     out.extend(rebound.iter().cloned());
-    (out, rebound)
+    (out, rebound, getattr_loads)
 }
 
 /// The attributes the function of `ix` stores or deletes by name through a call, by receiver
@@ -6440,6 +6510,7 @@ fn str_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Strin
         }
         let defs: FxHashMap<VarId, &Inst> =
             insts().filter_map(|i| Some((i.kind.dst()?, i))).collect();
+        let shape = FnShape::new(f);
         for (name, value) in bindings {
             let q = declared.get(name).copied().unwrap_or_default();
             let (key, once, rebindable) = if f.is_module_body {
@@ -6470,7 +6541,7 @@ fn str_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Strin
                 Some(Err(fqn)) => StrValue::Alias(fqn),
                 None if f.is_module_body => {
                     let fixed = input.ir.constants.str_tuples.get(name);
-                    match tuple_source(f, &defs, &imports, value, fixed, fixed_import(name)) {
+                    match tuple_source(&shape, &defs, &imports, value, fixed, fixed_import(name)) {
                         Some(items) => StrValue::Tuple(items),
                         None => continue,
                     }
@@ -7421,37 +7492,30 @@ fn constant_source<'a>(
     }
 }
 
-/// The items of the tuple display of string constants behind `var` (through copies), bound to a
-/// name by the module body `f` ([`StrValue::Tuple`]): each a literal or another constant
+/// The items of the tuple display of string constants behind `var` (through copies, `shape`),
+/// bound to a name by the module body `f` ([`StrValue::Tuple`]): each a literal or another constant
 /// ([`constant_source`]). A tuple of literals is one of the module's constants (`fixed`,
 /// `heki_ir::ModuleConstants::str_tuples`), shared with it, and one naming another module's
 /// constants is one only where the module's IR fixes the name (`fixed_import`,
 /// `heki_ir::ModuleConstants::imported`), as for a string.
 fn tuple_source(
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     defs: &FxHashMap<VarId, &Inst>,
     imports: &FxHashMap<Span, String>,
     var: VarId,
     fixed: Option<&Arc<[Arc<str>]>>,
     fixed_import: bool,
 ) -> Option<Box<[StrValue]>> {
-    let mut cur = var;
-    let mut display = None;
-    for _ in 0..MAX_ALIAS_CHASE {
-        match &defs.get(&cur)?.kind {
-            InstKind::Copy { src, .. } => cur = *src,
-            InstKind::AllocBuiltin {
-                dst,
-                kind: heki_ir::BuiltinKind::Tuple,
-                elems,
-            } => {
-                display = Some((*dst, elems));
-                break;
-            }
-            _ => return None,
-        }
-    }
-    let (dst, elems) = display?;
+    let f = shape.f;
+    let InstKind::AllocBuiltin {
+        dst,
+        kind: heki_ir::BuiltinKind::Tuple,
+        elems,
+    } = &shape.inst(shape.copy_root(var))?.kind
+    else {
+        return None;
+    };
+    let dst = *dst;
     let sources: Vec<Result<&str, String>> = (elems.iter().enumerate())
         .map(|(i, e)| (!f.is_starred(dst, i)).then(|| constant_source(defs, imports, *e))?)
         .collect::<Option<_>>()?;
@@ -8627,6 +8691,8 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     small_globals: BTreeMap::new(),
     grown_globals: BTreeSet::new(),
     rebound_globals: BTreeSet::new(),
+    getattr_loads: BTreeSet::new(),
+    getattr_rebinds: false,
     rebound_definitions: BTreeSet::new(),
     made_in: None,
     stores_elsewhere: None,
@@ -8847,19 +8913,13 @@ impl<'a> TypeCtx<'a> {
     /// its own constants, or one it imports (`from pkg.keys import KEY`, also through a star
     /// import).
     pub fn global_str(&self, name: &str) -> Option<&'a str> {
-        match self.global_constant(name)? {
-            StrValue::Literal(v) => Some(v),
-            _ => None,
-        }
+        self.global_constant(name)?.text()
     }
 
     /// The texts of the items of the module-level tuple constant `name` read inside this
     /// module, of its own or one it imports, as [`Self::global_str`] reads a string.
     pub fn global_str_tuple(&self, name: &str) -> Option<Vec<&'a str>> {
-        match self.global_constant(name)? {
-            StrValue::Tuple(items) => items.iter().map(|i| self.project.item_text(i)).collect(),
-            _ => None,
-        }
+        self.project.tuple_texts(self.global_constant(name)?)
     }
 
     /// What the module-level constant `name` read inside this module is bound to
@@ -8875,7 +8935,7 @@ impl<'a> TypeCtx<'a> {
             };
         };
         let fqn = || format!("{}.{name}", self.module.module_name);
-        if constant.rebindable && self.project.rebound_elsewhere(&fqn()) {
+        if self.project.constant_rebound(&fqn(), constant.rebindable) {
             return None;
         }
         match &constant.value {

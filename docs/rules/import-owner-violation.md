@@ -31,7 +31,7 @@ What an import loads is decided as Python decides it:
 - Relative imports are made absolute from the importing module.
 - `importlib.import_module("pkg.db")` and `__import__("pkg.db")` with a constant name, or a name
   heki establishes, import that module. With several possible names, the call is reported only
-  when every one of them breaks the contract.
+  when every one of them breaks the contract, and the report gives each name's reason.
 - An import of a module the project lacks below one of its packages fails, and is no import.
 
 A module pattern is a whole module name or a glob whose `*` spans dots (`pkg.backend.*` names
