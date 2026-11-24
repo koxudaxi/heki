@@ -6,6 +6,7 @@ use crate::opt_rules::{Creators, Sizes};
 use crate::premises::{self, OpenCause, Told};
 use crate::{CheckContext, FnSites, ModuleUnit};
 use heki_diagnostics::{Certainty, Diagnostic, OpenPremise, OpenRecord};
+use heki_effect::resolver::Val;
 use heki_effect::{CallHop, CallSite, CallTarget, SiteEffect, TypeCtx, with_paths};
 use heki_ir::walk::{Answer, Budget, Def, FnShape, Visit, reach};
 use heki_ir::{
@@ -198,6 +199,7 @@ fn established_updates(
             f,
             paths,
             ix,
+            types: &types,
             origins,
         };
         hits.iter()
@@ -235,6 +237,7 @@ struct UpdateDecision<'d, 'o> {
     f: &'d IrFunction,
     paths: &'d Paths<'d, 'd>,
     ix: &'d FnIndex<'d>,
+    types: &'d FxHashMap<VarId, Val>,
     origins: &'d ItemOrigins<'o>,
 }
 
@@ -282,7 +285,11 @@ impl UpdateDecision<'_, '_> {
         if !told.stopped && !every_iteration() {
             told.step(&premises::NOT_EVERY_ITERATION);
         }
-        if !told.stopped && !ix.fixed_trips(hit.lp, &mut |_| None).is_open() {
+        let call_items = &mut |inst: &heki_ir::Inst| {
+            self.tcx
+                .fixed_call_items(self.types, &|v| shape.inst(v), inst)
+        };
+        if !told.stopped && !ix.fixed_trips(hit.lp, call_items).is_open() {
             told.step(&premises::FIXED_BY_THE_CODE);
         }
         if !told.stopped && !carries_only(shape, f, budget, &hit.lc.back_vars, hit.update) {
@@ -292,7 +299,7 @@ impl UpdateDecision<'_, '_> {
             let _ = self.origins.of_loop(budget, f.id, li);
             return None;
         }
-        match DataOrigins::of_loop_items(cx, self.tcx, self.origins, budget, (f.id, li)) {
+        match DataOrigins::of_loop_items(self.tcx, self.origins, budget, (f.id, li)) {
             Ok(found) => (!told.open).then_some(found),
             Err(cause) => {
                 told.step(cause);

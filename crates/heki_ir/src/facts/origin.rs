@@ -225,6 +225,12 @@ impl<'m> ItemOrigins<'m> {
         let Some(iterable) = ix.f.loops.get(li).and_then(|lp| ix.loop_iterable(lp)) else {
             return Answer::Open;
         };
+        self.of_value(budget, f, iterable)
+    }
+
+    /// Where the items of the value `v` of function `f` come from, charged to `budget`: what a
+    /// loop over it would step through (a function's returned value, [`Self::of_loop`]).
+    pub fn of_value(&self, budget: &Budget, f: FunctionId, v: VarId) -> Answer<BTreeSet<ItemOrigin>> {
         // `own` decides a question's successors with its own fact; `next` hands them on.
         let pending: RefCell<Vec<Key>> = RefCell::new(Vec::new());
         let own = |key: Key| {
@@ -234,7 +240,7 @@ impl<'m> ItemOrigins<'m> {
         };
         let next = |_: Key, out: &mut Vec<Key>| out.append(&mut pending.borrow_mut());
         self.closure
-            .ask(budget, (f, iterable, Steps::default()), own, next)
+            .ask(budget, (f, v, Steps::default()), own, next)
             .and_then(|fact| match &fact.0 {
                 Some(origins) => Answer::Known(origins.iter().copied().collect()),
                 None => Answer::Open,
