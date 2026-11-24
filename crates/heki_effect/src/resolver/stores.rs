@@ -15,12 +15,15 @@ use super::{
 };
 use crate::ModuleInput;
 use crate::infer::Inferred;
-use crate::types::Ty;
+use crate::types::{Added, Change, Ty};
 
 use heki_ir::walk::{
-    Answer, Budget, Def, Facts, FnShape, Join, Sparse, Use, Visit, fixpoint, reach,
+    Answer, Budget, Closure, Def, Facts, FnShape, Join, Sparse, Use, Visit, fixpoint, reach,
 };
-use heki_ir::{BlockId, BuiltinKind, Inst, InstKind, IrFunction, LastBindings, Terminator, VarId};
+use heki_ir::{
+    BlockId, BuiltinKind, InPlaceChanges, Inst, InstKind, IrFunction, LastBindings, Terminator,
+    VarId,
+};
 use heki_kb::EffectiveEcosystemKb;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::{Borrow, Cow};
@@ -575,6 +578,8 @@ struct StoringFn<'f> {
     /// The loads of a global or an attribute whose object the function changes in place
     /// ([`changed_loads`]).
     changed: Box<[ChangedLoad<'f>]>,
+    /// The changes in place of the function, `None` when heki cannot list them all.
+    changes: Option<InPlaceChanges<'f>>,
     /// The class whose instance the function stores into as `self` (qualname), and the
     /// variables holding it ([`self_of`]).
     selfs: Option<(&'f str, FxHashSet<VarId>)>,
@@ -584,22 +589,20 @@ struct StoringFn<'f> {
     state: Option<VarId>,
 }
 
-/// A load whose object a function changes in place ([`changed_loads`]), with the variable it
-/// binds.
-#[derive(Clone, Copy)]
-enum ChangedLoad<'f> {
-    /// Of a name of the module (`HANDLERS[kind] = run`).
-    Name(VarId, &'f str),
-    /// Of attribute `attr` of `obj` (`self.items.append(x)`): `(dst, obj, attr)`.
-    Attr(VarId, VarId, &'f str),
+/// A load whose object a function changes in place ([`changed_loads`]): the variable it binds
+/// and what it reads.
+struct ChangedLoad<'f> {
+    dst: VarId,
+    of: LoadOf<'f>,
 }
 
-impl ChangedLoad<'_> {
-    fn dst(self) -> VarId {
-        match self {
-            Self::Name(dst, _) | Self::Attr(dst, ..) => dst,
-        }
-    }
+/// What a [`ChangedLoad`] reads.
+#[derive(Clone, Copy)]
+enum LoadOf<'f> {
+    /// A name of the module (`HANDLERS[kind] = run`).
+    Name(&'f str),
+    /// Attribute `attr` of `obj` (`self.items.append(x)`): `(obj, attr)`.
+    Attr(VarId, &'f str),
 }
 
 /// What the stores of a function bind in other modules, by name.
@@ -617,15 +620,32 @@ struct ForeignStore {
     stored: Stored,
     /// A store rebinds the name to what an in-place operator gives on its own value.
     in_place: bool,
-    /// The function changes the object the name holds in place ([`StoringFn::changed`]).
-    changed: bool,
+    /// What the function's changes in place of the object the name holds add to it
+    /// ([`StoringFn::changed`]).
+    changed: Option<Added>,
+}
+
+impl ForeignStore {
+    fn changed_by(&mut self, added: &Added) {
+        join_added(&mut self.changed, added);
+    }
+}
+
+/// Join `added` into what changes in place add to a name (`None`: no change).
+fn join_added(changed: &mut Option<Added>, added: &Added) {
+    match changed {
+        Some(before) => {
+            before.join(added);
+        }
+        None => *changed = Some(added.clone()),
+    }
 }
 
 impl Foreign {
     fn into_decl(self) -> Option<StoresElsewhere> {
         let stored = |s: ForeignStore| {
             let ty = s.stored.elsewhere();
-            (ty.is_some() || s.in_place || s.changed).then_some(StoredElsewhere {
+            (ty.is_some() || s.in_place || s.changed.is_some()).then_some(StoredElsewhere {
                 ty,
                 in_place: s.in_place,
                 changed: s.changed,
@@ -1282,27 +1302,44 @@ fn insts(f: &IrFunction) -> impl Iterator<Item = &Inst> {
 }
 
 /// The loads of `f` of a global or an attribute whose object `f` changes in place itself
-/// ([`heki_ir::FnIndex::changed_vars`]: `HANDLERS[kind] = run`, `self.items.append(x)`), in
-/// the order of the function's instructions.
-fn changed_loads<'f>(input: &ModuleInput<'_>, f: &'f IrFunction) -> Box<[ChangedLoad<'f>]> {
+/// ([`heki_ir::FnIndex::changes_in_place`]: `HANDLERS[kind] = run`, `self.items.append(x)`,
+/// `self.items += more`), in the order of the function's instructions, and the changes (`None`
+/// when heki cannot list them all, and every load may be changed).
+fn changed_loads<'f>(
+    input: &'f ModuleInput<'_>,
+    f: &'f IrFunction,
+) -> (Box<[ChangedLoad<'f>]>, Option<InPlaceChanges<'f>>) {
     let changes = insts(f).any(|inst| {
         matches!(
             inst.kind,
-            InstKind::SubscriptStore { .. } | InstKind::MethodCall { .. }
+            InstKind::SubscriptStore { .. }
+                | InstKind::MethodCall { .. }
+                | InstKind::BinOp { in_place: true, .. }
         )
     });
     if !changes {
-        return Box::default();
+        return (Box::default(), None);
     }
-    let changed = heki_ir::FnIndex::new(f, &input.ir.constants).changed_vars();
-    let loads = insts(f).filter_map(|inst| match &inst.kind {
-        InstKind::LoadGlobal { dst, name, .. } | InstKind::LoadName { dst, name } => {
-            Some(ChangedLoad::Name(*dst, name))
-        }
-        InstKind::AttrLoad { dst, obj, attr } => Some(ChangedLoad::Attr(*dst, *obj, attr)),
-        _ => None,
+    let changes = match heki_ir::FnIndex::new(f, &input.ir.constants).changes_in_place() {
+        Answer::Known(changes) => Some(changes),
+        Answer::Open => None,
+    };
+    let changed = |dst: &VarId| {
+        changes
+            .as_ref()
+            .is_none_or(|c| c.aliased_by.contains_key(dst))
+    };
+    let loads = insts(f).filter_map(|inst| {
+        let (dst, of) = match &inst.kind {
+            InstKind::LoadGlobal { dst, name, .. } | InstKind::LoadName { dst, name } => {
+                (*dst, LoadOf::Name(name))
+            }
+            InstKind::AttrLoad { dst, obj, attr } => (*dst, LoadOf::Attr(*obj, attr)),
+            _ => return None,
+        };
+        changed(&dst).then_some(ChangedLoad { dst, of })
     });
-    loads.filter(|load| changed.contains(&load.dst())).collect()
+    (loads.collect(), changes)
 }
 
 /// The functions of the module that may store into a global or into an attribute of an
@@ -1328,7 +1365,7 @@ fn storing_functions<'f>(input: &'f ModuleInput<'_>, cx: &TypeCtx<'f>) -> Vec<St
             budget: &budget,
             names_builtin: &names_builtin,
         };
-        let changed = changed_loads(input, f);
+        let (changed, changes) = changed_loads(input, f);
         if changed.is_empty() && !insts(f).any(|inst| calls.may_store(&inst.kind)) {
             continue;
         }
@@ -1338,6 +1375,7 @@ fn storing_functions<'f>(input: &'f ModuleInput<'_>, cx: &TypeCtx<'f>) -> Vec<St
             f,
             shape,
             changed,
+            changes,
             at_init: method && (f.name == "__init__" || f.name == "__post_init__"),
             state: (method && f.name == "__setstate__")
                 .then(|| f.params.get(1).map(|p| p.var))
@@ -2043,8 +2081,22 @@ impl<'c, 'f> Classifier<'c, 'f> {
         for (ns, obj) in namespaces {
             self.namespace(&mut out, ns, obj);
         }
-        for &load in &self.s.changed {
-            self.changed_in_place(&mut out, load);
+        let budget = Budget::of_function("store additions", f);
+        let additions: Closure<VarId, Added> = Closure::new();
+        for load in &self.s.changed {
+            let added = match &self.s.changes {
+                Some(changes) => additions.ask(
+                    &budget,
+                    load.dst,
+                    |v| self.added_by(changes, v),
+                    |v, out| out.extend(changes.aliased_by.get(&v).into_iter().flatten()),
+                ),
+                None => Answer::Open,
+            };
+            // Past the budget, or when heki cannot list the changes, they add what heki cannot
+            // type.
+            let added = added.open_means(Rc::new(Added::unknown()));
+            self.changed_in_place(&mut out, load, &added);
         }
     }
 
@@ -2058,35 +2110,36 @@ impl<'c, 'f> Classifier<'c, 'f> {
             (self.holders(obj).iter()).any(|h| matches!(h, Holder::Module(m) if m == module))
         };
         (self.s.changed.iter())
-            .filter_map(|load| match *load {
-                ChangedLoad::Name(_, name) => Some(name),
-                ChangedLoad::Attr(_, obj, attr) => own_module(obj).then_some(attr),
+            .filter_map(|load| match load.of {
+                LoadOf::Name(name) => Some(name),
+                LoadOf::Attr(obj, attr) => own_module(obj).then_some(attr),
             })
             .collect()
     }
 
     /// A change in place of the object the load `load` gives (an item store, a method call
-    /// that may add items): a store, into the name the load reads, of the
-    /// object's class with its items unknown, or of an annotated global's declaration. The name
-    /// keeps its class and no items the code may add or replace (`HANDLERS = {"a": run}`, then
-    /// `HANDLERS[kind] = other`). A global read through the module's own object, which types it
-    /// by its name alone (`tables.HANDLERS[kind] = other` in a module importing itself), keeps
-    /// its declaration or no type.
-    fn changed_in_place(&self, out: &mut Sink<'_>, load: ChangedLoad<'_>) {
-        // The loaded value's class with its items unknown, when it has items; another module's
-        // names are marked instead, decided by their own module's stores.
-        let loaded = self.types.ty(load.dst());
-        let without_items = loaded
-            .map(|t| (t.without_items(), t))
+    /// that may add items, an in-place operator): a store, into the name the load reads, of
+    /// the loaded type with what the changes add ([`Ty::with_added`]), or of an annotated
+    /// global's declaration. The name keeps its class, and its items only where every change
+    /// adds items heki types (`HANDLERS = {"a": run}`, then `HANDLERS[kind] = other` with
+    /// `other` of unknown type, keeps no item type). A global read through the module's own
+    /// object, which types it by its name alone (`tables.HANDLERS[kind] = other` in a module
+    /// importing itself), keeps its declaration or no type.
+    fn changed_in_place(&self, out: &mut Sink<'_>, load: &ChangedLoad<'_>, added: &Added) {
+        // The loaded value's type with what the changes add, when that changes it; another
+        // module's names are marked instead, decided by their own module's stores.
+        let loaded = self.types.ty(load.dst);
+        let with_added = loaded
+            .map(|t| (t.with_added(added), t))
             .and_then(|(changed, t)| (changed != *t).then_some(changed));
-        let value = without_items.as_ref().map(Some);
+        let value = with_added.as_ref().map(Some);
         let module = self.cx.module_name();
-        match load {
-            ChangedLoad::Name(_, name) => {
+        match load.of {
+            LoadOf::Name(name) => {
                 if let Some(fqn) = self.decls.fixed_import(name) {
                     if let Some(foreign) = out.foreign.as_deref_mut() {
                         let fqn = self.cx.project.canonical(fqn);
-                        foreign.globals.entry(fqn).or_default().changed = true;
+                        foreign.globals.entry(fqn).or_default().changed_by(added);
                     }
                 } else if self.decls.unknown_globals.contains(name) {
                     // An annotation types the items any change adds, as it types every store.
@@ -2097,7 +2150,7 @@ impl<'c, 'f> Classifier<'c, 'f> {
                     }
                 }
             }
-            ChangedLoad::Attr(_, obj, attr) => {
+            LoadOf::Attr(obj, attr) => {
                 for holder in self.holders(obj) {
                     match holder {
                         Holder::Own { class, own_self } => {
@@ -2120,19 +2173,37 @@ impl<'c, 'f> Classifier<'c, 'f> {
                         Holder::Module(m) => {
                             if let Some(foreign) = out.foreign.as_deref_mut() {
                                 let fqn = format!("{m}.{attr}");
-                                foreign.globals.entry(fqn).or_default().changed = true;
+                                foreign.globals.entry(fqn).or_default().changed_by(added);
                             }
                         }
                         Holder::Class(class) => {
                             if let Some(foreign) = out.foreign.as_deref_mut() {
                                 let attrs = foreign.attrs.entry(class).or_default();
-                                attrs.entry(attr.to_owned()).or_default().changed = true;
+                                attrs.entry(attr.to_owned()).or_default().changed_by(added);
                             }
                         }
                     }
                 }
             }
         }
+    }
+
+    /// What the changes of `changes` on the variable `v` itself add to its object
+    /// ([`Added::of`]), as this function's types type their operands. A change whose result the
+    /// function changes in place again (`d.setdefault(k, []).append(x)`, `xs += ys` and then
+    /// `xs.append(x)`) adds items heki does not follow.
+    fn added_by(&self, changes: &InPlaceChanges<'_>, v: VarId) -> Added {
+        let mut added = Added::default();
+        for inst in changes.by_receiver.get(&v).into_iter().flatten() {
+            let changed_again = matches!(
+                inst.kind,
+                InstKind::MethodCall { dst, .. } | InstKind::BinOp { dst, .. }
+                    if changes.aliased_by.contains_key(&dst)
+            );
+            let change = Change::of(&inst.kind).filter(|_| !changed_again);
+            added.join(&change.map_or_else(Added::unknown, |(_, c)| Added::of(&c, self.types)));
+        }
+        added
     }
 
     /// Whether `value` is what an in-place operator gives on the value a load `loads_it`
@@ -2829,7 +2900,9 @@ impl StoredElsewhere {
     /// Join what another module's stores bind.
     fn join(&mut self, other: &StoredElsewhere) {
         self.in_place |= other.in_place;
-        self.changed |= other.changed;
+        if let Some(added) = &other.changed {
+            join_added(&mut self.changed, added);
+        }
         self.ty = match (self.ty.take(), &other.ty) {
             (t, None) => t,
             (None, t) => t.clone(),
@@ -2838,14 +2911,17 @@ impl StoredElsewhere {
         };
     }
 
-    /// The join of `own` and what these stores bind: `None` when it is unknown or rebinding in
-    /// place may change it.
+    /// The join of `own` and what these stores bind, with what the changes in place add:
+    /// `None` when it is unknown or rebinding in place may change it.
     fn joined_with(&self, own: &Ty) -> Option<Ty> {
         let t = match &self.ty {
             Some(other) => own.join(other.as_ref()?)?,
             None => own.clone(),
         };
-        let t = if self.changed { t.without_items() } else { t };
+        let t = match &self.changed {
+            Some(added) => t.with_added(added),
+            None => t,
+        };
         Some(t).filter(|t| kept_in_declarations(t) && (!self.in_place || keeps_in_place(t)))
     }
 }
@@ -2938,10 +3014,10 @@ impl ProjectDecls {
         match self.elsewhere.globals.get(&fqn) {
             None => Some(own.clone()),
             // Another module's change in place leaves an annotated global its declaration.
-            Some(stored) if stored.changed && m.declared_items.contains_key(name) => {
+            Some(stored) if stored.changed.is_some() && m.declared_items.contains_key(name) => {
                 let declared = &m.declared_items[name];
                 StoredElsewhere {
-                    changed: false,
+                    changed: None,
                     ..stored.clone()
                 }
                 .joined_with(declared)
@@ -3008,7 +3084,7 @@ impl ProjectDecls {
         let mut out = Stored::Nothing;
         let mut restoring = false;
         let mut in_place = false;
-        let mut changed = false;
+        let mut changed: Option<Added> = None;
         for (class, decl) in family
             .iter()
             .filter_map(|class| Some((class, self.class(class)?)))
@@ -3029,7 +3105,9 @@ impl ProjectDecls {
             }
             if let Some(stored) = self.elsewhere.attrs.get(class).and_then(|a| a.get(attr)) {
                 in_place |= stored.in_place;
-                changed |= stored.changed;
+                if let Some(added) = &stored.changed {
+                    join_added(&mut changed, added);
+                }
                 if let Some(t) = &stored.ty {
                     out.add(Some(t.as_ref()));
                 }
@@ -3040,9 +3118,10 @@ impl ProjectDecls {
         if restoring && !self.restores_hold(family, of_self) {
             return None;
         }
-        let t = out
-            .type_of()
-            .map(|t| if changed { t.without_items() } else { t });
+        let t = out.type_of().map(|t| match &changed {
+            Some(added) => t.with_added(added),
+            None => t,
+        });
         t.filter(|t| !in_place || keeps_in_place(t))
     }
 

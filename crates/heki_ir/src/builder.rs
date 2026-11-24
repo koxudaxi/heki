@@ -48,9 +48,11 @@ pub fn build_module_ir(
         class_by_span.insert(ci.span, (ci.id, ci.qualname.clone()));
     }
     let mut lazy_import_names = FxHashSet::default();
+    let mut lazy_import_spans = FxHashSet::default();
     for imp in &semantic.imports {
         if imp.is_lazy {
             lazy_import_names.insert(imp.bound_name.clone());
+            lazy_import_spans.insert(imp.span);
         }
     }
 
@@ -85,6 +87,7 @@ pub fn build_module_ir(
         module_aliases,
         class_by_span,
         lazy_import_names,
+        lazy_import_spans,
         functions: Vec::new(),
         class_bases: Vec::new(),
         statement_uses: Vec::new(),
@@ -94,6 +97,7 @@ pub fn build_module_ir(
         loop_hints: Vec::new(),
         next_comp_id: 0,
         has_star_import: false,
+        star_imports: Vec::new(),
     };
 
     let full_span = Span {
@@ -101,6 +105,7 @@ pub fn build_module_ir(
         end: source.len() as u32,
     };
     let module_fn = ctx.lower_function_body(FunctionSpec {
+        enclosing: None,
         name: "<module>".to_string(),
         qualname: "<module>".to_string(),
         owner_class: None,
@@ -150,6 +155,7 @@ pub fn build_module_ir(
         module_fn,
         has_future_annotations: semantic.has_future_annotations,
         has_star_import: ctx.has_star_import,
+        star_imports: ctx.star_imports,
         constants,
         class_bases,
         statement_uses,
@@ -283,6 +289,8 @@ impl CompKind {
 }
 
 struct FunctionSpec<'a> {
+    /// The scope whose code makes this one ([`IrFunction::enclosing`]).
+    enclosing: Option<FunctionId>,
     name: String,
     qualname: String,
     owner_class: Option<ClassId>,
@@ -329,6 +337,9 @@ struct ModuleLowerer<'a> {
     module_aliases: FxHashMap<String, String>,
     class_by_span: FxHashMap<Span, (ClassId, String)>,
     lazy_import_names: FxHashSet<String>,
+    /// The import aliases that bind lazily: a `lazy` statement, or a module `__lazy_modules__`
+    /// lists (`ModuleImport::is_lazy`).
+    lazy_import_spans: FxHashSet<Span>,
     functions: Vec<IrFunction>,
     /// The class bases of every lowered function (`ModuleIr::class_bases`).
     class_bases: Vec<(FunctionId, VarId, u32)>,
@@ -345,6 +356,8 @@ struct ModuleLowerer<'a> {
     loop_hints: Vec<(FunctionId, Vec<LoopHint>)>,
     next_comp_id: u32,
     has_star_import: bool,
+    /// [`ModuleIr::star_imports`].
+    star_imports: Vec<(BlockId, Span)>,
 }
 
 impl<'a> ModuleLowerer<'a> {
@@ -464,6 +477,7 @@ impl<'a> ModuleLowerer<'a> {
             is_module_body: spec.is_module_body,
             is_class_body: spec.is_class_body,
             passed_from: None,
+            enclosing: spec.enclosing,
         };
         let fn_id = self.alloc_function_slot(placeholder);
         // The module body is no definition, and its span (the whole source) is also the span of
@@ -560,7 +574,10 @@ impl<'a> ModuleLowerer<'a> {
         }
 
         let lowered = builder.finish();
-        self.functions[fn_id.0 as usize] = lowered.function;
+        self.functions[fn_id.0 as usize] = IrFunction {
+            enclosing: spec.enclosing,
+            ..lowered.function
+        };
         self.class_bases.extend(
             lowered
                 .class_bases
@@ -1499,7 +1516,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                             dst,
                             module: None,
                             name: alias.name.to_string(),
-                            is_lazy: imp.is_lazy,
+                            is_lazy: self.module.lazy_import_spans.contains(&span),
                             relative: false,
                         },
                         span,
@@ -1512,6 +1529,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 for alias in &imp.names {
                     if alias.name.as_str() == "*" {
                         self.module.has_star_import = true;
+                        (self.module.star_imports).push((self.cur_bb, Span::from(imp.range)));
                         continue;
                     }
                     let span = Span::from(alias.range);
@@ -1533,7 +1551,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                             dst,
                             module: module.clone(),
                             name: alias.name.to_string(),
-                            is_lazy: imp.is_lazy,
+                            is_lazy: self.module.lazy_import_spans.contains(&span),
                             relative: imp.level > 0,
                         },
                         span,
@@ -1628,12 +1646,15 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         let annotations = function_annotations(&func.parameters, func.returns.as_deref());
         let lazily_read = self.lower_annotations(&annotations, &mut retained);
 
-        let (owner_class, owner_class_qualname) = if self.is_class_body {
+        // A `def` under a `global` declaration of its name binds the module's name: neither a
+        // local nor a member of the class, and named as a module-level function.
+        let binds_global = self.binds_global(&func.name);
+        let (owner_class, owner_class_qualname) = if self.is_class_body && !binds_global {
             (self.owner_class, self.owner_class_qualname.clone())
         } else {
             (None, None)
         };
-        let qualname = if self.is_module_body {
+        let qualname = if self.is_module_body || binds_global {
             func.name.to_string()
         } else if self.is_class_body {
             format!("{}.{}", self.qualname, func.name)
@@ -1648,6 +1669,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         let child_outer = self.child_outer_locals();
 
         let child_id = self.module.lower_function_body(FunctionSpec {
+            enclosing: Some(self.id),
             name: func.name.to_string(),
             qualname,
             owner_class,
@@ -1756,6 +1778,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         let child_outer = self.child_outer_locals();
 
         let child_id = self.module.lower_function_body(FunctionSpec {
+            enclosing: Some(self.id),
             name: cls.name.to_string(),
             qualname: class_qualname.clone(),
             owner_class: Some(class_id),
@@ -3194,6 +3217,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 let child_outer = self.child_outer_locals();
                 let qualname = format!("{}.<locals>.<lambda>", self.qualname);
                 let child_id = self.module.lower_function_body(FunctionSpec {
+                    enclosing: Some(self.id),
                     name: "<lambda>".to_string(),
                     qualname,
                     owner_class: None,
@@ -3233,6 +3257,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 let child_outer = self.child_outer_locals();
                 let qualname = format!("{}.<locals>.<genexpr>", self.qualname);
                 let child_id = self.module.lower_function_body(FunctionSpec {
+                    enclosing: Some(self.id),
                     name: "<genexpr>".to_string(),
                     qualname,
                     owner_class: None,
@@ -3662,6 +3687,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             let child_outer = self.child_outer_locals();
             let qualname = format!("{}.<locals>.{comp_name}", self.qualname);
             let child_id = self.module.lower_function_body(FunctionSpec {
+                enclosing: Some(self.id),
                 name: comp_name.to_string(),
                 qualname,
                 owner_class: None,
@@ -3898,6 +3924,11 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         }
     }
 
+    /// Whether this scope declares `name` `global`, so that binding it binds the module's name.
+    fn binds_global(&self, name: &str) -> bool {
+        self.scope.globals.contains(self.scope_name(name).as_ref())
+    }
+
     /// Whether a read of `name` here resolves to a module global or a builtin.
     fn resolves_to_global(&self, name: &str) -> bool {
         if self.resolve_comp_rename(name).is_some() {
@@ -4004,6 +4035,11 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.str_heads.clear();
         self.statement_uses.clear();
         self.annotations.clear();
+        if self.is_module_body {
+            // The blocks the star imports were lowered in are gone; a star import runs only in
+            // the module body.
+            self.module.star_imports.clear();
+        }
         self.a1_hazards.push(A1Hazard {
             kind: crate::UNMODELED.to_owned(),
             span: self.span,
@@ -4105,6 +4141,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             is_module_body: self.is_module_body,
             is_class_body: self.is_class_body,
             passed_from: None,
+            enclosing: None,
         };
         Lowered {
             function: f,

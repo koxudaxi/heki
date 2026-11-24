@@ -23,7 +23,7 @@
 
 use crate::resolver::stores::Read;
 use crate::resolver::{self, Callee, ProjectDecls, TypeCtx, Val};
-use crate::types::{Args, Elem, Obj, Ty};
+use crate::types::{Added, Args, Change, Container, Elem, Obj, Operands, Ty};
 use heki_ast::Span;
 use heki_ir::walk::FnShape;
 use heki_ir::{
@@ -121,6 +121,13 @@ pub(crate) struct Inferred {
     /// The types `isinstance` checks give variables in the blocks they guard, where they differ
     /// from the variable's own.
     narrowed: FxHashMap<(BlockId, VarId), Ty>,
+}
+
+/// A value no path binds (`None`) adds no item type.
+impl Operands for Inferred {
+    fn elem(&self, v: VarId) -> Elem {
+        self.facts[v.0 as usize].elem()
+    }
 }
 
 impl Inferred {
@@ -447,9 +454,9 @@ pub(crate) fn captured_params(ir: &ModuleIr) -> FxHashMap<&str, resolver::Captur
     let mut own: FxHashMap<&str, usize> = FxHashMap::default();
     for f in &ir.functions {
         let qualname = f.qualname.as_str();
-        let enclosing = qualname
-            .match_indices(".<locals>.")
-            .filter_map(|(at, _)| read.get_key_value(&qualname[..at]));
+        let enclosing = ir
+            .enclosing_functions(f)
+            .filter_map(|g| read.get_key_value(resolver::func_qualname(g)));
         let mut params = enclosing
             .flat_map(|(owner, read)| read.iter().map(|i| (*owner, *i)))
             .peekable();
@@ -891,6 +898,21 @@ struct Narrowing<'e> {
     /// Each phi with its block.
     phis: FxHashMap<VarId, (BlockId, &'e PhiNode)>,
     entry: Vec<Option<FxHashMap<VarId, Ty>>>,
+}
+
+/// An operand not typed yet adds nothing yet.
+impl Operands for Engine<'_, '_> {
+    fn elem(&self, v: VarId) -> Elem {
+        self.fact(v).elem()
+    }
+
+    fn items(&self, v: VarId) -> Elem {
+        self.items_of(v)
+    }
+
+    fn entries(&self, v: VarId) -> (Elem, Elem) {
+        self.mapping(v)
+    }
 }
 
 impl<'e, 'a> Engine<'e, 'a> {
@@ -1518,10 +1540,11 @@ impl<'e, 'a> Engine<'e, 'a> {
             InstKind::Copy { src, .. } => self.need(*src)?.cloned(),
             // An augmented assignment changing a built-in container in place gives the
             // container: the display it is, with what the function adds to it, or the type the
-            // container has.
+            // container has with what the operator adds.
             InstKind::BinOp {
                 op,
                 lhs,
+                rhs,
                 in_place: true,
                 ..
             } => match self.display_of(*lhs) {
@@ -1531,7 +1554,8 @@ impl<'e, 'a> Engine<'e, 'a> {
                 Some(_) => None,
                 None => match self.need(*lhs)? {
                     Some(t @ Ty::Inst(o)) if crate::types::changes_in_place(&o.class, *op) => {
-                        Some(t.clone())
+                        let added = Added::of(&Change::Operator(*op, *rhs), self);
+                        Some(t.with_added(&added))
                     }
                     _ => None,
                 },
@@ -1701,62 +1725,21 @@ impl<'e, 'a> Engine<'e, 'a> {
         }
     }
 
-    /// Items added to a display after it is built: `append` / `insert` / `extend` / `+=` of a
-    /// list, `add` / `update` / `|=` / `^=` of a set, `xs[i] = v`, and `d[k] = v` /
-    /// `setdefault` / `update` / `|=` of a dict (also through copies of the variable holding it,
-    /// and through what an in-place operator gives).
+    /// Items added to a display after it is built ([`Container::added`]): `append` / `insert` /
+    /// `extend` / `+=` of a list, `add` / `update` / `|=` / `^=` of a set, `xs[i] = v`, and
+    /// `d[k] = v` / `setdefault` / `update` / `|=` of a dict (also through copies of the
+    /// variable holding it, and through what an in-place operator gives).
     fn add_contents(&mut self, inst: &Inst) {
-        let (target, item, value) = match &inst.kind {
-            InstKind::MethodCall {
-                recv, method, args, ..
-            } => {
-                let Some((root, kind)) = self.display_of(*recv) else {
-                    return;
-                };
-                match (kind, method.as_str(), args.as_slice()) {
-                    (BuiltinKind::List, "append", [v])
-                    | (BuiltinKind::List, "insert", [_, v])
-                    | (BuiltinKind::Set, "add", [v]) => (root, self.fact(*v).elem(), Elem::Empty),
-                    (BuiltinKind::List, "extend", [xs]) | (BuiltinKind::Set, "update", [xs]) => {
-                        (root, self.items_of(*xs), Elem::Empty)
-                    }
-                    (BuiltinKind::Dict, "setdefault", [k, v]) => {
-                        (root, self.fact(*k).elem(), self.fact(*v).elem())
-                    }
-                    (BuiltinKind::Dict, "update", [m]) => {
-                        let (k, v) = self.mapping(*m);
-                        (root, k, v)
-                    }
-                    _ => return,
-                }
-            }
-            InstKind::BinOp {
-                op,
-                lhs,
-                rhs,
-                in_place: true,
-                ..
-            } => match (self.display_of(*lhs), op) {
-                (Some((root, BuiltinKind::List)), BinOpKind::Add)
-                | (Some((root, BuiltinKind::Set)), BinOpKind::BitOr | BinOpKind::BitXor) => {
-                    (root, self.items_of(*rhs), Elem::Empty)
-                }
-                (Some((root, BuiltinKind::Dict)), BinOpKind::BitOr) => {
-                    let (k, v) = self.mapping(*rhs);
-                    (root, k, v)
-                }
-                _ => return,
-            },
-            InstKind::SubscriptStore {
-                obj, index, value, ..
-            } => match self.display_of(*obj) {
-                Some((root, BuiltinKind::Dict)) => {
-                    (root, self.fact(*index).elem(), self.fact(*value).elem())
-                }
-                Some((root, BuiltinKind::List)) => (root, self.fact(*value).elem(), Elem::Empty),
-                _ => return,
-            },
-            _ => return,
+        let Some((recv, change)) = Change::of(&inst.kind) else {
+            return;
+        };
+        let Some((target, kind)) = self.display_of(recv) else {
+            return;
+        };
+        let Some((item, value)) =
+            Container::of_display(kind).and_then(|container| container.added(&change, &*self))
+        else {
+            return;
         };
         let slot = self
             .added

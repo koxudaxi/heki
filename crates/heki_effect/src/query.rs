@@ -2,8 +2,8 @@
 //! set per question and linear in the states it visits (docs/development.md, "Analysis cost").
 
 use crate::{
-    AttrKeyPath, BlindSpotReach, BoundCallee, CallHop, CallSite, CellChange, EffectSummary, Facts,
-    FuncKey, ProjectIndex, Runner, SharedState, SiteRole, Slot,
+    AttrKeyPath, BlindSpotReach, BoundCallee, CallHop, CallSite, CellChange, ELEMENTS_PATH,
+    EffectSummary, Facts, FuncKey, ProjectIndex, Runner, SharedState, SiteRole, Slot,
 };
 use heki_ir::walk::{Answer, Budget, Closure, Visit, reach, reach_breadth_first};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -11,23 +11,52 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
-/// What a function changes in place: its parameter itself (`None`) or a slot of it.
-pub type ParamChange = Option<Slot>;
+/// What a function changes of its parameter.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ParamChange {
+    /// The argument itself, in place (`p.append(x)`, `p[k] = v`).
+    Itself,
+    /// The container held in a slot of the argument, in place (`p.a.append(x)`,
+    /// `p["k"][i] = v`).
+    InSlot(Slot),
+    /// An attribute of the argument, rebound or deleted ([`EffectSummary::rebinds_param_attr`]).
+    Rebinding(String),
+}
 
 impl EffectSummary {
-    /// Whether the summary changes its parameter `j` itself (`None`) or the container held in a
-    /// slot of it (`Some`) in place.
+    /// Whether the summary changes its parameter `j` as `what` says.
     pub fn changes_param(&self, j: u8, what: &ParamChange) -> bool {
         match what {
-            None => self
+            ParamChange::Itself => self
                 .mutated_param_paths
                 .get(&j)
                 .is_some_and(|paths| paths.contains("")),
-            Some(slot) => self
+            ParamChange::InSlot(slot) => self
                 .inplace_param_slots
                 .get(&j)
                 .is_some_and(|slots| slots.contains(slot)),
+            ParamChange::Rebinding(attr) => self.rebinds_param_attr(j, attr),
         }
+    }
+
+    /// The attributes of parameter `j` the function rebinds or deletes (`p.a = v`, `del p.a`,
+    /// `setattr(p, "a", v)`), itself or through its calls, and changes nothing below: the
+    /// paths of `mutated_param_paths` that `changed_param_attrs` leaves out.
+    pub fn rebound_param_attrs(&self, j: u8) -> impl Iterator<Item = &str> {
+        let below = self.changed_param_attrs.get(&j);
+        self.mutated_param_paths
+            .get(&j)
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .filter(move |a| {
+                !a.is_empty() && *a != ELEMENTS_PATH && below.is_none_or(|b| !b.contains(*a))
+            })
+    }
+
+    /// Whether `attr` is one of [`Self::rebound_param_attrs`] of parameter `j`.
+    pub fn rebinds_param_attr(&self, j: u8, attr: &str) -> bool {
+        self.rebound_param_attrs(j).any(|a| a == attr)
     }
 }
 
@@ -327,16 +356,15 @@ impl ProjectIndex {
                     for (j2, o) in c.params.iter().enumerate().take(64) {
                         let j2 = u8::try_from(j2).expect("at most 64 parameters");
                         let as_itself = o.param == Some((j, None));
-                        // The same change of the argument itself, the same slot of it, or the
-                        // argument itself when it is that slot (`helper(p.a)`).
+                        // The same change of the argument itself, or of a slot or attribute
+                        // of it, or the argument itself when it is that slot (`helper(p.a)`).
                         let next = match &what {
-                            Some(_) if as_itself && cs.changes_param(j2, &what) => {
-                                Some(what.clone())
-                            }
-                            None => (as_itself && cs.changes_param(j2, &None)).then_some(None),
-                            Some(slot) => (o.param_slot.as_ref() == Some(&(j, slot.clone()))
-                                && cs.changes_param(j2, &None))
-                            .then_some(None),
+                            _ if as_itself && cs.changes_param(j2, &what) => Some(what.clone()),
+                            ParamChange::InSlot(slot) => (o.param_slot.as_ref()
+                                == Some(&(j, slot.clone()))
+                                && cs.changes_param(j2, &ParamChange::Itself))
+                            .then_some(ParamChange::Itself),
+                            _ => None,
                         };
                         if let Some(next) = next
                             && enters(&c.callee, j2)
@@ -515,14 +543,12 @@ impl ProjectIndex {
                     return None;
                 }
                 // The argument is the attribute's object: changed itself, or a slot of it.
-                let what = if paths.contains("") {
-                    None
-                } else {
-                    callee
-                        .inplace_param_slots
-                        .get(&j)
-                        .and_then(|slots| slots.first().cloned())
-                };
+                let slot = callee
+                    .inplace_param_slots
+                    .get(&j)
+                    .and_then(|slots| slots.first())
+                    .filter(|_| !paths.contains(""));
+                let what = slot.map_or(ParamChange::Itself, |s| ParamChange::InSlot(s.clone()));
                 Some((bc, j, what))
             })
         })

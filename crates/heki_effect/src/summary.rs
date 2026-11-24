@@ -13,6 +13,7 @@ use crate::environment::{self, AccessKind, ExternalAccess};
 use crate::fresh;
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
 use crate::held;
+use crate::imports::{ImportSite, module_imports};
 use crate::infer::CellKey;
 use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
 use crate::invokes;
@@ -142,6 +143,7 @@ fn extract_module(
         .map(func_qualname)
         .collect();
     let mut cell_aliases = CellAliases::default();
+    let mut imported_by_name: Vec<ImportSite> = Vec::new();
     for f in &input.ir.functions {
         if f.is_class_body || (is_overload(f) && implemented.contains(func_qualname(f))) {
             continue;
@@ -161,8 +163,10 @@ fn extract_module(
             kept_points,
             types,
             mut blind,
+            imports: by_name,
             mut unawaited,
             fresh_return,
+            mut class_runs,
         } = Extractor::new(
             &shape,
             &key,
@@ -174,10 +178,12 @@ fn extract_module(
         )
         .run();
         cell_aliases.extend(cells);
+        imported_by_name.extend(by_name);
         // A `class` statement runs its body where it runs, in a function or the module body:
         // the body's effects, calls (a class attribute's value, a decorator, a default
         // argument), and accesses are that code's (its methods run only when they are called).
         for body in class_bodies_run_by(input.ir, f) {
+            let ran = class_runs.get(&body.id).copied().unwrap_or_default();
             let body = FnShape::new(body);
             let facts = Extractor::new(
                 &body,
@@ -192,14 +198,17 @@ fn extract_module(
             absorb_class_body(&mut summary, facts.summary, &key);
             external.extend(facts.external);
             blind.extend(facts.blind);
+            imported_by_name.extend(facts.imports);
             unawaited.extend(facts.unawaited);
-            sites.extend(
-                facts
-                    .sites
-                    .into_iter()
-                    .map(|site| CallSite { flow: None, ..site }),
-            );
+            let in_function = |site: CallSite| CallSite {
+                flow: None,
+                on_every_return: run_through(site.on_every_return, ran),
+                ..site
+            };
+            sites.extend(facts.sites.into_iter().map(in_function));
             references.extend(facts.references);
+            let nested = facts.class_runs.into_iter();
+            class_runs.extend(nested.map(|(id, run)| (id, run_through(run, ran))));
         }
         if let Some(mut flow) = flow {
             // Site-list indices of the function become indices into the file's call sites.
@@ -281,29 +290,55 @@ fn extract_module(
             }
         }
     }
+    if opt_in.imports
+        && let Some(imports) = module_imports(input, imported_by_name)
+    {
+        file.opt_in_tables_mut().imports = Some(Box::new(imports));
+    }
     release_spare_capacity(&mut file);
     file
 }
 
 /// The class bodies the `class` statements of `f` run, nested classes included, each once (a
-/// `class` statement in a `finally` body is made once per way out of its `try`).
+/// `class` statement in a `finally` body is made once per way out of its `try`), each before
+/// the bodies of the classes it makes.
 fn class_bodies_run_by<'m>(ir: &'m ModuleIr, f: &'m IrFunction) -> Vec<&'m IrFunction> {
     let mut out: Vec<&IrFunction> = Vec::new();
     let mut stack = vec![f];
     while let Some(g) = stack.pop() {
         for inst in g.blocks.iter().flat_map(|b| &b.insts) {
-            if let InstKind::MakeClosure {
-                func_id: Some(id), ..
-            } = &inst.kind
-                && ir.function(*id).is_class_body
-                && out.iter().all(|c| c.id != *id)
+            if let Some(id) = class_body_made(ir, &inst.kind)
+                && out.iter().all(|c| c.id != id)
             {
-                out.push(ir.function(*id));
-                stack.push(ir.function(*id));
+                out.push(ir.function(id));
+                stack.push(ir.function(id));
             }
         }
     }
     out
+}
+
+/// The class body the instruction runs, when it is a `class` statement.
+fn class_body_made(ir: &ModuleIr, kind: &InstKind) -> Option<FunctionId> {
+    match kind {
+        InstKind::MakeClosure {
+            func_id: Some(id), ..
+        } if ir.function(*id).is_class_body => Some(*id),
+        _ => None,
+    }
+}
+
+/// [`CallSite::on_every_return`] of a point of a class body (a call, or the `class` statement of
+/// a nested class) in the code that runs the body, from `body`, that code's flags of its `class`
+/// statement ([`Extractor::class_runs`]). The point has run whenever the code returns only when
+/// the body has returned too: an exception the body raised before the point may have been
+/// caught there.
+fn run_through(point: OnEveryReturn, body: OnEveryReturn) -> OnEveryReturn {
+    OnEveryReturn {
+        called: point.called && body.returned,
+        returned: point.returned && body.returned,
+        live: point.live && body.live,
+    }
 }
 
 /// Add the boxed local sites `more` to `into`.
@@ -691,10 +726,14 @@ struct Extracted {
     types: FxHashMap<VarId, Val>,
     /// [`FileSummary::blind_calls`].
     blind: Vec<BlindCall>,
+    /// The calls importing a module by name ([`FileSummary::imports`]).
+    imports: Vec<ImportSite>,
     /// [`FileSummary::unawaited_handoffs`].
     unawaited: Vec<UnawaitedHandoff>,
     /// The local fact of [`crate::OptInTables::fresh_returns`].
     fresh_return: Option<fresh::FreshReturn>,
+    /// [`Extractor::class_runs`].
+    class_runs: FxHashMap<FunctionId, OnEveryReturn>,
 }
 
 /// The points of a function that read one `self` attribute ([`Extractor::self_read_points`]).
@@ -849,6 +888,9 @@ struct Extractor<'a> {
     /// Per call instruction, whether the function has made it whenever it returns normally
     /// (filled before the visit when an enabled rule reads [`EffectSummary::must_exec`]).
     must_run: FxHashMap<(BlockId, usize), OnEveryReturn>,
+    /// Per class body a `class` statement of the function runs, [`Self::must_run`] of that
+    /// statement as a call of the body (filled with it).
+    class_runs: FxHashMap<FunctionId, OnEveryReturn>,
     /// [`KeyFacts`], built on first use.
     key_facts: OnceCell<KeyFacts<'a>>,
     /// The changes of checked containers of `self` the visit finds, recorded after it
@@ -875,6 +917,8 @@ struct Extractor<'a> {
     /// The calls heki is blind to (`OptInTables::blind_spots`), with
     /// [`OptInFacts::blind_spots`].
     blind: Vec<BlindCall>,
+    /// The calls importing a module by name, with [`OptInFacts::imports`].
+    imports: Vec<ImportSite>,
     /// The project functions handed to a library call that calls them without awaiting what
     /// they return (`OptInTables::unawaited_handoffs`), with
     /// [`OptInFacts::unawaited_handoffs`].
@@ -1223,6 +1267,7 @@ impl<'a> Extractor<'a> {
             ownership: false,
             opt_in,
             must_run: FxHashMap::default(),
+            class_runs: FxHashMap::default(),
             key_facts: OnceCell::new(),
             self_changes: Vec::new(),
             builtin_methods: FxHashMap::default(),
@@ -1233,6 +1278,7 @@ impl<'a> Extractor<'a> {
             established: OnceCell::new(),
             followed_callables: OnceCell::new(),
             blind: Vec::new(),
+            imports: Vec::new(),
             unawaited: Vec::new(),
         };
         ex.ownership = contracts.is_some_and(|c| c.ownership());
@@ -2253,10 +2299,10 @@ impl<'a> Extractor<'a> {
     /// The enclosing function whose variable `name` is (the nearest one whose nested functions
     /// capture it), by qualname.
     fn cell_owner(&self, name: &str) -> Option<String> {
-        let qualname = func_qualname(self.f);
-        qualname
-            .rmatch_indices(".<locals>.")
-            .map(|(i, _)| &qualname[..i])
+        self.cx
+            .ir()
+            .enclosing_functions(self.f)
+            .map(func_qualname)
             .find(|outer| self.cx.captures(outer, name))
             .map(str::to_owned)
     }
@@ -2795,8 +2841,10 @@ impl<'a> Extractor<'a> {
             kept_points: self.kept_points,
             types: self.types,
             blind: self.blind,
+            imports: self.imports,
             unawaited: self.unawaited,
             fresh_return,
+            class_runs: self.class_runs,
         }
     }
 
@@ -2964,9 +3012,7 @@ impl<'a> Extractor<'a> {
             }
             // A class statement runs the metaclass, the bases' `__init_subclass__`, and the
             // attributes' `__set_name__`.
-            InstKind::MakeClosure {
-                func_id: Some(id), ..
-            } if self.cx.ir().function(*id).is_class_body => any,
+            kind if class_body_made(self.cx.ir(), kind).is_some() => any,
             // The first import of a project module runs its body.
             InstKind::Import { .. } => {
                 let target = self
@@ -6371,6 +6417,9 @@ impl<'a> Extractor<'a> {
         self.call_escapes(callee, call);
         match callee {
             Callee::External(symbol) => {
+                if self.opt_in.imports {
+                    self.import_by_name(bb, symbol, call);
+                }
                 if let Some(c) = self.contracts {
                     if c.external_call(symbol) {
                         let imports = self.cx.catalog(symbol).and_then(|e| e.environment_access())
@@ -7345,11 +7394,12 @@ impl<'a> Extractor<'a> {
         self.f.params.iter().any(|p| p.var == v)
     }
 
-    /// [`Self::must_run`] and [`MustExec::never_returns`], from the path facts of the function
-    /// with what the catalog and the project's declarations know: the members of modules and
-    /// the context managers whose exit never suppresses an exception.
+    /// [`Self::must_run`], [`Self::class_runs`], and [`MustExec::never_returns`], from the path
+    /// facts of the function with what the catalog and the project's declarations know: the
+    /// members of modules and the context managers whose exit never suppresses an exception.
     fn path_facts(&mut self) {
         let f = self.f;
+        let ir = self.cx.ir();
         let every = |a: Answer<Must>| a == Answer::Known(Must::Every);
         let owner = "heki_effect::summary::Extractor::path_facts";
         let read_points = if self.opt_in.kept_values {
@@ -7357,24 +7407,36 @@ impl<'a> Extractor<'a> {
         } else {
             BTreeMap::new()
         };
-        let (must_run, never_returns, must_reads) =
+        let (must_run, class_runs, never_returns, must_reads) =
             crate::with_paths(self.cx, f, &self.types, owner, |paths, _| {
                 let mut must_run = FxHashMap::default();
+                let mut class_runs: FxHashMap<FunctionId, OnEveryReturn> = FxHashMap::default();
                 for bb in &f.blocks {
                     for (index, inst) in bb.insts.iter().enumerate() {
-                        if !crate::anchors_call_site(&inst.kind) {
+                        let class_body = class_body_made(ir, &inst.kind);
+                        if class_body.is_none() && !crate::anchors_call_site(&inst.kind) {
                             continue;
                         }
                         let at = (bb.id, index);
                         let called = paths.on_every_return(at, Progress::Called);
-                        must_run.insert(
-                            at,
-                            OnEveryReturn {
-                                called: every(called),
-                                returned: every(paths.on_every_return(at, Progress::Returned)),
-                                live: called.is_open() || called != Answer::Known(Must::Dead),
-                            },
-                        );
+                        let run = OnEveryReturn {
+                            called: every(called),
+                            returned: every(paths.on_every_return(at, Progress::Returned)),
+                            live: called.is_open() || called != Answer::Known(Must::Dead),
+                        };
+                        match class_body {
+                            // A `class` statement in a `finally` body is made once per way out
+                            // of its `try`: the body has run when one of them has.
+                            Some(id) => {
+                                let any = class_runs.entry(id).or_default();
+                                any.called |= run.called;
+                                any.returned |= run.returned;
+                                any.live |= run.live;
+                            }
+                            None => {
+                                must_run.insert(at, run);
+                            }
+                        }
                     }
                 }
                 let never_returns = f.blocks.first().is_some_and(|entry| {
@@ -7405,12 +7467,13 @@ impl<'a> Extractor<'a> {
                         }
                     }
                 }
-                (must_run, never_returns, must_reads)
+                (must_run, class_runs, never_returns, must_reads)
             });
         if !must_reads.is_empty() {
             self.summary.kept_mut().must_read_self_attrs = must_reads;
         }
         self.must_run = must_run;
+        self.class_runs = class_runs;
         if never_returns && self.opt_in.must_effects {
             self.summary.must_exec = Some(Box::new(MustExec {
                 never_returns,

@@ -35,7 +35,8 @@ Each step of the chain is established, not assumed:
   object (assumption R1; a name its module body or class body binds last to one named object on
   every path is that object): another store or a `del` of the name in its module (also on a
   branch, after `global`, or by `globals()` or `exec`), in its class body, or on its class
-  object; a store or `del` from another module, also through `setattr` with a string literal,
+  object; a class or function a function binds under `global` that the module body does not
+  bind on every path (by calling that function), whose name may be unbound; a store or `del` from another module, also through `setattr` with a string literal,
   and any name of a module that `setattr` stores into under a name heki cannot read; a store of
   the function's `__code__`; and, for a method, a store of the name on a class the lookup
   passes, of `__bases__` on a class along the MRO, or of `self.__class__` in a method;

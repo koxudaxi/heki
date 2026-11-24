@@ -217,3 +217,199 @@ call-targets = ["pkg.store.load"]
         ]
     );
 }
+
+/// `(line, rule)` of each report of `rules` on `app.py` holding `source`.
+fn rules_on(name: &str, rules: &str, source: &str) -> Vec<(u64, String)> {
+    let p = Project::new(name);
+    p.write("app.py", source);
+    let (code, stdout, stderr) = p.check(&["--select", rules, "--output-format", "json", "."]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let mut out: Vec<(u64, String)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+const WAITS: &str = r#"import time
+
+_IS_SYNC = False
+
+
+def blocking() -> None:
+    time.sleep(1)
+
+
+def parse(text: str) -> int:
+    return int(text)
+
+
+def on_some_paths(flag: bool) -> None:
+    if flag:
+        class Held:
+            value = blocking()
+
+
+def always() -> None:
+    class Held:
+        value = blocking()
+
+
+def caught(text: str) -> None:
+    try:
+        class Held:
+            parsed = parse(text)
+            value = blocking()
+    except ValueError:
+        pass
+
+
+def in_finally(text: str) -> None:
+    try:
+        parse(text)
+    finally:
+        class Held:
+            value = blocking()
+
+
+def nested(flag: bool) -> None:
+    class Outer:
+        if flag:
+            class Inner:
+                value = blocking()
+
+
+def nested_always() -> None:
+    class Outer:
+        class Inner:
+            value = blocking()
+
+
+async def handle(flag: bool, text: str) -> None:
+    on_some_paths(flag)
+    always()
+    caught(text)
+    in_finally(text)
+    nested(flag)
+    nested_always()
+
+
+async def handle_never() -> None:
+    if _IS_SYNC:
+        class Held:
+            value = blocking()
+
+
+async def handle_branch(flag: bool) -> None:
+    if flag:
+        class Held:
+            value = blocking()
+"#;
+
+/// A function has made a call of a class body whenever it returns only when it has run the
+/// `class` statement to its end whenever it returns: not behind a branch, not where the body may
+/// raise into a handler that goes on, and for a nested class, the statements around it too. A
+/// class statement in a `finally` body runs on the way out of the `try`.
+#[test]
+fn a_class_body_call_runs_on_every_return_only_with_its_class_statement() {
+    assert_eq!(
+        rules_on("class_bodies_every_return", "EFF101,EFF111", WAITS),
+        vec![
+            (56, "EFF111".to_owned()),
+            (57, "EFF101".to_owned()),
+            (58, "EFF111".to_owned()),
+            (59, "EFF101".to_owned()),
+            (60, "EFF111".to_owned()),
+            (61, "EFF101".to_owned()),
+            // No path reaches the class statement.
+            (67, "EFF111".to_owned()),
+            // The reported call is the class body's own: it waits whenever it returns.
+            (73, "EFF101".to_owned()),
+        ]
+    );
+}
+
+/// The same holds along an `EFF103` chain: a helper that runs the query in a class body behind
+/// a branch does not send it on every iteration.
+#[test]
+fn a_query_in_a_class_body_behind_a_branch_is_not_sent_on_every_iteration() {
+    let open = r#"import sqlite3
+
+SQL = "SELECT * FROM t WHERE id = ?"
+
+
+def fetch(db: sqlite3.Cursor, x: str) -> None:
+    db.execute(SQL, (x,))
+
+
+def query(db: sqlite3.Cursor, x: str, flag: bool) -> None:
+    if flag:
+        class Row:
+            value = fetch(db, x)
+
+
+def process(db: sqlite3.Cursor, items: list[str], flag: bool) -> None:
+    for x in items:
+        query(db, x, flag)
+"#;
+    assert_eq!(
+        rules_on("class_bodies_query_branch", "EFF103,EFF113", open),
+        vec![(18, "EFF113".to_owned())]
+    );
+    let closed = open.replace(
+        "    if flag:\n        class Row:\n            value = fetch(db, x)\n",
+        "    class Row:\n        value = fetch(db, x)\n",
+    );
+    assert_eq!(
+        rules_on("class_bodies_query_always", "EFF103,EFF113", &closed),
+        vec![(17, "EFF103".to_owned())]
+    );
+}
+
+/// At module level, a class statement behind a branch, a nested one included, still runs its
+/// body's calls in the module body: only the guarantee that they run on every path depends on the
+/// statement, and no chain enters a module body.
+#[test]
+fn a_class_body_behind_a_branch_at_module_level_is_the_module_body() {
+    let p = Project::new("class_bodies_module_branch");
+    p.write("src/pkg/__init__.py", "")
+        .write("src/pkg/store.py", "def load() -> int:\n    return 1\n")
+        .write(
+            "src/pkg/body.py",
+            r#"import os
+
+from pkg.store import load
+
+if os.environ.get("SETTINGS"):
+    class Settings:
+        loaded = load()
+
+        class Inner:
+            again = load()
+"#,
+        )
+        .write(
+            "heki.toml",
+            r#"[[effect-boundaries]]
+name = "no-load"
+scopes = ["pkg.body:<module>"]
+forbid = ["calls"]
+call-targets = ["pkg.store.load"]
+"#,
+        );
+    assert_eq!(
+        found(&p),
+        vec![d("src/pkg/body.py", 7, 18, "EFF201", "<module>")]
+    );
+    // One report of the target, for both calls.
+    let (_, stdout, _) = p.check(&["--output-format", "json", "src"]);
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(diags[0]["sites"], 2);
+}

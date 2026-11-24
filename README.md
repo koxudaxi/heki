@@ -152,6 +152,7 @@ time. Each kind of rule has its own contract:
 | No caller changes the settings `load_settings` returns to everyone | `readonly-returns` | `producers = ["app.config.load_settings"]`, `deep = true` |
 | Every change of `Order.items` is followed by `order_changed()` | `invalidation` | `targets = ["Order.items"]`, `invalidators = ["app.cache.order_changed"]` |
 | Code in `app.render` makes no blocking call | `effect-boundaries` | `scopes = ["app.render.*"]`, `forbid = ["blocking"]` |
+| `app.domain` imports nothing from `app.web`, even lazily or inside a function | `import-owners` | `importers = ["app.domain.*"]`, `forbidden-imports = ["app.web", "app.web.*"]` |
 
 See [Contracts](https://heki.koxudaxi.dev/configuration/#contracts) for every key.
 
@@ -166,7 +167,8 @@ Types say what values are; heki checks what code does:
 
 - **Aliases and in-place changes:** which objects a function changes, through any alias, helper,
   or subclass.
-- **Contracts:** who may write, read, or call what, and which code may reach I/O.
+- **Contracts:** who may write, read, or call what, which code may reach I/O, and which modules
+  may import which.
 - **Proven rewrites:** quadratic patterns are rewritten only when the rewrite is proven, not
   guessed.
 
@@ -228,8 +230,9 @@ through helpers, effects behind a call, stale shared state, and quadratic patter
 
 Ruff models syntax, and type checkers model declared types. heki models effects and aliases,
 what code does, so use it next to them: the second example passes `mypy --strict` and pyright's
-strict mode, yet sends one query per order. Import rules that know when each import runs, and
-read the contracts of tach and import-linter, are planned. See the
+strict mode, yet sends one query per order. Import contracts (experimental) know when each import
+runs: in a function, lazily, by a constant name, or never under `TYPE_CHECKING`. Reading the
+contracts of tach and import-linter is planned. See the
 [comparison](https://heki.koxudaxi.dev/#how-heki-differs).
 
 ## 🔧 Rewrites proven under CPython's semantics
@@ -312,7 +315,9 @@ for `heki inspect` and [Configuration advice](https://heki.koxudaxi.dev/recommen
 
 ## 🪜 pre-commit and CI
 
-A pre-commit hook (heki follows calls across files, so it checks the whole project). The
+A pre-commit hook. heki follows calls across files, so the hook analyzes the whole project and
+passes the staged files to `--touched`: it shows and fails on the reports in those files and the
+reports whose call chain reaches them, so old findings elsewhere do not block a commit. The
 [heki-pre-commit](https://github.com/koxudaxi/heki-pre-commit) repository installs heki from its PyPI
 wheel, so there is no compile and no Rust toolchain:
 
@@ -320,7 +325,7 @@ wheel, so there is no compile and no Rust toolchain:
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.2.3
+    rev: v0.2.7
     hooks:
       - id: heki
 ```
@@ -339,10 +344,11 @@ repos:
     hooks:
       - id: heki
         name: heki
-        entry: uvx heki check
+        entry: uvx heki check --touched
         language: system   # needs uv on PATH
         types: [python]
-        pass_filenames: false
+        pass_filenames: true
+        require_serial: true
 ```
 
 A GitHub Actions workflow with code-scanning alerts (SARIF) and annotations:
