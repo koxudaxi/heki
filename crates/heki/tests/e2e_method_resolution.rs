@@ -3581,6 +3581,46 @@ fn every_spelling_of_a_store_and_every_read_of_one() {
     );
 }
 
+/// A global changed in place through the module's own object is typed by its name alone: what
+/// the changes add joins its type once its stores establish it, also from a method whose
+/// stores heki decides with the attributes it reads (`self.client`). An annotated global keeps
+/// its declaration.
+const SELF_CHANGED: &str = r#"import httpx
+
+import pkg.forms
+
+grown = []
+typed: list[httpx.Client] = []
+
+
+class Grower:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def grow(self) -> None:
+        pkg.forms.grown.append(self.client)
+
+
+def grow_typed() -> None:
+    pkg.forms.typed.append(httpx.Client())
+
+
+async def reads() -> None:
+    for c in grown:
+        c.get("https://example.com")  # EFF101
+    for c in typed:
+        c.get("https://example.com")  # EFF101
+"#;
+
+#[test]
+fn a_global_changed_through_its_module_joins_what_the_changes_add() {
+    check_marks(
+        "store_self_changed",
+        &[("pkg/forms.py", SELF_CHANGED)],
+        &["EFF101"],
+    );
+}
+
 /// A `__setstate__` that also reads an attribute heki is deciding is solved with the stores, and
 /// its restores hold the type its `__init__` gave; a base and its subclass, read through
 /// one family, are decided together.
