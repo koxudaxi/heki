@@ -37,7 +37,7 @@ line, an array of them from one analysis, in the order of the names):
 | `purity` | `pure`, `impure` with the reasons, or `unknown` with the reasons; whatever the verdict, the functions below it whose calls heki cannot resolve, nearest first, each with the call chain to it; and what the verdict assumes |
 | `callers` | who calls it, whether in a loop; with `--callers`, transitively |
 | `reports` | what `heki check` reports in it; with `--callers`, also above it |
-| `contracts` | the contracts that name it |
+| `contracts` | the contracts that name it, with its roles in them, and the contracts the reports above are of (role `reported`) |
 
 - `pure` means heki found no effect and no change of an input or of shared state, and resolved
   every call below. Libraries heki's catalog does not list count as having no effects.
