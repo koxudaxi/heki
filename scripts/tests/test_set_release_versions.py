@@ -12,7 +12,7 @@ import set_release_versions as release
 from helpers import ROOT
 
 DATA = Path(__file__).parent / "data" / "set_release_versions"
-MANIFESTS = ("Cargo.toml", "pyproject.toml", "Cargo.lock")
+MANIFESTS = ("Cargo.toml", "pyproject.toml", "Cargo.lock", "uv.lock")
 REPOSITORY = "https://github.com/koxudaxi/heki"
 CHECKOUT_VERSION = "0.1.1"
 """The version of the copies, older than the releases the tests sync, whatever `main` declares."""
@@ -79,7 +79,9 @@ def test_every_version_a_build_reads_is_written(checkout: Path, capsys) -> None:
     assert {name: text for name, text in after.items() if name.startswith("crates/")} == {
         name: text for name, text in before.items() if name.startswith("crates/")
     }
-    assert capsys.readouterr().out == "9.8.7: wrote Cargo.toml, pyproject.toml, Cargo.lock.\n"
+    assert (
+        capsys.readouterr().out == "9.8.7: wrote Cargo.toml, pyproject.toml, Cargo.lock, uv.lock.\n"
+    )
 
 
 def test_a_pre_release_version_is_written(checkout: Path) -> None:
@@ -231,6 +233,12 @@ def edit(root: Path, name: str, old: str, new: str) -> None:
             '[[package]]\nname = "heki_outside"\nversion = "0.0.1"\n\n'
             '[[package]]\nname = "heki_ast"\n',
             "Cargo.lock: the entries without a source are",
+        ),
+        (
+            "uv.lock",
+            'version = "{v}"\nsource = { virtual = "." }',
+            'version = "{v}"\nsource = { registry = "https://pypi.org/simple" }',
+            "uv.lock `heki`: expected one line matching",
         ),
         (
             "crates/heki_kb/Cargo.toml",

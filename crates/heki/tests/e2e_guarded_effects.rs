@@ -1279,6 +1279,10 @@ async def zero_pause_two_deep() -> None:
     pause_twice(0)
 
 
+async def zero_float_pause() -> None:
+    pause(0.0)
+
+
 async def omitted_pause() -> None:
     pause_default()
 

@@ -334,14 +334,14 @@ impl ConstClass {
     }
 
     /// The outcome of `test` on every value of this class: truthiness only for the buffers,
-    /// which define neither `__bool__` nor `__len__`.
+    /// which define neither `__bool__` nor `__len__`. A catalog test reads more of the value
+    /// than its class ([`fact_outcome`]).
     fn decide(self, test: &GuardTest) -> Option<bool> {
         match test {
             GuardTest::Truthy => matches!(self, Self::StringIo | Self::BytesIo).then_some(true),
             GuardTest::IsNone => Some(self == Self::None),
             GuardTest::IsInstance(classes) => self.is_instance(classes),
-            GuardTest::HasAttr(name) => self.has_attr(name),
-            GuardTest::Value(_) => None,
+            GuardTest::HasAttr(_) | GuardTest::Value(_) => self.has_attr(test.attr()?),
         }
     }
 
