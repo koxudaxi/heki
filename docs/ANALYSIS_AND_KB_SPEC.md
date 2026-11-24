@@ -377,8 +377,9 @@ the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores
   and writes of the namespace (`obj.__dict__["attr"] = v`, `vars(obj).setdefault("attr", v)`).
   The name may be a literal or a string constant of a module or a class (`KEY: Final`), or one
   of the string constants of the tuple, list, or set display a loop takes it from
-  (`for key in ("a", "b")`), which stores each (`stores::key_name`, the one decision of the
-  names these stores and the ownership facts read).
+  (`for key in ("a", "b")`; a list or set only while nothing but loops, copies, and `list`,
+  `tuple`, `sorted`, or `dict` reads it), which stores each (`stores::key_name`, the one
+  decision of the names these stores and the ownership facts read).
 - **What a store binds.** A store of `None` adds nothing (a call on it raises). A store of a value
   of unknown type, or values no tracked type covers, leaves the name untyped. `obj.attr += v`
   binds what the operator gives on the attribute's own value: nothing new when the name holds a
@@ -1245,6 +1246,10 @@ re-checked, and a test that moves moves the related locations showing it, as a c
 the language server re-checks the files showing a change site that moved, as for a call site. A
 place it records keeps what is there (a call's callees, a change's attribute), so that two calls
 or changes of one length swapping on a line, which keep every span, count as moved too.
+While a strict `read-owners` or `call-owners` contract has a glob target, it keeps the member
+names the code of every file writes on instances of project classes and on objects of unknown
+class (`heki_rules::class_member_names`), which decide what the glob matches on an object of
+unknown class; when they change, every checked file is re-checked.
 
 The incremental index also records what summarizing each file read of the project declarations
 (`FileSummary::decl_reads`: the modules looked up, the classes whose subclasses were listed, the
