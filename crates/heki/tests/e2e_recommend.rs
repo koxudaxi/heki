@@ -153,8 +153,8 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
          Rules worth enabling here\n\
          \x20 rule    reports  exact  consequence  right about the code (published)  real harm  \
          block\n\
-         \x20 EFF101        1      0  slowdown     82% (69-90%), n=50, 2026-11-21    32%        \
-         no: slower code, not a bug\n\
+         \x20 EFF101        1      0  bug          82% (69-90%), n=50, 2026-11-21    32%        \
+         yes\n\
          \x20 OPT101        1      0  slowdown     78% (45-94%), n=9, 2026-11-21     0%         \
          no: slower code, not a bug\n\
          \x20 OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         \
@@ -184,7 +184,7 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
          \n\
          pyproject.toml: keys to add or change\n\
          \x20 [tool.heki.lint]\n\
-         \x20 extend-select = [\"EFF111\"]  # adds EFF111\n\
+         \x20 extend-select = [\"EFF101\"]  # adds EFF101\n\
          \n\
          \x20 [[tool.heki.effect-boundaries]]\n\
          \x20 name = \"app.lists without blocking calls\"\n\
@@ -296,11 +296,11 @@ fn the_json_object_names_the_project_and_its_run() {
         (&report["notes"], &report["config"], &report["config_toml"]),
         (
             &json!(exit_notes(1, 1)),
-            &json!({"lint": {"extend-select": ["EFF111"]},
+            &json!({"lint": {"extend-select": ["EFF101"]},
                     "effect-boundaries": [{"name": "app.lists without blocking calls",
                                            "scopes": ["app.lists:*"], "forbid": ["blocking"]}]}),
             &json!(
-                "[tool.heki.lint]\nextend-select = [\"EFF111\"]  # adds EFF111\n\n\
+                "[tool.heki.lint]\nextend-select = [\"EFF101\"]  # adds EFF101\n\n\
                  [[tool.heki.effect-boundaries]]\nname = \"app.lists without blocking calls\"\n\
                  scopes = [\"app.lists:*\"]\nforbid = [\"blocking\"]\n"
             )
@@ -708,10 +708,9 @@ fn rules_worth_enabling_follow_the_policy() {
     assert_eq!(
         section,
         "  rule    reports  exact  consequence  right about the code (published)  real harm  block\n\
+        \x20 EFF101        1      0  bug          82% (69-90%), n=50, 2026-11-21    32%        yes\n\
         \x20 EFF107        1      -  bug          not measured                      -          yes\n\
-        \x20 EFF111        1      -  bug          not measured                      -          yes\n\
         \x20 MUT106        1      -  bug          not measured                      -          yes\n\
-        \x20 EFF101        1      0  slowdown     82% (69-90%), n=50, 2026-11-21    32%        no: slower code, not a bug\n\
         \x20 MUT107        1      -  bug          78% (65-87%), n=50, 2026-11-21    4%         no: real harm below 10%\n\
         \x20 OPT101        1      0  slowdown     78% (45-94%), n=9, 2026-11-21     0%         no: slower code, not a bug\n\
         \x20 OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug\n\
@@ -724,7 +723,7 @@ fn rules_worth_enabling_follow_the_policy() {
     assert!(
         out.contains(
             "\npyproject.toml: keys to add or change\n  [tool.heki.lint]\n  extend-select = \
-             [\"EFF107\", \"EFF111\", \"MUT106\"]  # adds EFF107, EFF111, MUT106\n"
+             [\"EFF101\", \"EFF107\", \"MUT106\"]  # adds EFF101, EFF107, MUT106\n"
         ),
         "{out}"
     );
@@ -776,7 +775,7 @@ fn rules_worth_enabling_follow_the_policy() {
     assert_eq!(rule(&report, "MUT103")["reports"], Value::Null);
     assert_eq!(
         report["config"]["lint"],
-        json!({"extend-select": ["EFF107", "EFF111", "MUT106"]})
+        json!({"extend-select": ["EFF101", "EFF107", "MUT106"]})
     );
     // Rules the current selection runs in full, and contract rules, are not listed.
     for code in ["EFF103", "OPT102", "MUT201", "EFF201"] {
@@ -799,7 +798,7 @@ fn rules_worth_enabling_follow_the_policy() {
     );
     assert_eq!(
         ignoring["config"]["lint"],
-        json!({"extend-select": ["EFF107", "EFF111"]})
+        json!({"extend-select": ["EFF101", "EFF107"]})
     );
     // A selected `MUT103` is not advice.
     let (_, selected, _) = recommend_json(&p, &["--extend-select", "MUT103"]);
@@ -824,6 +823,7 @@ fn the_block_enables_exactly_the_reports_it_promises() {
         }
         p.write(file, existing);
         let (_, report, _) = recommend_json(&p, &[]);
+        let before = checked(&p, &[]);
         let block = report["config_toml"].as_str().unwrap();
         // The user adds the keys: the array is written whole, so it replaces the line.
         let merged = if existing.contains("extend-select") {
@@ -844,10 +844,14 @@ fn the_block_enables_exactly_the_reports_it_promises() {
             .filter(|r| r["in_block"] == true)
             .collect();
         assert!(!promised.is_empty(), "{file}");
+        // A rule on by default (`EFF101`) is in the block for its heuristic reports: the block
+        // adds them to the exact ones shown already.
         for r in &promised {
             let code = r["code"].as_str().unwrap();
-            let found = after.iter().filter(|d| d["rule_code"] == code).count();
-            assert_eq!(json!(found), r["reports"], "{file}: {code}");
+            let count =
+                |reports: &[Value]| reports.iter().filter(|d| d["rule_code"] == code).count();
+            let added = count(&after) - count(&before);
+            assert_eq!(json!(added), r["reports"], "{file}: {code}");
         }
         let added: u64 = promised
             .iter()

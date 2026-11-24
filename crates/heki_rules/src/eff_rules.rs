@@ -630,7 +630,12 @@ impl DataOrigins {
             .map(|o| data_origin(tcx, ir, *o))
             .collect::<Result<Vec<(String, bool)>, _>>()?;
         let counts_only = named.iter().any(|(_, counted)| *counted);
-        let names = named.into_iter().map(|(name, _)| name).collect::<Vec<_>>();
+        let mut names: Vec<String> = Vec::new();
+        for (name, _) in named {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
         (!names.is_empty())
             .then_some(Self { names, counts_only })
             .ok_or(&premises::NO_ITEMS_FOLLOWED)
@@ -868,7 +873,7 @@ pub(crate) fn data_origin(
                 })?;
             let items = called
                 .items
-                .read_through(origin.text, counted)
+                .read_through(origin.text, origin.dropped, counted)
                 .ok_or(unsized_call)?;
             let what = items.named().ok_or(unsized_call)?;
             let returned = called
