@@ -503,12 +503,13 @@ pub fn declares_ownership(config: &HekiConfig) -> bool {
 /// Whether propagation carries typed writes for the rules `selection` runs on `config`: with an
 /// ownership contract (the gate of the other contract-only facts; `MUT201` and `EFF201` read
 /// the callers' typed write sites, and `EFF201`'s `IndirectHelper` sites depend on the callees'
-/// write facts), or with `MUT108` or `MUT112`, which read the callees' write facts. The readers
-/// assert it ([`heki_effect::ProjectIndex::propagates_typed_writes`]).
+/// write facts), or with `MUT108`, `MUT112`, or `MUT120`, which read the callees' write facts.
+/// The readers assert it ([`heki_effect::ProjectIndex::propagates_typed_writes`]).
 pub fn typed_writes(config: &HekiConfig, selection: &RuleSelection) -> TypedWrites {
     if declares_ownership(config)
         || selection.is_enabled("MUT108")
         || selection.is_enabled("MUT112")
+        || selection.is_enabled("MUT120")
     {
         TypedWrites::Propagated
     } else {

@@ -1498,7 +1498,7 @@ effects
 changes
   self.items     users.py:14 Loader._remember -> users.py:18
   global CACHE   directly: users.py:13
-  other objects  not computed (an ownership contract, MUT108, or MUT112 propagates them)
+  other objects  not computed (an ownership contract, MUT108, MUT112, or MUT120 propagates them)
 retains   stores url; what it keeps is not computed (needs an ownership contract)
 returns   value: state that outlives the call
 callers   1

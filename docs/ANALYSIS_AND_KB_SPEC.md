@@ -1174,8 +1174,8 @@ Early Cutoff compares summaries without their source positions, so an edit that 
 changes no caller's facts. The positions callers copy (call chains, write sites) are still
 re-propagated into their summaries, so that the incremental index always equals a full build, and
 the language server re-checks the files whose diagnostics show a moved call site. The call chains
-of `MUT108` / `MUT110` reports are no summary facts: the rule walks the own summaries and project
-calls of the functions below the call (`FileSummary::local_functions` and `call_sites`) down to
+of `MUT108` / `MUT110` / `MUT120` reports are no summary facts: the rule walks the own summaries
+and project calls of the functions below the call (`FileSummary::local_functions` and `call_sites`) down to
 the first function whose body makes the change. A heuristic `MUT110` report, whose chain names no
 line, records "Changed at the line" open when the run asks (`CheckExtras::open_premises`): no
 function on the chain makes the change in its own body (a generator another function returns is

@@ -223,7 +223,7 @@ once you declare a contract: see [Rules](rules/index.md) and [Rule precision](pr
 
 | What Python leaves open | What other languages enforce | What heki checks |
 | --- | --- | --- |
-| Any code can change any object it reaches | ownership and borrowing (Rust), `const` / `readonly` | read-only parameters and fields changed through helpers (`MUT110`, `MUT108`); `write-owners` / `read-owners` contracts (`MUT201`, `MUT203`) |
+| Any code can change any object it reaches | ownership and borrowing (Rust), `const` / `readonly` | read-only parameters, fields, and views changed through helpers (`MUT110`, `MUT108`, `MUT120`); `write-owners` / `read-owners` contracts (`MUT201`, `MUT203`) |
 | A signature does not say what a function does | effect types, `IO` in the type (Haskell) | blocking calls reached from `async def`, and clients and queries in loops (`EFF101`–`EFF103`); `effect-boundaries` (`EFF201`); effect snapshots (`MUT103`) |
 | Shared mutable objects hide changes | value semantics, immutability by default | stale cached properties and hashes (`MUT101`, `MUT107`); changed shared return values (`MUT114`, `MUT202`); writes an `invalidation` contract must announce (`MUT109`) |
 | Dynamic dispatch blocks optimizations | static types let a compiler prove a rewrite | quadratic patterns (`OPT`), rewritten only when proven under CPython's semantics |

@@ -232,7 +232,7 @@ once you declare a contract: see [Rules](https://heki.koxudaxi.dev/rules/) and [
 
 | What Python leaves open | What other languages enforce | What heki checks |
 | --- | --- | --- |
-| Any code can change any object it reaches | ownership and borrowing (Rust), `const` / `readonly` | read-only parameters and fields changed through helpers (`MUT110`, `MUT108`); `write-owners` / `read-owners` contracts (`MUT201`, `MUT203`) |
+| Any code can change any object it reaches | ownership and borrowing (Rust), `const` / `readonly` | read-only parameters, fields, and views changed through helpers (`MUT110`, `MUT108`, `MUT120`); `write-owners` / `read-owners` contracts (`MUT201`, `MUT203`) |
 | A signature does not say what a function does | effect types, `IO` in the type (Haskell) | blocking calls reached from `async def`, and clients and queries in loops (`EFF101`–`EFF103`); `effect-boundaries` (`EFF201`); effect snapshots (`MUT103`) |
 | Shared mutable objects hide changes | value semantics, immutability by default | stale cached properties and hashes (`MUT101`, `MUT107`); changed shared return values (`MUT114`, `MUT202`); writes an `invalidation` contract must announce (`MUT109`) |
 | Dynamic dispatch blocks optimizations | static types let a compiler prove a rewrite | quadratic patterns (`OPT`), rewritten only when proven under CPython's semantics |
@@ -676,6 +676,10 @@ Catalog lookups are exact. These contribute no effect until you add them with
   attributes, and `ReadOnly` `TypedDict` keys. It does not see the transforms of installed
   packages (attrs, Pydantic), and an instance the function constructs itself counts as under
   construction.
+- `MUT120` (opt-in) follows read-only views, classes and protocols of properties without a
+  setter: a helper that does not see the view's type and rebinds one of its properties, and the
+  container a property returns changed in place. A write through the view itself is left to the
+  type checker.
 
 ### Generators and coroutines
 
@@ -829,10 +833,10 @@ The proofs heki can make, on five axes:
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
 | Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT109`, `MUT113`, `EFF102`, `EFF103`, `EFF106`, `EFF109`, `EFF110`, `EFF114`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT112`, `MUT113`, `MUT119`, `MUT201`–`MUT204` |
-| Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `MUT112`, `MUT119`, `EFF107`, `EFF109`, `EFF110`, `EFF112`, `OPT101`–`OPT130` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT120`, `MUT112`, `MUT113`, `MUT119`, `MUT201`–`MUT204` |
+| Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `MUT120`, `MUT112`, `MUT119`, `EFF107`, `EFF109`, `EFF110`, `EFF112`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
-| State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT201`–`MUT204` |
+| State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT120`, `MUT111`, `MUT112`, `MUT113`, `MUT201`–`MUT204` |
 
 
 ---
@@ -1332,7 +1336,7 @@ the installed release changed, and the changelog on GitHub lists every release.
   says how many.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
   `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `MUT101`, `MUT103`, `MUT106`, `MUT107`,
-  `MUT108`, `MUT111`, `MUT112`, `MUT113`, `MUT115`): they need their exact code or name. In `ignore`, a prefix covers every
+  `MUT108`, `MUT111`, `MUT112`, `MUT113`, `MUT115`, `MUT120`): they need their exact code or name. In `ignore`, a prefix covers every
   rule it matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
@@ -2916,7 +2920,7 @@ Rules worth enabling here
   rule    reports  exact  consequence  right about the code (published)  real harm  block
   MUT106        1      -  bug          not measured                      -          yes
   OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
-  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF112, EFF113, EFF114, EFF115, EFF116, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, OPT112
+  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF112, EFF113, EFF114, EFF115, EFF116, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, OPT112
   MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it.
 
 Contract candidates
@@ -3595,7 +3599,7 @@ Source: https://heki.koxudaxi.dev/rules/
 
 # Rules
 
-heki has 49 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
+heki has 50 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
 
 - The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report of an exact rule that did not establish every premise (an `OPT` report whose rewrite is not proven) is shown where a heuristic rule would run.
 - A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
@@ -3631,6 +3635,7 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT115 | [shallow-copy-nested-mutation](https://heki.koxudaxi.dev/rules/shallow-copy-nested-mutation/) | Opt-in: changing in place an object below a shallow copy the function made of state that outlives the call (`dict(x)`, `x.copy()`, `copy.copy(x)`, `model_copy()`): the copied value holds the same object, so the change is seen through it too. | ≈ 🔌 |
 | MUT118 | [sentinel-lost-in-deepcopy](https://heki.koxudaxi.dev/rules/sentinel-lost-in-deepcopy/) | `copy.deepcopy` of an instance holding an `object()` sentinel in an attribute that a function tests against the sentinel by identity (the copy holds a new object, which the test does not match). | ≈ |
 | MUT119 | [change-lost-on-new-object](https://heki.koxudaxi.dev/rules/change-lost-on-new-object/) | An in-place change of a builtin container applied to a new object that nothing else holds and no name keeps (`list(xs).sort()`, `env = os.environ.copy().update(...)`, `obj.settings[k] = v` with a getter returning a new dict): the change is lost when the statement ends. |  |
+| MUT120 | [readonly-view-mutation](https://heki.koxudaxi.dev/rules/readonly-view-mutation/) | Opt-in: changing a value held through a read-only view (a protocol or class whose members are all properties without a setter) where a type checker does not see it: a helper that does not see the view's type rebinds one of its properties, or code changes in place the container a property returns. | ≈ 🔌 🧪 |
 | MUT201 | [write-owner-violation](https://heki.koxudaxi.dev/rules/write-owner-violation/) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. | ≈ 📜 |
 | MUT202 | [readonly-return-mutation](https://heki.koxudaxi.dev/rules/readonly-return-mutation/) | Mutating a shared object returned by a declared `readonly-returns` producer, directly or through the functions that return it. | ≈ 📜 |
 | MUT203 | [read-owner-violation](https://heki.koxudaxi.dev/rules/read-owner-violation/) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. | ≈ 📜 |
@@ -3943,6 +3948,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `rule.MUT111` | rule | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | 0.2.0 | - |
 | `rule.MUT113` | rule | [`MUT113`](https://heki.koxudaxi.dev/rules/iterated-container-mutation/) | 0.2.0 | - |
+| `rule.MUT120` | rule | [`MUT120`](https://heki.koxudaxi.dev/rules/readonly-view-mutation/) | 0.2.7 | - |
 
 ## `cli-option.generate-prompt`
 
@@ -4079,6 +4085,14 @@ Its precision on real code bases is still low: much of what it reports is code t
 - **Since:** 0.2.0
 
 It has few reports, and most of them are still false.
+
+## `rule.MUT120`
+
+- **Kind:** rule
+- **Target:** [`MUT120`](https://heki.koxudaxi.dev/rules/readonly-view-mutation/)
+- **Since:** 0.2.7
+
+It is new: its reports are heuristic until a review of its reports on real code bases certifies its claim.
 
 
 ---
@@ -4217,7 +4231,7 @@ On a save, the edit reaches other files only through what it changes:
 | what a function changes of its own containers, or what it does with the generators it calls (`MUT113`, when selected) | the classes of its family with generators suspending inside an iteration of their containers, and those of the generators it calls |
 | the writes that leave a `@cached_property` stale (`MUT111`, when selected) | the files reading such a property: whether a read is reported depends on every writer of the class family, wherever it is |
 | a function generators are handed to | those generators: whether it iterates them decides where their writes and reads are reported |
-| a function's own in-place changes or its calls, while its effects stay the same | the files with `MUT108` / `MUT110` reports above it: a report's call chain ends at the first function whose body makes the change |
+| a function's own in-place changes, attribute rebindings, or calls, while its effects stay the same | the files with `MUT108` / `MUT110` / `MUT120` reports above it: a report's call chain ends at the first function whose body makes the change |
 | the position of a call site, also when its bytes stay where they were | the files whose call chains show that call site |
 | the position of a method's own change of a container | the files whose `MUT113` reports show it |
 | the position of an import | the files whose `import-owners` chains show it |
@@ -9874,6 +9888,137 @@ No automatic fix.
 - `lint.extend-select = ["MUT108"]` (or `--extend-select MUT108`) enables the rule. It is
   opt-in: selecting the `MUT` prefix does not enable it.
 - No other configuration: the rule reads standard `typing` and `dataclasses` declarations only.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/readonly-view-mutation/
+
+# readonly-view-mutation (MUT120)
+
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+
+Opt-in: changing a value held through a read-only view (a protocol or class whose members are all properties without a setter) where a type checker does not see it: a helper that does not see the view's type rebinds one of its properties, or code changes in place the container a property returns.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+
+!!! warning "Experimental"
+
+    It is new: its reports are heuristic until a review of its reports on real code bases certifies its claim. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
+
+## What it does
+Checks changes of a value that the code holds through a read-only view, where a type checker
+does not see them. A read-only view is a class, a `typing.Protocol` or not, whose members are all
+properties without a setter or deleter: no plain attribute, no method, no `__setattr__`, along
+its bases in the project, and no other base than `object`, `abc.ABC`, `Generic`, or `Protocol`.
+A value is held through the view when its type is the view by annotation, as for `MUT108`: a
+parameter, a variable, an element of a `Sequence[View]` another view returns.
+
+A type checker reports a write of a view's property made through the view
+(`view.required = True`), but not two other ways to change the value:
+
+- handing the view to a helper that does not see its type (an unannotated or `Any` parameter),
+  which rebinds or deletes one of the view's properties (`p.required = ...`, `del p.required`,
+  `setattr(p, "required", ...)`), itself or through further helpers. The call that hands the
+  view over is reported, with the calls down to the write as related locations;
+- changing in place the container a property returns, when the property's annotation is a
+  mutable container type (`view.extras["k"] = v`, `view.items.append(x)`), directly, through a
+  local alias, or through helpers (`fill(view.extras)`, `reset(view)` changing `p.extras`), as
+  `MUT108` does for frozen fields. Through a helper, a property annotated with a read-only type
+  (`Sequence`, `Mapping`) counts too.
+
+The rule does not report:
+
+- a write of a property through the view itself, or through a helper whose parameter is
+  annotated with the view: the type checker reports it there. A helper that sees the view and
+  hands it on to one that does not is reported at its own call;
+- a change made through a value of a class that implements the view (`field: Field`, not
+  `field: FieldView`);
+- a direct change of a container a property annotated `Sequence` / `Mapping` returns: the type
+  checker reports it;
+- a copy (`extras = dict(view.extras)`, `fill(list(view.items))`), and a container inside the one
+  the property returns (`view.tables["a"].append(1)`);
+- a class with a setter or deleter, a plain attribute (`required: bool` in a protocol), a
+  method, or a `functools.cached_property`: it is no read-only view;
+- an attribute the view does not declare (`p.cache = {}` in a helper).
+
+Out of scope, both for a protocol that classes in the project implement: a property whose
+getter returns one attribute of their own in every implementation (`return self._extras`), which
+heki follows to that attribute, one the view does not declare; and the container of a property
+handed to a helper (`fill(view.extras)`), which heki does not tie to one class. Such changes are
+not reported.
+
+## What a report states
+
+A report states that a value the code holds through a read-only view is changed: a helper that
+does not see the view's type rebinds or deletes one of its properties, or the container a
+property returns is changed in place.
+
+Its premises:
+
+- **Read-only view**: every member of the class and of its bases in the project is a property
+  without a setter or deleter. Established from the declarations.
+- **Held through the view**: the value's type is the view, by annotation (assumption R2).
+- **Changed**: an attribute store or deletion in a helper whose parameter has no type a checker
+  reads, or an item store or mutator method on the container a property returns. Open through a
+  helper: a change on one of its paths is enough.
+
+## Why is this bad?
+A read-only view hands code the facts it may read and nothing it may change: callers pass their
+live objects through it, often while other code relies on them being final. A type checker keeps
+the promise only as far as it sees the view's type. A helper without annotations, or a container
+a property returns, lets a change through, and the change reaches every other holder of the
+object.
+
+## Example
+```python
+from typing import Protocol
+
+
+class FieldView(Protocol):
+    @property
+    def required(self) -> bool: ...
+
+    @property
+    def extras(self) -> dict[str, object]: ...
+
+
+def _flip(field):
+    field.required = not field.required
+
+
+def decide(field: FieldView) -> None:
+    _flip(field)  # MUT120: `_flip` rebinds the view's property `required`
+    field.extras["init"] = False  # MUT120: changes the container `extras` returns
+```
+
+Use instead:
+```python
+from collections.abc import Mapping
+from typing import Protocol
+
+
+class FieldView(Protocol):
+    @property
+    def required(self) -> bool: ...
+
+    @property
+    def extras(self) -> Mapping[str, object]: ...
+
+
+def decide(field: FieldView) -> dict[str, object]:
+    return {**field.extras, "init": False, "required": not field.required}
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `lint.extend-select = ["MUT120"]` (or `--extend-select MUT120`) enables the rule. It is
+  opt-in: selecting the `MUT` prefix does not enable it.
+- No other configuration: the rule reads standard `typing` and `abc` declarations only.
 
 
 ---

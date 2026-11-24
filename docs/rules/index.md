@@ -2,7 +2,7 @@
 
 # Rules
 
-heki has 49 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](../precision.md) says how a rule is certified and what each one measured. Each rule's page says what a report states.
+heki has 50 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](../precision.md) says how a rule is certified and what each one measured. Each rule's page says what a report states.
 
 - The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report of an exact rule that did not establish every premise (an `OPT` report whose rewrite is not proven) is shown where a heuristic rule would run.
 - A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
@@ -38,6 +38,7 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT115 | [shallow-copy-nested-mutation](shallow-copy-nested-mutation.md) | Opt-in: changing in place an object below a shallow copy the function made of state that outlives the call (`dict(x)`, `x.copy()`, `copy.copy(x)`, `model_copy()`): the copied value holds the same object, so the change is seen through it too. | ≈ 🔌 |
 | MUT118 | [sentinel-lost-in-deepcopy](sentinel-lost-in-deepcopy.md) | `copy.deepcopy` of an instance holding an `object()` sentinel in an attribute that a function tests against the sentinel by identity (the copy holds a new object, which the test does not match). | ≈ |
 | MUT119 | [change-lost-on-new-object](change-lost-on-new-object.md) | An in-place change of a builtin container applied to a new object that nothing else holds and no name keeps (`list(xs).sort()`, `env = os.environ.copy().update(...)`, `obj.settings[k] = v` with a getter returning a new dict): the change is lost when the statement ends. |  |
+| MUT120 | [readonly-view-mutation](readonly-view-mutation.md) | Opt-in: changing a value held through a read-only view (a protocol or class whose members are all properties without a setter) where a type checker does not see it: a helper that does not see the view's type rebinds one of its properties, or code changes in place the container a property returns. | ≈ 🔌 🧪 |
 | MUT201 | [write-owner-violation](write-owner-violation.md) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. | ≈ 📜 |
 | MUT202 | [readonly-return-mutation](readonly-return-mutation.md) | Mutating a shared object returned by a declared `readonly-returns` producer, directly or through the functions that return it. | ≈ 📜 |
 | MUT203 | [read-owner-violation](read-owner-violation.md) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. | ≈ 📜 |

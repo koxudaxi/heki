@@ -14,8 +14,8 @@ use heki_ast::{LineIndex, Span};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
     AttrKeyPath, CallHop, CallsByCaller, CellChange, EffectSummary, EntryKey, FuncKey, GuardTest,
-    ProjectDecls, ProjectIndex, SharedState, SiteRole, Slot, TypedFieldWriteSite, func_qualname,
-    is_stub,
+    ParamChange, ProjectDecls, ProjectIndex, SharedState, SiteRole, Slot, TypedFieldWriteSite,
+    func_qualname, is_stub,
 };
 use heki_ir::IrFunction;
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
@@ -596,7 +596,7 @@ const ASSUMES: &[&str] = &[
     "objects of unknown origin changed in place are not tracked",
 ];
 const TYPED_WRITES_NEED: &str =
-    "an ownership contract, MUT108, or MUT112 propagates writes to other objects";
+    "an ownership contract, MUT108, MUT112, or MUT120 propagates writes to other objects";
 const OWNERSHIP_NEEDS: &str =
     "an ownership contract (write-owners, read-owners, effect-boundaries, invalidation)";
 
@@ -1011,16 +1011,16 @@ fn changes(
                 .get(&i)
                 .is_some_and(|v| !v.is_empty());
         let what = if paths.contains("") {
-            None
+            Some(ParamChange::Itself)
         } else {
             s.inplace_param_slots
                 .get(&i)
                 .and_then(|slots| slots.first().cloned())
+                .map(ParamChange::InSlot)
         };
-        let chain = if !direct && (paths.contains("") || what.is_some()) {
-            index.param_change_chain(&mut b.calls.borrow_mut(), key, i, &what)
-        } else {
-            heki_effect::ChangeChain::default()
+        let chain = match what.filter(|_| !direct) {
+            Some(what) => index.param_change_chain(&mut b.calls.borrow_mut(), key, i, &what),
+            None => heki_effect::ChangeChain::default(),
         };
         let at = if direct {
             first_change_site(b, key, i)
