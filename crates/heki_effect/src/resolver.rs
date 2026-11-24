@@ -4671,11 +4671,12 @@ impl ProjectDecls {
     }
 
     /// Whether the inferred type `t` is narrower than the declared `declared`, so that a value
-    /// keeps it: anything for a declaration of `Any` / `object`, an instance of a project
-    /// subclass of the declared class (`x: Base = Sub()`), and for a declared class object, a
-    /// class named exactly or the class object of a subclass (`kind: type[Base] = Base`, `=
-    /// Sub`, `= type(sub)`).
-    pub(crate) fn narrower(&self, t: &Ty, declared: &Ty) -> bool {
+    /// keeps it: anything for a declaration of `Any` / `object`, an instance of a class that
+    /// specializes the declared one ([`Self::specializes`]: `x: Base = Sub()`, `cur:
+    /// sqlite3.Cursor = conn.execute(...)` on a file), and for a declared class object, a class
+    /// named exactly or the class object of a subclass (`kind: type[Base] = Base`, `= Sub`, `=
+    /// type(sub)`).
+    pub(crate) fn narrower(&self, t: &Ty, declared: &Ty, kb: &EffectiveEcosystemKb) -> bool {
         if let Ty::Class(d) = declared {
             return match t {
                 Ty::Ref(c) => c == d || self.is_subclass(c, d),
@@ -4687,8 +4688,16 @@ impl ProjectDecls {
             of_any_class(&d.class)
                 || (is_any_callable(&d.class) && t.obj().is_none())
                 || t.obj()
-                    .is_some_and(|i| i.class != d.class && self.is_subclass(&i.class, &d.class))
+                    .is_some_and(|i| self.specializes(&i.class, &d.class, kb))
         })
+    }
+
+    /// Whether every instance of `class` is an instance of `base` that says more than `base`
+    /// does: `class` is a project subclass of it, or a catalog class with the methods of the
+    /// library class `base` ([`EffectiveEcosystemKb::api_class`]: `sqlite3.connect(file)`, a
+    /// `sqlite3.Connection` on a file).
+    pub(crate) fn specializes(&self, class: &str, base: &str, kb: &EffectiveEcosystemKb) -> bool {
+        class != base && (self.is_subclass(class, base) || kb.api_class(class) == Some(base))
     }
 
     /// The declared type `declared` with what the inferred `t` says beyond it: `t` when it is
@@ -4696,8 +4705,8 @@ impl ProjectDecls {
     /// item slot of `t` that is narrower than the declared one or that the declaration leaves
     /// unknown (`dict[str, Callable]` declared, a display of functions stored); else
     /// `declared`.
-    pub(crate) fn refine(&self, t: &Ty, declared: &Ty) -> Ty {
-        if self.narrower(t, declared) {
+    pub(crate) fn refine(&self, t: &Ty, declared: &Ty, kb: &EffectiveEcosystemKb) -> Ty {
+        if self.narrower(t, declared, kb) {
             return t.clone();
         }
         let (Some(i), Some(d)) = (t.obj(), declared.obj()) else {
@@ -4707,7 +4716,7 @@ impl ProjectDecls {
             return declared.clone();
         }
         let slot = |a: &Elem, b: &Elem| match (a, b) {
-            (Elem::Of(x), Elem::Of(y)) if self.narrower(x, y) => a.clone(),
+            (Elem::Of(x), Elem::Of(y)) if self.narrower(x, y, kb) => a.clone(),
             (Elem::Of(_), Elem::Unknown) => a.clone(),
             _ => b.clone(),
         };

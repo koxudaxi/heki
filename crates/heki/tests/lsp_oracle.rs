@@ -765,6 +765,13 @@ const ST_KEEPER_GLOBAL: &str = "import httpx\n\nfrom pkg.st_holder import Holder
 const ST_STAR: &str = "import httpx\n\nclient = httpx.Client()\n\nfrom pkg.st_exporting import *  # noqa: E402, F403\n\n\nasync def handler():\n    client.get(\"u\")\n";
 const ST_EXPORTING: &str = "__all__ = [\"other\"]\n\nother = 1\n";
 const ST_EXPORTING_APPENDED: &str = "import httpx\n\n__all__ = [\"other\"]\n__all__.append(\"client\")\n\nother = 1\nclient = httpx.AsyncClient()\n";
+// A global annotated with the library class of the connection it holds keeps where the
+// connection was opened: its readers in other modules wait while it is opened on a file.
+const ST_LITE: &str = "import sqlite3\n\nconn: sqlite3.Connection = sqlite3.connect(\"app.db\")\n";
+const ST_LITE_IN_MEMORY: &str =
+    "import sqlite3\n\nconn: sqlite3.Connection = sqlite3.connect(\":memory:\")\n";
+const ST_LITE_USE: &str =
+    "from pkg.st_lite import conn\n\n\nasync def serve():\n    conn.execute(\"SELECT 1\")\n";
 
 // Method lookups (`ProjectDecls::method_read_runs_no_code`): a helper looks up a method before it
 // sleeps, inside a `try` whose handler goes on; a subclass in another module comes and goes.
@@ -1180,6 +1187,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/st_keeper.py", ST_KEEPER),
         ("pkg/st_star.py", ST_STAR),
         ("pkg/st_exporting.py", ST_EXPORTING),
+        ("pkg/st_lite.py", ST_LITE),
+        ("pkg/st_lite_use.py", ST_LITE_USE),
         ("pkg/lc_settings.py", LC_SETTINGS),
         ("pkg/lc_use.py", LC_USE),
         ("pkg/ml_base.py", ML_BASE),
@@ -1476,13 +1485,15 @@ fn steps_exact_effects() -> Vec<Step> {
 /// in another function of the module, in a third module, in a subclass or a mixin of it in
 /// another file, or through a parameter of the class makes the calls on it unresolved, which the
 /// language server sees in every reader; so does a store of another class into a global that
-/// the stores of another global read.
+/// the stores of another global read. A global annotated with the class of a connection is the
+/// connection the store opens: in memory, its reader in another module does not wait.
 fn steps_store_types() -> Vec<Step> {
     const READERS: &[(&str, &str)] = &[("pkg/st_client.py", "EFF101"), ("pkg/st_use.py", "EFF101")];
     const HOLDER: &[(&str, &str)] = &[("pkg/st_holder.py", "EFF101")];
     const ACTIVE: &[(&str, &str)] = &[("pkg/st_active.py", "EFF101")];
     const ATTR_ACTIVE: &[(&str, &str)] = &[("pkg/st_attr_active.py", "EFF101")];
     const STAR: &[(&str, &str)] = &[("pkg/st_star.py", "EFF101")];
+    const LITE: &[(&str, &str)] = &[("pkg/st_lite_use.py", "EFF101")];
     vec![
         Step::new(
             "another function rebinds the global to an async client",
@@ -1635,6 +1646,16 @@ fn steps_store_types() -> Vec<Step> {
             vec![save("pkg/st_exporting.py", ST_EXPORTING)],
         )
         .present(STAR),
+        Step::new(
+            "the annotated global's connection is opened in memory",
+            vec![save("pkg/st_lite.py", ST_LITE_IN_MEMORY)],
+        )
+        .absent(LITE),
+        Step::new(
+            "it is opened on a file again",
+            vec![save("pkg/st_lite.py", ST_LITE)],
+        )
+        .present(LITE),
     ]
 }
 

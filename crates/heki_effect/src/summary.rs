@@ -827,6 +827,11 @@ struct Extractor<'a> {
     sites: Vec<CallSite>,
     /// Resolved callee of every `Call` / `MethodCall` by position (for the iteration flow).
     callees: FxHashMap<(BlockId, usize), Callee>,
+    /// Whether each call of a held callable (a bound method, `m = obj.method; m(...)`, or a
+    /// `functools.partial` object made here), which resolves past the type of the value it
+    /// calls, has as its targets every implementation it can run, by position
+    /// ([`Self::targets_complete_at`]).
+    held_calls_complete: FxHashMap<Position, bool>,
     /// The project calls (`Call` / `MethodCall`), for the sites of the objects they return.
     project_calls: Vec<ProjectCall>,
     contracts: Option<&'a dyn Contracts>,
@@ -1243,6 +1248,7 @@ impl<'a> Extractor<'a> {
             summary,
             sites: Vec::new(),
             callees: FxHashMap::default(),
+            held_calls_complete: FxHashMap::default(),
             project_calls: Vec::new(),
             own_line: OnceCell::new(),
             lambdas: OnceCell::new(),
@@ -4966,6 +4972,8 @@ impl<'a> Extractor<'a> {
                         .and_then(|p| p.called_with(passed.args, passed.kwargs, passed.star_from))
                 {
                     let (target, recv_var) = self.callable_callee(partial.callable);
+                    let complete = self.callable_targets_complete(partial.callable, &target);
+                    self.held_calls_complete.insert((bb, index), complete);
                     let (recv, recv_is_self) = match recv_var {
                         Some(r) => {
                             let (origin, is_self) = self.receiver(r, bb);
@@ -5000,9 +5008,12 @@ impl<'a> Extractor<'a> {
                 // `m = obj.method; m(...)` and `getattr(obj, "method")(...)` call a method of
                 // the receiver, as `obj.method(...)` does.
                 if callee_val.is_none()
-                    && let Some((recv, method)) = callee_var.and_then(|v| self.bound_method(v))
+                    && let Some(held) = *callee_var
+                    && let Some((recv, method)) = self.bound_method(held)
                 {
                     let target = self.cx.resolve_method(self.val(recv), &method);
+                    let complete = self.callable_targets_complete(held, &target);
+                    self.held_calls_complete.insert((bb, index), complete);
                     self.unresolved_access(&method, Access::Call, recv, span);
                     let (recv_origin, recv_is_self) = self.receiver(recv, bb);
                     let call = Call {
@@ -5342,12 +5353,19 @@ impl<'a> Extractor<'a> {
 
     /// Whether `callee`, what [`Self::callable_callee`] resolves calling `var` to, is every
     /// implementation that call can run ([`crate::TypeCtx::method_targets_complete`] for a
-    /// bound method, [`crate::TypeCtx::call_targets_complete`] otherwise).
+    /// bound method that `getattr` gives with no default, [`crate::TypeCtx::call_targets_complete`]
+    /// otherwise).
     fn callable_targets_complete(&self, var: VarId, callee: &Callee) -> bool {
         match self.bound_method(var) {
             Some((recv, method)) => {
-                self.cx
-                    .method_targets_complete(self.val(recv), &method, callee)
+                // `getattr(obj, "method", default)` gives the default where the object lacks
+                // the method.
+                let root = self.defs.get(&self.shape.copy_root(var)).map(|i| &i.kind);
+                let default = matches!(root, Some(InstKind::Call { args, .. }) if args.len() == 3);
+                !default
+                    && self
+                        .cx
+                        .method_targets_complete(self.val(recv), &method, callee)
             }
             None => self.cx.call_targets_complete(self.val(var), callee),
         }
@@ -7410,8 +7428,12 @@ impl<'a> Extractor<'a> {
     }
 
     /// [`Self::targets_complete`] of the call at `(bb, index)`, with the types its block narrows
-    /// (those its callee was resolved with).
+    /// (those its callee was resolved with); for a call of a held callable, those of the call
+    /// it was resolved to ([`Self::held_calls_complete`]).
     fn targets_complete_at(&self, (bb, index): Position) -> bool {
+        if let Some(&complete) = self.held_calls_complete.get(&(bb, index)) {
+            return complete;
+        }
         // A read that runs property getters ([`Self::property_read`]) runs the getter each class
         // the object may be finds for the name (more than CHA follows are none).
         self.f.block(bb).insts.get(index).is_some_and(|i| {

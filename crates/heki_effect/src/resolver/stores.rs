@@ -2212,13 +2212,14 @@ impl<'c, 'f> Classifier<'c, 'f> {
 
     /// A change in place of the object the load `load` gives (an item store, a method call
     /// that may add items, an in-place operator): a store, into the name the load reads, of
-    /// the loaded type with what the changes add ([`Ty::with_added`]), or of an annotated
-    /// global's declaration. The name keeps its class, and its items only where every change
-    /// adds items heki types (`HANDLERS = {"a": run}`, then `HANDLERS[kind] = other` with
-    /// `other` of unknown type, keeps no item type). A global read through the module's own
-    /// object, which types it by its name alone (`tables.HANDLERS[kind] = other` in a module
-    /// importing itself), keeps its declaration, or its type joins what the changes add once
-    /// it is established ([`Joins::added`]).
+    /// the loaded type with what the changes add ([`Ty::with_added`]), or for an annotated
+    /// global, of its declaration refined by the instance the load gives with what the changes
+    /// add ([`Self::declared_store`]). The name keeps its class, and its items only where every
+    /// change adds items heki types (`HANDLERS = {"a": run}`, then `HANDLERS[kind] = other`
+    /// with `other` of unknown type, keeps no item type). A global read through the module's
+    /// own object, which types it by its name alone (`tables.HANDLERS[kind] = other` in a
+    /// module importing itself), keeps its declaration, or its type joins what the changes add
+    /// once it is established ([`Joins::added`]).
     fn changed_in_place(&self, out: &mut Sink<'_>, load: &ChangedLoad<'_>, added: &Added) {
         // The loaded value's type with what the changes add, when that changes it; another
         // module's names are marked instead, decided by their own module's stores.
@@ -2227,6 +2228,8 @@ impl<'c, 'f> Classifier<'c, 'f> {
             .map(|t| (t.with_added(added), t))
             .and_then(|(changed, t)| (changed != *t).then_some(changed));
         let value = with_added.as_ref().map(Some);
+        // A load typed by a name says nothing of the object the name holds.
+        let changed_object = with_added.as_ref().or(loaded).filter(|t| t.obj().is_some());
         let module = self.cx.module_name();
         match load.of {
             LoadOf::Name(name) => {
@@ -2237,7 +2240,7 @@ impl<'c, 'f> Classifier<'c, 'f> {
                     }
                 } else if self.decls.unknown_globals.contains(name) {
                     // An annotation types the items any change adds, as it types every store.
-                    let declared = (self.declared)(name);
+                    let declared = self.declared_store(name, changed_object);
                     if let Some(value) = declared.as_ref().map(Some).or(value) {
                         let target = StoreTarget::Global(name.to_owned());
                         out.own.store(target, false, Some(value));
@@ -2256,7 +2259,7 @@ impl<'c, 'f> Classifier<'c, 'f> {
                         }
                         Holder::Module(m) if m == module => {
                             let target = StoreTarget::Global(attr.to_owned());
-                            let declared = (self.declared)(attr);
+                            let declared = self.declared_store(attr, changed_object);
                             let named_only = loaded.is_none_or(|t| matches!(t, Ty::Ref(_)));
                             if let Some(value) = declared.as_ref().map(Some).or(value) {
                                 out.own.store(target, false, Some(value));
@@ -2352,20 +2355,28 @@ impl<'c, 'f> Classifier<'c, 'f> {
     }
 
     /// What a store of `value` in the global `name` binds: of unknown type when the module may
-    /// rebind it (`rebinds`); its declaration, refined by what the value says beyond it
-    /// ([`ProjectDecls::refine`]), when the module annotates it.
+    /// rebind it (`rebinds`); [`Self::declared_store`] when the module annotates it.
     fn global_value(&self, name: &str, value: VarId, rebinds: bool) -> Option<Option<Ty>> {
         let mut out = self.types.stored(value).map(|t| t.cloned());
         if rebinds {
             out = Some(None);
         }
-        if let Some(d) = (self.declared)(name) {
-            out = Some(Some(match out {
-                Some(Some(t)) => self.cx.project.refine(&t, &d),
-                _ => d,
-            }));
+        let known = out.as_ref().and_then(Option::as_ref);
+        if let Some(declared) = self.declared_store(name, known) {
+            out = Some(Some(declared));
         }
         out
+    }
+
+    /// What a store of a value of type `value` (`None`: unknown) binds in the global `name`
+    /// the module annotates: its declaration, refined by what the value says beyond it
+    /// ([`ProjectDecls::refine`]); `None` for a global it does not annotate.
+    fn declared_store(&self, name: &str, value: Option<&Ty>) -> Option<Ty> {
+        let declared = (self.declared)(name)?;
+        Some(match value {
+            Some(t) => self.cx.project.refine(t, &declared, self.cx.kb),
+            None => declared,
+        })
     }
 
     /// The name the variable `var` holding an attribute name names ([`key_name`]).
