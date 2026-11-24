@@ -197,8 +197,9 @@ fn a_text_run_says_how_many_heuristic_rules_and_reports_it_left_off() {
         ),
         ("concise", ""),
     ] {
+        // The contract report is heuristic: it counts as a warning, and the run passes.
         let (code, stdout, stderr) = p.heki(&["check", "--output-format", format]);
-        assert_eq!(code, 1, "{stdout}{stderr}");
+        assert_eq!(code, 0, "{stdout}{stderr}");
         let tail = format!("{}{after}", note(&rules_and_report(every)));
         assert!(stderr.ends_with(&tail), "{format}: {stderr}");
     }
@@ -244,7 +245,7 @@ fn every_output_labels_a_heuristic_report_and_only_that() {
     let p = heuristic_and_contract("heuristic_labels", "heuristic = true\n");
     let (_, full, _) = p.heki(&["check"]);
     assert!(
-        full.contains("app.py:5:5: EFF101 (async-blocking-call) [warning, heuristic] `handler`"),
+        full.contains("app.py:5:5: EFF101 (async-blocking-call) [error, heuristic] `handler`"),
         "{full}"
     );
     assert!(
@@ -298,7 +299,7 @@ fn an_exact_report_runs_by_default_and_carries_no_label() {
     assert_eq!(plain(&p, &[]).1, ["EFF101"]);
     let (_, full, _) = p.heki(&["check"]);
     assert!(
-        full.starts_with("app.py:5:5: EFF101 (async-blocking-call) [warning] `handler`"),
+        full.starts_with("app.py:5:5: EFF101 (async-blocking-call) [error] `handler`"),
         "{full}"
     );
     let (_, github, _) = p.heki(&["check", "--output-format", "github"]);

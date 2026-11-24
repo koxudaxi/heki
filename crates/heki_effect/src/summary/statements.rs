@@ -448,3 +448,273 @@ fn lines(text: &str) -> impl Iterator<Item = &str> {
         Some(line)
     })
 }
+
+/// Whether the catalog API `symbol` runs the statement passed to it first ([`SQL_EXECUTORS`]).
+pub(crate) fn runs_statement(symbol: &str) -> bool {
+    SQL_EXECUTORS.contains(&symbol.rsplit('.').next().unwrap_or(symbol))
+}
+
+/// SQL aggregate functions: over the rows of a query without `GROUP BY` they give one row. `min`
+/// and `max` given more than one argument are scalar functions instead.
+const AGGREGATES: &[&str] = &["AVG", "COUNT", "GROUP_CONCAT", "MAX", "MIN", "SUM", "TOTAL"];
+
+/// Words that, outside parentheses, make a query give more than one row of aggregates: a grouping,
+/// a compound query, or a window.
+const MANY_AGGREGATE_ROWS: &[&str] = &["EXCEPT", "GROUP", "INTERSECT", "OVER", "UNION", "WINDOW"];
+
+/// The most rows the single query `text` gives when its text fixes the number: the count of a
+/// `LIMIT` with a literal count at its end (`LIMIT 3`, `LIMIT 3 OFFSET 6`, `LIMIT 6, 3`), or one
+/// row for a `SELECT` of aggregates only with no grouping, compound query, or window
+/// (`SELECT COUNT(*) FROM t`). A `LIMIT` inside parentheses (a subquery) bounds only that part.
+pub(crate) fn fixed_rows(text: &str) -> Option<u32> {
+    let tokens = top_level_tokens(text)?;
+    let end = tokens
+        .iter()
+        .position(|t| *t == Token::End)
+        .unwrap_or(tokens.len());
+    if tokens[end..].iter().any(|t| *t != Token::End) {
+        return None;
+    }
+    let tokens = &tokens[..end];
+    if !matches!(tokens.first(), Some(Token::Word(w)) if w.eq_ignore_ascii_case("SELECT")) {
+        return None;
+    }
+    let limit = limit_count(tokens);
+    let aggregate = aggregates_only(tokens).then_some(1);
+    match (limit, aggregate) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// The count of the `LIMIT` that ends `tokens`, when it is a literal.
+fn limit_count(tokens: &[Token<'_>]) -> Option<u32> {
+    let at = tokens
+        .iter()
+        .rposition(|t| matches!(t, Token::Word(w) if w.eq_ignore_ascii_case("LIMIT")))?;
+    let count = match &tokens[at + 1..] {
+        [Token::Int(n)] | [Token::Int(_), Token::Comma, Token::Int(n)] => *n,
+        [Token::Int(n), Token::Word(w), Token::Int(_)] if w.eq_ignore_ascii_case("OFFSET") => *n,
+        _ => return None,
+    };
+    u32::try_from(count).ok()
+}
+
+/// The `SELECT` of `tokens` lists only aggregate calls, each with an optional alias, and nothing
+/// outside parentheses groups, combines, or windows them ([`MANY_AGGREGATE_ROWS`]).
+fn aggregates_only(tokens: &[Token<'_>]) -> bool {
+    let is_word = |t: &Token<'_>, words: &[&str]| matches!(t, Token::Word(w) if words.iter().any(|k| w.eq_ignore_ascii_case(k)));
+    if tokens.iter().any(|t| is_word(t, MANY_AGGREGATE_ROWS)) {
+        return false;
+    }
+    let rest = &tokens[1..];
+    let listed = rest
+        .iter()
+        .position(|t| is_word(t, &["FROM"]))
+        .map_or(rest, |at| &rest[..at]);
+    let aggregate = |name: &str, inner: &str| {
+        // `min(a, b)` and `max(a, b)` compare their arguments in each row.
+        let scalar = ["MIN", "MAX"].iter().any(|m| name.eq_ignore_ascii_case(m))
+            && top_level_tokens(inner).is_none_or(|t| t.contains(&Token::Comma));
+        AGGREGATES.iter().any(|a| name.eq_ignore_ascii_case(a)) && !scalar
+    };
+    !listed.is_empty()
+        && listed.split(|t| *t == Token::Comma).all(|item| match item {
+            [Token::Word(name), Token::Group(inner)]
+            | [
+                Token::Word(name),
+                Token::Group(inner),
+                Token::Word(_) | Token::Other,
+            ] => aggregate(name, inner),
+            [
+                Token::Word(name),
+                Token::Group(inner),
+                Token::Word(as_),
+                Token::Word(_) | Token::Other,
+            ] if as_.eq_ignore_ascii_case("AS") => aggregate(name, inner),
+            _ => false,
+        })
+}
+
+/// A token of SQL text outside parentheses ([`top_level_tokens`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Token<'t> {
+    /// A keyword or a name.
+    Word(&'t str),
+    /// An integer literal.
+    Int(u64),
+    Comma,
+    /// `;`.
+    End,
+    /// A parenthesized part, by its text inside the parentheses.
+    Group(&'t str),
+    /// Anything else: an operator, a quoted string or name, a parameter.
+    Other,
+}
+
+/// The tokens of `text` outside parentheses, comments and blanks left out; `None` when a quote,
+/// a comment, or a parenthesis is left open.
+fn top_level_tokens(text: &str) -> Option<Vec<Token<'_>>> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match c {
+            b' ' | b'\t' | b'\n' | b'\r' | b'\x0b' | b'\x0c' => i += 1,
+            b'-' if bytes.get(i + 1) == Some(&b'-') => {
+                i = text[i..].find('\n').map_or(bytes.len(), |n| i + n);
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i = i + 2 + text[i + 2..].find("*/")? + 2;
+            }
+            b'\'' | b'"' | b'`' => {
+                i = quoted_end(bytes, i, c)?;
+                out.push(Token::Other);
+            }
+            b'[' => {
+                i += text[i..].find(']')? + 1;
+                out.push(Token::Other);
+            }
+            b'(' => {
+                let close = group_end(bytes, i)?;
+                out.push(Token::Group(&text[i + 1..close]));
+                i = close + 1;
+            }
+            b')' => return None,
+            b',' => {
+                out.push(Token::Comma);
+                i += 1;
+            }
+            b';' => {
+                out.push(Token::End);
+                i += 1;
+            }
+            b'0'..=b'9' => {
+                let end = bytes[i..]
+                    .iter()
+                    .position(|b| !(b.is_ascii_alphanumeric() || *b == b'_' || *b == b'.'))
+                    .map_or(bytes.len(), |n| i + n);
+                out.push(text[i..end].parse().map_or(Token::Other, Token::Int));
+                i = end;
+            }
+            c if c.is_ascii_alphabetic() || c == b'_' => {
+                let end = bytes[i..]
+                    .iter()
+                    .position(|b| !(b.is_ascii_alphanumeric() || *b == b'_' || *b == b'$'))
+                    .map_or(bytes.len(), |n| i + n);
+                out.push(Token::Word(&text[i..end]));
+                i = end;
+            }
+            _ => {
+                out.push(Token::Other);
+                i += text[i..].chars().next().map_or(1, char::len_utf8);
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Past the quote `quote` opening at `start`, where a doubled quote stands for itself.
+fn quoted_end(bytes: &[u8], start: usize, quote: u8) -> Option<usize> {
+    let mut i = start + 1;
+    loop {
+        let at = i + bytes[i..].iter().position(|b| *b == quote)?;
+        if bytes.get(at + 1) == Some(&quote) {
+            i = at + 2;
+        } else {
+            return Some(at + 1);
+        }
+    }
+}
+
+/// The `)` closing the parenthesis at `open`, past quotes and nested parentheses.
+fn group_end(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            q @ (b'\'' | b'"' | b'`') => {
+                i = quoted_end(bytes, i, q)?;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixed_rows;
+
+    #[test]
+    fn a_limit_or_an_aggregate_fixes_the_rows_of_a_query() {
+        for (text, rows) in [
+            ("SELECT id FROM t LIMIT 3", Some(3)),
+            ("select id from t limit 3;", Some(3)),
+            ("SELECT id FROM t LIMIT 3 OFFSET 6", Some(3)),
+            ("SELECT id FROM t LIMIT 6, 3", Some(3)),
+            (
+                "SELECT id FROM t ORDER BY id LIMIT 3 -- the first\n",
+                Some(3),
+            ),
+            ("SELECT id /* all */ FROM t LIMIT 3", Some(3)),
+            ("SELECT COUNT(*) FROM t", Some(1)),
+            (
+                "SELECT count(*) AS n, max(x) m FROM t WHERE y = 'a;b'",
+                Some(1),
+            ),
+            ("SELECT total(x), group_concat(x, ',') FROM t", Some(1)),
+            ("SELECT COUNT(*) FROM t LIMIT 5", Some(1)),
+            ("SELECT COUNT(*) FROM t LIMIT 0", Some(0)),
+            (
+                "SELECT [id] FROM \"t\" WHERE `x` = 'it''s' LIMIT 2",
+                Some(2),
+            ),
+            // The data decides how many rows there are.
+            ("SELECT id FROM t", None),
+            ("SELECT id FROM t LIMIT ?", None),
+            ("SELECT id FROM t LIMIT 3 FOR UPDATE", None),
+            (
+                "SELECT id FROM t WHERE id IN (SELECT id FROM u LIMIT 3)",
+                None,
+            ),
+            ("SELECT COUNT(*) FROM t GROUP BY x", None),
+            ("SELECT COUNT(*) FROM t UNION SELECT COUNT(*) FROM u", None),
+            ("SELECT COUNT(*) OVER () FROM t", None),
+            ("SELECT COUNT(*) FILTER (WHERE x) FROM t", None),
+            ("SELECT max(a, b) FROM t", None),
+            ("SELECT COUNT(*), id FROM t", None),
+            ("SELECT DISTINCT COUNT(*) FROM t", None),
+            ("SELECT FROM t", None),
+            ("SELECT id FROM t LIMIT 99999999999", None),
+            ("DELETE FROM t LIMIT 3", None),
+            ("SELECT id FROM t LIMIT 3; SELECT id FROM u", None),
+            ("WITH x AS (SELECT 1) SELECT * FROM x LIMIT 3", None),
+            // Text heki does not read as a whole.
+            ("SELECT id FROM t WHERE x = 'open LIMIT 3", None),
+            ("SELECT id FROM t /* open LIMIT 3", None),
+            ("SELECT id FROM [t LIMIT 3", None),
+            ("SELECT id FROM t WHERE (x = 1 LIMIT 3", None),
+            ("SELECT id FROM t) LIMIT 3", None),
+            ("SELECT COUNT(*) FROM t WHERE x = 'é' LIMIT 1", Some(1)),
+            ("SELECT 1.5e3 FROM t LIMIT 3", Some(3)),
+            ("SELECT x @ y FROM t LIMIT 3", Some(3)),
+            ("SELECT min((a)) FROM t", Some(1)),
+            ("SELECT min('a', b) FROM t", None),
+            ("SELECT count(\"it\"\"s\") FROM t", Some(1)),
+            ("SELECT min('open) FROM t", None),
+        ] {
+            assert_eq!(fixed_rows(text), rows, "{text}");
+        }
+    }
+}

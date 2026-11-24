@@ -126,6 +126,20 @@ fn watch_exits_with_the_last_reports_status() {
     p.write("heki.toml", "[lint]\nfail-on = \"warning\"\n");
     assert_eq!(watch_status(&[]), Some(1));
     assert_eq!(watch_status(&["--fail-on", "error"]), Some(0));
+    // As in `heki check`, an exact error fails the last report, and a heuristic report of an
+    // error rule counts as a warning.
+    p.write(
+        "blocking.py",
+        "import time\n\n\nasync def handler():\n    time.sleep(1)\n",
+    );
+    assert_eq!(watch_status(&["--fail-on", "error"]), Some(1));
+    std::fs::remove_file(p.dir.join("blocking.py")).unwrap();
+    p.write(
+        "maybe.py",
+        "import time\n\n\ndef pause(seconds: float) -> None:\n    if seconds > 0:\n        time.sleep(seconds)\n\n\nasync def handler(seconds: float) -> None:\n    pause(seconds)\n",
+    );
+    assert_eq!(watch_status(&["--fail-on", "error"]), Some(0));
+    assert_eq!(watch_status(&[]), Some(1));
     // Invalid configuration is reported before watching starts.
     p.write("heki.toml", "[lint]\nselect = [\"NOPE1\"]\n");
     let out = common::heki_command()
@@ -211,7 +225,7 @@ fn watch_full_output_idle_polls_and_a_clean_exit() {
     assert_eq!(out.status.code(), Some(0), "the last report is clean");
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
-        stdout.starts_with("a.py:5:5: EFF101 (async-blocking-call) [warning] ")
+        stdout.starts_with("a.py:5:5: EFF101 (async-blocking-call) [error] ")
             && stdout.contains("5 |     time.sleep(1)")
             && stdout.contains("\n  = help: use `await asyncio.sleep(...)`"),
         "full output with the source line:\n{stdout}"

@@ -66,7 +66,7 @@ See [Configuration Advice](recommend.md).
 ## Read a diagnostic
 
 ```console
-app/api.py:5:12: EFF101 (async-blocking-call) [warning] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (1 call down, on every path)
+app/api.py:5:12: EFF101 (async-blocking-call) [error] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (1 call down, on every path)
   |
 5 |     user = load_user(user_id)
   |            ^
@@ -79,7 +79,7 @@ app/api.py:5:12: EFF101 (async-blocking-call) [warning] `app.users.load_user` al
 | ---- | ------- |
 | `app/api.py:5:12` | where to look |
 | `EFF101 (async-blocking-call)` | the rule's code and name |
-| `[warning]` | its severity: `error` for a bug (a wrong result, an exception, a lost update, a deadlock, a broken contract), `warning` for slower code, as here, or for a bug that is rarely harmful. An error makes `heki check` fail; a warning is shown without failing it, unless `--fail-on warning` (`lint.fail-on = "warning"`) is set. A heuristic report adds `heuristic` (`[warning, heuristic]`): it can be wrong about the code, as a premise of its claim can be open |
+| `[error]` | its severity: `error` for a bug that can be critical (a wrong result, an exception, a lost update, a deadlock, an event loop held up for every other task, as here, a broken contract), `warning` for slower code or for a bug that is rarely harmful. An exact error makes `heki check` fail; a warning is shown without failing it, unless `--fail-on warning` (`lint.fail-on = "warning"`) is set. A heuristic report adds `heuristic` (`[error, heuristic]`): it can be wrong about the code, as a premise of its claim can be open, so it counts as a warning and fails the run only with `--fail-on warning` |
 | the message | what heki established, in one sentence: here, that the call to `load_user` always runs `requests.get`, a call that waits on the network, on the event loop |
 | `related` lines | the hops of the chain of calls behind it, to follow it across files; editors show them as related information you can jump to |
 | `help` line | what to do about it |
@@ -192,6 +192,6 @@ writes to stderr are not colored.
 
 | Code | Meaning |
 | ---- | ------- |
-| `0` | no diagnostics, or only warnings (they are printed) |
-| `1` | an error found, or a warning with `--fail-on warning` (`lint.fail-on = "warning"`), among the Ratchet regressions when a baseline is used; also when `--update-baseline` refuses a grown entry, a baseline entry matched nothing with [`report-unused-suppressions`](configuration.md#unused-suppressions), or `--diff` would change files |
+| `0` | no diagnostics, or only warnings and heuristic reports (they are printed) |
+| `1` | an exact error found, or any report with `--fail-on warning` (`lint.fail-on = "warning"`), among the Ratchet regressions when a baseline is used; also when `--update-baseline` refuses a grown entry, a baseline entry matched nothing with [`report-unused-suppressions`](configuration.md#unused-suppressions), or `--diff` would change files |
 | `2` | configuration error, unreadable file, unknown rule, or syntax error |

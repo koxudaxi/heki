@@ -1571,7 +1571,8 @@ impl<'a> FnIndex<'a> {
     /// `range(...)` of integer constants, or a builtin wrapper of one (`enumerate`, `zip` of at least one, `reversed`,
     /// `sorted`, `list`, `tuple`, `set`, `frozenset`, `dict`, `iter`, `map` / `filter` of one
     /// iterable, `.items()` / `.keys()` / `.values()`). `leaf` decides a load of a global or an
-    /// attribute this module's constants do not cover (the Advisory lane knows other modules).
+    /// attribute this module's constants do not cover (the Advisory lane knows other modules),
+    /// and what a call gives at most (the catalog knows library calls).
     pub fn iter_bound(&self, v: VarId, leaf: &mut dyn FnMut(&Inst) -> Option<u32>) -> Option<u32> {
         self.iter_bound_depth(v, leaf, 0, SMALL_MAX, &mut false)
     }
@@ -1677,6 +1678,13 @@ impl<'a> FnIndex<'a> {
             | InstKind::LoadName { .. }
             | InstKind::AttrLoad { .. }
             | InstKind::Import { .. } => leaf(inst).filter(|n| *n <= cap),
+            // What a call gives, when the reader sizes it, caps what may be input
+            // (`fetchmany(3)` gives at most three rows).
+            InstKind::Call { .. } | InstKind::MethodCall { .. } => {
+                let n = leaf(inst).filter(|n| *n <= cap);
+                *capped |= n.is_some();
+                n
+            }
             _ => None,
         }
     }
@@ -1958,7 +1966,7 @@ impl<'a> FnIndex<'a> {
     }
 
     /// The trip count the code fixes for the `for` loop `lp`, up to `cap`: what its iterable
-    /// yields ([`Self::iter_bound`], `leaf` deciding loads of globals and attributes), or the
+    /// yields ([`Self::iter_bound`], `leaf` deciding loads of globals and attributes, and calls), or the
     /// length a test every path to the loop passes caps it at ([`Self::guarded_len`]).
     pub fn fixed_trip(
         &self,
@@ -1981,7 +1989,7 @@ impl<'a> FnIndex<'a> {
     /// [`LEN_CAP_MAX`]), or the counter a `while` loop steps ([`Self::counted_trips`]). `Open`
     /// when nothing these facts read bounds it. No claim rests on a size: an open count only
     /// leaves the loop data-sized to the rules that read it so. `leaf` decides loads of globals
-    /// and attributes.
+    /// and attributes, and calls.
     pub fn fixed_trips(
         &self,
         lp: &NaturalLoop,

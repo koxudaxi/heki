@@ -732,7 +732,7 @@ heki/
 
 ## 9. CLI, configuration, and Ratchet baseline (one interface with Ruff and `t-linter`)
 
-### 9.1 Commands (exit codes: `0` clean or only warnings / `1` errors, and warnings with `--fail-on warning` / `2` configuration, I/O, or syntax errors)
+### 9.1 Commands (exit codes: `0` clean, or only warnings and heuristic reports / `1` exact errors, and any report with `--fail-on warning` / `2` configuration, I/O, or syntax errors)
 ```bash
 heki check [PATHS...]                         # semantic diagnostics (MUT, EFF / DATA, OPT)
 heki check FILE...                            # the project of the files, showing what touches them (as ROOT --touched FILE...)
@@ -741,7 +741,7 @@ heki check --fix --include-size-dependent     # also the proven size-dependent r
 heki check --diff [PATHS...]                  # preview the fixes
 heki check --select EFF,MUT --ignore MUT101   # rule selection (codes, prefixes, or names)
 heki check --heuristic                        # also the heuristic rules (lint.heuristic = true)
-heki check --fail-on warning                  # warnings fail the run too (lint.fail-on = "warning")
+heki check --fail-on warning                  # warnings and heuristic reports fail the run too (lint.fail-on = "warning")
 heki check --output-format full|concise|json|github|sarif   # default: HEKI_OUTPUT_FORMAT, github in GitHub Actions, full
 heki check --color auto|always|never          # colored full / concise / --diff output (NO_COLOR, FORCE_COLOR, as in Ruff)
 heki check --baseline heki-baseline.toml      # Ratchet: more findings fail, fewer ask to shrink the file
@@ -770,7 +770,7 @@ select = ["EFF", "DATA", "MUT", "OPT"]
 extend-select = ["EFF105"]
 ignore = []
 heuristic = true                     # prefixes and the defaults also select the heuristic rules
-fail-on = "warning"                  # warnings fail heki check too (default: "error")
+fail-on = "warning"                  # warnings and heuristic reports fail heki check too (default: "error")
 
 [tool.heki.lint.severity]
 MUT101 = "warning"

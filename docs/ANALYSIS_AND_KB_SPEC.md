@@ -344,6 +344,7 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     item of a call's result, a global that is no constant, and anything else are `Open`. The walk
     is a `Closure` over questions `(function, value, steps)`, the steps being what the way from
     the loop applies to the value's sources (an item, a count, pieces of text).
+    `ItemOrigins::of_value` asks the same of any value (a function's returned one).
   - The reader has two set-ups. Where types are inferred, `heki_effect::with_paths` builds it
     (the module's bindings, members from the catalog or the project, methods of the inferred
     class, managers the catalog says suppress nothing): the summaries' must-facts, `EFF103`'s
@@ -676,6 +677,23 @@ decorator but those keeping calls as defined and a `functools` cache, returns th
 annotation of a class of its own (none, `-> ModuleType`). A value of
 `types.ModuleType` says nothing of the names the module binds: a call of one is unresolved, as on
 `Any`.
+
+A function's return fact (`FunctionDecl::returns`, `heki_effect::resolver::returns`) is what
+every `return` of every definition of its name gives, past what the annotation says. It is
+pass 1: inferred against the module's own declarations, completed against themselves (the
+module's own stores type its globals and attributes), so it stays a function of the module's
+text, and a value another module gives is of no type there. Its items (`ReturnFact::items`)
+are those of the calls every returned value's items come from (`ItemOrigins::of_value`), when
+they agree: the rows, lines, or entries of a catalog call sizing its result, or what another
+function of the module returns. `TypeCtx::call_items` is the one reading of the items of a call's
+result, for the return facts and for `EFF103`'s "Origin" (`data_origin`): a catalog call's
+`items`, a project function's return fact, and for an API handing back what a callable it is
+handed returns (`result_of`: `asyncio.to_thread(f, x)`) the callable's, through
+`functools.partial` objects as typing follows them. A count the code fixes is no data's
+(`TypeCtx::fixed_call_items`: a statement whose text fixes its rows, `items_up_to`, a call on
+a receiver a call of the same items made): such a call gives no items fact, and in a loop it is
+a trip count `FnIndex::fixed_trips` reads through its `leaf`. The facts of a module are
+decided in at most eight passes, each from the facts of the pass before.
 
 A module-level `TypeVar` bound once with a `bound=` (a name, an attribute of one, or the string of
 an annotation) or constraints is that bound, or the union of the constraints, wherever an
@@ -2527,8 +2545,9 @@ over a loop the data sizes), which the Advisory lane decides for the loop around
 not fix or cap its trip count (`FnIndex::fixed_trips`, computed with the candidate), and its
 items are the data's as `EFF103`'s "Origin" establishes them (`DataOrigins::of_loop_items`: a
 parameter or a part of one, `*args` included, or the rows, lines, or entries of a call the
-catalog sizes, through `ItemOrigins::of_loop` and `data_origin`; a walk budget per function). A
-loop over a receiver's attribute, a project function's result, `range` of a number that is no
+catalog sizes or a project function returns, through `ItemOrigins::of_loop` and `data_origin`;
+a walk budget per function). A loop over a receiver's attribute, a project function's result
+whose return fact gives no items, `range` of a number that is no
 constant or length, an item of a call's result (`type(x).__mro__`), or a `while` loop runs as
 many times as the program has parts, however large the input. A proven report over such a loop
 leaves no premise of its row open; it records the condition with its cause in the same list as
