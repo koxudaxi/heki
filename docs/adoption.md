@@ -74,7 +74,9 @@ so it still analyzes the whole project, but it shows and fails on only the repor
 and the reports whose call chain reaches one of them: after a change to `app/users.py`, the
 `EFF101` in `app/api.py` that reaches the change through two helpers is shown, and old findings in
 files the commit left alone are not. A project can run the hook from its first commit, without a
-baseline.
+baseline. A change can also make a report appear in a file the commit left alone without a call chain
+through the change, for example when a type annotation that another module relied on is removed;
+such a report is not shown here, so run the whole project in continuous integration.
 
 ```yaml
 # .pre-commit-config.yaml
