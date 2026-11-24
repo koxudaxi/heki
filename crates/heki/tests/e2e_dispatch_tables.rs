@@ -1337,7 +1337,7 @@ second = _blocking
 
 
 async def in_module():
-    fetch("u")  # EFF111
+    fetch("u")  # EFF101 [heuristic]
     read("u")  # EFF101
     get("u")
 "#;
@@ -1411,15 +1411,15 @@ from pkg.fetchers import fetch
 
 
 async def module_on_a_path():
-    fetchers.fetch("u")  # EFF111
+    fetchers.fetch("u")  # EFF101 [heuristic]
 
 
 async def imported_on_a_path():
-    fetch("u")  # EFF111
+    fetch("u")  # EFF101 [heuristic]
 
 
 async def module_blocking_on_a_path():
-    fetchers.load("u")  # EFF111
+    fetchers.load("u")  # EFF101 [heuristic]
 
 
 async def module_on_every_path():
@@ -1439,7 +1439,7 @@ async def module_defined_last():
 
 
 async def module_on_either_branch():
-    fetchers.pick("u")  # EFF111
+    fetchers.pick("u")  # EFF101 [heuristic]
 
 
 async def module_alias_of_a_definition_bound_again():
@@ -1451,24 +1451,24 @@ async def module_definition_bound_again():
 
 
 async def class_on_a_path(c: Client):
-    c.fetch("u")  # EFF111
+    c.fetch("u")  # EFF101 [heuristic]
 
 
 async def class_object_on_a_path():
-    Client.fetch(Client(), "u")  # EFF111
+    Client.fetch(Client(), "u")  # EFF101 [heuristic]
 
 
 async def class_object_static_on_a_path():
-    Client.check(Client(), "u")  # EFF111
+    Client.check(Client(), "u")  # EFF101 [heuristic]
 
 
 async def class_attribute_held(c: Client):
     run = Client.fetch
-    run(c, "u")  # EFF111
+    run(c, "u")  # EFF101 [heuristic]
 
 
 async def class_blocking_on_a_path(c: Client):
-    c.load("u")  # EFF111
+    c.load("u")  # EFF101 [heuristic]
 
 
 async def class_on_every_path(c: Client):
@@ -1504,7 +1504,7 @@ const FALLBACK_CALLS: &str = r#"from pkg import fallback
 
 
 async def module_imported_on_a_path():
-    fallback.lookup("u")  # EFF111
+    fallback.lookup("u")  # EFF101 [heuristic]
 "#;
 
 /// `(path, line, code)` of every report of `codes`.
@@ -1515,7 +1515,7 @@ fn reported_codes(p: &Project, codes: &[&str]) -> Vec<(String, u64, String)> {
     let mut out: Vec<(String, u64, String)> = diags
         .iter()
         .filter_map(|d| {
-            let rule = d["rule_code"].as_str()?;
+            let rule = common::tiered_code(d);
             codes.contains(&rule).then(|| {
                 (
                     d["path"].as_str().unwrap().to_owned(),
@@ -1547,7 +1547,7 @@ fn marked_codes(files: &[(&str, &str)], codes: &[&str]) -> Vec<(String, u64, Str
 
 #[test]
 fn a_name_bound_again_on_some_paths_is_each_binding() {
-    const CODES: &[&str] = &["EFF101", "EFF111"];
+    const CODES: &[&str] = &["EFF101", "EFF101 [heuristic]"];
     let files = [
         ("pkg/fetchers.py", REBOUND_FETCHERS),
         ("pkg/client.py", REBOUND_CLIENT),
@@ -1576,7 +1576,7 @@ fn a_name_bound_again_on_some_paths_is_each_binding() {
 }
 
 const BLOCKING_CONFIG: &str =
-    "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF101\", \"EFF111\"]\n";
+    "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF101\"]\n";
 
 /// A class attribute bound to a library function runs it through the class, and as a
 /// `staticmethod` also on an instance, where every class the instance may be binds it to the
@@ -1608,7 +1608,7 @@ async def static_on_an_instance(api: Api) -> None:
 
 #[test]
 fn a_class_attribute_bound_to_a_library_function_is_that_function() {
-    const CODES: &[&str] = &["EFF101", "EFF111"];
+    const CODES: &[&str] = &["EFF101", "EFF101 [heuristic]"];
     let files = [("pkg/api.py", LIBRARY_ALIASES)];
     let p = Project::new("dispatch_library_aliases");
     p.write("pyproject.toml", BLOCKING_CONFIG);
@@ -1648,7 +1648,7 @@ fn class_aliases_of_more_than_eight_functions_are_too_many() {
         p.write("pyproject.toml", BLOCKING_CONFIG);
         p.write("pkg/__init__.py", "");
         p.write("pkg/sources.py", &aliased_functions(n));
-        let found = reported_codes(&p, &["EFF101", "EFF111"]);
+        let found = reported_codes(&p, &["EFF101", "EFF101 [heuristic]"]);
         assert_eq!(found.len(), reports, "{n}: {found:?}");
     }
 }

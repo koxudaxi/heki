@@ -676,7 +676,7 @@ fn reported(p: &Project, args: &[&str], file: &str) -> BTreeSet<(String, String)
         .map(|d| {
             (
                 d["qualname"].as_str().unwrap().to_owned(),
-                d["rule_code"].as_str().unwrap().to_owned(),
+                common::tiered_code(d).to_owned(),
             )
         })
         .collect()
@@ -992,7 +992,7 @@ name = "t"
 target-version = "py311"
 
 [tool.heki.lint]
-select = ["MUT201", "EFF101", "EFF111"]
+select = ["MUT201", "EFF101"]
 
 [[tool.heki.write-owners]]
 name = "store"
@@ -1089,8 +1089,8 @@ fn protocol_receivers_dispatch_to_the_classes_implementing_them() {
         // lacks `data_type`).
         ("write_view", "MUT201"),
         ("extend_view", "MUT201"),
-        // `Sleepy.pause` blocks; a protocol's implementations are never complete (`EFF111`).
-        ("run", "EFF111"),
+        // `Sleepy.pause` blocks; a protocol's implementations are never complete (heuristic).
+        ("run", "EFF101 [heuristic]"),
     ]
     .iter()
     .map(|(q, r)| ((*q).to_owned(), (*r).to_owned()))
@@ -1139,7 +1139,7 @@ fn a_protocol_typed_argument_ties_a_helper_write_to_the_implementations() {
     p.write(
         "pyproject.toml",
         &format!("{PROTOCOL_CONFIG}unresolved = \"report\"\n").replace(
-            "select = [\"MUT201\", \"EFF101\", \"EFF111\"]",
+            "select = [\"MUT201\", \"EFF101\"]",
             "select = [\"MUT201\", \"MUT205\"]",
         ),
     )
@@ -1210,10 +1210,7 @@ fn a_protocol_target_covers_the_writes_of_helpers_handed_a_protocol_typed_object
     p.write(
         "pyproject.toml",
         &PROTOCOL_CONFIG
-            .replace(
-                "select = [\"MUT201\", \"EFF101\", \"EFF111\"]",
-                "select = [\"MUT201\"]",
-            )
+            .replace("select = [\"MUT201\", \"EFF101\"]", "select = [\"MUT201\"]")
             .replace(
                 "targets = [\"Field.data_type\", \"Field.name\"]",
                 "targets = [\"FieldView.data_type\", \"Named.name\"]",

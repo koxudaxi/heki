@@ -1437,19 +1437,18 @@ async def handler() -> bool:
     return any(slow())
 "#,
     );
-    let (code, stdout, stderr) = p.check(&[
-        "--select",
-        "MUT106,EFF101,EFF111",
-        "--output-format",
-        "concise",
-    ]);
+    let (code, stdout, stderr) =
+        p.check(&["--select", "MUT106,EFF101", "--output-format", "concise"]);
     assert_eq!(code, 1, "{stdout}{stderr}");
     let lines: Vec<&str> = stdout.lines().collect();
     // `any` still runs the generator's body on the event loop.
     assert_eq!(lines.len(), 3, "{stdout}");
     assert!(lines[0].starts_with("app.py:20:12: MUT106"), "{stdout}");
     assert!(lines[1].starts_with("app.py:26:12: MUT106"), "{stdout}");
-    assert!(lines[2].starts_with("app.py:35:12: EFF111"), "{stdout}");
+    assert!(
+        lines[2].starts_with("app.py:35:12: EFF101 [heuristic]"),
+        "{stdout}"
+    );
 }
 
 #[test]

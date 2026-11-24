@@ -8,16 +8,21 @@ mod common;
 use common::Project;
 use serde_json::Value;
 
-/// `(line, message)` of every diagnostic of `rule`.
-/// `(line, field)` of every `rule` report, `field` being `message` or `help`.
+/// `(line, field)` of every `rule` report, `field` being `message` or `help`, and `rule` a code
+/// with its tier ([`common::with_tier`]): `EFF103` for the exact reports of the rule, and
+/// `EFF103 [heuristic]` for its heuristic ones.
 fn reports_with(p: &Project, rule: &str, field: &str) -> Vec<(u64, String)> {
-    let (code, stdout, stderr) = p.check(&["--select", rule, "--output-format", "json"]);
-    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let code = common::code_of(rule);
+    let (status, stdout, stderr) = p.check(&["--select", code, "--output-format", "json"]);
+    assert!(status == 0 || status == 1, "{stdout}{stderr}");
     let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
     diags
         .iter()
+        .filter(|d| {
+            assert_eq!(d["rule_code"], code, "{d:#}");
+            common::tiered_code(d) == rule
+        })
         .map(|d| {
-            assert_eq!(d["rule_code"], rule, "{d:#}");
             (
                 d["line"].as_u64().unwrap(),
                 d[field].as_str().unwrap().to_owned(),
@@ -38,11 +43,10 @@ fn lines(p: &Project, rule: &str) -> Vec<u64> {
     reports(p, rule).into_iter().map(|(line, _)| line).collect()
 }
 
-/// The lines of the reports of a database query in a loop, established (`EFF103`) or not
-/// (`EFF113`).
+/// The lines of the reports of a database query in a loop, exact or heuristic (`EFF103`).
 fn query_lines(p: &Project) -> Vec<u64> {
     let mut out = lines(p, "EFF103");
-    out.extend(lines(p, "EFF113"));
+    out.extend(lines(p, "EFF103 [heuristic]"));
     out.sort_unstable();
     out
 }
@@ -90,7 +94,7 @@ async def handler(cur: sqlite3.Cursor) -> None:
     // still blocks the event loop (on a cursor only an annotation names, which may be in
     // memory: not established).
     assert_eq!(query_lines(&p), vec![8, 22, 28]);
-    assert_eq!(lines(&p, "EFF111"), vec![32]);
+    assert_eq!(lines(&p, "EFF101 [heuristic]"), vec![32]);
 }
 
 const DDL_AT_RUN_TIME: &str = r#"import sqlite3

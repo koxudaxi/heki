@@ -7,7 +7,7 @@ use common::Project;
 
 const BLOCKING: &str = "import time\n\n\nasync def handler():\n    time.sleep(1)\n";
 
-/// A wait whose length the caller passes, which may be zero: an `EFF111` report.
+/// A wait whose length the caller passes, which may be zero: a heuristic `EFF101` report.
 const POSSIBLY_BLOCKING: &str =
     "import time\n\n\nasync def handler(delay):\n    time.sleep(delay)\n";
 
@@ -40,7 +40,7 @@ fn an_empty_select_starts_from_no_rules() {
         "pyproject.toml",
         "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = []\n",
     );
-    assert_eq!(concise(&p, &["--select", "EFF101,EFF111"]).len(), 1);
+    assert_eq!(concise(&p, &["--select", "EFF101"]).len(), 1);
 }
 
 #[test]
@@ -58,7 +58,8 @@ fn per_file_ignores_globs_match_across_directories_as_in_ruff() {
     assert!(out[0].starts_with("src/app.py:5:5: EFF101"), "{out:?}");
 }
 
-/// A project with a heuristic rule's report (`EFF111`) and a contract rule's (`MUT201`).
+/// A project with a heuristic report of an exact rule (`EFF101`) and a contract rule's report
+/// (`MUT201`).
 fn heuristic_and_contract(name: &str, lint: &str) -> Project {
     let p = Project::new(name);
     p.write("app.py", POSSIBLY_BLOCKING)
@@ -76,7 +77,7 @@ fn heuristic_and_contract(name: &str, lint: &str) -> Project {
 }
 
 /// `heki check <args>` as the user types it (without the `--heuristic` of `Project::check`):
-/// `(exit code, codes reported, stderr)`.
+/// `(exit code, codes reported with their tier, stderr)`.
 fn plain(p: &Project, args: &[&str]) -> (i32, Vec<String>, String) {
     let all = [&["check", "--output-format", "json"][..], args].concat();
     let (code, stdout, stderr) = p.heki(&all);
@@ -84,53 +85,110 @@ fn plain(p: &Project, args: &[&str]) -> (i32, Vec<String>, String) {
     let diags: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
     let codes = diags
         .iter()
-        .map(|d| d["rule_code"].as_str().unwrap().to_owned())
+        .map(|d| common::tiered_code(d).to_owned())
         .collect();
     (code, codes, stderr)
 }
 
 #[test]
-fn heuristic_rules_run_when_named_or_with_lint_heuristic_and_contract_rules_when_declared() {
+fn heuristic_reports_show_when_named_or_with_lint_heuristic_and_contract_rules_when_declared() {
     let p = heuristic_and_contract("heuristic_selection", "");
-    // The default set is the exact rules and the contract rules.
+    // The default set is the exact rules, which show their exact reports only, and the contract
+    // rules.
     assert_eq!(plain(&p, &[]).1, ["MUT201"]);
-    // A prefix or `ALL` selects no heuristic rule without `lint.heuristic`; a contract rule it
+    // A prefix or `ALL` shows no heuristic report without `lint.heuristic`; a contract rule it
     // matches still runs.
     assert_eq!(plain(&p, &["--select", "EFF"]).1, Vec::<String>::new());
     assert_eq!(plain(&p, &["--select", "ALL"]).1, ["MUT201"]);
-    // An exact code or name selects it.
-    assert_eq!(plain(&p, &["--select", "EFF101,EFF111"]).1, ["EFF111"]);
+    // An exact code or name shows them.
+    assert_eq!(plain(&p, &["--select", "EFF101"]).1, ["EFF101 [heuristic]"]);
     assert_eq!(
-        plain(&p, &["--extend-select", "async-possibly-blocking-call"]).1,
-        ["EFF111", "MUT201"]
+        plain(&p, &["--extend-select", "async-blocking-call"]).1,
+        ["EFF101 [heuristic]", "MUT201"]
     );
-    // `--heuristic` adds every heuristic rule that is not opt-in, by default and for prefixes.
-    assert_eq!(plain(&p, &["--heuristic"]).1, ["EFF111", "MUT201"]);
-    assert_eq!(plain(&p, &["--heuristic", "--select", "EFF"]).1, ["EFF111"]);
+    // `--heuristic` shows them, by default and for prefixes.
+    assert_eq!(
+        plain(&p, &["--heuristic"]).1,
+        ["EFF101 [heuristic]", "MUT201"]
+    );
+    assert_eq!(
+        plain(&p, &["--heuristic", "--select", "EFF"]).1,
+        ["EFF101 [heuristic]"]
+    );
     // The last of `--heuristic` / `--no-heuristic` wins.
     assert_eq!(plain(&p, &["--heuristic", "--no-heuristic"]).1, ["MUT201"]);
 
     // The configuration key, which the command line overrides both ways.
     let p = heuristic_and_contract("heuristic_key", "heuristic = true\n");
-    assert_eq!(plain(&p, &[]).1, ["EFF111", "MUT201"]);
+    assert_eq!(plain(&p, &[]).1, ["EFF101 [heuristic]", "MUT201"]);
     assert_eq!(plain(&p, &["--no-heuristic"]).1, ["MUT201"]);
     let p = heuristic_and_contract("heuristic_key_off", "heuristic = false\n");
-    assert_eq!(plain(&p, &["--heuristic"]).1, ["EFF111", "MUT201"]);
+    assert_eq!(
+        plain(&p, &["--heuristic"]).1,
+        ["EFF101 [heuristic]", "MUT201"]
+    );
     let p = heuristic_and_contract("heuristic_key_typed", "heuristic = \"yes\"\n");
     let (code, _, stderr) = p.heki(&["check"]);
     assert_eq!(code, 2, "{stderr}");
     assert!(stderr.contains("heuristic"), "{stderr}");
 }
 
+/// `EFF111` and `EFF113`, the codes of the heuristic tiers of `EFF101` and `EFF103` before
+/// 0.4.0, name no rule (no code is an alias of another): a selector, a suppression, and a
+/// baseline entry with one are read like any unknown code.
 #[test]
-fn a_text_run_says_how_many_heuristic_rules_it_left_off() {
+fn the_former_codes_of_the_heuristic_tiers_name_no_rule() {
+    let p = Project::new("former_heuristic_codes");
+    p.write("app.py", POSSIBLY_BLOCKING);
+    for selector in [
+        "EFF111",
+        "EFF113",
+        "async-possibly-blocking-call",
+        "loop-possible-db-query",
+    ] {
+        let (code, _, stderr) = p.heki(&["check", "--select", selector]);
+        assert_eq!(code, 2, "{stderr}");
+        assert!(
+            stderr.contains(&format!("unknown rule selector `{selector}` in `--select`")),
+            "{stderr}"
+        );
+    }
+    // A suppression with a former code suppresses nothing.
+    p.write(
+        "app.py",
+        &POSSIBLY_BLOCKING.replace(
+            "time.sleep(delay)",
+            "time.sleep(delay)  # heki: ignore[EFF111]",
+        ),
+    );
+    assert_eq!(plain(&p, &["--heuristic"]).1, ["EFF101 [heuristic]"]);
+    // A baseline entry with a former code allows nothing: the report is a regression, and the
+    // entry can only be removed by recording the baseline again.
+    p.write("app.py", POSSIBLY_BLOCKING);
+    let (code, _, stderr) = p.check(&["--baseline", "b.toml", "--update-baseline"]);
+    assert_eq!(code, 0, "{stderr}");
+    let recorded = p.read("b.toml");
+    assert!(recorded.contains("rule_code = \"EFF101\""), "{recorded}");
+    p.write("b.toml", &recorded.replace("EFF101", "EFF111"));
+    let (code, _, stderr) = p.check(&["--baseline", "b.toml"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("Found 1 Ratchet regression(s)")
+            && stderr.contains("EFF111 `time.sleep` can shrink 1 -> 0"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_text_run_says_how_many_heuristic_rules_and_reports_it_left_off() {
     let p = heuristic_and_contract("heuristic_hint", "");
     let every = heki_rules_off_by_default(&p);
-    let note = |n: usize| {
-        format!(
-            "note: {n} heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`\n"
-        )
+    let note = |what: &str| {
+        format!("note: {what}; enable them with `--heuristic` or `lint.heuristic = true`\n")
     };
+    // The heuristic `EFF101` report is withheld.
+    let rules_and_report =
+        |n: usize| format!("{n} heuristic rule(s) are off and 1 heuristic report(s) are not shown");
     // The full output then names the pages of the reported rules.
     for (format, after) in [
         (
@@ -141,18 +199,21 @@ fn a_text_run_says_how_many_heuristic_rules_it_left_off() {
     ] {
         let (code, stdout, stderr) = p.heki(&["check", "--output-format", format]);
         assert_eq!(code, 1, "{stdout}{stderr}");
-        let tail = format!("{}{after}", note(every));
+        let tail = format!("{}{after}", note(&rules_and_report(every)));
         assert!(stderr.ends_with(&tail), "{format}: {stderr}");
     }
     // Only the rules a selection would run with `lint.heuristic` count, not the ignored ones.
     let (_, _, stderr) = p.heki(&["check", "--select", "EFF"]);
-    assert!(stderr.ends_with(&note(3)), "{stderr}");
+    assert!(stderr.ends_with(&note(&rules_and_report(1))), "{stderr}");
     let (_, _, stderr) = p.heki(&["check", "--select", "EFF", "--ignore", "EFF102"]);
-    assert!(stderr.ends_with(&note(2)), "{stderr}");
+    assert!(
+        stderr.ends_with(&note("1 heuristic report(s) are not shown")),
+        "{stderr}"
+    );
     // Nothing left off, nothing said.
     for args in [
         &["--heuristic"][..],
-        &["--select", "EFF101,EFF111"],
+        &["--select", "EFF101"],
         &["--select", "MUT201"],
     ] {
         let (_, _, stderr) = p.heki(&[&["check"][..], args].concat());
@@ -179,13 +240,11 @@ fn heki_rules_off_by_default(p: &Project) -> usize {
 }
 
 #[test]
-fn every_output_labels_a_heuristic_rule_and_only_that() {
+fn every_output_labels_a_heuristic_report_and_only_that() {
     let p = heuristic_and_contract("heuristic_labels", "heuristic = true\n");
     let (_, full, _) = p.heki(&["check"]);
     assert!(
-        full.contains(
-            "app.py:5:5: EFF111 (async-possibly-blocking-call) [warning, heuristic] `handler`"
-        ),
+        full.contains("app.py:5:5: EFF101 (async-blocking-call) [warning, heuristic] `handler`"),
         "{full}"
     );
     assert!(
@@ -194,12 +253,12 @@ fn every_output_labels_a_heuristic_rule_and_only_that() {
     );
     let (_, concise, _) = p.heki(&["check", "--output-format", "concise"]);
     assert!(
-        concise.starts_with("app.py:5:5: EFF111 [heuristic] `handler`"),
+        concise.starts_with("app.py:5:5: EFF101 [heuristic] `handler`"),
         "{concise}"
     );
     let (_, github, _) = p.heki(&["check", "--output-format", "github"]);
     assert!(
-        github.contains(",title=heki EFF111 (heuristic)::"),
+        github.contains(",title=heki EFF101 (heuristic)::"),
         "{github}"
     );
     let (_, json, _) = p.heki(&["check", "--output-format", "json"]);

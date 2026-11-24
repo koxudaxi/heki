@@ -151,5 +151,5 @@ def test_a_rule_page_lists_the_premises_of_the_table(listed: list[str], stale: l
 
 
 def test_a_heuristic_rule_without_premises_needs_none() -> None:
-    rule = {"code": "EFF111", "certainty": "heuristic", "doc": page(["On every path"]), "premises": []}
+    rule = {"code": "EFF102", "certainty": "heuristic", "doc": page(["On every path"]), "premises": []}
     assert build_docs.premises_disagreeing([rule]) == []

@@ -148,7 +148,7 @@ fn a_file_outside_any_project_is_analyzed_alone() {
 
 #[test]
 fn an_exact_report_of_a_file_holds_for_its_project() {
-    // `app/fast.py` rebinds `load`: the project run reports a heuristic `EFF111`, and so does a
+    // `app/fast.py` rebinds `load`: the project run reports a heuristic `EFF101`, and so does a
     // run naming `app/api.py`, which analyzes the rebinding too; alone, the file would make an
     // exact `EFF101` "on every path".
     let p = Project::new("paths_rebound");
@@ -172,7 +172,8 @@ fn an_exact_report_of_a_file_holds_for_its_project() {
             .concat(),
         );
         assert!(
-            stdout.starts_with("app/api.py:9:5: EFF111 ") && stdout.lines().count() == 1,
+            stdout.starts_with("app/api.py:9:5: EFF101 [heuristic] ")
+                && stdout.lines().count() == 1,
             "{args:?}: {stdout}"
         );
     }

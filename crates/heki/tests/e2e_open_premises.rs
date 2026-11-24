@@ -8,8 +8,8 @@ mod common;
 use common::Project;
 use serde_json::Value;
 
-const EFF101: &str = "EFF101,EFF111";
-const EFF103: &str = "EFF103,EFF113";
+const EFF101: &str = "EFF101";
+const EFF103: &str = "EFF103";
 
 /// The reports `heki dump-open-premises` prints for `app.py` holding `source`.
 fn reports(name: &str, select: &str, source: &str) -> Vec<Value> {
@@ -36,44 +36,14 @@ fn open_of(report: &Value) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The one report of `source`: of `rule`, heuristic, of `exact`'s claim, with `open` open in
-/// that order; returned for more checks.
-fn heuristic(
-    name: &str,
-    select: &str,
-    source: &str,
-    rule: &str,
-    exact: &str,
-    open: &[(&str, &str)],
-) -> Value {
-    heuristic_of(name, select, source, rule, Value::from(exact), open)
-}
-
-/// [`heuristic`] for a rule whose heuristic reports keep its code: of its own claim.
-fn own_heuristic(
-    name: &str,
-    select: &str,
-    source: &str,
-    rule: &str,
-    open: &[(&str, &str)],
-) -> Value {
-    heuristic_of(name, select, source, rule, Value::Null, open)
-}
-
-fn heuristic_of(
-    name: &str,
-    select: &str,
-    source: &str,
-    rule: &str,
-    exact_side: Value,
-    open: &[(&str, &str)],
-) -> Value {
+/// The one report of `source`: of `rule`, heuristic, with `open` open in that order; returned
+/// for more checks.
+fn heuristic(name: &str, select: &str, source: &str, rule: &str, open: &[(&str, &str)]) -> Value {
     let found = reports(name, select, source);
     assert_eq!(found.len(), 1, "{found:#?}");
     let report = found[0].clone();
     assert_eq!(report["rule"], rule, "{report:#?}");
     assert_eq!(report["certainty"], "heuristic");
-    assert_eq!(report["exact_side"], exact_side);
     let expected: Vec<(String, String)> = open
         .iter()
         .map(|(p, c)| ((*p).to_owned(), (*c).to_owned()))
@@ -88,7 +58,6 @@ fn exact(name: &str, select: &str, source: &str, rule: &str) {
     assert_eq!(found.len(), 1, "{found:#?}");
     assert_eq!(found[0]["rule"], rule, "{found:#?}");
     assert_eq!(found[0]["certainty"], "exact");
-    assert_eq!(found[0]["exact_side"], Value::Null);
     assert!(open_of(&found[0]).is_empty(), "{found:#?}");
 }
 
@@ -111,7 +80,6 @@ fn a_helper_that_returns_before_the_wait_leaves_every_return_open() {
         "op_every_return",
         EFF101,
         open,
-        "EFF111",
         "EFF101",
         &[("Every return", "not-made-on-every-return")],
     );
@@ -131,7 +99,6 @@ fn a_call_behind_a_branch_the_code_decides_against_is_never_reached() {
         "op_never_reached",
         EFF101,
         open,
-        "EFF111",
         "EFF101",
         &[("Every return", "never-reached")],
     );
@@ -146,7 +113,6 @@ fn a_helper_that_always_raises_never_returns() {
         "op_never_returns",
         EFF101,
         open,
-        "EFF111",
         "EFF101",
         &[("Every return", "never-returns")],
     );
@@ -161,7 +127,6 @@ fn a_receiver_typed_by_a_protocol_leaves_the_targets_incomplete() {
         "op_protocol",
         EFF101,
         open,
-        "EFF111",
         "EFF101",
         &[("Every implementation", "incomplete-targets")],
     );
@@ -180,7 +145,6 @@ fn a_name_the_project_binds_again_leaves_the_targets_incomplete() {
         "op_rebound",
         EFF101,
         open,
-        "EFF111",
         "EFF101",
         &[("Every implementation", "incomplete-targets")],
     );
@@ -199,7 +163,6 @@ fn an_override_that_does_not_wait_is_an_implementation_without_the_fact() {
         "op_override",
         EFF101,
         open,
-        "EFF111",
         "EFF101",
         &[("Every implementation", "implementation-without-the-fact")],
     );
@@ -222,7 +185,6 @@ fn a_function_a_builtin_calls_per_item_is_not_run_at_the_call() {
         "op_per_item",
         EFF101,
         open,
-        "EFF111",
         "EFF101",
         &[("Every implementation", "not-run-at-the-call")],
     );
@@ -238,7 +200,6 @@ fn an_async_override_is_not_run_at_the_call() {
         "op_async_override",
         EFF101,
         open,
-        "EFF111",
         "EFF101",
         &[("Every implementation", "not-run-at-the-call")],
     );
@@ -260,7 +221,6 @@ fn a_cache_may_not_run_the_body() {
         "op_decorated",
         EFF101,
         open,
-        "EFF111",
         "EFF101",
         &[("Every implementation", "decorated")],
     );
@@ -279,7 +239,6 @@ fn a_function_defined_twice_is_not_followed() {
         "op_defined_twice",
         EFF101,
         open,
-        "EFF111",
         "EFF101",
         &[("Every implementation", "defined-twice")],
     );
@@ -295,7 +254,6 @@ fn a_wait_for_another_thread_may_end_at_once() {
         "op_thread_wait",
         EFF101,
         open,
-        "EFF111",
         "EFF101",
         &[("Waits", "waits-on-another-thread")],
     );
@@ -310,7 +268,6 @@ fn a_sleep_whose_length_the_caller_passes_may_not_wait() {
         "op_conditional_wait",
         EFF101,
         open,
-        "EFF111",
         "EFF101",
         &[("Waits", "conditional-wait")],
     );
@@ -325,7 +282,6 @@ fn each_premise_open_along_the_chain_is_recorded_at_its_call() {
         "op_several",
         EFF101,
         open,
-        "EFF111",
         "EFF101",
         &[
             ("Every implementation", "implementation-without-the-fact"),
@@ -361,7 +317,6 @@ fn a_helper_that_returns_before_the_query_leaves_every_return_open() {
         "op_query_every_return",
         EFF103,
         &open,
-        "EFF113",
         "EFF103",
         &[("Every return", "not-made-on-every-return")],
     );
@@ -382,7 +337,6 @@ fn a_query_through_a_protocol_leaves_the_targets_incomplete() {
         "op_query_protocol",
         EFF103,
         &open,
-        "EFF113",
         "EFF103",
         &[("Every implementation", "incomplete-targets")],
     );
@@ -397,7 +351,6 @@ fn a_session_lookup_may_be_answered_from_the_identity_map() {
         "op_conditional_statement",
         EFF103,
         open,
-        "EFF113",
         "EFF103",
         &[("Sends", "conditional-statement")],
     );
@@ -414,7 +367,6 @@ fn a_continue_before_the_query_leaves_every_iteration_open() {
         "op_every_iteration",
         EFF103,
         &open,
-        "EFF113",
         "EFF103",
         &[("Every iteration", "not-every-iteration")],
     );
@@ -436,7 +388,6 @@ fn a_query_a_builtin_runs_per_item_is_repeated_by_the_builtin() {
         "op_per_item_query",
         EFF103,
         &open,
-        "EFF113",
         "EFF103",
         &[
             ("Every implementation", "not-run-at-the-call"),
@@ -466,7 +417,6 @@ fn a_loop_over_a_fixed_display_is_fixed_by_the_code() {
         "op_fixed",
         EFF103,
         &open,
-        "EFF113",
         "EFF103",
         &[("Origin", "fixed-by-the-code")],
     );
@@ -483,7 +433,6 @@ fn a_loop_over_a_slice_is_fixed_by_the_code() {
         "op_slice",
         EFF103,
         &open,
-        "EFF113",
         "EFF103",
         &[("Origin", "fixed-by-the-code")],
     );
@@ -499,7 +448,6 @@ fn a_loop_over_the_receiver_is_not_over_the_data() {
         "op_receiver",
         EFF103,
         &open,
-        "EFF113",
         "EFF103",
         &[("Origin", "items-not-from-the-data")],
     );
@@ -516,7 +464,6 @@ fn a_loop_over_a_project_function_result_is_not_over_the_data() {
         "op_project_items",
         EFF103,
         &open,
-        "EFF113",
         "EFF103",
         &[("Origin", "items-not-from-the-data")],
     );
@@ -533,7 +480,6 @@ fn a_loop_over_a_library_result_the_catalog_does_not_size() {
         "op_library_items",
         EFF103,
         &open,
-        "EFF113",
         "EFF103",
         &[("Origin", "library-call-without-items")],
     );
@@ -551,7 +497,6 @@ fn a_while_loop_steps_through_no_items() {
         "op_while",
         EFF103,
         &open,
-        "EFF113",
         "EFF103",
         &[("Origin", "no-items-followed")],
     );
@@ -569,7 +514,6 @@ fn each_loop_premise_open_is_recorded() {
         "op_loop_several",
         EFF103,
         &open,
-        "EFF113",
         "EFF103",
         &[
             ("Every iteration", "not-every-iteration"),
@@ -589,7 +533,7 @@ const OPT: &str = "OPT101,OPT102,OPT103,OPT110,OPT111,OPT120,OPT121,OPT130";
 #[test]
 fn an_accumulator_passed_to_unseen_code_leaves_the_rewrite_unproven() {
     let open = "def build(items, sink):\n    x = []\n    sink.keep(x)\n    for i in items:\n        x = x + [i]\n    return len(x)\n";
-    let report = own_heuristic(
+    let report = heuristic(
         "op_opt_unique",
         OPT,
         open,
@@ -611,7 +555,7 @@ fn an_accumulator_passed_to_unseen_code_leaves_the_rewrite_unproven() {
 #[test]
 fn a_read_of_the_accumulator_inside_the_loop_leaves_the_rewrite_unproven() {
     let open = "def build(items):\n    x = ()\n    for i in items:\n        x = x + (i,)\n        print(len(x))\n    return x\n";
-    own_heuristic(
+    heuristic(
         "op_opt_reads",
         OPT,
         open,
@@ -625,7 +569,7 @@ fn a_read_of_the_accumulator_inside_the_loop_leaves_the_rewrite_unproven() {
 #[test]
 fn a_probe_of_unknown_type_leaves_the_rewrite_unproven() {
     let open = "def count(items, n):\n    x = list(range(n * 7))\n    hits = 0\n    for i in items:\n        if i in x:\n            hits += 1\n    return hits\n";
-    own_heuristic(
+    heuristic(
         "op_opt_probe",
         OPT,
         open,
@@ -639,7 +583,7 @@ fn a_probe_of_unknown_type_leaves_the_rewrite_unproven() {
 #[test]
 fn each_unproven_obligation_of_a_rewrite_is_recorded() {
     let open = "def build(items):\n    x = ()\n    for i in items:\n        x = x + (i,)\n        print(len(x))\n        locals()\n    return x\n";
-    let report = own_heuristic(
+    let report = heuristic(
         "op_opt_several",
         OPT,
         open,
@@ -679,7 +623,7 @@ const TYPED: &str = "lefts: list[Left], rights: list[Right]";
 #[test]
 fn a_key_that_is_a_property_may_run_code() {
     let open = join("lefts: list[Left], rights: list[Prop]", "rights", MATCH);
-    let report = own_heuristic(
+    let report = heuristic(
         "op_join_property",
         "OPT113",
         &open,
@@ -702,7 +646,7 @@ fn a_key_that_is_a_property_may_run_code() {
 #[test]
 fn items_of_unknown_type_leave_the_key_loads_and_the_steps_open() {
     let open = join("lefts, rights", "rights", MATCH);
-    let report = own_heuristic(
+    let report = heuristic(
         "op_join_untyped",
         "OPT113",
         &open,
@@ -726,7 +670,7 @@ fn items_of_unknown_type_leave_the_key_loads_and_the_steps_open() {
 fn a_subscript_of_an_item_of_unknown_type_may_run_code() {
     let body = "            if a[\"id\"] == b[\"id\"]:\n                out.append(a)\n";
     let open = join("lefts: list[dict[str, int]], rights", "rights", body);
-    own_heuristic(
+    heuristic(
         "op_join_subscript",
         "OPT113",
         &open,
@@ -749,7 +693,7 @@ fn a_loop_over_the_receiver_does_not_step_through_inputs() {
     let open = format!(
         "{DATACLASSES}class Holder:\n    rows: list[Right] = []\n\n    def join(self, lefts: list[Left]):\n        out = []\n        for a in lefts:\n            for b in self.rows:\n                if a.key == b.key:\n                    out.append(a)\n        return out\n"
     );
-    let report = own_heuristic(
+    let report = heuristic(
         "op_join_receiver",
         "OPT113",
         &open,
@@ -778,7 +722,7 @@ fn a_loop_over_a_display_steps_through_items_the_code_fixes() {
             .join(", ")
     );
     let open = join("lefts: list[int]", &display, body);
-    own_heuristic(
+    heuristic(
         "op_join_display",
         "OPT113",
         &open,
@@ -792,7 +736,7 @@ fn a_loop_over_a_display_steps_through_items_the_code_fixes() {
 #[test]
 fn work_on_a_mismatch_leaves_the_inner_loop_busy() {
     let before = format!("            out.append(None)\n{MATCH}");
-    own_heuristic(
+    heuristic(
         "op_join_work",
         "OPT113",
         &join(TYPED, "rights", &before),
@@ -801,7 +745,7 @@ fn work_on_a_mismatch_leaves_the_inner_loop_busy() {
     );
     // A way out of the inner loop on a mismatch is work too.
     let stop = format!("{MATCH}            if b.payload < 0:\n                break\n");
-    own_heuristic(
+    heuristic(
         "op_join_break",
         "OPT113",
         &join(TYPED, "rights", &stop),
@@ -823,7 +767,7 @@ fn an_iterable_that_may_be_a_generator_runs_code_to_advance() {
         "rights",
         MATCH,
     );
-    own_heuristic(
+    heuristic(
         "op_join_iterable",
         "OPT113",
         &open,
@@ -843,7 +787,7 @@ fn an_outer_loop_that_grows_the_inner_collection_or_rekeys_it() {
     let grow = format!(
         "{DATACLASSES}def join(lefts: list[Left], rights: list[Right], flag):\n    out = []\n    for a in lefts:\n        if flag and rights:\n            rights.append(rights[0])\n        for b in rights:\n{MATCH}    return out\n"
     );
-    own_heuristic(
+    heuristic(
         "op_join_grow",
         "OPT113",
         &grow,
@@ -856,7 +800,7 @@ fn an_outer_loop_that_grows_the_inner_collection_or_rekeys_it() {
     );
     exact("op_join_grow_closed", "OPT113", &closed, "OPT113");
     let rekey = format!("{MATCH}                b.key = -1\n");
-    own_heuristic(
+    heuristic(
         "op_join_rekey",
         "OPT113",
         &join(TYPED, "rights", &rekey),
@@ -868,7 +812,7 @@ fn an_outer_loop_that_grows_the_inner_collection_or_rekeys_it() {
 #[test]
 fn each_premise_of_a_join_left_open_is_recorded() {
     let open = join(TYPED, "load(rights)", MATCH);
-    own_heuristic(
+    heuristic(
         "op_join_several",
         "OPT113",
         &open,
@@ -902,7 +846,7 @@ fn a_helper_that_may_return_another_value_is_not_the_catalog_call() {
     let open = arrays(
         "def grow(arr, c, flag):\n    if flag:\n        return arr\n    return np.append(arr, c)\n\n\ndef build(items: list[str], flag):\n    acc = np.array([])\n    for c in items:\n        acc = grow(acc, c, flag)\n    return acc\n",
     );
-    let report = own_heuristic(
+    let report = heuristic(
         "op_data_helper",
         "DATA101",
         &open,
@@ -927,7 +871,7 @@ fn a_reset_on_one_path_leaves_the_value_not_carried() {
         "        acc = np.append(acc, c)\n",
         "        acc = np.append(acc, c)\n        if c == \"0\":\n            acc = np.array([])\n",
     ));
-    own_heuristic(
+    heuristic(
         "op_data_reset",
         "DATA101",
         &open,
@@ -947,7 +891,7 @@ fn a_previous_value_on_some_paths_only_is_not_held() {
     let open = arrays(
         "def build(items: list[str], other, flag):\n    acc = np.array([])\n    for c in items:\n        acc = np.append(acc if flag else other, c)\n    return acc\n",
     );
-    own_heuristic(
+    heuristic(
         "op_data_held",
         "DATA101",
         &open,
@@ -968,7 +912,7 @@ fn a_continue_before_the_update_leaves_every_iteration_open() {
         "    for c in items:\n",
         "    for c in items:\n        if c == \"skip\":\n            continue\n",
     ));
-    own_heuristic(
+    heuristic(
         "op_data_every",
         "DATA101",
         &open,
@@ -1002,7 +946,7 @@ fn a_loop_not_over_the_data_leaves_the_origin_open() {
             "no-items-followed",
         ),
     ] {
-        own_heuristic(name, "DATA101", &arrays(&shape), "DATA101", &[("Origin", cause)]);
+        heuristic(name, "DATA101", &arrays(&shape), "DATA101", &[("Origin", cause)]);
     }
     exact(
         "op_data_origin_closed",
@@ -1017,7 +961,7 @@ fn each_premise_of_an_update_left_open_is_recorded() {
     let open = arrays(
         "def grow(arr, c, flag):\n    if flag:\n        return arr\n    return np.append(arr, c)\n\n\ndef build(items: list[str], flag):\n    acc = np.array([])\n    for c in items:\n        if c == \"skip\":\n            continue\n        acc = grow(acc, c, flag)\n        if c == \"0\":\n            acc = np.array([])\n    return acc\n",
     );
-    own_heuristic(
+    heuristic(
         "op_data_several",
         "DATA101",
         &open,
@@ -1046,7 +990,7 @@ fn a_change_a_project_subclass_may_replace_names_no_line() {
         "\n\ndef append_to_lists",
         "\n\nclass Frozen(list):\n    def append(self, item):\n        return None\n\n\ndef append_to_lists",
     );
-    let report = own_heuristic(
+    let report = heuristic(
         "op_mut110_subclass",
         "MUT110",
         &open,
@@ -1072,7 +1016,7 @@ fn a_change_a_project_subclass_may_replace_names_no_line() {
 #[test]
 fn a_change_where_a_returned_generator_is_iterated_has_no_changing_body() {
     let open = "from collections.abc import Sequence\n\n\ndef wipe(values):\n    values.clear()\n    yield 1\n\n\ndef adapter(values):\n    return wipe(values)\n\n\ndef consume(values):\n    list(adapter(values))\n\n\ndef entry(values: Sequence[float]) -> None:\n    consume(values)\n";
-    own_heuristic(
+    heuristic(
         "op_mut110_generator",
         "MUT110",
         open,
@@ -1104,7 +1048,7 @@ const APPEND: &str =
 #[test]
 fn a_cache_that_keeps_nothing_leaves_the_cached_result_open() {
     let open = cached("@functools.lru_cache(maxsize=0)", TABLE, APPEND);
-    let report = own_heuristic(
+    let report = heuristic(
         "op_mut114_cached",
         "MUT114",
         &open,
@@ -1144,7 +1088,7 @@ fn a_cache_that_keeps_nothing_leaves_the_cached_result_open() {
                 "table(name)"
             },
         );
-        own_heuristic(
+        heuristic(
             name,
             "MUT114",
             &cached(KEEPS, table, &body),
@@ -1161,7 +1105,7 @@ fn a_cache_that_keeps_nothing_leaves_the_cached_result_open() {
 #[test]
 fn a_subclass_the_annotation_admits_may_replace_the_change() {
     let frozen = "def table(name) -> list[str]:\n    return Frozen([name, \"id\"])";
-    let report = own_heuristic(
+    let report = heuristic(
         "op_mut114_subclass",
         "MUT114",
         &cached(KEEPS, frozen, APPEND),
@@ -1185,7 +1129,7 @@ fn a_value_that_is_the_result_on_some_paths_only_is_not_the_same_object() {
             "result = table(name)",
             "result = table(name) if not flag else []",
         );
-    own_heuristic(
+    heuristic(
         "op_mut114_branch",
         "MUT114",
         &cached(KEEPS, TABLE, &open),
@@ -1206,7 +1150,7 @@ fn a_result_returned_through_a_wrapper_is_not_established_the_same_object() {
         "def wrapper(name):\n    return table(name)\n\n\n{}",
         APPEND.replace("result = table(name)", "result = wrapper(name)")
     );
-    let report = own_heuristic(
+    let report = heuristic(
         "op_mut114_wrapper",
         "MUT114",
         &cached(KEEPS, TABLE, &open),
@@ -1231,14 +1175,14 @@ fn a_change_that_is_not_one_of_the_kind_at_the_line() {
         "def mutate(xs):\n    xs.append(\"x\")\n\n\n{}",
         APPEND.replace("    result.append(\"x\")\n", "    mutate(result)\n")
     );
-    own_heuristic(
+    heuristic(
         "op_mut114_helper",
         "MUT114",
         &cached(KEEPS, TABLE, &helper),
         "MUT114",
         &[("Changed in place", "changed-in-a-called-function")],
     );
-    own_heuristic(
+    heuristic(
         "op_mut114_add",
         "MUT114",
         &cached(KEEPS, TABLE, &APPEND.replace("result.append", "result.add")),
@@ -1247,14 +1191,14 @@ fn a_change_that_is_not_one_of_the_kind_at_the_line() {
     );
     // An attribute store, on the result or on an item of it.
     let attribute = APPEND.replace("    result.append(\"x\")\n", "    result.tag = \"x\"\n");
-    own_heuristic(
+    heuristic(
         "op_mut114_attribute",
         "MUT114",
         &cached(KEEPS, TABLE, &attribute),
         "MUT114",
         &[("Changed in place", "not-a-change-of-the-kind")],
     );
-    own_heuristic(
+    heuristic(
         "op_mut114_item",
         "MUT114",
         &cached(
@@ -1279,7 +1223,7 @@ fn a_change_that_is_not_one_of_the_kind_at_the_line() {
 #[test]
 fn each_premise_of_a_cached_change_left_open_is_recorded() {
     let open = "def mutate(xs):\n    xs.append(\"x\")\n\n\ndef use(name, flag):\n    result = table(name) if not flag else []\n    mutate(result)\n    return result\n";
-    own_heuristic(
+    heuristic(
         "op_mut114_several",
         "MUT114",
         &cached("@functools.lru_cache(maxsize=0)", TABLE, open),
@@ -1355,7 +1299,7 @@ fn a_file_the_rule_is_ignored_in_gets_no_report() {
         .write("quiet.py", source)
         .write(
             "pyproject.toml",
-            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nper-file-ignores = { \"quiet.py\" = [\"EFF111\"] }\n",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nper-file-ignores = { \"quiet.py\" = [\"EFF101\"] }\n",
         );
     let (code, stdout, stderr) = p.heki(&["dump-open-premises", "--select", EFF101, "."]);
     assert_eq!(code, 0, "{stderr}");

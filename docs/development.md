@@ -145,10 +145,10 @@ cannot strip stops the run, so the generator grows with the table. `--table-heki
 table from another build, to check a release older than the table with it, and `--table-rules`
 keeps only the rules it names, for the oracle run of one rule's certification.
 
-For the rules whose heuristic reports record the premises they leave open (`OPEN_PREMISE_CODES`
-in `premise_generator.py`: `EFF101` through `EFF111`, `EFF103` through `EFF113`, and the `OPT`
-rewrites, `OPT113`, `DATA101`, `MUT110`, and `MUT114` through their own codes), a program with a
-premise stripped is also run through `heki dump-open-premises`: each heuristic report of the claim
+For the rules whose heuristic reports record the premises they leave open (`OPEN_PREMISE_RULES`
+in `premise_generator.py`: `EFF101`, `EFF103`, the `OPT` rewrites, `OPT113`, `DATA101`,
+`MUT110`, and `MUT114`), a program with a premise stripped is also run through
+`heki dump-open-premises`: each heuristic report of the claim
 has to name the stripped premise among its open ones, since the causes come from the decision that
 made the report heuristic. A report that does not is an oracle finding of its own kind, written to
 `unrecorded/` beside the refutations and counted with them for `--fail-on-refutation`. A heki

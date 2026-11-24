@@ -699,7 +699,7 @@ const TALLY: &str = "class Tally:\n    def __init__(self):\n        self.counts 
 const TALLY_USE: &str = "from pkg.tally import Tally\n\n\ndef total(t: Tally):\n    n = 0\n    for k in t._walk():\n        n += 1\n    return n\n";
 const TALLY_COUNTING: &str = "from pkg.tally import Tally\n\n\ndef _counting(t: Tally):\n    n = 0\n    for k in t._walk():\n        n += 1\n    return n\n\n\ndef start(t: Tally):\n    t.cursor = _counting(t)\n";
 
-// Exact effect reports (`EFF101` / `EFF111`): an `async def` calls a method on a base class whose
+// The tiers of `EFF101` reports: an `async def` calls a method on a base class whose
 // implementation always blocks; a subclass in a third module starts overriding it without the
 // blocking call, then with another one, and the base's call becomes conditional.
 const EXACT_BASE: &str = "import requests\n\n\nclass Base:\n    def fetch(self, url):\n        return requests.get(url)\n";
@@ -820,7 +820,7 @@ const WIT_MID: &str =
     "from pkg.wit_fetch import fetch\n\n\ndef load(r):\n    return fetch(r, \"k\")\n";
 const WIT_SERVE: &str = "from pkg.wit_mid import load\nfrom pkg.wit_repo import Repo\n\n\nasync def serve(r: Repo):\n    load(r)\n";
 
-// Queue capacities (`EFF111` on `queue.Queue.put`, a wait on another thread): a queue one module builds and another
+// Queue capacities (a heuristic `EFF101` on `queue.Queue.put`, a wait on another thread): a queue one module builds and another
 // module's class stores, an `async def` putting on its parameter whose caller is in another
 // module, and a class constant bounding a queue that a subclass in another module may define
 // again.
@@ -1376,19 +1376,19 @@ fn steps_exact_effects() -> Vec<Step> {
             "a subclass in another file overrides the method without blocking",
             vec![save("pkg/exact_sub.py", EXACT_SUB_OVERRIDING)],
         )
-        .present(&[("pkg/exact_use.py", "EFF111")])
+        .present(&[("pkg/exact_use.py", "EFF101 [heuristic]")])
         .absent(&[("pkg/exact_use.py", "EFF101")]),
         Step::new(
             "the override blocks too",
             vec![save("pkg/exact_sub.py", EXACT_SUB_BLOCKING)],
         )
         .present(&[("pkg/exact_use.py", "EFF101")])
-        .absent(&[("pkg/exact_use.py", "EFF111")]),
+        .absent(&[("pkg/exact_use.py", "EFF101 [heuristic]")]),
         Step::new(
             "the base method blocks only on some paths",
             vec![save("pkg/exact_base.py", EXACT_BASE_CONDITIONAL)],
         )
-        .present(&[("pkg/exact_use.py", "EFF111")])
+        .present(&[("pkg/exact_use.py", "EFF101 [heuristic]")])
         .absent(&[("pkg/exact_use.py", "EFF101")]),
         Step::new(
             "the base method blocks on every path again, and the override stops overriding",
@@ -1398,7 +1398,7 @@ fn steps_exact_effects() -> Vec<Step> {
             ],
         )
         .present(&[("pkg/exact_use.py", "EFF101")])
-        .absent(&[("pkg/exact_use.py", "EFF111")]),
+        .absent(&[("pkg/exact_use.py", "EFF101 [heuristic]")]),
         // `ModuleDecls::rebound_globals` of another module: a name bound again leaves the call's
         // targets incomplete (`ProjectDecls::lookup_rebound`). Bound again on every path of the
         // base's class body, the name holds the other function (`NamedAttr::body`).
@@ -1406,33 +1406,33 @@ fn steps_exact_effects() -> Vec<Step> {
             "the third module binds the base's method to another function",
             vec![save("pkg/exact_sub.py", EXACT_SUB_REBINDING)],
         )
-        .present(&[("pkg/exact_use.py", "EFF111")])
+        .present(&[("pkg/exact_use.py", "EFF101 [heuristic]")])
         .absent(&[("pkg/exact_use.py", "EFF101")]),
         Step::new(
             "it stops binding the method",
             vec![save("pkg/exact_sub.py", EXACT_SUB)],
         )
         .present(&[("pkg/exact_use.py", "EFF101")])
-        .absent(&[("pkg/exact_use.py", "EFF111")]),
+        .absent(&[("pkg/exact_use.py", "EFF101 [heuristic]")]),
         Step::new(
             "the base's class body binds the method to another function",
             vec![save("pkg/exact_base.py", EXACT_BASE_REBOUND)],
         )
         .absent(&[
             ("pkg/exact_use.py", "EFF101"),
-            ("pkg/exact_use.py", "EFF111"),
+            ("pkg/exact_use.py", "EFF101 [heuristic]"),
         ]),
         Step::new(
             "the base binds it once again",
             vec![save("pkg/exact_base.py", EXACT_BASE)],
         )
         .present(&[("pkg/exact_use.py", "EFF101")])
-        .absent(&[("pkg/exact_use.py", "EFF111")]),
+        .absent(&[("pkg/exact_use.py", "EFF101 [heuristic]")]),
         Step::new(
             "the base's class body binds the method to another function on some paths",
             vec![save("pkg/exact_base.py", EXACT_BASE_QUIET_ON_A_PATH)],
         )
-        .present(&[("pkg/exact_use.py", "EFF111")])
+        .present(&[("pkg/exact_use.py", "EFF101 [heuristic]")])
         .absent(&[("pkg/exact_use.py", "EFF101")]),
         Step::new(
             "the base defines the method once again, and a module calls a blocking function",
@@ -1450,7 +1450,7 @@ fn steps_exact_effects() -> Vec<Step> {
             "the function's module binds its name to another function on some paths",
             vec![save("pkg/exact_fetch.py", EXACT_FETCH_ON_A_PATH)],
         )
-        .present(&[("pkg/exact_fetch_use.py", "EFF111")])
+        .present(&[("pkg/exact_fetch_use.py", "EFF101 [heuristic]")])
         .absent(&[("pkg/exact_fetch_use.py", "EFF101")]),
         Step::new(
             "the module binds the name to the other function on every path",
@@ -1458,7 +1458,7 @@ fn steps_exact_effects() -> Vec<Step> {
         )
         .absent(&[
             ("pkg/exact_fetch_use.py", "EFF101"),
-            ("pkg/exact_fetch_use.py", "EFF111"),
+            ("pkg/exact_fetch_use.py", "EFF101 [heuristic]"),
         ]),
         Step::new(
             "a module binds a class under `global` in a function it runs on every path",
@@ -1472,7 +1472,7 @@ fn steps_exact_effects() -> Vec<Step> {
             "it runs the function on a branch only",
             vec![save("pkg/exact_made.py", EXACT_MADE_ON_A_BRANCH)],
         )
-        .present(&[("pkg/exact_made_use.py", "EFF111")])
+        .present(&[("pkg/exact_made_use.py", "EFF101 [heuristic]")])
         .absent(&[("pkg/exact_made_use.py", "EFF101")]),
         Step::new(
             "the class stays local to the function",
@@ -1480,14 +1480,14 @@ fn steps_exact_effects() -> Vec<Step> {
         )
         .absent(&[
             ("pkg/exact_made_use.py", "EFF101"),
-            ("pkg/exact_made_use.py", "EFF111"),
+            ("pkg/exact_made_use.py", "EFF101 [heuristic]"),
         ]),
         Step::new(
             "the function binds it under `global` again",
             vec![save("pkg/exact_made.py", EXACT_MADE)],
         )
         .present(&[("pkg/exact_made_use.py", "EFF101")])
-        .absent(&[("pkg/exact_made_use.py", "EFF111")]),
+        .absent(&[("pkg/exact_made_use.py", "EFF101 [heuristic]")]),
     ]
 }
 
@@ -1700,7 +1700,7 @@ fn steps_unused_suppressions() -> Vec<Step> {
         )
         .present(&[
             ("pkg/exact_use.py", "unused-suppression"),
-            ("pkg/exact_use.py", "EFF111"),
+            ("pkg/exact_use.py", "EFF101 [heuristic]"),
         ]),
         Step::new(
             "the override blocks too: the suppression is used again",
@@ -1763,26 +1763,26 @@ fn steps_method_lookups() -> Vec<Step> {
                 ML_SHADOW_GETTER.to_owned(),
             )],
         )
-        .present(&[("pkg/ml_use.py", "EFF111")])
+        .present(&[("pkg/ml_use.py", "EFF101 [heuristic]")])
         .absent(&[("pkg/ml_use.py", "EFF101")]),
         Step::new(
             "the subclass overrides it with a method",
             vec![save("pkg/ml_shadow.py", ML_SHADOW_METHOD)],
         )
         .present(&[("pkg/ml_use.py", "EFF101")])
-        .absent(&[("pkg/ml_use.py", "EFF111")]),
+        .absent(&[("pkg/ml_use.py", "EFF101 [heuristic]")]),
         Step::new(
             "the subclass defines `__getattribute__`",
             vec![save("pkg/ml_shadow.py", ML_SHADOW_HOOKED)],
         )
-        .present(&[("pkg/ml_use.py", "EFF111")])
+        .present(&[("pkg/ml_use.py", "EFF101 [heuristic]")])
         .absent(&[("pkg/ml_use.py", "EFF101")]),
         Step::new(
             "the subclass is deleted",
             vec![Action::Delete("pkg/ml_shadow.py")],
         )
         .present(&[("pkg/ml_use.py", "EFF101")])
-        .absent(&[("pkg/ml_use.py", "EFF111")]),
+        .absent(&[("pkg/ml_use.py", "EFF101 [heuristic]")]),
     ]
 }
 
@@ -1877,28 +1877,28 @@ fn steps_helper_witnesses() -> Vec<Step> {
             vec![save("pkg/wit_local.py", WIT_LOCAL_PUT)],
         )
         .present(&[("pkg/wit_serve.py", "EFF101")])
-        .absent(&[("pkg/wit_serve.py", "EFF111")]),
+        .absent(&[("pkg/wit_serve.py", "EFF101 [heuristic]")]),
         Step::new(
             "it stops waiting",
             vec![save("pkg/wit_local.py", WIT_LOCAL_QUIET)],
         )
-        .present(&[("pkg/wit_serve.py", "EFF111")])
+        .present(&[("pkg/wit_serve.py", "EFF101 [heuristic]")])
         .absent(&[("pkg/wit_serve.py", "EFF101")]),
         Step::new("it waits again", vec![save("pkg/wit_local.py", WIT_LOCAL)])
             .present(&[("pkg/wit_serve.py", "EFF101")])
-            .absent(&[("pkg/wit_serve.py", "EFF111")]),
+            .absent(&[("pkg/wit_serve.py", "EFF101 [heuristic]")]),
         Step::new(
             "the helper's parameter names only the implementation on its shortest chain",
             vec![save("pkg/wit_fetch.py", WIT_FETCH_REMOTE)],
         )
         .present(&[("pkg/wit_serve.py", "EFF101")])
-        .absent(&[("pkg/wit_serve.py", "EFF111")]),
+        .absent(&[("pkg/wit_serve.py", "EFF101 [heuristic]")]),
         Step::new(
             "the helper's parameter names the base class again",
             vec![save("pkg/wit_fetch.py", WIT_FETCH)],
         )
         .present(&[("pkg/wit_serve.py", "EFF101")])
-        .absent(&[("pkg/wit_serve.py", "EFF111")]),
+        .absent(&[("pkg/wit_serve.py", "EFF101 [heuristic]")]),
     ]
 }
 
@@ -2698,13 +2698,13 @@ fn steps_body_runs() -> Vec<Step> {
                 WORKER_OPS.replace("    return i\n", "    return session.execute(i)\n"),
             )],
         )
-        .present(&[("pkg/worker_view.py", "EFF113")])
-        .absent(&[("pkg/worker_view.py", "EFF111")]),
+        .present(&[("pkg/worker_view.py", "EFF103 [heuristic]")])
+        .absent(&[("pkg/worker_view.py", "EFF101 [heuristic]")]),
         Step::new(
             "the worker's query is removed",
             vec![save("pkg/worker_ops.py", WORKER_OPS)],
         )
-        .absent(&[("pkg/worker_view.py", "EFF113")]),
+        .absent(&[("pkg/worker_view.py", "EFF103 [heuristic]")]),
         // A function a builtin calls once per item: its caller is re-checked when the
         // function in another module starts or stops querying.
         Step::new(
@@ -2714,17 +2714,17 @@ fn steps_body_runs() -> Vec<Step> {
                 RANK_KEY.replace("    return i\n", "    return session.execute(i)\n"),
             )],
         )
-        .present(&[("pkg/rank_user.py", "EFF113")]),
+        .present(&[("pkg/rank_user.py", "EFF103 [heuristic]")]),
         Step::new(
             "the sort key's query is removed",
             vec![save("pkg/rank_key.py", RANK_KEY)],
         )
-        .absent(&[("pkg/rank_user.py", "EFF113")]),
+        .absent(&[("pkg/rank_user.py", "EFF103 [heuristic]")]),
         Step::new(
             "a helper becomes a generator: the report moves to the iteration",
             vec![save("pkg/feed.py", FEED_GENERATOR)],
         )
-        .present(&[("pkg/feed_user.py", "EFF111")]),
+        .present(&[("pkg/feed_user.py", "EFF101 [heuristic]")]),
         Step::new(
             "the generator becomes a helper again",
             vec![save("pkg/feed.py", FEED)],
@@ -4190,12 +4190,12 @@ fn steps_queue_capacity() -> Vec<Step> {
                 &Q_OWNER.replace("queue.Queue()", "queue.Queue(maxsize=8)"),
             )],
         )
-        .present(&[("pkg/q_publish.py", "EFF111")]),
+        .present(&[("pkg/q_publish.py", "EFF101 [heuristic]")]),
         Step::new(
             "it builds the queue unbounded again",
             vec![save("pkg/q_owner.py", Q_OWNER)],
         )
-        .absent(&[("pkg/q_publish.py", "EFF111")]),
+        .absent(&[("pkg/q_publish.py", "EFF101 [heuristic]")]),
         Step::new(
             "the caller of an async def putting on its parameter passes an unbounded queue",
             vec![save(
@@ -4203,12 +4203,12 @@ fn steps_queue_capacity() -> Vec<Step> {
                 &Q_RUN.replace("queue.Queue(5)", "queue.Queue()"),
             )],
         )
-        .absent(&[("pkg/q_drain.py", "EFF111")]),
+        .absent(&[("pkg/q_drain.py", "EFF101 [heuristic]")]),
         Step::new(
             "it passes a bounded queue again",
             vec![save("pkg/q_run.py", Q_RUN)],
         )
-        .present(&[("pkg/q_drain.py", "EFF111")]),
+        .present(&[("pkg/q_drain.py", "EFF101 [heuristic]")]),
         Step::new(
             "a subclass in another module defines the constant bounding the queue again",
             vec![save(
@@ -4216,12 +4216,12 @@ fn steps_queue_capacity() -> Vec<Step> {
                 &Q_SMALL.replace("label = \"small\"", "_MAX = 0"),
             )],
         )
-        .absent(&[("pkg/q_halt.py", "EFF111")]),
+        .absent(&[("pkg/q_halt.py", "EFF101 [heuristic]")]),
         Step::new(
             "the subclass leaves the constant to its base again",
             vec![save("pkg/q_small.py", Q_SMALL)],
         )
-        .present(&[("pkg/q_halt.py", "EFF111")]),
+        .present(&[("pkg/q_halt.py", "EFF101 [heuristic]")]),
         Step::new(
             "the module a global copies its queue from, and a function imports it from, bounds it",
             vec![save(
@@ -4229,12 +4229,18 @@ fn steps_queue_capacity() -> Vec<Step> {
                 &Q_EVENTS.replace("queue.Queue()", "queue.Queue(4)"),
             )],
         )
-        .present(&[("pkg/q_mirror.py", "EFF111"), ("pkg/q_local.py", "EFF111")]),
+        .present(&[
+            ("pkg/q_mirror.py", "EFF101 [heuristic]"),
+            ("pkg/q_local.py", "EFF101 [heuristic]"),
+        ]),
         Step::new(
             "it builds the queue unbounded again",
             vec![save("pkg/q_events.py", Q_EVENTS)],
         )
-        .absent(&[("pkg/q_mirror.py", "EFF111"), ("pkg/q_local.py", "EFF111")]),
+        .absent(&[
+            ("pkg/q_mirror.py", "EFF101 [heuristic]"),
+            ("pkg/q_local.py", "EFF101 [heuristic]"),
+        ]),
     ]
 }
 
@@ -4644,8 +4650,8 @@ fn steps_initial_index() -> Vec<Step> {
         ("pkg/guard_use.py", "EFF102"),
         ("pkg/guard_default_use.py", "EFF102"),
         ("pkg/guard_conn_use.py", "EFF102"),
-        ("pkg/buf_use.py", "EFF111"),
-        ("pkg/buf_default_use.py", "EFF111"),
+        ("pkg/buf_use.py", "EFF101 [heuristic]"),
+        ("pkg/buf_default_use.py", "EFF101 [heuristic]"),
         ("pkg/guard_global_use.py", "EFF102"),
         ("pkg/fill.py", "MUT201"),
         ("pkg/fill_main.py", "MUT201"),
@@ -4895,8 +4901,8 @@ fn steps_guarded_effects() -> Vec<Step> {
             "a reader in another file gains the `hasattr` test a buffer argument decides",
             vec![save("pkg/buf_read.py", BUF_READ_HASATTR)],
         )
-        .present(&[("pkg/buf_default_use.py", "EFF111")])
-        .absent(&[("pkg/buf_use.py", "EFF111")]),
+        .present(&[("pkg/buf_default_use.py", "EFF101 [heuristic]")])
+        .absent(&[("pkg/buf_use.py", "EFF101 [heuristic]")]),
         Step::new(
             "the reader tests an attribute a buffer may lack",
             vec![save(
@@ -4904,22 +4910,22 @@ fn steps_guarded_effects() -> Vec<Step> {
                 &BUF_READ_HASATTR.replace("\"read\")", "\"name\")"),
             )],
         )
-        .present(&[("pkg/buf_use.py", "EFF111")]),
+        .present(&[("pkg/buf_use.py", "EFF101 [heuristic]")]),
         Step::new(
             "the reader rebinds a missing argument to a buffer before its `isinstance` test",
             vec![save("pkg/buf_read.py", BUF_READ_REBINDING)],
         )
         .absent(&[
-            ("pkg/buf_use.py", "EFF111"),
-            ("pkg/buf_default_use.py", "EFF111"),
+            ("pkg/buf_use.py", "EFF101 [heuristic]"),
+            ("pkg/buf_default_use.py", "EFF101 [heuristic]"),
         ]),
         Step::new(
             "the reader loses its tests",
             vec![save("pkg/buf_read.py", BUF_READ)],
         )
         .present(&[
-            ("pkg/buf_use.py", "EFF111"),
-            ("pkg/buf_default_use.py", "EFF111"),
+            ("pkg/buf_use.py", "EFF101 [heuristic]"),
+            ("pkg/buf_default_use.py", "EFF101 [heuristic]"),
         ]),
         Step::new(
             "a helper in another file keeps its connection in a module global",
@@ -5376,12 +5382,12 @@ fn steps_declarations() -> Vec<Step> {
                 &SQUARE.replace("def side", "def area"),
             )],
         )
-        .present(&[("pkg/draw.py", "EFF111")]),
+        .present(&[("pkg/draw.py", "EFF101 [heuristic]")]),
         Step::new(
             "the override is removed",
             vec![save("pkg/square.py", SQUARE)],
         )
-        .absent(&[("pkg/draw.py", "EFF111")]),
+        .absent(&[("pkg/draw.py", "EFF101 [heuristic]")]),
     ]
 }
 
@@ -5619,6 +5625,13 @@ struct Diag {
     certainty: String,
     message: String,
     related: Vec<(Range, String)>,
+}
+
+impl Diag {
+    /// The code with its tier, as a step names it ([`common::with_tier`]).
+    fn tiered_code(&self) -> &str {
+        common::with_tier(&self.code, &self.certainty)
+    }
 }
 
 /// Byte offset -> LSP position (0-based line, UTF-16 column) in `text`.
@@ -5921,7 +5934,7 @@ impl Session {
             assert!(
                 reference
                     .get(*file)
-                    .is_some_and(|d| d.iter().any(|x| x.code == *code)),
+                    .is_some_and(|d| d.iter().any(|x| x.tiered_code() == *code)),
                 "step `{}`: the CLI does not report {code} in {file}: {reference:#?}",
                 step.name
             );
@@ -5930,7 +5943,7 @@ impl Session {
             assert!(
                 !reference
                     .get(*file)
-                    .is_some_and(|d| d.iter().any(|x| x.code == *code)),
+                    .is_some_and(|d| d.iter().any(|x| x.tiered_code() == *code)),
                 "step `{}`: the CLI reports {code} in {file}: {reference:#?}",
                 step.name
             );
