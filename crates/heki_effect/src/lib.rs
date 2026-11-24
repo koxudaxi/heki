@@ -1160,6 +1160,16 @@ pub enum GuardTest {
     Value(Box<ValueTest>),
 }
 
+impl GuardTest {
+    /// The attribute a `hasattr` test names.
+    pub fn attr(&self) -> Option<&str> {
+        match self {
+            Self::HasAttr(name) => Some(name),
+            _ => None,
+        }
+    }
+}
+
 /// A test of a value by the catalog's facts on a call made with it, for one effect of that
 /// call ([`GuardTest::Value`]): a caller binding the value decides it from what it knows of the
 /// argument ([`ArgBinding::fact`]), as the call decides an argument of its own.
