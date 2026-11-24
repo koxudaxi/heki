@@ -1705,6 +1705,145 @@ async def through_annotated_return() -> None:
     opened().execute("SELECT 1")
 "#;
 
+/// A local or a global annotated with the library class of the connection or the cursor it is
+/// assigned keeps what heki knows of the value: opened on a file (every wait established) or in
+/// memory (none), also once an `isinstance` test of that class passes. An annotation naming
+/// another class, or typing a value heki does not know, is what types it, as before; a statement
+/// sent per item is established either way.
+#[test]
+fn an_annotation_agreeing_with_a_connection_keeps_where_it_was_opened() {
+    assert_eq!(
+        check("cat_sqlite_annotated", "lite.py", ANNOTATED_SQLITE, RULES),
+        vec![
+            d(8, "EFF101", "tp_plain", "sqlite3.Connection.execute"),
+            d(9, "EFF101", "tp_plain", "sqlite3.Cursor.fetchone"),
+            d(
+                13,
+                "EFF101",
+                "tp_annotated_cursor",
+                "sqlite3.Connection.execute"
+            ),
+            d(
+                14,
+                "EFF101",
+                "tp_annotated_cursor",
+                "sqlite3.Cursor.fetchone"
+            ),
+            d(18, "EFF101", "tp_annotated_connection", "sqlite3.connect"),
+            d(
+                19,
+                "EFF101",
+                "tp_annotated_connection",
+                "sqlite3.Connection.execute"
+            ),
+            d(
+                23,
+                "EFF101",
+                "tp_annotated_global",
+                "sqlite3.Connection.execute"
+            ),
+            d(27, "EFF101", "tp_isinstance", "sqlite3.Connection.execute"),
+            d(29, "EFF101", "tp_isinstance", "sqlite3.Cursor.fetchone"),
+            d(
+                39,
+                "EFF101",
+                "heuristic_disagreeing",
+                "sqlite3.Connection.execute"
+            ),
+            d(
+                40,
+                "EFF111",
+                "heuristic_disagreeing",
+                "sqlite3.Connection.execute"
+            ),
+            d(
+                45,
+                "EFF111",
+                "heuristic_unknown_value",
+                "sqlite3.Cursor.fetchone"
+            ),
+            d(51, "EFF103", "tp_query_per_id", "sqlite3.Cursor.execute"),
+            d(
+                57,
+                "EFF103",
+                "tp_query_per_row",
+                "sqlite3.Connection.execute"
+            ),
+            d(
+                63,
+                "EFF103",
+                "tp_held_query_per_id",
+                "sqlite3.Connection.execute"
+            ),
+        ]
+    );
+}
+
+const ANNOTATED_SQLITE: &str = r#"import sqlite3
+
+conn = sqlite3.connect("app.db")
+shared: sqlite3.Connection = sqlite3.connect("app.db")
+
+
+async def tp_plain() -> object:
+    cur = conn.execute("SELECT 1")
+    return cur.fetchone()
+
+
+async def tp_annotated_cursor() -> object:
+    cur: sqlite3.Cursor = conn.execute("SELECT 1")
+    return cur.fetchone()
+
+
+async def tp_annotated_connection() -> object:
+    c: sqlite3.Connection = sqlite3.connect("app.db")
+    return c.execute("SELECT 1")
+
+
+async def tp_annotated_global() -> object:
+    return shared.execute("SELECT 1")
+
+
+async def tp_isinstance() -> object:
+    cur = conn.execute("SELECT 1")
+    if isinstance(cur, sqlite3.Cursor):
+        return cur.fetchone()
+    return None
+
+
+async def tn_annotated_in_memory() -> object:
+    mem: sqlite3.Connection = sqlite3.connect(":memory:")
+    return mem.execute("SELECT 1")
+
+
+async def heuristic_disagreeing() -> object:
+    cur: sqlite3.Connection = conn.execute("SELECT 1")
+    return cur.execute("SELECT 2")
+
+
+async def heuristic_unknown_value(make) -> object:
+    cur: sqlite3.Cursor = make()
+    return cur.fetchone()
+
+
+def tp_query_per_id(ids: list[int]) -> None:
+    cur: sqlite3.Cursor = conn.cursor()
+    for i in ids:
+        cur.execute("SELECT * FROM t WHERE id = ?", (i,))
+
+
+def tp_query_per_row() -> None:
+    rows: sqlite3.Cursor = conn.execute("SELECT id FROM t")
+    for (i,) in rows:
+        conn.execute("SELECT * FROM u WHERE id = ?", (i,))
+
+
+def tp_held_query_per_id(ids: list[int]) -> None:
+    execute = conn.execute
+    for i in ids:
+        execute("SELECT * FROM t WHERE id = ?", (i,))
+"#;
+
 #[test]
 fn in_memory_databases_and_connection_options_do_not_wait() {
     // An in-memory database is opened, and its statements run, without waiting; a connection

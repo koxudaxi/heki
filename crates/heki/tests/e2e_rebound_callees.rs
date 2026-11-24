@@ -13,7 +13,8 @@
 //! `Made = Other`, none of which waits), and one bound so on a branch is either object, a
 //! target without the fact. `MUT114`'s claim that the changed object is what a cached function
 //! returned rests on the same targets, and a module constant set through `setattr` is no
-//! constant.
+//! constant. A local bound once to a bound method or a `functools.partial` object calls what it
+//! holds, exactly.
 //!
 //! Every fixture marks each line with the report it must get ([`MARKS`]).
 
@@ -669,3 +670,86 @@ fn a_constant_set_through_setattr_is_no_constant() {
         ],
     );
 }
+
+/// A local bound once to a bound method (`execute = conn.execute`, `getattr(conn, "execute")`)
+/// or to a `functools.partial` object is the method of that receiver, or the function, on every
+/// path: calling it runs what calling the method or the function runs, exactly when that call
+/// would. A `getattr` with a default may give the default, and a local bound on a branch, or to
+/// a method of a receiver heki does not know, is no exact target.
+#[test]
+fn a_callable_held_in_a_local_is_what_it_holds() {
+    check_marks("held_callables", &[("pkg/held.py", HELD)]);
+}
+
+const HELD: &str = r#"import functools
+import sqlite3
+import time
+
+conn = sqlite3.connect("app.db")
+other = sqlite3.connect("other.db")
+
+
+class Box:
+    def work(self) -> None:
+        time.sleep(1)
+
+
+class Base:
+    def work(self) -> None:
+        time.sleep(1)
+
+
+class Quiet(Base):
+    def work(self) -> None:
+        return None
+
+
+async def direct() -> object:
+    return conn.execute("SELECT 1")  # EFF101
+
+
+async def held() -> object:
+    execute = conn.execute
+    return execute("SELECT 1")  # EFF101
+
+
+async def held_fetch() -> object:
+    cur = conn.execute("SELECT 1")  # EFF101
+    fetch = cur.fetchone
+    return fetch()  # EFF101
+
+
+async def through_getattr() -> object:
+    return getattr(conn, "execute")("SELECT 1")  # EFF101
+
+
+async def through_getattr_with_a_default() -> object:
+    return getattr(conn, "execute", None)("SELECT 1")  # EFF111
+
+
+async def through_partial() -> None:
+    nap = functools.partial(time.sleep, 1)
+    nap()  # EFF101
+
+
+async def project_method(box: Box) -> None:
+    work = box.work
+    work()  # EFF101
+
+
+async def overridden(base: Base) -> None:
+    work = base.work
+    work()  # EFF111 either
+
+
+async def rebound_on_a_branch(flag: bool) -> object:
+    execute = conn.execute
+    if flag:
+        execute = other.execute
+    return execute("SELECT 1")
+
+
+async def unknown_receiver(db) -> object:
+    execute = db.execute
+    return execute("SELECT 1")
+"#;
