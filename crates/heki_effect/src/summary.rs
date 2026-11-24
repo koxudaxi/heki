@@ -303,11 +303,12 @@ fn extract_module(
 /// the bodies of the classes it makes.
 fn class_bodies_run_by<'m>(ir: &'m ModuleIr, f: &'m IrFunction) -> Vec<&'m IrFunction> {
     let mut out: Vec<&IrFunction> = Vec::new();
+    let mut made: FxHashSet<FunctionId> = FxHashSet::default();
     let mut stack = vec![f];
     while let Some(g) = stack.pop() {
         for inst in g.blocks.iter().flat_map(|b| &b.insts) {
             if let Some(id) = class_body_made(ir, &inst.kind)
-                && out.iter().all(|c| c.id != id)
+                && made.insert(id)
             {
                 out.push(ir.function(id));
                 stack.push(ir.function(id));
