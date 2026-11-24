@@ -6230,12 +6230,10 @@ impl<'a> Extractor<'a> {
                     let removes = matches!(method, "pop" | "__delitem__");
                     self.write_named(owner, &name, removes, kind, span);
                 }
-                ("update", [other]) if plain => match self.update_keys(*other) {
-                    AttrName::KeyOf(sources) => {
-                        self.computed_name(&owner, Adds::UnlessKeysOf(&sources), kind, span);
-                    }
-                    _ => self.computed_name(&owner, Adds::Any, kind, span),
-                },
+                ("update", [other]) if plain => {
+                    let names = self.update_keys(*other);
+                    self.write_named(owner, &names, false, kind, span);
+                }
                 ("popitem" | "clear", _) => {
                     if method == "clear" && owner.is_self {
                         self.summary.invalidates_cached.insert("*".to_owned());

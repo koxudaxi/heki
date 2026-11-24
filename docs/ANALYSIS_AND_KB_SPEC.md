@@ -257,7 +257,16 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     the module writes, which aliases and items share), whose length gives its display. It is
     the one view of a module name bound once (a star import that runs, not one under
     `if TYPE_CHECKING:`, rebinds every name not bound after it for good, also one with an
-    underscore, which the imported module's `__all__` may list; `LastBindings`): the
+    underscore, which the imported module's `__all__` may list; `LastBindings`). A change
+    through `globals()` leaves no name fixed unless it binds only a name the namespace lacks
+    (`globals().setdefault(k, v)`, or `globals()[name] = v` in the module's `__getattr__`, keyed
+    by the parameter Python passes the missing name in, which only Python calls: an undecorated
+    hook no function of the module loads): that acts as a star import at the start of the body,
+    so the names the body binds on every path stay constants, and the builtins are still not
+    trusted. Such a hook another module loads (`keys.__getattr__("KEY")`, `from keys import
+    __getattr__`; `ModuleConstants::getattr_rebinds`, `ModuleDecls::getattr_loads`) may bind any
+    of its module's globals, also one declared `Final`: the declarations take each as rebound
+    elsewhere (`ProjectDecls::rebound_by_getattr`, a key the language server tracks). The
     effect lane's declarations read their number, boolean, and string constants from it, and `GlobalStores` is the one count of the stores
     and deletions of each module global that it, `ModuleBindings`, and the declarations read.
   - The Soundness lane reads these facts within one module only (`FnIndex`). The Advisory rules
@@ -378,8 +387,13 @@ the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores
   The name may be a literal or a string constant of a module or a class (`KEY: Final`), or one
   of the string constants of the tuple, list, or set display a loop takes it from
   (`for key in ("a", "b")`; a list or set only while nothing but loops, copies, and `list`,
-  `tuple`, `sorted`, or `dict` reads it), which stores each (`stores::key_name`, the one
-  decision of the names these stores and the ownership facts read).
+  `tuple`, `sorted`, or `dict` reads it) or of a module's tuple constant (`for key in RECORDS`,
+  `ProjectDecls::str_tuple`), which stores each (`stores::key_name`, the one decision of the
+  names these stores and the ownership facts read). A generator expression is one more wrapper
+  around its outermost iterable, which its creator evaluates and passes as `.0`
+  (`Iterated::yielded`): it yields each item of its first `for` clause, or `(key, value)` pairs
+  keyed by that item or by a string constant, whose keys `ns.update(pairs)` stores
+  (`stores::update_keys`), as do `dict(pairs)` and a loop unpacking them.
 - **What a store binds.** A store of `None` adds nothing (a call on it raises). A store of a value
   of unknown type, or values no tracked type covers, leaves the name untyped. `obj.attr += v`
   binds what the operator gives on the attribute's own value: nothing new when the name holds a
@@ -859,10 +873,15 @@ symbol's last name (aliases included), a function or class of the module itself 
 unbound name by its spelling.
 
 String constants (`ModuleDecls::str_constants`) name attributes and keys for every rule:
-the module's string constants (`heki_ir::ModuleConstants::strs`, whose texts they share), and
-module-level names bound once to a constant of another module, each rebound by no other module
+the module's string constants (`heki_ir::ModuleConstants::strs`, whose texts they share), its
+tuples of them (`StrValue::Tuple`: one of literals is a tuple of `ModuleConstants::str_tuples`,
+one naming other constants holds their names), and
+module-level names bound once to a constant of another module where the module's IR fixes the
+name (`ModuleConstants::imported`: not in a loop, before a star import, or where `exec` or
+`globals()` may rebind it), each rebound by no other module
 unless declared `Final` (`StrConstant::rebindable`, checked against
-`ProjectDecls::rebound_elsewhere` where a constant is read), and class-body names declared `ClassVar` or `Final` and bound once, stored on the class or
+`ProjectDecls::rebound_elsewhere` where a constant is read, `ProjectDecls::constant_rebound`),
+nor through its module's `__getattr__`, and class-body names declared `ClassVar` or `Final` and bound once, stored on the class or
 an instance by no other code of their module (and, without `Final`, by no other module), read
 through the MRO when the MRO of every subclass finds the same definition (none defines the name
 again or lists another base defining it first); a class that code stores the name on

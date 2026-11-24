@@ -149,25 +149,23 @@ pub(super) fn scalar<'a>(ix: &FnIndex<'a>, v: VarId) -> Option<Scalar<'a>> {
             name,
             is_lazy_import: false,
             ..
-        } if !module.dynamic => module
+        } => module
             .bools
             .get(name)
             .map(|b| Scalar::Bool(*b))
             .or_else(|| module.ints.get(name).map(|n| Scalar::Int(*n)))
             .or_else(|| module.strs.get(name).map(|s| Scalar::Str(s))),
-        InstKind::AttrLoad { obj, attr, .. } if !module.dynamic => {
-            match &shape.inst(shape.copy_root(*obj))?.kind {
-                InstKind::LoadGlobal {
-                    name,
-                    is_lazy_import: false,
-                    ..
-                } => module
-                    .bools
-                    .get(&format!("{name}.{attr}"))
-                    .map(|b| Scalar::Bool(*b)),
-                _ => None,
-            }
-        }
+        InstKind::AttrLoad { obj, attr, .. } => match &shape.inst(shape.copy_root(*obj))?.kind {
+            InstKind::LoadGlobal {
+                name,
+                is_lazy_import: false,
+                ..
+            } => module
+                .bools
+                .get(&format!("{name}.{attr}"))
+                .map(|b| Scalar::Bool(*b)),
+            _ => None,
+        },
         _ => None,
     }
 }

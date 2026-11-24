@@ -1529,8 +1529,9 @@ needs a target first. A target names the keys its attribute pattern matches (`Fi
 `_cache`), and an entry target names its container. A key another contract names is that
 contract's to guard: its writes are judged by that contract's allowance alone. The contract's
 allowance applies to an unlisted key as to a target write. A key a loop takes from a tuple,
-list, or set of string constants writes each of them. A key computed at run time has no name
-to check (`MUT205`, with `unresolved = "report"`), nor has a copy of the keys of an instance's
+list, or set of string constants, or from a module's tuple of them, writes each of them, and so
+does the key of each pair a generator of them gives `update`. A key computed at run time has no
+name to check (`MUT205`, with `unresolved = "report"`), nor has a copy of the keys of an instance's
 namespace or of the fields its class declares, whose keys exist already, and neither has a
 write on an object heki cannot type, a helper's parameter that no annotation types included:
 with `unresolved = "report"` too, `MUT205` reports such a key (below). A key every function may
@@ -2245,7 +2246,12 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   on its instances, one of a project base, an attribute or a constant `__dict__` key the code
   writes or reads on an object typed with the class or a subclass, or one written on an object
   heki cannot type. A key a loop takes from a tuple, list, or set of string constants
-  (`for key in ("_a", "_b")`) names each of them, a list or set only while no code changes it.
+  (`for key in ("_a", "_b")`), or from a module's tuple of them (`for key in RECORDS`), names
+  each of them, a list or set only while no code changes it, and so does the key of each pair a
+  generator of them gives `update` (`ns.update((key, v) for key in RECORDS)`). A module
+  `__getattr__` caching what it serves (`globals()[name] = value`) leaves its module's string
+  constants bound on every path known, since Python calls it only for a name the module lacks,
+  unless a decorator wraps it or another module loads it (`keys.__getattr__("KEY")`).
   A class whose module stores attributes heki
   cannot name (`setattr(self, name, v)`), or that the code gives a name computed at run time,
   may have any attribute: an entry naming none of its known ones is not reported, except with
@@ -12074,7 +12080,9 @@ write:
   `setattr(model, name, v)`, `model.__dict__[name] = v`, `model.__dict__.update(...)`,
   `model.__dict__ |= other` (also through `vars(model)` or a local alias of the namespace), and a
   `__dict__` key in a name that is no constant: a module-level name bound twice, in a loop, or
-  before a star import, or rebound by another module, a class attribute without `ClassVar` or
+  before a star import, rebound by another module, or that a change through `globals()` may
+  bind (in a module whose `__getattr__` caches what it serves, one the module body binds on some
+  paths only), a class attribute without `ClassVar` or
   `Final` (an instance may hold its own), one a subclass defines again or inherits first from
   another base, a `Final` field of a dataclass read on an instance (or on a class object with
   `slots=True` along the way), and one stored on its class, a subclass, or an instance outside
@@ -12325,7 +12333,10 @@ allowed writers:
   `vars(model)["fields"]`, `model.__dict__.setdefault("fields", v)`, and a local alias of the
   namespace),
   also with a string constant for the name (`model.__dict__[FIELDS_KEY]`, imported or not):
-  a module-level name declared `Final` or bound once in its module and rebound by no other, or
+  a module-level name declared `Final` or bound once in its module and rebound by no other (a
+  module `__getattr__` caching what it serves, `globals()[name] = value`, leaves the names the
+  module body binds on every path, since Python calls it only for a missing name, unless a
+  decorator wraps it or another module loads it), or
   a class-body name declared `ClassVar` or `Final` and bound once (`self.KEY`, `cls.KEY`,
   `Model.KEY`), which every subclass of the object's class finds along its MRO in the same
   class (none defines it again or lists another base defining it first,
@@ -12336,8 +12347,11 @@ allowed writers:
   each instance holds itself (`Keys("x").KEY`): it names an attribute only when read on the
   class object of a dataclass whose default no class along the way replaces (one with
   `slots=True` or built by a transform); a name a loop takes from a tuple, list, or set of such
-  constants (`for key in ("fields", FIELDS_KEY): setattr(model, key, [])`) writes each of them,
-  when no code changes the list or set (`keys.append(name)` makes the name unknown);
+  constants (`for key in ("fields", FIELDS_KEY): setattr(model, key, [])`), or from a module's
+  tuple of them (`for key in RECORDS`, imported or not), writes each of them, when no code
+  changes the list or set (`keys.append(name)` makes the name unknown), and so does the key of
+  each pair a generator gives `__dict__.update`
+  (`copy.__dict__.update((key, src.__dict__[key]) for key in RECORDS)`);
 - into the entries of the container the attribute holds (`model.meta["kw"][name] = v`,
   `model.meta["kw"].append(v)`, through a local alias of the entry): an `item_mut` write;
 - through a helper that mutates the container or object it receives (`helper(model.fields)`),

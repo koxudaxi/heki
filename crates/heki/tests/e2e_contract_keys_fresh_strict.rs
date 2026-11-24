@@ -2868,7 +2868,7 @@ const GLOBALS_USES: &[(&str, &str, &str)] = &[
     ),
     ("write_del", "    del globals()[name]\n    return None", ""),
     (
-        "write_setdefault",
+        "missing_setdefault",
         "    return globals().setdefault(name, value)",
         "",
     ),
@@ -2917,6 +2917,89 @@ const GLOBALS_USES: &[(&str, &str, &str)] = &[
         "    globals()[name] = value\n    return None",
         "def globals() -> dict:\n    return {}\n",
     ),
+    (
+        "missing_getattr",
+        "    return None",
+        "def __getattr__(name: str) -> object:\n    value = object()\n    \
+         globals()[name] = value\n    return value\n",
+    ),
+    (
+        "missing_getattr_copied_name",
+        "    return None",
+        "def __getattr__(name: str) -> object:\n    key = name\n    \
+         return globals().setdefault(key, object())\n",
+    ),
+    (
+        "write_getattr_other_key",
+        "    return None",
+        "def __getattr__(name: str) -> object:\n    globals()[name.upper()] = 1\n    return 1\n",
+    ),
+    (
+        "write_getattr_constant_key",
+        "    return None",
+        "def __getattr__(name: str) -> object:\n    globals()[\"KEY\"] = 1\n    return 1\n",
+    ),
+    (
+        "write_getattr_rebound_name",
+        "    return None",
+        "def __getattr__(name: str) -> object:\n    if not name:\n        name = \"KEY\"\n    \
+         globals()[name] = 1\n    return 1\n",
+    ),
+    (
+        "write_getattr_helper",
+        "    return None",
+        "def _cache(name: str, value: object) -> None:\n    globals()[name] = value\n\n\n\
+         def __getattr__(name: str) -> object:\n    _cache(name, 1)\n    return 1\n",
+    ),
+    (
+        "write_getattr_called",
+        "    return None",
+        "def __getattr__(name: str) -> object:\n    globals()[name] = 1\n    return 1\n\n\n\
+         def warm() -> None:\n    __getattr__(\"KEY\")\n",
+    ),
+    (
+        "write_getattr_decorated",
+        "    return None",
+        "def warm(hook: object) -> object:\n    hook(\"KEY\")\n    return hook\n\n\n\
+         @warm\ndef __getattr__(name: str) -> object:\n    globals()[name] = 1\n    return 1\n",
+    ),
+    (
+        "write_getattr_update",
+        "    return None",
+        "def __getattr__(name: str) -> object:\n    globals().update({name: 1})\n    return 1\n",
+    ),
+    (
+        "write_getattr_coroutine",
+        "    return None",
+        "async def __getattr__(name: str) -> object:\n    globals()[name] = 1\n    return 1\n",
+    ),
+    (
+        "write_getattr_generator",
+        "    return None",
+        "def __getattr__(name: str) -> object:\n    globals()[name] = 1\n    yield 1\n",
+    ),
+    (
+        "write_getattr_nested",
+        "    return None",
+        "def make() -> None:\n    def __getattr__(name: str) -> object:\n        \
+         globals()[name] = 1\n        return 1\n",
+    ),
+    (
+        "write_getattr_method",
+        "    return None",
+        "class Lazy:\n    def __getattr__(self, name: str) -> object:\n        \
+         globals()[name] = 1\n        return 1\n",
+    ),
+    (
+        "write_getattr_keyword",
+        "    return None",
+        "def __getattr__(*, name: str) -> object:\n    globals()[name] = 1\n    return 1\n",
+    ),
+    (
+        "write_getattr_dict_value",
+        "    return None",
+        "def __getattr__(name: str) -> object:\n    globals()[name] = globals()\n    return 1\n",
+    ),
 ];
 
 /// A project whose write owners own `pkg.model.Node._hidden`, with `pkg/writer.py` defining a
@@ -2943,11 +3026,16 @@ fn globals_project(name: &str) -> Project {
 
 /// Reading the dict of module globals (`globals().get(name)`, `globals()[name]`, `name in
 /// globals()`, iterating it, `len(globals())` with the real builtin) binds no name, so the
-/// module's constants still name keys; storing into it, deleting from it, a method changing it,
-/// or handing it on may bind any name, even one declared `Final`. Handing it on includes the
-/// builtin `globals` itself, a call of a reading builtin's name that the module, an import, a
-/// parameter, or a local rebinds (`def len(ns)`; a class attribute does not rebind it for the
-/// methods), and a place where another object's method receives the dict: an index
+/// module's constants still name keys, and so does a change binding only a name the namespace
+/// lacks: `setdefault`, and a store in the module's `__getattr__` under the name Python passes
+/// it, which Python does only for a missing name. Storing into it otherwise (another key, the
+/// name rebound, through a helper, in a hook the module's code calls or decorates, in a
+/// coroutine, generator, nested function, or method, from a keyword-only parameter), deleting
+/// from it, a method
+/// changing it, or handing it on may bind any name, even one declared `Final`. Handing it on
+/// includes the builtin `globals` itself, a call of a reading builtin's name that the module, an
+/// import, a parameter, or a local rebinds (`def len(ns)`; a class attribute does not rebind it
+/// for the methods), and a place where another object's method receives the dict: an index
 /// (`obj[globals()]`), a container tested (`globals() in obj`), a comparison (`obj ==
 /// globals()`), the sentinel of `iter`. A call of a function the module names `globals` may
 /// return the dict too.
@@ -2973,7 +3061,7 @@ fn only_a_change_through_the_dict_of_module_globals_unfixes_its_constants() {
     let expected: Vec<(String, String)> = GLOBALS_USES
         .iter()
         .map(|(module, _, _)| {
-            let code = if module.starts_with("read_") {
+            let code = if module.starts_with("read_") || module.starts_with("missing_") {
                 "MUT201"
             } else {
                 "MUT205"
@@ -2984,6 +3072,449 @@ fn only_a_change_through_the_dict_of_module_globals_unfixes_its_constants() {
     let mut sorted = expected.clone();
     sorted.sort();
     assert_eq!(codes, sorted);
+}
+
+/// A module whose `__getattr__` caches what it serves (`globals()[name] = value`) and binds
+/// `KEY` once (line 11 writes `node.__dict__[KEY]`): `(module, how the module binds `KEY`)`.
+const MISSING_NAME_BINDINGS: &[(&str, &str)] = &[
+    // Bound on every path, before or after the hook.
+    ("every_path", "KEY: Final = \"_hidden\"\n\n\n"),
+    // On one path only: the hook may bind `KEY` on the others.
+    (
+        "one_path",
+        "if os.environ.get(\"HIDDEN\"):\n    KEY: Final = \"_hidden\"\n",
+    ),
+    // Deleted by a function: the hook may bind it again.
+    (
+        "deleted",
+        "KEY: Final = \"_hidden\"\n\n\ndef drop() -> None:\n    global KEY\n    del KEY\n",
+    ),
+];
+
+const CACHING_HOOK: &str = "\n\n\ndef __getattr__(name: str) -> object:\n    value = object()\n    \
+                            globals()[name] = value\n    return value\n";
+
+/// Python calls a module's `__getattr__` only for a name the module's namespace lacks, so its
+/// cache binds no name the module body binds on every path and nothing deletes: such a name keeps
+/// the body's value, and one the body binds on some paths only, or that a function deletes, may
+/// hold what the hook binds. Without the hook, a name bound on one path is still a constant
+/// wherever a read of it succeeds.
+#[test]
+fn a_module_getattr_cache_leaves_the_names_the_body_binds_on_every_path() {
+    let p = globals_project("keys_getattr_bindings");
+    for (module, binding) in MISSING_NAME_BINDINGS {
+        let source = format!(
+            "import os\nfrom typing import Final\n\nfrom pkg.model import Node\n\n{binding}\n\n\
+             def write(node: Node) -> None:\n    node.__dict__[KEY] = 1\n"
+        );
+        p.write(&format!("pkg/{module}.py"), &source);
+        p.write(
+            &format!("pkg/{module}_hooked.py"),
+            &format!("{source}{CACHING_HOOK}"),
+        );
+    }
+    let codes: Vec<(String, String)> = found(&diagnostics(&p, &[]))
+        .into_iter()
+        .filter(|x| x.3 == "write")
+        .map(|x| (x.0, x.2))
+        .collect();
+    let at = |module: &str, code: &str| (format!("pkg/{module}.py"), code.to_owned());
+    assert_eq!(
+        codes,
+        vec![
+            at("deleted", "MUT205"),
+            at("deleted_hooked", "MUT205"),
+            at("every_path", "MUT201"),
+            at("every_path_hooked", "MUT201"),
+            at("one_path", "MUT201"),
+            at("one_path_hooked", "MUT205"),
+        ]
+    );
+}
+
+const GETATTR_KEYS: &str = r#"from typing import Final
+
+ORIGIN_KEY: Final = "_origin"
+NUMBER_KEY: Final = "_number"
+RECORDS: Final = (ORIGIN_KEY, NUMBER_KEY)
+
+
+def __getattr__(name: str) -> object:
+    if name != "LAZY":
+        raise AttributeError(name)
+    value = object()
+    globals()[name] = value
+    return value
+"#;
+
+const GETATTR_WRITER: &str = r#"from pkg.keys import ORIGIN_KEY, RECORDS
+from pkg.model import Field
+
+
+def writes_imported_key(field: Field) -> None:
+    field.__dict__[ORIGIN_KEY] = 1
+
+
+def copies_records(source: Field, target: Field) -> None:
+    for key in RECORDS:
+        if key in source.__dict__:
+            target.__dict__[key] = source.__dict__[key]
+"#;
+
+const GETATTR_ORIGINS: &str = r#"from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from pkg.keys import NUMBER_KEY
+
+if TYPE_CHECKING:
+    from pkg.model import Field
+
+
+def with_number(field: Field) -> Field:
+    field.__dict__[NUMBER_KEY] = True
+    return field
+"#;
+
+const GETATTR_RECORDS: &str = r#"from typing import Final
+
+from pkg.keys import NUMBER_KEY, ORIGIN_KEY
+from pkg.model import Field
+
+LOCAL_RECORDS: Final = (ORIGIN_KEY, NUMBER_KEY)
+
+
+def keeps_records(copy: Field, source: Field) -> None:
+    copy.__dict__.update((key, source.__dict__[key]) for key in LOCAL_RECORDS if key in source.__dict__)
+"#;
+
+/// The keys another module imports from a module with a caching `__getattr__` are its
+/// constants: a write under one names the attribute, and so does a loop over its tuple of them
+/// or over a tuple of the imported names, also in a generator of pairs a namespace is updated
+/// with, so no target is left unmatched. Another module calling the hook itself, through the
+/// module or under the name it imports the hook by, may bind any of them, `Final` too. A cache
+/// under another key may bind any name, and a key bound on one path only may be what the hook
+/// binds, as may a tuple holding it.
+#[test]
+fn constants_of_a_module_with_a_caching_getattr_name_keys_in_other_modules() {
+    let p = Project::new("keys_getattr_imported");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT205\"]\n\
+         unmatched-contract-entries = \"error\"\n\n[[tool.heki.write-owners]]\nname = \"records\"\n\
+         targets = [\"Field._origin\", \"Field._number\"]\nallowed-writers = [\"pkg.model:*\"]\n\
+         unresolved = \"report\"\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/model.py",
+        "class Field:\n    def __init__(self) -> None:\n        self.name = \"\"\n",
+    )
+    .write("pkg/keys.py", GETATTR_KEYS)
+    .write("pkg/writer.py", GETATTR_WRITER)
+    .write("pkg/origins.py", GETATTR_ORIGINS)
+    .write("pkg/records.py", GETATTR_RECORDS);
+    let (w, o, r) = ("pkg/writer.py", "pkg/origins.py", "pkg/records.py");
+    let (origin, number) = ("Field._origin", "Field._number");
+    let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(!stderr.contains("names no attribute"), "{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(o, 12, "MUT201", "with_number", number),
+            d(r, 10, "MUT201", "keeps_records", origin),
+            d(w, 6, "MUT201", "writes_imported_key", origin),
+            d(w, 12, "MUT201", "copies_records", origin),
+        ]
+    );
+    assert!(
+        message_at(&diags, r, 10).ends_with("(also `Field._number`)"),
+        "{diags:#?}"
+    );
+    let unknown = vec![
+        d(o, 12, "MUT205", "with_number", "Field"),
+        d(r, 10, "MUT205", "keeps_records", "Field"),
+        d(w, 6, "MUT205", "writes_imported_key", "Field"),
+        d(w, 12, "MUT205", "copies_records", "Field"),
+    ];
+    for warm in [
+        "from pkg import keys\n\n\ndef warm() -> None:\n    keys.__getattr__(\"ORIGIN_KEY\")\n",
+        "from pkg.keys import __getattr__ as load\n\n\ndef warm() -> None:\n    load(\"ORIGIN_KEY\")\n",
+    ] {
+        p.write("pkg/warm.py", warm);
+        assert_eq!(found(&diagnostics(&p, &[])), unknown, "{warm}");
+    }
+    p.write("pkg/warm.py", "");
+    p.write(
+        "pkg/keys.py",
+        &GETATTR_KEYS.replace("globals()[name]", "globals()[name.lower()]"),
+    );
+    assert_eq!(found(&diagnostics(&p, &[])), unknown);
+    p.write(
+        "pkg/keys.py",
+        &format!(
+            "import os\n{}",
+            GETATTR_KEYS.replace(
+                "ORIGIN_KEY: Final",
+                "if os.environ.get(\"ORIGIN\"):\n    ORIGIN_KEY: Final"
+            )
+        ),
+    );
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![
+            d(o, 12, "MUT201", "with_number", number),
+            d(r, 10, "MUT205", "keeps_records", "Field"),
+            d(w, 6, "MUT205", "writes_imported_key", "Field"),
+            d(w, 12, "MUT205", "copies_records", "Field"),
+        ]
+    );
+}
+
+const TUPLE_KEYS: &str = r#"from typing import Final
+
+ORIGIN_KEY: Final = "_origin"
+NUMBER_KEY: Final = "_number"
+RECORDS: Final = (ORIGIN_KEY, NUMBER_KEY)
+LISTED = [ORIGIN_KEY]
+AGAIN = (ORIGIN_KEY,)
+AGAIN = (NUMBER_KEY,)
+
+
+def name() -> str:
+    return "x"
+
+
+MIXED = (ORIGIN_KEY, name())
+"#;
+
+const TUPLE_USES: &str = r#"from typing import Final
+
+from pkg import keys
+from pkg.keys import AGAIN, LISTED, MIXED, ORIGIN_KEY, RECORDS
+from pkg.model import Field
+
+OWN: Final = ("_origin", "_number")
+OWN_IMPORTED = (ORIGIN_KEY, "_number")
+
+
+def module_attr(target: Field) -> None:
+    for key in keys.RECORDS:
+        target.__dict__[key] = None
+
+
+def own(target: Field) -> None:
+    for key in OWN:
+        target.__dict__[key] = None
+
+
+def own_imported(target: Field) -> None:
+    for key in OWN_IMPORTED:
+        setattr(target, key, None)
+
+
+def filtered(target: Field, source: Field) -> None:
+    for key in (k for k in RECORDS if k in source.__dict__):
+        target.__dict__[key] = source.__dict__[key]
+
+
+def constant_pair(target: Field, values: list) -> None:
+    target.__dict__.update(("_origin", v) for v in values)
+
+
+def listed(target: Field) -> None:
+    for key in LISTED:
+        target.__dict__[key] = None
+
+
+def again(target: Field) -> None:
+    for key in AGAIN:
+        target.__dict__[key] = None
+
+
+def mixed(target: Field) -> None:
+    for key in MIXED:
+        target.__dict__[key] = None
+
+
+def computed_pair(target: Field) -> None:
+    target.__dict__.update((key.upper(), 1) for key in RECORDS)
+
+
+def strings(target: Field) -> None:
+    target.__dict__.update(RECORDS)
+
+
+def pairs_of_namespace(target: Field, source: Field) -> None:
+    target.__dict__.update((k, v) for k, v in source.__dict__.items())
+
+
+def dict_of_pairs(target: Field, source: Field) -> None:
+    for key in dict((k, source.__dict__[k]) for k in RECORDS):
+        target.__dict__[key] = None
+
+
+def unpacked(target: Field, source: Field) -> None:
+    for key, value in ((k, source.__dict__[k]) for k in RECORDS):
+        target.__dict__[key] = value
+
+
+def inner_loop(target: Field, rows: list) -> None:
+    target.__dict__.update((key, row) for row in rows for key in RECORDS)
+
+
+class Holder:
+    KEYS = ("_origin",)
+
+
+def instance_attr(target: Field, holder: Holder) -> None:
+    for key in holder.KEYS:
+        target.__dict__[key] = None
+
+
+def namespace(target: Field, source: Field) -> None:
+    target.__dict__.update(source.__dict__)
+
+
+def namespace_items(target: Field, source: Field) -> None:
+    target.__dict__.update(source.__dict__.items())
+
+
+def tuple_as_key(target: Field) -> None:
+    target.__dict__[RECORDS] = None
+
+
+def characters(target: Field) -> None:
+    for key in ORIGIN_KEY:
+        target.__dict__[key] = None
+"#;
+
+/// A key a loop takes from a module-level tuple of string constants, of the module or imported
+/// (by name or as a module attribute), names each of them, as a loop over the display does, and
+/// so does the key of each pair a generator yields to `update`, `dict`, or a loop unpacking it,
+/// keyed by the item of its first `for` clause or by a constant, or a key it yields itself. A
+/// list, a name bound twice, a tuple holding a value that is no constant, a key computed from
+/// the item, strings handed to `update` as pairs, a key a later `for` clause takes, a class's
+/// tuple read on an instance, a namespace or its pairs, a tuple constant used as a key, and the
+/// characters of a string constant name no key.
+#[test]
+fn a_tuple_constant_and_a_generator_of_pairs_name_each_key() {
+    let p = Project::new("keys_tuple_constants");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT205\"]\n\n\
+         [[tool.heki.write-owners]]\nname = \"records\"\n\
+         targets = [\"Field._origin\", \"Field._number\"]\nallowed-writers = [\"pkg.model:*\"]\n\
+         unresolved = \"report\"\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/model.py",
+        "class Field:\n    def __init__(self) -> None:\n        self.name = \"\"\n",
+    )
+    .write("pkg/keys.py", TUPLE_KEYS)
+    .write("pkg/use.py", TUPLE_USES);
+    let u = "pkg/use.py";
+    let (origin, field) = ("Field._origin", "Field");
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![
+            d(u, 13, "MUT201", "module_attr", origin),
+            d(u, 18, "MUT201", "own", origin),
+            d(u, 23, "MUT201", "own_imported", origin),
+            d(u, 28, "MUT201", "filtered", origin),
+            d(u, 32, "MUT201", "constant_pair", origin),
+            d(u, 37, "MUT205", "listed", field),
+            d(u, 42, "MUT205", "again", field),
+            d(u, 47, "MUT205", "mixed", field),
+            d(u, 51, "MUT205", "computed_pair", field),
+            d(u, 55, "MUT205", "strings", field),
+            d(u, 59, "MUT205", "pairs_of_namespace", field),
+            d(u, 64, "MUT201", "dict_of_pairs", origin),
+            d(u, 69, "MUT201", "unpacked", origin),
+            d(u, 73, "MUT205", "inner_loop", field),
+            d(u, 82, "MUT205", "instance_attr", field),
+            d(u, 86, "MUT205", "namespace", field),
+            d(u, 90, "MUT205", "namespace_items", field),
+            d(u, 94, "MUT205", "tuple_as_key", field),
+            d(u, 99, "MUT205", "characters", field),
+        ]
+    );
+}
+
+/// How a module binds names bound to another module's constant (`KEY = ORIGIN_KEY`,
+/// `KEYS = (ORIGIN_KEY,)`), after `def write` / `def loop` read them.
+const ALIAS_MODULES: &[(&str, &str)] = &[
+    ("plain", ""),
+    (
+        "rebinding",
+        "\n\ndef rebind(name: str) -> None:\n    globals()[name] = \"_other\"\n",
+    ),
+    ("starred", "\nfrom pkg.helpers import *\n"),
+    ("hooked", CACHING_HOOK),
+];
+
+/// A name bound to another module's constant, or to a tuple of such names, is a constant only
+/// where its module fixes the name, as for a literal: not where a change through `globals()`
+/// may bind any name, nor before a star import, and still where the only change is a
+/// `__getattr__` caching what it serves.
+#[test]
+fn a_name_bound_to_another_modules_constant_is_fixed_as_a_literal_is() {
+    let p = Project::new("keys_imported_aliases");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT205\"]\n\n\
+         [[tool.heki.write-owners]]\nname = \"records\"\ntargets = [\"Field._origin\"]\n\
+         allowed-writers = [\"pkg.model:*\"]\nunresolved = \"report\"\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/model.py",
+        "class Field:\n    def __init__(self) -> None:\n        self.name = \"\"\n",
+    )
+    .write(
+        "pkg/keys.py",
+        "from typing import Final\n\nORIGIN_KEY: Final = \"_origin\"\n",
+    )
+    .write("pkg/helpers.py", "def helper() -> None:\n    pass\n");
+    for (module, binding) in ALIAS_MODULES {
+        p.write(
+            &format!("pkg/{module}.py"),
+            &format!(
+                "from pkg.keys import ORIGIN_KEY\nfrom pkg.model import Field\n\n\
+                 KEY = ORIGIN_KEY\nKEYS = (ORIGIN_KEY,)\n{binding}\n\n\
+                 def write(target: Field) -> None:\n    target.__dict__[KEY] = 1\n\n\n\
+                 def loop(target: Field) -> None:\n    for key in KEYS:\n        \
+                 target.__dict__[key] = 1\n"
+            ),
+        );
+    }
+    let codes: Vec<(String, String, String)> = found(&diagnostics(&p, &[]))
+        .into_iter()
+        .map(|x| (x.0, x.3, x.2))
+        .collect();
+    let at = |module: &str, qualname: &str, code: &str| {
+        (
+            format!("pkg/{module}.py"),
+            qualname.to_owned(),
+            code.to_owned(),
+        )
+    };
+    assert_eq!(
+        codes,
+        vec![
+            at("hooked", "write", "MUT201"),
+            at("hooked", "loop", "MUT201"),
+            at("plain", "write", "MUT201"),
+            at("plain", "loop", "MUT201"),
+            at("rebinding", "write", "MUT205"),
+            at("rebinding", "loop", "MUT205"),
+            at("starred", "write", "MUT205"),
+            at("starred", "loop", "MUT205"),
+        ]
+    );
 }
 
 // ================================================================ an object's namespace
