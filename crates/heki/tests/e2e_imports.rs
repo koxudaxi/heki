@@ -381,8 +381,10 @@ finally:
 
 /// A read of a lazily imported name loads the module of the binding it sees: of a name bound
 /// twice, the later one; of a name bound on each branch, or rebound in a `try` body or by a
-/// star import, maybe the lazy one; of a name rebound before any read, none. A read heki cannot
-/// place among several bindings (in a class body) leaves them open.
+/// star import, maybe the lazy one; of a name rebound before any read, none. A read after a
+/// `with` statement also sees the bindings its body held where it may have raised, since the
+/// manager may suppress the exception. A read heki cannot place among several bindings (in a
+/// class body) leaves them open.
 #[test]
 fn a_lazy_read_loads_the_import_whose_binding_it_sees() {
     let p = Project::new("imports_lazy_bindings");
@@ -419,6 +421,18 @@ DUMP = serializer.dumps
     .write(
         "lazy_star.py",
         "lazy import string as join\nfrom os.path import *\nJOINED = join\n",
+    )
+    .write(
+        "lazy_with.py",
+        "\
+import contextlib
+lazy import fractions as dep
+with contextlib.suppress(NameError):
+    lazy import decimal as dep
+    probe()
+    dep = None
+VALUE = dep
+",
     );
     let (code, report, err) = imports(&p, "lazy_names", &["--target-version", "py315"]);
     assert_eq!(code, 0, "{err}");
@@ -445,6 +459,15 @@ DUMP = serializer.dumps
     assert_eq!(
         sites(&report, "lazy_star"),
         strings(&["1 import body -> string", "2 star body always -> os.path"])
+    );
+    let (_, report, _) = imports(&p, "lazy_with", &["--target-version", "py315"]);
+    assert_eq!(
+        sites(&report, "lazy_with"),
+        strings(&[
+            "1 import body always -> contextlib",
+            "2 import body -> fractions",
+            "4 import body -> decimal",
+        ])
     );
 }
 
