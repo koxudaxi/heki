@@ -9,7 +9,8 @@
 //! mappings a call unpacks, the walk to the uses handing a reference to a call target on, the
 //! locks `EFF109` follows, the values class statements pass as bases, the bindings the deque
 //! rewrite's candidates check, the star imports a name is bound through, many or nested deep,
-//! and the walks over the import graph (`heki inspect --imports`).
+//! the sizes of a thousand lists each extending the next or of one list extending many deep
+//! chains, and the walks over the import graph (`heki inspect --imports`).
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -1938,6 +1939,90 @@ fn lists_that_extend_each_other_are_not_fixed() {
         .filter(|d| d["rule_code"] == "EFF113")
         .collect();
     assert_eq!(queries.len(), 1, "{found:#?}");
+}
+
+/// A thousand lists, each extending the next: the size of each asks for the size of the next, a
+/// thousand questions deep, more than a worker thread's stack holds in a test build when each is
+/// decided inside the one asking it (the modules of a project of several files are analyzed on
+/// worker threads). The sizes are decided a bounded depth at a time, with the answers of the
+/// whole recursion: the chain, followed to its end, holds one item, and closed into a cycle, its
+/// sizes depend on themselves and are not fixed. The loop copying the chain's items into the
+/// queried list runs as many times as the chain holds: its count is asked under the waits too.
+#[test]
+fn a_chain_of_lists_extending_each_other_is_followed_to_its_end() {
+    const LISTS: usize = 1000;
+    let p = Project::new("bounds_extend_chain");
+    for (module, closed) in [("chain.py", false), ("cycle.py", true)] {
+        let mut lines = vec![
+            "import sqlite3".to_owned(),
+            String::new(),
+            String::new(),
+            "def f(conn: sqlite3.Connection):".to_owned(),
+        ];
+        lines.extend((0..LISTS - 1).map(|i| format!("    a{i} = []")));
+        let last = LISTS - 1;
+        lines.push(format!("    a{last} = [{}]", if closed { "" } else { "1" }));
+        lines.extend((0..last).map(|i| format!("    a{i}.extend(a{})", i + 1)));
+        if closed {
+            lines.push(format!("    a{last}.extend(a0)"));
+        }
+        lines.extend(
+            [
+                "    queried = []",
+                "    for x in a0:",
+                "        queried.append(x)",
+                "    for x in queried:",
+                "        conn.execute(\"SELECT ?\", (x,))",
+            ]
+            .map(str::to_owned),
+        );
+        p.write(module, &(lines.join("\n") + "\n"));
+    }
+    let found = check(&p);
+    let queries: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF113")
+        .map(|d| d["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(queries, ["cycle.py"], "{found:#?}");
+}
+
+/// A list extending `chains` chains of lists, each 66 deep, one more than the size facts decide
+/// nested at a time: the list's size is decided again after each chain, and every decision from
+/// the first wait on takes its steps from one budget of the function's size facts, which they
+/// share with every chain. The chains are empty, so the loop over the list runs no query.
+#[test]
+fn a_list_extending_many_deep_chains_is_decided_again_on_one_budget() {
+    const DEPTH: usize = 66;
+    let shape = |chains: usize| {
+        let p = Project::new(&format!("bounds_extend_chains_{chains}"));
+        let mut lines = vec![
+            "import sqlite3".to_owned(),
+            String::new(),
+            String::new(),
+            "def f(conn: sqlite3.Connection):".to_owned(),
+            "    acc = []".to_owned(),
+        ];
+        for c in 0..chains {
+            lines.extend((0..DEPTH).map(|k| format!("    c{c}_{k} = []")));
+            lines.push(format!("    acc.extend(c{c}_0)"));
+            lines.extend((1..DEPTH).map(|k| format!("    c{c}_{}.extend(c{c}_{k})", k - 1)));
+        }
+        lines.push("    for x in acc:".to_owned());
+        lines.push("        conn.execute(\"SELECT ?\", (x,))".to_owned());
+        p.write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let (found, steps) = past_budgets(128, &[], shape, |p| {
+        let (found, steps) = check_counted(p);
+        ((found, steps.clone()), steps)
+    });
+    assert!(
+        found.iter().all(|d| d["rule_code"] != "EFF113"),
+        "{found:#?}"
+    );
+    let replays = steps[&("heki_ir::facts::FnIndex::sizes".to_owned(), None)];
+    assert!(replays.taken > 0 && !replays.spent, "{replays:?}");
 }
 
 /// A length test repeated through `steps` assignments, each `and` of the one before with its

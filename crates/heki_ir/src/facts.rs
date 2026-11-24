@@ -27,7 +27,7 @@ mod paths;
 pub use origin::{Carries, ItemOrigin, ItemOrigins, ItemSource};
 pub use paths::{Decided, ModuleBindings, Must, PathReader, Paths, Progress};
 
-use crate::walk::{Answer, Budget, Def, FnShape, Use, Visit, reach};
+use crate::walk::{Answer, Budget, Def, FnShape, Recursion, Use, Visit, reach};
 use crate::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, FunctionId,
     FunctionKind, Inst, InstKind, IrFunction, LenCap, LoopBound, NaturalLoop, Terminator,
@@ -38,6 +38,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::Hash;
 use std::sync::Arc;
 
 /// The most items a container display, or a loop's fixed trip count, may have to count as
@@ -476,6 +477,10 @@ pub struct FnIndex<'a> {
     /// [`Self::display_at`] of each value and sink asked so far, in the same way: two lists that
     /// extend each other hold no display the code fixes.
     sink_displays: RefCell<FxHashMap<(VarId, Sink), Option<SmallDisplay>>>,
+    /// The questions of the three memos above being decided. Their decisions ask each other (the
+    /// size of a list asks for the size of each list extending it) as deep as chains in the code
+    /// go, which this keeps to a bounded depth on the native stack.
+    sizes: Recursion<SizeQuestion>,
     /// The values `f` passes to `len()` (after copies): only their lengths can be tested.
     measured: OnceCell<FxHashSet<VarId>>,
     /// The length caps the branches of `f` establish ([`Self::guarded_len`]).
@@ -569,6 +574,16 @@ enum Sink {
     Return,
 }
 
+/// A question of [`FnIndex`] whose answer is kept: [`FnIndex::container_bound`] of a value
+/// asked at a depth, [`FnIndex::display_at`] of a value and a sink, and
+/// [`FnIndex::trip_count`] of a loop.
+#[derive(Clone, Copy)]
+enum SizeQuestion {
+    Bound(VarId, u32),
+    Display(VarId, Sink),
+    Trips(usize),
+}
+
 /// The walk of [`FnIndex::lives_across`]: the phis it reached, and the answer of each
 /// instruction.
 #[derive(Default)]
@@ -619,6 +634,7 @@ impl<'a> FnIndex<'a> {
             bounds: RefCell::default(),
             trips: RefCell::default(),
             sink_displays: RefCell::default(),
+            sizes: Recursion::default(),
             measured: OnceCell::new(),
             guards: OnceCell::new(),
             decided: OnceCell::new(),
@@ -666,13 +682,64 @@ impl<'a> FnIndex<'a> {
     }
 
     fn container_bound_nested(&self, v: VarId, depth: u32) -> Option<u32> {
-        if let Some(known) = self.bounds.borrow().get(&v) {
-            return *known;
+        let q = SizeQuestion::Bound(v, depth);
+        self.kept(&self.bounds, v, q, || self.decide_bound(v, depth))
+    }
+
+    /// The answer `memo` keeps for `key`, decided by `decide` the first time it is asked, as the
+    /// question `q` of [`Self::sizes`]. A key asked while it is being decided reads as `None`.
+    fn kept<K: Clone + Eq + Hash, A: Clone>(
+        &self,
+        memo: &RefCell<FxHashMap<K, Option<A>>>,
+        key: K,
+        q: SizeQuestion,
+        decide: impl FnOnce() -> Option<A>,
+    ) -> Option<A> {
+        if let Some(known) = memo.borrow().get(&key) {
+            return known.clone();
         }
-        self.bounds.borrow_mut().insert(v, None);
-        let bound = self.decide_bound(v, depth);
-        self.bounds.borrow_mut().insert(v, bound);
-        bound
+        if self.sizes.outermost() {
+            let replays = || Budget::of_function("heki_ir::facts::FnIndex::sizes", self.f);
+            self.sizes.settle(q, replays, |q| self.ask_again(q));
+            return memo.borrow().get(&key).cloned().flatten();
+        }
+        if !self.sizes.enter(q) {
+            return None;
+        }
+        memo.borrow_mut().insert(key.clone(), None);
+        let answer = decide();
+        if !self.sizes.leave() {
+            return None;
+        }
+        memo.borrow_mut().insert(key, answer.clone());
+        answer
+    }
+
+    /// `walk` with the budget of one walk of a size decision, named `owner`: its own, or the one
+    /// of the decisions run after a question waited ([`Recursion::replays`]).
+    fn with_walk_budget<T>(&self, owner: &'static str, walk: impl FnOnce(&Budget) -> T) -> T {
+        match self.sizes.replays() {
+            Some(replays) => walk(replays),
+            None => walk(&Budget::of_function(owner, self.f)),
+        }
+    }
+
+    /// Ask `q` as [`Recursion::settle`] does: an open question's mark is removed first.
+    fn ask_again(&self, q: SizeQuestion) {
+        match q {
+            SizeQuestion::Bound(v, depth) => {
+                self.bounds.borrow_mut().remove(&v);
+                self.container_bound_nested(v, depth);
+            }
+            SizeQuestion::Display(value, sink) => {
+                self.sink_displays.borrow_mut().remove(&(value, sink));
+                self.display_at(value, sink);
+            }
+            SizeQuestion::Trips(li) => {
+                self.trips.borrow_mut().remove(&li);
+                self.trip_count(li);
+            }
+        }
     }
 
     fn decide_bound(&self, v: VarId, depth: u32) -> Option<u32> {
@@ -709,15 +776,10 @@ impl<'a> FnIndex<'a> {
     }
 
     fn display_at(&self, value: VarId, sink: Sink) -> Option<SmallDisplay> {
-        if let Some(known) = self.sink_displays.borrow().get(&(value, sink)) {
-            return known.clone();
-        }
-        self.sink_displays.borrow_mut().insert((value, sink), None);
-        let display = self.decide_display(value, sink);
-        self.sink_displays
-            .borrow_mut()
-            .insert((value, sink), display.clone());
-        display
+        let q = SizeQuestion::Display(value, sink);
+        self.kept(&self.sink_displays, (value, sink), q, || {
+            self.decide_display(value, sink)
+        })
     }
 
     fn decide_display(&self, value: VarId, sink: Sink) -> Option<SmallDisplay> {
@@ -991,16 +1053,21 @@ impl<'a> FnIndex<'a> {
         // The methods of a container of unknown kind may add any number of items.
         let counted = !origins.shared && !origins.opaque;
         // Aliases past the walk's budget may be grown any number of times. A step per alias and
-        // per instruction reading one is at most three per IR unit, which the budget counts
-        // without ever reaching.
-        let budget = Budget::of_function("heki_ir::facts::FnIndex::growth", self.f);
-        let alias = self
-            .aliases(&origins.roots, &budget)
-            .map(Some)
-            .open_means(None)?;
-        if self.captured(&alias) {
-            return None;
-        }
+        // per instruction reading one is at most three per IR unit, which the budget of one walk
+        // counts without ever reaching.
+        let (alias, reading) =
+            self.with_walk_budget("heki_ir::facts::FnIndex::growth", |budget| {
+                let alias = self
+                    .aliases(&origins.roots, budget)
+                    .map(Some)
+                    .open_means(None)?;
+                if self.captured(&alias) {
+                    return None;
+                }
+                // Only what reads an alias can grow it.
+                let reading = self.reading(&alias, within);
+                budget.take(reading.len()).then_some((alias, reading))
+            })?;
         let kinds = &origins.kinds;
         let list_only =
             !origins.opaque && !kinds.is_empty() && kinds.iter().all(|k| *k == BuiltinKind::List);
@@ -1008,9 +1075,6 @@ impl<'a> FnIndex<'a> {
             !origins.opaque && !kinds.is_empty() && kinds.iter().all(|k| *k == BuiltinKind::Dict);
         let mut added: u32 = 0;
         let mut ops = Vec::new();
-        // Only what reads an alias can grow it.
-        let reading = self.reading(&alias, within);
-        budget.take(reading.len()).then_some(())?;
         for (b, at) in reading {
             let bb = self.f.block(b);
             let Some(i) = at else {
@@ -1863,21 +1927,18 @@ impl<'a> FnIndex<'a> {
     /// recorded bound, else what its iterable yields or a test before it caps
     /// ([`Self::fixed_trip`]).
     fn trip_count(&self, li: usize) -> Option<u32> {
-        if let Some(known) = self.trips.borrow().get(&li) {
-            return *known;
-        }
         let lp = self.f.loops.get(li)?;
-        let trips = match lp.bound {
+        match lp.bound {
             LoopBound::ConstSmall(n) if self.recorded_trips => Some(n),
             LoopBound::DaemonPolling => None,
             // A retry loop over a fixed range records no count.
             LoopBound::ConstSmall(_) | LoopBound::RetryPattern | LoopBound::Unbounded => {
-                self.trips.borrow_mut().insert(li, None);
-                self.fixed_trip(lp, &mut |_| None, SMALL_MAX)
+                let q = SizeQuestion::Trips(li);
+                self.kept(&self.trips, li, q, || {
+                    self.fixed_trip(lp, &mut |_| None, SMALL_MAX)
+                })
             }
-        };
-        self.trips.borrow_mut().insert(li, trips);
-        trips
+        }
     }
 
     /// The trip count the code fixes for the `for` loop `lp`, up to `cap`: what its iterable
@@ -2038,30 +2099,34 @@ impl<'a> FnIndex<'a> {
                 .collect();
             let mut ops = Vec::new();
             // A root whose aliases are past the walk's budget may be changed on the way. A step
-            // per alias is at most one per IR unit, which the budget counts without ever reaching.
-            let budget = Budget::of_function("heki_ir::facts::FnIndex::guarded_len", self.f);
-            let root_changed = self.aliases(&[p.root], &budget).map(|root| {
-                self.f
-                    .blocks
-                    .iter()
-                    .filter(|bb| on_the_way[bb.id.0 as usize])
-                    .flat_map(|bb| &bb.insts)
-                    .any(|i| match &i.kind {
-                        InstKind::AttrLoad { .. } => false,
-                        InstKind::AttrStore { obj, .. }
-                        | InstKind::AttrDelete { obj, .. }
-                        | InstKind::SubscriptDelete { obj, .. }
-                            if root.contains(obj) =>
-                        {
-                            true
-                        }
-                        _ => {
-                            ops.clear();
-                            self.grown_operands(i, false, &mut ops);
-                            ops.iter().any(|o| root.contains(o))
-                        }
-                    })
-            });
+            // per alias is at most one per IR unit, which the budget of one walk counts without
+            // ever reaching.
+            let root_changed = self
+                .with_walk_budget("heki_ir::facts::FnIndex::guarded_len", |budget| {
+                    self.aliases(&[p.root], budget)
+                })
+                .map(|root| {
+                    self.f
+                        .blocks
+                        .iter()
+                        .filter(|bb| on_the_way[bb.id.0 as usize])
+                        .flat_map(|bb| &bb.insts)
+                        .any(|i| match &i.kind {
+                            InstKind::AttrLoad { .. } => false,
+                            InstKind::AttrStore { obj, .. }
+                            | InstKind::AttrDelete { obj, .. }
+                            | InstKind::SubscriptDelete { obj, .. }
+                                if root.contains(obj) =>
+                            {
+                                true
+                            }
+                            _ => {
+                                ops.clear();
+                                self.grown_operands(i, false, &mut ops);
+                                ops.iter().any(|o| root.contains(o))
+                            }
+                        })
+                });
             let root_changed = root_changed.open_means(true);
             let mut values = vec![v];
             values.extend(linked.iter().map(|g| g.var));

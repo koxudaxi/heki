@@ -5,6 +5,9 @@
 //!
 //! - [`Memo`] keeps each answer per key, a node and a question: a walk through the inputs of a
 //!   phi or both operands of an expression decides each node once.
+//! - [`Recursion`] decides the questions of a memo written by hand, whose decisions ask each
+//!   other on the native stack, a bounded depth at a time, with the answers of the whole
+//!   recursion, and what it decides again on one budget of the owner.
 //! - [`Closure`] joins the facts of every node a node reaches (the members of a cycle share one
 //!   fact), and [`fixpoint`] joins the facts of nodes that read each other, visiting a node again
 //!   only when a fact it reads grows, up to a visit limit. Neither ever replaces a fact.
@@ -26,8 +29,8 @@
 //! cannot tell") holds the choices: a rewrite takes an open answer as "no rewrite", an exact report
 //! as "no finding", and a heuristic report states its own choice where it reads the answer.
 //!
-//! `Memo`, `Closure`, and `Budget` are `!Sync`: they live in their owner for one analysis, never
-//! in the shared project index (ADR-017), which must be `Sync`.
+//! `Memo`, `Recursion`, `Closure`, and `Budget` are `!Sync`: they live in their owner for one
+//! analysis, never in the shared project index (ADR-017), which must be `Sync`.
 
 mod join;
 mod shape;
@@ -38,7 +41,7 @@ pub use shape::{Def, FnShape, Use};
 use crate::IrFunction;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 use std::hash::Hash;
@@ -403,6 +406,128 @@ impl<K: Clone + Eq + Hash, A: Clone> Memo<K, A> {
             .borrow_mut()
             .insert(key, Slot::Known(answer.clone()));
         Answer::Known(answer)
+    }
+}
+
+// ------------------------------------------------------------------------------- recursion
+
+/// How many questions a [`Recursion`] decides nested on the native stack at a time.
+pub const MAX_NATIVE_NESTING: usize = 64;
+
+/// The questions of a memo whose decisions ask each other on the native stack (its owner keeps
+/// the answers, and a question asked again while it is being decided reads as its mark there),
+/// decided at most [`MAX_NATIVE_NESTING`] deep at a time. The depth of such a recursion follows
+/// chains in the source (thousands of lists extending each other), past any thread's stack.
+///
+/// A question asked deeper waits: the decisions under way unwind, recording nothing and deciding
+/// nothing new, and their questions stay open, marked. The waiting question is then decided
+/// with the same questions open, and the open ones are asked again from the innermost, each
+/// finding the answers below it recorded. Every question is so decided with the same questions
+/// open and the same answers recorded as in the unbounded recursion: the answers are the
+/// recursion's, also those inside a cycle, which depend on the question asked first. A decision
+/// may run more than once, so it changes nothing besides the answers its owner records.
+///
+/// A question with many questions below it, each asked too deep, is decided again after each of
+/// them, so its work counts once per such question. From the first wait of a settle on, the
+/// decisions therefore take their steps from one budget of the owner, kept for every settle
+/// ([`Self::replays`]), and each question asked again takes a step of it. Past it the settle
+/// stops, and the questions still open keep their marks: unknown, as any answer of an owner past
+/// its budget.
+pub struct Recursion<Q> {
+    /// The questions being decided, outermost first: those whose decisions gave way to a deeper
+    /// question, then those being decided on the native stack.
+    open: RefCell<Vec<Q>>,
+    /// Where the questions being decided on the native stack start in `open`.
+    base: Cell<usize>,
+    /// The question asked too deep, while the decisions on the native stack unwind.
+    waiting: Cell<Option<Q>>,
+    /// Whether the outermost question is being decided.
+    settling: Cell<bool>,
+    /// Whether a question has waited in the settle under way.
+    waited: Cell<bool>,
+    /// The budget of the decisions after a wait, made at the first one.
+    replays: OnceCell<Budget>,
+}
+
+impl<Q> Default for Recursion<Q> {
+    fn default() -> Self {
+        Self {
+            open: RefCell::default(),
+            base: Cell::new(0),
+            waiting: Cell::new(None),
+            settling: Cell::new(false),
+            waited: Cell::new(false),
+            replays: OnceCell::new(),
+        }
+    }
+}
+
+impl<Q: Copy> Recursion<Q> {
+    /// Whether a question asked now, with no answer recorded, is the outermost: its owner decides
+    /// it with [`Self::settle`].
+    pub fn outermost(&self) -> bool {
+        !self.settling.get()
+    }
+
+    /// Start deciding `q`: `false` when it is not decided now and its asker reads it as unknown,
+    /// while the decisions under way unwind (`q` is then the question asked too deep, or one
+    /// asked after it).
+    pub fn enter(&self, q: Q) -> bool {
+        if self.waiting.get().is_some() {
+            return false;
+        }
+        let mut open = self.open.borrow_mut();
+        if open.len() - self.base.get() >= MAX_NATIVE_NESTING {
+            self.waiting.set(Some(q));
+            return false;
+        }
+        open.push(q);
+        true
+    }
+
+    /// End the decision entered last: `true` when its answer stands and the owner records it,
+    /// `false` when it gave way to a deeper question and stays open, its mark kept.
+    pub fn leave(&self) -> bool {
+        if self.waiting.get().is_some() {
+            return false;
+        }
+        self.open.borrow_mut().pop();
+        true
+    }
+
+    /// The budget the owner's walks take their steps from while the decisions after a wait run,
+    /// `None` before the first wait of a settle: each decision then has its own.
+    pub fn replays(&self) -> Option<&Budget> {
+        self.replays.get().filter(|_| self.waited.get())
+    }
+
+    /// Decide the outermost question `q`, and every question asked too deep under it, with `ask`:
+    /// it asks a question as the owner does, removing its mark first when it is open. `budget`
+    /// makes the owner's budget of [`Self::replays`], at the first wait.
+    pub fn settle(&self, q: Q, budget: impl Fn() -> Budget, mut ask: impl FnMut(Q)) {
+        self.settling.set(true);
+        let mut next = Some(q);
+        while let Some(q) = next {
+            self.base.set(self.open.borrow().len());
+            ask(q);
+            next = match self.waiting.take() {
+                Some(deeper) => Some(deeper),
+                // `q` is decided: the innermost open question, which asked it, goes on.
+                None => self.open.borrow_mut().pop(),
+            };
+            // Only a wait leaves a question to ask: every one from the first wait on runs again,
+            // or under one that does.
+            if next.is_some() {
+                self.waited.set(true);
+                if !self.replays.get_or_init(&budget).take(1) {
+                    self.open.borrow_mut().clear();
+                    break;
+                }
+            }
+        }
+        self.base.set(0);
+        self.waited.set(false);
+        self.settling.set(false);
     }
 }
 
