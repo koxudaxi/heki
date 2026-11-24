@@ -530,8 +530,8 @@ fn reports_now(
         .collect();
     let withheld_heuristic = current.withhold_heuristic(&mut now);
     let failing = |judged: &[Diagnostic]| judged.iter().filter(|d| d.fails_run(fail_on)).count();
-    let mut judged_failing = None;
-    let baseline = baseline.map(|baseline| {
+    // With a baseline, `heki check` judges the regressions only.
+    let split = baseline.map(|baseline| {
         let regressed = regressed(baseline, &now, files);
         let (regressions, allowed): (Vec<_>, Vec<_>) = now
             .iter()
@@ -540,13 +540,17 @@ fn reports_now(
             .partition(|(_, regressed)| *regressed);
         let printed = |split: Vec<(Diagnostic, bool)>| printed(split.into_iter().map(|(d, _)| d));
         let regressions = printed(regressions);
-        judged_failing = Some(failing(&regressions));
-        BaselineSplit {
+        let split = BaselineSplit {
             allowed: printed(allowed).len(),
             regressions: regressions.len(),
-        }
+        };
+        (split, failing(&regressions))
     });
     let shown = printed(now);
+    let (baseline, failing) = match split {
+        Some((split, failing)) => (Some(split), failing),
+        None => (None, failing(&shown)),
+    };
     let exact = shown
         .iter()
         .filter(|d| d.certainty == Certainty::Exact)
@@ -558,7 +562,7 @@ fn reports_now(
         withheld_heuristic,
         heuristic_rules_off: current.heuristic_off().len(),
         baseline,
-        failing: judged_failing.unwrap_or_else(|| failing(&shown)),
+        failing,
     }
 }
 
