@@ -1090,7 +1090,7 @@ impl<'a> Defs<'a> {
                 .collect::<Option<Vec<_>>>()?
                 .first()
                 .copied(),
-            Val::Ref(_) | Val::Class(_) | Val::Super(_) => None,
+            Val::Ref(_) | Val::Class(_) | Val::Super(_) | Val::OneOf(_) => None,
         }
     }
 

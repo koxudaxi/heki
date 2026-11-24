@@ -135,6 +135,23 @@ pub struct LintConfig {
     pub report_unused_suppressions: Option<bool>,
     /// Report `# heki: ignore` comments that name no rule. Defaults to `false`.
     pub require_suppression_codes: Option<bool>,
+    /// What `heki check` does with a contract entry that matches nothing in the analyzed files.
+    /// Unset, a run over the whole project warns about them.
+    pub unmatched_contract_entries: Option<UnmatchedEntries>,
+}
+
+/// `lint.unmatched-contract-entries`: how `heki check` reports a contract entry that names no
+/// definition, attribute, method, or `__dict__` key in the analyzed files.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UnmatchedEntries {
+    /// A warning: the run does not fail.
+    #[default]
+    Warning,
+    /// An error: the run fails.
+    Error,
+    /// Not reported.
+    Ignore,
 }
 
 /// `[[tool.heki.write-owners]]` contract for `MUT201`.
@@ -285,6 +302,11 @@ pub struct EffectBoundaryRule {
     /// `"allow"` (default) or `"report"`: whether `reads-environment` also forbids the imports
     /// that probe whether a module is installed (`try: import yaml` / `except ImportError:`).
     pub import_probes: Option<String>,
+    /// `"report"`: also report what the boundary cannot judge in its scopes' reach: a call heki
+    /// cannot resolve, a function it does not model or whose body only a stub declares, and a
+    /// write of an attribute `write-targets` or `write-universe` names on an object of unknown
+    /// class; `"ignore"` (default) does not.
+    pub unresolved: Option<String>,
     /// The help of every `EFF201` report of this contract.
     pub message: Option<String>,
 }
@@ -385,6 +407,9 @@ pub fn contract_label(table: &str, index: usize, name: &str) -> String {
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct HekiConfig {
     pub target_version: Option<String>,
+    /// A PEP 440 specifier the running heki must satisfy (`>=0.2.6`); [`schema::check_keys`]
+    /// refuses an older heki before it reads any other key.
+    pub required_version: Option<String>,
     pub exclude: Option<Vec<String>>,
     pub extend_exclude: Vec<String>,
     /// Source roots ([`source_root`]): project-relative directories whose files are named
@@ -472,6 +497,14 @@ pub enum ConfigError {
         key: String,
         position: Option<(u32, u32)>,
     },
+    /// `required-version` names a heki release this one is not.
+    #[error("this is heki {running}, but the configuration requires `{required}`")]
+    RequiredVersion {
+        path: PathBuf,
+        position: Option<(u32, u32)>,
+        required: String,
+        running: &'static str,
+    },
     #[error("invalid `src` entry `{entry}`: {reason}")]
     SourceRoot {
         path: PathBuf,
@@ -521,6 +554,16 @@ impl Explain for ConfigError {
                 problem.help.extend(help);
                 problem.docs(key.as_ref().map_or(Docs::ConfigTables, |(t, k)| Docs::of_key(t, k)))
             }
+            Self::RequiredVersion {
+                path,
+                position,
+                required,
+                ..
+            } => at(problem, path, position)
+                .help(format!(
+                    "install a heki that satisfies `{required}` (`pip install --upgrade heki`), or change `required-version` in this file"
+                ))
+                .docs(Docs::RequiredVersion),
             Self::ToolTable { path, position } => at(problem, path, position)
                 .help("only a `pyproject.toml` holds the settings under `tool.heki`; this file holds them at the top level: write `[lint]` and `[[write-owners]]`, not `[tool.heki.lint]`")
                 .docs(Docs::ConfigTables),
@@ -787,6 +830,35 @@ pub fn requires_python_lower_bound(spec: &str) -> Option<PythonVersion> {
     })
 }
 
+/// The version of this heki (`workspace.package.version`).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Whether `version` satisfies the PEP 440 specifier `spec` (`>=0.2.6, <0.3`), compared on release
+/// segments; `None` when `spec` is not a specifier. Every clause is an operator and a release of
+/// digits and dots (`==1.2.*` allowed): a pre-, post-, or development-release suffix or trailing
+/// text is refused, since the comparison would silently drop it.
+pub fn version_satisfies(spec: &str, version: &str) -> Option<bool> {
+    let is_release_only = |clause: &str| {
+        let release = clause
+            .trim()
+            .trim_start_matches(['=', '!', '~', '<', '>'])
+            .trim();
+        let release = release.strip_suffix(".*").unwrap_or(release);
+        release
+            .split('.')
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    };
+    if !spec.split(',').all(is_release_only) {
+        return None;
+    }
+    let clauses = spec
+        .split(',')
+        .map(VersionClause::parse)
+        .collect::<Option<Vec<_>>>()?;
+    let release = VersionClause::parse(&format!("=={version}"))?.release;
+    Some(clauses.iter().all(|c| c.admits(&release)))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VersionOp {
     /// `===`: arbitrary equality, compared here as `==`.
@@ -889,6 +961,7 @@ impl HekiConfig {
     /// The top-level keys of the configuration (`[tool.heki]` of a `pyproject.toml`).
     pub const KEYS: &'static [&'static str] = &[
         "target-version",
+        "required-version",
         "exclude",
         "extend-exclude",
         "src",
@@ -1121,6 +1194,7 @@ import-probes = "report"
                 fresh_objects: Some("allow".into()),
                 references: Some("calls".into()),
                 import_probes: Some("report".into()),
+                unresolved: None,
             }
         );
         assert!(cfg.readonly_returns[0].deep);
@@ -1323,6 +1397,7 @@ writes-in-order = { arg = 0, param = "data", sorted-by = "sort_keys" }
     fn keys_name_every_setting() {
         let all = HekiConfig {
             target_version: Some(String::new()),
+            required_version: Some(String::new()),
             exclude: Some(Vec::new()),
             extend_exclude: Vec::new(),
             src: Some(Vec::new()),

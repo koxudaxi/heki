@@ -14,7 +14,7 @@ impl Extractor<'_> {
     /// The function's references to a project function, method, or class
     /// ([`FileSummary::reference_sites`]): a load of one (a global, a name, an attribute, or a
     /// closure cell, which holds what the enclosing function binds to the name, a local import
-    /// included) whose value reaches, through copies, phis, and the displays holding it, a use
+    /// included), or the function a `def` or `lambda` makes, whose value reaches, through copies, phis, and the displays holding it, a use
     /// handing it on ([`Usage::HandsOn`]), or with [`Contracts::reference_reads`] another use
     /// ([`Usage::Reads`]), which a load handing it on is not. The value as a callee is a call (its
     /// own site), and so is a callable a library API runs (`Self::handed_callable`); a closure's
@@ -27,10 +27,10 @@ impl Extractor<'_> {
     pub(super) fn reference_sites(&mut self) -> Vec<CallSite> {
         let reads = self.contracts.is_some_and(|c| c.reference_reads());
         let flow = HandedValues::of(
-            self.f,
+            (self.f, self.cx.ir()),
             |at| self.callees.get(&at).is_some_and(names_only),
             &self.handed,
-            reads.then(|| self.cx.ir()),
+            reads,
         );
         // Past the budget every walk answers open and the function has no reference site.
         let budget = Budget::of_function("summary::reference_sites", self.f);
@@ -174,11 +174,12 @@ impl HandedValues {
     /// module, the other uses are kept too, with the values its statements use without an
     /// instruction ([`ModuleIr::statement_uses`]).
     fn of(
-        f: &IrFunction,
+        (f, ir): (&IrFunction, &ModuleIr),
         names_only_at: impl Fn(Position) -> bool,
         handed: &FxHashSet<(VarId, VarId)>,
-        reads: Option<&ModuleIr>,
+        reads: bool,
     ) -> Self {
+        let reads = reads.then_some(ir);
         let mut flow = Self {
             from: FxHashMap::default(),
             held: FxHashMap::default(),
@@ -278,8 +279,19 @@ impl HandedValues {
                     InstKind::MakeGenExpr { outer_iter, .. } => {
                         flow.add(*outer_iter, span, Usage::Reads);
                     }
-                    // A binding of another name, a deletion, and a closure's captures (the
-                    // defaults and class keywords among them are statement uses).
+                    // A `def` or `lambda` makes the function its value refers to: in a module
+                    // body, bound to its name as an import is, so read without a load of its own
+                    // (`HANDLERS = [run]` after `def run`). A class statement's own uses are its
+                    // bases. Its captures (the defaults and class keywords among them are
+                    // statement uses) use nothing.
+                    InstKind::MakeClosure {
+                        dst,
+                        func_id: Some(id),
+                        ..
+                    } if !ir.function(*id).is_class_body => {
+                        flow.loads.push((at, *dst, span, f.is_module_body));
+                    }
+                    // A binding of another name, a deletion.
                     InstKind::StoreDeref { .. }
                     | InstKind::Delete { .. }
                     | InstKind::MakeClosure { .. } => {}

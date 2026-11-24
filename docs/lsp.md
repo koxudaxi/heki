@@ -107,7 +107,9 @@ The server indexes the workspace in the background, then keeps only the per-func
 summaries in memory. It runs the analyses one at a time, in the order of the editor's messages
 (an edit's analysis takes its place when its debounce ends), so the diagnostics do not depend on
 which analysis happens to start first: of documents opened together, each is analyzed with the
-ones opened before it already indexed.
+ones opened before it already indexed. When the editor closes the server's input or goes away
+without ending the session, the server exits at once (exit code 1), also with an analysis still
+running.
 
 | Event | Re-analyzed |
 | ----- | ----------- |
@@ -123,7 +125,7 @@ On a save, the edit reaches other files only through what it changes:
 | The edit changes | Also re-analyzed |
 | ---------------- | ---------------- |
 | a function's effects, the locks it takes (`EFF109`), the objects it uses one operation at a time (`EFF110`), what it returns in a set's order or writes of its parameters (`EFF112`), whether it reaches a call cycle (`EFF114`), or what the object it returns may be (a new one, its argument, or state it keeps; for `MUT119`, a new container on every return) | its callers, and the functions of a call cycle through it (their effects change with it) |
-| a declaration that names resolve through: a re-exported class, a new method or base class, a property getter, a subclass, an offloading decorator, a function becoming an `async def` or a plain `def` (`EFF115`) | every file that resolved names through it |
+| a declaration that names resolve through: a re-exported class, a new method or base class, a property getter, a subclass, an offloading decorator, a function becoming an `async def` or a plain `def` (`EFF115`), or a generator function or a plain one (`EFF116`) | every file that resolved names through it |
 | a method of a class family | the classes of that family; with `MUT112` selected, every changed method counts: a value stored in `self.<attr>` is reported when a method of the family changes that attribute in place |
 | what a function changes of its own containers, or what it does with the generators it calls (`MUT113`, when selected) | the classes of its family with generators suspending inside an iteration of their containers, and those of the generators it calls |
 | the writes that leave a `@cached_property` stale (`MUT111`, when selected) | the files reading such a property: whether a read is reported depends on every writer of the class family, wherever it is |

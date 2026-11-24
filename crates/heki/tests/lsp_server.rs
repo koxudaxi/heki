@@ -610,13 +610,18 @@ fn lsp_exit_codes_follow_the_shutdown_handshake() {
     );
     lsp.notify("exit", Value::Null);
     assert_eq!(status(&mut lsp), Some(0));
-    // `exit` without `shutdown`, or stdin closing without either: 1.
+    // `exit` without `shutdown`, or stdin closing without either (a client that went away,
+    // also before any message): 1.
     let mut lsp = ready_server(&p, json!({}));
     lsp.notify("exit", Value::Null);
     assert_eq!(status(&mut lsp), Some(1));
+    assert_eq!(ready_server(&p, json!({})).hang_up().code(), Some(1));
+    let lsp = Lsp::start(&p.dir, &["server", "--stdio"]);
+    assert_eq!(lsp.hang_up().code(), Some(1));
+    // Stdin closing after `shutdown`: 0.
     let mut lsp = ready_server(&p, json!({}));
-    lsp.stdin = None;
-    assert_eq!(status(&mut lsp), Some(1));
+    assert_eq!(lsp.request("shutdown", Value::Null), Value::Null);
+    assert_eq!(lsp.hang_up().code(), Some(0));
 }
 
 #[test]
@@ -968,4 +973,30 @@ fn the_server_runs_the_heuristic_rules_as_the_command_line_and_the_configuration
         "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"OPT101\"]\n",
     );
     assert_eq!(published(&["server", "--no-heuristic"]), ["OPT101"]);
+}
+
+/// Work in flight does not keep a server whose client went away. The index load waits on a
+/// FIFO named `.hekiignore` that the test opens for writing and never writes, and a document
+/// opened meanwhile waits for the state the load holds, and the protocol loop with it.
+#[cfg(unix)]
+#[test]
+fn lsp_server_ends_with_its_input_while_an_analysis_runs() {
+    let p = Project::new("lsp_input_end_in_flight");
+    p.write("a.py", UTIL);
+    let fifo = p.dir.join(".hekiignore");
+    let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+    assert!(made.unwrap().success());
+    let mut lsp = Lsp::start(&p.dir, &["server", "--stdio"]);
+    lsp.request(
+        "initialize",
+        json!({"processId": null, "rootUri": uri(&p.dir), "capabilities": {}}),
+    );
+    lsp.notify("initialized", json!({}));
+    // Opening a FIFO for writing returns once a reader has opened it: the walk of the
+    // workspace, which then waits for its first line.
+    let (opened, writer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || opened.send(std::fs::File::options().write(true).open(fifo)));
+    let _writer = writer.recv_timeout(common::HANG).unwrap().unwrap();
+    lsp.open(&uri(&p.dir.join("a.py")), UTIL);
+    assert_eq!(lsp.hang_up().code(), Some(1));
 }

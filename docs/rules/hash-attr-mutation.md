@@ -44,7 +44,9 @@ The rule reports the write itself, once per method and attribute. It does not re
   instead, or which raises without one, and any write on a class whose MRO defines
   `__setattr__` or `__delattr__`;
 - lazy initialization: a write under a `None` / falsy check of the same attribute
-  (`if self._key is None: self._key = ...`, `if not self._parts: ...`);
+  (`if self._key is None: self._key = ...`, `if not self._parts: ...`, also of
+  `getattr(self, "_key", None)` and `hasattr(self, "_key")`), or in the `except
+  AttributeError:` clause of a `try` that reads it;
 - memo / cache dictionaries (`self._cache[key] = value`, `setdefault`, the
   `if key not in self._memo:` pattern): in-place changes of an attribute with a `cache` or
   `memo` word in its name; rebinding it (`self.cache_size = n`) and names such as

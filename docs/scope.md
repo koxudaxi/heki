@@ -274,6 +274,13 @@ Missed findings close as heki learns more:
   nothing: what the instance keeps can be replaced.
 - A `write-owners` contract with `unresolved = "report"` reports the writes heki cannot tie to a
   class ([`MUT205`](rules/unresolved-guarded-write.md)).
+- A private helper hands its accesses to the callers heki sees. A helper some code also hands on
+  as a value (a table, a class attribute, an argument) has callers heki does not see: an owner
+  contract with `unresolved = "report"` judges it as if it had no callers, and one without lets
+  its callers decide.
+- An effect boundary is silent where heki cannot see: a call it cannot resolve, or a write on an
+  object of unknown class, in a scope's reach. With `unresolved = "report"` it reports them
+  (`EFF201`).
 
 ### Objects without a known class
 
@@ -284,8 +291,13 @@ Missed findings close as heki learns more:
   [`MUT207`](rules/unresolved-guarded-call.md).
 - A write in an unannotated helper is still found where a caller passes it an object of a known
   class. A read is not.
-- Not typed: values declared `Any`, generics substituted through `TypeVar`s, and calls of
-  `type[C]` attributes.
+- Not typed: values declared `Any` or `types.ModuleType`, generics substituted through
+  unbounded `TypeVar`s (a bounded or constrained one gives its bound or constraints), and calls
+  of `type[C]` attributes.
+- A module-level table of functions (`HANDLERS = {"create": create}`) gives the value of a key
+  a string constant gives, and one of its values for any other key, only while no code changes
+  it in place; a change through a call it is handed to (`register(HANDLERS)`) is not seen.
+  Changing a dict or list a global or an attribute holds in place leaves its items untyped.
 - The type of a module global or an instance attribute joins every store of it through a
   receiver whose type heki knows: `self`, an instance of the class (a parameter `obj: Helper`,
   `cls()` in a class method, one the storing module keeps in its own attribute or global, as
@@ -359,6 +371,8 @@ A generator's body runs where it is iterated:
 | a project function iterating it | |
 
 - A generator a function returns runs where its caller iterates it.
+- A generator nothing iterates (a call as a statement, a value only tested for truth) never runs
+  its body; `EFF116` reports such calls.
 - A generator expression counts where it is written.
 - A coroutine runs where it is awaited; one only scheduled (`asyncio.create_task`) is checked on
   its own.
@@ -444,6 +458,36 @@ Contracts reason about the callers heki sees: a private helper hands its reports
 and a function called only from allowed writers is not reported. Code outside the run, such as
 tests left out of it, is not known.
 
+## Measured and not taken
+
+These shapes were measured on the Stage 0-A corpus (378 packages, 30.75 million lines) and not built.
+Each failed the bar for a default rule: at least 10 % of the judged sample harmful, and no false exact
+claim.
+
+- Late binding of loop variables: 132 closures in 38 packages beyond the 3,865 names Ruff B023
+  reports; every harmful one is already a B023 report, and heki found none that B023 misses.
+- Resource use after close: 289 sites in 80 packages, 8 % harmful, with false exact claims. Left to
+  runtime and review.
+- Resource leaks across calls: 1,848 sites in 162 packages, 4 % harmful; about half are direct
+  constructors that Ruff `SIM115` and Pylint `R1732` flag.
+- Command-query separation (a `get_*`, `is_*`, or property that changes state): 11,558 sites in 254
+  packages, 4 % harmful; most are caches heki does not see as caches.
+- Dropped results of pure calls: 59,083 sites in 327 packages, no harm in the sample; the real bugs
+  are `str` methods on `str` values, which pyright `reportUnusedCallResult` covers.
+- Stale caches: 199 sites in 54 packages, 5 % harmful; Ruff B019 and Pylint W1518 flag the cache on
+  a method.
+- `asyncio.run` under a running loop: 71 sites in 12 packages, 1 of 25 judged right; nearly all are
+  guarded by a test heki does not model.
+- Writes lost in a child process: 62 sites in 27 packages, 4 % harmful.
+- `Popen` pipes left unread: 22 sites in 13 packages, 5 % harmful.
+- `CancelledError` swallowed: 466 sites in 62 packages, none harmful as judged; flake8-async
+  `ASYNC103` and `ASYNC104` cover the shape.
+- `BytesIO` read without a seek: 69 sites in 7 packages, 57 of them one test suite; too rare.
+- Opposite lock orders: 106 ordered pairs of named locks in 31 packages, no pair in opposite order.
+- An `except` clause that nothing in its `try` body raises, through its calls: 2,730 clauses in 157 packages
+  for project exceptions and 3,597 in 153 for library ones; of 60 judged, one was harmful, and that one is a
+  one-statement shape. Which exceptions a function can raise is planned as a `heki inspect` fact instead.
+
 ## How a rule gets into heki
 
 heki only takes checks that need what it can prove. A proposed rule goes through four questions,
@@ -466,7 +510,7 @@ The proofs heki can make, on five axes:
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
 | Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT109`, `MUT113`, `EFF102`, `EFF103`, `EFF106`, `EFF109`, `EFF110`, `EFF114`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT112`, `MUT113`, `MUT119`, `MUT201`–`MUT204` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT112`, `MUT113`, `MUT119`, `MUT201`–`MUT204` |
 | Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `MUT112`, `MUT119`, `EFF107`, `EFF109`, `EFF110`, `EFF112`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
 | State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT201`–`MUT204` |

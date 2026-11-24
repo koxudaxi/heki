@@ -5,20 +5,22 @@
 use crate::premises::{self, OpenCause, Told};
 use crate::{
     CheckContext, DottedPattern, FnSites, ModuleUnit, RuleConfigError, SitesByCaller, SitesBySpan,
-    has_glob_syntax, split_last_dot,
+    def_spellings, has_glob_syntax, split_last_dot,
 };
 use heki_ast::Span;
 use heki_diagnostics::{Certainty, Diagnostic, OpenPremise, OpenRecord};
 use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
     AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite, CallTarget, Callee,
-    Construction, ContractClass, Delivery, EffectSummary, Facts, FuncKey, INITIALIZERS,
-    ProjectDecls, ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx,
-    TypedFieldWriteSite, Val, WriteKind, attr_writes, container_mutator, self_attr_writes,
+    Construction, ContractClass, Delivery, EffectSummary, Facts, FuncKey, ProjectDecls,
+    ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx, TypedFieldReadSite,
+    TypedFieldWriteSite, Val, WriteKind, attr_writes, container_mutator, initializes_own_self,
+    is_initializer, self_attr_writes,
 };
 use heki_env::HekiConfig;
 use heki_ir::walk::{Answer, Budget, FnShape, Visit, reach};
 use heki_ir::{BlockId, FnIndex, Inst, InstKind, IrFunction, VarId};
+use heki_semantic::mangling;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -50,6 +52,8 @@ const INIT_METHODS: &[&str] = &[
 /// a checked file also carries its IR, one per definition (only checked methods are reported).
 struct Method<'a> {
     key: FuncKey,
+    /// [`Self::name`].
+    name: String,
     /// The file defining it.
     path: &'a Path,
     checked: Option<Checked<'a>>,
@@ -62,14 +66,22 @@ struct Checked<'a> {
     f: &'a IrFunction,
 }
 
-impl Method<'_> {
-    /// The method's own name (the last component of its qualname).
+impl<'a> Method<'a> {
+    fn new(key: FuncKey, path: &'a Path, checked: Option<Checked<'a>>) -> Self {
+        let name = mangling::member_name(&key.qualname).into_owned();
+        Self {
+            key,
+            name,
+            path,
+            checked,
+        }
+    }
+
+    /// The name its class holds the method under: the last component of its qualname,
+    /// mangled for a private name (`_Parser__run` of `Parser.__run`), which no method of
+    /// another class overrides.
     fn name(&self) -> &str {
-        self.key
-            .qualname
-            .rsplit('.')
-            .next()
-            .unwrap_or(&self.key.qualname)
+        &self.name
     }
 
     /// The fqn of the class defining the method.
@@ -115,11 +127,11 @@ impl<'a> ClassMethods<'a> {
                 by_class
                     .entry(format!("{}.{owner}", unit.input.module_name))
                     .or_default()
-                    .push(Method {
-                        key: CheckContext::key(unit, f),
-                        path: &unit.input.path,
-                        checked: Some(Checked { unit, f }),
-                    });
+                    .push(Method::new(
+                        CheckContext::key(unit, f),
+                        &unit.input.path,
+                        Some(Checked { unit, f }),
+                    ));
             }
         }
         let checked: FxHashSet<&Path> = units.iter().map(|u| u.input.path.as_path()).collect();
@@ -138,11 +150,7 @@ impl<'a> ClassMethods<'a> {
             by_class
                 .entry(format!("{}.{owner}", key.module))
                 .or_default()
-                .push(Method {
-                    key: key.clone(),
-                    path,
-                    checked: None,
-                });
+                .push(Method::new(key.clone(), path, None));
         }
         Self { by_class }
     }
@@ -764,7 +772,7 @@ pub fn family_readers(
                 let inherited = ancestors
                     .iter()
                     .flat_map(|a| decls.methods_of(a))
-                    .filter_map(|k| k.qualname.rsplit('.').next().map(str::to_owned))
+                    .map(|k| mangling::member_name(&k.qualname).into_owned())
                     .collect();
                 let family: Vec<String> = ancestors
                     .into_iter()
@@ -843,11 +851,14 @@ fn private_methods_called_from_init(
     out
 }
 
+mod allowed_examples;
 mod kept_values;
 mod lost_changes;
 mod sentinel_copies;
 mod stale_reads;
 
+use allowed_examples::{AllowedExamples, contract_help, place_functions};
+pub use allowed_examples::{EXAMPLE_RULES, ExampleOwners, example_digest};
 pub use kept_values::{kept_removals_in, lazy_setup_files};
 pub(crate) use lost_changes::mut119;
 pub(crate) use sentinel_copies::mut118;
@@ -860,7 +871,7 @@ pub use sentinel_copies::{SentinelTestKey, deep_copy_files, sentinel_tests_in};
 pub(crate) struct ContractTarget {
     /// The configured text (diagnostic target and baseline key).
     pub text: String,
-    attr: DottedPattern,
+    attr: MemberPattern,
     /// The entry key of an item target.
     pub key: Option<String>,
     /// Project classes (fqn) the class pattern names, plus all their subclasses: the
@@ -890,9 +901,56 @@ impl ContractTarget {
     }
 }
 
+/// The member a contract target names after its last dot (`fields` of `pkg.Model.fields`),
+/// matched against an attribute name as its class holds it: as written in the class, and for a
+/// private name (`__cache`) mangled with a class the target names (`_Model__cache`), or with
+/// any class when the target names none (`__cache`).
+#[derive(Debug, Clone)]
+pub(crate) struct MemberPattern {
+    pattern: DottedPattern,
+    /// The names of the classes the target names, without their leading underscores; `None`
+    /// when it names no class.
+    holders: Option<FxHashSet<String>>,
+}
+
+impl MemberPattern {
+    /// `text` held by the classes of `all` that `holder` names, or by any class without one.
+    pub(crate) fn new(
+        text: &str,
+        holder: Option<&DottedPattern>,
+        all: &[ContractClass],
+        context: &'static str,
+    ) -> Result<Self, RuleConfigError> {
+        let holders = holder.map(|holder| {
+            all.iter()
+                .filter(|c| holder.matches_class(c))
+                .map(|c| {
+                    let qualname = c.qualname.as_deref().unwrap_or(&c.fqn);
+                    let name = qualname.rsplit('.').next().unwrap_or(qualname);
+                    name.trim_start_matches('_').to_owned()
+                })
+                .collect()
+        });
+        Ok(Self {
+            pattern: DottedPattern::new(text, context)?,
+            holders,
+        })
+    }
+
+    pub(crate) fn matches(&self, attr: &str) -> bool {
+        self.pattern.matches(attr)
+            || mangling::unmangled(attr).any(|(class, written)| {
+                self.holders.as_ref().is_none_or(|h| h.contains(class))
+                    && self.pattern.matches(written)
+            })
+    }
+}
+
 /// The targets of one contract `site` writes (by index): the item targets naming the entry it
 /// changes when there are any, else the attribute targets, so a write of one entry is reported
-/// once, under its most specific target.
+/// once, under its most specific target. A copy of a callee's write with the key a call passes
+/// ([`TypedFieldWriteSite::passed`]) hits item targets only: the callee's own site is the write
+/// of the attribute.
 pub(crate) fn write_hits<'t>(
     targets: &'t [ContractTarget],
     site: &TypedFieldWriteSite,
@@ -900,7 +958,7 @@ pub(crate) fn write_hits<'t>(
     let hits: Vec<(usize, &ContractTarget)> = targets
         .iter()
         .enumerate()
-        .filter(|(_, t)| t.matches_write(site))
+        .filter(|(_, t)| t.matches_write(site) && (t.key.is_some() || !site.passed))
         .collect();
     if hits.iter().any(|(_, t)| t.key.is_some()) {
         hits.into_iter().filter(|(_, t)| t.key.is_some()).collect()
@@ -940,7 +998,7 @@ pub(crate) fn project_classes(cx: &CheckContext<'_>) -> Vec<ContractClass> {
 
 /// The project classes (fqn) of `all` that `pattern` names, plus all their subclasses when
 /// `subclasses` covers them.
-fn class_set(
+pub(crate) fn class_set(
     cx: &CheckContext<'_>,
     pattern: &DottedPattern,
     all: &[ContractClass],
@@ -980,7 +1038,7 @@ pub(crate) fn parse_targets(
         let class = DottedPattern::new(class, context)?;
         out.push(ContractTarget {
             text: t.clone(),
-            attr: DottedPattern::new(attr, context)?,
+            attr: MemberPattern::new(attr, Some(&class), all, context)?,
             key,
             classes: class_set(cx, &class, all, Subclasses::Covered),
         });
@@ -1046,6 +1104,10 @@ pub(crate) struct Allowance {
     /// The project protocols `allowed-protocols` names, with their subclasses unless
     /// `protocol-subclasses = false` ([`Self::allows_protocol`]).
     protocols: FxHashSet<String>,
+    /// With `unresolved = "report"`: the functions some code hands on as values
+    /// ([`CheckContext::escaping_functions`]), which have callers heki does not see. Each judges
+    /// its accesses itself, as if it had no callers ([`delegated_reports`]).
+    escaping: Option<std::sync::Arc<FxHashSet<FuncKey>>>,
 }
 
 /// Project functions a `call-owners` / `call-targets` entry names: the whole text by fqn or
@@ -1126,15 +1188,17 @@ impl FunctionMatcher {
         let Some((holder, member)) = &self.member else {
             return self.whole.matches_def(fqn, qualname);
         };
-        [fqn, qualname]
-            .into_iter()
-            .any(|name| match (holder, name.rsplit_once('.')) {
-                (None, split) => member.matches(split.map_or(name, |(_, last)| last)),
-                (Some(holder), Some((held_by, last))) => {
-                    member.matches(last) && holder.matches(held_by)
+        def_spellings(fqn, qualname).any(|(fqn, qualname)| {
+            [fqn.as_ref(), qualname.as_ref()].into_iter().any(|name| {
+                match (holder, name.rsplit_once('.')) {
+                    (None, split) => member.matches(split.map_or(name, |(_, last)| last)),
+                    (Some(holder), Some((held_by, last))) => {
+                        member.matches(last) && holder.matches(held_by)
+                    }
+                    (Some(_), None) => false,
                 }
-                (Some(_), None) => false,
             })
+        })
     }
 
     /// Whether the text names `symbol`, a function, class, or module attribute outside the
@@ -1160,8 +1224,11 @@ impl FunctionMatcher {
     pub(crate) fn matches(&self, key: &FuncKey) -> bool {
         self.names_def(&key.fqn(), &key.qualname)
             || self.method.as_ref().is_some_and(|(family, name)| {
-                key.qualname.rsplit_once('.').is_some_and(|(owner, last)| {
-                    name.matches(last) && family.contains(&format!("{}.{owner}", key.module))
+                key.qualname.rsplit_once('.').is_some_and(|(owner, _)| {
+                    // A method overrides by the name its class holds it under: a private name
+                    // (`__run`, held as `_Sub__run`) is its own class's, and overrides nothing.
+                    name.matches(&mangling::member_name(&key.qualname))
+                        && family.contains(&format!("{}.{owner}", key.module))
                 })
             })
     }
@@ -1191,6 +1258,7 @@ impl Allowance {
             attribution: Attribution::CallGraph,
             own_receiver: false,
             protocols: FxHashSet::default(),
+            escaping: None,
         };
         for e in keys.exempt.0 {
             if e.contains(['.', ':']) || has_glob_syntax(e) {
@@ -1220,6 +1288,14 @@ impl Allowance {
         names(&self.allowed, key)
     }
 
+    /// Whether the contract names `key` as a place to access its targets from: an `allowed-*`
+    /// pattern names it, or the `forbidden-*` patterns leave it out. Exempt methods (construction
+    /// and copies) and the guarded functions themselves are allowed for what they are, not as
+    /// such places (`Diagnostic::allowed_examples`).
+    pub(crate) fn names_place(&self, key: &FuncKey) -> bool {
+        self.names_allowed(key) || !self.in_scope(key)
+    }
+
     /// The same allowance, with the guarded functions `targets` allowed too.
     pub(crate) fn with_targets(self, targets: std::sync::Arc<FunctionMatchers>) -> Self {
         Self {
@@ -1239,6 +1315,21 @@ impl Allowance {
     /// The same allowance, allowing the accesses through values typed with `protocols`.
     pub(crate) fn with_protocols(self, protocols: FxHashSet<String>) -> Self {
         Self { protocols, ..self }
+    }
+
+    /// The same allowance, judging the accesses of the functions some code hands on as values
+    /// (`escaping`, with `unresolved = "report"`) in those functions.
+    pub(crate) fn with_escaping(
+        self,
+        escaping: Option<std::sync::Arc<FxHashSet<FuncKey>>>,
+    ) -> Self {
+        Self { escaping, ..self }
+    }
+
+    /// Whether `func` judges its accesses itself because code hands it on as a value
+    /// ([`Self::with_escaping`]).
+    fn escapes(&self, func: &FuncKey) -> bool {
+        self.escaping.as_ref().is_some_and(|e| e.contains(func))
     }
 
     /// Whether `allowed-protocols` names a project class.
@@ -1544,24 +1635,22 @@ pub(crate) fn binds_receiver(decl: &heki_effect::FunctionDecl) -> bool {
     decl.is_method && !decl.is_staticmethod
 }
 
-/// A class's own initialization: `key` is an initializer (`INITIALIZERS`) of a class of the
-/// target's `family`, and the accessed object may be its own instance (`obj_params` bit 0,
-/// `self`): only an object that is provably not `self` (another parameter, a fresh instance,
-/// an attribute) stays reported.
+/// A class's own initialization ([`initializes_own_self`]) of a class of the target's `family`:
+/// `key` is an initializer of such a class, and the accessed object may be its own instance
+/// (`obj_params` bit 0, `self`). Only an object that is provably not `self` (another parameter, a
+/// fresh instance, an attribute) stays reported.
 pub(crate) fn initializes_itself(
     cx: &CheckContext<'_>,
     key: &FuncKey,
     family: &FxHashSet<String>,
     obj_params: u64,
 ) -> bool {
-    let name = key.qualname.rsplit('.').next().unwrap_or(&key.qualname);
-    obj_params & 1 != 0
-        && INITIALIZERS.contains(&name)
-        && cx
-            .index
-            .summary(key)
-            .and_then(|s| s.owner_class_qualname.as_deref())
-            .is_some_and(|owner| family.contains(&format!("{}.{owner}", key.module)))
+    cx.index.summary(key).is_some_and(|s| {
+        initializes_own_self(key, s, obj_params)
+            && s.owner_class_qualname
+                .as_deref()
+                .is_some_and(|owner| family.contains(&format!("{}.{owner}", key.module)))
+    })
 }
 
 /// Whether `func` (about to be reported for an access to an object that may be its parameters
@@ -1620,8 +1709,6 @@ fn runs_inside_allowed_through(
     obj: u64,
     first: FirstCallers,
 ) -> bool {
-    let is_initializer =
-        |k: &FuncKey| INITIALIZERS.contains(&k.qualname.rsplit('.').next().unwrap_or(&k.qualname));
     if is_initializer(func) {
         return false;
     }
@@ -2000,7 +2087,8 @@ struct MergedReport<'u> {
     /// The member the message names (quoted), and the other members behind the key.
     named: String,
     also: BTreeSet<String>,
-    help: Option<String>,
+    /// The contract's `message`, which the help starts with.
+    note: Option<String>,
     chain: Vec<CallHop>,
     sites: BTreeSet<SiteId>,
     groups: BTreeSet<SiteGroup>,
@@ -2044,7 +2132,7 @@ impl<'u, K: Ord> MergedReports<'u, K> {
                 rank: name.rank,
                 named: name.named.to_owned(),
                 also: BTreeSet::new(),
-                help: note.map(str::to_owned),
+                note: note.map(str::to_owned),
                 chain: chain(),
                 sites: BTreeSet::new(),
                 groups: BTreeSet::new(),
@@ -2064,7 +2152,18 @@ impl<'u, K: Ord> MergedReports<'u, K> {
         }
     }
 
-    pub(crate) fn emit(self, cx: &CheckContext<'_>, code: &'static str, out: &mut Vec<Diagnostic>) {
+    /// Emit the reports under `code`. The help of each names the functions doing what it shows
+    /// from places its contract allows (`who` of the member it names), which `collect` finds
+    /// with [`AllowedExamples::add`], under the key and name such a report would have.
+    pub(crate) fn emit<'c>(
+        self,
+        cx: &CheckContext<'c>,
+        (code, who): (&'static str, &str),
+        out: &mut Vec<Diagnostic>,
+        collect: impl FnOnce(&mut AllowedExamples<'c, K>),
+    ) where
+        K: Clone,
+    {
         // Groups of equal sites are one group: the groups of two targets of one access hold the
         // same sites.
         let mut first_of: FxHashMap<&BTreeSet<SiteId>, usize> = FxHashMap::default();
@@ -2109,15 +2208,28 @@ impl<'u, K: Ord> MergedReports<'u, K> {
                 }
             }
         }
-        for (distinct, members) in merged {
+        // The target configured first names the report; the others' names, with their members,
+        // follow its own members.
+        let merged: Vec<(usize, Vec<usize>, usize)> = merged
+            .into_iter()
+            .map(|(distinct, members)| {
+                let lead = *members
+                    .iter()
+                    .min_by_key(|&&i| reports[i].1.rank)
+                    .unwrap_or(&members[0]);
+                (distinct, members, lead)
+            })
+            .collect();
+        let mut examples = AllowedExamples::wanting(merged.iter().map(|&(_, _, lead)| {
+            let ((_, _, key, target), r) = reports[lead];
+            (key, target.as_str(), r.named.as_str())
+        }));
+        if !examples.is_empty() {
+            collect(&mut examples);
+        }
+        for (distinct, members, lead) in merged {
             let sites = u32::try_from(distinct).unwrap_or(u32::MAX);
-            // The target configured first names the report; the others' names, with their
-            // members, follow its own members.
-            let lead = *members
-                .iter()
-                .min_by_key(|&&i| reports[i].1.rank)
-                .unwrap_or(&members[0]);
-            let ((func, span, _, target), r) = reports[lead];
+            let ((func, span, key, target), r) = reports[lead];
             let mut also: Vec<(usize, &str)> =
                 r.also.iter().map(|m| (r.rank, m.as_str())).collect();
             for &i in members.iter().filter(|&&i| i != lead) {
@@ -2141,6 +2253,8 @@ impl<'u, K: Ord> MergedReports<'u, K> {
                 .flat_map(|&i| &reports[i].1.contracts)
                 .copied()
                 .collect();
+            let found = examples.found_for(key, target, &r.named);
+            let (help, allowed) = contract_help(r.note.as_deref(), (who, &r.named), &found);
             if let Some(d) = cx.emit(
                 out,
                 code,
@@ -2149,11 +2263,12 @@ impl<'u, K: Ord> MergedReports<'u, K> {
                 &func.qualname,
                 target.clone(),
                 message,
-                r.help.clone(),
+                help,
                 &r.chain,
             ) {
                 d.sites = sites;
                 d.contracts = contract_places(contracts);
+                d.allowed_examples = allowed;
             }
         }
     }
@@ -2179,6 +2294,17 @@ const FRESH_OBJECTS: &[&str] = &["allow", "report"];
 const UNLISTED_DICT_KEYS: &[&str] = &["ignore", "report"];
 /// The values of `import-probes`, the default first.
 const IMPORT_PROBES: &[&str] = &["allow", "report"];
+
+/// The functions some code hands on as values ([`CheckContext::escaping_functions`]), for a
+/// contract reporting what it cannot tie (`strict`), computed at most once per check
+/// (`known`).
+pub(crate) fn escaping_for(
+    cx: &CheckContext<'_>,
+    strict: bool,
+    known: &std::cell::OnceCell<std::sync::Arc<FxHashSet<FuncKey>>>,
+) -> Option<std::sync::Arc<FxHashSet<FuncKey>>> {
+    strict.then(|| std::sync::Arc::clone(known.get_or_init(|| cx.escaping_functions().into())))
+}
 
 /// Whether a contract reports the accesses heki cannot tie to a class (`unresolved`).
 pub(crate) fn reports_unresolved(
@@ -2502,6 +2628,20 @@ impl<'r> NamedDictKeys<'r> {
     }
 }
 
+/// The name a report of the write `site` of the target `t` gives the target ([`matched_name`]):
+/// the configured text, or the member written, with the key of an entry target.
+fn written_member(t: &ContractTarget, site: &TypedFieldWriteSite) -> String {
+    matched_name(&t.text, || {
+        let entry = t.key.as_ref().map(|k| format!("[\"{k}\"]"));
+        format!(
+            "{}.{}{}",
+            site.class_qualname,
+            site.attr,
+            entry.unwrap_or_default()
+        )
+    })
+}
+
 /// What a write site writes of a `write-owners` contract ([`OwnerRule::written`]).
 enum Written<'r> {
     Target(&'r ContractTarget),
@@ -2526,7 +2666,10 @@ pub(crate) fn mut201(
     );
     let all_classes = project_classes(cx);
     let mut rules = Vec::new();
+    let escaping = std::cell::OnceCell::new();
     for (index, rule) in cx.config.write_owners.iter().enumerate() {
+        let report_unresolved =
+            reports_unresolved(rule.unresolved.as_deref(), "write-owners", &rule.name)?;
         let targets = parse_targets(
             cx,
             &all_classes,
@@ -2554,7 +2697,8 @@ pub(crate) fn mut201(
             &all_classes,
             (&rule.allowed_protocols, rule.protocol_subclasses),
             "write-owners.allowed-protocols",
-        )?);
+        )?)
+        .with_escaping(escaping_for(cx, report_unresolved, &escaping));
         let mut forbid_cached = FxHashSet::default();
         for p in &rule.forbid_cached_property_on {
             let p = DottedPattern::new(p, "write-owners.forbid-cached-property-on")?;
@@ -2567,11 +2711,7 @@ pub(crate) fn mut201(
             forbid_cached,
             note: rule.message.as_deref(),
             allow_fresh: allows_fresh(rule.fresh_objects.as_deref(), "write-owners", &rule.name)?,
-            report_unresolved: reports_unresolved(
-                rule.unresolved.as_deref(),
-                "write-owners",
-                &rule.name,
-            )?,
+            report_unresolved,
             report_unlisted_keys: mode(
                 rule.unlisted_dict_keys.as_deref(),
                 UNLISTED_DICT_KEYS,
@@ -2583,7 +2723,8 @@ pub(crate) fn mut201(
         });
     }
 
-    unresolved::mut205(cx, &rules, out);
+    let named_keys = NamedDictKeys::new(&rules);
+    unresolved::mut205(cx, &rules, &named_keys, out);
     if !writes {
         return Ok(());
     }
@@ -2604,7 +2745,6 @@ pub(crate) fn mut201(
         .map(|r| r.targets.iter().map(|_| InsideAllowed::default()).collect())
         .collect();
     let names_protocols = rules.iter().any(|r| r.allowance.names_protocols());
-    let named_keys = NamedDictKeys::new(&rules);
     for path in paths {
         let file = &cx.index.files[path];
         let Some(unit) = cx.unit(path) else {
@@ -2671,12 +2811,17 @@ pub(crate) fn mut201(
                         // No initializer name is private, so on a reported chain only the
                         // outermost function can be the initializer of the written object.
                         let sites = sites.get_or_insert_with(|| cx.sites_by_caller());
-                        let kept_below = || {
-                            chain[1..=origin].iter().any(|k| {
-                                is_private(&k.qualname) && !delegates(cx, sites, k, Handover::Every)
-                            })
+                        // A function handed on as a value keeps its accesses, as a function
+                        // without callers does (`Allowance::escapes`).
+                        let keeps = |k: &FuncKey| {
+                            rule.allowance.escapes(k) || !delegates(cx, sites, k, Handover::Every)
                         };
-                        if !lexical && (kept_below() || delegates(cx, sites, key, Handover::Every))
+                        let kept_below = || {
+                            chain[1..=origin]
+                                .iter()
+                                .any(|k| is_private(&k.qualname) && keeps(k))
+                        };
+                        if !lexical && (kept_below() || !keeps(key))
                             || rule
                                 .allowance
                                 .owns(cx, &judged, family, (obj_params, obj_params))
@@ -2694,14 +2839,16 @@ pub(crate) fn mut201(
                         }
                         // A function that only runs inside the owner's operations (every caller
                         // path starts in an allowed context) writes inside them.
-                        if judged_inside_allowed(
-                            cx,
-                            sites,
-                            &rule.allowance,
-                            family,
-                            (key, site.obj_params),
-                            &mut inside[r][ti],
-                        ) {
+                        if !rule.allowance.escapes(key)
+                            && judged_inside_allowed(
+                                cx,
+                                sites,
+                                &rule.allowance,
+                                family,
+                                (key, site.obj_params),
+                                &mut inside[r][ti],
+                            )
+                        {
                             continue;
                         }
                         let span = site.via_chain.first().map_or(site.span, |h| h.span);
@@ -2713,13 +2860,7 @@ pub(crate) fn mut201(
                         // The report's target: the configured one, or the unlisted key as a
                         // target naming it would (`Class.key`).
                         let (text, named, unlisted) = match written {
-                            Written::Target(t) => {
-                                let named = matched_name(&t.text, || {
-                                    let entry = t.key.as_ref().map(|k| format!("[\"{k}\"]"));
-                                    format!("{member}{}", entry.unwrap_or_default())
-                                });
-                                (t.text.clone(), named, "")
-                            }
+                            Written::Target(t) => (t.text.clone(), written_member(t, site), ""),
                             Written::UnlistedKey(_) => {
                                 let class = &site.class_qualname;
                                 let qualname = cx.decls.class_qualname(class).unwrap_or(class);
@@ -2765,7 +2906,34 @@ pub(crate) fn mut201(
             }
         }
     }
-    reports.emit(cx, "MUT201", out);
+    reports.emit(cx, ("MUT201", "allowed writers"), out, |examples| {
+        let owners = |k: &FuncKey| rules.iter().any(|r| r.allowance.names_place(k));
+        for (key, path, s) in place_functions(cx, owners) {
+            for site in s
+                .typed_field_write_sites
+                .iter()
+                .filter(|w| w.via_chain.is_empty())
+            {
+                for (r, rule) in rules.iter().enumerate() {
+                    if !rule.allowance.names_place(key)
+                        || rule.allow_fresh && site.construction == Construction::Yes
+                    {
+                        continue;
+                    }
+                    for (ti, t) in write_hits(&rule.targets, site) {
+                        let named = format!("`{}`", written_member(t, site));
+                        let name = Named {
+                            target: &t.text,
+                            named: &named,
+                            rank: ti,
+                            contract: r,
+                        };
+                        examples.add((&r, name), key, path);
+                    }
+                }
+            }
+        }
+    });
 
     // `forbid-cached-property-on`: a `@cached_property` defined on a guarded class.
     for unit in cx.units {
@@ -3270,12 +3438,16 @@ impl<'a> Mut202Fn<'a> {
         })
     }
 
-    /// The one project function the call instruction `inst` runs.
+    /// The one project function the call instruction `inst` runs: its one target, whose name
+    /// the project binds to no other object (R1, [`ProjectDecls::call_rebound`]).
     fn single_callee(&self, inst: &'a Inst) -> Option<&'a FuncKey> {
         let shape = self.shape();
         let call = site_call(&|v| shape.inst(v), self.sites, inst, false)?;
         let callees = call.site?.project_callees();
         let bc = callees.first().filter(|_| callees.len() == 1)?;
+        if self.cx.decls.call_rebound(&bc.callee.fqn()) {
+            return None;
+        }
         self.cx.index.summary(&bc.callee).map(|_| &bc.callee)
     }
 
@@ -3494,10 +3666,7 @@ impl<'a> Mut202Fn<'a> {
                 }
                 // `readonly-returns` may name a property: `obj.schema`.
                 if let Some(Val::Inst(class)) = self.types.get(obj) {
-                    let class = ContractClass {
-                        fqn: class.clone(),
-                        qualname: self.cx.decls.class_qualname(class).map(str::to_owned),
-                    };
+                    let class = ContractClass::with_qualname(self.cx.decls, class.clone());
                     let (fqn, qualname) = class.member(attr);
                     if let Some(deep) = self.returns.producers.deep_for(&fqn, &qualname) {
                         return Ro::new(fqn, true, Shared::produced(deep), vec![]);
@@ -4201,7 +4370,10 @@ pub(crate) fn mut203<'c>(
     }
     let all_classes = project_classes(cx);
     let mut rules = Vec::new();
+    let escaping = std::cell::OnceCell::new();
     for (index, rule) in cx.config.read_owners.iter().enumerate() {
+        let report_unresolved =
+            reports_unresolved(rule.unresolved.as_deref(), "read-owners", &rule.name)?;
         rules.push(ReadOwnerRule {
             label: heki_env::contract_label("read-owners", index, &rule.name),
             targets: parse_read_targets(
@@ -4231,13 +4403,10 @@ pub(crate) fn mut203<'c>(
                 &all_classes,
                 (&rule.allowed_protocols, rule.protocol_subclasses),
                 "read-owners.allowed-protocols",
-            )?),
+            )?)
+            .with_escaping(escaping_for(cx, report_unresolved, &escaping)),
             note: rule.message.as_deref(),
-            report_unresolved: reports_unresolved(
-                rule.unresolved.as_deref(),
-                "read-owners",
-                &rule.name,
-            )?,
+            report_unresolved,
         });
     }
     unresolved::mut206(cx, &rules, out);
@@ -4272,8 +4441,7 @@ pub(crate) fn mut203<'c>(
                     .enumerate()
                     .filter(|(_, (t, _))| t.matches(&read.class_qualname, &read.attr))
                 {
-                    let named =
-                        matched_name(&t.text, || format!("{}.{}", read.class_qualname, read.attr));
+                    let named = read_member(t, read);
                     let walk = || {
                         delegated_reports(
                             cx,
@@ -4329,8 +4497,37 @@ pub(crate) fn mut203<'c>(
             }
         }
     }
-    reports.emit(cx, "MUT203", out);
+    reports.emit(cx, ("MUT203", "allowed readers"), out, |examples| {
+        let owners = |k: &FuncKey| rules.iter().any(|r| r.allowance.names_place(k));
+        for (key, path, s) in place_functions(cx, owners) {
+            let own = s.typed_field_read_sites.iter();
+            for read in own.filter(|r| r.counts_for_contracts()) {
+                for (contract, rule) in rules.iter().enumerate() {
+                    if !rule.allowance.names_place(key) {
+                        continue;
+                    }
+                    let hits = rule.targets.iter().enumerate();
+                    for (k, t) in hits.filter(|(_, t)| t.matches(&read.class_qualname, &read.attr))
+                    {
+                        let named = format!("`{}`", read_member(t, read));
+                        let name = Named {
+                            target: &t.text,
+                            named: &named,
+                            rank: k,
+                            contract,
+                        };
+                        examples.add((&contract, name), key, path);
+                    }
+                }
+            }
+        }
+    });
     Ok(())
+}
+
+/// The name a report of the read `read` of the target `t` gives the target ([`matched_name`]).
+fn read_member(t: &ContractTarget, read: &TypedFieldReadSite) -> String {
+    matched_name(&t.text, || format!("{}.{}", read.class_qualname, read.attr))
 }
 
 /// One state of the walk from an access up the reverse call graph.
@@ -4395,10 +4592,13 @@ pub(crate) fn delegated_reports<'k>(
             && !allowance.owns(cx, func, family, objs)
             && !runs_inside_allowed_through(cx, sites, allowance, family, func, objs.0, first)
     };
-    if !delegates(cx, sites, func, Handover::ByImplementation) {
+    // A function handed on as a value has callers heki does not see: it keeps the accesses it
+    // runs, as a function without callers does.
+    let escapes = allowance.escapes(func);
+    if escapes || !delegates(cx, sites, func, Handover::ByImplementation) {
         if !in_scope
             || allowance.owns(cx, func, family, (obj, looked_up))
-            || judged_inside_allowed(cx, sites, allowance, family, (func, obj), inside)
+            || !escapes && judged_inside_allowed(cx, sites, allowance, family, (func, obj), inside)
         {
             return Vec::new();
         }
@@ -4451,6 +4651,7 @@ pub(crate) fn delegated_reports<'k>(
             callers_of(cx, sites, &callee, facts)
                 .into_iter()
                 .partition(|c| Handover::ByImplementation.hands_over(c));
+
         // Callers through a protocol declaring the method leave the accesses with the function
         // running them, also when its other callers take them over.
         if states[i].runs_access
@@ -4497,10 +4698,16 @@ pub(crate) fn delegated_reports<'k>(
             let in_scope = below_in_scope
                 || allowance.in_scope(c.caller)
                 || c.via.is_some_and(|p| allowance.in_scope(p));
-            let delegating = *delegating
-                .entry(c.caller)
-                .or_insert_with(|| delegates(cx, sites, c.caller, Handover::ByImplementation));
-            if delegating {
+            let escapes = allowance.escapes(c.caller);
+            let delegating = !escapes
+                && *delegating
+                    .entry(c.caller)
+                    .or_insert_with(|| delegates(cx, sites, c.caller, Handover::ByImplementation));
+            if escapes {
+                if in_scope && !allowance.owns(cx, c.caller, family, caller_objs) {
+                    out.push(report_at(&states, i, c.caller, hops));
+                }
+            } else if delegating {
                 if visited.insert((c.caller.clone(), c.into, caller_objs, in_scope)) {
                     states.push(WalkState {
                         func: c.caller.clone(),

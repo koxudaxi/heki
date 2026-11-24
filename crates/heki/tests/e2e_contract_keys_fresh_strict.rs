@@ -293,6 +293,15 @@ write-universe = ["DataModelFieldBase.*"]
             d(u, 31, "MUT201", "entries", init),
             d(u, 32, "MUT201", "entries", init),
             d(u, 33, "MUT201", "entries", extras),
+            // A key heki cannot tell (the function's parameter) may be the entry the boundary
+            // forbids.
+            d(
+                u,
+                34,
+                "EFF201",
+                "entries",
+                "pure:DataModelFieldBase.extras[?]"
+            ),
             d(u, 34, "MUT201", "entries", extras),
             d(u, 35, "MUT201", "entries", extras),
             d(u, 36, "EFF201", "entries", "pass:DataModelFieldBase.extras"),
@@ -3377,6 +3386,136 @@ fn unlisted_dict_keys_count_the_keys_every_write_owners_contract_names() {
     );
 }
 
+const UNKNOWN_CLASS_MODEL: &str = r#"from __future__ import annotations
+
+
+class Field:
+    def __init__(self) -> None:
+        self.kind = "str"
+        _init_cache(self)
+
+
+class Sub(Field):
+    pass
+
+
+class Other:
+    pass
+
+
+def _init_cache(obj) -> None:
+    obj.__dict__["_init_cache"] = None
+"#;
+
+const UNKNOWN_CLASS_PASSES: &str = r#"from __future__ import annotations
+
+from pkg.model import Field, Other
+
+
+def typed_new_key(field: Field) -> None:
+    field.__dict__["_name_cache"] = 1
+
+
+def untyped_new_key(field) -> None:
+    field.__dict__["_name_cache"] = 1
+
+
+def loop_new_key(fields: list) -> None:
+    for field in fields:
+        field.__dict__.setdefault("_seen_cache", True)
+
+
+def untyped_listed_key(field) -> None:
+    field.__dict__["_type_cache"] = 1
+
+
+def untyped_key_named_elsewhere(field) -> None:
+    field.__dict__["_named_elsewhere"] = 1
+
+
+def untyped_new_attribute(field) -> None:
+    field._new_attribute = 1
+
+
+def _fill(obj) -> None:
+    obj.__dict__.pop("_filled", None)
+
+
+def fill_field(field: Field) -> None:
+    _fill(field)
+
+
+def other_only(obj) -> None:
+    obj.__dict__["_other_key"] = 1
+
+
+def call_other(other: Other) -> None:
+    other_only(other)
+"#;
+
+/// A project whose contract `caches` guards `Field._type_cache` with `keys` added, next to a
+/// contract naming `Field._named_elsewhere`.
+fn unknown_class_project(name: &str, keys: &str) -> Project {
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT205\"]\n\n{}{}",
+            write_owner("caches", "pkg.model.Field._type_cache", "pkg.store:*", keys),
+            write_owner("other", "pkg.model.Field._named_elsewhere", "pkg.store:*", ""),
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", UNKNOWN_CLASS_MODEL)
+    .write("pkg/passes.py", UNKNOWN_CLASS_PASSES)
+    .write(
+        "pkg/store.py",
+        "def save(field) -> None:\n    field.__dict__[\"_stored\"] = 1\n",
+    );
+    p
+}
+
+/// With `unlisted-dict-keys = "report"` and `unresolved = "report"`, a constant `__dict__` key
+/// no target names, written on an object of unknown class (a parameter no annotation types, a
+/// loop variable), is a `MUT205` report: it may be a new key of a target's class. So is one in a
+/// helper a caller hands an instance of a target's class, which `MUT201` does not see as a
+/// `__dict__` write at the caller. A key another contract names, a plain attribute store, a
+/// helper only called with an object of another class, the class's own initialization through
+/// a helper, and the allowed writers are not; without either key the write stays silent.
+#[test]
+fn unlisted_dict_keys_on_objects_of_unknown_class_are_unresolved_writes() {
+    let u = "pkg/passes.py";
+    let typed = d(u, 7, "MUT201", "typed_new_key", "Field._name_cache");
+    let listed = d(u, 20, "MUT205", "untyped_listed_key", "_type_cache");
+    let both = "unlisted-dict-keys = \"report\"\nunresolved = \"report\"\n";
+    let p = unknown_class_project("unlisted_keys_unknown_class", both);
+    let diags = diagnostics(&p, &[]);
+    assert_eq!(
+        found(&diags),
+        vec![
+            typed.clone(),
+            d(u, 11, "MUT205", "untyped_new_key", "_name_cache"),
+            d(u, 16, "MUT205", "loop_new_key", "_seen_cache"),
+            listed.clone(),
+            d(u, 32, "MUT205", "_fill", "_filled"),
+        ]
+    );
+    assert_eq!(
+        message_at(&diags, u, 11),
+        "`untyped_new_key` writes `_name_cache` (as a `__dict__` item), a `__dict__` key no target names, on an object of unknown class outside the write owners of `caches`: heki cannot tell whether it writes `pkg.model.Field._name_cache`"
+    );
+    let p = unknown_class_project(
+        "unlisted_keys_unknown_class_typed_only",
+        "unlisted-dict-keys = \"report\"\n",
+    );
+    assert_eq!(found(&diagnostics(&p, &[])), vec![typed]);
+    let p = unknown_class_project(
+        "unlisted_keys_unknown_class_listed_only",
+        "unresolved = \"report\"\n",
+    );
+    assert_eq!(found(&diagnostics(&p, &[])), vec![listed]);
+}
+
 /// A star import binds the names its module exports, which heki does not read, so it may bind
 /// the name of any builtin: `len(globals())` may hand the dict to another `len` (the one
 /// `pkg.writer` defines), which may bind a name declared `Final`. That holds for a star import
@@ -3420,4 +3559,330 @@ fn a_star_import_may_bind_the_name_of_a_reading_builtin() {
         .collect();
     expected.sort();
     assert_eq!(codes, expected);
+}
+
+// ======================================================== entries a store operation writes
+
+const STORE_MODEL: &str = r#"from typing import Final
+
+INIT: Final = "init"
+
+
+class Field:
+    def __init__(self) -> None:
+        self.extras: dict[str, object] = {}
+
+
+def set_extra(field: Field, key: str, value: object) -> None:
+    field.extras[key] = value
+
+
+def _drop_extra(field: Field, key: str) -> None:
+    field.extras.pop(key, None)
+
+
+def relay(field: Field, key: str) -> None:
+    set_extra(field, key, True)
+
+
+def set_flag(field: Field, flags: dict) -> None:
+    field.extras[flags["name"]] = True
+
+
+def quiet_store(field: Field, key: str) -> None:
+    field.extras[key] = 0
+
+
+def relay_quiet(field: Field, key: str) -> None:
+    quiet_store(field, key)
+
+
+def _relay_private(field: Field, key: str) -> None:
+    set_extra(field, key, True)
+"#;
+
+const STORE_PASSES: &str = r#"from pkg.model import (
+    INIT,
+    Field,
+    _drop_extra,
+    _relay_private,
+    quiet_store,
+    relay,
+    relay_quiet,
+    set_extra,
+    set_flag,
+)
+
+
+def writes_its_own_key(field: Field) -> None:
+    field.extras["validate_default"] = True
+
+
+def writes_its_own_key_through_the_store(field: Field) -> None:
+    set_extra(field, "validate_default", True)
+
+
+def writes_a_frozen_key(field: Field) -> None:
+    field.extras["init"] = False
+
+
+def writes_a_frozen_key_through_the_store(field: Field) -> None:
+    set_extra(field, "init", False)
+
+
+def writes_a_key_it_computes(field: Field, key: str) -> None:
+    set_extra(field, key, False)
+
+
+def through_a_constant_and_a_relay(field: Field) -> None:
+    relay(field, INIT)
+
+
+def drops_through_a_private_helper(field: Field) -> None:
+    _drop_extra(field, "init")
+
+
+def computes_in_place(field: Field, names: list[str]) -> None:
+    field.extras[names[0]] = 1
+
+
+def computed_by_the_store(field: Field) -> None:
+    set_flag(field, {"name": "init"})
+
+
+def through_an_allowed_store(field: Field) -> None:
+    quiet_store(field, "init")
+    relay_quiet(field, "init")
+
+
+def through_another_pass(field: Field) -> None:
+    writes_a_key_it_computes(field, "init")
+
+
+def through_a_private_relay(field: Field) -> None:
+    _relay_private(field, "init")
+
+
+def passes_a_computed_key(field: Field, names: list[str]) -> None:
+    set_extra(field, names[0], 1)
+"#;
+
+const STORE_OTHERS: &str = r#"from pkg.model import Field, set_extra
+
+
+def lenient(field: Field, key: str) -> None:
+    set_extra(field, key, 1)
+
+
+def strict(field: Field, key: str) -> None:
+    set_extra(field, "init", 1)
+    set_extra(field, key, 1)
+"#;
+
+/// A store operation taking the key as an argument (`set_extra(field, "init", v)` writing
+/// `field.extras[key]`) writes the entry each call passes, through any number of functions
+/// passing the key on, a `Final` constant, and a private helper; a key heki cannot tell (the
+/// scope function's own parameter, one computed in place or by the store) is reported where the
+/// boundary names entries of the attribute, unless it allows the whole container. An allowed
+/// callee and another function of the scopes keep their writes.
+#[test]
+fn a_store_operation_writes_the_entry_its_caller_passes() {
+    let p = Project::new("store_operation_keys");
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["EFF201"]
+
+[[tool.heki.effect-boundaries]]
+name = "render-preparation-writes-its-keys"
+scopes = ["pkg.passes.*"]
+write-universe = ['Field.extras["init"]', 'Field.extras["validate_default"]']
+allow-writes = ['Field.extras["validate_default"]']
+allowed-callees = ["pkg.model.quiet_store"]
+
+[[tool.heki.effect-boundaries]]
+name = "lenient"
+scopes = ["pkg.others.lenient"]
+write-universe = ['Field.extras["init"]']
+allow-writes = ["Field.extras"]
+
+[[tool.heki.effect-boundaries]]
+name = "strict"
+scopes = ["pkg.others.strict"]
+forbid = ["writes-targets"]
+write-targets = ['Field.extras["init"]']
+"#,
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", STORE_MODEL)
+    .write("pkg/passes.py", STORE_PASSES)
+    .write("pkg/others.py", STORE_OTHERS);
+    let diags = diagnostics(&p, &[]);
+    let (s, o) = ("pkg/passes.py", "pkg/others.py");
+    let init = "render-preparation-writes-its-keys:Field.extras[\"init\"]";
+    let open = "render-preparation-writes-its-keys:Field.extras[?]";
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(o, 9, "EFF201", "strict", "strict:Field.extras[\"init\"]"),
+            d(o, 10, "EFF201", "strict", "strict:Field.extras[?]"),
+            d(s, 23, "EFF201", "writes_a_frozen_key", init),
+            d(
+                s,
+                27,
+                "EFF201",
+                "writes_a_frozen_key_through_the_store",
+                init
+            ),
+            d(s, 31, "EFF201", "writes_a_key_it_computes", open),
+            d(s, 35, "EFF201", "through_a_constant_and_a_relay", init),
+            d(s, 39, "EFF201", "drops_through_a_private_helper", init),
+            d(s, 43, "EFF201", "computes_in_place", open),
+            d(s, 47, "EFF201", "computed_by_the_store", open),
+            d(s, 60, "EFF201", "through_a_private_relay", init),
+            d(s, 64, "EFF201", "passes_a_computed_key", open),
+        ],
+        "{diags:#?}"
+    );
+    assert_eq!(
+        message_at(&diags, s, 31),
+        "`writes_a_key_it_computes` writes an entry of `Field.extras` under a key heki cannot tell (in place via `pkg.model.set_extra`), where effect boundary `render-preparation-writes-its-keys` names some of its entries"
+    );
+    assert_eq!(
+        message_at(&diags, s, 27),
+        "`writes_a_frozen_key_through_the_store` writes `Field.extras[\"init\"]` (in place via `pkg.model.set_extra`), which effect boundary `render-preparation-writes-its-keys` does not allow"
+    );
+    // `heki inspect` names the entries: the constant a call passes, the parameter a store
+    // operation keys by, a key heki cannot tell.
+    let inspect = |name: &str| p.heki(&["inspect", name]).1;
+    assert!(
+        inspect("pkg.passes.writes_a_frozen_key_through_the_store")
+            .contains("pkg.model.Field.extras[\"init\"]  container_mut"),
+    );
+    assert!(inspect("pkg.model.set_extra").contains("pkg.model.Field.extras[key]  container_mut"));
+    assert!(inspect("pkg.model.set_flag").contains("pkg.model.Field.extras[?]  container_mut"));
+}
+
+const ROUTES_MODEL: &str = r#"class Field:
+    def __init__(self) -> None:
+        self.extras: dict[str, object] = {}
+
+
+def set_extra(field: Field, key: str, value: object) -> None:
+    field.extras[key] = value
+
+
+def trusted(field: Field, key: str) -> None:
+    set_extra(field, key, True)
+
+
+def relay(field: Field, key: str) -> None:
+    _forward(field, key)
+
+
+def _forward(field: Field, key: str) -> None:
+    set_extra(field, key, True)
+
+
+def _store(field: Field, key: str) -> None:
+    field.extras[key] = 1
+"#;
+
+const ROUTES: &str = r#"from pkg.model import Field, relay, trusted
+
+
+def through_both_routes(field: Field) -> None:
+    trusted(field, "init")
+    relay(field, "init")
+
+
+def through_the_allowed_route(field: Field) -> None:
+    trusted(field, "init")
+
+
+def through_two_keys(field: Field, key: str) -> None:
+    relay(field, "other")
+    relay(field, key)
+"#;
+
+const ROUTES_OTHER: &str = r#"from pkg.model import Field, _store
+
+
+def reset(field: Field) -> None:
+    field.extras.clear()
+    field.extras["init"] = 1
+
+
+def through_a_private_store(field: Field) -> None:
+    _store(field, "init")
+"#;
+
+/// The keys a store operation writes are the ones each followed route passes: a scope function
+/// passing `"init"` through an allowed callee (`trusted`) and through a relay that is not
+/// allowed is reported for the relay, whose route is longer; through the allowed callee alone it
+/// is not. Each key is reported through a call passing it. `heki inspect` lists a write of the
+/// whole container next to an entry the same function writes, and a private store operation's
+/// write only under the entry its call passes.
+#[test]
+fn a_store_operation_is_judged_on_each_route_passing_its_key() {
+    let p = Project::new("store_operation_routes");
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["EFF201"]
+
+[[tool.heki.effect-boundaries]]
+name = "routes"
+scopes = ["pkg.routes.*"]
+write-universe = ['Field.extras["init"]']
+allowed-callees = ["pkg.model.trusted"]
+"#,
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", ROUTES_MODEL)
+    .write("pkg/routes.py", ROUTES)
+    .write("pkg/other.py", ROUTES_OTHER);
+    let diags = diagnostics(&p, &[]);
+    let r = "pkg/routes.py";
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(
+                r,
+                6,
+                "EFF201",
+                "through_both_routes",
+                "routes:Field.extras[\"init\"]"
+            ),
+            d(
+                r,
+                15,
+                "EFF201",
+                "through_two_keys",
+                "routes:Field.extras[?]"
+            ),
+        ],
+        "{diags:#?}"
+    );
+    let changed = |name: &str| -> Vec<String> {
+        let out = p.heki(&["inspect", name]).1;
+        out.lines()
+            .filter(|l| l.ends_with("container_mut"))
+            .filter_map(|l| l.split_whitespace().next().map(str::to_owned))
+            .collect()
+    };
+    assert_eq!(
+        changed("pkg.other.reset"),
+        ["pkg.model.Field.extras", "pkg.model.Field.extras[\"init\"]"]
+    );
+    assert_eq!(
+        changed("pkg.other.through_a_private_store"),
+        ["pkg.model.Field.extras[\"init\"]"]
+    );
 }
