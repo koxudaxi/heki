@@ -713,6 +713,10 @@ fn invalid_contracts_are_configuration_errors() {
             "unknown `type-checking` value `maybe` in import-owners `bad`",
         ),
         (
+            "unresolved = \"yes\"",
+            "unknown `unresolved` value `yes` in import-owners `bad`",
+        ),
+        (
             "forbidden-imports = [\"pkg.[\"]",
             "invalid glob `pkg.[` in import-owners.forbidden-imports",
         ),
