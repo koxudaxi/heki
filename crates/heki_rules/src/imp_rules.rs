@@ -6,9 +6,9 @@
 mod circular;
 mod cycles;
 
+pub use circular::circular_failure_files;
 pub(crate) use circular::imp102;
 pub(crate) use cycles::imp101;
-pub use circular::circular_failure_files;
 pub use cycles::import_cycle_files;
 
 use crate::mut_rules::{contract_places, mode, reports_unresolved};

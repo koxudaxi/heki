@@ -36,9 +36,7 @@ pub use contracts::{
 };
 pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
 pub use heki_diagnostics::Certainty;
-pub use imp_rules::{
-    circular_failure_files, import_cycle_files, walking_importers, walks_imports,
-};
+pub use imp_rules::{circular_failure_files, import_cycle_files, walking_importers, walks_imports};
 pub use mut_rules::{
     CHAIN_RULES, ChainFacts, EXAMPLE_RULES, ExampleOwners, SentinelTestKey, StaleWriteKey,
     chain_facts, deep_copy_files, example_digest, family_readers, kept_removals_in,

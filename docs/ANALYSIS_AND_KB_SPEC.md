@@ -2322,21 +2322,26 @@ an import itself.
   The language server re-checks the files whose groups close a cycle, before and after an
   import changes (`Workspace::note_import_reports`).
 - **Circular failures** (`ImportGraph::circular_failures`, for `IMP102`): the cycle groups
-  through the sites that may run while a module loads (`body`, or open). Each module of a group
-  is imported first in turn: its parent packages, then its body, run through their sites in
-  order; a site that imports whenever its module loads, where it is written, with no handler
-  that may take an `ImportError` (`ImportSite::always_imports_uncaught`), runs the body of each
-  module of the group it enters that has not loaded yet before going on. A `from M import n` of
-  such a site fails when `M` is loading, the project has no module `M.n`, `M` may not have bound
-  `n`, `__getattr__`, or any name before the site it is paused at (body order), and no other
-  module binds `M.n` (`ProjectDecls::global_bound_elsewhere`). What else may load a module of
-  the group stops the run: a site the run cannot place, or whose module heki cannot name, that
-  may load a module of the group not loaded yet; a module outside the group whose load may load
-  one of the group or any module (`walk::Closure` over every site that may run while a module
-  loads, with bitsets of the groups); and, when a function or lazy import of the project may
-  load a module of the group, code a module body runs (body order). The runs of every group
-  share one `Budget::of_graph` (owner `import_failures`), one step per site run; past it no
-  further run reports.
+  through the sites that may run while a module loads (`body`, or open). Each module of a group,
+  and each package holding one outside the group whose import loads the group, is imported first
+  in turn: its parent packages, then its body, run through their sites in order; a site that
+  imports whenever its module loads, where it is written, with no handler that may take an
+  `ImportError` (`ImportSite::always_imports_uncaught`), runs the body of each module it enters
+  that has not loaded yet before going on. A module of the group has not until the run enters
+  it; one outside the group has not when its load certainly loads a module of the group (a
+  `walk::Closure` over those sites) and may reach the group through no import other than such
+  hops (it cannot have run whole, nor be paused at an import leading to the entry), and changes
+  nothing the run reads when its load may load no module of the group. A `from M import n` of
+  such a site, naming `M` itself, fails when `M` is loading, the project has no module `M.n`, `M`
+  may not have bound `n`, `__getattr__`, or any name before the site it is paused at (body
+  order), and no other module binds `M.n` (`ProjectDecls::global_bound_elsewhere`). What else
+  may load a module of the group stops the run: a site the run cannot place, or whose module
+  heki cannot name, that may load a module of the group not loaded yet; a module outside the
+  group whose load may load one of the group or any module (`walk::Closure` over every site that
+  may run while a module loads, with bitsets of the groups); and, when a function or lazy import
+  of the project may load a module of the group, code a module body runs (body order). The runs
+  of every group share one `Budget::of_graph` (owner `import_failures`), one step per site run;
+  past it no further run reports.
 - **Early Cutoff**: `IncrementalUpdate::imports_changed` tells whether a file's sites or body
   order changed, without positions (`ModuleImports::same_facts`), or appeared or disappeared
   with the file.

@@ -16,18 +16,19 @@ Opt-in: a `from M import name` that raises `ImportError` when a module of its im
 
 ## What it does
 Reports a `from M import name` that raises `ImportError` when a module of its import cycle is
-imported before the other modules of the cycle. Importing that module runs its body, and the
-imports in module bodies lead from it to the statement while `M` is still loading: `M` is paused
-at the import that started the chain, and has not bound `name` yet. Python then raises
+imported before the other modules of the cycle have loaded. Importing that module runs its body,
+and the imports in module bodies lead from it to the statement while `M` is still loading: `M`
+is paused at the import that started the chain, and has not bound `name` yet. Python then raises
 `ImportError: cannot import name 'name' from partially initialized module 'M' (most likely due to
 a circular import)`.
 
 heki finds it without configuration. For each group of the project's modules that import each
-other while they load, it imports each module of the group first in turn: the module's parent
-packages load first, then the module bodies run in order through their imports, and each import
-of a module that has not loaded yet runs that module's body before the import goes on. One
-report is given per failing statement, naming the modules whose import fails there, with the
-imports of the chain from the first of them as related locations.
+other while they load, it imports each module of the group first in turn, and each package
+holding one whose `__init__.py` imports the group: the module's parent packages load first, then
+the module bodies run in order through their imports, and each import of a module that has not
+loaded yet runs that module's body before the import goes on. One report is given per failing
+statement, naming the modules whose import fails there, with the imports of the chain from the
+first of them as related locations.
 
 Only `from M import name` fails this way. `import M` and `import M as m` take the module while
 it is still loading and do not fail there, and neither does `from pkg import sub` of a submodule
@@ -35,10 +36,10 @@ it is still loading and do not fail there, and neither does `from pkg import sub
 
 ## What a report states
 
-A report states that importing one of the modules it names, before any other module of its
-import cycle is imported in the process, does not complete: unless code that runs before raises
-first, the chain of imports shown reaches the reported statement while `M` is loading and has not
-bound `name`, and the statement raises `ImportError`.
+A report states that importing one of the modules it names, while no module of the import cycle
+has been imported in the process, does not complete: unless code that runs before raises first,
+the chain of imports shown reaches the reported statement while `M` is loading and has not bound
+`name`, and the statement raises `ImportError`.
 
 Its premises, each established or no report:
 
@@ -46,7 +47,12 @@ Its premises, each established or no report:
   by-name import there), runs on every path through the body, is no lazy import, and loads the
   module shown: its name resolved against the project's modules, a `from` import split between a
   submodule and an attribute as Python splits it, and the parent packages of a module loading
-  first. The reported statement is such an import too.
+  first. The reported statement is such an import too, and takes the name from `M` itself.
+- **Not loaded before**: each module the chain enters has not loaded yet. A module of the cycle
+  has not, by the claim; a module outside it has not when its import imports a module of the
+  cycle whenever it runs, and every way from its imports to the cycle is an import in a module
+  body that heki names. Otherwise an import of a module outside the cycle that may load one of
+  the cycle stops the run.
 - **No handler**: no handler takes the `ImportError` on the way: no `except` clause naming
   `ImportError`, `Exception`, `BaseException`, a type heki cannot tell is another builtin
   exception, or a bare `except`, and no `with` block or `finally` body around an import of the

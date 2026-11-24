@@ -11,7 +11,8 @@ use serde_json::Value;
 /// The `IMP102` reports of `heki check --select IMP102`, as JSON.
 fn diagnostics(p: &Project) -> Vec<Value> {
     let (code, out, err) = p.check(&["--select", "IMP102", "--output-format", "json"]);
-    assert!(code == 0 || code == 1, "{code}: {out}\n{err}");
+    // 2: a file heki could not read.
+    assert!((0..=2).contains(&code), "{code}: {out}\n{err}");
     let all: Vec<Value> = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
     (all.into_iter())
         .filter(|d| d["rule_code"] == "IMP102")
@@ -25,7 +26,7 @@ fn reports(p: &Project) -> Vec<String> {
         .map(|d| {
             let message = d["message"].as_str().unwrap();
             let entries = message.split(": importing ").nth(1).unwrap();
-            let entries = entries.split(" before the other modules").next().unwrap();
+            let entries = entries.split(" while no module").next().unwrap();
             let entries: Vec<&str> = entries.split('`').skip(1).step_by(2).collect();
             format!(
                 "{}:{} [{}] {}",
@@ -126,8 +127,8 @@ fn each_module_of_a_cycle_imported_first_fails_at_the_other() {
     assert_eq!(
         found[1]["message"],
         "`<module>` imports `helper_a` from `pkg.a` while `pkg.a` is still loading, at its import \
-         of `pkg.b`, and has not bound it: importing `pkg.a` before the other modules of its \
-         import cycle raises `ImportError` here"
+         of `pkg.b`, and has not bound it: importing `pkg.a` while no module of the import \
+         cycle has loaded raises `ImportError` here"
     );
     assert_eq!(
         found[1]["related"][0]["message"],
@@ -156,13 +157,16 @@ fn only_the_entries_whose_chain_reaches_the_import_paused_fail() {
         "circular_imports_ring",
         &[
             ("ring/__init__.py", ""),
-            ("ring/a.py", "import ring.b\n\n\ndef helper_a():\n    return 1\n"),
+            (
+                "ring/a.py",
+                "import ring.b\n\n\ndef helper_a():\n    return 1\n",
+            ),
             ("ring/b.py", "import ring.c\n"),
             ("ring/c.py", "from ring.a import helper_a\n"),
         ],
     );
     let (message, related) = the_report(&p);
-    assert!(message.contains("importing `ring.a` before"), "{message}");
+    assert!(message.contains("importing `ring.a` while"), "{message}");
     assert_eq!(
         related,
         [
@@ -187,7 +191,7 @@ fn an_entry_through_its_parent_package_fails_where_the_package_does() {
     assert_eq!(reports(&p), ["pkg/b.py:1 [pkg.VALUE] pkg pkg.a pkg.b"]);
     let (message, related) = the_report(&p);
     assert!(
-        message.contains("importing `pkg`, `pkg.a`, or `pkg.b` before the other modules of their"),
+        message.contains("importing `pkg`, `pkg.a`, or `pkg.b` while no module"),
         "{message}"
     );
     assert_eq!(
@@ -199,6 +203,51 @@ fn an_entry_through_its_parent_package_fails_where_the_package_does() {
     );
 }
 
+/// `from . import b` of a submodule takes it from `sys.modules` while it loads: no failure.
+#[test]
+fn a_from_import_of_a_submodule_does_not_fail() {
+    let p = project(
+        "circular_imports_submodules",
+        &[
+            ("pkg/__init__.py", ""),
+            ("pkg/a.py", "from . import b\n"),
+            ("pkg/b.py", "from . import a\n"),
+        ],
+    );
+    assert_eq!(reports(&p), Vec::<String>::new());
+}
+
+/// A package outside the cycle whose `__init__` imports a module of it: importing the package,
+/// or any of its modules, loads the cycle in the order the package does, so all of them fail
+/// at the same import.
+#[test]
+fn a_package_loading_the_cycle_is_imported_first_too() {
+    let p = project(
+        "circular_imports_outer_package",
+        &[
+            ("pkg/__init__.py", "from pkg.core import Core\n"),
+            (
+                "pkg/core.py",
+                "from pkg.util import helper\n\n\nclass Core:\n    pass\n",
+            ),
+            (
+                "pkg/util.py",
+                "from pkg.core import Core\n\n\ndef helper():\n    return 1\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        reports(&p),
+        ["pkg/util.py:1 [pkg.core.Core] pkg pkg.core pkg.util"]
+    );
+    // The package may load the cycle on a branch only: it may have loaded before without it.
+    p.write(
+        "pkg/__init__.py",
+        "import os\n\nif os.environ.get(\"X\"):\n    from pkg.core import Core\n",
+    );
+    assert_eq!(reports(&p), Vec::<String>::new());
+}
+
 /// `import M` takes the module while it loads; only `from M import name` asks it for a name.
 #[test]
 fn an_import_of_the_module_does_not_fail() {
@@ -206,8 +255,14 @@ fn an_import_of_the_module_does_not_fail() {
         "circular_imports_import_form",
         &[
             ("pkg/__init__.py", ""),
-            ("pkg/a.py", "import pkg.b\n\n\ndef helper_a():\n    return 1\n"),
-            ("pkg/b.py", "import pkg.a\n\n\ndef uses_a():\n    return pkg.a.helper_a()\n"),
+            (
+                "pkg/a.py",
+                "import pkg.b\n\n\ndef helper_a():\n    return 1\n",
+            ),
+            (
+                "pkg/b.py",
+                "import pkg.a\n\n\ndef uses_a():\n    return pkg.a.helper_a()\n",
+            ),
         ],
     );
     assert_eq!(reports(&p), Vec::<String>::new());
@@ -312,7 +367,10 @@ fn a_handler_of_other_exceptions_leaves_the_report() {
         "circular_imports_other_handlers",
         &[
             ("pkg/__init__.py", ""),
-            ("pkg/a.py", "from pkg.b import helper_b\n\n\ndef helper_a():\n    return 1\n"),
+            (
+                "pkg/a.py",
+                "from pkg.b import helper_b\n\n\ndef helper_a():\n    return 1\n",
+            ),
             (
                 "pkg/b.py",
                 "try:\n    from pkg.a import helper_a\nexcept (KeyError, ModuleNotFoundError):\n    helper_a = None\n",
@@ -333,7 +391,10 @@ fn code_that_may_load_the_cycle_out_of_order_stops_a_run() {
         &[
             ("pkg/__init__.py", ""),
             ("pkg/loader.py", "def load():\n    import pkg.x\n"),
-            ("pkg/e.py", "from pkg.loader import load\n\nload()\nimport pkg.m\n"),
+            (
+                "pkg/e.py",
+                "from pkg.loader import load\n\nload()\nimport pkg.m\n",
+            ),
             (
                 "pkg/m.py",
                 "import pkg.x\n\n\ndef name():\n    return 1\n\n\nimport pkg.e\n",
@@ -354,7 +415,10 @@ fn a_name_the_package_binds_from_its_submodule_does_not_fail() {
     let p = project(
         "circular_imports_submodule_attribute",
         &[
-            ("pkg/__init__.py", "from pkg.a import value\nfrom pkg.b import b\n"),
+            (
+                "pkg/__init__.py",
+                "from pkg.a import value\nfrom pkg.b import b\n",
+            ),
             ("pkg/a.py", "from pkg import b\n\nvalue = 1\n"),
             ("pkg/b.py", "def b():\n    return 1\n"),
         ],
@@ -373,4 +437,135 @@ fn a_name_the_package_binds_from_its_submodule_does_not_fail() {
     let site = &report["modules"][0]["imports"][0];
     assert_eq!(site["target"], "pkg");
     assert_eq!(site["may_load"], serde_json::json!(["pkg.b"]));
+}
+
+/// The H7 shape where `pkg.a` runs `prefix` before its import of `pkg.b`.
+fn h7_with_prefix(name: &str, prefix: &str) -> Project {
+    project(
+        name,
+        &[
+            ("pkg/__init__.py", ""),
+            (
+                "pkg/a.py",
+                &format!(
+                    "{prefix}\nfrom pkg.b import helper_b\n\n\ndef helper_a():\n    return 1\n"
+                ),
+            ),
+            (
+                "pkg/b.py",
+                "def helper_b():\n    return 2\n\n\nfrom pkg.a import helper_a\n",
+            ),
+            ("pkg/other.py", ""),
+            ("pkg/plugins/__init__.py", ""),
+            ("pkg/plugins/x.py", "import pkg.b\n"),
+        ],
+    )
+}
+
+/// What may load a module of the cycle before the import that pauses `pkg.a` stops the run of
+/// `pkg.a` imported first: an import heki cannot name, one of several or under a package, a
+/// module it could not read, and an import that raises whenever it runs. Others do not.
+#[test]
+fn imports_the_run_cannot_place_stop_it() {
+    let stopping = [
+        "import importlib\nimport os\nimportlib.import_module(os.environ[\"M\"])",
+        "import importlib\nimport os\nimportlib.import_module(\"pkg.b\" if os.environ.get(\"X\") else \"json\")",
+        "import importlib\nimport os\nimportlib.import_module(f\"pkg.plugins.{os.environ['P']}\")",
+        "import pkg.broken",
+        "from pkg.missing import gone",
+    ];
+    for (i, prefix) in stopping.iter().enumerate() {
+        let p = h7_with_prefix(&format!("circular_imports_unplaced_{i}"), prefix);
+        p.write("pkg/broken.py", "def broken(:\n");
+        assert_eq!(reports(&p), Vec::<String>::new(), "{prefix}");
+    }
+    let passing = [
+        "import json\nimport pkg.other",
+        "import importlib\nimportlib.import_module(\"pkg.other\")",
+    ];
+    for (i, prefix) in passing.iter().enumerate() {
+        let p = h7_with_prefix(&format!("circular_imports_placed_{i}"), prefix);
+        assert_eq!(
+            reports(&p),
+            ["pkg/b.py:5 [pkg.a.helper_a] pkg.a"],
+            "{prefix}"
+        );
+    }
+}
+
+/// When a function of the project may load a module of the cycle, code `pkg.a` runs before its
+/// import of `pkg.b` may call it, and stops the run; what runs no code does not.
+#[test]
+fn code_that_may_call_a_loading_function_stops_the_run() {
+    let loader = "def load():\n    import pkg.b\n";
+    let silent = [
+        "S = {1, 2}",
+        "D = {\"a\": 1}",
+        "class C:\n    pass",
+        "import os\nif os.environ.get(\"X\"):\n    raise RuntimeError(\"no\")",
+        "import os\nPATH = os.sep",
+        "import os\nX = len(os.sep)",
+    ];
+    for (i, prefix) in silent.iter().enumerate() {
+        let p = h7_with_prefix(&format!("circular_imports_code_{i}"), prefix);
+        p.write("pkg/loader.py", loader);
+        assert_eq!(reports(&p), Vec::<String>::new(), "{prefix}");
+    }
+    let inert = [
+        "__all__ = [\"helper_a\"]\nVALUE = (1, 2)\nNOTHING = {}",
+        "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import json",
+        "FLAG = None\nFLAG is None",
+        "def helper():\n    return 1",
+    ];
+    for (i, prefix) in inert.iter().enumerate() {
+        let p = h7_with_prefix(&format!("circular_imports_inert_{i}"), prefix);
+        p.write("pkg/loader.py", loader);
+        assert_eq!(
+            reports(&p),
+            ["pkg/b.py:5 [pkg.a.helper_a] pkg.a"],
+            "{prefix}"
+        );
+    }
+}
+
+/// A module of the cycle that loads whole before the failing import runs its code after its
+/// last import: with a function that may load the cycle, that stops the run too.
+#[test]
+fn code_after_the_last_import_of_a_module_loaded_whole_stops_the_run() {
+    let p = project(
+        "circular_imports_code_after",
+        &[
+            ("pkg/__init__.py", ""),
+            (
+                "pkg/a.py",
+                "import pkg.b\nimport pkg.c\n\n\ndef f():\n    return 1\n",
+            ),
+            ("pkg/b.py", "import pkg.a\n\nprint(\"loaded\")\n"),
+            ("pkg/c.py", "from pkg.a import f\n"),
+        ],
+    );
+    assert_eq!(reports(&p), ["pkg/c.py:1 [pkg.a.f] pkg.a pkg.b"]);
+    // Importing `pkg.b` first fails before `pkg.b` runs its code.
+    p.write("pkg/loader.py", "def load():\n    import pkg.c\n");
+    assert_eq!(reports(&p), ["pkg/c.py:1 [pkg.a.f] pkg.b"]);
+}
+
+/// `from pkg import b`, where the package binds `b` and has a module `pkg.b`: the import may load
+/// the submodule, a module of the cycle that has not loaded, which stops the run.
+#[test]
+fn a_submodule_a_from_import_may_load_stops_the_run() {
+    let p = project(
+        "circular_imports_maybe_submodule",
+        &[
+            ("pkg/__init__.py", "b = None\n"),
+            (
+                "pkg/a.py",
+                "from pkg import b\nimport pkg.b\n\n\ndef helper_a():\n    return 1\n",
+            ),
+            ("pkg/b.py", "from pkg.a import helper_a\n"),
+        ],
+    );
+    assert_eq!(reports(&p), Vec::<String>::new());
+    p.write("pkg/__init__.py", "");
+    assert_eq!(reports(&p), ["pkg/b.py:1 [pkg.a.helper_a] pkg.a"]);
 }

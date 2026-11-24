@@ -133,7 +133,10 @@ impl ImportSite {
     /// not lazy, and no handler may take the error ([`Self::caught`]). A handler of only
     /// `ModuleNotFoundError` guards the site but does not take the error.
     pub fn always_imports_uncaught(&self) -> bool {
-        self.timing == Answer::Known(Timing::Body) && self.unconditional && !self.lazy && !self.caught
+        self.timing == Answer::Known(Timing::Body)
+            && self.unconditional
+            && !self.lazy
+            && !self.caught
     }
 
     /// The site with its positions zeroed: what Early Cutoff compares.
@@ -716,7 +719,11 @@ impl BodyOrder {
             let insts = (b.insts.iter())
                 .filter(|i| may_run_code(ir, &i.kind))
                 .map(|i| i.span.start);
-            insts.chain(tests_truth(&shape, b).then(|| b.term_span.map(|s| s.start)).flatten())
+            insts.chain(
+                tests_truth(&shape, b)
+                    .then(|| b.term_span.map(|s| s.start))
+                    .flatten(),
+            )
         });
         Self {
             bound_before,
@@ -757,23 +764,29 @@ fn may_run_code(ir: &ModuleIr, kind: &InstKind) -> bool {
 
 /// Whether block `b` ends by testing the truth of a value that may run code (its `__bool__` or
 /// `__len__`), or by raising a value (which may make an instance of the class raised): a
-/// constant, an identity test, and `TYPE_CHECKING` run none.
+/// constant, an identity test, and `TYPE_CHECKING` (read as a global, or as the value its import
+/// binds in the module body) run none.
 fn tests_truth(shape: &FnShape<'_>, b: &BasicBlock) -> bool {
     match &b.terminator {
-        Terminator::Branch { cond, .. } => !matches!(
-            shape.inst(shape.copy_root(*cond)).map(|i| &i.kind),
-            Some(
-                InstKind::Const { .. }
-                    | InstKind::Compare {
-                        op: CompareOpKind::Is | CompareOpKind::IsNot,
-                        ..
-                    }
+        Terminator::Branch { cond, .. } => {
+            !matches!(
+                shape.inst(shape.copy_root(*cond)).map(|i| &i.kind),
+                Some(
+                    InstKind::Const { .. }
+                        | InstKind::Compare {
+                            op: CompareOpKind::Is | CompareOpKind::IsNot,
+                            ..
+                        }
+                )
+            ) && !matches!(
+                shape.inst(shape.copy_root(*cond)).map(|i| &i.kind),
+                Some(
+                    InstKind::LoadGlobal { name, .. }
+                        | InstKind::LoadName { name, .. }
+                        | InstKind::Import { name, .. }
+                ) if name == "TYPE_CHECKING"
             )
-        ) && !matches!(
-            shape.inst(shape.copy_root(*cond)).map(|i| &i.kind),
-            Some(InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. })
-                if name == "TYPE_CHECKING"
-        ),
+        }
         Terminator::Raise(Some(_)) => true,
         _ => false,
     }

@@ -43,6 +43,7 @@ import builtins, importlib, importlib.util, json, sys
 root, first = sys.argv[1], sys.argv[2]
 sys.path[:0] = [root, root + "/src"]
 edges = []
+MISSING = object()
 original_import = builtins.__import__
 original_import_module = importlib.import_module
 
@@ -78,9 +79,11 @@ def recorded_import(name, globals=None, locals=None, fromlist=(), level=0):
             edges.append([importer, absolute])
         for item in items:
             full = absolute + "." + item
-            bound = getattr(sys.modules.get(absolute), item, None)
-            target = full if full in sys.modules and bound is sys.modules[full] else absolute
-            edges.append([importer, target])
+            # The name the import takes: the package's attribute, or, while the package has
+            # none (the submodule is still loading), the submodule in `sys.modules`.
+            bound = getattr(sys.modules.get(absolute), item, MISSING)
+            submodule = full in sys.modules and bound in (MISSING, sys.modules[full])
+            edges.append([importer, full if submodule else absolute])
     return module
 
 
@@ -133,7 +136,7 @@ def circular_failures(heki: str, root: Path) -> dict[str, tuple[str, int]]:
         raise SystemExit(f"{root}: heki check exited with {result.returncode}\n{result.stderr}")
     failing: dict[str, tuple[str, int]] = {}
     for report in json.loads(result.stdout):
-        named = report["message"].split(": importing ", 1)[1].split(" before the other modules")[0]
+        named = report["message"].split(": importing ", 1)[1].split(" while no module")[0]
         if " other module" in named:
             raise SystemExit(f"{root}: {report['path']}: a report names too many modules to compare")
         where = (Path(report["path"]).as_posix(), report["line"])

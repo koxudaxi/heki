@@ -7,7 +7,7 @@ use super::hop_text;
 use crate::CheckContext;
 use heki_diagnostics::Diagnostic;
 use heki_effect::ProjectIndex;
-use heki_effect::imports::{CircularFailure, ImportForm, ImportGraph, ModuleRef};
+use heki_effect::imports::{CircularFailure, ImportGraph, ModuleRef};
 use heki_effect::resolver::ProjectDecls;
 use std::path::PathBuf;
 
@@ -45,7 +45,10 @@ fn entries_text(names: &[&str]) -> String {
         _ => {
             let others = quoted.len() - NAMED_ENTRIES;
             let more = if others == 1 { "module" } else { "modules" };
-            format!("{}, or {others} other {more}", quoted[..NAMED_ENTRIES].join(", "))
+            format!(
+                "{}, or {others} other {more}",
+                quoted[..NAMED_ENTRIES].join(", ")
+            )
         }
     }
 }
@@ -62,24 +65,24 @@ fn report(
         return;
     };
     let (site, _) = &graph.sites(failure.module).expect("a failure is at a site")[failure.site];
-    let ImportForm::From(name) = &site.form else {
-        unreachable!("a failing import is a `from` import");
-    };
+    let name = &failure.name;
     let module = |m: u32| graph.name(ModuleRef::Project(m));
     let from = module(failure.from);
     let paused = (failure.chain.iter())
         .find(|hop| hop.from == failure.from)
         .expect("the chain leaves the module the name comes from");
-    let (_, paused_target) = &graph.sites(failure.from).expect("a chain steps from sites")[paused.site];
-    let paused_at = paused_target
-        .certain()
-        .map_or_else(|| module(paused.to).to_owned(), |t| graph.name(t).to_owned());
+    let (_, paused_target) =
+        &graph.sites(failure.from).expect("a chain steps from sites")[paused.site];
+    let paused_at = graph.name(
+        paused_target
+            .certain()
+            .expect("a hop's site loads a module"),
+    );
     let entries: Vec<&str> = failure.entries.iter().map(|&m| module(m)).collect();
-    let whose = if entries.len() == 1 { "its" } else { "their" };
     let message = format!(
         "`{}` imports `{name}` from `{from}` while `{from}` is still loading, at its import of \
-         `{paused_at}`, and has not bound it: importing {} before the other modules of {whose} \
-         import cycle raises `ImportError` here",
+         `{paused_at}`, and has not bound it: importing {} while no module of the import cycle \
+         has loaded raises `ImportError` here",
         site.qualname,
         entries_text(&entries),
     );
@@ -138,8 +141,14 @@ mod tests {
             (&["a"][..], "`a`"),
             (&["a", "b"][..], "`a` or `b`"),
             (&["a", "b", "c"][..], "`a`, `b`, or `c`"),
-            (&["a", "b", "c", "d"][..], "`a`, `b`, `c`, or 1 other module"),
-            (&["a", "b", "c", "d", "e"][..], "`a`, `b`, `c`, or 2 other modules"),
+            (
+                &["a", "b", "c", "d"][..],
+                "`a`, `b`, `c`, or 1 other module",
+            ),
+            (
+                &["a", "b", "c", "d", "e"][..],
+                "`a`, `b`, `c`, or 2 other modules",
+            ),
         ] {
             assert_eq!(entries_text(names), text, "{names:?}");
         }

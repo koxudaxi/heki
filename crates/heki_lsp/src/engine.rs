@@ -18,8 +18,8 @@ use heki_rules::project::{
 use heki_rules::{
     CHAIN_RULES, ChainFacts, CheckExtras, EXAMPLE_RULES, ExampleOwners, RuleSelection,
     SNAPSHOT_FILE, SelectionError, SentinelTestKey, SnapshotError, StaleWriteKey, SummarySnapshot,
-    chain_facts, check_project, deep_copy_files, example_digest, family_readers,
-    circular_failure_files, import_cycle_files, kept_removals_in, lazy_setup_files, sentinel_tests_in,
+    chain_facts, check_project, circular_failure_files, deep_copy_files, example_digest,
+    family_readers, import_cycle_files, kept_removals_in, lazy_setup_files, sentinel_tests_in,
     stale_writes_by_file,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
