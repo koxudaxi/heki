@@ -338,6 +338,34 @@ impl Touched {
         touched.is_none_or(|t| t.touches(d))
     }
 
+    /// The file errors of `errors` a run with `touched` reports and fails on, as it does its
+    /// reports: only those of a touched file. A note names the others once: a run over given
+    /// files says with its exit code whether those files could be analyzed, and another file
+    /// that cannot be read only leaves out the reports that need its code.
+    pub(crate) fn errors<'e>(
+        touched: Option<&Self>,
+        errors: &'e [FileError],
+        format: OutputFormat,
+    ) -> Vec<&'e FileError> {
+        let (shown, others): (Vec<&FileError>, Vec<&FileError>) =
+            (errors.iter()).partition(|e| touched.is_none_or(|t| t.files.contains(&e.path)));
+        if !others.is_empty() {
+            let mut paths: Vec<String> = (others.iter().take(recommend::MAX_EXAMPLES))
+                .map(|e| format!("`{}`", shown_text(&e.path)))
+                .collect();
+            if others.len() > recommend::MAX_EXAMPLES {
+                paths.push("...".to_owned());
+            }
+            log!(
+                format,
+                "note: {} file(s) the run does not report on could not be analyzed: {}; reports that need their code are missing: name a file to see its error, or exclude it with `extend-exclude`",
+                others.len(),
+                paths.join(", ")
+            );
+        }
+        shown
+    }
+
     /// Whether `--fix` and `--diff` in a run with `touched` apply the fix of `d`, a report it
     /// shows: only in a touched file.
     fn rewrites(touched: Option<&Self>, d: &Diagnostic) -> bool {
@@ -604,7 +632,8 @@ fn run_check(args: &CheckArgs) -> Result<ExitCode> {
         } else {
             ExitCode::from(1)
         };
-        let mut errors = failure::of_files(&run.errors);
+        let shown = Touched::errors(run.touched.as_ref(), &run.errors, args.output_format);
+        let mut errors = failure::of_files(shown);
         errors.extend(run.refused.iter().map(Problem::new));
         return finish(args.output_format, &errors, code);
     }
@@ -840,6 +869,7 @@ fn report(
 
     let unmatched_entries = report_unmatched_entries(args, analyzed)?;
     note_imports_left_out(project, fmt)?;
+    let errors = Touched::errors(touched, &project.errors, fmt);
     if let Some(touched) = touched {
         touched.keep(&mut diags);
     }
@@ -858,7 +888,7 @@ fn report(
         Some((f, lines)) => lines.line_text(&f.source, line).map(str::to_owned),
         None => heki_diagnostics::file_line(p, line),
     };
-    let failures = shown_failures(&project.errors);
+    let failures = shown_failures(errors.iter().copied());
     print!(
         "{}",
         render(
@@ -875,6 +905,8 @@ fn report(
     ) {
         summary(
             &diags,
+            errors.len(),
+            refused_update || unused_entries || unmatched_entries,
             project.files.len(),
             baseline_path.is_some(),
             touched.map(Touched::file_count),
@@ -885,7 +917,7 @@ fn report(
         );
         // A file given as a path selects what is shown, as `--touched` does.
         if diags.is_empty()
-            && project.errors.is_empty()
+            && errors.is_empty()
             && touched.is_none()
             && baseline_path.is_none()
             && !project.env.cfg.declares_contracts()
@@ -905,11 +937,7 @@ fn report(
     } else {
         ExitCode::SUCCESS
     };
-    finish(
-        args.output_format,
-        &failure::of_files(&project.errors),
-        code,
-    )
+    finish(args.output_format, &failure::of_files(errors), code)
 }
 
 /// Print the contract entries that match nothing in the analyzed files, as
@@ -1055,23 +1083,38 @@ fn not_written(what: &str, path: &Path, failed: usize) -> Problem {
     .docs(docs)
 }
 
-/// The last line of a text run; `touched` is the number of analyzed files `--touched` names.
-fn summary(diags: &[Diagnostic], files: usize, baseline: bool, touched: Option<usize>) {
+/// The last line of a text run, with the number of file errors it reports and whether an error
+/// it printed above fails it (a contract entry that matches nothing, a baseline entry that
+/// matches no report, a refused baseline update); `touched` is the number of analyzed files
+/// `--touched` names. Only a run that passes says that all checks passed.
+fn summary(
+    diags: &[Diagnostic],
+    errors: usize,
+    failed: bool,
+    files: usize,
+    baseline: bool,
+    touched: Option<usize>,
+) {
     let what = if baseline {
         "Ratchet regression(s)"
     } else {
         "diagnostic(s)"
     };
-    match (diags.len(), touched) {
-        (0, None) => eprintln!("All checks passed ({files} file(s))."),
-        (found, None) => eprintln!("Found {found} {what} in {files} file(s)."),
-        (0, Some(touched)) => {
-            eprintln!("All checks passed for {touched} touched file(s) ({files} file(s) analyzed).")
+    let found = diags.len();
+    let scope = match touched {
+        None => format!("in {files} file(s)"),
+        Some(touched) => format!("for {touched} touched file(s) ({files} file(s) analyzed)"),
+    };
+    let line = match (found, errors, failed, touched) {
+        (0, 0, false, None) => format!("All checks passed ({files} file(s))."),
+        (0, 0, false, Some(_)) => format!("All checks passed {scope}."),
+        (0, 0, true, _) => format!("Found 0 {what} {scope}; the errors above fail the run."),
+        (found, 0, _, _) => format!("Found {found} {what} {scope}."),
+        (found, errors, _, _) => {
+            format!("Found {found} {what} {scope}; {errors} file(s) could not be analyzed.")
         }
-        (found, Some(touched)) => eprintln!(
-            "Found {found} {what} for {touched} touched file(s) ({files} file(s) analyzed)."
-        ),
-    }
+    };
+    eprintln!("{line}");
 }
 
 /// After the summary of the full text format: where each reported rule is explained.

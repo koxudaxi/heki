@@ -329,7 +329,10 @@ def cli_page(heki: Path) -> str:
         "",
         "A file that cannot be read or does not parse does not stop the run: `heki check` reports "
         "its error, checks and reports the other files, and exits with `2`, also when it reports "
-        "diagnostics. A file that does not parse cannot run either, so nothing it would do is "
+        "diagnostics. A run over given files (file PATHS, or `--touched`) reports and fails on "
+        "only the errors of those files, as it does with diagnostics, and names the other files "
+        "it could not analyze in a note. A file that does not parse cannot run either, so nothing "
+        "it would do is "
         "assumed; the names under its module resolve to nothing. SARIF output lists such files as "
         "`error` notifications of a run that did not execute successfully "
         "(`invocations[0].toolExecutionNotifications`, `executionSuccessful: false`); JSON output "

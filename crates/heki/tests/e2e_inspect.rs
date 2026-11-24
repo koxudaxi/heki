@@ -322,7 +322,7 @@ fn the_effect_chain_is_the_one_an_effect_boundary_reports() {
     assert_eq!(net["runs"], "called");
     assert_eq!(
         r["contracts"],
-        serde_json::json!([{"kind": "effect-boundaries", "name": "no-net", "roles": ["boundary-scope"]}])
+        serde_json::json!([{"kind": "effect-boundaries", "name": "no-net", "roles": ["boundary-scope", "reported"]}])
     );
     assert_eq!(r["reports"].as_array().unwrap().len(), 1);
     assert_eq!(r["reports"][0]["where"], "in");
@@ -1557,6 +1557,47 @@ fn contracts_name_the_roles_a_function_has() {
     }
 }
 
+/// A contract that names nothing of a function is listed when a report shown with it is of
+/// that contract: a write outside the owners, and an import a boundary forbids, are reported
+/// where they happen. A function with no such report lists none.
+#[test]
+fn contracts_name_the_contracts_of_the_reports_shown() {
+    let p = Project::new("inspect_reported_contracts");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.write-owners]]\nname = \"through-ledger\"\ntargets = [\"pkg.model:Holder.items\"]\nallowed-writers = [\"pkg.model:Holder.__init__\"]\n\n[[tool.heki.import-boundaries]]\nname = \"no-json\"\nimporters = [\"pkg.model\"]\nforbidden-imports = [\"json\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/model.py",
+        "class Holder:\n    def __init__(self):\n        self.items = []\n\n\ndef bad(h: Holder):\n    h.items.append(1)\n\n\ndef dump(x):\n    import json\n\n    return json.dumps(x)\n\n\ndef fine(x):\n    return x\n",
+    );
+    let r = report(&p, "pkg.model.bad");
+    assert_eq!(r["reports"][0]["rule_code"], "MUT201", "{r:#}");
+    assert_eq!(
+        r["contracts"],
+        serde_json::json!([{"kind": "write-owners", "name": "through-ledger", "roles": ["reported"]}])
+    );
+    let r = report(&p, "pkg.model.dump");
+    assert_eq!(r["reports"][0]["rule_code"], "IMP201", "{r:#}");
+    assert_eq!(
+        r["contracts"],
+        serde_json::json!([{"kind": "import-boundaries", "name": "no-json", "roles": ["reported"]}])
+    );
+    let r = report(&p, "pkg.model.fine");
+    assert_eq!(r["contracts"], serde_json::json!([]), "{r:#}");
+    let (_, out, _) = p.heki(&["inspect", "pkg.model.bad"]);
+    assert!(
+        out.contains("contracts that name it, or that a report above is of (`reported`)\n  write-owners through-ledger: reported\n"),
+        "{out}"
+    );
+    let (_, out, _) = p.heki(&["inspect", "pkg.model.fine"]);
+    assert!(
+        out.contains("contracts none name it, and no report above is of one\n"),
+        "{out}"
+    );
+}
+
 #[test]
 fn the_text_form_has_one_line_per_fact() {
     let p = users_project("inspect_text");
@@ -1588,7 +1629,7 @@ callers   1
 reports
   pkg/users.py:39  EFF101 `pkg.users.Loader.load` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)
   pkg/users.py:39  EFF101 `pkg.users.Loader.load` always runs the waiting call `time.sleep` on the event loop (2 calls down, on every path)
-contracts none
+contracts none name it, and no report above is of one
 ";
     assert_eq!(out, expected);
 }
@@ -2100,7 +2141,10 @@ fn the_text_form_shows_every_kind_of_fact() {
         .write("other.py", "import m\n\n\ndef keeps(x, sink: list):\n    sink.append(x)\n\n\ndef nothing(x):\n    return 1\n")
         .write("wrap.py", "from m import Model, Store\n\n\ndef secret_of(m: Model):\n    return Store().read(m)\n");
     let (_, out, _) = owned.heki(&["inspect", "--heuristic", "m.Store.read"]);
-    has(&out, "contracts\n  write-owners store: allowed-writer");
+    has(
+        &out,
+        "contracts that name it, or that a report above is of (`reported`)\n  write-owners store: allowed-writer",
+    );
     let (_, out, _) = owned.heki(&["inspect", "--heuristic", "wrap.secret_of"]);
     has(&out, "  shared with read-only producer m.Store.read");
     let (_, out, _) = owned.heki(&["inspect", "--heuristic", "other.keeps"]);

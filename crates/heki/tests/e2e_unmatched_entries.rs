@@ -75,6 +75,7 @@ fn a_run_warns_about_the_entries_that_match_nothing() {
     assert_eq!(code, 0, "{stdout}{stderr}");
     assert_eq!(lines(&stderr, "warning: "), REPRO_ENTRIES, "{stderr}");
     assert!(stderr.contains("All checks passed"), "{stderr}");
+    assert!(!stderr.contains("errors above"), "{stderr}");
 
     let p = repro(
         "unmatched_error",
@@ -83,6 +84,12 @@ fn a_run_warns_about_the_entries_that_match_nothing() {
     let (code, stdout, stderr) = p.heki(&["check"]);
     assert_eq!(code, 1, "{stdout}{stderr}");
     assert_eq!(lines(&stderr, "error: "), REPRO_ENTRIES, "{stderr}");
+    // A run these errors fail does not say that all checks passed.
+    assert!(!stderr.contains("All checks passed"), "{stderr}");
+    assert!(
+        stderr.contains("; the errors above fail the run."),
+        "{stderr}"
+    );
 
     let p = repro(
         "unmatched_ignore",

@@ -228,9 +228,9 @@ pub fn render_text(r: &InspectReport) -> String {
         }
     }
     if r.contracts.is_empty() {
-        out.push_str("contracts none\n");
+        out.push_str("contracts none name it, and no report above is of one\n");
     } else {
-        out.push_str("contracts\n");
+        out.push_str("contracts that name it, or that a report above is of (`reported`)\n");
         for c in &r.contracts {
             let _ = writeln!(out, "  {} {}: {}", c.kind, c.name, c.roles.join(", "));
         }

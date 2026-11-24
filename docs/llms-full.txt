@@ -1120,7 +1120,7 @@ writes to stderr are not colored.
 | ---- | ------- |
 | `0` | no diagnostics, or only warnings and heuristic reports (they are printed) |
 | `1` | an exact error found, or any report with `--fail-on warning` (`lint.fail-on = "warning"`), among the Ratchet regressions when a baseline is used; also when `--update-baseline` refuses a grown entry, a baseline entry matched nothing with [`report-unused-suppressions`](https://heki.koxudaxi.dev/configuration/#unused-suppressions), or `--diff` would change files |
-| `2` | configuration error, unreadable file, unknown rule, or syntax error |
+| `2` | configuration error, unknown rule, or a file that cannot be read or has a syntax error; with files given (`heki check src/app.py`, `--touched`), only one of those files fails the run, and the others are named in a note |
 
 
 ---
@@ -2683,7 +2683,7 @@ The recorded set can only shrink:
 | No baseline file yet | an error (exit code 2) | records today's findings |
 | A finding was fixed | a note that the entry can shrink; with [`report-unused-suppressions`](https://heki.koxudaxi.dev/configuration/#unused-suppressions), an entry that matches nothing is an error (exit code 1) | records the smaller entry |
 | An entry grew, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1 for an exact error, and for a warning or a heuristic report with [`fail-on = "warning"`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint)) | reports it the same way and leaves the file as it is (exit code 1) |
-| A file could not be analyzed (a syntax error, an unreadable file) | reports the error and the other files' findings (exit code 2) | writes nothing, so the entries of that file are not lost (exit code 2) |
+| A file could not be analyzed (a syntax error, an unreadable file) | reports the error and the other files' findings (exit code 2); a run over given files fails only on an error in one of them | writes nothing, so the entries of that file are not lost (exit code 2) |
 
 To record new findings on purpose, delete the baseline and record it again.
 
@@ -3301,17 +3301,17 @@ Source: https://heki.koxudaxi.dev/cli-reference/
 
 Exit codes: `0` no diagnostic that fails the run (warnings and heuristic reports are reported without failing it), `1` an exact `error` diagnostic, or any diagnostic with `--fail-on warning` (`lint.fail-on`), among the Ratchet regressions when a baseline is used (or a refused `--update-baseline`, or pending `--diff` changes), `2` configuration / I/O / syntax errors.
 
-A file that cannot be read or does not parse does not stop the run: `heki check` reports its error, checks and reports the other files, and exits with `2`, also when it reports diagnostics. A file that does not parse cannot run either, so nothing it would do is assumed; the names under its module resolve to nothing. SARIF output lists such files as `error` notifications of a run that did not execute successfully (`invocations[0].toolExecutionNotifications`, `executionSuccessful: false`); JSON output holds the diagnostics only.
+A file that cannot be read or does not parse does not stop the run: `heki check` reports its error, checks and reports the other files, and exits with `2`, also when it reports diagnostics. A run over given files (file PATHS, or `--touched`) reports and fails on only the errors of those files, as it does with diagnostics, and names the other files it could not analyze in a note. A file that does not parse cannot run either, so nothing it would do is assumed; the names under its module resolve to nothing. SARIF output lists such files as `error` notifications of a run that did not execute successfully (`invocations[0].toolExecutionNotifications`, `executionSuccessful: false`); JSON output holds the diagnostics only.
 
 ## `heki`
 
 ```text
-Experimental static checker for Python that tracks side effects and mutations across function calls
+heki (壁, "wall") is a static checker for Python. It tracks side effects and mutations across function calls, and checks imports and the contracts you declare.
 
 Usage: heki <COMMAND>
 
 Commands:
-  check        Run semantic checks across Python files or directories (Ruff-aligned)
+  check        Check Python files or directories for blocking calls, mutations, imports, and broken contracts
   server       Start the incremental Language Server Protocol (LSP) server [alias: lsp]
   rule         Explain a rule, its Proof Obligations, and counterexamples (`ruff rule` style) [alias: explain]
   snapshot     Manage interprocedural effect summary snapshots (`MUT103`)
@@ -3367,7 +3367,7 @@ Output for programs:
 ## `heki check`
 
 ```text
-Run semantic checks across Python files or directories (Ruff-aligned)
+Check Python files or directories for blocking calls, mutations, imports, and broken contracts
 
 Usage: heki check [OPTIONS] [PATHS]...
 
@@ -4912,7 +4912,7 @@ $ printf '%s\n' app.users.load_user 'app.orders.*' | heki inspect - --output-for
 | `purity` | `pure`, `impure` with the reasons, or `unknown` with the reasons; whatever the verdict, the functions below it whose calls heki cannot resolve, nearest first, each with the call chain to it; and what the verdict assumes |
 | `callers` | who calls it, whether in a loop; with `--callers`, transitively |
 | `reports` | what `heki check` reports in it; with `--callers`, also above it |
-| `contracts` | the contracts that name it |
+| `contracts` | the contracts that name it, with its roles in them, and the contracts the reports above are of (role `reported`) |
 
 - A name is a dotted name (`pkg.mod.Class.method`, or a suffix such as `Class.method`, or a
   glob), `path.py:line`, or `path.py::name`. An ambiguous or unknown name exits with 2: the error
@@ -5404,7 +5404,9 @@ engine is measured beyond an empty module watched the same way and compared with
 the same linear shapes timed through the watch engine (the script keeps the seconds each mode's
 shapes take on the machine of the limits), since the engine's startup and its second index slow
 down from one machine to another unlike a `heki check` run. A shape over the limits is run twice
-more and keeps the least of the three times, the way the references are timed. `heki check --walk-steps <path>` (hidden)
+more and keeps the least of the three times, the way the references are timed. A family measured
+past 1 s has a limit of its own in the script (`Family.limit_seconds`), just above what it took.
+`heki check --walk-steps <path>` (hidden)
 writes the steps each owner's walks took per function as JSON: the gate also fails when an
 owner's steps grow more than
 2.5 times from half the size to the full size, or when a budget is spent on a shape like real code.

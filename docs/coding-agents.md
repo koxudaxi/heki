@@ -195,7 +195,7 @@ $ printf '%s\n' app.users.load_user 'app.orders.*' | heki inspect - --output-for
 | `purity` | `pure`, `impure` with the reasons, or `unknown` with the reasons; whatever the verdict, the functions below it whose calls heki cannot resolve, nearest first, each with the call chain to it; and what the verdict assumes |
 | `callers` | who calls it, whether in a loop; with `--callers`, transitively |
 | `reports` | what `heki check` reports in it; with `--callers`, also above it |
-| `contracts` | the contracts that name it |
+| `contracts` | the contracts that name it, with its roles in them, and the contracts the reports above are of (role `reported`) |
 
 - A name is a dotted name (`pkg.mod.Class.method`, or a suffix such as `Class.method`, or a
   glob), `path.py:line`, or `path.py::name`. An ambiguous or unknown name exits with 2: the error
