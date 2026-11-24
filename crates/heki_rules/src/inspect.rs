@@ -928,15 +928,13 @@ fn effects(b: &Builder<'_, '_>, s: &EffectSummary, params: &[String]) -> Vec<Eff
                             GuardTest::IsNone => "is_none",
                             GuardTest::IsInstance(_) => "isinstance",
                             GuardTest::HasAttr(_) => "hasattr",
+                            GuardTest::Value(_) => "catalog",
                         },
                         classes: match &g.test {
                             GuardTest::IsInstance(c) => c.clone(),
                             _ => Vec::new(),
                         },
-                        has: match &g.test {
-                            GuardTest::HasAttr(name) => Some(name.clone()),
-                            _ => None,
-                        },
+                        has: g.test.attr().map(str::to_owned),
                         holds: g.holds,
                     })
                     .collect(),

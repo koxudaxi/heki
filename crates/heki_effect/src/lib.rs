@@ -1156,6 +1156,37 @@ pub enum GuardTest {
     IsInstance(Vec<String>),
     /// `hasattr(x, "name")` with a string literal.
     HasAttr(String),
+    /// What the catalog says a call the function makes with the value does ([`ValueTest`]).
+    Value(Box<ValueTest>),
+}
+
+impl GuardTest {
+    /// The attribute a `hasattr` test names.
+    pub fn attr(&self) -> Option<&str> {
+        match self {
+            Self::HasAttr(name) => Some(name),
+            _ => None,
+        }
+    }
+}
+
+/// A test of a value by the catalog's facts on a call made with it, for one effect of that
+/// call ([`GuardTest::Value`]): a caller binding the value decides it from what it knows of the
+/// argument ([`ArgBinding::fact`]), as the call decides an argument of its own.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValueTest {
+    /// The value is the argument the call's cases test: the first case it passes gives the
+    /// outcome, `otherwise` when it passes none. The cases keep only their tests.
+    Cases {
+        cases: Vec<(heki_kb::ArgCase, bool)>,
+        otherwise: bool,
+    },
+    /// The value is the call's receiver, or the object the receiver was returned from by calls
+    /// of catalog methods: an instance of one of these catalog classes (the states of the
+    /// library class the call names, `heki_kb::EffectiveEcosystemKb::states_of`) gives the
+    /// outcome beside it. Of any other class the outcome is not known.
+    States(Vec<(String, bool)>),
 }
 
 /// A test of an input, and the outcome (`holds`) an effect needs to run.
@@ -1262,7 +1293,11 @@ pub struct ArgumentValues(pub Vec<(String, ArgValue)>);
 /// or the literal default of an omitted parameter.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ArgBinding {
-    pub constant: Option<ConstArg>,
+    /// What the caller knows of the value, kept when it can decide a test of the callee: a
+    /// constant, a value of a class it knows exactly ([`ConstArg`]), or a class, flag, or file
+    /// name a catalog case or method tells apart ([`GuardTest::Value`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fact: Option<Box<heki_kb::ArgFact>>,
     /// The caller's own input the argument is (a guard subject of the caller).
     pub input: Option<GuardSubject>,
     /// Caller parameters the argument may come from: itself, its attributes and elements, and
@@ -1273,11 +1308,22 @@ pub struct ArgBinding {
     /// The loops around the call (bit `d - 1`: the one at depth `d`) across whose iterations
     /// the argument stays one object: those that do not construct it.
     pub stays_in_loops: u64,
-    /// The string constant the argument is (a literal or a `Final` constant), for the item
-    /// writes a callee keys by the parameter ([`EntryKey::Param`]); kept only when an ownership
-    /// contract is declared.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<Box<str>>,
+}
+
+impl ArgBinding {
+    /// The argument's constant view ([`ConstArg::of_fact`]).
+    pub fn constant(&self) -> Option<ConstArg> {
+        self.fact.as_deref().and_then(ConstArg::of_fact)
+    }
+
+    /// The string constant the argument is, for the item writes a callee keys by the parameter
+    /// ([`EntryKey::Param`]).
+    pub fn text(&self) -> Option<&str> {
+        match self.fact.as_deref()?.literal.as_ref()? {
+            heki_kb::LiteralValue::Str(s) => Some(s),
+            _ => None,
+        }
+    }
 }
 
 impl EffectSummary {
@@ -1900,7 +1946,7 @@ impl BoundCallee {
     /// caller's own parameter, or a value heki cannot tell.
     pub fn passed_key(&self, p: u8) -> (Option<String>, EntryKey) {
         let arg = self.params.get(usize::from(p));
-        if let Some(text) = arg.and_then(|a| a.binding.as_ref()?.text.as_deref()) {
+        if let Some(text) = arg.and_then(|a| a.binding.as_ref()?.text()) {
             return (Some(text.to_owned()), EntryKey::Written);
         }
         match arg.and_then(|a| a.param.as_ref()) {
