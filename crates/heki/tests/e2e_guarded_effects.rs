@@ -1919,3 +1919,52 @@ fn an_unpacked_display_decides_no_truthiness_test() {
         &["EFF101"],
     );
 }
+
+/// A helper forwarding its parameter to a method whose implementations end in different waits
+/// runs one of them whichever the argument selects: the exact report through it names each, as
+/// it does for a forwarded call that waits whatever it is passed.
+#[test]
+fn a_selected_wait_through_overrides_names_each_implementations_call() {
+    let p = Project::new("guards_selected_wait_overrides");
+    p.write(
+        "m.py",
+        r#"import socket
+import urllib.request
+
+
+class Base:
+    def run(self, url):
+        urllib.request.urlopen(url)
+
+
+class Resolver(Base):
+    def run(self, url):
+        socket.gethostbyname("example.com")
+
+
+def forward(obj: Base, url):
+    obj.run(url)
+
+
+async def caller(obj: Base):
+    forward(obj, "https://example.com")
+"#,
+    );
+    let (code, stdout, stderr) = p.check(&["--select", "EFF101", "--output-format", "json"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let got: Vec<(u64, &str, &str)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["certainty"].as_str().unwrap(),
+                d["target"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![(20, "exact", "socket.gethostbyname, urllib.request.urlopen")]
+    );
+}

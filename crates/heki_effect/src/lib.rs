@@ -254,6 +254,11 @@ pub struct GivenChain {
     pub effect: ExecEffectKind,
     pub needs: ParamTests,
     pub chain: SharedChain,
+    /// For implementations of one call ending in different calls, every such call, as
+    /// [`MustExec::alternatives`] keeps them for a chain that holds whatever is passed; empty
+    /// when they end in the chain's last call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub witnesses: SharedChain,
 }
 
 /// The tests a chain of [`GivenChains`] needs, at most.
@@ -275,14 +280,16 @@ impl GivenChains {
         self.0.iter().map(|c| c.effect)
     }
 
-    /// Keeps `chain` of `e` given `needs`, unless a chain of `e` needing some of them is no
-    /// longer; it replaces the chains needing more. Past the bounds the chains needing the most
-    /// tests go first.
+    /// Keeps `chain` of `e` given `needs`, with the calls its implementations end in
+    /// (`witnesses`, [`GivenChain::witnesses`]), unless a chain of `e` needing some of them is
+    /// no longer; it replaces the chains needing more. Past the bounds the chains needing the
+    /// most tests go first.
     pub fn insert(
         &mut self,
         e: ExecEffectKind,
         mut needs: Vec<(u8, ValueTest)>,
         chain: SharedChain,
+        witnesses: SharedChain,
     ) {
         needs.sort();
         needs.dedup();
@@ -304,6 +311,7 @@ impl GivenChains {
             effect: e,
             needs,
             chain,
+            witnesses,
         });
         self.0.sort_by(|a, b| {
             (a.effect, a.needs.len(), a.chain.len()).cmp(&(b.effect, b.needs.len(), b.chain.len()))
@@ -320,7 +328,9 @@ impl GivenChains {
     }
 
     pub fn chains_mut(&mut self) -> impl Iterator<Item = &mut SharedChain> {
-        self.0.iter_mut().map(|c| &mut c.chain)
+        self.0
+            .iter_mut()
+            .flat_map(|c| [&mut c.chain, &mut c.witnesses])
     }
 }
 
