@@ -683,6 +683,8 @@ pub fn unread_module(path: &Path, root: &Path, layout: &ModuleLayout) -> UnreadM
 /// Where a run looks for files and configuration.
 #[derive(Default)]
 pub struct ProjectOptions<'a> {
+    /// The files and directories to analyze, at least one: the commands default to the working
+    /// directory (`.`), and the language server names its workspace folder.
     pub paths: &'a [PathBuf],
     pub config: Option<&'a Path>,
     /// The directory the run works from, where a project without a configuration file is
@@ -882,8 +884,7 @@ impl std::fmt::Display for FileError {
 /// A discovered, parsed project.
 pub struct Project {
     pub env: ProjectEnv,
-    /// The paths discovery walked ([`ProjectOptions::paths`], the working directory when none
-    /// is given).
+    /// The paths discovery walked ([`ProjectOptions::paths`]).
     pub paths: Vec<PathBuf>,
     pub files: Vec<ParsedFile>,
     pub errors: Vec<FileError>,
@@ -895,11 +896,7 @@ impl Project {
     pub fn load(opts: &ProjectOptions<'_>) -> Result<Self, ProjectError> {
         let env = ProjectEnv::load(opts)?;
         let exclude = exclude_set(&env.cfg)?;
-        let paths = if opts.paths.is_empty() {
-            vec![PathBuf::from(".")]
-        } else {
-            opts.paths.to_vec()
-        };
+        let paths = opts.paths.to_vec();
         let mut found = collect_files(&paths, &env.root, &exclude)?;
         if let Some(removed) = opts.removed {
             found.retain(|p| !removed.contains(&display_path(p)));
