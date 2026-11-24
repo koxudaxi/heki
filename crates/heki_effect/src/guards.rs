@@ -172,9 +172,9 @@ pub(crate) fn literal_fact(literal: &ConstLiteral) -> Option<ArgFact> {
 }
 
 /// The outcome of `test` on a value `fact` describes, when the value decides it.
-pub(crate) fn decide(fact: &ArgFact, test: &GuardTest) -> Option<bool> {
+pub(crate) fn fact_outcome(fact: &ArgFact, test: &GuardTest) -> Option<bool> {
     match test {
-        GuardTest::Value(t) => t.decide(fact),
+        GuardTest::Value(t) => t.outcome(fact),
         _ => ConstArg::of_fact(fact)?.decide(test),
     }
 }
@@ -182,12 +182,12 @@ pub(crate) fn decide(fact: &ArgFact, test: &GuardTest) -> Option<bool> {
 impl ValueTest {
     /// The outcome on a value `fact` describes: the first case it passes, or `otherwise`; the
     /// one of its class among the states.
-    pub(crate) fn decide(&self, fact: &ArgFact) -> Option<bool> {
+    pub(crate) fn outcome(&self, fact: &ArgFact) -> Option<bool> {
         match self {
             Self::Cases { cases, otherwise } => Some(
                 cases
                     .iter()
-                    .find(|(case, _)| case.holds(fact))
+                    .find(|(case, _)| heki_kb::ArgCase::holds(case, fact))
                     .map_or(*otherwise, |(_, outcome)| *outcome),
             ),
             Self::States(states) => {
@@ -457,7 +457,7 @@ pub(crate) fn through_call(
             continue;
         };
         if g.subject.attr.is_none()
-            && let Some(outcome) = b.fact.as_deref().and_then(|f| decide(f, &g.test))
+            && let Some(outcome) = b.fact.as_deref().and_then(|f| fact_outcome(f, &g.test))
         {
             if outcome != g.holds {
                 return None;
