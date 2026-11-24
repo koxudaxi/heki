@@ -14,8 +14,8 @@ use heki_effect::{
     AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite, CallTarget, Callee,
     Construction, ContractClass, Delivery, EffectSummary, Facts, FuncKey, ProjectDecls,
     ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx, TypedFieldReadSite,
-    TypedFieldWriteSite, Val, WriteKind, attr_writes, container_mutator, initializes_own_self,
-    is_initializer, self_attr_writes,
+    TypedFieldWriteSite, Unresolved, Val, WriteKind, attr_writes, container_mutator,
+    initializes_own_self, is_initializer, self_attr_writes,
 };
 use heki_env::HekiConfig;
 use heki_ir::walk::{Answer, Budget, FnShape, Visit, reach};
@@ -889,6 +889,13 @@ impl ContractTarget {
         self.attr.matches(attr)
     }
 
+    /// Whether an access of `attr` on an object of unknown class may be one of the target
+    /// ([`MemberPattern::matches_on_unknown`], the target's class family having the names
+    /// `family` gives).
+    pub(crate) fn matches_on_unknown(&self, attr: &str, family: impl FnOnce() -> bool) -> bool {
+        self.attr.matches_on_unknown(attr, family)
+    }
+
     /// Whether `site` writes the target: its class and attribute, and for an item target the
     /// entry with its key (a write of the whole container, or with a computed key, writes the
     /// attribute only).
@@ -943,6 +950,113 @@ impl MemberPattern {
                 self.holders.as_ref().is_none_or(|h| h.contains(class))
                     && self.pattern.matches(written)
             })
+    }
+
+    /// Whether an access of `attr` on an object of unknown class may be one of the member: the
+    /// pattern matches it, and a glob also needs some class it is a member of to have `attr`
+    /// from project code (`family`, [`ClassMembers`]). A glob is a rule about the members the
+    /// project gives its classes: a name only a base outside the project gives them (`_replace`
+    /// of a `NamedTuple`) is that base's API, which any object may have too.
+    pub(crate) fn matches_on_unknown(&self, attr: &str, family: impl FnOnce() -> bool) -> bool {
+        self.matches(attr) && (self.pattern.name().glob().is_none() || family())
+    }
+
+    /// Whether the text names no class holding the member (`reset`, `*_helper`): the member
+    /// may be one of any class.
+    pub(crate) fn names_any_class(&self) -> bool {
+        self.holders.is_none()
+    }
+}
+
+/// The member names project code gives the instances of project classes, which a glob target
+/// matches on an object of unknown class ([`MemberPattern::matches_on_unknown`]): the names a
+/// class declares ([`ProjectDecls::declared_names`]) and those the code writes on objects typed
+/// with it, its project bases' too. A class whose module stores names heki cannot tell, or on
+/// whose instances the code writes names computed at run time, may have any member; a name
+/// written on an object of unknown class may be any class's. A name computed at run time and
+/// written on an object of unknown class is not counted: it would let every glob match every
+/// name (`MUT205` reports that write).
+pub(crate) struct ClassMembers<'a> {
+    /// The attributes and constant `__dict__` keys the code writes on objects typed with each
+    /// class (fqn).
+    written: FxHashMap<&'a str, FxHashSet<&'a str>>,
+    /// The attributes the code writes on objects heki cannot type.
+    on_unknown: FxHashSet<&'a str>,
+    /// The classes (fqn) the code writes names computed at run time on.
+    computed: FxHashSet<&'a str>,
+}
+
+impl<'a> ClassMembers<'a> {
+    pub(crate) fn new(cx: &CheckContext<'a>) -> Self {
+        let mut out = Self {
+            written: FxHashMap::default(),
+            on_unknown: FxHashSet::default(),
+            computed: FxHashSet::default(),
+        };
+        for (_, s) in cx.defined_functions() {
+            for w in &s.typed_field_write_sites {
+                (out.written.entry(&w.class_qualname).or_default()).insert(&w.attr);
+            }
+            for w in &s.unresolved_write_sites {
+                match &w.what {
+                    Unresolved::Receiver(attr) => {
+                        out.on_unknown.insert(attr);
+                    }
+                    Unresolved::Name(class) => {
+                        out.computed.insert(class);
+                    }
+                    // A name the instance has already adds none.
+                    Unresolved::Existing(_) | Unresolved::Anything => {}
+                }
+            }
+        }
+        out
+    }
+
+    /// The names the classes of `family` (fqn) have from project code.
+    pub(crate) fn of_family<'f>(
+        &self,
+        cx: &CheckContext<'a>,
+        family: impl Iterator<Item = &'f str>,
+    ) -> FamilyMembers<'a> {
+        let mut family = family.peekable();
+        // A name written on an object of unknown class may be a member of any class, but a
+        // family without classes has no members.
+        let mut names = match family.peek() {
+            Some(_) => self.on_unknown.clone(),
+            None => FxHashSet::default(),
+        };
+        let mut any = false;
+        let mut seen: FxHashSet<String> = FxHashSet::default();
+        for class in family {
+            for c in std::iter::once(class.to_owned()).chain(cx.decls.ancestors_of(class)) {
+                if !seen.insert(c.clone()) {
+                    continue;
+                }
+                any |= self.computed.contains(c.as_str()) || cx.decls.adds_unnamed_attrs(&c);
+                names.extend(cx.decls.declared_names(&c));
+                names.extend(self.written.get(c.as_str()).into_iter().flatten().copied());
+            }
+        }
+        FamilyMembers { names, any }
+    }
+}
+
+/// The member names a family of project classes has from project code
+/// ([`ClassMembers::of_family`]).
+pub(crate) struct FamilyMembers<'a> {
+    names: FxHashSet<&'a str>,
+    /// Some class of the family may have any member.
+    any: bool,
+}
+
+impl FamilyMembers<'_> {
+    /// Whether the family may have the member `attr`, as written in its class or as the class
+    /// holds it (`_Parser__run`).
+    pub(crate) fn has(&self, attr: &str) -> bool {
+        self.any
+            || self.names.contains(attr)
+            || mangling::unmangled(attr).any(|(_, written)| self.names.contains(written))
     }
 }
 

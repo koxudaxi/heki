@@ -15,7 +15,11 @@ The strict mode of a `[[tool.heki.call-owners]]` contract that sets `unresolved 
 reports the calls outside the call owners that `MUT204` cannot tie to a target, so a clean
 `MUT204` run says how much it did not check. A call of a method named like a target (the last
 name of the target: `replace_reference` for `DataType.replace_reference`, also for a function or
-class target) is reported once, at the call, when its receiver is of unknown class: an
+class target; for a glob, `Parser._*`, a name `Parser`, a project subclass, or a project base
+gives its instances in project code, not one only a base outside the project gives them:
+`_replace` of a `NamedTuple` is none,
+[configuration](../configuration.md#globs-on-objects-of-unknown-class)) is reported once, at
+the call, when its receiver is of unknown class: an
 unannotated parameter, a loop variable, the result of a call heki does not resolve, a value
 annotated `Any` or `object` (unless an `isinstance` test around the call narrows it to a class),
 a protocol whose implementations heki cannot list (one without members, or implemented by more

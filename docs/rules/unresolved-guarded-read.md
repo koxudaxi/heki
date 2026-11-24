@@ -14,7 +14,10 @@ Strict mode of a `read-owners` contract (`unresolved = "report"`): reading an at
 The strict mode of a `[[tool.heki.read-owners]]` contract that sets `unresolved = "report"`:
 reports the reads outside the read owners that `MUT203` cannot tie to a target class, so a clean
 `MUT203` run says how much it did not check. A read of an attribute named like a target attribute
-(`children` for `Reference.children`, any name for `Reference.*`) is reported once, at the read,
+(`children` for `Reference.children`; for `Reference.*`, a name `Reference`, a project subclass,
+or a project base gives its instances in project code, not one only a base outside the project
+gives them, [configuration](../configuration.md#globs-on-objects-of-unknown-class)) is reported
+once, at the read,
 when its object is of unknown class: an unannotated parameter, a loop variable, the result of a
 call heki does not resolve, a value annotated `Any` or `object` (unless an `isinstance` test
 around the read narrows it to a class), a protocol whose implementations heki cannot list (one

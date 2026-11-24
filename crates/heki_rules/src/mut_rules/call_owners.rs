@@ -462,6 +462,12 @@ impl CallTargetPattern {
     fn name_part(&self) -> &str {
         &self.text[..self.text.len() - self.list.len()]
     }
+
+    /// The classes whose methods the text names, with their subclasses, and the classes it
+    /// names.
+    pub(crate) fn family(&self) -> &FxHashSet<String> {
+        &self.family
+    }
 }
 
 /// The constants an argument list names, by parameter.

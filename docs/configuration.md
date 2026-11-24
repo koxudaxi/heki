@@ -442,7 +442,7 @@ protocol (see [How contracts report](#how-contracts-report)).
 | `forbidden-readers` | `[]` | When set, only reads by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to read the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
-| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the reads of a target's attribute name on an object of unknown class are reported under [`MUT206`](rules/unresolved-guarded-read.md). |
+| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the reads of a target's attribute name on an object of unknown class are reported under [`MUT206`](rules/unresolved-guarded-read.md). A target ending in a glob (`Context._*`) matches only the names a class it names, or a project subclass, has from project code ([below](#globs-on-objects-of-unknown-class)). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 | `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
 | `allowed-protocols` | `[]` | As in `write-owners`, for a read or a call through the protocol. |
@@ -475,7 +475,7 @@ The call side of `write-owners`.
 | `forbidden-callers` | `[]` | When set, only calls by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to call the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
-| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the calls of a method named like a target (its last name) on an object of unknown class are reported under [`MUT207`](rules/unresolved-guarded-call.md). |
+| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the calls of a method named like a target (its last name) on an object of unknown class are reported under [`MUT207`](rules/unresolved-guarded-call.md). A target ending in a glob matches only the names a class it names, or a project subclass, has from project code ([below](#globs-on-objects-of-unknown-class)). |
 | `references` | `"ignore"` | `"ignore"`, `"calls"`, `"calls-and-bases"`, or `"reads"`: whether a reference handing a target on to be called later counts as a call of it (`[decide]`, `return decide`, `partial(decide)`, `field(default_factory=Rule)`, `obj.callback = self.decide`), with `"calls-and-bases"` a class statement naming a class target among its bases too (`class Derived(Base)`), and with `"reads"` every other use of a target's value as well (`Keys.of(...)`, `Code.OK`, `isinstance(x, Keys)`, `case Keys():`, `tuple[Keys, int]`). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 | `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
@@ -564,6 +564,26 @@ The call side of `write-owners`.
   statement). A load handing a target on is reported as a hand-on only. A read is matched as a
   construction is, so a subclass counts unless `subclasses = false`; an instance of the class is
   no read of it.
+
+### Globs on objects of unknown class
+
+With `unresolved = "report"`, a `read-owners` or `call-owners` target names the reads or calls of
+its last name on objects of unknown class (`MUT206`, `MUT207`). A last name that is a glob
+(`Context._*`) matches there only the names a class the target names, or a project subclass of
+one, has from project code: the names the class or a project base declares (in its body, set on
+its instances by its methods or its module, or stored on the class object), and the names the
+code writes on objects typed with one of them or on objects of unknown class. A name only a base
+outside the project gives the class is that base's API, which any object may have: with
+`targets = ["Context._*"]` and `class Context(NamedTuple)`, an untyped `ctx._replace(...)` is not
+reported, and an untyped `ctx._secret()` is when `Context` defines `_secret`.
+
+- A class whose module stores attributes heki cannot name (`setattr(self, name, v)`), or on
+  whose instances the code writes names computed at run time, may have any name.
+- A glob naming no holder (`_*` among the `call-owners` targets) matches the names of every
+  project class; one naming only modules (`pkg.util.*`) or symbols outside the project matches
+  none: no object of unknown class has them as members.
+- A written-out last name (`Context._replace`) matches by name, and so do the writes `MUT205`
+  counts: a write may add the member.
 
 ### Allowed and forbidden functions
 

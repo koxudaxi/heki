@@ -1547,7 +1547,7 @@ protocol (see [How contracts report](https://heki.koxudaxi.dev/configuration/#ho
 | `forbidden-readers` | `[]` | When set, only reads by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to read the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
-| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the reads of a target's attribute name on an object of unknown class are reported under [`MUT206`](https://heki.koxudaxi.dev/rules/unresolved-guarded-read/). |
+| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the reads of a target's attribute name on an object of unknown class are reported under [`MUT206`](https://heki.koxudaxi.dev/rules/unresolved-guarded-read/). A target ending in a glob (`Context._*`) matches only the names a class it names, or a project subclass, has from project code ([below](https://heki.koxudaxi.dev/configuration/#globs-on-objects-of-unknown-class)). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 | `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
 | `allowed-protocols` | `[]` | As in `write-owners`, for a read or a call through the protocol. |
@@ -1580,7 +1580,7 @@ The call side of `write-owners`.
 | `forbidden-callers` | `[]` | When set, only calls by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to call the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
-| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the calls of a method named like a target (its last name) on an object of unknown class are reported under [`MUT207`](https://heki.koxudaxi.dev/rules/unresolved-guarded-call/). |
+| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the calls of a method named like a target (its last name) on an object of unknown class are reported under [`MUT207`](https://heki.koxudaxi.dev/rules/unresolved-guarded-call/). A target ending in a glob matches only the names a class it names, or a project subclass, has from project code ([below](https://heki.koxudaxi.dev/configuration/#globs-on-objects-of-unknown-class)). |
 | `references` | `"ignore"` | `"ignore"`, `"calls"`, `"calls-and-bases"`, or `"reads"`: whether a reference handing a target on to be called later counts as a call of it (`[decide]`, `return decide`, `partial(decide)`, `field(default_factory=Rule)`, `obj.callback = self.decide`), with `"calls-and-bases"` a class statement naming a class target among its bases too (`class Derived(Base)`), and with `"reads"` every other use of a target's value as well (`Keys.of(...)`, `Code.OK`, `isinstance(x, Keys)`, `case Keys():`, `tuple[Keys, int]`). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 | `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
@@ -1669,6 +1669,26 @@ The call side of `write-owners`.
   statement). A load handing a target on is reported as a hand-on only. A read is matched as a
   construction is, so a subclass counts unless `subclasses = false`; an instance of the class is
   no read of it.
+
+### Globs on objects of unknown class
+
+With `unresolved = "report"`, a `read-owners` or `call-owners` target names the reads or calls of
+its last name on objects of unknown class (`MUT206`, `MUT207`). A last name that is a glob
+(`Context._*`) matches there only the names a class the target names, or a project subclass of
+one, has from project code: the names the class or a project base declares (in its body, set on
+its instances by its methods or its module, or stored on the class object), and the names the
+code writes on objects typed with one of them or on objects of unknown class. A name only a base
+outside the project gives the class is that base's API, which any object may have: with
+`targets = ["Context._*"]` and `class Context(NamedTuple)`, an untyped `ctx._replace(...)` is not
+reported, and an untyped `ctx._secret()` is when `Context` defines `_secret`.
+
+- A class whose module stores attributes heki cannot name (`setattr(self, name, v)`), or on
+  whose instances the code writes names computed at run time, may have any name.
+- A glob naming no holder (`_*` among the `call-owners` targets) matches the names of every
+  project class; one naming only modules (`pkg.util.*`) or symbols outside the project matches
+  none: no object of unknown class has them as members.
+- A written-out last name (`Context._replace`) matches by name, and so do the writes `MUT205`
+  counts: a write may add the member.
 
 ### Allowed and forbidden functions
 
@@ -10779,7 +10799,11 @@ The strict mode of a `[[tool.heki.call-owners]]` contract that sets `unresolved 
 reports the calls outside the call owners that `MUT204` cannot tie to a target, so a clean
 `MUT204` run says how much it did not check. A call of a method named like a target (the last
 name of the target: `replace_reference` for `DataType.replace_reference`, also for a function or
-class target) is reported once, at the call, when its receiver is of unknown class: an
+class target; for a glob, `Parser._*`, a name `Parser`, a project subclass, or a project base
+gives its instances in project code, not one only a base outside the project gives them:
+`_replace` of a `NamedTuple` is none,
+[configuration](https://heki.koxudaxi.dev/configuration/#globs-on-objects-of-unknown-class)) is reported once, at
+the call, when its receiver is of unknown class: an
 unannotated parameter, a loop variable, the result of a call heki does not resolve, a value
 annotated `Any` or `object` (unless an `isinstance` test around the call narrows it to a class),
 a protocol whose implementations heki cannot list (one without members, or implemented by more
@@ -10954,7 +10978,10 @@ Strict mode of a `read-owners` contract (`unresolved = "report"`): reading an at
 The strict mode of a `[[tool.heki.read-owners]]` contract that sets `unresolved = "report"`:
 reports the reads outside the read owners that `MUT203` cannot tie to a target class, so a clean
 `MUT203` run says how much it did not check. A read of an attribute named like a target attribute
-(`children` for `Reference.children`, any name for `Reference.*`) is reported once, at the read,
+(`children` for `Reference.children`; for `Reference.*`, a name `Reference`, a project subclass,
+or a project base gives its instances in project code, not one only a base outside the project
+gives them, [configuration](https://heki.koxudaxi.dev/configuration/#globs-on-objects-of-unknown-class)) is reported
+once, at the read,
 when its object is of unknown class: an unannotated parameter, a loop variable, the result of a
 call heki does not resolve, a value annotated `Any` or `object` (unless an `isinstance` test
 around the read narrows it to a class), a protocol whose implementations heki cannot list (one
@@ -11056,7 +11083,7 @@ reports the writes outside the write owners that `MUT201` cannot tie to a target
 write:
 
 - an attribute named like a target attribute (`fields` for `Model.fields`, any name for
-  `Model.*`) written on an object of unknown class: an unannotated parameter that no project
+  `Model.*`: a write may add the member) written on an object of unknown class: an unannotated parameter that no project
   caller binds to an instance of a known class, a loop variable, the result of a call heki does
   not resolve, a value annotated `Any` or `object` (unless an `isinstance` test around the write
   narrows it to a class: `if isinstance(obj, Field): ...`), a protocol whose implementations
