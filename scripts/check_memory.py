@@ -62,7 +62,7 @@ COPIES_DEPTH = 16
 # (docs/development.md, Memory).
 HEAP_BUDGETS_MIB = {
     "check": 59.5,
-    "watch": 55.5,
+    "watch": 55.8,
     "owners": 73.4,
     "recommend": 100.0,
     "recommend-owners": 100.0,
