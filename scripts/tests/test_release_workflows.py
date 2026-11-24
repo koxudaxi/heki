@@ -16,8 +16,12 @@ from helpers import ROOT, FakeGitHub, Repository, outputs
 yaml = pytest.importorskip("yaml")
 
 PINNED = re.compile(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}")
-SET_VERSION = 'uv run --no-project --python 3.14 scripts/set_release_versions.py "$RELEASE_VERSION"'
+SET_VERSION = (
+    "uv run --no-project --python 3.14 scripts/set_release_versions.py "
+    '"$RELEASE_VERSION" ${RELEASE_DATE:+--changelog "$RELEASE_DATE"}'
+)
 RELEASE_VERSION = "${{ needs.version.outputs.version }}"
+RELEASE_DATE = "${{ needs.version.outputs.date }}"
 OWNER = "Koudai Aono <630670+koxudaxi@users.noreply.github.com>"
 GIT_WITHOUT_USER_CONFIG = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
 
@@ -102,6 +106,7 @@ def test_every_job_that_builds_writes_the_release_version_first(release: dict[st
                 for step in steps[: writes[0]]
             ), name
             assert job["env"]["RELEASE_VERSION"] == RELEASE_VERSION, name
+            assert job["env"]["RELEASE_DATE"] == RELEASE_DATE, name
             assert "version" in job["needs"], name
     assert sorted(builders) == ["crates-io", "sdist", "wheels"]
 
@@ -150,7 +155,32 @@ def test_the_release_version_comes_from_the_tag_or_the_input(
     }
     result = run_step(script, {**os.environ, **env})
     assert result.returncode == 0, result.stderr
-    assert outputs(output) == {"version": expected}
+    assert outputs(output) == {"version": expected, "date": ""}
+
+
+@pytest.mark.parametrize(
+    ("prerelease", "expected"),
+    [("false", "2026-11-25"), ("true", "")],
+)
+def test_a_final_release_dates_its_build_with_the_publish_date(
+    release: dict[str, Any], tmp_path: Path, prerelease: str, expected: str
+) -> None:
+    """The UTC date of `published_at`, as the Release Sync workflow reads it; a pre-release has
+    no CHANGELOG section of its own to date."""
+    output = tmp_path / "output"
+    script = release["jobs"]["version"]["steps"][0]["run"]
+    env = {
+        "GITHUB_EVENT_NAME": "release",
+        "TAG": "v0.1.2",
+        "PUBLISHED_AT": "2026-11-25T23:59:59Z",
+        "PRERELEASE": prerelease,
+        "INPUT": "",
+        "PUBLISH": "",
+        "GITHUB_OUTPUT": str(output),
+    }
+    result = run_step(script, {**os.environ, **env})
+    assert result.returncode == 0, result.stderr
+    assert outputs(output) == {"version": "0.1.2", "date": expected}
 
 
 def test_a_release_tag_without_a_version_fails(release: dict[str, Any], tmp_path: Path) -> None:

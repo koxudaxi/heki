@@ -7,8 +7,10 @@ name: Release
 #
 # The tag is the version (`v` + the version): every job that builds from the checkout first writes
 # it into the manifests and the lock files (`scripts/set_release_versions.py`), and the checks
-# compare the distributions with it. Nothing is committed here; after the release, the Release
-# Sync workflow opens the pull request that brings `main` to it.
+# compare the distributions with it. A published final release also dates its CHANGELOG section
+# there with the publish date, as the Release Sync workflow does on `main`, so that
+# `heki version --changelog` prints the section as `main` gets it. Nothing is committed here;
+# after the release, the Release Sync workflow opens the pull request that brings `main` to it.
 
 on:
   release:
@@ -38,15 +40,20 @@ jobs:
   version:
     # The version the builds write and the checks expect: the release tag without its `v`, the
     # `version` input of a manual run, or empty to keep the committed manifests' version. Only a
-    # release tag publishes a version the manifests do not declare.
+    # release tag publishes a version the manifests do not declare. The date is the UTC publish
+    # date of a final release, the date the Release Sync workflow gives its CHANGELOG section;
+    # empty for a pre-release, whose version has no section, and for a manual run.
     name: release version
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+      date: ${{ steps.version.outputs.date }}
     steps:
       - id: version
         env:
           TAG: ${{ github.event.release.tag_name }}
+          PUBLISHED_AT: ${{ github.event.release.published_at }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
           INPUT: ${{ inputs.version }}
           PUBLISH: ${{ inputs.publish }}
         run: |
@@ -60,7 +67,14 @@ jobs:
             echo "::error::The release tag \`$TAG\` names no version."
             exit 1
           fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          date=""
+          if [ "$GITHUB_EVENT_NAME" = release ] && [ "$PRERELEASE" != true ]; then
+            date="${PUBLISHED_AT:0:10}"
+          fi
+          {
+            echo "version=$version"
+            echo "date=$date"
+          } >> "$GITHUB_OUTPUT"
 
   wheels:
     name: wheel (${{ matrix.target }})
@@ -87,6 +101,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       RELEASE_VERSION: ${{ needs.version.outputs.version }}
+      RELEASE_DATE: ${{ needs.version.outputs.date }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -95,10 +110,10 @@ jobs:
         with:
           version: "0.13.4"
           enable-cache: false
-      - name: Write the release version into the manifests
+      - name: Write the release into the manifests and the CHANGELOG
         if: env.RELEASE_VERSION != ''
         shell: bash
-        run: uv run --no-project --python 3.14 scripts/set_release_versions.py "$RELEASE_VERSION"
+        run: uv run --no-project --python 3.14 scripts/set_release_versions.py "$RELEASE_VERSION" ${RELEASE_DATE:+--changelog "$RELEASE_DATE"}
       - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
         with:
           targets: ${{ matrix.target }}
@@ -132,6 +147,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       RELEASE_VERSION: ${{ needs.version.outputs.version }}
+      RELEASE_DATE: ${{ needs.version.outputs.date }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -140,9 +156,9 @@ jobs:
         with:
           version: "0.13.4"
           enable-cache: false
-      - name: Write the release version into the manifests
+      - name: Write the release into the manifests and the CHANGELOG
         if: env.RELEASE_VERSION != ''
-        run: uv run --no-project --python 3.14 scripts/set_release_versions.py "$RELEASE_VERSION"
+        run: uv run --no-project --python 3.14 scripts/set_release_versions.py "$RELEASE_VERSION" ${RELEASE_DATE:+--changelog "$RELEASE_DATE"}
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           command: sdist
@@ -306,6 +322,7 @@ jobs:
       id-token: write
     env:
       RELEASE_VERSION: ${{ needs.version.outputs.version }}
+      RELEASE_DATE: ${{ needs.version.outputs.date }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -314,14 +331,15 @@ jobs:
         with:
           version: "0.13.4"
           enable-cache: false
-      - name: Write the release version into the manifests
+      - name: Write the release into the manifests and the CHANGELOG
         if: env.RELEASE_VERSION != ''
-        run: uv run --no-project --python 3.14 scripts/set_release_versions.py "$RELEASE_VERSION"
+        run: uv run --no-project --python 3.14 scripts/set_release_versions.py "$RELEASE_VERSION" ${RELEASE_DATE:+--changelog "$RELEASE_DATE"}
       - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
       # Trusted publishing: a short-lived token from the repository's OIDC identity.
       - id: auth
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
-      # `--allow-dirty`: the version written above is the only change to the checkout.
+      # `--allow-dirty`: the version and the CHANGELOG date written above are the only changes
+      # to the checkout.
       - name: Publish every crate
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

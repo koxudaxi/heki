@@ -527,14 +527,32 @@ fn effect_boundaries_cover_modules_and_packages_reaching_no_blocking_call() {
     );
     let scopes =
         |target: &str| candidate(&report, "effect-boundaries", target)["entry"]["scopes"].clone();
-    // A package with an `__init__.py` is named with and without its module part; a namespace
-    // package below it only.
+    // A package is named by its own module and the modules below it, a namespace package too:
+    // code its `__init__.py` gets later is inside the boundary. A module is named alone.
     assert_eq!(
         scopes("app.domain"),
         json!(["app.domain:*", "app.domain.*:*"])
     );
-    assert_eq!(scopes("lib"), json!(["lib.*:*"]));
+    assert_eq!(scopes("lib"), json!(["lib:*", "lib.*:*"]));
     assert_eq!(scopes("app.pricing"), json!(["app.pricing:*"]));
+    let declared = Project::new("recommend_contract_boundaries_declared");
+    for file in ["lib/a.py", "lib/b.py"] {
+        declared.write(file, &std::fs::read_to_string(p.dir.join(file)).unwrap());
+    }
+    declared
+        .write(
+            "pyproject.toml",
+            &format!(
+                "[project]\nname = \"t\"\n\n[[tool.heki.effect-boundaries]]\nname = \"lib\"\nscopes = {}\nforbid = [\"blocking\"]\n",
+                scopes("lib")
+            ),
+        )
+        .write(
+            "lib/__init__.py",
+            "import time\n\n\nasync def wait() -> None:\n    time.sleep(1)\n",
+        );
+    let (_, out, err) = declared.heki(&["check", "--output-format", "concise"]);
+    assert!(out.contains("lib/__init__.py:5:5: EFF201"), "{out}{err}");
     let pricing = candidate(&report, "effect-boundaries", "app.pricing");
     assert_eq!(
         (&pricing["entry"]["name"], &pricing["entry"]["forbid"]),
@@ -601,7 +619,7 @@ fn a_package_holding_a_test_module_names_its_other_modules_one_by_one() {
     );
     assert_eq!(domain["confidence"], "high");
     let lib = candidate(&report, "effect-boundaries", "lib");
-    assert_eq!(lib["entry"]["scopes"], json!(["lib.*:*"]));
+    assert_eq!(lib["entry"]["scopes"], json!(["lib:*", "lib.*:*"]));
     assert_eq!(report["rejected_contracts"], json!([]), "{report:#}");
 }
 
@@ -627,8 +645,12 @@ fn a_module_defining_a_test_function_is_test_code_too() {
         domain["entry"]["scopes"],
         json!(["app.domain:*", "app.domain.rules:*"])
     );
+    // The package's own module is named too, and names none of the modules below it.
     let lib = candidate(&report, "effect-boundaries", "lib");
-    assert_eq!(lib["entry"]["scopes"], json!(["lib.a:*", "lib.b:*"]));
+    assert_eq!(
+        lib["entry"]["scopes"],
+        json!(["lib:*", "lib.a:*", "lib.b:*"])
+    );
     assert!(
         kept(&report)
             .iter()

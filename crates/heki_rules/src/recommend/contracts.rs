@@ -722,18 +722,7 @@ fn effect_boundaries(
         .into_iter()
         .zip(callers)
         .map(|((scope, members), callers)| {
-            let package = members.len() > 1 || members[0].module != scope;
-            let mut patterns = Vec::new();
-            if package && holding_tests.contains(scope) {
-                patterns.extend(members.iter().map(|m| format!("{}:*", m.module)));
-            } else {
-                if members.iter().any(|m| m.module == scope) {
-                    patterns.push(format!("{scope}:*"));
-                }
-                if package {
-                    patterns.push(format!("{scope}.*:*"));
-                }
-            }
+            let patterns = scope_patterns(scope, &members, holding_tests.contains(scope));
             let functions = defined_functions(&members);
             let audience = Listed::of(callers.iter().map(|c| c.module.clone()));
             Candidate {
@@ -838,6 +827,23 @@ fn attribute_reports<'d>(
         }
     }
     out
+}
+
+/// The `scopes` of a boundary around `members`, the modules at or below `scope`. A package's
+/// scope names its own module, which a module part names without its submodules, also when it
+/// has no `__init__.py` yet: code added there later is inside the boundary. Below it, the
+/// package's every module, or, when test code lives below the package, each member by name.
+fn scope_patterns(scope: &str, members: &[&ModuleUse<'_>], holding_tests: bool) -> Vec<String> {
+    let mut patterns = vec![format!("{scope}:*")];
+    let below = members.iter().filter(|m| m.module != scope);
+    if members.len() > 1 || members[0].module != scope {
+        if holding_tests {
+            patterns.extend(below.map(|m| format!("{}:*", m.module)));
+        } else {
+            patterns.push(format!("{scope}.*:*"));
+        }
+    }
+    patterns
 }
 
 /// What a block setting `src` changes, which a run on the files as they are named now does not
