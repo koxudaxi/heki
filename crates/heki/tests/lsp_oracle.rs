@@ -5196,6 +5196,19 @@ fn steps_configuration() -> Vec<Step> {
             vec![Action::Configure(CONFIG.to_owned())],
         )
         .present(&[("pkg/svc_user.py", "EFF101")]),
+        // The oracle compares the severity: the server republishes the report as a warning.
+        Step::new(
+            "the configuration makes the blocking-call rule a warning",
+            vec![Action::Configure(format!(
+                "{CONFIG}\n[tool.heki.lint.severity]\nEFF101 = \"warning\"\n"
+            ))],
+        )
+        .present(&[("pkg/svc_user.py", "EFF101")]),
+        Step::new(
+            "the rule is an error again",
+            vec![Action::Configure(CONFIG.to_owned())],
+        )
+        .present(&[("pkg/svc_user.py", "EFF101")]),
     ]
 }
 

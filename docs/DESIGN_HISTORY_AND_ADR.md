@@ -543,6 +543,28 @@ that need no configuration, the import contracts of other tools, and heki's own 
   (the update did not happen) and pending `--diff` changes (files would change) still exit 1.
   *Rejected*: failing on both severities (the 0.1 behavior); an `--exit-zero` switch (it hides
   the bugs too).
+- **Amended in 0.4.0**: only a certain bug that can be critical fails a run.
+  1. `EFF101` is a `Bug`, an `error`: a call that blocks the event loop holds up every
+     concurrent task while it waits, as `EFF106`'s deadlock does. Its heuristic reports (a
+     call that can reach a blocking call) keep the severity and fail nothing by default (point 2).
+     Slower code (`EFF102`, `EFF103`, `EFF105`, `DATA101`, the `OPT` rules) stays a
+     `warning`: of the 4 `EFF103` reports on an event-loop boundary in the corpus, none adds a
+     package the `EFF101` reports do not already fail.
+  2. A heuristic report counts as a `warning` for `fail-on`, whatever its severity
+     (`Diagnostic::fails_run`). It can be wrong about the code, and a check that fails on a
+     report that may be false is turned off as surely as one that fails on every slower loop.
+     The report keeps its rule's severity in every output: the severity says what the bug costs
+     if the report is right, the certainty whether it is. `fail-on = "warning"` fails on it,
+     which is how a project makes its contracts, whose rules are heuristic until certified, stop
+     a run.
+
+  On the development corpus (364 packages analyzed), a run with no configuration fails 36
+  packages instead of 7 (the median newly failing package has 2 reports, the largest 13), with
+  the same reports. *Rejected*: failing on every exact report, slower code included (a new
+  `fail-on` value as the default: 62 packages fail); `fail-on = "warning"` as the default, as
+  Ruff and ty do (62, and 249 with every rule and `--heuristic`, mostly on reports heki labels as
+  possibly wrong); showing a heuristic report of an `error` rule as a `warning` (the label and the
+  SARIF level would stop saying what the bug costs).
 ### ADR-020: `heki recommend`: advice on the configuration from the project's own analysis
 - **Background**: what to enable and declare is the user's question after a first run: which
   heuristic reports could be made exact, which opt-in rules would report here, which ownership
