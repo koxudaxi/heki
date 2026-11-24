@@ -870,14 +870,17 @@ impl FunctionDecl {
 
     /// What calling it gives when its declaration says it returns `returned`: for an
     /// `async def` that no decorator replaces, the coroutine that awaiting gives `returned`.
-    /// The value calling it gives by the declarations: what the return annotation names (`Self`
-    /// left unbound), unless every return gives an object an import binds
+    /// The value calling it gives by the declarations: what every return gives when it is
+    /// narrower than the annotation ([`ReturnFact::ty`]), else what the return annotation names
+    /// (`Self` left unbound), unless every return gives an object an import binds
     /// ([`Self::returned_import`]) and that object is a project module or the annotation names
     /// none of its own (`-> ModuleType`, none).
     pub(crate) fn declared_return(&self, project: &ProjectDecls) -> Option<Ty> {
         let declared = self
-            .return_type
+            .returns
             .as_ref()
+            .and_then(|r| r.ty.as_ref())
+            .or(self.return_type.as_ref())
             .and_then(|t| project.declared_ty(t))
             .and_then(|t| t.bind_self(None));
         let Some(fqn) = &self.returned_import else {
@@ -1092,6 +1095,12 @@ pub struct ModuleDecls {
     /// `STRICT = False`), as [`Self::str_constants`] holds the strings.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub literal_constants: BTreeMap<String, LiteralConstant>,
+    /// Module-level names the module body binds once, outside a loop, to a value that names a
+    /// file ([`names_a_file`]: `DB_PATH = Path(__file__).parent / "app.db"`), with the
+    /// conditions of a type variable: neither `exec` / `globals()` nor a star import may rebind
+    /// them ([`ProjectDecls::file_constant`]).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub file_constants: BTreeSet<String>,
     /// Module-level names bound once, outside a loop, to a new object of the builtin `object`
     /// (`MISSING = object()`), with the conditions of a string constant: no import binds the
     /// name, and neither `exec` / `globals()` nor a star import may rebind it. Such an object
@@ -3244,6 +3253,17 @@ impl ProjectDecls {
         (!self.constant_rebound(&fqn, constant.rebindable))
             .then(|| literal_value(&constant.value))
             .flatten()
+    }
+
+    /// Whether the module constant `fqn` names a file ([`ModuleDecls::file_constants`]),
+    /// through re-exports, unless another module rebinds it.
+    pub fn file_constant(&self, fqn: &str) -> bool {
+        let Some(fqn) = self.canonical_value(fqn) else {
+            return false;
+        };
+        self.split_module(&fqn)
+            .is_some_and(|(m, rest)| m.file_constants.contains(rest))
+            && !self.constant_rebound(&fqn, true)
     }
 
     /// The value of the string constant `fqn` (`pkg.keys.KEY`, `pkg.model.Model.KEY`), through
@@ -6087,6 +6107,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
     }
     decls.str_constants = str_constants(input, &decls);
     decls.literal_constants = literal_constants(input, &decls);
+    decls.file_constants = file_constants(input, &decls);
     decls.object_sentinels = sentinels::object_sentinels(input, &decls);
     sentinels::named_attrs(input, &mut decls);
     decls.copy_registrations = sentinels::copy_registrations(input, &decls);
@@ -6761,6 +6782,54 @@ fn unknown_globals(stores: &GlobalStores<'_>, decls: &ModuleDecls) -> BTreeSet<S
         })
         .map(str::to_owned)
         .collect()
+}
+
+/// [`ModuleDecls::file_constants`], in the order the module body binds them: a constant may be
+/// built from one bound before it (`DB_PATH = DATA_DIR / "app.db"`).
+fn file_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    if input.ir.constants.dynamic || input.ir.has_star_import {
+        return out;
+    }
+    let body = input.ir.function(input.ir.module_fn);
+    let stores = GlobalStores::of(&input.ir.functions);
+    let shape = FnShape::new(body);
+    let imports: FxHashMap<Span, String> = input
+        .semantic
+        .imports
+        .iter()
+        .filter(|imp| !imp.in_type_checking)
+        .filter_map(|imp| Some((imp.span, import_target(imp, input)?)))
+        .collect();
+    let name_of = |v: VarId| match module_read(&shape, &imports, v)? {
+        ModuleRead::Name(text) => decls.resolve_dotted(&text, true),
+        ModuleRead::Imported(fqn) => Some(fqn),
+    };
+    let strs = &input.ir.constants.strs;
+    fn loaded(inst: &Inst) -> Option<&str> {
+        match &inst.kind {
+            InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+    let globals = |inst: &Inst| {
+        let text = strs.get(loaded(inst)?)?;
+        Some(LiteralValue::Str(text.to_string()))
+    };
+    for bb in body.blocks.iter().filter(|b| shape.loop_depth(b.id) == 0) {
+        for inst in &bb.insts {
+            let InstKind::StoreGlobal { name, value } = &inst.kind else {
+                continue;
+            };
+            let files = |inst: &Inst| loaded(inst).is_some_and(|n| out.contains(n));
+            let names_file = stores.once(name)
+                && names_a_file(&|v| shape.inst(v), &name_of, &globals, &files, *value);
+            if names_file {
+                out.insert(name.clone());
+            }
+        }
+    }
+    out
 }
 
 /// [`ModuleDecls::type_vars`]: the module-level names bound once, by the module body, to a
@@ -8182,17 +8251,19 @@ fn literal_value(literal: &ConstLiteral) -> Option<LiteralValue> {
 /// [`ArgFact`] of `var`: its constant (a literal, or a module constant bound once that
 /// `globals` gives, [`TypeCtx::module_constant`]), the class `class_of` gives it, the flags it
 /// sets through the named objects `name_of` gives its operands, and whether it names a file
-/// ([`names_a_file`]).
+/// ([`names_a_file`], `files` giving the module constants that do,
+/// [`TypeCtx::names_file_constant`]).
 pub(crate) fn arg_fact<'i>(
     def: impl Fn(VarId) -> Option<&'i Inst>,
     class_of: impl Fn(VarId) -> Option<String>,
     name_of: impl Fn(VarId) -> Option<String>,
     globals: &dyn Fn(&Inst) -> Option<LiteralValue>,
+    files: &dyn Fn(&Inst) -> bool,
     var: VarId,
 ) -> ArgFact {
     ArgFact {
         literal: literal(&def, globals, var),
-        names_file: names_a_file(&def, &name_of, globals, var),
+        names_file: names_a_file(&def, &name_of, globals, files, var),
         class: class_of(var).or_else(|| bytes_literal_class(&def, var)),
         flags: set_flags(&def, &name_of, var),
     }
@@ -8251,7 +8322,9 @@ enum FilePart {
 }
 
 /// What `var` is built from: a string literal or a module string constant bound once
-/// (`globals`, read by name, through an import, or as a module's attribute) names a file unless it has an in-memory form ([`in_memory_name`]), and so does
+/// (`globals`, read by name, through an import, or as a module's attribute) names a file unless
+/// it has an in-memory form ([`in_memory_name`]), a module constant that names one (`files`,
+/// [`ModuleDecls::file_constants`]) names one, and so does
 /// `__file__`; a copy, `+`, `/`, and `.parent` are made from their operands, a [`PATH_FUNCTIONS`]
 /// call (the called object or receiver resolved by `name_of`) from its arguments, and a
 /// [`PATH_METHODS`] call from its receiver and arguments. Anything else (a parameter, a phi, an
@@ -8260,12 +8333,16 @@ fn file_part<'i>(
     def: &impl Fn(VarId) -> Option<&'i Inst>,
     name_of: &impl Fn(VarId) -> Option<String>,
     globals: &dyn Fn(&Inst) -> Option<LiteralValue>,
+    files: &dyn Fn(&Inst) -> bool,
     var: VarId,
 ) -> FilePart {
     let path_function =
         |name: Option<String>| name.is_some_and(|n| PATH_FUNCTIONS.contains(&n.as_str()));
     let inst = def(var);
-    let names_file = |inst: &Inst| matches!(globals(inst), Some(LiteralValue::Str(text)) if !in_memory_name(&text));
+    let names_file = |inst: &Inst| {
+        files(inst)
+            || matches!(globals(inst), Some(LiteralValue::Str(text)) if !in_memory_name(&text))
+    };
     match inst.map(|i| &i.kind) {
         Some(InstKind::Const {
             literal: ConstLiteral::Str(text),
@@ -8305,12 +8382,13 @@ pub(crate) fn names_a_file<'i>(
     def: &impl Fn(VarId) -> Option<&'i Inst>,
     name_of: &impl Fn(VarId) -> Option<String>,
     globals: &dyn Fn(&Inst) -> Option<LiteralValue>,
+    files: &dyn Fn(&Inst) -> bool,
     var: VarId,
 ) -> bool {
     let budget = Budget::unmetered("heki_effect::resolver::names_a_file");
     let mut steps = 0usize;
     let mut leaves = 0usize;
-    let part = |v| file_part(def, name_of, globals, v);
+    let part = |v| file_part(def, name_of, globals, files, v);
     let not_a_file = reach(
         &budget,
         [var],
@@ -8717,6 +8795,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     path_changes: None,
     str_constants: BTreeMap::new(),
     literal_constants: BTreeMap::new(),
+    file_constants: BTreeSet::new(),
     object_sentinels: BTreeSet::new(),
     copy_registrations: BTreeSet::new(),
     global_capacities: BTreeMap::new(),
@@ -9559,6 +9638,24 @@ impl<'a> TypeCtx<'a> {
     /// The module constant `inst` reads ([`Self::global_read`]): a string, a number, or a
     /// boolean bound once, under the rules on rebinding and imports of [`Self::global_literal`]
     /// and [`ProjectDecls::literal_constant`].
+    /// Whether the read `inst` of a module constant (as for [`Self::module_constant`]) names a
+    /// file ([`ProjectDecls::file_constant`]).
+    pub(crate) fn names_file_constant(
+        &self,
+        inst: &Inst,
+        module_of: &dyn Fn(VarId) -> Option<String>,
+    ) -> bool {
+        let fqn = match self.global_read(inst, module_of) {
+            Some(GlobalRead::Own(name)) => match self.module.imports.get(name) {
+                Some(_) => self.module.fixed_import(name).cloned(),
+                None => Some(format!("{}.{name}", self.module.module_name)),
+            },
+            Some(GlobalRead::Other(fqn)) => Some(fqn),
+            None => None,
+        };
+        fqn.is_some_and(|fqn| self.project.file_constant(&fqn))
+    }
+
     pub(crate) fn module_constant(
         &self,
         inst: &Inst,

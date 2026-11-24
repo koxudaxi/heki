@@ -358,6 +358,16 @@ const GAPS: &[(&str, &str, &str)] = &[
     ),
     ("sqlite-file-global", "two-helpers", "EFF101 [heuristic]"),
     ("sqlite-file-global", "unannotated-helper", "-"),
+    (
+        "sqlite-file-path-constant",
+        "annotated-helper",
+        "EFF101 [heuristic]",
+    ),
+    (
+        "sqlite-file-path-constant",
+        "two-helpers",
+        "EFF101 [heuristic]",
+    ),
     ("sqlite-memory", "annotated-helper", "EFF101 [heuristic]"),
     ("sqlite-memory", "two-helpers", "EFF101 [heuristic]"),
     (
@@ -406,34 +416,14 @@ const GAPS: &[(&str, &str, &str)] = &[
     ("urlopen-data", "two-helpers", "EFF101 [heuristic]"),
     ("urlopen-data", "unannotated-helper", "EFF101 [heuristic]"),
     ("bounded-queue-put", "unannotated-helper", "-"),
-    // A call's result is typed by the function's return annotation only, and carries neither
-    // the state of the value returned nor the literal it is: a connection's file is not known
-    // (heuristic, or nothing without an annotation), a queue's capacity is not known (nothing),
-    // and a returned zero or `data:` URL is an argument heki cannot evaluate, which counts as one
-    // the call waits on (assumption R6).
-    ("sqlite-file", "factory", "EFF101 [heuristic]"),
+    // A call's result is typed by what every return of an annotated function gives, but it
+    // carries no literal: a factory without an annotation gives nothing, a queue's capacity is
+    // not known (nothing), and a returned zero or `data:` URL is an argument heki cannot
+    // evaluate, which counts as one the call waits on (assumption R6).
     ("sqlite-file", "unannotated-factory", "-"),
-    ("sqlite-file", "to-thread", "EFF101 [heuristic]"),
-    ("sqlite-file", "partial", "EFF101 [heuristic]"),
-    ("sqlite-file-global", "factory", "EFF101 [heuristic]"),
     ("sqlite-file-global", "unannotated-factory", "-"),
-    ("sqlite-file-global", "to-thread", "EFF101 [heuristic]"),
-    ("sqlite-file-global", "partial", "EFF101 [heuristic]"),
-    ("sqlite-file-name-constant", "factory", "EFF101 [heuristic]"),
     ("sqlite-file-name-constant", "unannotated-factory", "-"),
-    (
-        "sqlite-file-name-constant",
-        "to-thread",
-        "EFF101 [heuristic]",
-    ),
-    ("sqlite-file-name-constant", "partial", "EFF101 [heuristic]"),
     ("sqlite-file-path-constant", "unannotated-factory", "-"),
-    ("sqlite-memory", "factory", "EFF101 [heuristic]"),
-    ("sqlite-memory", "to-thread", "EFF101 [heuristic]"),
-    ("sqlite-memory", "partial", "EFF101 [heuristic]"),
-    ("sqlite-memory-global", "factory", "EFF101 [heuristic]"),
-    ("sqlite-memory-global", "to-thread", "EFF101 [heuristic]"),
-    ("sqlite-memory-global", "partial", "EFF101 [heuristic]"),
     ("sleep-zero", "factory", "EFF101"),
     ("sleep-zero", "unannotated-factory", "EFF101"),
     ("sleep-zero", "to-thread", "EFF101"),
@@ -454,9 +444,6 @@ const GAPS: &[(&str, &str, &str)] = &[
     ),
     ("shutdown-no-wait", "to-thread", "EFF101 [heuristic]"),
     ("shutdown-no-wait", "partial", "EFF101 [heuristic]"),
-    // A `Path` module constant read inside a function is not known to name a file, while the
-    // module body's own call on it is: here the inline form is the heuristic one.
-    ("sqlite-file-path-constant", "module-constant", "EFF101"),
     // The items a loop steps through are the data's ("Origin") when they come from a parameter,
     // a catalog call, or a project function returning such items (also through
     // `asyncio.to_thread` or `functools.partial`): the rows a module constant holds leave

@@ -714,6 +714,12 @@ const EXACT_USE: &str =
 const ROWS_DB: &str = "import sqlite3\n\nCONN = sqlite3.connect(\"app.db\")\n\n\ndef authors():\n    return CONN.execute(\"SELECT id FROM a\").fetchall()\n\n\ndef book(i):\n    return CONN.execute(\"SELECT * FROM b WHERE a = ?\", (i,)).fetchone()\n";
 const ROWS_DB_LIMITED: &str = "import sqlite3\n\nCONN = sqlite3.connect(\"app.db\")\n\n\ndef authors():\n    return CONN.execute(\"SELECT id FROM a LIMIT 3\").fetchall()\n\n\ndef book(i):\n    return CONN.execute(\"SELECT * FROM b WHERE a = ?\", (i,)).fetchone()\n";
 const ROWS_DB_THROUGH: &str = "import sqlite3\n\nCONN = sqlite3.connect(\"app.db\")\n\n\ndef _all():\n    return CONN.execute(\"SELECT id FROM a\")\n\n\ndef authors():\n    return _all()\n\n\ndef book(i):\n    return CONN.execute(\"SELECT * FROM b WHERE a = ?\", (i,)).fetchone()\n";
+// A connection a factory of another module returns (`ReturnFact::ty`), opened on a path a module
+// constant names (`ModuleDecls::file_constants`).
+const FACTORY_DB: &str = "import sqlite3\nfrom pathlib import Path\n\nDB_PATH = Path(__file__).parent / \"app.db\"\n\n\ndef connect() -> sqlite3.Connection:\n    return sqlite3.connect(DB_PATH)\n";
+const FACTORY_DB_MEMORY: &str = "import sqlite3\nfrom pathlib import Path\n\nDB_PATH = Path(__file__).parent / \"app.db\"\n\n\ndef connect() -> sqlite3.Connection:\n    return sqlite3.connect(\":memory:\")\n";
+const FACTORY_DB_UNKNOWN_PATH: &str = "import os\nimport sqlite3\n\nDB_PATH = os.environ[\"DB\"]\n\n\ndef connect() -> sqlite3.Connection:\n    return sqlite3.connect(DB_PATH)\n";
+const FACTORY_USE: &str = "from pkg.factory_db import connect\n\n\nasync def serve():\n    return connect().execute(\"SELECT 1\")\n";
 const ROWS_USE: &str = "from pkg.rows_db import authors, book\n\n\ndef each():\n    for r in authors():\n        book(r[0])\n";
 // The third module binds the base's method to another function: the call may run that
 // function instead. The base's class body binds it to another function on every path: the call
@@ -1192,6 +1198,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/exact_use.py", EXACT_USE),
         ("pkg/rows_db.py", ROWS_DB),
         ("pkg/rows_use.py", ROWS_USE),
+        ("pkg/factory_db.py", FACTORY_DB),
+        ("pkg/factory_use.py", FACTORY_USE),
         ("pkg/st_client.py", ST_CLIENT),
         ("pkg/st_use.py", ST_USE),
         ("pkg/st_rebind.py", ST_REBIND),
@@ -1496,6 +1504,37 @@ fn steps_exact_effects() -> Vec<Step> {
         )
         .present(&[("pkg/exact_made_use.py", "EFF101")])
         .absent(&[("pkg/exact_made_use.py", "EFF101 [heuristic]")]),
+    ]
+}
+
+/// A call of a factory in another file gives what every return of the factory gives
+/// (`ReturnFact::ty`): a connection on the file a module constant names, one in memory, or, on a
+/// path heki cannot decide, a connection in an unknown state.
+fn steps_returned_types() -> Vec<Step> {
+    const EXACT: &[(&str, &str)] = &[("pkg/factory_use.py", "EFF101")];
+    const HEURISTIC: &[(&str, &str)] = &[("pkg/factory_use.py", "EFF101 [heuristic]")];
+    const NEITHER: &[(&str, &str)] = &[
+        ("pkg/factory_use.py", "EFF101"),
+        ("pkg/factory_use.py", "EFF101 [heuristic]"),
+    ];
+    vec![
+        Step::new(
+            "the factory opens a database in memory",
+            vec![save("pkg/factory_db.py", FACTORY_DB_MEMORY)],
+        )
+        .absent(NEITHER),
+        Step::new(
+            "it opens the path an environment variable gives",
+            vec![save("pkg/factory_db.py", FACTORY_DB_UNKNOWN_PATH)],
+        )
+        .present(HEURISTIC)
+        .absent(EXACT),
+        Step::new(
+            "it opens the file its path constant names again",
+            vec![save("pkg/factory_db.py", FACTORY_DB)],
+        )
+        .present(EXACT)
+        .absent(HEURISTIC),
     ]
 }
 
@@ -6116,6 +6155,7 @@ sessions!(editing, Session::start, {
     effect_index: steps_effect_index,
     exact_effects: steps_exact_effects,
     returned_rows: steps_returned_rows,
+    returned_types: steps_returned_types,
     store_types: steps_store_types,
     unused_suppressions: steps_unused_suppressions,
     helper_witnesses: steps_helper_witnesses,

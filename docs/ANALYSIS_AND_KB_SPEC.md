@@ -690,7 +690,15 @@ handed returns (`result_of`: `asyncio.to_thread(f, x)`) the callable's, through
 (`TypeCtx::fixed_call_items`: a statement whose text fixes its rows, `items_up_to`, a call on
 a receiver a call of the same items made): such a call gives no items fact, and in a loop it is
 a trip count `FnIndex::fixed_trips` reads through its `leaf`. The facts of a module are
-decided in at most eight passes, each from the facts of the pass before.
+decided in at most eight passes, each from the facts of the pass before. Its type
+(`ReturnFact::ty`) is the type every returned value of a function with a return annotation has,
+when they agree on one narrower than the annotation (`ProjectDecls::narrower`: a catalog class of
+the annotated library class, `sqlite3.connect(file)` of `-> sqlite3.Connection`, or a subclass
+of the annotated class): `FunctionDecl::declared_return` gives it in the annotation's place, for
+typing, `result_of`, and the globals and attributes of pass 2. A module constant the module
+body binds once, outside a loop, to a value that names a file (`ModuleDecls::file_constants`,
+`names_a_file`) names it where a function or another module reads it
+(`TypeCtx::names_file_constant`), unless another module rebinds it.
 
 A module-level `TypeVar` bound once with a `bound=` (a name, an attribute of one, or the string of
 an annotation) or constraints is that bound, or the union of the constraints, wherever an

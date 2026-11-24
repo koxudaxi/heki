@@ -7747,6 +7747,7 @@ impl<'a> Extractor<'a> {
                     |c| self.instance_of(c),
                     name_of,
                     &|inst| self.cx.module_constant(inst, &name_of),
+                    &|inst| self.cx.names_file_constant(inst, &name_of),
                     v,
                 )
             })

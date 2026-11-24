@@ -1603,6 +1603,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                     class,
                     name_of,
                     &|inst| self.cx.module_constant(inst, &name_of),
+                    &|inst| self.cx.names_file_constant(inst, &name_of),
                     v,
                 )
             },
