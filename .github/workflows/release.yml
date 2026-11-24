@@ -6,7 +6,7 @@ name: Release
 # what they build or check is published.
 #
 # The tag is the version (`v` + the version): every job that builds from the checkout first writes
-# it into the manifests and `Cargo.lock` (`scripts/set_release_versions.py`), and the checks
+# it into the manifests and the lock files (`scripts/set_release_versions.py`), and the checks
 # compare the distributions with it. A published final release also dates its CHANGELOG section
 # there with the publish date, as the Release Sync workflow does on `main`, so that
 # `heki version --changelog` prints the section as `main` gets it. Nothing is committed here;

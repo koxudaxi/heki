@@ -15,6 +15,8 @@ CHANGELOG a binary embeds (`heki version --changelog`) has the section `main` ge
 - `pyproject.toml`: ``project.version``;
 - `Cargo.lock`: the version of every workspace member, without registry access, so that a build
   with ``--locked`` accepts the lock file;
+- `uv.lock`: the version of the project itself, so that ``uv run`` under ``UV_LOCKED=1`` accepts
+  the lock file;
 - with ``--changelog DATE``, `CHANGELOG.md`: the first ``## [VERSION] - Unreleased`` heading
   becomes ``## [VERSION] - DATE``, and the ``[VERSION]`` link, a compare that ends at ``HEAD``,
   ends at the release tag instead (a missing one compares the previous release with the tag, or
@@ -165,9 +167,27 @@ def cargo_lock(text: str, version: str, members: list[str]) -> str:
     return text
 
 
-def check_written(pyproject: str, cargo: str, lock: str, version: str, members: list[str]) -> None:
+def uv_lock(text: str, version: str, name: str) -> str:
+    """Set the version of the project's own entry, the one whose source is the checkout."""
+    entry = re.compile(
+        rf'^\[\[package\]\]\nname = "{re.escape(name)}"\nversion = "(?P<value>[^"]*)"\n'
+        r'(?=source = \{ (virtual|editable) = "\." \}$)',
+        re.MULTILINE,
+    )
+    return replace_value(text, entry, version, f"uv.lock `{name}`")
+
+
+def check_written(
+    pyproject: str, cargo: str, lock: str, uv: str, version: str, members: list[str]
+) -> None:
     """Fail unless every version a build reads is `version`: the edits missed no entry."""
+    project = tomllib.loads(pyproject)["project"]["name"]
     declared = declared_versions(tomllib.loads(pyproject), tomllib.loads(cargo))
+    declared |= {
+        f"uv.lock `{project}`": package["version"]
+        for package in tomllib.loads(uv)["package"]
+        if package["name"] == project
+    }
     local = {
         package["name"]: package["version"]
         for package in tomllib.loads(lock)["package"]
@@ -251,7 +271,7 @@ def release_files(root: Path, version: str, changelog_date: str | None) -> dict[
     """The new text of every file the release changes, checked before anything is written."""
     texts = {
         name: (root / name).read_text(encoding="utf-8")
-        for name in ("Cargo.toml", "pyproject.toml", "Cargo.lock")
+        for name in ("Cargo.toml", "pyproject.toml", "Cargo.lock", "uv.lock")
     }
     cargo = tomllib.loads(texts["Cargo.toml"])
     internal = [
@@ -264,9 +284,17 @@ def release_files(root: Path, version: str, changelog_date: str | None) -> dict[
         "Cargo.toml": cargo_toml(texts["Cargo.toml"], version, internal),
         "pyproject.toml": pyproject_toml(texts["pyproject.toml"], version),
         "Cargo.lock": cargo_lock(texts["Cargo.lock"], version, members),
+        "uv.lock": uv_lock(
+            texts["uv.lock"], version, tomllib.loads(texts["pyproject.toml"])["project"]["name"]
+        ),
     }
     check_written(
-        written["pyproject.toml"], written["Cargo.toml"], written["Cargo.lock"], version, members
+        written["pyproject.toml"],
+        written["Cargo.toml"],
+        written["Cargo.lock"],
+        written["uv.lock"],
+        version,
+        members,
     )
     if changelog_date is not None:
         repository = cargo["workspace"]["package"]["repository"].rstrip("/")

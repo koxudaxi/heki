@@ -879,7 +879,10 @@ impl FunctionDecl {
         let declared = self
             .returns
             .as_ref()
-            .and_then(|r| r.ty.as_ref())
+            .and_then(|r| {
+                let rebound = r.ty_globals.iter().any(|g| project.rebound_elsewhere(g));
+                r.ty.as_ref().filter(|_| !rebound)
+            })
             .or(self.return_type.as_ref())
             .and_then(|t| project.declared_ty(t))
             .and_then(|t| t.bind_self(None));
@@ -4405,8 +4408,14 @@ impl ProjectDecls {
     /// already: `source` is `class` or derives from it, so its instances hold only attributes
     /// of the family of `class`, and a copy of such a namespace or of its fields adds none.
     pub(crate) fn keys_exist_in(&self, source: &str, class: &str) -> bool {
-        let (source, class) = (self.canonical(source), self.canonical(class));
-        source == class || self.is_subclass(&source, &class)
+        self.derives_from(source, class)
+    }
+
+    /// Whether every instance of `class` is an instance of `base`: `class` is `base` or a project
+    /// class deriving from it.
+    pub fn derives_from(&self, class: &str, base: &str) -> bool {
+        let (class, base) = (self.canonical(class), self.canonical(base));
+        class == base || self.is_subclass(&class, &base)
     }
 
     /// The method resolution order of `class`: Python's C3 linearization of its project bases;
