@@ -2180,13 +2180,15 @@ impl<'e, 'a> Engine<'e, 'a> {
             }
             // A copy (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`) has its original's
             // type.
-            _ => {
-                let entry = self.cx.catalog(fqn);
-                if !args.is_empty() && entry.is_some_and(|e| e.copy_sanitizer.is_some()) {
-                    return Ok(self.need(args[0])?.cloned());
-                }
-                return Ok(self.cx.call_result(fqn, |i, k| self.passed(call, i, k)));
+            _ if !args.is_empty()
+                && self
+                    .cx
+                    .catalog(fqn)
+                    .is_some_and(|e| e.copy_sanitizer.is_some()) =>
+            {
+                return Ok(self.need(args[0])?.cloned());
             }
+            _ => return Ok(self.cx.call_result(fqn, |i, k| self.passed(call, i, k))),
         }))
     }
 

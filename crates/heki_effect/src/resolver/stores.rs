@@ -601,8 +601,8 @@ struct StoringFn<'f> {
     /// The loads of a global or an attribute whose object the function changes in place
     /// ([`changed_loads`]).
     changed: Box<[ChangedLoad<'f>]>,
-    /// The changes in place of the function, `None` when heki cannot list them all.
-    changes: Option<InPlaceChanges<'f>>,
+    /// The changes in place of the function, [`Answer::Open`] when heki cannot list them all.
+    changes: Answer<InPlaceChanges<'f>>,
     /// The class whose instance the function stores into as `self` (qualname), and the
     /// variables holding it ([`self_of`]).
     selfs: Option<(&'f str, FxHashSet<VarId>)>,
@@ -1326,12 +1326,12 @@ fn insts(f: &IrFunction) -> impl Iterator<Item = &Inst> {
 
 /// The loads of `f` of a global or an attribute whose object `f` changes in place itself
 /// ([`heki_ir::FnIndex::changes_in_place`]: `HANDLERS[kind] = run`, `self.items.append(x)`,
-/// `self.items += more`), in the order of the function's instructions, and the changes (`None`
-/// when heki cannot list them all, and every load may be changed).
+/// `self.items += more`), in the order of the function's instructions, and the changes
+/// ([`Answer::Open`] when heki cannot list them all, and every load may be changed).
 fn changed_loads<'f>(
     input: &'f ModuleInput<'_>,
     f: &'f IrFunction,
-) -> (Box<[ChangedLoad<'f>]>, Option<InPlaceChanges<'f>>) {
+) -> (Box<[ChangedLoad<'f>]>, Answer<InPlaceChanges<'f>>) {
     let changes = insts(f).any(|inst| {
         matches!(
             inst.kind,
@@ -1341,16 +1341,12 @@ fn changed_loads<'f>(
         )
     });
     if !changes {
-        return (Box::default(), None);
+        return (Box::default(), Answer::Known(InPlaceChanges::default()));
     }
-    let changes = match heki_ir::FnIndex::new(f, &input.ir.constants).changes_in_place() {
-        Answer::Known(changes) => Some(changes),
-        Answer::Open => None,
-    };
+    let changes = heki_ir::FnIndex::new(f, &input.ir.constants).changes_in_place();
     let changed = |dst: &VarId| {
-        changes
-            .as_ref()
-            .is_none_or(|c| c.aliased_by.contains_key(dst))
+        let aliased = changes.as_ref().map(|c| c.aliased_by.contains_key(dst));
+        aliased.open_means(true)
     };
     let loads = insts(f).filter_map(|inst| {
         let (dst, of) = match &inst.kind {
@@ -1604,12 +1600,15 @@ impl<'i> Iterated<'_, 'i> {
         None
     }
 
-    /// What the loop whose iterator `iter` holds takes ([`Self::items`] of what it iterates).
-    fn items_of_iter(&self, iter: VarId) -> Option<Items> {
-        match &self.def(iter)?.kind {
-            InstKind::MakeIter { iterable, .. } => self.items(*iterable),
-            _ => None,
+    /// What the loop `item` holds an item of takes ([`Self::items`] of what it iterates), when
+    /// `item` holds one.
+    fn loop_items(&self, item: VarId) -> Option<Items> {
+        if let InstKind::IterNext { iter, .. } = self.def(item)?.kind
+            && let InstKind::MakeIter { iterable, .. } = self.def(iter)?.kind
+        {
+            return self.items(iterable);
         }
+        None
     }
 
     /// What a loop over `iterable` takes: the items of a display of string constants, the keys
@@ -1667,11 +1666,10 @@ impl<'i> Iterated<'_, 'i> {
                     cur = *recv;
                 }
                 kind => {
-                    let (wrapper, _, [arg]) =
-                        super::plain_call(kind, WRAPPERS, |v| self.types.get(&v))?
-                    else {
-                        return None;
-                    };
+                    let (wrapper, _, args) =
+                        super::plain_call(kind, WRAPPERS, |v| self.types.get(&v))?;
+                    // Each wrapper takes one iterable: `list()` iterates nothing.
+                    let [arg] = args else { return None };
                     wrappers.push(match wrapper {
                         "builtins.dict" => Wrapper::Dict,
                         _ => Wrapper::Same,
@@ -1806,13 +1804,8 @@ pub(crate) fn key_name<'i>(
         types,
         constant: &constant,
     };
-    // What the loop the item `item` comes from takes.
-    let item_of = |item: VarId| match loops.def(item).map(|i| &i.kind) {
-        Some(InstKind::IterNext { iter, .. }) => loops.items_of_iter(*iter),
-        _ => None,
-    };
     let items = match loops.def(key).map(|i| &i.kind) {
-        Some(InstKind::IterNext { iter, .. }) => loops.items_of_iter(*iter),
+        Some(InstKind::IterNext { .. }) => loops.loop_items(key),
         // The first of the pair a loop unpacks (`for key, value in ...`).
         Some(InstKind::SubscriptLoad {
             obj,
@@ -1820,15 +1813,17 @@ pub(crate) fn key_name<'i>(
             key_const: None,
             is_slice: false,
             ..
-        }) if is_int(loops.def(*index), 0) => match item_of(*obj) {
+        }) if is_int(loops.def(*index), 0) => match loops.loop_items(*obj) {
             Some(Items::Pairs(classes)) => Some(Items::Keys(classes)),
             _ => None,
         },
         // The name of the field a loop takes (`for field in dataclasses.fields(obj)`).
-        Some(InstKind::AttrLoad { obj, attr, .. }) if attr == "name" => match item_of(*obj) {
-            Some(Items::Fields(classes)) => Some(Items::Keys(classes)),
-            _ => None,
-        },
+        Some(InstKind::AttrLoad { obj, attr, .. }) if attr == "name" => {
+            match loops.loop_items(*obj) {
+                Some(Items::Fields(classes)) => Some(Items::Keys(classes)),
+                _ => None,
+            }
+        }
         _ => None,
     };
     match items {
@@ -2177,15 +2172,14 @@ impl<'c, 'f> Classifier<'c, 'f> {
         let budget = Budget::of_function("store additions", f);
         let additions: Closure<VarId, Added> = Closure::new();
         for load in &self.s.changed {
-            let added = match &self.s.changes {
-                Some(changes) => additions.ask(
+            let added = self.s.changes.as_ref().and_then(|changes| {
+                additions.ask(
                     &budget,
                     load.dst,
                     |v| self.added_by(changes, v),
                     |v, out| out.extend(changes.aliased_by.get(&v).into_iter().flatten()),
-                ),
-                None => Answer::Open,
-            };
+                )
+            });
             // Past the budget, or when heki cannot list the changes, they add what heki cannot
             // type.
             let added = added.open_means(Rc::new(Added::unknown()));
@@ -2381,30 +2375,24 @@ impl<'c, 'f> Classifier<'c, 'f> {
 
     /// The name the variable `var` holding an attribute name names ([`key_name`]).
     fn key_name(&self, var: VarId) -> AttrName<'static> {
-        if !self.budget.take(1) {
-            return AttrName::Unknown;
-        }
-        key_name(
-            self.cx,
-            self.s.f,
-            var,
-            &|v| self.s.shape.inst(v),
-            &self.vals,
-        )
+        self.traced(|def| key_name(self.cx, self.s.f, var, def, &self.vals))
     }
 
     /// The names the keys of `other` name, stored by `ns.update(other)` ([`update_keys`]).
     fn update_keys(&self, other: VarId) -> AttrName<'static> {
+        self.traced(|def| update_keys(self.cx, self.s.f, other, def, &self.vals))
+    }
+
+    /// What `trace` tells from the instructions defining the function's variables, for one step
+    /// of the budget: past it, any name.
+    fn traced(
+        &self,
+        trace: impl FnOnce(&dyn Fn(VarId) -> Option<&'f Inst>) -> AttrName<'static>,
+    ) -> AttrName<'static> {
         if !self.budget.take(1) {
             return AttrName::Unknown;
         }
-        update_keys(
-            self.cx,
-            self.s.f,
-            other,
-            &|v| self.s.shape.inst(v),
-            &self.vals,
-        )
+        trace(&|v| self.s.shape.inst(v))
     }
 
     /// What the receiver `obj` holds.

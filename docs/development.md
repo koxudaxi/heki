@@ -308,8 +308,12 @@ costs more than 1 s (on the machine the limits were measured on, scaled to the m
 the gate by linear shapes of calls and of loops, and for a project shape also of a module of
 thousands of functions, whose heap slows down more on a CI runner; they are timed on a fixed
 release of heki from PyPI, so that a change to the binary under test never moves its own limits)
-or 1 GiB beyond an empty module. A shape over the limits is run twice more and keeps the least of
-the three times, the way the references are timed. `heki check --walk-steps <path>` (hidden)
+or 1 GiB beyond an empty module. The limits are calibrated per mode: a run through the `--watch`
+engine is measured beyond an empty module watched the same way and compared with 1 s scaled by
+the same linear shapes timed through the watch engine (the script keeps the seconds each mode's
+shapes take on the machine of the limits), since the engine's startup and its second index slow
+down from one machine to another unlike a `heki check` run. A shape over the limits is run twice
+more and keeps the least of the three times, the way the references are timed. `heki check --walk-steps <path>` (hidden)
 writes the steps each owner's walks took per function as JSON: the gate also fails when an
 owner's steps grow more than
 2.5 times from half the size to the full size, or when a budget is spent on a shape like real code.

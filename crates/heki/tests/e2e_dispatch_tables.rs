@@ -1189,6 +1189,69 @@ fn in_place_operators_add_their_items() {
     assert_eq!(verdict(&p, "m.Holder.run_all"), "impure");
 }
 
+/// Changes that add no item keep the items: those after a `return`, whose operands no path
+/// binds, and `+=` on a tuple, which makes a new tuple (an alias keeps the items of the one it
+/// holds). `setdefault` with a key only adds the key.
+const ADDING_NOTHING: &str = r#"COUNT = 0
+
+
+class Quiet:
+    def run(self) -> None:
+        pass
+
+
+class Loud:
+    def run(self) -> None:
+        global COUNT
+        COUNT += 1
+
+
+ITEMS = [Quiet()]
+TABLE = {"quiet": Quiet()}
+
+
+def after_return() -> None:
+    return
+    more = [Loud()]
+    ITEMS.extend(more)
+    extra = {"loud": Loud()}
+    TABLE.update(extra)
+
+
+def run_items() -> None:
+    for item in ITEMS:
+        item.run()
+
+
+def run_table() -> None:
+    TABLE["quiet"].run()
+
+
+def run_tuple_alias() -> None:
+    items = (Quiet(),)
+    kept = items
+    items += (Loud(),)
+    for item in kept:
+        item.run()
+
+
+def run_set_default() -> None:
+    seen = {Quiet(): 1}
+    seen.setdefault(Loud())
+    for item in seen:
+        item.run()
+"#;
+
+#[test]
+fn changes_adding_no_item_keep_the_items() {
+    let p = Project::new("dispatch_adding_nothing");
+    p.write("m.py", ADDING_NOTHING);
+    assert_eq!(verdict(&p, "m.run_items"), "pure");
+    assert_eq!(verdict(&p, "m.run_table"), "pure");
+    assert_eq!(verdict(&p, "m.run_tuple_alias"), "pure");
+    assert_eq!(verdict(&p, "m.run_set_default"), "impure");
+}
+
 /// A module body or a class body binding a function's name again on some paths
 /// (`if flag: fetch = _quiet`, also to a function another module defines, or a `def` on one
 /// branch and another function on the other): a call through the name may run either function,

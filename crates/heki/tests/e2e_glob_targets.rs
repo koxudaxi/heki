@@ -445,3 +445,52 @@ unresolved = "report"
         )]
     );
 }
+
+/// A class whose instances the code gives a name computed at run time may have any member, so
+/// its glob target matches any name on an object of unknown class: also the `NamedTuple` API
+/// and `_nobody_has_this`. A computed name the instance has already (a key of another
+/// instance's namespace), or one written on an object of unknown class, gives it no member.
+#[test]
+fn a_class_given_names_computed_at_run_time_may_have_any_member() {
+    let codes = |p: &Project| -> Vec<(u64, String)> {
+        reports(p)
+            .into_iter()
+            .map(|(line, code, _)| (line, code))
+            .collect()
+    };
+    let owned = |found: &[(u64, &str)]| -> Vec<(u64, String)> {
+        found.iter().map(|(l, c)| (*l, (*c).to_owned())).collect()
+    };
+    let globs = "[\"pkg.parser.base.Parser._*\"]";
+    let p = unknown_objects_project("unknown_objects_existing_names", (globs, globs));
+    p.write(
+        "pkg/parser/names.py",
+        "from pkg.parser.base import Parser\n\n\ndef copy_from(parser: Parser, other: Parser) -> None:\n    for key in vars(other):\n        setattr(parser, key, getattr(other, key))\n\n\ndef attach_anything(obj, name: str) -> None:\n    setattr(obj, name, None)\n",
+    );
+    assert_eq!(
+        codes(&p),
+        owned(&[
+            (17, "MUT204"),
+            (21, "MUT207"),
+            (25, "MUT207"),
+            (29, "MUT206")
+        ])
+    );
+    p.write(
+        "pkg/parser/names.py",
+        "from pkg.parser.base import Parser\n\n\ndef attach_named(parser: Parser, name: str) -> None:\n    setattr(parser, name, None)\n",
+    );
+    assert_eq!(
+        codes(&p),
+        owned(&[
+            (9, "MUT207"),
+            (13, "MUT207"),
+            (13, "MUT206"),
+            (17, "MUT204"),
+            (21, "MUT207"),
+            (25, "MUT207"),
+            (29, "MUT206"),
+            (33, "MUT207"),
+        ])
+    );
+}
