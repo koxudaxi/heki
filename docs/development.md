@@ -165,6 +165,27 @@ failing on a project, a child process that crashed or timed out, the recorder fa
 CI runs the checker tests and seeds 0 to 199 with `--fail-on-refutation` on CPython 3.12 to
 3.15.
 
+## Boundary equivalence
+
+`crates/heki/tests/e2e_boundary_equivalence.rs` checks a principle of the effect rules through the
+binary: moving the value an effect depends on into a helper's parameter (annotated or not, one or
+two helpers deep), a factory's return (with or without a return annotation), a module constant, a
+function `asyncio.to_thread` runs, or a factory called through `functools.partial` does not
+change what heki reports about the effect. Each row of the table is an expression (a connection
+opened on a file or in memory, a sleep, a URL, a queue, a flag, the rows of a query) and the
+statement using it; the test writes the row in every form and requires the code and certainty the
+inline form reports, or no report where the inline form has none.
+
+Today's exceptions are listed in `GAPS` with what each form reports instead, grouped by the fact
+heki does not carry across that boundary. The list is exact: a form that starts to report as its
+inline form does fails the test until its line is removed, so the list only shrinks as the facts
+cross more boundaries, and a form that changes otherwise fails it too.
+
+To add a row, add a `Row` to `ROWS` (the rule, the module's setup, the expression and the class
+annotating it, the statement using it as `{v}`, and the calls that make the value, whose own
+reports are not the use's), run the test, and check every difference it prints: a difference is a
+new gap, which goes to `GAPS` only with the fact it lacks, or a bug.
+
 ## Memory
 
 ```console
