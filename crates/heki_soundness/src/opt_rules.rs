@@ -1666,13 +1666,9 @@ impl<'a, 'c> Rules<'a, 'c> {
             {
                 SetUse::OrderFree
             }
-            InstKind::Call {
-                callee_var,
-                callee,
-                args,
-                ..
-            } if heki_ir::comprehension_id(*callee_var, callee).is_some()
-                && args.first() == Some(&u) =>
+            kind if kind
+                .comprehension_operands()
+                .is_some_and(|(iterable, _)| iterable == u) =>
             {
                 SetUse::Observes(format!("{who} is iterated (line {line})"))
             }
@@ -1686,9 +1682,6 @@ impl<'a, 'c> Rules<'a, 'c> {
                 SetUse::Observes(format!("{who} is passed to `.{method}(...)` (line {line})"))
             }
             InstKind::MakeIter { .. } | InstKind::YieldFrom { .. } => {
-                SetUse::Observes(format!("{who} is iterated (line {line})"))
-            }
-            InstKind::MakeGenExpr { outer_iter, .. } if *outer_iter == u => {
                 SetUse::Observes(format!("{who} is iterated (line {line})"))
             }
             InstKind::Yield { .. } => SetUse::Observes(format!("{who} is yielded (line {line})")),

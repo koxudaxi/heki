@@ -6,7 +6,7 @@
 use super::{ModuleDecls, PathChange, imported_fqn};
 use crate::ModuleInput;
 use heki_ir::walk::{Budget, Closure, Def, Join, Use};
-use heki_ir::{BinOpKind, FnIndex, InstKind, Terminator, VarId, comprehension_id};
+use heki_ir::{BinOpKind, FnIndex, InstKind, Terminator, VarId};
 use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
 
@@ -399,11 +399,6 @@ impl Paths<'_> {
                 m if READING_METHODS.contains(&m) => None,
                 _ => Some(PathChange::Replaced),
             },
-            InstKind::MakeGenExpr {
-                outer_iter,
-                captured,
-                ..
-            } => (*outer_iter != v || captured.contains(&v)).then_some(PathChange::Replaced),
             // A package binding `__path__` rebinds its own path, also to an imported list; in a
             // module that is not a package, an import binding the name only names the list it
             // imports, whose changes are followed through the import.
@@ -435,22 +430,13 @@ impl Paths<'_> {
     }
 
     /// Whether the call `kind` only reads `v`: a builtin that only reads its arguments, a
-    /// comprehension function iterating it, or one of [`PATH_READERS`].
+    /// comprehension iterating it ([`InstKind::only_iterates`]), or one of [`PATH_READERS`].
     fn only_reads(&self, kind: &InstKind, v: VarId) -> bool {
         match kind {
             InstKind::Call {
                 callee_var, callee, ..
             } if self.ix.builtin(*callee_var, callee).is_some() => true,
-            // A comprehension function iterates its first argument; the others are the names its
-            // body reads.
-            InstKind::Call {
-                callee_var,
-                callee,
-                args,
-                ..
-            } if comprehension_id(*callee_var, callee).is_some() => args
-                .split_first()
-                .is_some_and(|(first, rest)| *first == v && !rest.contains(&v)),
+            _ if kind.comprehension_operands().is_some() => kind.only_iterates(v),
             _ => self
                 .called(kind)
                 .is_some_and(|c| PATH_READERS.contains(&c.as_str())),

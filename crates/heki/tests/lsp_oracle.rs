@@ -3034,6 +3034,31 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
         )
         .absent(&[("pkg/key_writer.py", "MUT201")]),
         Step::new(
+            "the hook caches under its own name what a generator expression over the globals makes",
+            vec![Action::Save(
+                "pkg/key_consts.py",
+                format!(
+                    "{KEY_CONSTS}{}",
+                    KEY_HOOK.replace("object()", "tuple(n for n in globals())")
+                ),
+            )],
+        )
+        .present(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
+            "the generator expression's body changes the globals, which may rebind the constant",
+            vec![Action::Save(
+                "pkg/key_consts.py",
+                format!(
+                    "{KEY_CONSTS}{}",
+                    KEY_HOOK.replace(
+                        "object()",
+                        "tuple(globals().pop(n) for n in list(globals()))"
+                    )
+                ),
+            )],
+        )
+        .absent(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
             "a tuple of the constant, which a loop in another module takes the key from",
             vec![
                 Action::Save(
