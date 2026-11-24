@@ -1387,7 +1387,10 @@ fn only_a_named_file_makes_a_sqlite_connection_wait() {
         .collect();
     got.dedup();
     let file = |line: u64| ("ondisk.py".to_owned(), line);
-    assert_eq!(got, vec![file(10), file(14), file(18), file(26), file(30)]);
+    assert_eq!(
+        got,
+        vec![file(10), file(14), file(18), file(22), file(26), file(30)]
+    );
 }
 
 const MEMORY_SHAPES: &str = r#"import contextlib
@@ -1628,8 +1631,8 @@ async def tn_path_method_on_a_parameter(base: Path) -> None:
 /// memory: its waits are not established, whatever opens it (here, in memory, through annotated
 /// attributes and an unannotated parameter). A helper's annotated parameter is decided at each
 /// call by the connection passed there: one opened in memory does not wait, as the same calls
-/// written inline do not. Its statements are sent either way, so a loop over data still sends
-/// one per item.
+/// written inline do not, and so is a factory's annotated return by the connection every return
+/// gives. Its statements are sent either way, so a loop over data still sends one per item.
 #[test]
 fn connections_only_annotations_name_may_be_in_memory() {
     let p = Project::new("cat_annotated_connections");
@@ -1654,7 +1657,6 @@ fn connections_only_annotations_name_may_be_in_memory() {
         vec![
             at("repro.py", 27, "EFF101 [heuristic]"),
             at("repro.py", 34, "EFF103"),
-            at("repro2.py", 29, "EFF101 [heuristic]"),
         ]
     );
 }
