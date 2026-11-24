@@ -1748,14 +1748,6 @@ memory = sqlite3.connect(":memory:", check_same_thread=False)
 pool = concurrent.futures.ThreadPoolExecutor()
 
 
-def run(sql: str) -> sqlite3.Cursor:
-    return conn.execute(sql)
-
-
-def untyped(sql: str):
-    return conn.execute(sql)
-
-
 async def direct() -> object:
     return conn.execute("SELECT 1").fetchone()
 
@@ -1788,21 +1780,6 @@ async def through_lambda() -> object:
 
 async def through_submit() -> object:
     return pool.submit(conn.execute, "SELECT 1").result().fetchone()
-
-
-async def project_direct() -> object:
-    return run("SELECT 1").fetchone()
-
-
-async def through_project_function() -> object:
-    cur = await asyncio.to_thread(run, "SELECT 1")
-    return cur.fetchone()
-
-
-async def through_untyped_function() -> object:
-    loop = asyncio.get_running_loop()
-    cur = await loop.run_in_executor(None, untyped, "SELECT 1")
-    return cur.fetchone()
 
 
 async def annotated_direct() -> object:
@@ -1902,44 +1879,107 @@ fn an_offloaded_call_hands_back_what_its_callable_returns() {
         got,
         vec![
             // Written out, the cursor's fetch waits as the statement does.
-            (23, "EFF101", "sqlite3.Connection.execute"),
-            (23, "EFF101", "sqlite3.Cursor.fetchone"),
+            (15, "EFF101", "sqlite3.Connection.execute"),
+            (15, "EFF101", "sqlite3.Cursor.fetchone"),
             // `asyncio.to_thread`, `loop.run_in_executor`, `anyio.to_thread.run_sync`, a
             // partial object, and a lambda run the statement on a worker; the fetch on the
             // cursor they hand back waits on the event loop.
-            (28, "EFF101", "sqlite3.Cursor.fetchone"),
-            (34, "EFF101", "sqlite3.Cursor.fetchone"),
-            (39, "EFF101", "sqlite3.Cursor.fetchone"),
-            (44, "EFF101", "sqlite3.Cursor.fetchone"),
-            (49, "EFF101", "sqlite3.Cursor.fetchone"),
+            (20, "EFF101", "sqlite3.Cursor.fetchone"),
+            (26, "EFF101", "sqlite3.Cursor.fetchone"),
+            (31, "EFF101", "sqlite3.Cursor.fetchone"),
+            (36, "EFF101", "sqlite3.Cursor.fetchone"),
+            (41, "EFF101", "sqlite3.Cursor.fetchone"),
             // An executor's future hands the cursor back through `result()`.
-            (53, "EFF101 [heuristic]", "concurrent.futures.Future.result"),
-            (53, "EFF101", "sqlite3.Cursor.fetchone"),
-            // A project function typed by its annotation, as written out; one without an
-            // annotation returns nothing known.
-            (57, "EFF101", "sqlite3.Connection.execute"),
-            (57, "EFF101 [heuristic]", "sqlite3.Cursor.fetchone"),
-            (62, "EFF101 [heuristic]", "sqlite3.Cursor.fetchone"),
+            (45, "EFF101 [heuristic]", "concurrent.futures.Future.result"),
+            (45, "EFF101", "sqlite3.Cursor.fetchone"),
             // A local annotated with the cursor's library class keeps the cursor of a file
             // connection it holds.
-            (72, "EFF101", "sqlite3.Connection.execute"),
-            (73, "EFF101", "sqlite3.Cursor.fetchall"),
-            (78, "EFF101", "sqlite3.Cursor.fetchall"),
+            (49, "EFF101", "sqlite3.Connection.execute"),
+            (50, "EFF101", "sqlite3.Cursor.fetchall"),
+            (55, "EFF101", "sqlite3.Cursor.fetchall"),
             // Reading the cursor's `description` waits for nothing. The arguments are passed
             // on: a file connection waits, an in-memory one does not (the keyword `to_thread`
             // passes on), and nothing is known where a mapping may replace the keyword a partial
             // object holds or `*` may move the callable. A cursor of either connection may come
             // back, as written out.
-            (88, "EFF101", "sqlite3.Connection.execute"),
+            (65, "EFF101", "sqlite3.Connection.execute"),
             // A bound method held by a variable is the method: its statement waits, and it
             // returns what calling it written out does.
-            (119, "EFF101", "sqlite3.Connection.execute"),
-            (119, "EFF101", "sqlite3.Cursor.fetchone"),
+            (96, "EFF101", "sqlite3.Connection.execute"),
+            (96, "EFF101", "sqlite3.Cursor.fetchone"),
             // A future kept in an attribute hands back the cursor where it is awaited.
-            (129, "EFF101", "sqlite3.Cursor.fetchone"),
+            (106, "EFF101", "sqlite3.Cursor.fetchone"),
             // A lambda reading a function its creator does not read is typed by its body too.
             // An imported `to_thread` is the same API.
-            (146, "EFF101", "sqlite3.Cursor.fetchone"),
+            (123, "EFF101", "sqlite3.Cursor.fetchone"),
+        ]
+    );
+}
+
+const OFFLOADED_PROJECT_FUNCTIONS: &str = r#"import asyncio
+import sqlite3
+
+conn = sqlite3.connect("x.db")
+memory = sqlite3.connect(":memory:")
+
+
+def run(sql: str) -> sqlite3.Cursor:
+    return conn.execute(sql)
+
+
+def run_in_memory(sql: str) -> sqlite3.Cursor:
+    return memory.execute(sql)
+
+
+def untyped(sql: str):
+    return conn.execute(sql)
+
+
+async def project_direct() -> object:
+    return run("SELECT 1").fetchone()
+
+
+async def through_project_function() -> object:
+    cur = await asyncio.to_thread(run, "SELECT 1")
+    return cur.fetchone()
+
+
+async def through_in_memory_function() -> object:
+    cur = await asyncio.to_thread(run_in_memory, "SELECT 1")
+    return cur.fetchone()
+
+
+async def through_untyped_function() -> object:
+    loop = asyncio.get_running_loop()
+    cur = await loop.run_in_executor(None, untyped, "SELECT 1")
+    return cur.fetchone()
+"#;
+
+/// A project function hands back the class its returns give, also through an offloading API:
+/// the cursor of a file connection waits, the cursor of an in-memory one does not, and a
+/// function without a return annotation returns nothing known.
+#[test]
+fn an_offloaded_project_function_hands_back_the_cursor_it_returns() {
+    let p = Project::new("offloaded_project_functions");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/m.py", OFFLOADED_PROJECT_FUNCTIONS);
+    let diags = diagnostics(&p, &["--select", "EFF101"]);
+    let got: Vec<(u64, &str, &str)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                common::tiered_code(d),
+                d["target"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (21, "EFF101", "sqlite3.Connection.execute"),
+            (21, "EFF101", "sqlite3.Cursor.fetchone"),
+            (26, "EFF101", "sqlite3.Cursor.fetchone"),
         ]
     );
 }

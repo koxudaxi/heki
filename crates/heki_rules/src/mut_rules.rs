@@ -3509,6 +3509,16 @@ const MUTABLE_BUILTINS: &[&str] = &[
     "builtins.bytearray",
 ];
 
+/// Whether an instance of `class` is a builtin container of [`MUTABLE_BUILTINS`], also as an
+/// instance of a project subclass of one (a return fact types a value by the subclass its returns
+/// build). An in-place operator changes it unless a subclass overrides the operator, which an
+/// exact claim reads apart ([`ProjectDecls::method_not_overridden`]).
+fn mutable_builtin(decls: &ProjectDecls, class: &str) -> bool {
+    MUTABLE_BUILTINS
+        .iter()
+        .any(|b| decls.derives_from(class, b))
+}
+
 pub(crate) fn mut202(
     cx: &CheckContext<'_>,
     unit: &ModuleUnit<'_>,
@@ -4173,7 +4183,7 @@ impl<'a> Mut202Fn<'a> {
                 lhs,
                 in_place: true,
                 ..
-            } if matches!(self.types.get(lhs), Some(Val::Inst(t)) if MUTABLE_BUILTINS.contains(&t.as_str())) => {
+            } if matches!(self.types.get(lhs), Some(Val::Inst(t)) if mutable_builtin(self.cx.decls, t)) => {
                 Some(*lhs)
             }
             _ => None,

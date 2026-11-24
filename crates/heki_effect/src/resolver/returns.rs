@@ -10,7 +10,7 @@
 //! a function returning one gets no fact.
 
 use super::{
-    Callee, ModuleDecls, ProjectDecls, TypeCtx, Val, complete_decls, is_generator_function,
+    Callee, ModuleDecls, ProjectDecls, Ty, TypeCtx, Val, complete_decls, is_generator_function,
     is_summarized_function, keeps_body_result,
 };
 use crate::infer::{Called, HandedArgs, MAX_HANDED_CALLS};
@@ -35,6 +35,17 @@ pub struct ReturnFact {
     /// returns of them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub items: Option<ReturnedItems>,
+    /// The class of the value every return gives, when it is narrower than the annotation
+    /// ([`ProjectDecls::narrower`]: a connection on a file of `-> sqlite3.Connection`, a subclass
+    /// of the annotated class): calling the function gives that, as a local or a global
+    /// annotated with the class keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ty: Option<Ty>,
+    /// The module globals the definitions read (fqns), which `ty` is inferred from as their
+    /// module binds them: once another module rebinds one, `ty` says nothing
+    /// ([`super::FunctionDecl::declared_return`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ty_globals: Vec<String>,
 }
 
 /// Items whose number the data decides ([`ReturnFact::items`], [`CallItems`]).
@@ -401,7 +412,8 @@ pub(super) fn record_return_facts(
     for q in ruled_out {
         candidates.remove(q);
     }
-    if candidates.is_empty() {
+    let typed = typed_candidates(input, decls, kb);
+    if candidates.is_empty() && typed.is_empty() {
         return;
     }
     let own = ProjectDecls::new([decls.clone()]);
@@ -411,11 +423,118 @@ pub(super) fn record_return_facts(
         candidates: &candidates,
         types: RefCell::default(),
     };
+    let mut decided: FxHashMap<&str, ReturnFact> = FxHashMap::default();
     for (qualname, items) in facts.in_passes() {
-        if let Some(d) = decls.functions.get_mut(qualname) {
-            d.returns = Some(Box::new(ReturnFact { items: Some(items) }));
+        decided.entry(qualname).or_default().items = Some(items);
+    }
+    for (qualname, definitions) in &typed {
+        if let Some(ty) = facts.returned_type(definitions) {
+            let fact = decided.entry(qualname).or_default();
+            fact.ty = Some(ty);
+            fact.ty_globals = globals_read(decls, definitions);
         }
     }
+    for (qualname, fact) in decided {
+        if let Some(d) = decls.functions.get_mut(qualname) {
+            d.returns = Some(Box::new(fact));
+        }
+    }
+}
+
+/// The module globals `definitions` read, by the fqn each name reads ([`ReturnFact::ty_globals`]):
+/// what an import binds, or the module's own global.
+fn globals_read(decls: &ModuleDecls, definitions: &[TypedReturns<'_>]) -> Vec<String> {
+    let mut out: Vec<String> = definitions
+        .iter()
+        .flat_map(|d| d.f.blocks.iter().flat_map(|b| &b.insts))
+        .filter_map(|i| match &i.kind {
+            InstKind::LoadGlobal { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .map(|name| {
+            decls
+                .fixed_import(name)
+                .cloned()
+                .unwrap_or_else(|| format!("{}.{name}", decls.module_name))
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// One definition whose returned values may be of a class narrower than its annotation: the
+/// values, and the annotation.
+struct TypedReturns<'f> {
+    f: &'f IrFunction,
+    values: Vec<VarId>,
+    declared: Ty,
+}
+
+/// The functions of the module whose every definition returns a value on every `return` and is
+/// annotated with a class a narrower one may specialize ([`ProjectDecls::specializes`]): a
+/// library class some catalog class has the methods of (`sqlite3.Connection`, of a connection
+/// on a file), or a class of the module that another of its classes names as a base.
+fn typed_candidates<'f>(
+    input: &'f ModuleInput<'_>,
+    decls: &ModuleDecls,
+    kb: &EffectiveEcosystemKb,
+) -> FxHashMap<&'f str, Vec<TypedReturns<'f>>> {
+    let specializable = |class: &str| {
+        kb.api_classes.values().any(|library| library == class)
+            || decls
+                .classes
+                .values()
+                .any(|c| c.bases.iter().any(|b| b == class))
+    };
+    let mut out: FxHashMap<&str, Vec<TypedReturns<'_>>> = FxHashMap::default();
+    let mut ruled_out: Vec<&str> = Vec::new();
+    for f in input
+        .ir
+        .functions
+        .iter()
+        .filter(|f| is_summarized_function(f))
+    {
+        let declared = decls
+            .functions
+            .get(&f.qualname)
+            .and_then(|d| d.return_type.as_ref())
+            .filter(|t| t.obj().is_some_and(|o| specializable(&o.class)))
+            .cloned();
+        let values = declared.as_ref().and_then(|_| returned_values(decls, f));
+        match declared.zip(values) {
+            Some((declared, values)) => out.entry(&f.qualname).or_default().push(TypedReturns {
+                f,
+                values,
+                declared,
+            }),
+            None => ruled_out.push(&f.qualname),
+        }
+    }
+    for q in ruled_out {
+        out.remove(q);
+    }
+    out
+}
+
+/// The value of every `return` of `f`, when calling it runs its body and gives what it returns
+/// and each `return` gives a value.
+fn returned_values(decls: &ModuleDecls, f: &IrFunction) -> Option<Vec<VarId>> {
+    if !matches!(f.kind, FunctionKind::Sync | FunctionKind::Async)
+        || is_generator_function(f)
+        || !keeps_body_result(f, decls)
+    {
+        return None;
+    }
+    let values: Vec<VarId> = f
+        .blocks
+        .iter()
+        .filter_map(|bb| match bb.terminator {
+            Terminator::Return(value) => Some(value),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    (!values.is_empty()).then_some(values)
 }
 
 /// The calls the items of the values one definition returns come from.
@@ -441,19 +560,10 @@ fn returned_origins(
     decls: &ModuleDecls,
     f: &IrFunction,
 ) -> Option<Returns> {
-    if !matches!(f.kind, FunctionKind::Sync | FunctionKind::Async)
-        || is_generator_function(f)
-        || !keeps_body_result(f, decls)
-    {
-        return None;
-    }
     let budget = Budget::of_function("heki_effect::resolver::returns", f);
     let mut calls = Vec::new();
-    for bb in &f.blocks {
-        let Terminator::Return(value) = bb.terminator else {
-            continue;
-        };
-        let Answer::Known(found) = origins.of_value(&budget, f.id, value?) else {
+    for value in returned_values(decls, f)? {
+        let Answer::Known(found) = origins.of_value(&budget, f.id, value) else {
             return None;
         };
         (!found.is_empty()).then_some(())?;
@@ -524,6 +634,26 @@ impl<'f> ReturnFacts<'_, 'f> {
         let first = each.next().flatten()?;
         each.all(|items| items.as_ref() == Some(&first))
             .then_some(first)
+    }
+
+    /// The type every value of `definitions` returns, when they agree on one narrower than the
+    /// annotation.
+    fn returned_type(&self, definitions: &[TypedReturns<'_>]) -> Option<Ty> {
+        let project = self.cx.project;
+        let mut each = definitions.iter().flat_map(|d| {
+            let inferred = self.cx.infer_types(d.f);
+            let declared = project.declared_ty(&d.declared);
+            d.values
+                .iter()
+                .map(|v| {
+                    let declared = declared.as_ref()?;
+                    let t = inferred.ty(*v)?;
+                    project.narrower(t, declared, self.cx.kb).then(|| t.clone())
+                })
+                .collect::<Vec<_>>()
+        });
+        let first = each.next().flatten()?;
+        each.all(|t| t.as_ref() == Some(&first)).then_some(first)
     }
 
     /// The items of the returned value whose items come from the call `call`.
