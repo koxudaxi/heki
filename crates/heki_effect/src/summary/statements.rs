@@ -456,15 +456,7 @@ pub(crate) fn runs_statement(symbol: &str) -> bool {
 
 /// SQL aggregate functions: over the rows of a query without `GROUP BY` they give one row. `min`
 /// and `max` given more than one argument are scalar functions instead.
-const AGGREGATES: &[&str] = &[
-    "AVG",
-    "COUNT",
-    "GROUP_CONCAT",
-    "MAX",
-    "MIN",
-    "SUM",
-    "TOTAL",
-];
+const AGGREGATES: &[&str] = &["AVG", "COUNT", "GROUP_CONCAT", "MAX", "MIN", "SUM", "TOTAL"];
 
 /// Words that, outside parentheses, make a query give more than one row of aggregates: a grouping,
 /// a compound query, or a window.
@@ -511,9 +503,7 @@ fn limit_count(tokens: &[Token<'_>]) -> Option<u32> {
 /// The `SELECT` of `tokens` lists only aggregate calls, each with an optional alias, and nothing
 /// outside parentheses groups, combines, or windows them ([`MANY_AGGREGATE_ROWS`]).
 fn aggregates_only(tokens: &[Token<'_>]) -> bool {
-    let is_word = |t: &Token<'_>, words: &[&str]| {
-        matches!(t, Token::Word(w) if words.iter().any(|k| w.eq_ignore_ascii_case(k)))
-    };
+    let is_word = |t: &Token<'_>, words: &[&str]| matches!(t, Token::Word(w) if words.iter().any(|k| w.eq_ignore_ascii_case(k)));
     if tokens.iter().any(|t| is_word(t, MANY_AGGREGATE_ROWS)) {
         return false;
     }
@@ -531,9 +521,11 @@ fn aggregates_only(tokens: &[Token<'_>]) -> bool {
     !listed.is_empty()
         && listed.split(|t| *t == Token::Comma).all(|item| match item {
             [Token::Word(name), Token::Group(inner)]
-            | [Token::Word(name), Token::Group(inner), Token::Word(_) | Token::Other] => {
-                aggregate(name, inner)
-            }
+            | [
+                Token::Word(name),
+                Token::Group(inner),
+                Token::Word(_) | Token::Other,
+            ] => aggregate(name, inner),
             [
                 Token::Word(name),
                 Token::Group(inner),
@@ -658,4 +650,71 @@ fn group_end(bytes: &[u8], open: usize) -> Option<usize> {
         i += 1;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixed_rows;
+
+    #[test]
+    fn a_limit_or_an_aggregate_fixes_the_rows_of_a_query() {
+        for (text, rows) in [
+            ("SELECT id FROM t LIMIT 3", Some(3)),
+            ("select id from t limit 3;", Some(3)),
+            ("SELECT id FROM t LIMIT 3 OFFSET 6", Some(3)),
+            ("SELECT id FROM t LIMIT 6, 3", Some(3)),
+            (
+                "SELECT id FROM t ORDER BY id LIMIT 3 -- the first\n",
+                Some(3),
+            ),
+            ("SELECT id /* all */ FROM t LIMIT 3", Some(3)),
+            ("SELECT COUNT(*) FROM t", Some(1)),
+            (
+                "SELECT count(*) AS n, max(x) m FROM t WHERE y = 'a;b'",
+                Some(1),
+            ),
+            ("SELECT total(x), group_concat(x, ',') FROM t", Some(1)),
+            ("SELECT COUNT(*) FROM t LIMIT 5", Some(1)),
+            ("SELECT COUNT(*) FROM t LIMIT 0", Some(0)),
+            (
+                "SELECT [id] FROM \"t\" WHERE `x` = 'it''s' LIMIT 2",
+                Some(2),
+            ),
+            // The data decides how many rows there are.
+            ("SELECT id FROM t", None),
+            ("SELECT id FROM t LIMIT ?", None),
+            ("SELECT id FROM t LIMIT 3 FOR UPDATE", None),
+            (
+                "SELECT id FROM t WHERE id IN (SELECT id FROM u LIMIT 3)",
+                None,
+            ),
+            ("SELECT COUNT(*) FROM t GROUP BY x", None),
+            ("SELECT COUNT(*) FROM t UNION SELECT COUNT(*) FROM u", None),
+            ("SELECT COUNT(*) OVER () FROM t", None),
+            ("SELECT COUNT(*) FILTER (WHERE x) FROM t", None),
+            ("SELECT max(a, b) FROM t", None),
+            ("SELECT COUNT(*), id FROM t", None),
+            ("SELECT DISTINCT COUNT(*) FROM t", None),
+            ("SELECT FROM t", None),
+            ("SELECT id FROM t LIMIT 99999999999", None),
+            ("DELETE FROM t LIMIT 3", None),
+            ("SELECT id FROM t LIMIT 3; SELECT id FROM u", None),
+            ("WITH x AS (SELECT 1) SELECT * FROM x LIMIT 3", None),
+            // Text heki does not read as a whole.
+            ("SELECT id FROM t WHERE x = 'open LIMIT 3", None),
+            ("SELECT id FROM t /* open LIMIT 3", None),
+            ("SELECT id FROM [t LIMIT 3", None),
+            ("SELECT id FROM t WHERE (x = 1 LIMIT 3", None),
+            ("SELECT id FROM t) LIMIT 3", None),
+            ("SELECT COUNT(*) FROM t WHERE x = 'é' LIMIT 1", Some(1)),
+            ("SELECT 1.5e3 FROM t LIMIT 3", Some(3)),
+            ("SELECT x @ y FROM t LIMIT 3", Some(3)),
+            ("SELECT min((a)) FROM t", Some(1)),
+            ("SELECT min('a', b) FROM t", None),
+            ("SELECT count(\"it\"\"s\") FROM t", Some(1)),
+            ("SELECT min('open) FROM t", None),
+        ] {
+            assert_eq!(fixed_rows(text), rows, "{text}");
+        }
+    }
 }

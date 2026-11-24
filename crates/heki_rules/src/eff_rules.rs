@@ -30,7 +30,7 @@ use heki_env::EffectBoundaryRule;
 pub(crate) use heki_ir::ItemOrigins;
 use heki_ir::walk::{self, Answer, Budget, FnShape, JoinMap, Or, Sparse, fixpoint};
 use heki_ir::{BlockId, Carries, InstKind, IrFunction, ItemOrigin, ItemSource, Must, Progress};
-use heki_kb::{EcosystemEntry, EnvironmentAccess, ExecEffectKind, ResultItems, WaitKind};
+use heki_kb::{EcosystemEntry, EnvironmentAccess, ExecEffectKind, WaitKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::ControlFlow;
@@ -866,23 +866,18 @@ pub(crate) fn data_origin(
                     NoItems::NotFollowed => not_the_data,
                     NoItems::Unsized => unsized_call,
                 })?;
-            let items = &called.items;
-            let what = match (items.kind, items.pieces || origin.text) {
-                (ResultItems::Rows, false) => "the rows",
-                (ResultItems::Lines, false) => "the lines",
-                (ResultItems::Entries, false) => "the entries",
-                (ResultItems::Text, true) if !(items.pieces && origin.text) => {
-                    "the lines of the text"
-                }
-                _ => return Err(unsized_call),
-            };
+            let items = called
+                .items
+                .read_through(origin.text, counted)
+                .ok_or(unsized_call)?;
+            let what = items.named().ok_or(unsized_call)?;
             let returned = called
                 .through
                 .map(|key| format!(" that `{}` returns", key.fqn()))
                 .unwrap_or_default();
             return Ok((
                 format!("{what} of `{}`{returned}", items.api),
-                counted || items.counted,
+                items.counted,
             ));
         }
         ItemSource::Receiver => return Err(not_the_data),

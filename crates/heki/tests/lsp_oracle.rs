@@ -710,6 +710,11 @@ const EXACT_SUB_OVERRIDING: &str = "from pkg.exact_base import Base\n\n\nclass Q
 const EXACT_SUB_BLOCKING: &str = "import requests\n\nfrom pkg.exact_base import Base\n\n\nclass Quiet(Base):\n    def fetch(self, url):\n        return requests.post(url)\n";
 const EXACT_USE: &str =
     "from pkg.exact_base import Base\n\n\nasync def serve(b: Base):\n    b.fetch(\"u\")\n";
+// A loop over the rows a function of another module returns (`FunctionDecl::returns`).
+const ROWS_DB: &str = "import sqlite3\n\nCONN = sqlite3.connect(\"app.db\")\n\n\ndef authors():\n    return CONN.execute(\"SELECT id FROM a\").fetchall()\n\n\ndef book(i):\n    return CONN.execute(\"SELECT * FROM b WHERE a = ?\", (i,)).fetchone()\n";
+const ROWS_DB_LIMITED: &str = "import sqlite3\n\nCONN = sqlite3.connect(\"app.db\")\n\n\ndef authors():\n    return CONN.execute(\"SELECT id FROM a LIMIT 3\").fetchall()\n\n\ndef book(i):\n    return CONN.execute(\"SELECT * FROM b WHERE a = ?\", (i,)).fetchone()\n";
+const ROWS_DB_THROUGH: &str = "import sqlite3\n\nCONN = sqlite3.connect(\"app.db\")\n\n\ndef _all():\n    return CONN.execute(\"SELECT id FROM a\")\n\n\ndef authors():\n    return _all()\n\n\ndef book(i):\n    return CONN.execute(\"SELECT * FROM b WHERE a = ?\", (i,)).fetchone()\n";
+const ROWS_USE: &str = "from pkg.rows_db import authors, book\n\n\ndef each():\n    for r in authors():\n        book(r[0])\n";
 // The third module binds the base's method to another function: the call may run that
 // function instead. The base's class body binds it to another function on every path: the call
 // runs that function.
@@ -1185,6 +1190,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/exact_base.py", EXACT_BASE),
         ("pkg/exact_sub.py", EXACT_SUB),
         ("pkg/exact_use.py", EXACT_USE),
+        ("pkg/rows_db.py", ROWS_DB),
+        ("pkg/rows_use.py", ROWS_USE),
         ("pkg/st_client.py", ST_CLIENT),
         ("pkg/st_use.py", ST_USE),
         ("pkg/st_rebind.py", ST_REBIND),
@@ -1489,6 +1496,35 @@ fn steps_exact_effects() -> Vec<Step> {
         )
         .present(&[("pkg/exact_made_use.py", "EFF101")])
         .absent(&[("pkg/exact_made_use.py", "EFF101 [heuristic]")]),
+    ]
+}
+
+/// The items a loop over a function's result steps through are those every return of the
+/// function gives (`FunctionDecl::returns`): a query in another module whose text fixes its
+/// rows makes the loop's report heuristic, and rows returned through a helper of that module
+/// are followed.
+fn steps_returned_rows() -> Vec<Step> {
+    const EXACT: &[(&str, &str)] = &[("pkg/rows_use.py", "EFF103")];
+    const HEURISTIC: &[(&str, &str)] = &[("pkg/rows_use.py", "EFF103 [heuristic]")];
+    vec![
+        Step::new(
+            "the row helper's query fixes how many rows it gives",
+            vec![save("pkg/rows_db.py", ROWS_DB_LIMITED)],
+        )
+        .present(HEURISTIC)
+        .absent(EXACT),
+        Step::new(
+            "it returns the rows of a helper of its own module",
+            vec![save("pkg/rows_db.py", ROWS_DB_THROUGH)],
+        )
+        .present(EXACT)
+        .absent(HEURISTIC),
+        Step::new(
+            "it returns its own query's rows again",
+            vec![save("pkg/rows_db.py", ROWS_DB)],
+        )
+        .present(EXACT)
+        .absent(HEURISTIC),
     ]
 }
 
@@ -6066,6 +6102,7 @@ sessions!(editing, Session::start, {
     receiver_typing: steps_receiver_typing,
     effect_index: steps_effect_index,
     exact_effects: steps_exact_effects,
+    returned_rows: steps_returned_rows,
     store_types: steps_store_types,
     unused_suppressions: steps_unused_suppressions,
     helper_witnesses: steps_helper_witnesses,

@@ -230,7 +230,12 @@ impl<'m> ItemOrigins<'m> {
 
     /// Where the items of the value `v` of function `f` come from, charged to `budget`: what a
     /// loop over it would step through (a function's returned value, [`Self::of_loop`]).
-    pub fn of_value(&self, budget: &Budget, f: FunctionId, v: VarId) -> Answer<BTreeSet<ItemOrigin>> {
+    pub fn of_value(
+        &self,
+        budget: &Budget,
+        f: FunctionId,
+        v: VarId,
+    ) -> Answer<BTreeSet<ItemOrigin>> {
         // `own` decides a question's successors with its own fact; `next` hands them on.
         let pending: RefCell<Vec<Key>> = RefCell::new(Vec::new());
         let own = |key: Key| {

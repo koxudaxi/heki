@@ -1,5 +1,5 @@
 //! What calling a project function gives by what every `return` of it gives
-//! ([`FunctionDecl::returns`]), and what the items of a call's result are
+//! ([`super::FunctionDecl::returns`]), and what the items of a call's result are
 //! ([`TypeCtx::call_items`]): the one reading of a call's result that typing and the rules'
 //! item origins share.
 //!
@@ -10,24 +10,24 @@
 //! a function returning one gets no fact.
 
 use super::{
-    Callee, FunctionDecl, ModuleDecls, ProjectDecls, TypeCtx, Val, complete_decls,
-    is_generator_function, is_summarized_function, keeps_body_result,
+    Callee, ModuleDecls, ProjectDecls, TypeCtx, Val, complete_decls, is_generator_function,
+    is_summarized_function, keeps_body_result,
 };
 use crate::infer::{Called, HandedArgs, MAX_HANDED_CALLS};
 use crate::partial::Partial;
 use crate::{FuncKey, ModuleInput};
 use heki_ir::walk::{Answer, Budget, FnShape};
 use heki_ir::{
-    FunctionKind, Inst, InstKind, IrFunction, ItemOrigin, ItemOrigins, ItemSource, Terminator,
-    VarId,
+    FunctionKind, Inst, InstKind, IrFunction, ItemOrigins, ItemSource, Terminator, VarId,
 };
 use heki_kb::{EffectiveEcosystemKb, LiteralValue, ResultItems};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
+use std::rc::Rc;
 
 /// What every `return` of a function gives, past what its annotation says
-/// ([`FunctionDecl::returns`]).
+/// ([`super::FunctionDecl::returns`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReturnFact {
     /// The items of the returned value, when the data decides how many there are: the rows,
@@ -70,9 +70,10 @@ pub enum NoItems {
     Unsized,
 }
 
-/// The most project functions one return fact follows down (`a` returning `b()` returning
-/// `c()`): past them a function gets no fact.
-const MAX_RETURN_DEPTH: u32 = 16;
+/// The most passes deciding a module's return facts ([`ReturnFacts::decide`]): a function
+/// returning what another returns (`a` returning `b()` returning `c()`) is decided a pass after
+/// it, so a function more than this many functions down such a chain gets no fact.
+const MAX_RETURN_PASSES: usize = 8;
 
 impl TypeCtx<'_> {
     /// What the items of the result of the call `inst` are, when the data decides how many
@@ -110,7 +111,8 @@ impl TypeCtx<'_> {
             ),
             _ => return Err(NoItems::NotFollowed),
         };
-        for _ in 0..=MAX_HANDED_CALLS {
+        let mut handed_calls = 0;
+        loop {
             if let Called::Value(v) = called
                 && let Some(held) = self.partial_held(types, def, v)
             {
@@ -123,46 +125,27 @@ impl TypeCtx<'_> {
                 },
                 Called::Method(recv, method) => self.resolve_method(types.get(&recv), method),
             };
-            match callee {
-                Callee::External(symbol) => {
-                    let entry = self.catalog(&symbol).ok_or(NoItems::Unsized)?;
-                    if let Some(of) = entry.result_of {
-                        let (callable, handed) =
-                            HandedArgs::of(of, passed.passed()).ok_or(NoItems::NotFollowed)?;
-                        called = Called::Value(callable);
-                        passed = handed;
-                        continue;
-                    }
-                    let kind = entry.items.ok_or(NoItems::Unsized)?;
-                    return Ok(CallItems {
-                        items: ReturnedItems {
-                            kind,
-                            pieces: false,
-                            counted: false,
-                            api: entry.api.clone().unwrap_or(symbol),
-                        },
-                        through: None,
-                    });
-                }
-                Callee::Project(keys, _) => {
-                    let mut found: Option<ReturnedItems> = None;
-                    for key in &keys {
-                        let items = returned(key).ok_or(NoItems::NotFollowed)?;
-                        if found.as_ref().is_some_and(|f| *f != items) {
-                            return Err(NoItems::NotFollowed);
-                        }
-                        found = Some(items);
-                    }
-                    let items = found.ok_or(NoItems::NotFollowed)?;
-                    return Ok(CallItems {
-                        items,
-                        through: (keys.len() == 1).then(|| keys[0].clone()),
-                    });
-                }
+            let symbol = match callee {
+                Callee::External(symbol) => symbol,
+                Callee::Project(keys, _) => return project_items(&keys, returned),
                 Callee::TooMany | Callee::Unresolved => return Err(NoItems::NotFollowed),
-            }
+            };
+            let entry = self.catalog(&symbol).ok_or(NoItems::Unsized)?;
+            let Some(of) = entry.result_of else {
+                let kind = entry.items.ok_or(NoItems::Unsized)?;
+                let api = entry.api.clone().unwrap_or(symbol);
+                return Ok(CallItems {
+                    items: ReturnedItems::of_call(kind, api),
+                    through: None,
+                });
+            };
+            let (callable, handed) = HandedArgs::of(of, passed.passed())
+                .filter(|_| handed_calls < MAX_HANDED_CALLS)
+                .ok_or(NoItems::NotFollowed)?;
+            handed_calls += 1;
+            called = Called::Value(callable);
+            passed = handed;
         }
-        Err(NoItems::NotFollowed)
     }
 
     /// [`Self::call_items`] with the return facts of the declarations.
@@ -221,7 +204,12 @@ impl TypeCtx<'_> {
                 kwargs,
                 star_from,
                 ..
-            } => (self.resolve_method(val(*recv), method), args, kwargs, star_from),
+            } => (
+                self.resolve_method(val(*recv), method),
+                args,
+                kwargs,
+                star_from,
+            ),
             _ => return None,
         };
         matches!(callee, Callee::External(s) if s == "functools.partial").then_some(())?;
@@ -302,12 +290,62 @@ impl TypeCtx<'_> {
             for n in [up_to, statement].into_iter().flatten() {
                 fewest = Some(fewest.map_or(n, |f| f.min(n)));
             }
-            let Some(next) = recv.and_then(|r| def(r)) else {
+            let Some(next) = recv.and_then(def) else {
                 break;
             };
             at = next;
         }
         fewest
+    }
+}
+
+/// The items a call of the project functions `keys` gives: those every one returns
+/// (`returned`), when they agree.
+fn project_items(
+    keys: &[FuncKey],
+    returned: &dyn Fn(&FuncKey) -> Option<ReturnedItems>,
+) -> Result<CallItems, NoItems> {
+    let mut each = keys.iter().map(returned);
+    let first = each.next().flatten().ok_or(NoItems::NotFollowed)?;
+    each.all(|items| items.as_ref() == Some(&first))
+        .then(|| CallItems {
+            items: first,
+            through: (keys.len() == 1).then(|| keys[0].clone()),
+        })
+        .ok_or(NoItems::NotFollowed)
+}
+
+impl ReturnedItems {
+    /// The items of a catalog call's result, `api` as reports name the call.
+    fn of_call(kind: ResultItems, api: String) -> Self {
+        Self {
+            kind,
+            pieces: false,
+            counted: false,
+            api,
+        }
+    }
+
+    /// What a value made from these items gives: the pieces `str.splitlines` cuts their text
+    /// into (`text`), and only their count (`counted`). Pieces of pieces are none heki names.
+    pub fn read_through(self, text: bool, counted: bool) -> Option<Self> {
+        (!(self.pieces && text)).then_some(Self {
+            pieces: self.pieces || text,
+            counted: self.counted || counted,
+            ..self
+        })
+    }
+
+    /// What a report calls the items: none for text iterated as it is (its characters) or
+    /// pieces of something other than text.
+    pub fn named(&self) -> Option<&'static str> {
+        match (self.kind, self.pieces) {
+            (ResultItems::Rows, false) => Some("the rows"),
+            (ResultItems::Lines, false) => Some("the lines"),
+            (ResultItems::Entries, false) => Some("the entries"),
+            (ResultItems::Text, true) => Some("the lines of the text"),
+            _ => None,
+        }
     }
 }
 
@@ -329,7 +367,7 @@ fn bound_method<'i>(def: &dyn Fn(VarId) -> Option<&'i Inst>, v: VarId) -> Option
     }
 }
 
-/// [`FunctionDecl::returns`] of the module's functions (pass 1): what every `return` of every
+/// [`super::FunctionDecl::returns`] of the module's functions (pass 1): what every `return` of every
 /// definition of a name gives, inferred against the module's own declarations completed against
 /// themselves. Only the functions some of whose returned items come from calls are inferred.
 pub(super) fn record_return_facts(
@@ -340,7 +378,12 @@ pub(super) fn record_return_facts(
     let origins = ItemOrigins::new(input.ir);
     let mut candidates: FxHashMap<&str, Vec<Returns>> = FxHashMap::default();
     let mut ruled_out: Vec<&str> = Vec::new();
-    for f in input.ir.functions.iter().filter(|f| is_summarized_function(f)) {
+    for f in input
+        .ir
+        .functions
+        .iter()
+        .filter(|f| is_summarized_function(f))
+    {
         match returned_origins(&origins, decls, f) {
             Some(returns) => candidates.entry(&f.qualname).or_default().push(returns),
             None => ruled_out.push(&f.qualname),
@@ -357,22 +400,28 @@ pub(super) fn record_return_facts(
     let facts = ReturnFacts {
         cx: TypeCtx::new(input, &completed, kb),
         candidates: &candidates,
-        decided: RefCell::default(),
+        types: RefCell::default(),
     };
-    let decided: Vec<(&str, ReturnedItems)> = candidates
-        .keys()
-        .filter_map(|q| Some((*q, facts.items_of(q, 0)?)))
-        .collect();
-    for (qualname, items) in decided {
+    for (qualname, items) in facts.decide() {
         if let Some(d) = decls.functions.get_mut(qualname) {
             d.returns = Some(Box::new(ReturnFact { items: Some(items) }));
         }
     }
 }
 
-/// Where the items of each value one definition returns come from.
+/// The calls the items of the values one definition returns come from.
 struct Returns {
-    values: Vec<std::collections::BTreeSet<ItemOrigin>>,
+    calls: Vec<ReturnedCall>,
+}
+
+/// A call the items of a returned value come from ([`ItemSource::Call`]), and how the value
+/// reads them ([`heki_ir::ItemOrigin::text`], [`heki_ir::ItemOrigin::carries`]).
+struct ReturnedCall {
+    function: heki_ir::FunctionId,
+    block: heki_ir::BlockId,
+    index: u32,
+    text: bool,
+    counted: bool,
 }
 
 /// The values every `return` of `f` gives with their item origins, when each returns a value
@@ -389,7 +438,7 @@ fn returned_origins(
         return None;
     }
     let budget = Budget::of_function("heki_effect::resolver::returns", f);
-    let mut values = Vec::new();
+    let mut calls = Vec::new();
     for bb in &f.blocks {
         let Terminator::Return(value) = bb.terminator else {
             continue;
@@ -397,101 +446,100 @@ fn returned_origins(
         let Answer::Known(found) = origins.of_value(&budget, f.id, value?) else {
             return None;
         };
-        let from_calls = !found.is_empty()
-            && found
-                .iter()
-                .all(|o| matches!(o.source, ItemSource::Call { .. }));
-        if !from_calls {
-            return None;
+        (!found.is_empty()).then_some(())?;
+        for o in found {
+            let ItemSource::Call { block, index } = o.source else {
+                return None;
+            };
+            calls.push(ReturnedCall {
+                function: o.function,
+                block,
+                index,
+                text: o.text,
+                counted: o.carries == heki_ir::Carries::Count,
+            });
         }
-        values.push(found);
     }
-    (!values.is_empty()).then_some(Returns { values })
+    (!calls.is_empty()).then_some(Returns { calls })
 }
 
-/// The return facts of one module being decided, each name once.
+/// The return facts of one module being decided.
 struct ReturnFacts<'c, 'f> {
     cx: TypeCtx<'c>,
     candidates: &'c FxHashMap<&'f str, Vec<Returns>>,
-    /// `None` while a name is being decided: a call back into it (recursion) gives no fact.
-    decided: RefCell<FxHashMap<String, Option<Option<ReturnedItems>>>>,
+    /// The types of each function a returned call is in, inferred once.
+    types: RefCell<FxHashMap<heki_ir::FunctionId, Rc<FxHashMap<VarId, Val>>>>,
 }
 
-impl ReturnFacts<'_, '_> {
-    /// The items every return of every definition of `qualname` gives, `depth` functions down.
-    fn items_of(&self, qualname: &str, depth: u32) -> Option<ReturnedItems> {
-        if let Some(decided) = self.decided.borrow().get(qualname) {
-            return decided.clone().flatten();
+impl<'f> ReturnFacts<'_, 'f> {
+    /// The facts of the candidates, by qualname: each pass decides every candidate from the
+    /// facts of the pass before (a function returning what another of the module returns has
+    /// its fact one pass after it), until no fact changes or [`MAX_RETURN_PASSES`] passes. A
+    /// fact, once decided, stays: a pass only adds facts, so the facts do not depend on the
+    /// order of the candidates. Past the bound, a function down a longer chain gets none.
+    fn decide(&self) -> FxHashMap<&'f str, ReturnedItems> {
+        let mut facts: FxHashMap<&'f str, ReturnedItems> = FxHashMap::default();
+        for _ in 0..MAX_RETURN_PASSES {
+            let next: FxHashMap<&'f str, ReturnedItems> = self
+                .candidates
+                .iter()
+                .filter_map(|(q, definitions)| Some((*q, self.agreed(definitions, &facts)?)))
+                .collect();
+            if next == facts {
+                break;
+            }
+            facts = next;
         }
-        let definitions = self.candidates.get(qualname)?;
-        if depth > MAX_RETURN_DEPTH {
-            return None;
-        }
-        self.decided.borrow_mut().insert(qualname.to_owned(), None);
-        let items = self.agreed(definitions, depth);
-        self.decided
-            .borrow_mut()
-            .insert(qualname.to_owned(), Some(items.clone()));
-        items
+        facts
     }
 
-    /// The items all of `definitions` return, when they agree.
-    fn agreed(&self, definitions: &[Returns], depth: u32) -> Option<ReturnedItems> {
+    /// The items all of `definitions` return, when they agree, by the facts `facts` of the
+    /// module's functions.
+    fn agreed(
+        &self,
+        definitions: &[Returns],
+        facts: &FxHashMap<&str, ReturnedItems>,
+    ) -> Option<ReturnedItems> {
         let module = &self.cx.module.module_name;
         let returned = |key: &FuncKey| {
             (key.module == *module)
-                .then(|| self.items_of(&key.qualname, depth + 1))
+                .then(|| facts.get(key.qualname.as_str()).cloned())
                 .flatten()
         };
-        let mut found: Option<ReturnedItems> = None;
-        for d in definitions {
-            for origins in &d.values {
-                for o in origins {
-                    let items = self.origin_items(o, &returned)?;
-                    if found.as_ref().is_some_and(|f| *f != items) {
-                        return None;
-                    }
-                    found = Some(items);
-                }
-            }
-        }
-        found
+        let mut each = definitions
+            .iter()
+            .flat_map(|d| &d.calls)
+            .map(|o| self.origin_items(o, &returned));
+        let first = each.next().flatten()?;
+        each.all(|items| items.as_ref() == Some(&first))
+            .then_some(first)
     }
 
-    /// The items of the returned value whose items come from the call at `origin`.
+    /// The items of the returned value whose items come from the call `call`.
     fn origin_items(
         &self,
-        origin: &ItemOrigin,
+        call: &ReturnedCall,
         returned: &dyn Fn(&FuncKey) -> Option<ReturnedItems>,
     ) -> Option<ReturnedItems> {
-        let ItemSource::Call { block, index } = origin.source else {
-            return None;
-        };
-        let f = self.cx.ir().function(origin.function);
-        let inst = f.block(block).insts.get(usize::try_from(index).ok()?)?;
-        let types = self.cx.infer(f);
+        let f = self.cx.ir().function(call.function);
+        let inst = f
+            .block(call.block)
+            .insts
+            .get(usize::try_from(call.index).ok()?)?;
+        let types = Rc::clone(
+            self.types
+                .borrow_mut()
+                .entry(f.id)
+                .or_insert_with(|| Rc::new(self.cx.infer(f))),
+        );
         let shape = FnShape::new(f);
         let def = |v: VarId| shape.inst(v);
-        if self.cx.fixed_call_items(&types, &def, inst).is_some() {
-            return None;
-        }
-        let called = self.cx.call_items(&types, &def, inst, returned).ok()?.items;
-        let pieces = match (called.kind, called.pieces, origin.text) {
-            (ResultItems::Text, false, true) => true,
-            (_, pieces, false) => pieces,
-            _ => return None,
-        };
-        Some(ReturnedItems {
-            pieces,
-            counted: called.counted || origin.carries == heki_ir::Carries::Count,
-            ..called
-        })
-    }
-}
-
-impl FunctionDecl {
-    /// The items calling it gives by its return fact ([`ReturnFact::items`]).
-    pub fn returned_items(&self) -> Option<&ReturnedItems> {
-        self.returns.as_ref()?.items.as_ref()
+        // A count the code fixes is no data's.
+        self.cx
+            .fixed_call_items(&types, &def, inst)
+            .is_none()
+            .then_some(())?;
+        let called = self.cx.call_items(&types, &def, inst, returned).ok()?;
+        called.items.read_through(call.text, call.counted)
     }
 }
