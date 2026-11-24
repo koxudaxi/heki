@@ -39,7 +39,10 @@ Each step of the chain is established, not assumed:
   bind on every path (by calling that function), whose name may be unbound; a store or `del` from another module, also through `setattr` with a string literal,
   and any name of a module that `setattr` stores into under a name heki cannot read; a store of
   the function's `__code__`; and, for a method, a store of the name on a class the lookup
-  passes, of `__bases__` on a class along the MRO, or of `self.__class__` in a method;
+  passes, of `__bases__` on a class along the MRO, or of `self.__class__` in a method; a call
+  of a local bound once to a bound method (`run = conn.execute`, or `getattr(conn, "execute")`
+  without a default) or to a `functools.partial` object runs what calling the method or the
+  function runs;
 - the waiting call is in the ecosystem catalog, waits on every call (a database call that may be
   answered by a session's identity map, a cache, an open connection, or that sends only pending
   changes does not), and no argument that may come from the caller can make it return at once
@@ -56,7 +59,9 @@ Each step of the chain is established, not assumed:
   connection opened from a value heki does not know waits. `sqlite3.connect` is the one
   exception, as its in-memory form is common: a SQLite connection waits only when heki
   establishes that it was opened on a file (a literal or a module constant without an in-memory
-  form, or a path built from such parts and `__file__`), and any other may be in memory.
+  form, or a path built from such parts and `__file__`), and any other may be in memory. A local
+  or a module global annotated with the connection's or the cursor's class
+  (`cur: sqlite3.Cursor = conn.execute(...)`) keeps where it was opened.
 
 Waits on another thread (`Thread.join()`, `Event.wait()`, acquiring a lock, `Queue.get()`,
 `put()` on a bounded queue, `Future.result()`, `Executor.shutdown()`) end at once when that
