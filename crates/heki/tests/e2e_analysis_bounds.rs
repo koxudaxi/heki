@@ -8,7 +8,8 @@
 //! targets and argument lists, the mappings a call unpacks, the walk to the uses handing a
 //! reference to a call target on, the locks `EFF109` follows, the values class statements pass as
 //! bases, the bindings the deque rewrite's candidates check, the star imports a name is bound
-//! through, many or nested deep, and the walks over the import graph (`heki inspect --imports`).
+//! through, many or nested deep, the sizes of a thousand lists each extending the next, and the
+//! walks over the import graph (`heki inspect --imports`).
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -1937,6 +1938,43 @@ fn lists_that_extend_each_other_are_not_fixed() {
         .filter(|d| d["rule_code"] == "EFF113")
         .collect();
     assert_eq!(queries.len(), 1, "{found:#?}");
+}
+
+/// A thousand lists, each extending the next: the size of each asks for the size of the next, a
+/// thousand questions deep, more than a worker thread's stack holds in a test build when each is
+/// decided inside the one asking it (the modules of a project of several files are analyzed on
+/// worker threads). The sizes are decided a bounded depth at a time, with the answers of the
+/// whole recursion: the chain, followed to its end, holds one item, and closed into a cycle, its
+/// sizes depend on themselves and are not fixed.
+#[test]
+fn a_chain_of_lists_extending_each_other_is_followed_to_its_end() {
+    const LISTS: usize = 1000;
+    let p = Project::new("bounds_extend_chain");
+    for (module, closed) in [("chain.py", false), ("cycle.py", true)] {
+        let mut lines = vec![
+            "import sqlite3".to_owned(),
+            String::new(),
+            String::new(),
+            "def f(conn: sqlite3.Connection):".to_owned(),
+        ];
+        lines.extend((0..LISTS - 1).map(|i| format!("    a{i} = []")));
+        let last = LISTS - 1;
+        lines.push(format!("    a{last} = [{}]", if closed { "" } else { "1" }));
+        lines.extend((0..last).map(|i| format!("    a{i}.extend(a{})", i + 1)));
+        if closed {
+            lines.push(format!("    a{last}.extend(a0)"));
+        }
+        lines.push("    for x in a0:".to_owned());
+        lines.push("        conn.execute(\"SELECT ?\", (x,))".to_owned());
+        p.write(module, &(lines.join("\n") + "\n"));
+    }
+    let found = check(&p);
+    let queries: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF113")
+        .map(|d| d["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(queries, ["cycle.py"], "{found:#?}");
 }
 
 /// A length test repeated through `steps` assignments, each `and` of the one before with its

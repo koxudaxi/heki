@@ -279,6 +279,9 @@ pub struct ImportOwnerRule {
     pub allowed_imports: Vec<String>,
     /// When set, only imports of these modules are reported (less the allowed ones).
     pub forbidden_imports: Vec<String>,
+    /// The modules the importers may import only through a relative import (`from . import
+    /// b`): one they import by its full name is reported, whatever the other lists say.
+    pub relative_imports: Vec<String>,
     /// `"importer -> imported"` pairs of module patterns whose imports the contract accepts.
     pub ignored_imports: Vec<String>,
     /// `"report"`: imports under `if TYPE_CHECKING:` count too; `"ignore"` (default) does not.

@@ -943,6 +943,15 @@ pub enum RuleConfigError {
         pattern: String,
         context: &'static str,
     },
+    /// A group in `relative-imports`: a relative import reaches only modules of the importer's
+    /// own top-level package, which no group names.
+    #[error(
+        "group `{pattern}` in {context}: a relative import reaches only the modules of the importer's own top-level package (expected a module or a glob)"
+    )]
+    RelativeGroup {
+        pattern: String,
+        context: &'static str,
+    },
     /// A value of a key outside the contracts (`imports.cycle-edges`) that the key does not take.
     #[error("unknown `{key}` value `{value}` in {table} (expected {expected})")]
     UnknownValue {
@@ -1055,6 +1064,10 @@ impl Explain for RuleConfigError {
             ),
             Self::ImportGroup { pattern, context } => (
                 problem.help("name a module, a glob, or one of the groups `<stdlib>`, `<project>`, and `<third-party>`"),
+                Setting::of_context(context, Some(pattern)),
+            ),
+            Self::RelativeGroup { pattern, context } => (
+                problem.help("name the modules of the package: `\"pkg._runtime\"`, `\"pkg._runtime.*\"`"),
                 Setting::of_context(context, Some(pattern)),
             ),
             Self::ImportPair { pattern, context } => (

@@ -324,8 +324,9 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, a name with more than one colon or an empty module or qualified name, call
   targets whose globs are too many to match together (tens of thousands of complex ones), an
-  argument list heki cannot read, an invalid glob in `allowed-protocols`, an unknown group or an
-  `ignored-imports` entry without `->` in `import-owners`, or an unknown value of `forbid`,
+  argument list heki cannot read, an invalid glob in `allowed-protocols`, an unknown group, a
+  group in `relative-imports`, or an `ignored-imports` entry without `->` in `import-owners`, or
+  an unknown value of `forbid`,
   `fresh-objects`, `unresolved`, `references`, `attribution`, `own-receiver`,
   `unlisted-dict-keys`, `type-checking`, or `reach`.
 - With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
@@ -904,8 +905,9 @@ or a glob whose `*` spans dots, never a suffix (`pkg.*` names `pkg.facts` and
 | `name` | `""` | The contract's name in reports. |
 | `importers` | every module | The modules judged. |
 | `exempt-importers` | `[]` | Modules of `importers` that are not judged. |
-| `allowed-imports` | `[]` | The modules the importers may import: every other import is reported. |
-| `forbidden-imports` | `[]` | When set, only imports of these modules are reported, less the allowed ones, as in [Allowed and forbidden functions](#allowed-and-forbidden-functions). A contract setting neither list allows no imports. |
+| `allowed-imports` | `[]` | The modules the importers may import: every other import is reported, but those of `relative-imports`. |
+| `forbidden-imports` | `[]` | When set, only imports of these modules are reported, less the allowed ones, as in [Allowed and forbidden functions](#allowed-and-forbidden-functions). A contract setting none of `allowed-imports`, `forbidden-imports`, and `relative-imports` allows no imports. |
+| `relative-imports` | `[]` | The modules the importers may import only through a relative import ([Relative imports only](#relative-imports-only)). |
 | `ignored-imports` | `[]` | `"importer -> imported"` pairs of module patterns whose imports the contract accepts (`"pkg.cli -> pkg.db"`). |
 | `type-checking` | `"ignore"` | `"ignore"` or `"report"`: whether the imports under `if TYPE_CHECKING:`, which never run, count. |
 | `reach` | `"statement"` | `"statement"`: each import of an importer is judged. `"import-time"`: every module loading an importer loads while it loads. `"all"`: every module a chain of imports that run leads to. |
@@ -959,6 +961,49 @@ importers = ["pkg.cli"]
 forbidden-imports = ["torch", "torch.*"]
 reach = "import-time"
 ```
+
+#### Relative imports only
+
+A package copied into other packages under another name works only while its modules import
+each other relatively: `from pkg._runtime import b` names a package the copy does not have.
+
+```toml
+[[tool.heki.import-owners]]
+name = "runtime-leaf"
+importers = ["pkg._runtime", "pkg._runtime.*"]
+allowed-imports = ["<stdlib>"]
+relative-imports = ["pkg._runtime", "pkg._runtime.*"]
+```
+
+```python
+# pkg/_runtime/a.py
+from . import b  # allowed
+from pkg._runtime import c  # IMP201: allowed only through a relative import
+```
+
+- An import names a module relatively when it gives the module's place from the importer:
+  `from . import b`, `from .b import f`, `from .. import c`, and
+  `importlib.import_module(".b", __package__)` (or `__name__`). By its full name are
+  `import pkg._runtime.b`, `from pkg._runtime import b`,
+  `importlib.import_module("pkg._runtime.b")`, `__import__("pkg._runtime.b")`, and a relative
+  name anchored at a package the code spells, `importlib.import_module(".b", "pkg._runtime")`.
+  `__import__` with a `level` other than `0` names a module heki cannot tell, which
+  [`IMP202`](rules/unresolved-guarded-import.md) reports with `unresolved = "report"`.
+  `heki inspect --imports` shows how each import names its modules (`spelling`).
+- A module the key matches needs no other entry. Imported relatively, it is allowed, also when
+  `forbidden-imports` names it; imported by its full name, it is reported, also when
+  `allowed-imports` names it. An `ignored-imports` pair accepts the import either way. A by-name
+  import given several names judges each module by the names that give it: one a relative name
+  and a full name both give counts as named by its full name.
+- The key takes module names and globs, not groups: a relative import reaches only the modules of
+  the importer's own top-level package. An importer outside the package of a module the key
+  matches cannot name it relatively, so each of its imports of that module is reported.
+- The imports judged are the ones the contract counts, as for the other keys: wherever they run,
+  and under `TYPE_CHECKING` only with `type-checking = "report"`. With `reach`, how an import
+  names its module is judged only at the importer's own imports (with `"import-time"`, those that
+  run while it loads): how the modules on a chain import each other is theirs, and a module of the
+  key that a chain reaches is allowed.
+- A report's target is the module imported, as for the other reports of the contract.
 
 ### How contracts report
 

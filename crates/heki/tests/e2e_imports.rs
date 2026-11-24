@@ -306,14 +306,14 @@ app.broken (app/broken.py, package code)
 
 app.cyc_a (app/cyc_a.py, package code)
   imports:
-    1:15  from-import of `cyc_b`: app.cyc_b (project)  [body, unconditional]
+    1:15  from-import of `cyc_b`: app.cyc_b (project)  [body, relative, unconditional]
   loads while it loads, at least:
     project modules: app, app.cyc_b, app.helpers, app.parse, app.util
     other modules: fractions, importlib, json, os, os.path, shlex, typing
 
 app.cyc_b (app/cyc_b.py, package code)
   imports:
-    1:15  from-import of `cyc_a`: app.cyc_a (project)  [body, unconditional]
+    1:15  from-import of `cyc_a`: app.cyc_a (project)  [body, relative, unconditional]
     2:8  import: app.parse (project)  [body, unconditional]
   loads while it loads, at least:
     project modules: app, app.cyc_a, app.helpers, app.parse, app.util
@@ -333,8 +333,8 @@ app.helpers (app/helpers.py, package code)
         "    18:12  import by name: unknown  [function, in `load`, unconditional]",
         "    17:5  import by name: one of the modules below  [function, in `load`, unconditional]\n      may load: json, pickle",
         "    23:16  import: decimal (stdlib)  [body, guarded]",
-        "    34:22  from-import of `gone`: app.missing, which the project does not have  [body, unconditional]",
-        "    35:17  from-import of `nothing`: nothing: climbs past the top-level package  [body, unconditional]",
+        "    34:22  from-import of `gone`: app.missing, which the project does not have  [body, relative, unconditional]",
+        "    35:17  from-import of `nothing`: nothing: climbs past the top-level package  [body, relative, unconditional]",
         "    39:1  star import: os.path (stdlib)  [body, unconditional]",
     ] {
         assert!(out.contains(line), "{line}\n{out}");
@@ -672,4 +672,49 @@ fn modules_past_the_budget_of_the_walks_load_what_heki_cannot_tell() {
         out.contains("  loads while it loads: unknown (past the walks' budget)\n"),
         "{out}"
     );
+}
+
+/// How each site names its modules: by the full name, relative to its own module (leading dots,
+/// or a relative name anchored at the module's own `__package__`; one anchored at a package the
+/// code spells is no such name), or both, for a by-name import given both kinds of names; nothing
+/// for a site whose modules heki cannot name.
+#[test]
+fn each_site_says_how_it_names_its_modules() {
+    let p = Project::new("imports_spelling");
+    p.write("pkg/__init__.py", "").write("pkg/b.py", "").write(
+        "pkg/a.py",
+        "import importlib\nfrom . import b\n\n\ndef load(flag: bool) -> object:\n    importlib.import_module(\".b\", __package__)\n    importlib.import_module(\".b\", \"pkg\")\n    __import__(\"b\", globals(), None, [], 1)\n    return importlib.import_module(\".b\" if flag else \"json\", __package__)\n",
+    );
+    let (code, report, err) = imports(&p, "pkg.a", &[]);
+    assert_eq!(code, 0, "{err}");
+    let mut spellings: Vec<(u64, &str)> = (module(&report, "pkg.a")["imports"].as_array().unwrap())
+        .iter()
+        .map(|s| {
+            (
+                s["line"].as_u64().unwrap(),
+                s["spelling"].as_str().unwrap_or("-"),
+            )
+        })
+        .collect();
+    spellings.sort_unstable();
+    assert_eq!(
+        spellings,
+        [
+            (1, "absolute"),
+            (2, "relative"),
+            (6, "relative"),
+            (7, "absolute"),
+            (8, "-"),
+            (9, "mixed")
+        ]
+    );
+    let (_, out, _) = p.heki(&["inspect", "--imports", "pkg.a", "."]);
+    for line in [
+        "    1:8  import: importlib (stdlib)  [body, unconditional]",
+        "    2:15  from-import of `b`: pkg.b (project)  [body, relative, unconditional]",
+        "    8:5  import by name: unknown  [function, in `load`, unconditional]",
+        "    9:12  import by name: one of the modules below  [function, relative and absolute names, in `load`, unconditional]",
+    ] {
+        assert!(out.contains(line), "{line}\n{out}");
+    }
 }
