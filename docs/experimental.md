@@ -21,7 +21,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `rule.IMP101` | rule | [`IMP101`](rules/import-cycle.md) | 0.2.7 | - |
 | `rule.IMP102` | rule | [`IMP102`](rules/circular-import-failure.md) | 0.3.0 | - |
 | `rule.IMP104` | rule | [`IMP104`](rules/development-code-import.md) | 0.3.0 | - |
-| `rule.IMP201` | rule | [`IMP201`](rules/import-owner-violation.md) | 0.2.7 | - |
+| `rule.IMP201` | rule | [`IMP201`](rules/import-boundary-violation.md) | 0.2.7 | - |
 | `rule.IMP202` | rule | [`IMP202`](rules/unresolved-guarded-import.md) | 0.2.7 | - |
 | `rule.IMP301` | rule | [`IMP301`](rules/development-dependency-at-import-time.md) | 0.3.0 | - |
 | `rule.IMP302` | rule | [`IMP302`](rules/optional-dependency-at-import-time.md) | 0.3.0 | - |
@@ -138,7 +138,7 @@ It is new: every report rests on established premises only, but its reports are 
 ## `rule.IMP201`
 
 - **Kind:** rule
-- **Target:** [`IMP201`](rules/import-owner-violation.md)
+- **Target:** [`IMP201`](rules/import-boundary-violation.md)
 - **Since:** 0.2.7
 
 It is new: its reports are heuristic until a review of its reports on real code bases certifies its claim.

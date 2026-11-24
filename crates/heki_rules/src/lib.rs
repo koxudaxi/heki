@@ -677,14 +677,14 @@ pub const CORE_RULES: &[RuleMeta] = &[
     },
     RuleMeta {
         code: "IMP201",
-        slug: "import-owner-violation",
+        slug: "import-boundary-violation",
         family: RuleFamily::Imp,
         certainty: Certainty::Heuristic,
         activation: Activation::Contract,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
-        summary: "An import that an `import-owners` contract does not allow: a forbidden module, or one outside the allowed imports.",
+        summary: "An import that an `import-boundaries` contract does not allow: a forbidden module, or one outside the allowed imports.",
         doc: include_str!("../rule-docs/IMP201.md"),
     },
     RuleMeta {
@@ -696,7 +696,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
-        summary: "Strict mode of an `import-owners` contract (`unresolved = \"report\"`): an import whose module heki cannot name, which may be one the contract does not allow.",
+        summary: "Strict mode of an `import-boundaries` contract (`unresolved = \"report\"`): an import whose module heki cannot name, which may be one the contract does not allow.",
         doc: include_str!("../rule-docs/IMP202.md"),
     },
     RuleMeta {

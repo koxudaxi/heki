@@ -1,4 +1,4 @@
-//! `IMP201` import ownership (`[[tool.heki.import-owners]]`): which modules a module may import,
+//! `IMP201` import boundaries (`[[tool.heki.import-boundaries]]`): which modules a module may import,
 //! and `IMP202`, its strict sibling for the imports whose module heki cannot name; `IMP101`,
 //! import cycles ([`cycles`]); `IMP102`, circular imports that fail ([`circular`]); `IMP104`,
 //! development code imported by package code ([`development`]); `IMP301` and `IMP302`,
@@ -23,11 +23,11 @@ use crate::patterns::PartIndex;
 use crate::{CheckContext, GLOB_CHARACTERS, NamePart, RuleConfigError, RuleSelection};
 use heki_diagnostics::{Diagnostic, RelatedLocation};
 use heki_effect::imports::{ImportForm, ImportGraph, ImportSite, ModuleRef, Target, Timing};
-use heki_env::{HekiConfig, ImportOwnerRule};
+use heki_env::{HekiConfig, ImportBoundaryRule};
 use heki_ir::walk::{Answer, Budget, Visit, reach_breadth_first};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-const SECTION: &str = "import-owners";
+const SECTION: &str = "import-boundaries";
 
 /// `reach` values; the first is the default.
 const REACH: &[&str] = &["statement", "import-time", "all"];
@@ -289,7 +289,7 @@ struct IgnoredPair {
     imported: ImportPattern,
 }
 
-/// The `import-owners` contracts, their patterns indexed together.
+/// The `import-boundaries` contracts, their patterns indexed together.
 struct ImportContracts<'c> {
     contracts: Vec<ImportContract<'c>>,
     /// The `importers` patterns, with their contracts; the contracts without the key judge
@@ -317,7 +317,7 @@ fn module_part(text: &str, context: &'static str) -> Result<NamePart, RuleConfig
 }
 
 impl<'c> ImportContracts<'c> {
-    fn new(rules: &'c [ImportOwnerRule]) -> Result<Self, RuleConfigError> {
+    fn new(rules: &'c [ImportBoundaryRule]) -> Result<Self, RuleConfigError> {
         let mut contracts = Vec::new();
         let (mut importers, mut every_module, mut exempt) = (Vec::new(), Vec::new(), Vec::new());
         let (mut imports, mut ignored) = (Vec::new(), Vec::new());
@@ -326,29 +326,29 @@ impl<'c> ImportContracts<'c> {
                 None => every_module.push(c),
                 Some(patterns) => {
                     for text in patterns {
-                        importers.push((module_part(text, "import-owners.importers")?, c));
+                        importers.push((module_part(text, "import-boundaries.importers")?, c));
                     }
                 }
             }
             for text in &rule.exempt_importers {
-                exempt.push((module_part(text, "import-owners.exempt-importers")?, c));
+                exempt.push((module_part(text, "import-boundaries.exempt-importers")?, c));
             }
             let mut sides = [Imports::default(), Imports::default(), Imports::default()];
             for (side, texts, context) in [
                 (
                     Side::Allowed,
                     &rule.allowed_imports,
-                    "import-owners.allowed-imports",
+                    "import-boundaries.allowed-imports",
                 ),
                 (
                     Side::Forbidden,
                     &rule.forbidden_imports,
-                    "import-owners.forbidden-imports",
+                    "import-boundaries.forbidden-imports",
                 ),
                 (
                     Side::Relative,
                     &rule.relative_imports,
-                    "import-owners.relative-imports",
+                    "import-boundaries.relative-imports",
                 ),
             ] {
                 for text in texts {
@@ -366,7 +366,7 @@ impl<'c> ImportContracts<'c> {
                 }
             }
             for text in &rule.ignored_imports {
-                let context = "import-owners.ignored-imports";
+                let context = "import-boundaries.ignored-imports";
                 let (importer, imported) = text
                     .split_once("->")
                     .map(|(a, b)| (a.trim(), b.trim()))
@@ -420,11 +420,11 @@ impl<'c> ImportContracts<'c> {
         }
         Ok(Self {
             contracts,
-            importers: indexed(importers, "import-owners.importers")?,
+            importers: indexed(importers, "import-boundaries.importers")?,
             every_module,
-            exempt: indexed(exempt, "import-owners.exempt-importers")?,
-            imports: indexed(imports, "import-owners.allowed-imports")?,
-            ignored: indexed(ignored, "import-owners.ignored-imports")?,
+            exempt: indexed(exempt, "import-boundaries.exempt-importers")?,
+            imports: indexed(imports, "import-boundaries.allowed-imports")?,
+            ignored: indexed(ignored, "import-boundaries.ignored-imports")?,
         })
     }
 
@@ -625,7 +625,7 @@ struct Run<'r, 'c, 'g> {
     out: &'r mut Vec<Diagnostic>,
 }
 
-/// `IMP201` and `IMP202`: the imports of the modules each `import-owners` contract judges that
+/// `IMP201` and `IMP202`: the imports of the modules each `import-boundaries` contract judges that
 /// it does not allow, and, with `unresolved = "report"`, the imports whose module heki cannot
 /// name that it may not allow.
 pub(crate) fn imp201_imp202(
@@ -635,7 +635,7 @@ pub(crate) fn imp201_imp202(
     if !judges_imports(cx.config, cx.selection) {
         return Ok(());
     }
-    let contracts = ImportContracts::new(&cx.config.import_owners)?;
+    let contracts = ImportContracts::new(&cx.config.import_boundaries)?;
     let walks = (contracts.contracts.iter()).any(|c| c.reach != Reach::Statement);
     let checked: FxHashSet<&str> = (cx.units.iter())
         .map(|u| u.input.module_name.as_str())
@@ -676,7 +676,7 @@ pub(crate) fn imp201_imp202(
         // The importers walk in the order of the modules and share one budget, as `heki check`
         // and the language server both ask them: a walk after the last checked module changes
         // no answer before it.
-        let budget = graph.budget("import_owners");
+        let budget = graph.budget("import_boundaries");
         for m in 0..=last {
             if contracts
                 .judging(graph.name(ModuleRef::Project(m)))
@@ -1068,32 +1068,32 @@ fn when_text(site: &ImportSite, module: Option<&str>) -> String {
     format!("{by_name}{when}")
 }
 
-/// Whether `IMP201` or `IMP202` judges the `import-owners` contracts of `config`: one is
+/// Whether `IMP201` or `IMP202` judges the `import-boundaries` contracts of `config`: one is
 /// declared, and `selection` runs one of the rules.
 pub fn judges_imports(config: &HekiConfig, selection: &RuleSelection) -> bool {
-    !config.import_owners.is_empty()
+    !config.import_boundaries.is_empty()
         && ["IMP201", "IMP202"]
             .iter()
             .any(|code| selection.is_enabled(code))
 }
 
-/// Whether the rules `selection` runs judge an `import-owners` contract of `config` walking what
+/// Whether the rules `selection` runs judge an `import-boundaries` contract of `config` walking what
 /// its importers import (`reach` other than `"statement"`): its reports change with the imports
 /// of every module its walks reach. A contract no selected rule judges is not read, so its
 /// patterns are not validated either.
 pub fn walks_imports(config: &HekiConfig, selection: &RuleSelection) -> bool {
     judges_imports(config, selection)
-        && (config.import_owners.iter())
+        && (config.import_boundaries.iter())
             .any(|r| r.reach.as_deref().is_some_and(|r| r != "statement"))
 }
 
 /// The modules among `modules`, each with what it stands for (its file), that an
-/// `import-owners` contract walking imports judges.
+/// `import-boundaries` contract walking imports judges.
 pub fn walking_importers<'m, T>(
     config: &HekiConfig,
     modules: impl IntoIterator<Item = (&'m str, T)>,
 ) -> Result<Vec<T>, RuleConfigError> {
-    let contracts = ImportContracts::new(&config.import_owners)?;
+    let contracts = ImportContracts::new(&config.import_boundaries)?;
     let walking = |c: &usize| contracts.contracts[*c].reach != Reach::Statement;
     Ok((modules.into_iter())
         .filter(|(module, _)| contracts.judging(module).iter().any(walking))

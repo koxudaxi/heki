@@ -6827,20 +6827,20 @@ fn what_a_long_chain_loads_from_the_package_is_walked_once() {
     assert_eq!(extra["related"].as_array().unwrap().len(), modules);
 }
 
-/// [`import_chain`] with an `import-owners` contract walking what `importers` import, which
+/// [`import_chain`] with an `import-boundaries` contract walking what `importers` import, which
 /// forbids the module at the end of the chain.
 fn import_chain_with_contract(modules: usize, importers: &str) -> Project {
     let p = import_chain(modules);
     p.write(
         "pyproject.toml",
         &format!(
-            "[project]\nname = \"t\"\n\n[[tool.heki.import-owners]]\nname = \"no-json\"\nimporters = [\"{importers}\"]\nforbidden-imports = [\"json\"]\nreach = \"all\"\n"
+            "[project]\nname = \"t\"\n\n[[tool.heki.import-boundaries]]\nname = \"no-json\"\nimporters = [\"{importers}\"]\nforbidden-imports = [\"json\"]\nreach = \"all\"\n"
         ),
     );
     p
 }
 
-/// The walk of an `import-owners` contract with `reach` from the head of a long chain of
+/// The walk of an `import-boundaries` contract with `reach` from the head of a long chain of
 /// imports visits each module once, and reports the module at its end with the whole chain.
 #[test]
 fn an_import_contract_walks_a_long_chain_once() {
@@ -6858,7 +6858,7 @@ fn an_import_contract_walks_a_long_chain_once() {
 /// of the contract share one budget, past which the importers left report nothing.
 #[test]
 fn the_importers_of_an_import_contract_share_one_budget() {
-    let diags = check_past_budgets(2_000, &["import_owners"], |n| {
+    let diags = check_past_budgets(2_000, &["import_boundaries"], |n| {
         import_chain_with_contract(n, "c.*")
     });
     let reported: Vec<&str> = (diags.iter())

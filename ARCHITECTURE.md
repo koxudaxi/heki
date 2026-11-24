@@ -31,7 +31,7 @@ ownership boundaries) semantic checker**.
 | **3: Effect & Alias semantic checking (this project)** | **heki** | **Effects and aliases over an SSA control-flow graph and the call graph** | **State corruption across function and class boundaries, write-ownership violations, stale caches, blocking calls, and $O(n^2)$ complexity regressions** |
 
 *(Which modules may import which, and import cycles, are walls in heki's scope
-([ADR-022](docs/DESIGN_HISTORY_AND_ADR.md#adr-022)): `import-owners` contracts check which
+([ADR-022](docs/DESIGN_HISTORY_AND_ADR.md#adr-022)): `import-boundaries` contracts check which
 modules a module may import (`IMP201`, `IMP202`), an opt-in rule reports the modules that
 import each other while they load (`IMP101`), another the `from` imports of such modules that
 fail when one of them is imported first (`IMP102`), and others package code importing
@@ -82,7 +82,7 @@ by crate boundaries, carrying three rule families and a planned fourth, imports.
      boundaries** declared in `pyproject.toml` (`EFF201`).
    - **Family 4: Imports (`IMP`, [ADR-022](docs/DESIGN_HISTORY_AND_ADR.md#adr-022))**: import
      facts with the time each import runs (while its module loads, lazily, inside a function, or
-     never under `TYPE_CHECKING`), and heki's own import contracts, `import-owners`: which
+     never under `TYPE_CHECKING`), and heki's own import contracts, `import-boundaries`: which
      modules a module may import, wherever the import runs, or what loading it may load
      (`IMP201`, `IMP202`, experimental), the groups of modules importing each other through
      the imports of chosen timing classes (`IMP101`, opt-in, experimental), and, without

@@ -4,7 +4,7 @@
 
 Family: Imports (IMP) · Heuristic · Runs when its contract is declared · Experimental · Severity `error` (a bug) · No automatic fix
 
-Strict mode of an `import-owners` contract (`unresolved = "report"`): an import whose module heki cannot name, which may be one the contract does not allow.
+Strict mode of an `import-boundaries` contract (`unresolved = "report"`): an import whose module heki cannot name, which may be one the contract does not allow.
 
 !!! note "Heuristic"
 
@@ -15,7 +15,7 @@ Strict mode of an `import-owners` contract (`unresolved = "report"`): an import 
     It is the strict mode of `IMP201`, which is experimental. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](../experimental.md).
 
 ## What it does
-The strict mode of a `[[tool.heki.import-owners]]` contract that sets `unresolved = "report"`:
+The strict mode of a `[[tool.heki.import-boundaries]]` contract that sets `unresolved = "report"`:
 reports the imports of the judged modules that `IMP201` cannot judge because heki cannot name
 the module they load, when that module may be one the contract does not allow:
 
@@ -48,7 +48,7 @@ module name out, without mixing them with the violations `IMP201` proves.
 
 ## Example
 ```toml
-[[tool.heki.import-owners]]
+[[tool.heki.import-boundaries]]
 name = "core-plugins"
 importers = ["pkg.core.*"]
 forbidden-imports = ["pkg.plugins.*"]
@@ -67,6 +67,6 @@ def plugin(name: str) -> object:
 No automatic fix.
 
 ## Options
-- `[[tool.heki.import-owners]]`:
+- `[[tool.heki.import-boundaries]]`:
   - `unresolved`: `"ignore"` (default) or `"report"`.
   - the other keys: as for `IMP201`.
