@@ -1035,6 +1035,17 @@ impl HekiConfig {
         "import-owners",
     ];
 
+    /// Whether a contract is declared: a table of one of [`Self::CONTRACT_KEYS`].
+    pub fn declares_contracts(&self) -> bool {
+        !(self.write_owners.is_empty()
+            && self.read_owners.is_empty()
+            && self.call_owners.is_empty()
+            && self.effect_boundaries.is_empty()
+            && self.readonly_returns.is_empty()
+            && self.invalidation.is_empty()
+            && self.import_owners.is_empty())
+    }
+
     /// Load an explicit configuration file ([`ConfigLayout`]): the `[tool.heki]` table of a
     /// `pyproject.toml` (empty config when absent), the top-level keys of any other file.
     pub fn load_from_file(path: &Path) -> Result<Self, ConfigError> {

@@ -753,6 +753,15 @@ fn report(
             analyzed.heuristic_off,
             Touched::shown(touched, &analyzed.withheld),
         );
+        let whole_project = touched.is_none() && args.paths.iter().all(|p| p.is_dir());
+        if diags.is_empty()
+            && project.errors.is_empty()
+            && whole_project
+            && baseline_path.is_none()
+            && !project.env.cfg.declares_contracts()
+        {
+            eprintln!("{}", heki_rules::RECOMMEND_HINT);
+        }
     }
     if matches!(args.output_format, OutputFormat::Full) {
         rule_pages(&diags);

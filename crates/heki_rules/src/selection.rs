@@ -422,6 +422,11 @@ pub fn heuristic_hint(rules_off: usize, reports_withheld: usize) -> Option<Strin
     ))
 }
 
+/// The line a text run ends with when it shows nothing on a whole project without contracts: what
+/// to do next is `heki recommend`'s question (ADR-020).
+pub const RECOMMEND_HINT: &str = "hint: `heki recommend` (experimental) lists the rules and \
+    contracts that fit this project, and what heki could not see";
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -426,3 +426,52 @@ fn the_size_dependent_rewrites_are_opt_in_and_the_option_applying_them_selects_t
     let (code, stdout, stderr) = p.heki(&["check", "--diff"]);
     assert_eq!((code, stdout.as_str()), (0, ""), "{stderr}");
 }
+
+#[test]
+fn a_clean_text_run_of_a_project_without_contracts_points_to_recommend() {
+    let hint = "hint: `heki recommend` (experimental) lists the rules and contracts that fit \
+                this project, and what heki could not see\n";
+    let p = Project::new("recommend_hint");
+    p.write("pyproject.toml", "[project]\nname = \"t\"\n")
+        .write("app/__init__.py", "")
+        .write("app/util.py", "def add(a, b):\n    return a + b\n");
+    let stderr = |args: &[&str]| {
+        let (code, _, stderr) = p.heki(&[&["check"][..], args].concat());
+        assert!(code == 0 || code == 1, "{stderr}");
+        stderr
+    };
+    // The last line of a clean run, in both text formats.
+    for args in [&[][..], &["--output-format", "concise"], &["app"]] {
+        let out = stderr(args);
+        assert!(out.ends_with(hint), "{args:?}: {out}");
+        assert_eq!(out.matches("hint:").count(), 1, "{out}");
+    }
+    // Not in the other formats, not for a file or the files of `--touched`, and not with a
+    // baseline.
+    let none: [&[&str]; 6] = [
+        &["--output-format", "json"],
+        &["--output-format", "github"],
+        &["--output-format", "sarif"],
+        &["app/util.py"],
+        &[".", "--touched", "app/util.py"],
+        &["--baseline", "b.toml"],
+    ];
+    p.write("b.toml", "version = 2\n");
+    for args in none {
+        assert!(!stderr(args).contains("hint:"), "{args:?}");
+    }
+    // Not when the run shows a report.
+    p.write("app/api.py", BLOCKING);
+    assert!(!stderr(&[]).contains("hint:"));
+    std::fs::remove_file(p.dir.join("app/api.py")).unwrap();
+    // Not once a contract is declared.
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.effect-boundaries]]\nname = \"pure\"\nscopes = [\"app.util:*\"]\nforbid = [\"blocking\"]\n",
+    );
+    let out = stderr(&[]);
+    assert!(
+        out.starts_with("All checks passed") && !out.contains("hint:"),
+        "{out}"
+    );
+}

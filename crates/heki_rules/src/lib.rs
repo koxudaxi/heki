@@ -47,7 +47,9 @@ pub use mut_rules::{
     family_readers, kept_removals_in, lazy_setup_files, reads_class_members, sentinel_tests_in,
     stale_writes_by_file,
 };
-pub use selection::{EffectiveSelectors, RuleSelection, SelectionError, Selectors, heuristic_hint};
+pub use selection::{
+    EffectiveSelectors, RECOMMEND_HINT, RuleSelection, SelectionError, Selectors, heuristic_hint,
+};
 pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};
 
 use globset::{Glob, GlobMatcher};
