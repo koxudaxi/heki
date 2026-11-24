@@ -5,6 +5,179 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
+## [0.2.7] - Unreleased
+
+### Breaking changes
+
+- The pre-commit hook `heki` passes the staged Python files to `heki check --touched` and shows and
+  fails on only the reports in those files or whose call chain reaches one of them; it checked the
+  whole project before. Set `args: []` and `pass_filenames: false` on the hook to keep checking
+  the whole project on every commit.
+- An `EFF101` or `EFF103` chain through a function whose `class` statement runs on some paths
+  only (behind a branch, or with a body that may raise into a handler the function goes on from)
+  is now the heuristic `EFF111` or `EFF113` (see Fixed).
+- A class or function bound under a `global` declaration in a function is named as CPython names
+  it (`Config`, not `_define.<locals>.Config`), so reports, baseline entries, and contract targets
+  that used the old name change (see Changed).
+- Default output can gain reports where heki now types more values: items added to a list or
+  dict attribute (a regression in 0.2.6, see Fixed), the result of `asyncio.to_thread` and the
+  other offloading calls, and classes bound with `global`. On the 378 packages heki is measured on,
+  the default output is unchanged.
+- Owner contracts: `allowed-protocols` allows more (accesses through `type[P]`, and instances of
+  protocols whose implementations heki cannot list), a glob target matches fewer names on objects
+  of unknown class under `unresolved = "report"`, a call-only load of an outside name is no read,
+  and a write under a key from a constant tuple or list is a `MUT201` report of the target instead
+  of a `MUT205` report (see Changed). Baseline entries of the moved reports change rule.
+- With `lint.unmatched-contract-entries = "error"`, a target that names none of the known names
+  of a class whose code sets attributes named at run time is now reported (see Changed).
+
+### Added
+
+- `import-owners` contracts (experimental): which modules a module may import.
+  `[[tool.heki.import-owners]]` names the judged modules (`importers`, `exempt-importers`) and the
+  modules they may or may not import (`allowed-imports`, `forbidden-imports`, `ignored-imports`
+  pairs), as module patterns or the groups `<stdlib>`, `<project>`, and `<third-party>`.
+  `IMP201` (`import-owner-violation`) reports an import the contract does not allow, wherever it
+  runs: in the module body, a class body, a function, lazily (`lazy import`), or by a constant
+  name (`importlib.import_module`, `__import__`). What an import loads is decided as Python
+  decides it (`from pkg import parse` imports the function when `pkg/__init__.py` re-exports it).
+  Imports under `if TYPE_CHECKING:` count only with `type-checking = "report"`. With
+  `reach = "import-time"` the contract judges every module that loading an importer loads while it
+  loads, and with `reach = "all"` every module a chain of imports leads to, each reported once at
+  the import that starts a shortest chain. With `unresolved = "report"`, `IMP202`
+  (`unresolved-guarded-import`) reports the imports whose module heki cannot name when that module
+  may be one the contract does not allow.
+- `IMP101` (`import-cycle`, opt-in, experimental): the project modules that import each other
+  while they load. Each group of modules importing each other is reported once, at the import
+  that closes a shortest cycle from the group's first module by name, with the other imports of
+  that cycle as related locations; the baseline target is the sorted group, so a baseline entry
+  survives reordered imports. `[tool.heki.imports] cycle-edges` (default `["body"]`) names the
+  timing classes that count: `"body"` (module and class bodies, constant by-name imports, and
+  lazy imports the module body reads), `"lazy"`, `"function"`, and `"type-checking"`. An import
+  also steps into the parent packages it loads first (`import app.sub.leaf` runs
+  `app/sub/__init__.py`), except those holding the importing module, and into its own package
+  only when it imports the package or a name the package binds. `--select ALL` does not select
+  it; on the measured corpus, `--select IMP101` reports 220 groups in 84 of 378 packages.
+- `heki inspect --imports MODULE` shows the imports of the project modules a name or glob
+  names: each import with the module it loads, when it runs (while the module loads, lazily,
+  inside a function, or never under `TYPE_CHECKING`), whether an `ImportError` handler guards it,
+  and what loading the module loads while it loads, at least (an import on one branch is listed
+  but not counted there; a lazy import counts where the module body reads its binding). Imports
+  by a constant name (`importlib.import_module("pkg.plugins")`, `__import__`) count. The facts
+  are checked against CPython 3.11 to 3.15.
+- From Python 3.15 on, a module's `__lazy_modules__` makes the later imports of the modules it
+  lists lazy, as PEP 810 says. Where heki cannot read the list, whether such an import is lazy is
+  left open.
+- `heki check --touched FILE...` analyzes the project as before and shows, fixes, and fails on
+  only the diagnostics in the given files or whose call chain (`related`) reaches one of them: an
+  `EFF101` in `app/api.py` stays when only `app/users.py` changed. The summary, every output
+  format, and `--generate-prompt` describe the reports shown. A baseline still counts every
+  report of an entry, and only the entries of the touched files and of the shown reports are
+  judged. A path that is not an analyzed file gets a warning. It does not combine with `--watch`
+  or `--update-baseline`. The Coding Agents page and the Agent Skill use `--touched` instead of
+  filtering the JSON by hand.
+- `heki inspect -` reads the symbols from standard input, one per line, and reports on every
+  function they name from one analysis of the project: `--output-format json` prints an array of
+  the objects `heki inspect <SYMBOL>` prints, in the order of the symbols, and the text form one
+  section per function. A glob read this way names each function it matches. A symbol that
+  names no single function is its error object in the array, and the exit code is 2.
+  `heki inspect <SYMBOL>` prints what it printed.
+- `MUT120` (`readonly-view-mutation`, opt-in, experimental, heuristic until it is certified): a
+  value held through a read-only view, a class or protocol whose members are all properties
+  without a setter, changed where a type checker does not see it. A helper that does not see the
+  view's type (an unannotated or `Any` parameter) and rebinds or deletes one of its properties is
+  reported at the call that hands the view over, with the calls down to the write; an in-place
+  change of the container a property returns is reported directly, through an alias, or through
+  a helper, as `MUT108` does for frozen fields. A write through the view itself, or through a
+  helper whose parameter is the view, is left to the type checker.
+- `call-owners` and `read-owners` targets can name symbols outside the project, as an effect
+  boundary's `call-targets` and `read-targets` do: a full dotted name (`sys._getframe`), and
+  `<external>._*` for the private members of every module and class outside the project, which
+  leaves out the names that are public API though they start with an underscore (dunder and
+  sunder names, and `_asdict`, `_field_defaults`, `_fields`, `_make`, `_replace`). A call or a
+  read is judged at the symbol heki resolves it to, also through a project module re-exporting
+  it. Effect boundaries take `<external>` too. The unmatched-entries check does not report such a
+  target when the analyzed files use it, nor, when nothing uses it, an `<external>` entry or one
+  whose first name is a module outside the project.
+- Where pydantic, dataclasses, and attrs keep the fields a class declares is a new catalog table,
+  `[[declared_fields]]` (see Fixed).
+
+### Changed
+
+- A class or function that a function (or a class body) binds under a `global` declaration of
+  its name is a definition of the module, named as CPython names it (`Config`, `Config.run`; it
+  was `_define.<locals>.Config`): contract targets, annotations, imports, subclasses in other
+  modules, and `heki inspect` name it so, and a `def` under `global` in a class body is no method
+  of the class. Once the module body calls the function on every path, the name holds the
+  definition; when the function may not run at import (never called there, called on a branch,
+  nested in another function), the name may be unbound, so a call through it is not exact, and a
+  later binding on some paths makes it one of the objects. With `attribution = "lexical"`, the
+  class body's code is that function's.
+- With `unresolved = "report"`, a glob target (`Context._*`) matches on an object of unknown
+  class only the names a class it names, or a project subclass or base, has from project code:
+  an untyped `ctx._replace(...)` of a `NamedTuple` is no longer `MUT207`, and a glob naming
+  module functions matches no method of such an object.
+- `allowed-protocols` allows the accesses through a class object typed `type[P]` of a protocol
+  it names that declares the member (a parameter, a local, or an attribute annotated so), and
+  through an instance of a protocol whose implementations heki cannot list, which `MUT205`,
+  `MUT206`, and `MUT207` reported.
+- A name of a module outside the project loaded only to be called there (`_getframe(1)` after
+  `from sys import _getframe`) is a call, and no longer also a read for `read-targets`, as
+  `sys._getframe(1)` was not.
+- A key a loop takes from a tuple, list, or set of string constants (`for key in ("_a", "_b"):
+  obj.__dict__[key] = v`, also through `setattr`) names each of them, as a constant key does:
+  `MUT201` reports the writes of a target (and, with `unlisted-dict-keys = "report"`, of a key
+  no target names) that were `MUT205` writes of an attribute named at run time, and the types of
+  the class's other attributes stay known. A list the code changes (`keys.append(name)`) still
+  names any key.
+- With `lint.unmatched-contract-entries = "error"`, an attribute target that names none of the
+  known names of a class the code gives attributes named at run time (`setattr(self, name, v)`
+  with a computed name) is reported, as naming nothing "unless it is one the code names at run
+  time". With `"warning"` (the default) such a target is still not reported. `heki recommend
+  --output-format json` marks such an entry with `named_at_run_time`.
+- `from pkg import name`, where the project package `pkg` binds no `name` and the project has no
+  module `pkg.name`, may import a module outside the project's files (a compiled extension
+  module): `heki inspect --imports` shows it as the package with the submodule possible, and an
+  `import-owners` contract with `unresolved = "report"` may report the submodule under `IMP202`.
+- `heki inspect` no longer repeats project-wide work for each function it reports on: 150
+  functions of a project of 14,000 take about as long as one.
+
+### Fixed
+
+- The items of a list, set, or dict a global or an attribute holds are no longer dropped when
+  every change in place adds items heki types (regression in 0.2.6): the type joins what
+  `append(x)`, `insert`, `extend`, `+=`, `add`, `update`, `setdefault`, and item stores add, in
+  the module or in another one (`model.fields.append(field)` with `field: Field` keeps
+  `model.fields` a list of `Field`). An addition of unknown type, an unpacked argument, or a
+  change of what a change gave (`d.setdefault(k, []).append(x)`) still leaves the items
+  unknown. An in-place operator adding items (`self.items += [other]`) left the items as they
+  were, and `heki inspect` could call a loop over them pure; the items now join what it adds.
+- What awaiting `asyncio.to_thread(f, *args, **kwargs)`, `loop.run_in_executor(executor, f,
+  *args)`, `anyio.to_thread.run_sync`, `trio.to_thread.run_sync`, or `run_in_threadpool` gives,
+  and the `result()` of `executor.submit(f, ...)`, has the type of what `f` returns, as certain
+  as the call written out: `cur = await asyncio.to_thread(conn.execute, sql)` then
+  `cur.fetchone()` in the same `async def` is an `EFF101` report, as `conn.execute(sql).fetchone()`
+  is. The offloaded call itself is still not reported.
+- A call in a class body counts as made whenever the function running the `class` statement
+  returns only when the function has run the statement to its end on every path on which it
+  returns. A class statement behind a branch, or one whose body may raise into a handler the
+  function goes on from, made its calls look made on every return, so an `EFF101` or `EFF103`
+  chain through the function could be exact; it is now `EFF111` or `EFF113`. A call in a class
+  body behind a branch the code decides against is not reached.
+- A copy of the attributes an instance has no longer hides stale contract targets from
+  `lint.unmatched-contract-entries`. A store under a key a loop takes from the namespace of an
+  instance of the same class (`for key, value in other.__dict__.items(): new.__dict__[key] =
+  value`, as a `__deepcopy__` does; also `.keys()`, `vars(other)`, wrappers of them,
+  `new.__dict__.update(other.__dict__)`, and `setattr` with such a key) names an attribute the
+  instance has already, and a deletion under a key heki cannot read adds none.
+- A copy of the fields a class declares (a pydantic model's `model_fields`,
+  `__pydantic_fields__`, or `__fields__`, a dataclass's `__dataclass_fields__` or
+  `dataclasses.fields(obj)`, an attrs class's `__attrs_attrs__`, `attrs.fields(cls)`, or
+  `attrs.fields_dict(cls)`) names attributes the class declares, so stale targets are reported
+  plainly with `lint.unmatched-contract-entries = "error"`.
+- `__import__`, `__build_class__`, and `__debug__` are builtins: a call of `__import__` was taken
+  for a call of an unbound name.
+
 ## [0.2.6] - 2026-11-23
 
 ### Breaking changes
@@ -1714,6 +1887,7 @@ The first public preview.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
+[0.2.7]: https://github.com/koxudaxi/heki/compare/v0.2.6...HEAD
 [0.2.6]: https://github.com/koxudaxi/heki/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/koxudaxi/heki/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/koxudaxi/heki/compare/v0.2.3...v0.2.4
