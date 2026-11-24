@@ -27,6 +27,7 @@
 //! await gives a coroutine's result, or a future's where the call making it hands back what a
 //! callable returns: `await asyncio.to_thread(f, x)` gives what `f(x)` does.
 
+use crate::ownership::CASTS;
 use crate::partial::Partial;
 use crate::resolver::stores::Read;
 use crate::resolver::{self, Callee, ProjectDecls, TypeCtx, Val};
@@ -1383,13 +1384,28 @@ impl<'e, 'a> Engine<'e, 'a> {
 
     /// [`Self::need`] without the `isinstance` checks guarding the current block.
     fn unnarrowed(&self, var: VarId) -> Result<Option<&Ty>, Pending> {
-        let inferred = &self.facts[var.0 as usize];
-        match (inferred, self.declared.get(&var)) {
-            (Fact::Known(t), Some(d)) if !self.cx.project.narrower(t, d, self.cx.kb) => Ok(Some(d)),
-            (Fact::Known(t), _) => Ok(Some(t)),
+        let inferred = match &self.facts[var.0 as usize] {
+            Fact::Known(t) => Ok(Some(t)),
+            Fact::Unknown => Ok(None),
+            Fact::Unset => Err(Pending),
+        };
+        self.declared_or_inferred(inferred, self.declared.get(&var))
+    }
+
+    /// The type of a value an annotation declares (an annotated local, the result of
+    /// `typing.cast`): the declaration types what nothing else types, and never replaces what
+    /// the value is inferred to hold when that is narrower ([`ProjectDecls::narrower`]: an
+    /// instance of a subclass, anything for a declaration of `Any` / `object`).
+    fn declared_or_inferred<'t>(
+        &self,
+        inferred: Result<Option<&'t Ty>, Pending>,
+        declared: Option<&'t Ty>,
+    ) -> Result<Option<&'t Ty>, Pending> {
+        match (inferred, declared) {
+            (Ok(Some(t)), Some(d)) if !self.cx.project.narrower(t, d, self.cx.kb) => Ok(Some(d)),
+            (Ok(Some(t)), _) => Ok(Some(t)),
             (_, Some(d)) => Ok(Some(d)),
-            (Fact::Unset, None) => Err(Pending),
-            (Fact::Unknown, None) => Ok(None),
+            (inferred, None) => inferred,
         }
     }
 
@@ -2202,8 +2218,13 @@ impl<'e, 'a> Engine<'e, 'a> {
                     .need(args[0])?
                     .map(|t| Ty::Partial(Box::new(t.clone()))));
             }
-            "typing.cast" | "typing_extensions.cast" if !args.is_empty() => {
-                return Ok(self.type_form(args[0]));
+            // `typing.cast(T, value)` returns `value`, which `T` declares.
+            _ if CASTS.contains(&fqn) && !args.is_empty() => {
+                let declared = self.type_form(args[0]);
+                let value = args.get(1).map_or(Ok(None), |v| self.need(*v));
+                return self
+                    .declared_or_inferred(value, declared.as_ref())
+                    .map(|t| t.cloned());
             }
             // A library class that copies its argument (`collections.deque(xs)`) makes an
             // instance of itself.
