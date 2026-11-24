@@ -6813,17 +6813,15 @@ fn file_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeSet<Stri
         ModuleRead::Name(text) => decls.resolve_dotted(&text, true),
         ModuleRead::Imported(fqn) => Some(fqn),
     };
-    let strs = &input.ir.constants.strs;
     fn loaded(inst: &Inst) -> Option<&str> {
         match &inst.kind {
             InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => Some(name),
             _ => None,
         }
     }
-    let globals = |inst: &Inst| {
-        let text = strs.get(loaded(inst)?)?;
-        Some(LiteralValue::Str(text.to_string()))
-    };
+    // A string constant is bound once to a literal before it is read: one naming a file is
+    // already among `out`, and any other names a database in memory.
+    let globals = |_: &Inst| None;
     for bb in body.blocks.iter().filter(|b| shape.loop_depth(b.id) == 0) {
         for inst in &bb.insts {
             let InstKind::StoreGlobal { name, value } = &inst.kind else {
