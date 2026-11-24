@@ -853,7 +853,7 @@ fn relative_imports_judge_every_spelling_of_an_import() {
         "pkg/_runtime/a.py:22 IMP202 by_name *",
         "pkg/_runtime/a.py:24 IMP202 by_name pkg._runtime.b|pkg._runtime.c",
         "pkg/_runtime/a.py:26 IMP202 by_name pkg._runtime.*",
-        "pkg/_runtime/dynamic.py:7 IMP202 dynamic *",
+        "pkg/_runtime/dynamic.py:6 IMP202 dynamic *",
     ];
     for (keys, expected) in [
         ("", exact.to_vec()),
