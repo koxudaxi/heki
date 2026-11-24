@@ -3605,12 +3605,22 @@ def copied(new: Field) -> None:
     keys = ["kind", "_type_cache"]
     for key in list(keys):
         setattr(new, key, None)
+
+
+def grown_on_one_path(new: Field, fresh: bool) -> None:
+    keys = ["kind"]
+    names = keys
+    if fresh:
+        names = []
+    names.append("_type_cache")
+    for key in keys:
+        setattr(new, key, None)
 "#;
 
 /// A key a loop takes from a list display names one of the display's constants only while
-/// nothing changes the list: a list that grows, or has an item replaced, may hold any name
-/// (`MUT205`), not only those it was made with (a write of `_type_cache` the list no longer
-/// holds would be a false `MUT201`).
+/// nothing changes the list: a list that grows, also through a name that is the list on only
+/// one path, or has an item replaced, may hold any name (`MUT205`), not only those it was made
+/// with (a write of `_type_cache` the list no longer holds would be a false `MUT201`).
 #[test]
 fn a_list_display_the_code_changes_names_any_key() {
     let p = Project::new("changed_display_keys");
@@ -3639,6 +3649,7 @@ fn a_list_display_the_code_changes_names_any_key() {
             d(u, 8, "MUT205", "grown", "Field"),
             d(u, 15, "MUT205", "replaced", "Field"),
             d(u, 21, "MUT201", "copied", "pkg.model.Field._type_cache"),
+            d(u, 31, "MUT205", "grown_on_one_path", "Field"),
         ]
     );
 }
