@@ -1740,3 +1740,206 @@ fn a_call_of_a_property_value_is_as_complete_as_calling_the_value() {
         ]
     );
 }
+
+/// Calls through an offloading API: what awaiting it gives (or a future's `result()`) is what
+/// the callable it runs returns, called with the arguments the API passes on, as certain as the
+/// call written out: a catalog class is exact, a project function's annotation (R2) and an
+/// annotated local heuristic, a function without an annotation unknown. The offloaded call itself
+/// runs on a worker.
+const OFFLOADED: &str = r#"import asyncio
+import concurrent.futures
+import functools
+import sqlite3
+from functools import partial
+
+import anyio
+
+conn = sqlite3.connect("x.db", check_same_thread=False)
+memory = sqlite3.connect(":memory:", check_same_thread=False)
+pool = concurrent.futures.ThreadPoolExecutor()
+
+
+def run(sql: str) -> sqlite3.Cursor:
+    return conn.execute(sql)
+
+
+def untyped(sql: str):
+    return conn.execute(sql)
+
+
+async def direct() -> object:
+    return conn.execute("SELECT 1").fetchone()
+
+
+async def through_to_thread() -> object:
+    cur = await asyncio.to_thread(conn.execute, "SELECT 1")
+    return cur.fetchone()
+
+
+async def through_executor() -> object:
+    loop = asyncio.get_running_loop()
+    cur = await loop.run_in_executor(None, conn.execute, "SELECT 1")
+    return cur.fetchone()
+
+
+async def through_anyio() -> object:
+    cur = await anyio.to_thread.run_sync(conn.execute, "SELECT 1")
+    return cur.fetchone()
+
+
+async def through_partial() -> object:
+    cur = await asyncio.to_thread(functools.partial(conn.execute, "SELECT 1"))
+    return cur.fetchone()
+
+
+async def through_lambda() -> object:
+    cur = await asyncio.to_thread(lambda: conn.execute("SELECT 1"))
+    return cur.fetchone()
+
+
+async def through_submit() -> object:
+    return pool.submit(conn.execute, "SELECT 1").result().fetchone()
+
+
+async def project_direct() -> object:
+    return run("SELECT 1").fetchone()
+
+
+async def through_project_function() -> object:
+    cur = await asyncio.to_thread(run, "SELECT 1")
+    return cur.fetchone()
+
+
+async def through_untyped_function() -> object:
+    loop = asyncio.get_running_loop()
+    cur = await loop.run_in_executor(None, untyped, "SELECT 1")
+    return cur.fetchone()
+
+
+async def annotated_direct() -> object:
+    cur: sqlite3.Cursor = conn.execute("SELECT 1")
+    return cur.fetchone()
+
+
+async def annotated() -> object:
+    cur: sqlite3.Cursor = await asyncio.to_thread(conn.execute, "SELECT 1")
+    return cur.fetchone()
+
+
+async def described() -> object:
+    cur = await asyncio.to_thread(conn.execute, "SELECT 1")
+    return cur.description
+
+
+async def opened_on_a_file() -> object:
+    db = await asyncio.to_thread(sqlite3.connect, "x.db")
+    return db.execute("SELECT 1")
+
+
+async def opened_in_memory() -> object:
+    db = await asyncio.to_thread(sqlite3.connect, database=":memory:")
+    return db.execute("SELECT 1")
+
+
+async def held_keywords_replaced(options: dict) -> object:
+    connect = partial(sqlite3.connect, timeout=1.0)
+    db = await asyncio.to_thread(connect, **options)
+    return db.execute("SELECT 1")
+
+
+async def unpacked(args: tuple) -> object:
+    cur = await asyncio.to_thread(*args)
+    return cur.fetchone()
+
+
+async def either(flag: bool) -> object:
+    loop = asyncio.get_running_loop()
+    if flag:
+        pending = loop.run_in_executor(None, conn.execute, "SELECT 1")
+    else:
+        pending = loop.run_in_executor(None, memory.execute, "SELECT 1")
+    cur = await pending
+    return cur.fetchone()
+
+
+async def held_by_a_variable() -> object:
+    execute = conn.execute
+    return execute("SELECT 1").fetchone()
+
+
+class Loader:
+    def __init__(self) -> None:
+        loop = asyncio.get_running_loop()
+        self.pending = loop.run_in_executor(None, conn.execute, "SELECT 1")
+
+    async def first(self) -> object:
+        cur = await self.pending
+        return cur.fetchone()
+
+
+def serve():
+    def receive(c):
+        return c.recv(1)
+
+    async def handle(c):
+        return await asyncio.to_thread(lambda: receive(c))
+
+    return handle
+"#;
+
+#[test]
+fn an_offloaded_call_hands_back_what_its_callable_returns() {
+    let p = Project::new("offloaded_results");
+    p.write("pkg/__init__.py", "").write("pkg/m.py", OFFLOADED);
+    let diags = diagnostics(&p, &["--select", "EFF101,EFF111"]);
+    let got: Vec<(u64, &str, &str)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap(),
+                d["target"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            // Written out, the cursor's fetch waits as the statement does.
+            (23, "EFF101", "sqlite3.Connection.execute"),
+            (23, "EFF101", "sqlite3.Cursor.fetchone"),
+            // `asyncio.to_thread`, `loop.run_in_executor`, `anyio.to_thread.run_sync`, a
+            // partial object, and a lambda run the statement on a worker; the fetch on the
+            // cursor they hand back waits on the event loop.
+            (28, "EFF101", "sqlite3.Cursor.fetchone"),
+            (34, "EFF101", "sqlite3.Cursor.fetchone"),
+            (39, "EFF101", "sqlite3.Cursor.fetchone"),
+            (44, "EFF101", "sqlite3.Cursor.fetchone"),
+            (49, "EFF101", "sqlite3.Cursor.fetchone"),
+            // An executor's future hands the cursor back through `result()`.
+            (53, "EFF101", "sqlite3.Cursor.fetchone"),
+            (53, "EFF111", "concurrent.futures.Future.result"),
+            // A project function typed by its annotation, as written out; one without an
+            // annotation returns nothing known.
+            (57, "EFF101", "sqlite3.Connection.execute"),
+            (57, "EFF111", "sqlite3.Cursor.fetchone"),
+            (62, "EFF111", "sqlite3.Cursor.fetchone"),
+            // An annotated local has its annotation, which names no file connection.
+            (72, "EFF101", "sqlite3.Connection.execute"),
+            (73, "EFF111", "sqlite3.Cursor.fetchone"),
+            (78, "EFF111", "sqlite3.Cursor.fetchone"),
+            // Reading the cursor's `description` waits for nothing. The arguments are passed
+            // on: a file connection waits, an in-memory one does not (the keyword `to_thread`
+            // passes on), and nothing is known where a mapping may replace the keyword a partial
+            // object holds or `*` may move the callable. A cursor of either connection may come
+            // back, as written out.
+            (88, "EFF101", "sqlite3.Connection.execute"),
+            // A bound method held by a variable returns what calling it written out does.
+            (119, "EFF101", "sqlite3.Cursor.fetchone"),
+            (119, "EFF111", "sqlite3.Connection.execute"),
+            // A future kept in an attribute hands back the cursor where it is awaited.
+            (129, "EFF101", "sqlite3.Cursor.fetchone"),
+            // A lambda reading a function its creator does not read is typed by its body too.
+        ]
+    );
+}

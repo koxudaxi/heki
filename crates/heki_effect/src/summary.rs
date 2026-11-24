@@ -23,6 +23,7 @@ use crate::locks::{self, LockStep, ObjRef};
 use crate::one_at_a_time;
 use crate::order_flow;
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, ReturnOrigins, Source};
+use crate::partial::Partial;
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared, container_mutator};
 use crate::resolver::{
     self, Callee, DeclKeys, FunctionDecl, ModuleDecls, TypeCtx, Val, func_qualname,
@@ -4824,7 +4825,9 @@ impl<'a> Extractor<'a> {
                     recv: None,
                 };
                 if let Some(v) = callee_var.filter(|v| self.val(*v).is_none())
-                    && let Some(partial) = self.partial(v).and_then(|p| p.called_with(&passed))
+                    && let Some(partial) = self
+                        .partial(v)
+                        .and_then(|p| p.called_with(passed.args, passed.kwargs, passed.star_from))
                 {
                     let (target, recv_var) = self.callable_callee(partial.callable);
                     let (recv, recv_is_self) = match recv_var {
@@ -7018,49 +7021,17 @@ impl<'a> Extractor<'a> {
         cur
     }
 
-    /// What calling `var` calls when it holds a `functools.partial` object (`partial(f, a,
-    /// k=b)` calls `f(a, ..., k=b)`), through copies and at most 16 nested partials (the inner
-    /// one's arguments go first; past the bound, the call is not resolved).
+    /// What calling `var` calls when it holds a `functools.partial` object ([`Partial::of`]).
     fn partial(&self, var: VarId) -> Option<Partial> {
-        let mut found: Option<Partial> = None;
-        let mut cur = var;
-        for _ in 0..16 {
-            let made = self.copied(cur);
-            let Some((inner, held, kwargs, open)) = self
-                .defs
-                .get(&made)
-                .and_then(|i| self.partial_call(&i.kind))
-            else {
-                break;
-            };
-            let p = found.get_or_insert_with(|| Partial {
-                callable: inner,
-                calls: Vec::new(),
-                args: Vec::new(),
-                kwargs: Vec::new(),
-                open: false,
-            });
-            p.callable = inner;
-            p.calls.push((made, inner));
-            // The outer partials' arguments come after what this one unpacks with `*`.
-            if open {
-                p.args.clear();
-            }
-            p.args.splice(0..0, held.iter().copied());
-            // An outer partial's `**` unpacking may override any keyword this one holds.
-            let overridden = p.kwargs.iter().any(|(k, _)| k.is_none());
-            // A keyword an outer partial writes again replaces this one's.
-            let replaced: Vec<_> = kwargs
-                .iter()
-                .filter(|(k, _)| !overridden || k.is_none())
-                .filter(|(k, _)| k.is_none() || !p.kwargs.iter().any(|(o, _)| o == k))
-                .cloned()
-                .collect();
-            p.kwargs.splice(0..0, replaced);
-            p.open |= open;
-            cur = inner;
-        }
-        found
+        Partial::of(
+            var,
+            |v| self.copied(v),
+            |object| {
+                self.defs
+                    .get(&object)
+                    .and_then(|i| self.partial_call(&i.kind))
+            },
+        )
     }
 
     /// The parts of a `functools.partial(f, ...)` call: `f`, the positional arguments after it
@@ -7094,9 +7065,7 @@ impl<'a> Extractor<'a> {
             _ => return None,
         };
         matches!(callee, Callee::External(s) if s == "functools.partial").then_some(())?;
-        let known = star_from.map_or(args.len(), |s| usize::from(s).min(args.len()));
-        let (&inner, held) = args[..known].split_first()?;
-        Some((inner, held, kwargs, known < args.len()))
+        crate::partial::parts(args, kwargs, *star_from)
     }
 
     /// A call site in block `bb` with the caller's guards there.
@@ -7985,71 +7954,6 @@ impl Bindings<'_> {
             .map(|(p, c)| (usize::from(*p), c))
             .filter(move |(p, _)| !by_position(*p) && !by_keyword.contains(p))
     }
-}
-
-/// What calling a `functools.partial` object calls ([`Extractor::partial`]).
-struct Partial {
-    callable: VarId,
-    /// Each nested `functools.partial` call: the object it makes and the callable it holds.
-    calls: Vec<(VarId, VarId)>,
-    /// The positional arguments it passes first, up to the first one `*` unpacks.
-    args: Vec<VarId>,
-    /// Its keywords (`**` unpacking is a `None` keyword).
-    kwargs: Vec<(Option<String>, VarId)>,
-    /// It unpacks positional arguments with `*`: the positions after `args` are not known.
-    open: bool,
-}
-
-impl Partial {
-    /// What a call passing `passed` to the object passes the callable it holds: the positional
-    /// arguments it holds, then the call's up to the first one `*` unpacks; its keywords, which
-    /// a keyword the call writes replaces, then the call's. `None` when the call unpacks a
-    /// mapping with `**` while the object holds keywords: the mapping may replace any of them.
-    fn called_with(self, passed: &Passed<'_>) -> Option<PartialCall> {
-        let unpacks_mapping = passed.kwargs.iter().any(|(k, _)| k.is_none());
-        if unpacks_mapping && !self.kwargs.is_empty() {
-            return None;
-        }
-        let written = |k: &Option<String>| passed.kwargs.iter().any(|(w, _)| w == k);
-        let kwargs = self
-            .kwargs
-            .iter()
-            .filter(|(k, _)| k.is_none() || !written(k))
-            .chain(passed.kwargs)
-            .cloned()
-            .collect();
-        let known = passed
-            .star_from
-            .map_or(passed.args.len(), |s| usize::from(s).min(passed.args.len()));
-        let held = self.args.len();
-        let (args, star_from) = match self.open {
-            true => (self.args, Some(held)),
-            false => {
-                let after = passed.args[..known].iter().copied();
-                let star_from = passed.star_from.map(|_| held + known);
-                (self.args.into_iter().chain(after).collect(), star_from)
-            }
-        };
-        Some(PartialCall {
-            callable: self.callable,
-            calls: self.calls,
-            args,
-            kwargs,
-            star_from: star_from.map(|s| u8::try_from(s).unwrap_or(u8::MAX)),
-        })
-    }
-}
-
-/// A call of a `functools.partial` object, as a call of the callable it holds
-/// ([`Partial::called_with`]).
-struct PartialCall {
-    callable: VarId,
-    /// [`Partial::calls`].
-    calls: Vec<(VarId, VarId)>,
-    args: Vec<VarId>,
-    kwargs: Vec<(Option<String>, VarId)>,
-    /// Where `*` unpacking starts among `args`.
-    star_from: Option<u8>,
 }
 
 /// What a builtin calling a callable once per item passes it ([`Extractor::passed_items`]).
