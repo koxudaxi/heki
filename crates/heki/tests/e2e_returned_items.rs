@@ -86,6 +86,10 @@ def notes(p: pathlib.Path):
 
 def note_lines(p: pathlib.Path):
     return p.read_text().splitlines()
+
+
+def fetch_some_text():
+    return CONN.execute("SELECT id FROM a").fetchmany("3")
 "#;
 
 const APP: &str = r#"import asyncio
@@ -200,6 +204,11 @@ def tn_characters(p: pathlib.Path) -> None:
 def tn_counted_filtered() -> None:
     for i in [i for i in db.ids() if i > 0]:
         book(i)
+
+
+def tp_size_not_a_number() -> None:
+    for r in db.fetch_some_text():
+        book(r[0])
 "#;
 
 /// What every return of a helper gives decides the origin of a loop over its result.
@@ -220,6 +229,11 @@ fn rows_a_function_returns_are_the_datas_and_rows_the_code_fixes_are_not() {
     let fetchall_of = |f: &str| {
         exact(&format!(
             "the rows of `sqlite3.Cursor.fetchall` that `pkg.db.{f}` returns"
+        ))
+    };
+    let fetchmany_of = |f: &str| {
+        exact(&format!(
+            "the rows of `sqlite3.Cursor.fetchmany` that `pkg.db.{f}` returns"
         ))
     };
     let cursor_of = |f: &str| {
@@ -268,6 +282,8 @@ fn rows_a_function_returns_are_the_datas_and_rows_the_code_fixes_are_not() {
         (107, "EFF103 [heuristic]", heuristic.to_owned()),
         // One item per row, then some of them: no count of the rows follows.
         (112, "EFF103 [heuristic]", heuristic.to_owned()),
+        // A size that is no number fixes no count of rows.
+        (117, "EFF103", fetchmany_of("fetch_some_text")),
     ];
     let expected: Vec<(u64, String, String)> = expected
         .into_iter()
