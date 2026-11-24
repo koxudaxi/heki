@@ -1234,6 +1234,10 @@ re-checked, and a test that moves moves the related locations showing it, as a c
 the language server re-checks the files showing a change site that moved, as for a call site. A
 place it records keeps what is there (a call's callees, a change's attribute), so that two calls
 or changes of one length swapping on a line, which keep every span, count as moved too.
+While a strict `read-owners` or `call-owners` contract has a glob target, it keeps the member
+names the code of every file writes on instances of project classes and on objects of unknown
+class (`heki_rules::class_member_names`), which decide what the glob matches on an object of
+unknown class; when they change, every checked file is re-checked.
 
 The incremental index also records what summarizing each file read of the project declarations
 (`FileSummary::decl_reads`: the modules looked up, the classes whose subclasses were listed, the

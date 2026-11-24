@@ -2511,6 +2511,78 @@ fn steps_contract_extensions() -> Vec<Step> {
     ]
 }
 
+/// Owner-contract targets naming symbols outside the project (`FileSummary::external_accesses`):
+/// a module calls and hands on a private function of `sys` another module re-exports, so which
+/// symbol the call and the read are of follows what the re-export binds, in another file.
+fn steps_outside_targets() -> Vec<Step> {
+    let contract = format!(
+        "{CONFIG}\n[[tool.heki.call-owners]]\nname = \"outside-calls\"\ntargets = [\"<external>._*\"]\nforbidden-callers = [\"pkg.frames:*\"]\n\n[[tool.heki.read-owners]]\nname = \"outside-reads\"\ntargets = [\"sys._getframe\"]\nforbidden-readers = [\"pkg.frames:*\"]\n"
+    );
+    let compat = "from sys import _getframe\n";
+    let frames = "from pkg.frame_compat import _getframe\n\n\ndef caller():\n    return _getframe(1)\n\n\ndef handed():\n    return _getframe\n";
+    vec![
+        Step::new(
+            "a module calls and hands on a private function of `sys` another module re-exports",
+            vec![
+                Action::Configure(contract),
+                Action::Create("pkg/frame_compat.py", compat.to_owned()),
+                Action::Create("pkg/frames.py", frames.to_owned()),
+            ],
+        )
+        .present(&[("pkg/frames.py", "MUT204"), ("pkg/frames.py", "MUT203")])
+        .absent(&[("pkg/frame_compat.py", "MUT203")]),
+        Step::new(
+            "the re-export binds a public function instead",
+            vec![save(
+                "pkg/frame_compat.py",
+                "from os import getcwd as _getframe\n",
+            )],
+        )
+        .absent(&[("pkg/frames.py", "MUT204"), ("pkg/frames.py", "MUT203")]),
+        Step::new(
+            "it binds the private function again",
+            vec![save("pkg/frame_compat.py", compat)],
+        )
+        .present(&[("pkg/frames.py", "MUT204"), ("pkg/frames.py", "MUT203")]),
+    ]
+}
+
+/// A glob target of a strict `read-owners` contract on an object of unknown class matches only
+/// the members a class it covers has from project code, among them the names any module writes
+/// on objects of unknown class (`heki_rules::class_member_names`): a write of `_cache` in a
+/// module the reader neither imports nor calls makes the reader's untyped `parser._cache` a
+/// `MUT206`, and its removal clears it.
+fn steps_glob_members() -> Vec<Step> {
+    let contract = format!(
+        "{CONFIG}\n[[tool.heki.read-owners]]\nname = \"parser-state\"\ntargets = [\"pkg.glob_model.Parser._*\"]\nallowed-readers = [\"pkg.glob_model:*\"]\nunresolved = \"report\"\n"
+    );
+    let model = "class Parser:\n    def __init__(self) -> None:\n        self._state = 1\n";
+    let peek = "def peek(parser):\n    return parser._cache\n";
+    let fill = |body: &str| format!("def fill(obj):\n    {body}\n");
+    vec![
+        Step::new(
+            "a strict glob target, and an untyped read of a name no class has",
+            vec![
+                Action::Configure(contract),
+                Action::Create("pkg/glob_model.py", model.to_owned()),
+                Action::Create("pkg/glob_peek.py", peek.to_owned()),
+                Action::Create("pkg/glob_fill.py", fill("return None")),
+            ],
+        )
+        .absent(&[("pkg/glob_peek.py", "MUT206")]),
+        Step::new(
+            "another module writes the name on an object of unknown class",
+            vec![save("pkg/glob_fill.py", &fill("obj._cache = 1"))],
+        )
+        .present(&[("pkg/glob_peek.py", "MUT206")]),
+        Step::new(
+            "the write goes",
+            vec![save("pkg/glob_fill.py", &fill("return None"))],
+        )
+        .absent(&[("pkg/glob_peek.py", "MUT206")]),
+    ]
+}
+
 /// Step 5c: environment reads below an effect boundary. No summary records them, so the report
 /// of the scope function above, and of the module body the boundary names, follows the helper's
 /// own accesses: a read of `sys.platform`, a call of `os.getenv` (whose call site the report's
@@ -5809,6 +5881,8 @@ sessions!(editing, Session::start, {
     bases_and_attribution: steps_bases_and_attribution,
     argument_lists: steps_argument_lists,
     environment: steps_environment,
+    outside_targets: steps_outside_targets,
+    glob_members: steps_glob_members,
     keys_fresh_strict: steps_keys_fresh_strict,
     files: steps_files,
     configuration: steps_configuration,

@@ -4643,6 +4643,17 @@ impl ProjectDecls {
             .then(|| Ty::Class(class.to_owned()))
     }
 
+    /// The project protocol a class object type names (`type[P]` of an annotation), whose
+    /// class [`Self::class_object`] leaves unknown: the contracts still judge an access through
+    /// it by the protocol (`allowed-protocols`).
+    pub(crate) fn protocol_class(&self, ty: &Ty) -> Option<String> {
+        let Ty::Class(class) = ty else {
+            return None;
+        };
+        let class = self.object_named(class);
+        self.protocol(&class).is_some().then_some(class)
+    }
+
     /// Whether the inferred type `t` is narrower than the declared `declared`, so that a value
     /// keeps it: anything for a declaration of `Any` / `object`, an instance of a project
     /// subclass of the declared class (`x: Base = Sub()`), and for a declared class object, a

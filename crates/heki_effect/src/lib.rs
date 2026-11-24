@@ -575,6 +575,10 @@ pub struct UnresolvedWriteSite {
     /// Whether the write constructs the object it writes (`fresh-objects`; a parameter is left
     /// to the callers, `Construction::No`).
     pub construction: Construction,
+    /// The project protocol the object is typed with although its class is unknown
+    /// ([`UnresolvedAccessSite::protocol`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -607,6 +611,12 @@ pub struct UnresolvedAccessSite {
     pub span: Span,
     /// Parameters of the accessing function the object is on every path (bit 0: `self`).
     pub obj_params: u64,
+    /// The project protocol the object is typed with although its class is unknown: an
+    /// instance of a protocol whose implementations heki cannot list, or a class object typed
+    /// `type[P]`, whose class may be any implementation's. `allowed-protocols` allows the
+    /// access when it names the protocol and the protocol declares the member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
 }
 
 /// What an [`UnresolvedAccessSite`] does with its name.
@@ -2244,9 +2254,9 @@ pub struct FileSummary {
     /// The `MUT101` facts of the file's methods that write a `self` attribute themselves, one
     /// per definition in source order (local, IR-free).
     pub cache_flows: FxHashMap<FuncKey, Vec<CacheFlow>>,
-    /// What each function of the file accesses outside the project that an effect boundary
-    /// forbids, in its own body and in the class bodies it runs (local, IR-free; empty unless a
-    /// boundary names such an access, [`Contracts::external_call`]).
+    /// What each function of the file accesses outside the project that a contract names, in
+    /// its own body and in the class bodies it runs (local, IR-free; empty unless a contract
+    /// names such an access, [`Contracts::external_call`]).
     #[serde(default, skip_serializing_if = "FxHashMap::is_empty")]
     pub external_accesses: FxHashMap<FuncKey, Vec<ExternalAccess>>,
     /// The facts of the file's functions that only opt-in readers ask for (IR-free; `None`
