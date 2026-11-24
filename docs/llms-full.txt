@@ -3287,6 +3287,9 @@ Options:
           
           [default: 3]
 
+      --imports
+          Show the imports of the project modules SYMBOL names (a module name or a glob over module names): each import with when it runs and what it loads, and what loading the module loads while it loads
+
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
 
@@ -4537,6 +4540,7 @@ $ cargo nextest run --workspace --cargo-profile ci
 ```console
 $ cargo build
 $ python3 tests/symtable_verify/verify_symtable.py --heki target/debug/heki tests/symtable_verify/fixtures/ tests/corpus/
+$ python3 tests/import_verify/verify_imports.py --heki target/debug/heki tests/import_verify/fixtures/
 $ python3 tests/sentinel/verify_soundness_kb.py
 $ python3 tests/difftest/counterexamples.py
 $ python3 tests/difftest/soundness_e2e_counterexamples.py
@@ -4548,6 +4552,7 @@ CI runs them on CPython 3.11 to 3.15 (`ir_counterexamples.py` on 3.15 only).
 | Script | Checks |
 | ------ | ------ |
 | `verify_symtable.py` | heki's scope analysis against CPython's `symtable`: the scope tree (kind, name, definition line, parent), bindings, parameters, `global` / `nonlocal` declarations, and every read. Every target must exist and every file must parse on the running CPython, except fixtures marked for a newer one in their name (`312_315`, `313_315`, `_314`, `pep810`); a run that compares no file fails. |
+| `verify_imports.py` | heki's import facts (`heki inspect --imports`) against CPython: each fixture module is imported first in a fresh interpreter that records the imports the module bodies run, and the `body` edges are compared both ways (every recorded import is one of heki's `body` sites, and every unconditional one heki lists that no `ImportError` handler guards is recorded); an `ast` reader checks the function, `TYPE_CHECKING`, and `lazy` classes. The fixtures under `py315` need CPython 3.15. |
 | `verify_soundness_kb.py` | every claim of the Layer 1 knowledge base (`kb/soundness/builtins.toml`), on the running interpreter |
 | `counterexamples.py` | that the naive rewrites heki refuses really change behavior |
 | `soundness_e2e_counterexamples.py` | that the rewrites earlier versions of heki made of these shapes change behavior; the end-to-end tests check that heki now blocks or disproves each |
@@ -4796,7 +4801,8 @@ once it costs under a quarter of the limits. `KNOWN_STEPS` lists, the same way, 
 steps are known to grow faster than linearly or to spend a budget.
 
 Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without it.
-The test counts the steps of the walks (`heki check --walk-steps`) on the shape and on the same
+The test counts the steps of the walks (`heki check --walk-steps`, and `heki inspect --imports
+--walk-steps` for the import graph) on the shape and on the same
 shape eight times smaller, and compares the counts, not times, so the result does not depend on the
 machine's speed or load: each owner's steps may grow at most sixteen times, and no owner may spend
 its budget on the full shape unless the test names it (`check_past_budgets`: a shape made to pass
@@ -4877,7 +4883,14 @@ key, each after reads of other mappings by the same key, and, for the call cycle
 follows, thousands of `try` statements in one function calling into one recursion, a call cycle
 through thousands of functions each calling the next inside a `try`, a lattice of calls thirty
 levels deep with a `try` at each level above a recursion, and a ladder of thousands of helpers
-above a recursion with a `try` calling each.
+above a recursion with a `try` calling each, and, for the import graph (`heki inspect
+--imports`), a chain of ten thousand modules each importing the next, every module of a chain
+of two thousand asked at once (made to pass the budget the walks share), three hundred modules
+each importing every other, a package importing two thousand submodules, two thousand reads of
+a lazy name bound on two branches, each after a branch, and five hundred lazy names each bound
+on two branches and read after five hundred branches (made to pass the budget the walks to the
+bindings share), and, for the declarations, forty layers of dependency groups each including
+both groups of the next layer.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
