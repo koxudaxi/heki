@@ -1624,10 +1624,12 @@ async def tn_path_method_on_a_parameter(base: Path) -> None:
     sqlite3.connect(base.with_suffix(".db")).execute("SELECT 1")
 "#;
 
-/// A connection whose opening heki does not see, a parameter or a value only an annotation
-/// types, may be in memory: its waits are not established, whatever opens it (here, in memory,
-/// through annotated parameters, attributes, and return values). Its statements are sent either
-/// way, so a loop over data still sends one per item.
+/// A connection whose opening heki does not see, a value only an annotation types, may be in
+/// memory: its waits are not established, whatever opens it (here, in memory, through annotated
+/// attributes and an unannotated parameter). A helper's annotated parameter is decided at each
+/// call by the connection passed there: one opened in memory does not wait, as the same calls
+/// written inline do not. Its statements are sent either way, so a loop over data still sends
+/// one per item.
 #[test]
 fn connections_only_annotations_name_may_be_in_memory() {
     let p = Project::new("cat_annotated_connections");
@@ -1650,10 +1652,7 @@ fn connections_only_annotations_name_may_be_in_memory() {
     assert_eq!(
         got,
         vec![
-            at("repro.py", 14, "EFF101 [heuristic]"),
-            at("repro.py", 15, "EFF101 [heuristic]"),
             at("repro.py", 27, "EFF101 [heuristic]"),
-            at("repro.py", 32, "EFF101 [heuristic]"),
             at("repro.py", 34, "EFF103"),
             at("repro2.py", 29, "EFF101 [heuristic]"),
         ]
