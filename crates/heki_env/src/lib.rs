@@ -1,9 +1,11 @@
 //! Environment resolution, `RuntimeProfile`, and Ruff/`t-linter`-compatible `heki` configuration.
 
+mod declared;
 pub mod problem;
 mod schema;
 mod stdlib;
 
+pub use declared::{Declared, EntryPoint, normalize_distribution, requirement_name};
 pub use problem::{Docs, Explain, Problem, Setting};
 pub use stdlib::is_stdlib_module;
 
@@ -262,6 +264,36 @@ pub struct CallOwnerRule {
     pub protocol_subclasses: Option<bool>,
 }
 
+/// `[[tool.heki.import-owners]]` contract for `IMP201`: which modules the modules of
+/// `importers` may import. Module patterns are whole module names or globs; `<stdlib>`,
+/// `<project>`, and `<third-party>` name groups.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ImportOwnerRule {
+    pub name: String,
+    /// The modules judged; `None` for every module.
+    pub importers: Option<Vec<String>>,
+    /// The modules of `importers` that are not judged.
+    pub exempt_importers: Vec<String>,
+    /// The modules the importers may import: every other import is reported.
+    pub allowed_imports: Vec<String>,
+    /// When set, only imports of these modules are reported (less the allowed ones).
+    pub forbidden_imports: Vec<String>,
+    /// `"importer -> imported"` pairs of module patterns whose imports the contract accepts.
+    pub ignored_imports: Vec<String>,
+    /// `"report"`: imports under `if TYPE_CHECKING:` count too; `"ignore"` (default) does not.
+    pub type_checking: Option<String>,
+    /// `"statement"` (default): each import statement or call is judged; `"import-time"`: what
+    /// loading an importer loads while it loads; `"all"`: what any chain of imports that run
+    /// leads to.
+    pub reach: Option<String>,
+    /// `"report"`: also report (`IMP202`) the imports whose module heki cannot name;
+    /// `"ignore"` (default) does not.
+    pub unresolved: Option<String>,
+    /// The help of every `IMP201` report of this contract.
+    pub message: Option<String>,
+}
+
 /// `[[tool.heki.effect-boundaries]]` contract for `EFF201`: effects that must not be reached,
 /// directly or through calls, from the functions of `scopes`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -421,6 +453,7 @@ pub struct HekiConfig {
     pub readonly_returns: Vec<ReadOnlyReturnRule>,
     pub invalidation: Vec<InvalidationRule>,
     pub effect_boundaries: Vec<EffectBoundaryRule>,
+    pub import_owners: Vec<ImportOwnerRule>,
     pub ecosystem: Vec<EcosystemOverride>,
     /// The version `project.requires-python` of the project's `pyproject.toml` selects
     /// ([`requires_python_lower_bound`]): the `target-version` default (read by the loaders,
@@ -435,6 +468,10 @@ pub struct HekiConfig {
     /// loaders, not a `[tool.heki]` key): their members are detected source roots.
     #[serde(skip)]
     pub workspaces: Vec<WorkspaceMembers>,
+    /// What the project's `pyproject.toml` declares about its distribution ([`Declared`]; read
+    /// by the loaders, not a `[tool.heki]` key).
+    #[serde(skip)]
+    pub declared: Option<Declared>,
 }
 
 /// The members one workspace table lists (`[tool.uv.workspace]`, the `workspace` of a Hatch
@@ -659,10 +696,12 @@ impl ConfigLayout {
             Self::PyProject => {
                 let wrapper: PyProjectWrapper = toml::from_str(text).map_err(toml_error)?;
                 let workspaces = wrapper.workspaces(path);
+                let table: toml::Table = toml::from_str(text).map_err(toml_error)?;
                 HekiConfig {
                     requires_python: wrapper.requires_python(),
                     project_name: wrapper.project_name(),
                     workspaces,
+                    declared: Declared::of(&table),
                     ..wrapper.tool.heki.unwrap_or_default()
                 }
                 .with_source_roots(path)
@@ -670,12 +709,17 @@ impl ConfigLayout {
             Self::TopLevel => {
                 let cfg: HekiConfig = toml::from_str(text).map_err(toml_error)?;
                 let dir = path.parent().unwrap_or(Path::new(""));
-                let sibling = sibling_pyproject(&dir.join("pyproject.toml"));
                 let pyproject = dir.join("pyproject.toml");
+                let sibling = sibling_pyproject(&pyproject);
                 HekiConfig {
-                    requires_python: sibling.as_ref().and_then(PyProjectWrapper::requires_python),
-                    project_name: sibling.as_ref().and_then(PyProjectWrapper::project_name),
-                    workspaces: sibling.unwrap_or_default().workspaces(&pyproject),
+                    requires_python: (sibling.as_ref())
+                        .and_then(|(wrapper, _)| wrapper.requires_python()),
+                    project_name: sibling
+                        .as_ref()
+                        .and_then(|(wrapper, _)| wrapper.project_name()),
+                    declared: sibling.as_ref().and_then(|(_, table)| Declared::of(table)),
+                    workspaces: (sibling.map(|(wrapper, _)| wrapper).unwrap_or_default())
+                        .workspaces(&pyproject),
                     ..cfg
                 }
                 .with_source_roots(path)
@@ -756,11 +800,11 @@ impl WorkspaceMembers {
     }
 }
 
-/// The `pyproject.toml` next to a `heki.toml`-style file; any problem with that file only loses
-/// what heki infers from it.
-fn sibling_pyproject(pyproject: &Path) -> Option<PyProjectWrapper> {
+/// The `pyproject.toml` next to a `heki.toml`-style file, read as heki reads its own and as a
+/// table; any problem with that file only loses what heki infers from it.
+fn sibling_pyproject(pyproject: &Path) -> Option<(PyProjectWrapper, toml::Table)> {
     let text = std::fs::read_to_string(pyproject).ok()?;
-    toml::from_str(&text).ok()
+    Some((toml::from_str(&text).ok()?, toml::from_str(&text).ok()?))
 }
 
 /// The Python version a PEP 440 `requires-python` specifier selects: the oldest supported
@@ -960,6 +1004,7 @@ impl HekiConfig {
         "readonly-returns",
         "invalidation",
         "effect-boundaries",
+        "import-owners",
         "ecosystem",
     ];
 
@@ -971,6 +1016,7 @@ impl HekiConfig {
         "effect-boundaries",
         "readonly-returns",
         "invalidation",
+        "import-owners",
     ];
 
     /// Load an explicit configuration file ([`ConfigLayout`]): the `[tool.heki]` table of a
@@ -1396,10 +1442,12 @@ writes-in-order = { arg = 0, param = "data", sorted-by = "sort_keys" }
             readonly_returns: Vec::new(),
             invalidation: Vec::new(),
             effect_boundaries: Vec::new(),
+            import_owners: Vec::new(),
             ecosystem: Vec::new(),
             requires_python: None,
             project_name: None,
             workspaces: Vec::new(),
+            declared: None,
         };
         let table = toml::Table::try_from(&all).unwrap();
         let mut keys: Vec<&str> = table.keys().map(String::as_str).collect();

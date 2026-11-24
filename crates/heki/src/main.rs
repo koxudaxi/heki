@@ -256,8 +256,17 @@ struct InspectArgs {
     /// How many caller levels `--callers` lists.
     #[arg(long, requires = "callers", default_value_t = 3, value_parser = clap::value_parser!(u16).range(1..=100))]
     depth: u16,
+    /// Show the imports of the project modules SYMBOL names (a module name or a glob over
+    /// module names): each import with when it runs and what it loads, and what loading the
+    /// module loads while it loads.
+    #[arg(long, conflicts_with = "callers")]
+    imports: bool,
     #[command(flatten)]
     analysis: AnalysisArgs,
+    /// Internal: write the steps each owner's walks took to this JSON file
+    /// (`crates/heki/tests/e2e_analysis_bounds.rs`).
+    #[arg(long, hide = true)]
+    walk_steps: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

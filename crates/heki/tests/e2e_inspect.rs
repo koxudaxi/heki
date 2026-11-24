@@ -272,6 +272,9 @@ fn a_configuration_error_is_an_error_of_the_command() {
     let (code, out, err) = p.heki(&["inspect", "fetch", "--select", "NOPE1"]);
     assert_eq!((code, out.as_str()), (2, ""));
     assert!(err.contains("unknown rule selector `NOPE1`"), "{err}");
+    let (code, out, err) = p.heki(&["inspect", "--imports", "fetch", "--select", "NOPE1"]);
+    assert_eq!((code, out.as_str()), (2, ""));
+    assert!(err.contains("unknown rule selector `NOPE1`"), "{err}");
 }
 
 /// `heki check --output-format json` of the project.
