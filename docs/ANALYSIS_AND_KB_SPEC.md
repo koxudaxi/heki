@@ -396,9 +396,11 @@ the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores
   definition of the method does).
   A store under a key of the namespace of an instance of the class or a subclass
   (`for key, value in other.__dict__.items()`, `vars(other)`, their keys, a `list`, `tuple`,
-  `sorted`, or copy of them, `update(other.__dict__)`) binds any value too, but adds no
-  attribute an instance did not have: only the others set `ClassDecl::adds_unnamed_attrs`,
-  which the unmatched contract entries read.
+  `sorted`, or copy of them, `update(other.__dict__)`), or under a field the class or a
+  subclass declares as the catalog's `[[declared_fields]]` keep them (the keys of
+  `type(other).model_fields`, the `name` of each of `dataclasses.fields(other)`), binds any
+  value too, but adds no attribute an instance did not have or the class does not declare: only
+  the others set `ClassDecl::adds_unnamed_attrs`, which the unmatched contract entries read.
 - **Globals the module may rebind.** In a module whose globals `globals()` or `exec` may change,
   every store of a global binds a value of unknown type. A module-body store does too when a star
   import that runs (not one under `if TYPE_CHECKING:`) may bind the name after it: the store comes
@@ -2633,6 +2635,19 @@ hands the result back to its caller (`hands_back`: an executor's `submit` and `m
 Every `offloads_blocking_arg` API counts as one too, and hands the result back. Each listed call also has an entry; the table
 stands beside the entries so that the entries without such an argument, nearly all, keep no word
 for it.
+
+`[[declared_fields]]` (`heki_kb::DeclaredFields`) says where a library keeps the fields a class
+declares, the names the bodies of the class and its bases declare as fields: the attributes of
+the classes deriving from its `bases` or built by its class `decorators` (pydantic's
+`model_fields`, `__pydantic_fields__`, and `__fields__`, also pydantic 1's; a dataclass's
+`__dataclass_fields__`; an attrs class's `__attrs_attrs__`), read on the class or an instance, and
+the `functions` returning them for the class, or the instance, passed first
+(`dataclasses.fields`, `attrs.fields`, `attrs.fields_dict`), each holding a field's name as a key
+of a mapping or as the `name` of each object. `ProjectDecls::declared_fields_attr` finds an
+attribute's row as `catalog_attribute` finds an `[[attributes]]` row (every class the value may
+be under R2 finds the same one first along its MRO, a decorated project class counting as one
+that binds it), and `stores::key_name` reads a key a loop takes from them as an attribute the
+class declares (section 2.1). Each row names the versions it was checked against.
 
 The entries follow the public API of each package, with three conventions:
 - An async API is `async_safe` and carries no blocking effect: it is often called without a

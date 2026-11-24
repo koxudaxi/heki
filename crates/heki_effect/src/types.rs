@@ -206,14 +206,9 @@ impl Ty {
 
     /// An instance of `class` with `args`, which are dropped when they nest too deep.
     pub(crate) fn container(class: &str, args: Args) -> Self {
-        let args = if args.depth() > MAX_DEPTH {
-            Args::None
-        } else {
-            args
-        };
         Ty::Inst(Obj {
             class: class.to_owned(),
-            args,
+            args: args.within_depth(),
         })
     }
 
@@ -305,14 +300,9 @@ impl Ty {
                 }
                 _ => Args::None,
             };
-            let args = if args.depth() > MAX_DEPTH {
-                Args::None
-            } else {
-                args
-            };
             Some(Obj {
                 class: o.class.clone(),
-                args,
+                args: args.within_depth(),
             })
         })
         .unwrap_or_else(|| self.clone())
@@ -467,6 +457,15 @@ impl Args {
             Args::Items(e) | Args::Result(e) => e.depth(),
             Args::Map(k, v) => k.depth().max(v.depth()),
             Args::Tuple(es) => es.iter().map(Elem::depth).max().unwrap_or(0),
+        }
+    }
+
+    /// The arguments, or none when they nest deeper than [`MAX_DEPTH`].
+    fn within_depth(self) -> Self {
+        if self.depth() > MAX_DEPTH {
+            Args::None
+        } else {
+            self
         }
     }
 }

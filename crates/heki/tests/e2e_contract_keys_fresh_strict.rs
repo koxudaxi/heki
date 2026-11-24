@@ -3584,6 +3584,61 @@ fn a_copy_of_the_namespace_writes_no_unlisted_key() {
     );
 }
 
+const FIELDS_COPY: &str = r#"import dataclasses
+
+from pkg.model import Field
+
+
+def copy_into(new: Field, field: Field) -> None:
+    for f in dataclasses.fields(field):
+        setattr(new, f.name, getattr(field, f.name))
+"#;
+
+/// A copy of the fields a class declares writes attributes the class declares, which `MUT205`
+/// and `EFF201` judge as any write of an attribute named at run time: none in an allowed writer,
+/// and elsewhere one heki cannot tell from a target, never one of an unlisted key.
+#[test]
+fn a_copy_of_the_declared_fields_is_a_write_named_at_run_time() {
+    let p = Project::new("unlisted_keys_fields_copy");
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\n\
+             select = [\"MUT201\", \"MUT205\", \"EFF201\"]\n\n{}\
+             [[tool.heki.effect-boundaries]]\nname = \"pure\"\nscopes = [\"pkg.passes.*\"]\n\
+             forbid = [\"writes-targets\"]\nwrite-targets = [\"Field.kind\"]\n\
+             unresolved = \"report\"\n",
+            write_owner(
+                "kinds",
+                "pkg.model.Field.kind",
+                "pkg.store:*",
+                "unlisted-dict-keys = \"report\"\nunresolved = \"report\"\n",
+            ),
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/model.py",
+        "import dataclasses\n\n\n@dataclasses.dataclass\nclass Field:\n    kind: str = \"str\"\n",
+    )
+    .write("pkg/store.py", FIELDS_COPY)
+    .write("pkg/passes.py", FIELDS_COPY);
+    let u = "pkg/passes.py";
+    let diags = diagnostics(&p, &[]);
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(u, 8, "EFF201", "copy_into", "pure:unresolved-writes:*"),
+            d(u, 8, "MUT205", "copy_into", "Field"),
+        ]
+    );
+    let mut5 = diags.iter().find(|x| x["rule_code"] == "MUT205").unwrap();
+    assert_eq!(
+        mut5["message"],
+        "`copy_into` writes an attribute named at run time (with `setattr`) on `Field` outside the write owners of `kinds`: heki cannot tell whether it writes `pkg.model.Field.kind`"
+    );
+}
+
 const CHANGED_DISPLAYS: &str = r#"from pkg.model import Field
 
 

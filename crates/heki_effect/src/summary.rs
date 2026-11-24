@@ -596,7 +596,8 @@ enum Adds<'s> {
     /// Every class: the name is computed at run time.
     Any,
     /// Those that not every one of these classes is or derives from: the name is a key of the
-    /// namespace of an instance of one of them ([`AttrName::KeyOf`]).
+    /// namespace of an instance of one of them, or a field one declares
+    /// ([`AttrName::KeyOf`]).
     UnlessKeysOf(&'s [String]),
     /// None: the write removes the attribute.
     Nothing,

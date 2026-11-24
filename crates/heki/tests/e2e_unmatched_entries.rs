@@ -241,16 +241,20 @@ const KEYS_CLASSES: [&str; 10] = [
     "Narrow",
 ];
 
-/// A project whose contract names a stale attribute of each class of [`KEYS_MODEL`], and the
-/// keys `_first` and `_second` of `Named`; `lint` holds the rest of the `[tool.heki.lint]`
-/// table.
-fn keys_project(name: &str, lint: &str) -> Project {
-    let mut targets: Vec<String> = KEYS_CLASSES
-        .iter()
-        .map(|c| format!("\"pkg.model.{c}.gone\""))
+/// A project whose contract names a stale attribute `gone` of each of `classes`, which `model`
+/// defines and `copies` writes, and the attributes `extra`; `lint` holds the rest of the
+/// `[tool.heki.lint]` table.
+fn stale_project(
+    name: &str,
+    lint: &str,
+    (model, copies): (&str, &str),
+    classes: &[&str],
+    extra: &[&str],
+) -> Project {
+    let targets: Vec<String> = (classes.iter().map(|c| format!("pkg.model.{c}.gone")))
+        .chain(extra.iter().map(|t| (*t).to_owned()))
+        .map(|t| format!("\"{t}\""))
         .collect();
-    targets.push("\"pkg.model.Named._first\"".to_owned());
-    targets.push("\"pkg.model.Named._second\"".to_owned());
     let p = Project::new(name);
     p.write(
         "pyproject.toml",
@@ -262,8 +266,8 @@ fn keys_project(name: &str, lint: &str) -> Project {
         ),
     )
     .write("pkg/__init__.py", "")
-    .write("pkg/model.py", KEYS_MODEL)
-    .write("pkg/copies.py", KEYS_COPIES);
+    .write("pkg/model.py", model)
+    .write("pkg/copies.py", copies);
     p
 }
 
@@ -273,6 +277,34 @@ fn stale(class: &str, suffix: &str) -> String {
         "`targets` entry `pkg.model.{class}.gone` of write-owners `stale` names no attribute, \
          method, or `__dict__` key of `pkg.model.{class}` in the analyzed files{suffix}"
     )
+}
+
+/// The entries of a [`stale_project`] naming nothing: under `"warning"` those of the classes
+/// outside `named_at_run_time` (the classes the code gives attributes named at run time), under
+/// `"error"` every one, those of `named_at_run_time` as ones that may name nothing.
+fn assert_stale(
+    name: &str,
+    files: (&str, &str),
+    (classes, extra): (&[&str], &[&str]),
+    named_at_run_time: &[&str],
+) {
+    let p = stale_project(&format!("{name}_warning"), "", files, classes, extra);
+    let (code, stdout, stderr) = p.heki(&["check"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let known = classes.iter().filter(|c| !named_at_run_time.contains(c));
+    let expected: Vec<String> = known.map(|c| stale(c, "")).collect();
+    assert_eq!(lines(&stderr, "warning: "), expected, "{stderr}");
+
+    let lint = "unmatched-contract-entries = \"error\"\n";
+    let p = stale_project(&format!("{name}_error"), lint, files, classes, extra);
+    let (code, stdout, stderr) = p.heki(&["check"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    let suffix = |c: &str| match named_at_run_time.contains(&c) {
+        true => ", unless it is one the code names at run time",
+        false => "",
+    };
+    let expected: Vec<String> = classes.iter().map(|c| stale(c, suffix(c))).collect();
+    assert_eq!(lines(&stderr, "error: "), expected, "{stderr}");
 }
 
 /// A key a store takes from the namespace of an instance of the class or a subclass names an
@@ -285,28 +317,340 @@ fn stale(class: &str, suffix: &str) -> String {
 /// `"error"`, as ones that may name nothing.
 #[test]
 fn only_a_key_heki_cannot_trace_may_name_anything() {
-    let named_at_run_time = ["Computed", "FromBase", "Narrow"];
-    let p = keys_project("unmatched_keys_warning", "");
-    let (code, stdout, stderr) = p.heki(&["check"]);
-    assert_eq!(code, 0, "{stdout}{stderr}");
-    let known = KEYS_CLASSES
-        .iter()
-        .filter(|c| !named_at_run_time.contains(c));
-    let expected: Vec<String> = known.map(|c| stale(c, "")).collect();
-    assert_eq!(lines(&stderr, "warning: "), expected, "{stderr}");
-
-    let p = keys_project(
-        "unmatched_keys_error",
-        "unmatched-contract-entries = \"error\"\n",
+    assert_stale(
+        "unmatched_keys",
+        (KEYS_MODEL, KEYS_COPIES),
+        (
+            &KEYS_CLASSES,
+            &["pkg.model.Named._first", "pkg.model.Named._second"],
+        ),
+        &["Computed", "FromBase", "Narrow"],
     );
-    let (code, stdout, stderr) = p.heki(&["check"]);
-    assert_eq!(code, 1, "{stdout}{stderr}");
-    let suffix = |c: &str| match named_at_run_time.contains(&c) {
-        true => ", unless it is one the code names at run time",
-        false => "",
-    };
-    let expected: Vec<String> = KEYS_CLASSES.iter().map(|c| stale(c, suffix(c))).collect();
-    assert_eq!(lines(&stderr, "error: "), expected, "{stderr}");
+}
+
+const FIELDS_MODEL: &str = r#"import copy
+import dataclasses
+
+import attrs
+from pydantic import BaseModel, v1
+
+
+class DataType(BaseModel):
+    kind: str = "str"
+
+    def __deepcopy__(self, memo: dict) -> "DataType":
+        new_obj = self.__class__.__new__(self.__class__)
+        for field_name in self.__class__.model_fields:
+            object.__setattr__(new_obj, field_name, copy.deepcopy(getattr(self, field_name), memo))
+        return new_obj
+
+
+class Leaves(BaseModel):
+    kind: str = "str"
+
+    def __deepcopy__(self, memo: dict) -> "Leaves":
+        cls = self.__class__
+        model_fields = cls.model_fields
+        new_obj: Leaves = cls.model_construct()
+        for field_name in model_fields:
+            object.__setattr__(new_obj, field_name, getattr(self, field_name))
+        for key, value in self.__dict__.items():
+            if key not in model_fields:
+                new_obj.__dict__[key] = value
+        return new_obj
+
+
+class ByType(BaseModel):
+    kind: str = "str"
+
+
+class ByInstance(BaseModel):
+    kind: str = "str"
+
+
+class ByClass(BaseModel):
+    kind: str = "str"
+
+    @classmethod
+    def blank(cls, old: "ByClass") -> "ByClass":
+        new = cls.model_construct()
+        for name, info in cls.__pydantic_fields__.items():
+            new.__dict__[name] = getattr(old, name)
+        return new
+
+
+class Named(BaseModel):
+    kind: str = "str"
+
+
+class Legacy(v1.BaseModel):
+    kind: str = "str"
+
+
+@dataclasses.dataclass
+class Point:
+    x: int = 0
+
+
+@dataclasses.dataclass
+class Plain:
+    x: int = 0
+
+
+class SubPlain(Plain):
+    y: int = 0
+
+
+@attrs.define
+class Pair:
+    a: int = 0
+
+
+class Target(BaseModel):
+    kind: str = "str"
+
+
+class Source(BaseModel):
+    other: str = "str"
+
+
+class Shadowing(BaseModel):
+    kind: str = "str"
+    model_fields = {"anything": None}
+
+
+class Proxied(BaseModel):
+    kind: str = "str"
+
+    @property
+    def __class__(self):
+        return Source
+"#;
+
+const FIELDS_COPIES: &str = r#"import dataclasses
+from dataclasses import fields
+
+import attrs
+
+from pkg.model import (
+    ByInstance, ByType, Legacy, Named, Pair, Plain, Point, Proxied, Shadowing, Source,
+    SubPlain, Target,
+)
+
+
+def by_type(new: ByType, old: ByType) -> None:
+    for name in type(old).model_fields.keys():
+        setattr(new, name, getattr(old, name))
+
+
+def by_instance(new: ByInstance, old: ByInstance) -> None:
+    new.__dict__.update(old.model_fields)
+
+
+def named(new: Named, old: Named) -> None:
+    for name in list(Named.__fields__):
+        setattr(new, name, getattr(old, name))
+
+
+def legacy(new: Legacy, old: Legacy) -> None:
+    for name in old.__fields__:
+        setattr(new, name, getattr(old, name))
+
+
+def point(new: Point, old: Point) -> None:
+    for field in dataclasses.fields(old):
+        setattr(new, field.name, getattr(old, field.name))
+
+
+def plain(new: Plain, old: Plain | SubPlain) -> None:
+    for field in fields(old):
+        object.__setattr__(new, field.name, getattr(old, field.name))
+    for name in old.__dataclass_fields__:
+        new.__dict__[name] = getattr(old, name)
+
+
+def pair(new: Pair, old: Pair) -> None:
+    for a in attrs.fields(type(old)):
+        setattr(new, a.name, getattr(old, a.name))
+    for a in old.__attrs_attrs__:
+        setattr(new, a.name, getattr(old, a.name))
+
+
+def from_another_class(new: Target, old: Source) -> None:
+    for name in Source.model_fields:
+        setattr(new, name, getattr(old, name))
+
+
+def shadowing(new: Shadowing) -> None:
+    for name in Shadowing.model_fields:
+        setattr(new, name, None)
+
+
+def proxied(new: Proxied, old: Proxied) -> None:
+    for name in old.__class__.model_fields:
+        setattr(new, name, None)
+"#;
+
+/// The classes of [`FIELDS_MODEL`].
+const FIELDS_CLASSES: [&str; 15] = [
+    "DataType",
+    "Leaves",
+    "ByType",
+    "ByInstance",
+    "ByClass",
+    "Named",
+    "Legacy",
+    "Point",
+    "Plain",
+    "SubPlain",
+    "Pair",
+    "Target",
+    "Source",
+    "Shadowing",
+    "Proxied",
+];
+
+/// A key taken from the fields a class or a subclass declares names an attribute the class
+/// declares, as the catalog keeps them (`[[declared_fields]]`): a pydantic model's
+/// `model_fields`, `__pydantic_fields__`, and `__fields__` (also pydantic 1's), read on the
+/// class (named, `cls`, `type(obj)`, `obj.__class__`) or an instance, their keys or pairs, and
+/// `update` with them; a dataclass's `__dataclass_fields__` and the `name` of each of
+/// `dataclasses.fields(obj)`, a subclass's too; an attrs class's `__attrs_attrs__` and
+/// `attrs.fields(cls)`. The `__deepcopy__` of the request reports its class's stale entries
+/// plainly. Another class's fields, a class binding `model_fields` itself, and a class whose
+/// `__class__` may be another class may still give any name.
+#[test]
+fn a_key_from_the_fields_a_class_declares_names_an_attribute() {
+    assert_stale(
+        "unmatched_fields",
+        (FIELDS_MODEL, FIELDS_COPIES),
+        (&FIELDS_CLASSES, &[]),
+        &["Target", "Shadowing", "Proxied"],
+    );
+}
+
+const WRAPPED_MODEL: &str = r#"class Config:
+    timeout = 1
+
+
+class Dicted:
+    kind: str = "str"
+
+
+class DictPairs:
+    kind: str = "str"
+
+
+class Updated:
+    kind: str = "str"
+
+
+class Values:
+    kind: str = "str"
+
+
+class FromClass:
+    kind: str = "str"
+
+
+class Copied:
+    kind: str = "str"
+
+
+class ListCopied:
+    kind: str = "str"
+
+
+class Wrapped:
+    kind: str = "str"
+
+
+class Picked:
+    kind: str = "str"
+"#;
+
+const WRAPPED_COPIES: &str = r#"from pkg.model import (
+    Config, Copied, DictPairs, Dicted, FromClass, ListCopied, Picked, Updated, Values, Wrapped,
+)
+
+
+def dicted(new: Dicted, old: Dicted) -> None:
+    for name in dict(vars(old)):
+        setattr(new, name, getattr(old, name))
+
+
+def dict_pairs(new: DictPairs, old: DictPairs) -> None:
+    for name in dict(old.__dict__.items()):
+        setattr(new, name, getattr(old, name))
+
+
+def updated(new: Updated, old: Updated) -> None:
+    new.__dict__.update(dict(vars(old)))
+
+
+def values(new: Values, old: Values) -> None:
+    for name in vars(old).values():
+        setattr(new, name, None)
+
+
+def from_class(new: FromClass) -> None:
+    for name in vars(Config):
+        setattr(new, name, getattr(Config, name))
+
+
+def copied(new: Copied) -> None:
+    for name in ["kind"].copy():
+        setattr(new, name, None)
+
+
+def list_copied(new: ListCopied) -> None:
+    for name in list(("kind",)).copy():
+        setattr(new, name, None)
+
+
+def wrapped(new: Wrapped, old: Wrapped) -> None:
+    for name in list(list(list(list(list(vars(old)))))):
+        setattr(new, name, getattr(old, name))
+
+
+def picked(new: Picked, old: Picked) -> None:
+    pair = next(iter(vars(old).items()))
+    setattr(new, pair[0], pair[1])
+"#;
+
+/// The classes of [`WRAPPED_MODEL`] the contract names.
+const WRAPPED_CLASSES: [&str; 9] = [
+    "Dicted",
+    "DictPairs",
+    "Updated",
+    "Values",
+    "FromClass",
+    "Copied",
+    "ListCopied",
+    "Wrapped",
+    "Picked",
+];
+
+/// A `dict` of the namespace of an instance or of its pairs gives its keys, to a loop and to
+/// `update`. The values of a namespace, the namespace of a class object, a copy of a display of
+/// constants or of a `list` of one (only the keys of a namespace or a mapping go through
+/// `copy()`), more than four wrappers around a namespace, and the first of a pair no loop takes
+/// may give any name.
+#[test]
+fn a_dict_of_a_namespace_gives_its_keys() {
+    assert_stale(
+        "unmatched_wrapped",
+        (WRAPPED_MODEL, WRAPPED_COPIES),
+        (&WRAPPED_CLASSES, &[]),
+        &[
+            "Values",
+            "FromClass",
+            "Copied",
+            "ListCopied",
+            "Wrapped",
+            "Picked",
+        ],
+    );
 }
 
 /// Without the key, a run over some files of the project judges nothing: an entry naming code

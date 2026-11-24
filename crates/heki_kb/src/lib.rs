@@ -7,8 +7,8 @@
 //! - `EffectiveEcosystemKB` (Layer 2) holds all Execution Effect sources, `async_safe`,
 //!   `offloads_blocking_arg`, `excluded` (logging), `copy_sanitizer` (MUT202), and
 //!   `opaque_to_layer3 = true` (preventing Layer 3 from descending into stdlib/Layer 2), and the
-//!   tables beside the entries: `[[invokes]]`, `[[cached_properties]]`, and `[[calls_unawaited]]`
-//!   (EFF115).
+//!   tables beside the entries: `[[invokes]]`, `[[cached_properties]]`, `[[calls_unawaited]]`
+//!   (EFF115), and `[[declared_fields]]`.
 //!
 //! The built-in TOML files under `kb/` are embedded with `include_str!`; every struct they
 //! deserialize into uses `#[serde(deny_unknown_fields)]`, so an advisory field written into
@@ -923,6 +923,38 @@ pub struct CachedPropertyDecorator {
     pub slot: Option<String>,
 }
 
+/// Where a library keeps the fields a class declares (`[[declared_fields]]`): the names the
+/// bodies of the class and its bases declare as fields, which the library collects as it builds
+/// the class. The `attributes` are those of the classes deriving from one of the library classes
+/// `bases` or built by one of the class `decorators`, and of their subclasses, read on the class
+/// or on an instance; the `functions` return the fields of the class passed first, or of the
+/// class of the instance passed first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeclaredFields {
+    #[serde(default)]
+    pub bases: Vec<String>,
+    #[serde(default)]
+    pub decorators: Vec<String>,
+    #[serde(default)]
+    pub attributes: Vec<String>,
+    #[serde(default)]
+    pub functions: Vec<String>,
+    pub items: FieldItems,
+    /// The versions whose source the row was checked against.
+    pub versions: String,
+}
+
+/// How a value holding the fields of a class holds each field's name ([`DeclaredFields`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldItems {
+    /// As a key of a mapping (`model_fields`, `__dataclass_fields__`).
+    Keys,
+    /// As the `name` attribute of each object of a sequence (`dataclasses.fields(obj)`).
+    Names,
+}
+
 /// What reading an attribute on an instance of a library class gives (`[[attributes]]`): in
 /// every release the distribution's `verified` range admits ([`Distribution`]), the value read
 /// has the catalogued members of the class `type`. It says nothing of the value's identity or
@@ -975,6 +1007,8 @@ struct EcosystemKbFile {
     cached_properties: Vec<CachedPropertyDecorator>,
     #[serde(default)]
     calls_unawaited: Vec<UnawaitedCall>,
+    #[serde(default)]
+    declared_fields: Vec<DeclaredFields>,
 }
 
 fn parse_ecosystem_file(file: &'static str, text: &str) -> Result<EcosystemKbFile, KbError> {
@@ -1000,6 +1034,8 @@ pub struct EffectiveEcosystemKb {
     pub cached_properties: BTreeMap<String, CachedPropertyDecorator>,
     /// The callable each listed library call calls without awaiting it ([`UnawaitedCall`]).
     pub calls_unawaited: BTreeMap<String, UnawaitedCall>,
+    /// Where libraries keep the fields a class declares ([`DeclaredFields`]).
+    pub declared_fields: Vec<DeclaredFields>,
     /// `Class.attribute` -> the class of what reading it on an instance gives
     /// ([`AttributeType`]), the built-in rows and the users' `attribute-type`.
     pub attributes: BTreeMap<String, String>,
@@ -1043,6 +1079,7 @@ impl EffectiveEcosystemKb {
             invokes: BTreeMap::new(),
             cached_properties: BTreeMap::new(),
             calls_unawaited: BTreeMap::new(),
+            declared_fields: Vec::new(),
             attributes: BTreeMap::new(),
             distributions: Vec::new(),
             provides: Vec::new(),
@@ -1060,6 +1097,7 @@ impl EffectiveEcosystemKb {
         let mut invokes = BTreeMap::new();
         let mut cached_properties = BTreeMap::new();
         let mut calls_unawaited = BTreeMap::new();
+        let mut declared_fields = Vec::new();
         let mut attributes = BTreeMap::new();
         let mut distributions = Vec::new();
         let mut provides = Vec::new();
@@ -1083,6 +1121,7 @@ impl EffectiveEcosystemKb {
                     .into_iter()
                     .map(|c| (c.symbol.clone(), c)),
             );
+            declared_fields.extend(parsed.declared_fields);
         }
         opaque_packages.sort();
         opaque_packages.dedup();
@@ -1105,11 +1144,12 @@ impl EffectiveEcosystemKb {
         let listed = serde_json::to_string(&invokes).unwrap_or_default();
         let caches = serde_json::to_string(&cached_properties).unwrap_or_default();
         let unawaited = serde_json::to_string(&calls_unawaited).unwrap_or_default();
+        let fields = serde_json::to_string(&declared_fields).unwrap_or_default();
         let read = serde_json::to_string(&attributes).unwrap_or_default();
         let provided = serde_json::to_string(&provides).unwrap_or_default();
         kb.digest = blake3::hash(
             format!(
-                "{}|{listed}|{caches}|{unawaited}|{read}|{provided}",
+                "{}|{listed}|{caches}|{unawaited}|{fields}|{read}|{provided}",
                 kb.digest
             )
             .as_bytes(),
@@ -1119,6 +1159,7 @@ impl EffectiveEcosystemKb {
         kb.invokes = invokes;
         kb.cached_properties = cached_properties;
         kb.calls_unawaited = calls_unawaited;
+        kb.declared_fields = declared_fields;
         kb.attributes = attributes;
         kb.distributions = distributions;
         kb.provides = provides;
@@ -1163,6 +1204,47 @@ impl EffectiveEcosystemKb {
     /// keeping the value in the instance `__dict__` ([`CachedPropertyDecorator`]).
     pub fn cached_property(&self, symbol: &str) -> Option<&CachedPropertyDecorator> {
         self.cached_properties.get(symbol)
+    }
+
+    /// Whether a row of `[[declared_fields]]` lists an attribute named `attr`.
+    pub fn keeps_fields_in(&self, attr: &str) -> bool {
+        (self.declared_fields.iter()).any(|row| row.attributes.iter().any(|a| a == attr))
+    }
+
+    /// Whether the library class `class` is a base whose subclasses get attributes holding the
+    /// fields they declare ([`DeclaredFields`]).
+    pub fn is_fields_base(&self, class: &str) -> bool {
+        (self.declared_fields.iter()).any(|row| row.bases.iter().any(|b| b == class))
+    }
+
+    /// How the attribute `attr` of the classes deriving from the library class `base` holds
+    /// the fields they declare, when the catalog lists it ([`DeclaredFields`]).
+    pub fn base_fields(&self, base: &str, attr: &str) -> Option<FieldItems> {
+        self.fields_attribute(attr, |row| row.bases.iter().any(|b| b == base))
+    }
+
+    /// How the attribute `attr` of the classes the class decorator `decorator` builds holds the
+    /// fields they declare, when the catalog lists it ([`DeclaredFields`]).
+    pub fn decorator_fields(&self, decorator: &str, attr: &str) -> Option<FieldItems> {
+        self.fields_attribute(attr, |row| row.decorators.iter().any(|d| d == decorator))
+    }
+
+    fn fields_attribute(
+        &self,
+        attr: &str,
+        source: impl Fn(&DeclaredFields) -> bool,
+    ) -> Option<FieldItems> {
+        (self.declared_fields.iter())
+            .find(|row| source(row) && row.attributes.iter().any(|a| a == attr))
+            .map(|row| row.items)
+    }
+
+    /// How what the function `symbol` returns holds the fields of the class passed first, or of
+    /// the class of the instance passed first, when the catalog lists it ([`DeclaredFields`]).
+    pub fn function_fields(&self, symbol: &str) -> Option<FieldItems> {
+        (self.declared_fields.iter())
+            .find(|row| row.functions.iter().any(|f| f == symbol))
+            .map(|row| row.items)
     }
 
     /// The distributions the catalog lists as installing the module `module` under another
@@ -4789,6 +4871,35 @@ mod tests {
         }));
         // The table is no entry of the catalog: other facts never see it.
         assert_eq!(kb.lookup("builtins.isinstance"), None);
+        // Where libraries keep the fields a class declares: attributes of the classes deriving
+        // from a base or built by a decorator, and functions given the class.
+        assert!(kb.keeps_fields_in("model_fields"));
+        assert!(!kb.keeps_fields_in("model_computed_fields"));
+        let keys = Some(FieldItems::Keys);
+        assert_eq!(kb.base_fields("pydantic.BaseModel", "model_fields"), keys);
+        assert_eq!(
+            kb.base_fields("pydantic.BaseModel", "__dataclass_fields__"),
+            None
+        );
+        assert_eq!(kb.base_fields("pydantic.RootModel", "model_fields"), None);
+        assert!(kb.is_fields_base("pydantic.BaseModel"));
+        assert!(!kb.is_fields_base("dataclasses.dataclass"));
+        let dataclass = kb.decorator_fields("dataclasses.dataclass", "__dataclass_fields__");
+        assert_eq!(dataclass, keys);
+        assert_eq!(
+            kb.decorator_fields("dataclasses.dataclass", "model_fields"),
+            None
+        );
+        let names = Some(FieldItems::Names);
+        assert_eq!(kb.function_fields("dataclasses.fields"), names);
+        assert_eq!(kb.function_fields("attrs.fields_dict"), keys);
+        assert_eq!(kb.function_fields("dataclasses.replace"), None);
+        assert!(kb.declared_fields.iter().all(|row| {
+            let attributes = !row.bases.is_empty() || !row.decorators.is_empty();
+            attributes != row.attributes.is_empty()
+                && (attributes || !row.functions.is_empty())
+                && !row.versions.is_empty()
+        }));
         let empty = EffectiveEcosystemKb::materialize(
             kb.entries.values().cloned().collect(),
             kb.opaque_packages.clone(),

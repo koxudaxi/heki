@@ -274,3 +274,128 @@ fn a_boundary_forbids_calling_external_private_members() {
         vec![at(33, "EFF201", "private_call", "<external>._*")]
     );
 }
+
+/// Contracts on symbols outside the project, each with its allowed functions: `pkg.frames`
+/// calls and reads `sys._getframe`, `pkg.exits` calls `os._exit` and also `sys._getframe`.
+fn allowed_outside_project() -> Project {
+    let p = Project::new("outside_allowed_examples");
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT203", "MUT204"]
+
+[[tool.heki.call-owners]]
+name = "frames"
+targets = ["sys._getframe"]
+allowed-callers = ["pkg.frames.*"]
+
+[[tool.heki.call-owners]]
+name = "exits"
+targets = ["os._exit"]
+allowed-callers = ["pkg.exits.*"]
+
+[[tool.heki.read-owners]]
+name = "frame-reads"
+targets = ["sys._getframe"]
+allowed-readers = ["pkg.frames.*"]
+"#,
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/frames.py",
+        "import sys\n\n\ndef caller() -> str:\n    return sys._getframe(1).f_code.co_name\n\n\ndef frame_function() -> object:\n    return sys._getframe\n",
+    )
+    .write(
+        "pkg/exits.py",
+        "import os\nimport sys\n\n\ndef quit_now() -> None:\n    sys._getframe(0)\n    os._exit(0)\n",
+    )
+    .write(
+        "pkg/other.py",
+        "import os\nimport sys\n\n\ndef bad_call() -> str:\n    return sys._getframe(1).f_code.co_name\n\n\ndef bad_read() -> object:\n    return sys._getframe\n\n\ndef bad_exit() -> None:\n    os._exit(1)\n",
+    );
+    p
+}
+
+/// A report on a symbol outside the project names the allowed functions that use it the same
+/// way today: the allowed callers calling it, not an allowed reader only reading it, nor a
+/// function another contract allows; the allowed readers reading it.
+#[test]
+fn reports_on_outside_symbols_name_the_allowed_functions_using_them() {
+    let p = allowed_outside_project();
+    let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let found: Vec<(String, u64, String, Vec<String>)> = diags
+        .iter()
+        .map(|d| {
+            let examples = d["allowed_examples"].as_array().unwrap();
+            (
+                d["path"].as_str().unwrap().to_owned(),
+                d["line"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap().to_owned(),
+                examples
+                    .iter()
+                    .map(|e| e["fqn"].as_str().unwrap().to_owned())
+                    .collect(),
+            )
+        })
+        .collect();
+    let report = |path: &str, line: u64, code: &str, example: &str| {
+        (
+            path.to_owned(),
+            line,
+            code.to_owned(),
+            vec![example.to_owned()],
+        )
+    };
+    assert_eq!(
+        found,
+        vec![
+            report("pkg/exits.py", 6, "MUT204", "pkg.frames.caller"),
+            report("pkg/other.py", 6, "MUT204", "pkg.frames.caller"),
+            report("pkg/other.py", 10, "MUT203", "pkg.frames.frame_function"),
+            report("pkg/other.py", 14, "MUT204", "pkg.exits.quit_now"),
+        ]
+    );
+}
+
+/// `heki inspect` gives a function no call-target role of an `<external>` target, which names
+/// symbols outside the project only, also when its name matches the target's last name.
+#[test]
+fn an_external_target_names_no_project_function() {
+    let p = external_project("external_roles", "[\"<external>._*\"]");
+    p.write(
+        "pkg/parser/helpers.py",
+        "def _private() -> None:\n    pass\n",
+    );
+    let (code, stdout, stderr) = p.heki(&[
+        "inspect",
+        "pkg.parser.helpers._private",
+        "--output-format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+    let roles: Vec<(&str, Vec<&str>)> = report["contracts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            let roles = c["roles"].as_array().unwrap();
+            (
+                c["kind"].as_str().unwrap(),
+                roles.iter().map(|r| r.as_str().unwrap()).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        roles,
+        vec![
+            ("read-owners", vec!["forbidden-reader"]),
+            ("call-owners", vec!["forbidden-caller"]),
+        ]
+    );
+}
