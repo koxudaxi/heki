@@ -276,6 +276,29 @@ fn a_sleep_whose_length_the_caller_passes_may_not_wait() {
 }
 
 #[test]
+fn a_helper_waits_as_its_caller_s_argument_selects() {
+    let helper = "import time\n\n\ndef nap(seconds: float) -> None:\n    time.sleep(seconds)\n\n\n";
+    let open = format!("{helper}async def handle(delay: float):\n    nap(delay)\n");
+    heuristic(
+        "op_helper_argument",
+        EFF101,
+        &open,
+        "EFF101",
+        &[("Waits", "conditional-wait")],
+    );
+    let closed = format!("{helper}async def handle():\n    nap(5)\n");
+    exact("op_helper_argument_closed", EFF101, &closed, "EFF101");
+}
+
+#[test]
+fn a_helper_querying_a_connection_waits_only_on_one_opened_on_a_file() {
+    let source = "import sqlite3\n\nDB = sqlite3.connect(\"app.db\")\n\n\ndef first(db: sqlite3.Connection) -> object:\n    return db.execute(\"SELECT 1\").fetchone()\n\n\nasync def handle():\n    return first(DB)\n";
+    exact("op_helper_connection", EFF101, source, "EFF101");
+    let in_memory = source.replace("app.db", ":memory:");
+    assert!(reports("op_helper_connection_memory", EFF101, &in_memory).is_empty());
+}
+
+#[test]
 fn each_premise_open_along_the_chain_is_recorded_at_its_call() {
     let open = "import time\n\n\nclass Base:\n    def run(self, delay) -> None:\n        if delay:\n            return None\n        time.sleep(delay)\n\n\nclass Quiet(Base):\n    def run(self, delay) -> None:\n        return None\n\n\nasync def handle(obj: Base, delay):\n    obj.run(delay)\n";
     let report = heuristic(

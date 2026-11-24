@@ -10,7 +10,9 @@
 //! locks `EFF109` follows, the values class statements pass as bases, the bindings the deque
 //! rewrite's candidates check, the star imports a name is bound through, many or nested deep,
 //! the sizes of a thousand lists each extending the next or of one list extending many deep
-//! chains, and the walks over the import graph (`heki inspect --imports`).
+//! chains, the walks over the import graph (`heki inspect --imports`), and the tests of their
+//! arguments that helpers hand on to their callers, through a long chain of helpers or for many
+//! parameters.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -7157,5 +7159,107 @@ fn return_facts_past_the_pass_bound_are_not_followed() {
         (queries("exact"), queries("heuristic")),
         (8, 56),
         "{found:#?}"
+    );
+}
+
+/// `(function, certainty)` of each `EFF101` report among `found`.
+fn blocking_reports(found: &[Value]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF101")
+        .map(|d| {
+            (
+                d["qualname"].as_str().unwrap().to_owned(),
+                d["certainty"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// A sleep for a parameter handed on through `helpers` helpers, each passing its parameter to
+/// the next: the test of the argument goes up one helper per caller, and each call of the last
+/// is decided by the argument it passes.
+fn pass_through_helpers(helpers: usize) -> String {
+    let mut out = vec![
+        "import time".to_owned(),
+        String::new(),
+        String::new(),
+        "def h0(n: float) -> None:".to_owned(),
+        "    time.sleep(n)".to_owned(),
+    ];
+    for k in 1..=helpers {
+        out.push(String::new());
+        out.push(String::new());
+        out.push(format!("def h{k}(n: float) -> None:"));
+        out.push(format!("    h{}(n)", k - 1));
+    }
+    for (name, seconds) in [("waits", 5), ("returns", 0)] {
+        out.push(String::new());
+        out.push(String::new());
+        out.push(format!("async def {name}() -> None:"));
+        out.push(format!("    h{helpers}({seconds})"));
+    }
+    out.join("\n") + "\n"
+}
+
+#[test]
+fn a_test_of_an_argument_goes_up_a_long_chain_of_helpers() {
+    let found = check_linear(400, |helpers| {
+        let p = Project::new(&format!("bounds_pass_through_{helpers}"));
+        p.write("m.py", &pass_through_helpers(helpers));
+        p
+    });
+    assert_eq!(
+        blocking_reports(&found),
+        [("waits".to_owned(), "exact".to_owned())]
+    );
+}
+
+/// A helper sleeping for each of its `params` parameters in turn, called through another one
+/// passing them on: each sleep is a chain of its own on a test of another parameter, of which a
+/// bounded number is kept (`heki_effect::MAX_GIVEN_CHAINS`).
+fn sleeps_on_many_parameters(params: usize) -> String {
+    let names: Vec<String> = (0..params).map(|i| format!("p{i}")).collect();
+    let typed: Vec<String> = names.iter().map(|n| format!("{n}: float")).collect();
+    let mut out = vec![
+        "import time".to_owned(),
+        String::new(),
+        String::new(),
+        format!("def wide({}) -> None:", typed.join(", ")),
+    ];
+    out.extend(names.iter().map(|n| format!("    time.sleep({n})")));
+    out.push(String::new());
+    out.push(String::new());
+    out.push(format!("def relay({}) -> None:", typed.join(", ")));
+    out.push(format!("    wide({})", names.join(", ")));
+    for (name, seconds) in [("waits", 5), ("returns", 0)] {
+        out.push(String::new());
+        out.push(String::new());
+        out.push(format!("async def {name}() -> None:"));
+        out.push(format!(
+            "    relay({})",
+            vec![seconds.to_string(); params].join(", ")
+        ));
+    }
+    out.join("\n") + "\n"
+}
+
+#[test]
+fn many_sleeps_on_parameters_keep_a_bounded_number_of_chains() {
+    let found = check_linear(240, |params| {
+        let p = Project::new(&format!("bounds_given_chains_{params}"));
+        p.write("m.py", &sleeps_on_many_parameters(params));
+        p
+    });
+    // A zero for every parameter is a sleep of none, but the occurrences test different
+    // parameters, so the call keeps a heuristic report.
+    assert_eq!(
+        blocking_reports(&found),
+        [
+            ("returns".to_owned(), "heuristic".to_owned()),
+            ("waits".to_owned(), "exact".to_owned())
+        ]
     );
 }

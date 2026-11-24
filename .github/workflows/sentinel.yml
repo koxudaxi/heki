@@ -28,6 +28,9 @@ concurrency:
   group: sentinel-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  UV_LOCKED: "1"
+
 jobs:
   ecosystem:
     name: Layer 2 catalog against releases
@@ -38,5 +41,6 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
+          version: "0.13.4"
           enable-cache: false
-      - run: uv run --no-project --python 3.12 --with "packaging==25.0" python tests/sentinel/verify_ecosystem_kb.py
+      - run: uv run --only-group sentinel --isolated --python 3.12 python tests/sentinel/verify_ecosystem_kb.py

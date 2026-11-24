@@ -344,63 +344,13 @@ impl Form {
 /// The forms that report otherwise than the inline form of their row today, with what they
 /// report (`-`: nothing). Each closes with the fact named above its group.
 const GAPS: &[(&str, &str, &str)] = &[
-    // A parameter is typed by its annotation only. The argument decides at the call only what
-    // rules the effect out (a connection in memory, a literal a catalog case takes): the use in
-    // the helper of an argument that keeps the effect (opened on a file, a literal no case
-    // takes) is heuristic. An unannotated parameter gives no class, so nothing is reported.
-    ("sqlite-file", "annotated-helper", "EFF101 [heuristic]"),
-    ("sqlite-file", "two-helpers", "EFF101 [heuristic]"),
+    // A parameter is typed by its annotation only; the argument at each call decides the
+    // catalog's cases and states the helper's calls leave to it. An unannotated parameter gives
+    // no class, so nothing is reported for a connection.
     ("sqlite-file", "unannotated-helper", "-"),
-    (
-        "sqlite-file-global",
-        "annotated-helper",
-        "EFF101 [heuristic]",
-    ),
-    ("sqlite-file-global", "two-helpers", "EFF101 [heuristic]"),
     ("sqlite-file-global", "unannotated-helper", "-"),
-    (
-        "sqlite-file-path-constant",
-        "annotated-helper",
-        "EFF101 [heuristic]",
-    ),
-    (
-        "sqlite-file-path-constant",
-        "two-helpers",
-        "EFF101 [heuristic]",
-    ),
-    (
-        "sqlite-file-name-constant",
-        "annotated-helper",
-        "EFF101 [heuristic]",
-    ),
-    (
-        "sqlite-file-name-constant",
-        "two-helpers",
-        "EFF101 [heuristic]",
-    ),
     ("sqlite-file-name-constant", "unannotated-helper", "-"),
     ("sqlite-file-path-constant", "unannotated-helper", "-"),
-    ("sleep", "annotated-helper", "EFF101 [heuristic]"),
-    ("sleep", "two-helpers", "EFF101 [heuristic]"),
-    ("sleep", "unannotated-helper", "EFF101 [heuristic]"),
-    (
-        "sleep-from-environment",
-        "annotated-helper",
-        "EFF101 [heuristic]",
-    ),
-    (
-        "sleep-from-environment",
-        "two-helpers",
-        "EFF101 [heuristic]",
-    ),
-    (
-        "sleep-from-environment",
-        "unannotated-helper",
-        "EFF101 [heuristic]",
-    ),
-    ("urlopen", "annotated-helper", "EFF101 [heuristic]"),
-    ("urlopen", "two-helpers", "EFF101 [heuristic]"),
-    ("urlopen", "unannotated-helper", "EFF101 [heuristic]"),
     ("bounded-queue-put", "unannotated-helper", "-"),
     // A call's result is typed by what every return of an annotated function gives, but it
     // carries no literal: a factory without an annotation gives nothing, a queue's capacity is

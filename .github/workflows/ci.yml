@@ -20,6 +20,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
+  UV_LOCKED: "1"
 
 jobs:
   changes:
@@ -57,6 +58,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
         with:
           components: rustfmt
+      # Without `--locked` cargo rewrites an out-of-date Cargo.lock and goes on; this fails first.
+      - name: Cargo.lock is up to date
+        run: cargo metadata --locked --format-version 1 > /dev/null
       - run: cargo fmt --all -- --check
 
   clippy:
@@ -489,9 +493,10 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
+          version: "0.13.4"
           enable-cache: false
       # Python 3.12 is the runner's `python3`, which release-draft.yml runs the scripts with.
-      - run: uvx --python 3.12 --from "pytest==8.4.2" --with "pyyaml==6.0.3" --with "jsonschema==4.25.1" pytest scripts/tests
+      - run: uv run --only-group scripts-tests --isolated --python 3.12 pytest scripts/tests
 
   pre-commit-hook:
     # `.pre-commit-hooks.yaml` as a project's configuration uses it: pre-commit builds heki from
@@ -511,6 +516,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
+          version: "0.13.4"
           enable-cache: false
       - name: The hook builds heki and checks a project
         working-directory: ${{ runner.temp }}
@@ -522,7 +528,7 @@ jobs:
           HEKI_OUTPUT_FORMAT: full
         run: |
           hook() {
-            uvx --from "pre-commit==4.7.0" pre-commit try-repo "$HOOK_REPOSITORY" heki --all-files | tee output.txt
+            uv run --project "$GITHUB_WORKSPACE" --only-group hooks --isolated pre-commit try-repo "$HOOK_REPOSITORY" heki --all-files | tee output.txt
           }
           mkdir -p project/app
           cd project
@@ -542,6 +548,20 @@ jobs:
             exit 1
           fi
           grep -qF "app/handler.py:5:5: EFF101 (async-blocking-call) [error]" output.txt
+
+  workflow-lint:
+    name: workflow lint
+    # zizmor from uv.lock, offline: it needs no token and reads only the workflow files.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.13.4"
+          enable-cache: false
+      - run: uv run --only-group lint-workflows --isolated zizmor --offline .github/workflows
 
   gate:
     name: CI gate
@@ -567,6 +587,7 @@ jobs:
       - memory
       - release-scripts
       - pre-commit-hook
+      - workflow-lint
     runs-on: ubuntu-24.04
     steps:
       - name: Every job passed or was skipped as the stack position allows
@@ -577,7 +598,7 @@ jobs:
             || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
             || github.event.pull_request.stack.position == github.event.pull_request.stack.size }}
           CODE: ${{ needs.changes.outputs.code }}
-          ALWAYS_ON: changes fmt architecture
+          ALWAYS_ON: changes fmt architecture workflow-lint
           STACK_ONLY: release-scripts
         shell: python
         run: |

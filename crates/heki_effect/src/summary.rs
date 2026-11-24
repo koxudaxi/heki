@@ -1383,6 +1383,13 @@ impl<'a> Extractor<'a> {
         }
         fact.flags.retain(|f| kb.decides_flag(f));
         b.fact = (fact != heki_kb::ArgFact::default()).then(|| Box::new(fact));
+        b.from_params = self.opt_in.must_effects
+            && resolver::from_parameter(
+                &|d| self.defs.get(&d).copied(),
+                &|x, next| self.phi_inputs(x, next),
+                &|x| self.is_param(x),
+                var,
+            );
         b
     }
 
@@ -7904,7 +7911,13 @@ impl<'a> Extractor<'a> {
             .copied()
             .filter(|e| unconditional & crate::effect_bit(*e) != 0)
             .collect();
-        let hop = (!must.is_empty()).then(|| Arc::new(self.hop(api.clone(), span)));
+        let given = if self.opt_in.must_effects && self.targets_complete() && case.is_none() {
+            self.given_waits(&symbol, entry, passed, &effects, unconditional)
+        } else {
+            Vec::new()
+        };
+        let hop =
+            (!must.is_empty() || !given.is_empty()).then(|| Arc::new(self.hop(api.clone(), span)));
         let target = CallTarget::Layer2 {
             symbol: api,
             effects,
@@ -7917,6 +7930,11 @@ impl<'a> Extractor<'a> {
             let facts = self.summary.must_exec.get_or_insert_with(Box::default);
             for e in must {
                 facts.effects.insert_new(e, || vec![Arc::clone(&hop)]);
+            }
+            for (e, param, test) in given {
+                facts
+                    .given
+                    .insert(e, vec![(param, test)], vec![Arc::clone(&hop)]);
             }
         }
         let queues = while_full.map(|w| {
@@ -7961,18 +7979,82 @@ impl<'a> Extractor<'a> {
         if from_caller {
             return 0;
         }
-        if entry.emits_in(case) == heki_kb::Emits::UnlessConfiguredOtherwise {
-            return 0;
-        }
         effects
             .iter()
-            .filter(|e| match entry.emits_in(case) {
-                heki_kb::Emits::Always => true,
-                // A connection that may be in memory sends its statements without waiting.
-                heki_kb::Emits::IfOnDisk => **e != ExecEffectKind::BlockingDb,
-                _ => !matches!(e, ExecEffectKind::BlockingDb | ExecEffectKind::DbQuery),
-            })
+            .filter(|e| on_every_call(entry.emits_in(case), **e))
             .fold(0, |mask, e| mask | crate::effect_bit(*e))
+    }
+
+    /// The effects of a call of `entry` (`symbol`) that selects no case which the call has on
+    /// every call when its callers pass a value that passes a test of the function's parameter
+    /// (`MustExec::given`): the parameter is the argument every case tests, and a case, or
+    /// passing none, has the effect on every call ([`on_every_call`]); or the call is made on the
+    /// parameter, or on what catalog methods return of it, and a state of its library class has
+    /// the effect on every call. Each with the parameter and the test; none of `unconditional`.
+    fn given_waits(
+        &self,
+        symbol: &str,
+        entry: &heki_kb::EcosystemEntry,
+        passed: Passed<'_>,
+        effects: &BTreeSet<ExecEffectKind>,
+        unconditional: u16,
+    ) -> Vec<(ExecEffectKind, u8, crate::ValueTest)> {
+        let open = effects
+            .iter()
+            .copied()
+            .filter(|e| unconditional & crate::effect_bit(*e) == 0);
+        let argument = entry
+            .case_slot()
+            .and_then(|at| resolver::passed_var(passed.args, passed.kwargs, passed.star_from, at))
+            .and_then(|v| self.own_param(v));
+        let method = symbol.rsplit('.').next().unwrap_or(symbol);
+        let receiver = passed
+            .recv
+            .filter(|_| entry.cases.is_empty())
+            .and_then(|r| self.receiver_root(r, method));
+        let mut out = Vec::new();
+        for e in open {
+            let waits = |case: Option<&heki_kb::ArgCase>| {
+                entry.effects_in(case).contains(&e) && on_every_call(entry.emits_in(case), e)
+            };
+            let test = if let Some(param) = argument {
+                let otherwise = waits(None);
+                let mut cases: Vec<(heki_kb::ArgCase, bool)> = entry
+                    .cases
+                    .iter()
+                    .map(|c| (case_tests(c), waits(Some(c))))
+                    .collect();
+                // Cases after the last one deciding otherwise than passing none give the same.
+                while cases.last().is_some_and(|(_, w)| *w == otherwise) {
+                    cases.pop();
+                }
+                let some = otherwise || cases.iter().any(|(_, w)| *w);
+                some.then_some((param, crate::ValueTest::Cases { cases, otherwise }))
+            } else if let Some((param, library, methods)) = &receiver {
+                let kb = self.cx.kb;
+                let states: Option<Vec<(String, bool)>> = kb
+                    .states_of(library)
+                    .map(|state| {
+                        let waits = match state_call(kb, state, methods)? {
+                            StateCall::Entry(s) => {
+                                s.cases.is_empty()
+                                    && s.effects.contains(&e)
+                                    && on_every_call(s.emits, e)
+                            }
+                            StateCall::Uncatalogued => false,
+                        };
+                        Some((state.to_owned(), waits))
+                    })
+                    .collect();
+                states
+                    .filter(|s| s.iter().any(|(_, w)| *w))
+                    .map(|s| (*param, crate::ValueTest::States(s)))
+            } else {
+                None
+            };
+            out.extend(test.map(|(param, test)| (e, param, test)));
+        }
+        out
     }
 
     /// A `[[tool.heki.ecosystem]]` entry naming the function declares what calling it does, as
@@ -8158,6 +8240,19 @@ impl<'a> Extractor<'a> {
 
 /// The method calls [`Extractor::receiver_root`] follows back from a receiver, at most.
 const MAX_RECEIVER_CALLS: usize = 8;
+
+/// Whether a catalog call that does its effects as `emits` says has effect `e` on every call:
+/// a database effect only where it is done on every call, except that a SQLite connection that
+/// may be in memory sends its statements without waiting; nothing a configuration can switch
+/// off.
+fn on_every_call(emits: heki_kb::Emits, e: ExecEffectKind) -> bool {
+    match emits {
+        heki_kb::Emits::Always => true,
+        heki_kb::Emits::IfOnDisk => e != ExecEffectKind::BlockingDb,
+        heki_kb::Emits::UnlessConfiguredOtherwise => false,
+        _ => !matches!(e, ExecEffectKind::BlockingDb | ExecEffectKind::DbQuery),
+    }
+}
 
 /// A case of a catalog entry with its tests only ([`crate::ValueTest::Cases`]).
 fn case_tests(case: &heki_kb::ArgCase) -> heki_kb::ArgCase {

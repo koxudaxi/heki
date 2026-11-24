@@ -229,6 +229,99 @@ pub struct MustExec {
     /// different waits), every such call: the witnesses beside the kept chain's last call.
     #[serde(default)]
     pub alternatives: EffectChains,
+    /// The effects the function has run whenever it returns when its callers pass values that
+    /// pass tests of its parameters ([`GivenChains`]); none of them is one of [`Self::effects`].
+    #[serde(default, skip_serializing_if = "GivenChains::is_empty")]
+    pub given: GivenChains,
+}
+
+/// [`MustExec::given`]: per effect, chains that hold when the arguments bound to some of the
+/// function's parameters pass the tests the chain needs ([`ValueTest`], decided at each call as
+/// the call decides an argument of its own, or handed on to the caller's parameter). At most
+/// [`MAX_GIVEN_TESTS`] tests per chain and [`MAX_GIVEN_CHAINS`] chains per effect: those needing
+/// the fewest tests, then the shortest.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GivenChains(Vec<GivenChain>);
+
+/// Tests of values bound to a function's parameters, each with the parameter's position.
+pub type ParamTests = Vec<(u8, ValueTest)>;
+
+/// A chain of [`GivenChains`]: it holds when the value bound to each parameter of `needs` passes
+/// its test (sorted by parameter).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GivenChain {
+    pub effect: ExecEffectKind,
+    pub needs: ParamTests,
+    pub chain: SharedChain,
+}
+
+/// The tests a chain of [`GivenChains`] needs, at most.
+pub const MAX_GIVEN_TESTS: usize = 4;
+/// The chains of one effect [`GivenChains`] keeps, at most.
+pub const MAX_GIVEN_CHAINS: usize = 4;
+
+impl GivenChains {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The chains of `e`.
+    pub fn of(&self, e: ExecEffectKind) -> impl Iterator<Item = &GivenChain> {
+        self.0.iter().filter(move |c| c.effect == e)
+    }
+
+    pub fn effects(&self) -> impl Iterator<Item = ExecEffectKind> + '_ {
+        self.0.iter().map(|c| c.effect)
+    }
+
+    /// Keeps `chain` of `e` given `needs`, unless a chain of `e` needing some of them is no
+    /// longer; it replaces the chains needing more. Past the bounds the chains needing the most
+    /// tests go first.
+    pub fn insert(
+        &mut self,
+        e: ExecEffectKind,
+        mut needs: Vec<(u8, ValueTest)>,
+        chain: SharedChain,
+    ) {
+        needs.sort();
+        needs.dedup();
+        if needs.len() > MAX_GIVEN_TESTS {
+            return;
+        }
+        let within = |small: &[(u8, ValueTest)], large: &[(u8, ValueTest)]| {
+            small.iter().all(|n| large.contains(n))
+        };
+        let covered = self.of(e).any(|c| {
+            within(&c.needs, &needs) && (c.needs != needs || c.chain.len() <= chain.len())
+        });
+        if covered {
+            return;
+        }
+        self.0
+            .retain(|c| c.effect != e || !within(&needs, &c.needs));
+        self.0.push(GivenChain {
+            effect: e,
+            needs,
+            chain,
+        });
+        self.0.sort_by(|a, b| {
+            (a.effect, a.needs.len(), a.chain.len()).cmp(&(b.effect, b.needs.len(), b.chain.len()))
+        });
+        let mut kept = 0;
+        self.0.retain(|c| {
+            kept = if c.effect == e { kept + 1 } else { kept };
+            c.effect != e || kept <= MAX_GIVEN_CHAINS
+        });
+    }
+
+    pub fn retain(&mut self, keep: impl FnMut(&GivenChain) -> bool) {
+        self.0.retain(keep);
+    }
+
+    pub fn chains_mut(&mut self) -> impl Iterator<Item = &mut SharedChain> {
+        self.0.iter_mut().map(|c| &mut c.chain)
+    }
 }
 
 /// A chain per effect, sorted by effect. A function has run one or two effects whenever it
@@ -1298,6 +1391,11 @@ pub struct ArgBinding {
     /// The loops around the call (bit `d - 1`: the one at depth `d`) across whose iterations
     /// the argument stays one object: those that do not construct it.
     pub stays_in_loops: u64,
+    /// The argument may be computed from the caller's parameters (`resolver::from_parameter`):
+    /// a case of a catalog call its value selects is the caller's callers' to decide (R6).
+    /// Computed while an enabled rule reads [`EffectSummary::must_exec`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_params: bool,
 }
 
 impl ArgBinding {
@@ -1447,6 +1545,7 @@ impl EffectSummary {
         if let Some(must) = &mut self.must_exec {
             must.effects.retain(|e| !hidden.contains(e));
             must.alternatives.retain(|e| !hidden.contains(e));
+            must.given.retain(|c| !hidden.contains(&c.effect));
         }
         if let Some(iterated) = &mut self.iterated {
             iterated.hide_exec_effects(hidden);
@@ -1460,11 +1559,12 @@ impl EffectSummary {
         for chain in out.exec_chains.values_mut() {
             zero_hop_spans(chain);
         }
-        for chain in out
-            .must_exec
-            .iter_mut()
-            .flat_map(|m| m.effects.values_mut().chain(m.alternatives.values_mut()))
-        {
+        for chain in out.must_exec.iter_mut().flat_map(|m| {
+            m.effects
+                .values_mut()
+                .chain(m.alternatives.values_mut())
+                .chain(m.given.chains_mut())
+        }) {
             zero_hop_spans(chain);
         }
         for (_, chain) in out

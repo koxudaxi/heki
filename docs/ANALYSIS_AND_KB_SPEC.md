@@ -1961,6 +1961,17 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      time), on the caller's thread, and has run `e` whenever it returns (returned). A target
      that never returns normally has run anything; a name bound twice has no facts. The facts
      grow over each SCC with the summaries and take part in Early Cutoff.
+   - A Layer 2 call whose case or receiver state depends on the function's parameter (the
+     shapes of `GuardTest::Value`) has the effect whenever its callers pass a value passing a
+     test: `MustExec::given` keeps the chain with the `ValueTest` (whether each case, or passing
+     none under R6, or each state has the effect on every call). At each project call, the
+     callee's given chain holds when the binding passes every test it needs
+     (`guards::given`: the binding's fact decides it, an argument heki cannot evaluate passes no
+     case, R6) or, for the caller's own facts, when the caller's own parameter is the argument,
+     whose test the caller's chain needs in turn; an argument computed from the caller's
+     parameters leaves it open. A chain needs at most `MAX_GIVEN_TESTS` tests and each effect
+     keeps at most `MAX_GIVEN_CHAINS` chains, those needing the fewest, then the shortest; a
+     chain that holds whatever the callers pass replaces them.
    - `EFF101` reports a boundary when its call has run a wait for input or output
      (`ExecEffectKind::wait_kind`) whenever it returns, through synchronous targets
      (`ProjectIndex::site_must`); `EFF103` when the call runs on every iteration that completes
