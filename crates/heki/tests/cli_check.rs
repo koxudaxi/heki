@@ -184,22 +184,30 @@ fn only_exact_errors_fail_a_run_by_default() {
         "{stdout}"
     );
     std::fs::remove_file(p.dir.join("app.py")).unwrap();
-    // A blocking call the event loop may run: a heuristic report, shown with `--heuristic` as
-    // an error, which passes the run unless `fail-on = "warning"`.
+    // A blocking call the event loop may run: a heuristic `EFF101` report, shown with
+    // `--heuristic` as an error, which passes the run unless `fail-on = "warning"`.
     p.write("maybe.py", MAYBE_BLOCKING);
     let (code, stdout, stderr) = p.plain(&[]);
     assert_eq!((code, stdout.as_str()), (0, ""), "{stderr}");
-    let (code, stdout, stderr) = p.plain(&["--heuristic", "--output-format", "json"]);
-    assert_eq!(code, 0, "{stderr}");
-    let diags: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let diags = diags.as_array().unwrap();
-    assert_eq!(diags.len(), 1, "{stdout}");
-    assert_eq!(
-        (&diags[0]["severity"], &diags[0]["certainty"]),
-        (&"error".into(), &"heuristic".into()),
-        "{stdout}"
-    );
-    assert_eq!(p.plain(&["--heuristic", "--fail-on", "warning"]).0, 1);
+    for selection in [&[][..], &["--select", "EFF101"]] {
+        let args = [selection, &["--heuristic", "--output-format", "json"]].concat();
+        let (code, stdout, stderr) = p.plain(&args);
+        assert_eq!(code, 0, "{selection:?}: {stderr}");
+        let diags: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        let diags = diags.as_array().unwrap();
+        assert_eq!(diags.len(), 1, "{stdout}");
+        assert_eq!(
+            (
+                &diags[0]["rule_code"],
+                &diags[0]["severity"],
+                &diags[0]["certainty"]
+            ),
+            (&"EFF101".into(), &"error".into(), &"heuristic".into()),
+            "{stdout}"
+        );
+        let failing = [selection, &["--heuristic", "--fail-on", "warning"]].concat();
+        assert_eq!(p.plain(&failing).0, 1, "{selection:?}");
+    }
     p.write(
         "heki.toml",
         "[lint]\nheuristic = true\nfail-on = \"warning\"\n",
