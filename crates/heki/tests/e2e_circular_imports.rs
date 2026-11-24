@@ -463,8 +463,9 @@ fn h7_with_prefix(name: &str, prefix: &str) -> Project {
 }
 
 /// What may load a module of the cycle before the import that pauses `pkg.a` stops the run of
-/// `pkg.a` imported first: an import heki cannot name, one of several or under a package, a
-/// module it could not read, and an import that raises whenever it runs. Others do not.
+/// `pkg.a` imported first: an import heki cannot name (also in a module outside the cycle that
+/// `pkg.a` loads), one of several or under a package, a module it could not read, and an import
+/// that raises whenever it runs. Others do not.
 #[test]
 fn imports_the_run_cannot_place_stop_it() {
     let stopping = [
@@ -479,6 +480,13 @@ fn imports_the_run_cannot_place_stop_it() {
         p.write("pkg/broken.py", "def broken(:\n");
         assert_eq!(reports(&p), Vec::<String>::new(), "{prefix}");
     }
+    // A module outside the cycle whose load imports a module heki cannot name.
+    let p = h7_with_prefix("circular_imports_unplaced_outside", "import pkg.other");
+    p.write(
+        "pkg/other.py",
+        "import importlib\nimport os\n\nimportlib.import_module(os.environ[\"M\"])\n",
+    );
+    assert_eq!(reports(&p), Vec::<String>::new());
     let passing = [
         "import json\nimport pkg.other",
         "import importlib\nimportlib.import_module(\"pkg.other\")",
@@ -511,6 +519,13 @@ fn code_that_may_call_a_loading_function_stops_the_run() {
         p.write("pkg/loader.py", loader);
         assert_eq!(reports(&p), Vec::<String>::new(), "{prefix}");
     }
+    // A function importing a module heki cannot name may load one of the cycle too.
+    let p = h7_with_prefix("circular_imports_code_any", silent[0]);
+    p.write(
+        "pkg/loader.py",
+        "import importlib\n\n\ndef load(name):\n    return importlib.import_module(name)\n",
+    );
+    assert_eq!(reports(&p), Vec::<String>::new());
     let inert = [
         "__all__ = [\"helper_a\"]\nVALUE = (1, 2)\nNOTHING = {}",
         "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import json",
@@ -525,6 +540,20 @@ fn code_that_may_call_a_loading_function_stops_the_run() {
             ["pkg/b.py:5 [pkg.a.helper_a] pkg.a"],
             "{prefix}"
         );
+    }
+    // `TYPE_CHECKING` a star import of `typing` binds, read as a global by `pkg.b` before its
+    // failing import (in `pkg.a`, the star import may bind `helper_a`), also when `pkg.b`
+    // deletes the name at its end.
+    for (i, end) in ["", "\ndel TYPE_CHECKING\n"].iter().enumerate() {
+        let p = h7_with_prefix(&format!("circular_imports_inert_star_{i}"), "");
+        p.write("pkg/loader.py", loader);
+        p.write(
+            "pkg/b.py",
+            &format!(
+                "from typing import *\n\nif TYPE_CHECKING:\n    import json\n\n\ndef helper_b():\n    return 2\n\n\nfrom pkg.a import helper_a\n{end}"
+            ),
+        );
+        assert_eq!(reports(&p), ["pkg/b.py:11 [pkg.a.helper_a] pkg.a"], "{end}");
     }
 }
 
