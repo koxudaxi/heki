@@ -68,3 +68,51 @@ fn the_readme_examples_print_what_the_readme_shows() {
         assert_eq!(format!("{stdout}{stderr}"), expected, "{section}");
     }
 }
+
+/// The `--diff` example of the `collections.deque` rewrite, shown in the README, docs/index.md,
+/// and docs/fixes.md: its console block, from the command to the end of the output.
+fn deque_example(doc: &str) -> &str {
+    let start = doc
+        .find("$ heki check --diff --include-size-dependent jobs.py\n")
+        .expect("the deque example");
+    let end = doc[start..].find("\n```").expect("the end of its block");
+    &doc[start..=start + end]
+}
+
+#[test]
+fn the_deque_example_prints_what_the_pages_show() {
+    let readme = repo_file("README.md");
+    let block = deque_example(&readme);
+    for page in ["docs/index.md", "docs/fixes.md"] {
+        assert_eq!(deque_example(&repo_file(page)), block, "{page}");
+    }
+    let (command, expected) = block.split_once('\n').unwrap();
+    // The file before the rewrite: the diff's context and removed lines (a page may drop the
+    // space of an empty context line).
+    fn before(line: &str) -> Option<&str> {
+        match line.chars().next() {
+            None => Some(""),
+            Some(' ' | '-') => Some(&line[1..]),
+            Some(_) => None,
+        }
+    }
+    let original: String = expected
+        .lines()
+        .skip_while(|l| !l.starts_with("@@ "))
+        .skip(1)
+        .take_while(|l| !l.starts_with("Would fix"))
+        .filter_map(before)
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let p = Project::new("readme_deque_example");
+    p.write("jobs.py", &original);
+    let args: Vec<&str> = command
+        .strip_prefix("$ heki ")
+        .unwrap()
+        .split_whitespace()
+        .collect();
+    let (code, stdout, stderr) = p.heki(&args);
+    // A diff with something to apply exits with 1.
+    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(format!("{stdout}{stderr}"), expected);
+}
