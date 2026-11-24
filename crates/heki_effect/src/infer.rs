@@ -125,7 +125,7 @@ pub(crate) struct Inferred {
 
 /// A value no path binds (`None`) adds no item type.
 impl Operands for Inferred {
-    fn elem(&self, v: VarId) -> Elem {
+    fn operand_item(&self, v: VarId) -> Elem {
         self.facts[v.0 as usize].elem()
     }
 }
@@ -902,15 +902,15 @@ struct Narrowing<'e> {
 
 /// An operand not typed yet adds nothing yet.
 impl Operands for Engine<'_, '_> {
-    fn elem(&self, v: VarId) -> Elem {
+    fn operand_item(&self, v: VarId) -> Elem {
         self.fact(v).elem()
     }
 
-    fn items(&self, v: VarId) -> Elem {
+    fn operand_items(&self, v: VarId) -> Elem {
         self.items_of(v)
     }
 
-    fn entries(&self, v: VarId) -> (Elem, Elem) {
+    fn operand_entries(&self, v: VarId) -> (Elem, Elem) {
         self.mapping(v)
     }
 }
