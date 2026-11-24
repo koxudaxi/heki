@@ -1963,7 +1963,7 @@ fn rule_and_explain_commands() {
     let (code, all, _) = heki(&["rule", "--all"]);
     assert_eq!(code, 0);
     let lines: Vec<&str> = all.lines().collect();
-    assert_eq!(lines.len(), 47, "{all}");
+    assert_eq!(lines.len(), 49, "{all}");
     assert!(lines[0].starts_with("MUT101   cached-property-stale-mutation "));
     // Each rule's certainty and when it runs with no configuration.
     for (code, state) in [
@@ -2006,7 +2006,7 @@ fn rule_and_explain_commands() {
     let (code, stdout, _) = heki(&["rule", "--all", "--output-format", "json"]);
     assert_eq!(code, 0);
     let rules: Vec<Value> = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(rules.len(), 47);
+    assert_eq!(rules.len(), 49);
     for r in &rules {
         let doc = r["doc"].as_str().unwrap();
         // Every page has Ruff's sections, in order.
@@ -2020,7 +2020,7 @@ fn rule_and_explain_commands() {
             "{}",
             r["code"]
         );
-        assert!(["Mut", "Eff", "Data", "Opt"].contains(&r["family"].as_str().unwrap()));
+        assert!(["Mut", "Eff", "Data", "Opt", "Imp"].contains(&r["family"].as_str().unwrap()));
     }
     assert_eq!(heki(&["rule", "--output-format", "json"]).1, stdout);
     let (code, one, _) = heki(&["rule", "opt101", "--output-format", "json"]);

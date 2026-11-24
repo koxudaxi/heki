@@ -84,8 +84,9 @@ const READ_ONLY_BUILTINS: &[&str] = &[
     "zip",
 ];
 
-/// The names Python 3.11 binds in `builtins` (every later version binds them too), without the
-/// module dunders, sorted.
+/// The names Python 3.11 binds in `builtins` (every later version binds them too), sorted,
+/// without the module attributes every module binds for itself (`__name__`, `__doc__`,
+/// `__package__`, `__loader__`, `__spec__`).
 const BUILTIN_NAMES: &[&str] = &[
     "ArithmeticError",
     "AssertionError",
@@ -161,6 +162,9 @@ const BUILTIN_NAMES: &[&str] = &[
     "ValueError",
     "Warning",
     "ZeroDivisionError",
+    "__build_class__",
+    "__debug__",
+    "__import__",
     "abs",
     "aiter",
     "all",

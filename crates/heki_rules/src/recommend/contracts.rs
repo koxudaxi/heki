@@ -423,7 +423,7 @@ pub fn allowed_pattern(
 
 /// The candidates of the project `index` analyzes, the census's, ranked and capped: what `cfg`
 /// and the rules `current` ignores leave to propose. `tests`: the files holding test code
-/// ([`crate::eff_rules::is_test_code`]: a test file, or one defining a test function), which no
+/// ([`heki_effect::code_kind::is_test_code`]: a test file, or one defining a test function), which no
 /// contract is drawn from and no effect boundary covers: a boundary is about the program's
 /// layers. A module whose name a pattern cannot spell ([`names_module_literally`]) gets no
 /// candidate either.

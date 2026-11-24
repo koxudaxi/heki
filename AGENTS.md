@@ -68,6 +68,8 @@ cargo run -p heki -- rule --all
 
 # heki_semantic against the CPython symtable, both ways (zero disagreements; CI runs 3.11-3.15)
 python3.15 tests/symtable_verify/verify_symtable.py --heki target/debug/heki tests/symtable_verify/fixtures/
+# Import facts against CPython, both ways (zero disagreements; CI runs 3.11-3.15)
+python3.15 tests/import_verify/verify_imports.py --heki target/debug/heki tests/import_verify/fixtures/
 # Layer 1 knowledge base sentinels
 python3.15 tests/sentinel/verify_soundness_kb.py
 # Layer 2 rows against releases of their distributions (needs uv and PyPI; its own workflow)

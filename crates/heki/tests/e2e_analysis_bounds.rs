@@ -7,8 +7,8 @@
 //! task factory, the walk to the callable a builtin calls once per item, contracts with many call
 //! targets and argument lists, the mappings a call unpacks, the walk to the uses handing a
 //! reference to a call target on, the locks `EFF109` follows, the values class statements pass as
-//! bases, the bindings the deque rewrite's candidates check, and the star imports a name is bound
-//! through, many or nested deep.
+//! bases, the bindings the deque rewrite's candidates check, the star imports a name is bound
+//! through, many or nested deep, and the walks over the import graph (`heki inspect --imports`).
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -178,9 +178,19 @@ fn check_linear(n: usize, shape: impl Fn(usize) -> Project) -> Vec<Value> {
 /// a walk past its budget answers open instead of walking on. An owner spending its budget
 /// where no test expects it is a walk that grew faster than the function.
 fn check_past_budgets(n: usize, owners: &[&str], shape: impl Fn(usize) -> Project) -> Vec<Value> {
+    past_budgets(n, owners, shape, check_counted)
+}
+
+/// [`check_past_budgets`] of what `counted` runs and counts the steps of.
+fn past_budgets<T>(
+    n: usize,
+    owners: &[&str],
+    shape: impl Fn(usize) -> Project,
+    counted: impl Fn(&Project) -> (T, StepsByOwner),
+) -> T {
     let (small, large) = (shape(n / SCALE), shape(n));
-    let (_, small_steps) = check_counted(&small);
-    let (diags, large_steps) = check_counted(&large);
+    let (_, small_steps) = counted(&small);
+    let (diags, large_steps) = counted(&large);
     let grown = step_growth(&small_steps, &large_steps);
     assert!(
         grown.is_empty(),
@@ -6353,6 +6363,254 @@ fn open_premises_of_rewrite_candidates_over_shared_iterables_are_explained() {
         assert_eq!(r["certainty"], "heuristic", "{r:#?}");
         assert!(!r["open_premises"].as_array().unwrap().is_empty(), "{r:#?}");
     }
+}
+
+/// `heki inspect --imports <query> --output-format json` of `p`, and the steps of its walks.
+fn imports_counted(p: &Project, query: &str) -> (Value, StepsByOwner) {
+    let path = p.dir.join(".walk-steps.json");
+    let out = run(
+        p,
+        &[
+            "inspect",
+            "--imports",
+            query,
+            "--output-format",
+            "json",
+            "--walk-steps",
+            path.to_str().unwrap(),
+            ".",
+        ],
+        &[0],
+    );
+    (serde_json::from_slice(&out).unwrap(), walk_steps(&path))
+}
+
+/// The modules of package `c`, each importing the next while it loads, the last one `json`.
+fn import_chain(modules: usize) -> Project {
+    let p = Project::new("bounds_import_chain");
+    p.write("c/__init__.py", "");
+    for i in 0..modules {
+        let next = if i + 1 < modules {
+            format!("import c.m{}\n", i + 1)
+        } else {
+            "import json\n".to_owned()
+        };
+        p.write(&format!("c/m{i}.py"), &next);
+    }
+    p
+}
+
+/// What a module at the head of a long chain of imports loads, and what every module of it
+/// loads from outside the project (`ImportGraph::import_time`), are walked once.
+#[test]
+fn a_long_chain_of_imports_is_walked_once() {
+    let modules = 10_000;
+    let report = past_budgets(modules, &[], import_chain, |p| imports_counted(p, "c.m0"));
+    let head = &report["modules"][0]["loads"];
+    assert_eq!(head["project"].as_array().unwrap().len(), modules);
+    assert_eq!(head["external"], json!(["json"]));
+}
+
+/// Every module of a long chain asked at once: each walks the rest of the chain, so the walks
+/// share one budget, past which the rest answer open.
+#[test]
+fn the_modules_of_a_long_chain_asked_at_once_share_one_budget() {
+    let report = past_budgets(2_000, &["import_graph"], import_chain, |p| {
+        imports_counted(p, "*")
+    });
+    let modules = report["modules"].as_array().unwrap();
+    assert_eq!(modules[0]["module"], "c");
+    assert!(modules[1]["loads"]["project"].is_array());
+    assert_eq!(modules.last().unwrap()["loads"], Value::Null);
+}
+
+/// Modules importing each other: `sites` imports in all, `sqrt(sites)` modules each importing
+/// every one, so the shape eight times smaller has an eighth of the imports.
+fn import_clique(sites: usize) -> Project {
+    let modules = (sites as f64).sqrt().round() as usize;
+    let p = Project::new("bounds_import_clique");
+    p.write("k/__init__.py", "");
+    let body: String = (0..modules)
+        .map(|j| format!("from . import m{j}\n"))
+        .collect();
+    for i in 0..modules {
+        p.write(&format!("k/m{i}.py"), &body);
+    }
+    p
+}
+
+/// A clique of modules importing each other is one component of the import-time closure.
+#[test]
+fn modules_importing_each_other_share_one_fact() {
+    let report = past_budgets(90_000, &[], import_clique, |p| imports_counted(p, "k.m0"));
+    let loads = &report["modules"][0]["loads"];
+    assert_eq!(loads["project"].as_array().unwrap().len(), 300);
+}
+
+/// A package whose `__init__` imports thousands of submodules, each importing `json`.
+fn package_of_submodules(submodules: usize) -> Project {
+    let p = Project::new("bounds_import_package");
+    let init: String = (0..submodules)
+        .map(|i| format!("from . import s{i}\n"))
+        .collect();
+    p.write("p/__init__.py", &init);
+    for i in 0..submodules {
+        p.write(&format!("p/s{i}.py"), "import json\n");
+    }
+    p
+}
+
+/// What a package loading thousands of submodules loads is joined once per submodule.
+#[test]
+fn a_package_loading_thousands_of_submodules_joins_each_once() {
+    let report = past_budgets(2_000, &[], package_of_submodules, |p| {
+        imports_counted(p, "p")
+    });
+    let loads = &report["modules"][0]["loads"];
+    assert_eq!(loads["project"].as_array().unwrap().len(), 2_000);
+    assert_eq!(loads["external"], json!(["json"]));
+}
+
+/// A Python 3.15 project of one module `m`, `source`.
+fn lazy_module(source: &str) -> Project {
+    let p = Project::new("bounds_lazy_imports");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"m\"\nrequires-python = \">=3.15\"\n",
+    )
+    .write("m.py", source);
+    p
+}
+
+/// A lazy name bound on each branch of an `if`, read after each of `reads` more branches.
+fn lazy_name_read_after_branches(reads: usize) -> Project {
+    let mut src = "\
+import sys
+if sys.version_info >= (3, 15):
+    lazy import tomllib as toml
+else:
+    lazy import tomli as toml
+"
+    .to_owned();
+    for i in 0..reads {
+        src += &format!("if sys.argv:\n    pass\nV{i} = toml.loads\n");
+    }
+    lazy_module(&src)
+}
+
+/// The reads of a lazy name bound more than once share the walk back to its bindings.
+#[test]
+fn the_reads_of_a_lazy_name_share_the_walk_to_its_bindings() {
+    let report = past_budgets(2_000, &[], lazy_name_read_after_branches, |p| {
+        imports_counted(p, "m")
+    });
+    let sites = report["modules"][0]["imports"].as_array().unwrap();
+    let timings: Vec<&Value> = sites.iter().map(|s| &s["timing"]).collect();
+    assert_eq!(timings, [&json!("body"); 3]);
+}
+
+/// `names` lazy names each bound on two branches, read after `names` more branches: each
+/// name's walk passes every branch, so the walks share one budget, past which the bindings of
+/// the rest are open.
+fn lazy_names_read_after_branches(names: usize) -> Project {
+    let mut src = "import sys\n".to_owned();
+    for i in 0..names {
+        src += &format!(
+            "if sys.argv:\n    lazy import json as n{i}\nelse:\n    lazy import csv as n{i}\n"
+        );
+    }
+    for _ in 0..names {
+        src += "if sys.argv:\n    pass\n";
+    }
+    for i in 0..names {
+        src += &format!("V{i} = n{i}\n");
+    }
+    lazy_module(&src)
+}
+
+#[test]
+fn the_walks_to_the_bindings_of_many_lazy_names_share_one_budget() {
+    let report = past_budgets(
+        500,
+        &["lazy_imports"],
+        lazy_names_read_after_branches,
+        |p| imports_counted(p, "m"),
+    );
+    let sites = report["modules"][0]["imports"].as_array().unwrap();
+    assert_eq!(sites[1]["timing"], "body");
+    assert_eq!(sites.last().unwrap()["timing"], Value::Null);
+}
+
+/// PEP 735 groups including each other along many paths: `layers` layers of two groups, each
+/// including both groups of the next layer, the last one naming a requirement.
+fn layered_dependency_groups(layers: usize) -> Project {
+    let mut toml = "[project]\nname = \"acme\"\n[dependency-groups]\n".to_owned();
+    for layer in 0..layers {
+        for side in ["a", "b"] {
+            let includes = if layer + 1 < layers {
+                format!(
+                    "{{include-group = \"a{0}\"}}, {{include-group = \"b{0}\"}}",
+                    layer + 1
+                )
+            } else {
+                "\"pytest\"".to_owned()
+            };
+            toml += &format!("{side}{layer} = [{includes}]\n");
+        }
+    }
+    let p = Project::new("bounds_dependency_groups");
+    p.write("pyproject.toml", &toml)
+        .write("acme/__init__.py", "");
+    p
+}
+
+/// Reading the groups expands each group once per group asked, not once per path to it: 40
+/// layers have 2^40 paths.
+#[test]
+fn dependency_groups_included_along_many_paths_are_read_once_each() {
+    check(&layered_dependency_groups(40));
+}
+
+/// [`import_chain`] with an `import-owners` contract walking what `importers` import, which
+/// forbids the module at the end of the chain.
+fn import_chain_with_contract(modules: usize, importers: &str) -> Project {
+    let p = import_chain(modules);
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[[tool.heki.import-owners]]\nname = \"no-json\"\nimporters = [\"{importers}\"]\nforbidden-imports = [\"json\"]\nreach = \"all\"\n"
+        ),
+    );
+    p
+}
+
+/// The walk of an `import-owners` contract with `reach` from the head of a long chain of
+/// imports visits each module once, and reports the module at its end with the whole chain.
+#[test]
+fn an_import_contract_walks_a_long_chain_once() {
+    let modules = 10_000;
+    let diags = check_past_budgets(modules, &[], |n| import_chain_with_contract(n, "c.m0"));
+    let report: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP201")
+        .collect();
+    assert_eq!(report.len(), 1, "{report:#?}");
+    assert_eq!(report[0]["target"], "json");
+    assert_eq!(report[0]["related"].as_array().unwrap().len(), modules - 1);
+}
+
+/// Every module of a long chain judged at once: each walks the rest of the chain, so the walks
+/// of the contract share one budget, past which the importers left report nothing.
+#[test]
+fn the_importers_of_an_import_contract_share_one_budget() {
+    let diags = check_past_budgets(2_000, &["import_owners"], |n| {
+        import_chain_with_contract(n, "c.*")
+    });
+    let reported: Vec<&str> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP201")
+        .map(|d| d["path"].as_str().unwrap())
+        .collect();
+    assert!(reported.contains(&"c/m0.py"), "{reported:?}");
+    assert!(!reported.contains(&"c/m1999.py"), "{reported:?}");
 }
 
 /// `levels` levels of two modules each, every module star-importing both modules of the next

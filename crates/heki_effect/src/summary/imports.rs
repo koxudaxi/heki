@@ -1,49 +1,124 @@
-//! The module a call of `importlib` imports, as far as the code fixes it: `reads-environment`
-//! effect boundaries forbid no import of the project's own modules.
+//! The modules a call importing or finding a module by name names, as far as the code fixes
+//! them: the import sites of `importlib.import_module` and `__import__`
+//! ([`crate::imports::ImportSite`]), and the project's own modules, which `reads-environment`
+//! effect boundaries forbid no import of.
 
 use super::statements::{Text, Walk};
-use super::{Extractor, Passed};
-use crate::environment::absolute_module_name;
+use super::{Call, Extractor, Passed};
+use crate::environment::{self, absolute_module_name};
+use crate::imports::{ImportForm, ImportSite, Named, Timing};
 use crate::resolver;
-use heki_ir::{InstKind, VarId};
+use heki_ir::walk::Answer;
+use heki_ir::{BlockId, InstKind, LastBindings, VarId};
+use heki_kb::ArgSlot;
 use std::sync::Arc;
+
+/// An argument by position and keyword ([`resolver::passed_var`]).
+type Slot<'s> = (Option<u8>, Option<&'s str>);
+
+/// `importlib`'s arguments: the name, and the package a relative one is anchored at.
+const IMPORTLIB_NAME: Slot<'static> = (Some(0), Some("name"));
+const IMPORTLIB_PACKAGE: Slot<'static> = (Some(1), Some("package"));
+
+fn slot(arg: &ArgSlot) -> Slot<'_> {
+    (arg.arg, arg.param.as_deref())
+}
 
 impl Extractor<'_> {
     /// Whether a call of a function the catalog tags `environment = "import"`, passed `passed`,
-    /// imports or finds a module of the project: every text its `name` may hold names one that
-    /// the import finds in the project (`"pkg.config"`, a module constant;
-    /// `ProjectDecls::holds_module`), or starts with a package holding only the project's
-    /// modules and a dot (`f"pkg.parser.{name}"`, `"pkg.parser." + name`;
-    /// `ProjectDecls::holds_modules_starting_with`). A relative name is anchored at every text
-    /// `package` may hold.
+    /// imports or finds a module of the project: every module it may name
+    /// ([`Self::imported_texts`]) is one that the import finds in the project (`"pkg.config"`, a
+    /// module constant; `ProjectDecls::holds_module`), or starts with a package holding only
+    /// the project's modules and a dot (`f"pkg.parser.{name}"`, `"pkg.parser." + name`;
+    /// `ProjectDecls::holds_modules_starting_with`).
     pub(super) fn imports_project_module(&self, passed: &Passed<'_>) -> bool {
-        let slot = |at| resolver::passed_var(passed.args, passed.kwargs, passed.star_from, at);
-        let Some(names) =
-            slot((Some(0), Some("name"))).and_then(|v| self.statement_texts(v, &mut Walk::exact()))
+        let project = self.cx.project;
+        self.imported_texts(passed, IMPORTLIB_NAME, Some(IMPORTLIB_PACKAGE), None)
+            .is_some_and(|names| {
+                names.iter().all(|name| match name {
+                    Named::Under(head) => project.holds_modules_starting_with(head),
+                    Named::Module(module) => project.holds_module(module),
+                })
+            })
+    }
+
+    /// Record the import site of a call of `symbol` in block `bb` when the catalog says it
+    /// loads a module by name (`heki_kb::EcosystemEntry::loads_module`).
+    pub(super) fn import_by_name(&mut self, bb: BlockId, symbol: &str, call: &Call<'_>) {
+        let Some(loads) = self
+            .cx
+            .catalog(symbol)
+            .and_then(|e| e.loads_module.as_ref())
         else {
-            return false;
+            return;
         };
+        let names = self.imported_texts(
+            &call.passed(),
+            slot(&loads.name),
+            loads.package.as_ref().map(slot),
+            loads.level.as_ref().map(slot),
+        );
+        let in_module_body = self.key.qualname == "<module>";
+        // A class body's own paths say nothing of whether its class statement runs.
+        let unconditional =
+            !self.f.is_class_body && LastBindings::of(self.shape).always_runs(self.shape, bb);
+        self.imports.push(ImportSite {
+            span: call.span,
+            qualname: self.key.qualname.clone(),
+            form: ImportForm::ByName,
+            modules: names.map_or(Answer::Open, Answer::Known),
+            timing: Answer::Known(if in_module_body {
+                Timing::Body
+            } else {
+                Timing::Function
+            }),
+            guarded: environment::guarded_against_import_errors(self.f, bb),
+            unconditional,
+        });
+    }
+
+    /// Every module a call importing or finding a module by name may name, made absolute: each
+    /// text the code fixes for its argument `name` (a module constant included), a relative
+    /// one anchored at each text the argument `package` may hold
+    /// ([`absolute_module_name`]); a text known only by how it starts names the modules under
+    /// it. `None` when a text is unknown, a relative name has no package to be anchored at or
+    /// climbs past its top-level package, or the call passes a `level` other than `0`.
+    fn imported_texts(
+        &self,
+        passed: &Passed<'_>,
+        name: Slot<'_>,
+        package: Option<Slot<'_>>,
+        level: Option<Slot<'_>>,
+    ) -> Option<Vec<Named>> {
+        let at = |slot| resolver::passed_var(passed.args, passed.kwargs, passed.star_from, slot);
+        if let Some(level) = level.and_then(at)
+            && self.shape.int_const(level) != Some(0)
+        {
+            return None;
+        }
+        let names = at(name).and_then(|v| self.statement_texts(v, &mut Walk::exact()))?;
         let relative = names.iter().any(|t| t.text().starts_with('.'));
         let packages: Vec<Option<Arc<str>>> = if relative {
-            let Some(texts) = slot((Some(1), Some("package"))).and_then(|v| self.package_texts(v))
-            else {
-                return false;
-            };
+            let texts = package.and_then(at).and_then(|v| self.package_texts(v))?;
             texts.into_iter().map(Text::whole).collect()
         } else {
             vec![None]
         };
-        let project = self.cx.project;
-        names.iter().all(|name| {
+        let mut out = Vec::new();
+        for name in &names {
             let head = matches!(name, Text::Head(_));
-            packages.iter().all(|package| {
-                match absolute_module_name(name.text(), package.as_deref(), head) {
-                    Some(module) if head => project.holds_modules_starting_with(&module),
-                    Some(module) => project.holds_module(&module),
-                    None => false,
-                }
-            })
-        })
+            for package in &packages {
+                let module = absolute_module_name(name.text(), package.as_deref(), head)?;
+                out.push(if head {
+                    Named::Under(module)
+                } else {
+                    Named::Module(module)
+                });
+            }
+        }
+        out.sort();
+        out.dedup();
+        Some(out)
     }
 
     /// Every text the `package` argument of an import may hold: the texts the code fixes, or the

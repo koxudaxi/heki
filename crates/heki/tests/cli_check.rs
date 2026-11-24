@@ -936,3 +936,274 @@ sys.stdout.buffer.write(out)
         assert_eq!(uncolored(&out), plain, "{vars:?} {args:?}");
     }
 }
+
+const USERS: &str = "import requests\n\n\ndef fetch_name(user_id):\n    return requests.get(f\"https://api.example.com/users/{user_id}\", timeout=5).text\n\n\ndef load_user(user_id):\n    return {\"id\": user_id, \"name\": fetch_name(user_id)}\n";
+const API: &str = "from app.users import load_user\n\n\nasync def get_user(user_id):\n    return load_user(user_id)\n";
+
+/// `app/api.py` blocks on `requests.get` in `app/users.py`, two helpers down; `app/jobs.py`
+/// blocks on its own; `app/__init__.py` reports nothing. Warnings fail the run.
+fn touched_project(name: &str) -> Project {
+    let p = Project::new(name);
+    p.write("heki.toml", "[lint]\nfail-on = \"warning\"\n")
+        .write("app/__init__.py", "")
+        .write("app/users.py", USERS)
+        .write("app/api.py", API)
+        .write("app/jobs.py", BLOCKING);
+    p
+}
+
+/// The first `path:line:column: CODE` of each concise line.
+fn sites(stdout: &str) -> Vec<&str> {
+    stdout
+        .lines()
+        .map(|l| l.split_once(": ").map_or(l, |(site, _)| site))
+        .collect()
+}
+
+#[test]
+fn touched_runs_show_and_fail_on_the_reports_that_touch_the_files() {
+    let p = touched_project("touched");
+    let concise = |touched: &[&str]| {
+        let (code, stdout, stderr) =
+            p.heki(&[&["--output-format", "concise", "--touched"][..], touched].concat());
+        (code, sites(&stdout).join("\n"), stderr)
+    };
+    let (code, stdout, stderr) = p.heki(&["--output-format", "concise"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(
+        sites(&stdout),
+        ["app/api.py:5:12", "app/jobs.py:4:5"],
+        "{stdout}"
+    );
+
+    // The report in `app/api.py` comes from `app/users.py`: its call chain touches the file.
+    let (code, shown, stderr) = concise(&["app/users.py"]);
+    assert_eq!((code, shown.as_str()), (1, "app/api.py:5:12"), "{stderr}");
+    assert!(
+        stderr.contains("Found 1 diagnostic(s) for 1 touched file(s) (4 file(s) analyzed)."),
+        "{stderr}"
+    );
+    // A file's own reports; the paths name the file however they are spelled.
+    let jobs = p.dir.join("app/jobs.py");
+    for spelled in [
+        "app/jobs.py",
+        "./app/jobs.py",
+        "app/../app/jobs.py",
+        jobs.to_str().unwrap(),
+    ] {
+        let (code, shown, stderr) = concise(&[spelled]);
+        assert_eq!(
+            (code, shown.as_str()),
+            (1, "app/jobs.py:4:5"),
+            "{spelled}: {stderr}"
+        );
+    }
+    let (code, shown, _) = concise(&["app/api.py", "app/jobs.py"]);
+    assert_eq!(
+        (code, shown.as_str()),
+        (1, "app/api.py:5:12\napp/jobs.py:4:5")
+    );
+    // `--touched` is repeatable.
+    let (code, stdout, _) = p.heki(&[
+        "--output-format",
+        "concise",
+        "--touched",
+        "app/api.py",
+        "--touched",
+        "app/jobs.py",
+    ]);
+    assert_eq!((code, sites(&stdout).len()), (1, 2), "{stdout}");
+
+    // A file no report touches passes, and so does a run whose paths are none of the analyzed
+    // files: each such path is named in one warning, and is no error.
+    let (code, shown, stderr) = concise(&["app/__init__.py"]);
+    assert_eq!((code, shown.as_str()), (0, ""), "{stderr}");
+    assert!(
+        stderr.contains("All checks passed for 1 touched file(s) (4 file(s) analyzed)."),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("warning:"), "{stderr}");
+    let (code, shown, stderr) = concise(&["gone.py", "heki.toml", "app"]);
+    assert_eq!((code, shown.as_str()), (0, ""), "{stderr}");
+    assert_eq!(stderr.matches("warning:").count(), 1, "{stderr}");
+    assert!(
+        stderr.contains(
+            "warning: `--touched` names 3 path(s) that are not among the analyzed files (missing, not a Python file under PATHS, or excluded): `gone.py`, `heki.toml`, `app`"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("All checks passed for 0 touched file(s) (4 file(s) analyzed)."),
+        "{stderr}"
+    );
+    // A touched file that does not parse is analyzed: its error is reported, and fails the run.
+    p.write("app/broken.py", "def f(:\n");
+    let (code, shown, stderr) = concise(&["app/broken.py"]);
+    assert_eq!((code, shown.as_str()), (2, ""), "{stderr}");
+    assert!(
+        stderr.contains("app/broken.py:1:7: syntax error"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("All checks passed for 1 touched file(s) (4 file(s) analyzed)."),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("warning:"), "{stderr}");
+    std::fs::remove_file(p.dir.join("app/broken.py")).unwrap();
+    // A file the paths leave out is not analyzed, so it touches nothing.
+    let (code, shown, stderr) = p.heki(&[
+        "app/jobs.py",
+        "--output-format",
+        "concise",
+        "--touched",
+        "app/users.py",
+    ]);
+    assert_eq!((code, sites(&shown)), (0, vec![]), "{stderr}");
+    assert!(stderr.contains("`app/users.py`"), "{stderr}");
+
+    // Every format shows the same reports.
+    let (code, stdout, stderr) = p.heki(&["--output-format", "json", "--touched", "app/users.py"]);
+    assert_eq!(code, 1, "{stderr}");
+    let reports: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let reports = reports.as_array().unwrap();
+    assert_eq!(reports.len(), 1, "{stdout}");
+    assert_eq!(reports[0]["path"], "app/api.py");
+    assert!(
+        reports[0]["related"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["path"] == "app/users.py"),
+        "{stdout}"
+    );
+    let (code, stdout, _) = p.heki(&["--output-format", "github", "--touched", "app/jobs.py"]);
+    assert_eq!(code, 1);
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(
+        stdout.starts_with("::warning file=app/jobs.py,line=4,"),
+        "{stdout}"
+    );
+    let (code, stdout, _) = p.heki(&["--output-format", "sarif", "--touched", "app/users.py"]);
+    assert_eq!(code, 1);
+    let sarif: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let results = sarif["runs"][0]["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1, "{stdout}");
+    assert_eq!(
+        results[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+        "app/api.py"
+    );
+    // The full format lists the pages of the rules it shows.
+    let (code, _, stderr) = p.heki(&["--touched", "app/__init__.py"]);
+    assert_eq!(code, 0);
+    assert!(!stderr.contains("`heki rule EFF101`"), "{stderr}");
+
+    // A run that watches every change, or that writes the baseline, covers the whole project.
+    for option in ["--watch", "--update-baseline"] {
+        let (code, stdout, stderr) = p.heki(&[option, "--touched", "app/jobs.py"]);
+        assert_eq!((code, stdout.as_str()), (2, ""), "{option}: {stderr}");
+        assert!(stderr.contains("cannot be used with"), "{option}: {stderr}");
+    }
+}
+
+#[test]
+fn touched_runs_judge_only_the_baseline_entries_of_the_reports_they_show() {
+    let p = touched_project("touched_baseline");
+    p.write(
+        "heki.toml",
+        "baseline = \"b.toml\"\n\n[lint]\nfail-on = \"warning\"\nreport-unused-suppressions = true\n",
+    )
+    .write(
+        "app/orders.py",
+        "import requests\n\n\ndef load_order(order_id):\n    return requests.get(f\"https://api.example.com/orders/{order_id}\", timeout=5).text\n",
+    )
+    // One baseline entry with two sites: one through each helper.
+    .write(
+        "app/api.py",
+        "from app.orders import load_order\nfrom app.users import load_user\n\n\nasync def page(user_id):\n    return load_user(user_id), load_order(user_id)\n",
+    );
+    let (code, _, stderr) = p.heki(&["--update-baseline"]);
+    assert_eq!(code, 0, "{stderr}");
+    let baseline = std::fs::read_to_string(p.dir.join("b.toml")).unwrap();
+    assert!(baseline.contains("count = 2"), "{baseline}");
+    let check = |touched: &str| {
+        let (code, stdout, stderr) = p.heki(&["--output-format", "concise", "--touched", touched]);
+        (code, sites(&stdout).join("\n"), stderr)
+    };
+
+    // The entry counts both sites, whichever of them the run shows: nothing grew or shrank.
+    for touched in ["app/users.py", "app/orders.py", "app/api.py"] {
+        let (code, shown, stderr) = check(touched);
+        assert_eq!((code, shown.as_str()), (0, ""), "{touched}: {stderr}");
+        assert!(!stderr.contains("baseline entry"), "{touched}: {stderr}");
+        assert!(
+            stderr.contains("All checks passed for 1 touched file(s) (5 file(s) analyzed)."),
+            "{touched}: {stderr}"
+        );
+    }
+
+    // A fixed report's entry is judged by a run that touches its file only.
+    p.write("app/jobs.py", "async def handler():\n    return 1\n");
+    let unused = "error: baseline entry app/jobs.py::handler EFF101 `time.sleep` matched no report";
+    let (code, _, stderr) = check("app/users.py");
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("baseline entry"), "{stderr}");
+    let (code, _, stderr) = check("app/jobs.py");
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains(unused), "{stderr}");
+    let (code, _, stderr) = p.heki(&["--output-format", "concise"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains(unused), "{stderr}");
+    p.write("app/jobs.py", BLOCKING);
+
+    // A third site grows the entry: a run shows the sites of the grown entry that touch its
+    // files, and fails on them.
+    p.write(
+        "app/api.py",
+        "from app.orders import load_order\nfrom app.users import load_user\n\n\nasync def page(user_id):\n    return load_user(user_id), load_order(user_id), load_user(user_id + 1)\n",
+    );
+    let grew =
+        "note: baseline entry app/api.py::page EFF101 `requests.get` allows 2 site(s), found 3";
+    let (code, shown, stderr) = check("app/users.py");
+    assert_eq!(
+        (code, shown.as_str()),
+        (1, "app/api.py:6:12\napp/api.py:6:53"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(grew), "{stderr}");
+    assert!(
+        stderr
+            .contains("Found 2 Ratchet regression(s) for 1 touched file(s) (5 file(s) analyzed)."),
+        "{stderr}"
+    );
+    let (code, shown, stderr) = check("app/jobs.py");
+    assert_eq!((code, shown.as_str()), (0, ""), "{stderr}");
+    assert!(!stderr.contains("baseline entry"), "{stderr}");
+}
+
+#[test]
+fn touched_runs_fold_only_the_reports_they_show() {
+    let p = Project::new("touched_fold");
+    p.write("app/__init__.py", "").write(
+        "app/slow.py",
+        "import time\n\n\ndef wait():\n    time.sleep(1)\n",
+    );
+    for i in 0..11 {
+        p.write(
+            &format!("app/c{i:02}.py"),
+            "from app.slow import wait\n\n\nasync def h():\n    wait()\n",
+        );
+    }
+    let concise = ["--output-format", "concise"];
+    let (_, stdout, _) = p.heki(&concise);
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(stdout.contains("(+10 more async call sites"), "{stdout}");
+    // One caller's report alone, although the folded report of the whole run is another file's.
+    let (code, stdout, stderr) = p.heki(&[&concise[..], &["--touched", "app/c07.py"]].concat());
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(sites(&stdout), ["app/c07.py:5:5"], "{stdout}");
+    assert!(!stdout.contains("more async call sites"), "{stdout}");
+    // Every caller reaches the touched helper: they fold as in the whole run.
+    let (_, stdout, _) = p.heki(&[&concise[..], &["--touched", "app/slow.py"]].concat());
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(stdout.contains("(+10 more async call sites"), "{stdout}");
+}

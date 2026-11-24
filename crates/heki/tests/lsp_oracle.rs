@@ -28,7 +28,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "EFF115", "EFF116", "MUT115", "MUT118", "MUT119"]
+extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "EFF115", "EFF116", "MUT115", "MUT118", "MUT119", "MUT120"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -98,6 +98,17 @@ deep = true
 name = "index"
 targets = ["Node.kids"]
 invalidators = ["Index.refresh"]
+
+[[tool.heki.import-owners]]
+name = "imports"
+importers = ["pkg.imp_user"]
+forbidden-imports = ["pkg.imp_db", "pkg.imp_pkg.sub"]
+
+[[tool.heki.import-owners]]
+name = "startup"
+importers = ["pkg.imp_cli"]
+forbidden-imports = ["pkg.imp_heavy"]
+reach = "import-time"
 
 [[tool.heki.invalidation]]
 name = "dial"
@@ -371,6 +382,12 @@ const RECORDS: &str = "from typing import dataclass_transform\n\n\n@dataclass_tr
 const FROZEN_MODEL: &str = "from dataclasses import dataclass, field\n\nfrom pkg.frozen.records import record\n\n\n@dataclass\nclass Config:\n    tags: list[str] = field(default_factory=list)\n\n\n@record\nclass Entry:\n    names: list[str]\n";
 const FROZEN_HELPERS: &str = "def add_default(tags):\n    tags.append(\"default\")\n\n\ndef clear_names(entry):\n    entry.names.clear()\n";
 const CONFIGURE: &str = "from pkg.frozen.helpers import add_default, clear_names\nfrom pkg.frozen.model import Config, Entry\n\n\ndef configure(config: Config) -> None:\n    add_default(config.tags)\n\n\ndef reset(entry: Entry) -> None:\n    clear_names(entry)\n";
+
+// `MUT120`: a read-only view (a protocol of properties without a setter) in one module, helpers
+// that do not see its type in a second, and a function holding the view in a third.
+const RO_VIEW: &str = "from typing import Protocol\n\n\nclass FieldView(Protocol):\n    @property\n    def required(self) -> bool: ...\n\n    @property\n    def extras(self) -> dict[str, object]: ...\n";
+const RO_VIEW_HELPERS: &str = "def flip(field):\n    return field.required\n\n\ndef tag(field):\n    field.extras[\"k\"] = 1\n";
+const RO_VIEW_DECIDE: &str = "from pkg.roview.helpers import flip, tag\nfrom pkg.roview.model import FieldView\n\n\ndef decide(field: FieldView) -> None:\n    flip(field)\n    tag(field)\n";
 
 // Where a body runs: a helper an `async def` in another module awaits gains an offloading
 // decorator (`@sync_to_async`, `FunctionDecl::offloaded_by`), and a helper whose result an
@@ -942,6 +959,10 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/frozen/model.py", FROZEN_MODEL),
         ("pkg/frozen/helpers.py", FROZEN_HELPERS),
         ("pkg/frozen/configure.py", CONFIGURE),
+        ("pkg/roview/__init__.py", ""),
+        ("pkg/roview/model.py", RO_VIEW),
+        ("pkg/roview/helpers.py", RO_VIEW_HELPERS),
+        ("pkg/roview/decide.py", RO_VIEW_DECIDE),
         ("pkg/ro/__init__.py", RO_INIT),
         ("pkg/ro/helpers.py", RO_HELPERS),
         ("pkg/ro/callers.py", RO_CALLERS),
@@ -2100,6 +2121,63 @@ fn steps_mut108() -> Vec<Step> {
             vec![save("pkg/frozen/model.py", FROZEN_MODEL)],
         )
         .absent(&[("pkg/frozen/configure.py", "MUT108")]),
+    ]
+}
+
+/// `MUT120` (opt-in, enabled in the project's configuration): a helper in another module starts
+/// rebinding a property of a read-only view the caller hands it, then moves the write to a
+/// function of its own and back while its summary stays the same (the chain ends at the first
+/// function whose body rebinds the property, `heki_rules::ChainFacts`), and the view in a third
+/// module gains a setter, which makes it no read-only view.
+fn steps_mut120() -> Vec<Step> {
+    let rebinding = |flip: &str| {
+        format!(
+            "{flip}\n\ndef _set(field):\n    field.required = True\n\n\ndef tag(field):\n    field.extras[\"k\"] = 1\n"
+        )
+    };
+    let setter = format!(
+        "{RO_VIEW}\n    @required.setter\n    def required(self, value: bool) -> None: ...\n"
+    );
+    vec![
+        Step::new(
+            "a helper in another module starts rebinding a property of the view",
+            vec![Action::Save(
+                "pkg/roview/helpers.py",
+                rebinding("def flip(field):\n    field.required = True\n"),
+            )],
+        )
+        .present(&[("pkg/roview/decide.py", "MUT120")]),
+        Step::new(
+            "the helper rebinds the property only through a function of its own: a second hop",
+            vec![Action::Save(
+                "pkg/roview/helpers.py",
+                rebinding("def flip(field):\n    _set(field)\n"),
+            )],
+        )
+        .present(&[("pkg/roview/decide.py", "MUT120")]),
+        Step::new(
+            "the helper rebinds the property itself again",
+            vec![Action::Save(
+                "pkg/roview/helpers.py",
+                rebinding("def flip(field):\n    field.required = True\n"),
+            )],
+        )
+        .present(&[("pkg/roview/decide.py", "MUT120")]),
+        Step::new(
+            "the view gains a setter: it is no read-only view",
+            vec![Action::Save("pkg/roview/model.py", setter)],
+        )
+        .absent(&[("pkg/roview/decide.py", "MUT120")]),
+        Step::new(
+            "the setter is gone again",
+            vec![save("pkg/roview/model.py", RO_VIEW)],
+        )
+        .present(&[("pkg/roview/decide.py", "MUT120")]),
+        Step::new(
+            "the helper only reads the view again",
+            vec![save("pkg/roview/helpers.py", RO_VIEW_HELPERS)],
+        )
+        .present(&[("pkg/roview/decide.py", "MUT120")]),
     ]
 }
 
@@ -5119,6 +5197,68 @@ fn steps_package_names() -> Vec<Step> {
     ]
 }
 
+/// `import-owners`: an import added to the importer, a module created that turns a `from`
+/// import of a name into an import of the submodule, and with `reach`, an import added to,
+/// moved in, and removed from a module the importer imports.
+fn steps_import_owners() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a module imports nothing forbidden",
+            vec![
+                Action::Create("pkg/imp_db.py", String::new()),
+                Action::Create("pkg/imp_pkg/__init__.py", String::new()),
+                Action::Create(
+                    "pkg/imp_user.py",
+                    "import json\nfrom pkg.imp_pkg import sub\n".to_owned(),
+                ),
+            ],
+        )
+        .absent(&[("pkg/imp_user.py", "IMP201")]),
+        Step::new(
+            "the package gets the submodule the from-import names",
+            vec![Action::Create("pkg/imp_pkg/sub.py", String::new())],
+        )
+        .present(&[("pkg/imp_user.py", "IMP201")]),
+        Step::new(
+            "the submodule is gone again",
+            vec![Action::Delete("pkg/imp_pkg/sub.py")],
+        )
+        .absent(&[("pkg/imp_user.py", "IMP201")]),
+        Step::new(
+            "the module imports a forbidden module",
+            vec![save("pkg/imp_user.py", "import json\nimport pkg.imp_db\n")],
+        )
+        .present(&[("pkg/imp_user.py", "IMP201")]),
+        Step::new(
+            "a start-up module imports a light one",
+            vec![
+                Action::Create("pkg/imp_heavy.py", String::new()),
+                Action::Create("pkg/imp_mid.py", String::new()),
+                Action::Create("pkg/imp_cli.py", "import pkg.imp_mid\n".to_owned()),
+            ],
+        )
+        .absent(&[("pkg/imp_cli.py", "IMP201")]),
+        Step::new(
+            "the light module imports the heavy one",
+            vec![save("pkg/imp_mid.py", "import pkg.imp_heavy\n")],
+        )
+        .present(&[("pkg/imp_cli.py", "IMP201")]),
+        Step::new(
+            "the import moves down a line",
+            vec![save("pkg/imp_mid.py", "\nimport pkg.imp_heavy\n")],
+        )
+        .present(&[("pkg/imp_cli.py", "IMP201")]),
+        Step::new(
+            "the light module imports it only when a function runs",
+            vec![save(
+                "pkg/imp_mid.py",
+                "def load():\n    import pkg.imp_heavy\n",
+            )],
+        )
+        .absent(&[("pkg/imp_cli.py", "IMP201")]),
+    ]
+}
+
 const STAR_IMPL: &str = "import time\n\n__all__ = [\"fetch\"]\n\n\ndef fetch(url):\n    time.sleep(1)\n    return url\n";
 const STAR_USER: &str =
     "from pkg.star import fetch\n\n\nasync def handle(url):\n    return fetch(url)\n";
@@ -5589,6 +5729,7 @@ sessions!(editing, Session::start, {
     guarded_effects: steps_guarded_effects,
     mut108: steps_mut108,
     mut110: steps_mut110,
+    mut120: steps_mut120,
     aliases_and_getters: steps_aliases_and_getters,
     protocol_reads: steps_protocol_reads,
     body_runs: steps_body_runs,
@@ -5641,6 +5782,7 @@ sessions!(editing, Session::start, {
     re_exports: steps_re_exports,
     package_names: steps_package_names,
     star_imports: steps_star_imports,
+    import_owners: steps_import_owners,
 });
 
 // ------------------------------------------------------- files, layout, and buffers (session 2)

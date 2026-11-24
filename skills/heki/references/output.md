@@ -23,7 +23,8 @@ broken contract) and `warning` for slower code or a bug that is rarely harmful.
 
 ## `heki inspect --output-format json` (experimental)
 
-One versioned object about one function:
+One versioned object about one function (with `-` and the names on standard input, one per
+line, an array of them from one analysis, in the order of the names):
 
 | Field | Content |
 | ----- | ------- |
@@ -53,7 +54,7 @@ One versioned object about one function:
 ## `heki check --generate-prompt --output-format json` (experimental)
 
 One versioned object: `question`, `configuration` (root, configuration file, target version,
-source roots, rule selection, baseline, contracts), `rules` (code, name, certainty, activation,
+source roots, rule selection, baseline, `touched` with `--touched`, contracts), `rules` (code, name, certainty, activation,
 and what a report states), `heuristic_rules_off`, `diagnostics` (the concise fields of the
 diagnostics that fit, with `omitted` counting the rest), and `guidance`.
 `heki check --output-format-json-schema generate-prompt` prints its JSON Schema. A word after
