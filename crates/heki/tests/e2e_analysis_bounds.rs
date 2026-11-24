@@ -6447,6 +6447,61 @@ fn modules_importing_each_other_share_one_fact() {
     assert_eq!(loads["project"].as_array().unwrap().len(), 300);
 }
 
+/// `IMP101` selected in `p`.
+fn selecting_import_cycles(p: Project) -> Project {
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"IMP101\"]\n",
+    );
+    p
+}
+
+/// The modules of package `c` in a ring, each importing the next while it loads and the last
+/// importing the first, with `IMP101` selected.
+fn import_ring(modules: usize) -> Project {
+    let p = Project::new("bounds_import_ring");
+    p.write("c/__init__.py", "");
+    for i in 0..modules {
+        p.write(
+            &format!("c/m{i}.py"),
+            &format!("import c.m{}\n", (i + 1) % modules),
+        );
+    }
+    selecting_import_cycles(p)
+}
+
+/// A ring of modules is one group: its cycle is found once, through every module.
+#[test]
+fn a_ring_of_modules_importing_each_other_is_one_report() {
+    let modules = 10_000;
+    let diags = check_past_budgets(modules, &[], import_ring);
+    let reports: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP101")
+        .collect();
+    assert_eq!(reports.len(), 1, "{reports:#?}");
+    assert_eq!(reports[0]["path"], "c/m9999.py");
+    assert_eq!(reports[0]["related"].as_array().unwrap().len(), modules - 1);
+}
+
+/// Every module of a clique imports every other: one group, whose shortest cycle the search
+/// finds two modules in.
+#[test]
+fn a_clique_of_modules_importing_each_other_is_one_report() {
+    let diags = check_past_budgets(90_000, &[], |sites| {
+        selecting_import_cycles(import_clique(sites))
+    });
+    let reports: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP101")
+        .collect();
+    assert_eq!(reports.len(), 1, "{reports:#?}");
+    assert_eq!(reports[0]["path"], "k/m1.py");
+    assert!(
+        (reports[0]["message"].as_str().unwrap())
+            .ends_with("one of the cycles of 300 modules that import each other"),
+        "{reports:#?}"
+    );
+}
+
 /// A package whose `__init__` imports thousands of submodules, each importing `json`.
 fn package_of_submodules(submodules: usize) -> Project {
     let p = Project::new("bounds_import_package");

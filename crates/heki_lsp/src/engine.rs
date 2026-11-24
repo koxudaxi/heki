@@ -19,7 +19,8 @@ use heki_rules::{
     CHAIN_RULES, ChainFacts, CheckExtras, EXAMPLE_RULES, ExampleOwners, MemberName, RuleSelection,
     SNAPSHOT_FILE, SelectionError, SentinelTestKey, SnapshotError, StaleWriteKey, SummarySnapshot,
     chain_facts, check_project, class_member_names, deep_copy_files, example_digest,
-    family_readers, kept_removals_in, lazy_setup_files, sentinel_tests_in, stale_writes_by_file,
+    family_readers, import_cycle_files, kept_removals_in, lazy_setup_files, sentinel_tests_in,
+    stale_writes_by_file,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
@@ -280,6 +281,10 @@ pub struct Workspace {
     /// files of the cached properties of those names need a new check when they change (their
     /// lazy setup steps read whether any function removes them).
     kept_removals: FxHashMap<PathBuf, BTreeSet<String>>,
+    /// The files `IMP101` reports in, as of the latest analysis: the file of the import closing
+    /// the cycle of each group of modules importing each other; kept while `IMP101` is
+    /// selected (`Workspace::note_import_cycles`).
+    cycle_files: Vec<PathBuf>,
     /// What the configured contracts read across functions (`Workspace::affected_by`).
     reach: ContractReach,
     stats: EngineStats,
@@ -586,6 +591,11 @@ impl Workspace {
         } else {
             FxHashMap::default()
         };
+        let cycle_files = if selection.is_enabled("IMP101") {
+            import_cycle_files(&env.cfg, &index, decls.completed()).map_err(EngineError::Rules)?
+        } else {
+            Vec::new()
+        };
         let class_members = if reach.class_members {
             (class_member_names(&index).into_iter())
                 .map(MemberName::into_owned)
@@ -619,6 +629,7 @@ impl Workspace {
                 stale_writes,
                 sentinel_tests,
                 kept_removals,
+                cycle_files,
                 reach,
                 stats,
             },
@@ -968,6 +979,25 @@ impl Workspace {
         deep_copy_files(&self.index)
     }
 
+    /// Record the files `IMP101` reports in against the current index. Its reports read the
+    /// imports of every module: when some file's imports changed (`imports_changed`), or those
+    /// files did, the files reporting before and after need a new check, and are returned.
+    fn note_import_cycles(&mut self, imports_changed: bool) -> Vec<PathBuf> {
+        if !self.selection.is_enabled("IMP101") {
+            return Vec::new();
+        }
+        let now = import_cycle_files(&self.env.cfg, &self.index, self.decls.completed())
+            .expect("invalid rule options fail `Workspace::load`");
+        let before = std::mem::replace(&mut self.cycle_files, now);
+        if !imports_changed && before == self.cycle_files {
+            return Vec::new();
+        }
+        before
+            .into_iter()
+            .chain(self.cycle_files.iter().cloned())
+            .collect()
+    }
+
     /// Record the names under which the functions of `path` remove a kept value by name; when
     /// they changed, the lazy setup steps of the cached properties of those names may change
     /// tier: returns their files.
@@ -1264,6 +1294,7 @@ impl Workspace {
         affected.extend(self.note_stale_writes(&parsed.path));
         affected.extend(self.note_sentinel_tests(&parsed.path));
         affected.extend(self.note_kept_removals(&parsed.path));
+        affected.extend(self.note_import_cycles(update.imports_changed));
         // Call chains of other files show this file's call sites, and `MUT113` reports the
         // container changes of its methods: when they move, those diagnostics move with them
         // (the summaries copying call sites were re-propagated).
@@ -1382,6 +1413,7 @@ impl Workspace {
         affected.extend(self.note_stale_writes(path));
         affected.extend(self.note_sentinel_tests(path));
         affected.extend(self.note_kept_removals(path));
+        affected.extend(self.note_import_cycles(update.imports_changed));
         if named_examples {
             affected.extend(self.example_reports.iter().cloned());
         }

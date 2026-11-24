@@ -294,6 +294,15 @@ pub struct ImportOwnerRule {
     pub message: Option<String>,
 }
 
+/// `[tool.heki.imports]`: which imports the import rules count.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ImportsConfig {
+    /// The timing classes of the imports `IMP101` follows (`"body"`, `"lazy"`, `"function"`,
+    /// `"type-checking"`); `None` for `["body"]`, the imports that run while a module loads.
+    pub cycle_edges: Option<Vec<String>>,
+}
+
 /// `[[tool.heki.effect-boundaries]]` contract for `EFF201`: effects that must not be reached,
 /// directly or through calls, from the functions of `scopes`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -454,6 +463,7 @@ pub struct HekiConfig {
     pub invalidation: Vec<InvalidationRule>,
     pub effect_boundaries: Vec<EffectBoundaryRule>,
     pub import_owners: Vec<ImportOwnerRule>,
+    pub imports: ImportsConfig,
     pub ecosystem: Vec<EcosystemOverride>,
     /// The version `project.requires-python` of the project's `pyproject.toml` selects
     /// ([`requires_python_lower_bound`]): the `target-version` default (read by the loaders,
@@ -1005,6 +1015,7 @@ impl HekiConfig {
         "invalidation",
         "effect-boundaries",
         "import-owners",
+        "imports",
         "ecosystem",
     ];
 
@@ -1443,6 +1454,7 @@ writes-in-order = { arg = 0, param = "data", sorted-by = "sort_keys" }
             invalidation: Vec::new(),
             effect_boundaries: Vec::new(),
             import_owners: Vec::new(),
+            imports: ImportsConfig::default(),
             ecosystem: Vec::new(),
             requires_python: None,
             project_name: None,

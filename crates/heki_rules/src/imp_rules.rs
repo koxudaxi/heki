@@ -1,6 +1,12 @@
 //! `IMP201` import ownership (`[[tool.heki.import-owners]]`): which modules a module may import,
-//! and `IMP202`, its strict sibling for the imports whose module heki cannot name. Which module
-//! an import loads is decided by `heki_effect::imports` alone.
+//! and `IMP202`, its strict sibling for the imports whose module heki cannot name; `IMP101`,
+//! import cycles ([`cycles`]). Which module an import loads is decided by `heki_effect::imports`
+//! alone.
+
+mod cycles;
+
+pub(crate) use cycles::imp101;
+pub use cycles::import_cycle_files;
 
 use crate::mut_rules::{contract_places, mode, reports_unresolved};
 use crate::patterns::PartIndex;
@@ -676,14 +682,6 @@ impl<'r, 'g> Run<'r, '_, 'g> {
     fn walk(&mut self, c: usize, m: u32, budget: &Budget, report: bool) {
         let (contracts, graph) = (self.contracts, self.graph);
         let contract = &contracts.contracts[c];
-        let importer = graph.name(ModuleRef::Project(m));
-        // The packages holding the importer load before it does: loading it loads them nowhere
-        // anew.
-        let loaded_before = |w: ModuleRef| {
-            matches!(w, ModuleRef::Project(_))
-                && (importer.strip_prefix(graph.name(w)))
-                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
-        };
         // The step into each module from the first module listing it: the nearest one.
         let mut into: FxHashMap<ModuleRef, Hop> = FxHashMap::default();
         let mut reached: Vec<ModuleRef> = Vec::new();
@@ -703,7 +701,7 @@ impl<'r, 'g> Run<'r, '_, 'g> {
                         continue;
                     }
                     for w in graph.parents(t).into_iter().chain([t]) {
-                        if loaded_before(w) {
+                        if graph.holds(w, m) {
                             continue;
                         }
                         into.entry(w).or_insert(Hop {
@@ -857,19 +855,8 @@ impl<'r, 'g> Run<'r, '_, 'g> {
         let graph = self.graph;
         let (from, site, message) = match *step {
             Related::Hop(hop, to) => {
-                let (site, target) =
-                    &graph.sites(hop.from).expect("a chain steps from sites")[hop.site];
-                let from = graph.name(ModuleRef::Project(hop.from));
-                let when = when_text(site, None);
-                let to_name = graph.name(to);
-                let message = match target.certain().filter(|_| hop.parent) {
-                    Some(t) => format!(
-                        "`{from}` imports `{}`{when}, which loads its package `{to_name}` first",
-                        graph.name(t)
-                    ),
-                    None => format!("`{from}` imports `{to_name}`{when}"),
-                };
-                (hop.from, &**site, message)
+                let (site, message) = hop_text(graph, hop.from, hop.site, to, hop.parent);
+                (hop.from, site, message)
             }
             Related::Site(r, site, ref what) => {
                 let from = graph.name(ModuleRef::Project(r));
@@ -879,6 +866,30 @@ impl<'r, 'g> Run<'r, '_, 'g> {
         };
         self.cx.related_at(graph.path(from), site.span, message)
     }
+}
+
+/// The site `j` of the project module `from` and what its step of an import chain into `to`
+/// does, as a related location says it: it imports `to`, or a module whose package `to` is,
+/// which it loads first (`parent`).
+fn hop_text<'g>(
+    graph: &ImportGraph<'g>,
+    from: u32,
+    j: usize,
+    to: ModuleRef,
+    parent: bool,
+) -> (&'g ImportSite, String) {
+    let (site, target) = &graph.sites(from).expect("a chain steps from sites")[j];
+    let from = graph.name(ModuleRef::Project(from));
+    let when = when_text(site, None);
+    let to_name = graph.name(to);
+    let message = match target.certain().filter(|_| parent) {
+        Some(t) => format!(
+            "`{from}` imports `{}`{when}, which loads its package `{to_name}` first",
+            graph.name(t)
+        ),
+        None => format!("`{from}` imports `{to_name}`{when}"),
+    };
+    (site, message)
 }
 
 /// How the import at `site` is made, and when it runs: in the module body of `module` when it

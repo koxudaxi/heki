@@ -2274,9 +2274,10 @@ an import itself.
   kept in the index): what each site loads (`Target`). `import a.b.c` loads `a.b.c`, after its
   parent packages. `from p import n` loads `p.n` when the project has that module and
   `ProjectDecls::from_import` says the name is the submodule, `p` when it is the package's
-  attribute or `n` is no module, and `p` with `p.n` open when the package binds `n` before the
-  submodule is imported (`PackageOrSubmodule`); for a package outside the project, `p`, with `p.n`
-  open. A module below a project package that the project does not have is `Missing`; one the
+  attribute or `n` is no module the package binds, and `p` with `p.n` open when the package binds
+  `n` before the submodule is imported, or binds no `n` and the project has no module `p.n`, which
+  Python then looks for outside the project's files (a compiled extension module)
+  (`PackageOrSubmodule`); for a package outside the project, `p`, with `p.n` open. A module below a project package that the project does not have is `Missing`; one the
   project has but an import may find elsewhere first (`ProjectDecls::holds_module`), or a name the
   code does not fix, is open. The lookups are declaration reads (`DeclKeys::modules`).
 - **Loads while it loads** (`ImportGraph::loads`): a module's `body` sites that run on every
@@ -2300,6 +2301,18 @@ an import itself.
   the modules and share one `Budget::of_graph`; past it they answer open and report nothing. A
   check without such a contract resolves only the checked modules' sites
   (`ImportGraph::resolving`), so the language server records only the declarations they read.
+- **Cycle groups** (`ImportGraph::cycle_groups`, for `IMP101`): a site of the classes asked
+  steps into the module it certainly loads and into the parent packages that load first, except
+  the packages holding its own module, which loaded before it ran (`ImportGraph::hops`,
+  `ImportGraph::holds`); an import naming such a package itself is a step. Per module, one hop
+  into each module, chosen by when its site runs and then by source order. The groups are the
+  strongly connected components of two or more modules (`scc::tarjan_scc`), and each gets a
+  shortest cycle through its smallest module, breadth first over the hops in the order of the
+  modules they enter (`walk::reach_breadth_first`). Both are linear in the modules and sites and
+  unmetered: Tarjan takes each hop once, and each search walks the modules of its own group,
+  which no other group shares (one step per module, owner `import_cycles`).
+  The language server re-checks the files whose groups close a cycle, before and after an
+  import changes (`Workspace::note_import_cycles`).
 - **Early Cutoff**: `IncrementalUpdate::imports_changed` tells whether a file's sites changed,
   without positions (`ModuleImports::same_facts`), or appeared or disappeared with the file.
 - **Kinds of code** (`heki_effect::code_kind`): a test module (under `tests/` or `test/`,

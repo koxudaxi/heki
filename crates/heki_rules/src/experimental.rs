@@ -161,6 +161,15 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         tracking: None,
     },
     ExperimentalFeature {
+        id: "rule.IMP101",
+        kind: ExperimentalKind::Rule,
+        target: "IMP101",
+        since: "0.2.7",
+        reason: "It is new: its reports are heuristic until a review of its reports on real code \
+            bases certifies its claim, and which imports count can still change.",
+        tracking: None,
+    },
+    ExperimentalFeature {
         id: "rule.IMP201",
         kind: ExperimentalKind::Rule,
         target: "IMP201",

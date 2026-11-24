@@ -233,9 +233,9 @@ the installed release changed, and the changelog on GitHub lists every release.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   says how many.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
-  `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `MUT101`, `MUT103`, `MUT106`, `MUT107`,
-  `MUT108`, `MUT111`, `MUT112`, `MUT113`, `MUT115`, `MUT120`): they need their exact code or name. In `ignore`, a prefix covers every
-  rule it matches.
+  `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `IMP101`, `MUT101`, `MUT103`, `MUT106`,
+  `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`, `MUT115`, `MUT120`): they need their exact
+  code or name. In `ignore`, a prefix covers every rule it matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
 
@@ -896,7 +896,8 @@ or a glob whose `*` spans dots, never a suffix (`pkg.*` names `pkg.facts` and
 - `import a.b.c` imports `a.b.c`, not `a` or `a.b`, which it loads first. `from a.b import c`
   imports the submodule `a.b.c` when the package has one and binds no `c` before importing it,
   and `a.b` otherwise. An import of a module the project lacks below one of its packages fails,
-  and is no import.
+  and is no import; `from a.b import c` of a name `a.b` binds nowhere still imports `a.b`, and
+  may import a module `a.b.c` outside the project's files (a compiled extension module).
 - One report per import and module. A report's target, which a
   [baseline](adoption.md#ratchet-baselines) counts it by, is the module imported.
 - With `reach`, each module reached is reported once per importer, at the import of the importer
@@ -1073,6 +1074,32 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   files below the project root (`heki check pkg/store.py`) would find unmatched the entries
   naming code in the others. With the key set, every run judges the files it analyzes.
 - `--watch` and the language server do not report them.
+
+## Imports: `[tool.heki.imports]`
+
+Which imports the import rules count.
+
+| Key | Default | Meaning |
+| --- | ------- | ------- |
+| `cycle-edges` | `["body"]` | The timing classes of the imports [`IMP101`](rules/import-cycle.md) follows when it looks for modules importing each other: `"body"`, `"lazy"`, `"function"`, and `"type-checking"`. |
+
+```toml
+[tool.heki.lint]
+extend-select = ["IMP101"]
+
+[tool.heki.imports]
+cycle-edges = ["body", "lazy"]   # also the lazy imports the module body does not read
+```
+
+- `"body"`: an import that runs while its module loads: in the module body or a class body the
+  module body runs, on any branch or inside `try`. A constant by-name import there
+  (`importlib.import_module("pkg.db")`) counts, and so does a lazy import (`lazy import`, or a
+  name a literal `__lazy_modules__` lists) whose name the module body reads.
+- `"lazy"`: a lazy import whose name the module body does not read; it runs at its first use.
+- `"function"`: an import inside a function, which runs when the function does.
+- `"type-checking"`: an import under `if TYPE_CHECKING:`, which never runs.
+- An import whose class heki cannot tell (a lazy import whose reads it cannot place) counts for
+  no class.
 
 ## Ecosystem knowledge: `[[tool.heki.ecosystem]]`
 
