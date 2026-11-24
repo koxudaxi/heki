@@ -3256,26 +3256,8 @@ impl<'a> Extractor<'a> {
                 let recv = recv.or(call.callee_var.filter(|_| symbol.ends_with(".__call__")));
                 library(symbol, recv).then_some(KeptRemovalKind::Any)
             }
-            // A method of a literal or of a display built here is its builtin class's own (the
-            // inference gives such a value no class of its own).
-            Callee::TooMany | Callee::Unresolved => {
-                let symbol = match (call.method, recv.and_then(|r| self.built_class(r))) {
-                    (Some((_, method)), Some(class)) => format!("{class}.{method}"),
-                    _ => return any,
-                };
-                library(&symbol, recv).then_some(KeptRemovalKind::Any)
-            }
+            Callee::TooMany | Callee::Unresolved => any,
         }
-    }
-
-    /// The builtin class of a literal (through copies), which the function's types leave
-    /// without a value (they type displays and f-strings).
-    fn built_class(&self, v: VarId) -> Option<String> {
-        let kind = match &self.defs.get(&self.shape.copy_root(v))?.kind {
-            InstKind::Const { literal, .. } => literal.builtin_kind()?,
-            _ => return None,
-        };
-        Some(format!("builtins.{}", kind.name()))
     }
 
     /// [`invokes::runs_project_code`] of the library call of `symbol` at `span` with these
@@ -3363,17 +3345,10 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// The builtin function or method the call at `(bb, i)` calls, as the catalog names it, also
-    /// a method of a literal ([`Self::built_class`]).
+    /// The builtin function or method the call at `(bb, i)` calls, as the catalog names it.
     fn builtin_result_at(&self, (bb, i): Position) -> Option<String> {
         match self.callees.get(&(bb, i)) {
             Some(Callee::External(symbol)) => Some(symbol.clone()),
-            Some(Callee::TooMany | Callee::Unresolved) => match &self.f.block(bb).insts[i].kind {
-                InstKind::MethodCall { recv, method, .. } => self
-                    .built_class(*recv)
-                    .map(|class| format!("{class}.{method}")),
-                _ => None,
-            },
             _ => None,
         }
     }

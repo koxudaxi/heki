@@ -11,13 +11,13 @@
 //! closure cell the function binds later.
 //!
 //! Types come from parameter, local, attribute, and return annotations (with the arguments of
-//! generic containers), constructors, imports, and `type(obj)`; they flow through copies, the
-//! augmented assignments that change a built-in container in place (`xs += ys` gives `xs`),
-//! attributes, calls, and the items of containers: iteration, subscripts, unpacking, `dict`
-//! views and `get` / `pop`, the builtins that wrap an iterable (`enumerate`, `zip`,
-//! `reversed`, `sorted`, `iter`, `next`, `list`, `tuple`, `set`, `frozenset`, `dict`, `filter`,
-//! `itertools.chain`), displays, and the items added to a local container (comprehensions build
-//! theirs that way). A comprehension or generator expression with a scope of its own iterates
+//! generic containers), constructors, constants, imports, and `type(obj)`; they flow through
+//! copies, the augmented assignments that change a built-in container in place (`xs += ys`
+//! gives `xs`), attributes, calls, and the items of containers: iteration, subscripts,
+//! unpacking, `dict` views and `get` / `pop`, the builtins that wrap an iterable (`enumerate`,
+//! `zip`, `reversed`, `sorted`, `iter`, `next`, `list`, `tuple`, `set`, `frozenset`, `dict`,
+//! `filter`, `itertools.chain`), displays, and the items added to a local container
+//! (comprehensions build theirs that way). A comprehension or generator expression with a scope of its own iterates
 //! the value its enclosing function hands it, and a nested scope reads the closure cells of the
 //! functions enclosing it, so those functions are inferred first.
 //!
@@ -1655,6 +1655,9 @@ impl<'e, 'a> Engine<'e, 'a> {
                 literal: ConstLiteral::None,
                 ..
             } => return Err(Pending),
+            InstKind::Const { dst, literal } => literal
+                .builtin_kind()
+                .map(|kind| self.display(*dst, kind, &[])),
             InstKind::AllocBuiltin { dst, kind, elems } => Some(self.display(*dst, *kind, elems)),
             InstKind::DictLiteral { dst, entries } => Some(self.dict_display(*dst, entries)),
             InstKind::Convert { dst, .. }
@@ -1786,7 +1789,7 @@ impl<'e, 'a> Engine<'e, 'a> {
     }
 
     /// The type of the new object `dst` of builtin `kind`: a display or a comprehension of
-    /// `elems` and of what the function adds to it, or the `str` of an f-string.
+    /// `elems` and of what the function adds to it, a constant, or the `str` of an f-string.
     fn display(&self, dst: VarId, kind: BuiltinKind, elems: &[VarId]) -> Ty {
         let class = format!("builtins.{}", kind.name());
         // A starred element (`*xs`, lowered to a copy of `xs`) adds its items.

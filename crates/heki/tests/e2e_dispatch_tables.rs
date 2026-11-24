@@ -3,10 +3,10 @@
 //! any of its values), a class attribute bound once to a function of the project or of a
 //! library, a `staticmethod` or a class (through the class, `cls`, or an instance), a function
 //! or a method returning a module it imports (a local import breaking a cycle, with a
-//! `functools` cache), and a value typed by a `TypeVar` with a bound or constraints. A dict or
-//! list something changes in place keeps the items of its own and of what the changes add, or
-//! none when a change adds what heki cannot type. A module-level function or a method its body
-//! binds again on some paths may be either object.
+//! `functools` cache), a name bound to one of two modules, and a value typed by a `TypeVar` with
+//! a bound or constraints. A dict or list something changes in place keeps the items of its own
+//! and of what the changes add, or none when a change adds what heki cannot type. A
+//! module-level function or a method its body binds again on some paths may be either object.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# EFF201`); every other line must not be.
@@ -551,7 +551,8 @@ fn a_class_attribute_bound_to_a_function_is_that_function() {
 /// A function or a method every return of which gives a module one of its imports binds (a
 /// local import breaking an import cycle, a `functools` cache around it) returns that module; a
 /// function returning one of two modules, typed `ModuleType`, says nothing of the module's
-/// functions.
+/// functions. A name the function binds to one of two modules it imports calls the function of
+/// either.
 const OPS: &str = r#"from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -629,11 +630,42 @@ class Lazy:
 
 def through_method(lazy: Lazy, field: Field) -> None:
     lazy.ops().require(field)  # EFF201
+
+
+def through_chosen(field: Field, flag: bool) -> None:
+    from pkg import checks, ops
+
+    chosen = ops if flag else checks
+    chosen.require(field)  # EFF201
+
+
+def through_chosen_reader(field: Field, flag: bool) -> None:
+    from pkg import checks, lint
+
+    chosen = checks if flag else lint
+    chosen.require(field)
+"#;
+
+const CHECKS: &str = r#"from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pkg.model import Field
+
+
+def require(field: Field) -> bool:
+    return field.required
 "#;
 
 #[test]
 fn a_function_returning_an_imported_module_returns_that_module() {
-    let files = [("pkg/ops.py", OPS), ("pkg/passes.py", MODULES)];
+    let files = [
+        ("pkg/ops.py", OPS),
+        ("pkg/checks.py", CHECKS),
+        ("pkg/lint.py", CHECKS),
+        ("pkg/passes.py", MODULES),
+    ];
     check_marks("dispatch_modules", &files);
     let p = project("dispatch_modules_unknown", &files);
     assert_eq!(verdict(&p, "pkg.passes.through_either"), "unknown");

@@ -8270,22 +8270,10 @@ pub(crate) fn arg_fact<'i>(
     ArgFact {
         literal: literal(&def, globals, var),
         names_file: names_a_file(&def, &name_of, globals, files, var),
-        class: class_of(var).or_else(|| bytes_literal_class(&def, var)),
+        class: class_of(var),
         flags: set_flags(&def, &name_of, var),
         ..ArgFact::default()
     }
-}
-
-/// The class of a `bytes` literal, which carries no inferred type of its own.
-fn bytes_literal_class<'i>(def: &impl Fn(VarId) -> Option<&'i Inst>, var: VarId) -> Option<String> {
-    matches!(
-        def(var)?.kind,
-        InstKind::Const {
-            literal: ConstLiteral::Bytes,
-            ..
-        }
-    )
-    .then(|| "builtins.bytes".to_owned())
 }
 
 /// Whether a database name opens a database in memory (`sqlite3.connect`), or opens none that
@@ -8751,9 +8739,6 @@ pub struct TypeCtx<'a> {
     captured: std::sync::OnceLock<FxHashMap<String, Vec<usize>>>,
     /// The module's bindings for the path facts, built on first use.
     bindings: std::cell::OnceCell<heki_ir::ModuleBindings>,
-    /// The module-level names bound once to a set of text constants
-    /// ([`Self::string_set_global`]).
-    string_sets: std::cell::OnceCell<FxHashSet<String>>,
     /// [`ProjectDecls::function_taken`] by class and name, asked once per module (the module's
     /// summaries are one recording, which the first answer's reads join).
     taken: RefCell<FxHashMap<(String, String), Option<FuncKey>>>,
@@ -8856,18 +8841,9 @@ impl<'a> TypeCtx<'a> {
             scopes: crate::infer::Scopes::default(),
             captured: std::sync::OnceLock::new(),
             bindings: std::cell::OnceCell::new(),
-            string_sets: std::cell::OnceCell::new(),
             taken: RefCell::default(),
             store_reads: None,
         }
-    }
-
-    /// Whether the module-level name `name` is bound once, in the module body, to a set of
-    /// text constants (a display, or `set()` / `frozenset()` of one): `EFF112`.
-    pub(crate) fn string_set_global(&self, name: &str) -> bool {
-        self.string_sets
-            .get_or_init(|| crate::order_flow::string_set_globals(self.ir))
-            .contains(name)
     }
 
     /// The module's bindings ([`heki_ir::ModuleBindings`]).
