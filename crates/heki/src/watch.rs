@@ -177,6 +177,9 @@ impl Watcher<'_> {
         let config_files = self.config_files(&env);
         let config = stamps_of(&config_files, earlier.1);
         let files = self.scan(&env, earlier.0)?;
+        // The workspace loads the catalogs again: kept through its analysis, these would be a
+        // second copy at the peak.
+        drop(env);
         let (ws, errors) = Workspace::load(
             &self.opts(),
             &crate::check::selectors(&self.args.analysis),
