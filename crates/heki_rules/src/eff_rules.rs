@@ -2120,7 +2120,9 @@ impl<'a> Reach<'a> {
                 .chain(&b.write_universe)
                 .filter(|t| match &w.what {
                     Unresolved::Receiver(attr) => t.matches_attr(attr),
-                    Unresolved::Name(class) => t.classes.contains(class),
+                    Unresolved::Name(class) | Unresolved::Existing(class) => {
+                        t.classes.contains(class)
+                    }
                     Unresolved::Anything => true,
                 })
                 .peekable();
@@ -2135,7 +2137,7 @@ impl<'a> Reach<'a> {
             }
             let attr = match &w.what {
                 Unresolved::Receiver(attr) => Some(attr.clone()),
-                Unresolved::Name(_) | Unresolved::Anything => None,
+                Unresolved::Name(_) | Unresolved::Existing(_) | Unresolved::Anything => None,
             };
             let nodes = &self.nodes;
             note(

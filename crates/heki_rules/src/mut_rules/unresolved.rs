@@ -56,7 +56,9 @@ pub(super) fn mut205(
                     .iter()
                     .filter(|t| match &w.what {
                         Unresolved::Receiver(attr) => t.matches_attr(attr),
-                        Unresolved::Name(class) => t.classes.contains(class),
+                        Unresolved::Name(class) | Unresolved::Existing(class) => {
+                            t.classes.contains(class)
+                        }
                         Unresolved::Anything => true,
                     })
                     .collect();
@@ -95,7 +97,7 @@ pub(super) fn mut205(
                 let name_family;
                 let (family, callers): (&FxHashSet<String>, _) = match (&w.what, unlisted) {
                     (_, Some(classes)) => (classes, Callers::LeaveTargetClasses(&may_get_key)),
-                    (Unresolved::Name(_), None) => {
+                    (Unresolved::Name(_) | Unresolved::Existing(_), None) => {
                         name_family = families(&hits);
                         (&name_family, Callers::Ignored)
                     }
@@ -117,7 +119,7 @@ pub(super) fn mut205(
                 }
                 let target = match &w.what {
                     Unresolved::Receiver(attr) => attr.clone(),
-                    Unresolved::Name(class) => {
+                    Unresolved::Name(class) | Unresolved::Existing(class) => {
                         cx.decls.class_qualname(class).unwrap_or(class).to_owned()
                     }
                     Unresolved::Anything => "*".to_owned(),
@@ -140,7 +142,7 @@ pub(super) fn mut205(
                         "writes `{attr}` ({}) on an object of unknown class",
                         w.kind.describe()
                     ),
-                    Unresolved::Name(_) => format!(
+                    Unresolved::Name(_) | Unresolved::Existing(_) => format!(
                         "writes an attribute named at run time ({}) on `{target}`",
                         w.kind.describe()
                     ),

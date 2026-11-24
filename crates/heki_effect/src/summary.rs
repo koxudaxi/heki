@@ -24,6 +24,7 @@ use crate::one_at_a_time;
 use crate::order_flow;
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, ReturnOrigins, Source};
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared, container_mutator};
+use crate::resolver::stores::{self, AttrName};
 use crate::resolver::{
     self, Callee, DeclKeys, FunctionDecl, ModuleDecls, TypeCtx, Val, func_qualname,
     is_generator_function, self_aliases,
@@ -549,6 +550,31 @@ struct Owner {
     reach: Reach,
     /// The variable holding the object (`TypedFieldWriteSite::construction`).
     var: Option<VarId>,
+}
+
+/// Which classes a write under a name heki cannot read may add an attribute to
+/// ([`Unresolved::Name`] rather than [`Unresolved::Existing`]).
+#[derive(Debug, Clone, Copy)]
+enum Adds<'s> {
+    /// Every class: the name is computed at run time.
+    Any,
+    /// Those that not every one of these classes is or derives from: the name is a key of the
+    /// namespace of an instance of one of them ([`AttrName::KeyOf`]).
+    UnlessKeysOf(&'s [String]),
+    /// None: the write removes the attribute.
+    Nothing,
+}
+
+impl Adds<'_> {
+    fn to(self, project: &resolver::ProjectDecls, class: &str) -> bool {
+        match self {
+            Self::Any => true,
+            Self::UnlessKeysOf(sources) => {
+                !(sources.iter()).all(|s| project.keys_exist_in(s, class))
+            }
+            Self::Nothing => false,
+        }
+    }
 }
 
 /// `obj.<attr>` with project-class `obj` (or `obj["key"]` with a `TypedDict` `obj`).
@@ -2501,6 +2527,46 @@ impl<'a> Extractor<'a> {
     fn resolved_str(&self, var: VarId) -> Option<String> {
         self.cx
             .str_constant_with(var, &|v| self.defs.get(&v).copied(), &self.types)
+    }
+
+    /// The name the variable `key` holding an attribute name names ([`stores::key_name`]).
+    fn key_name(&self, key: VarId) -> AttrName<'static> {
+        let def = |v: VarId| self.defs.get(&v).copied();
+        stores::key_name(self.cx, self.f, key, &def, &self.types)
+    }
+
+    /// The names the keys of `other` name, stored by `ns.update(other)` ([`stores::update_keys`]).
+    fn update_keys(&self, other: VarId) -> AttrName<'static> {
+        let def = |v: VarId| self.defs.get(&v).copied();
+        stores::update_keys(self.cx, self.f, other, &def, &self.types)
+    }
+
+    /// A store (`removes`: a deletion) of the attribute `name` names on `owner`'s object through
+    /// its namespace or `setattr`: a write of each name a constant gives, or of a name heki
+    /// cannot read ([`Self::computed_name`]).
+    fn write_named(
+        &mut self,
+        owner: Owner,
+        name: &AttrName<'_>,
+        removes: bool,
+        kind: WriteKind,
+        span: Span,
+    ) {
+        let attrs: Vec<&str> = match name {
+            AttrName::Named(attr) => vec![attr],
+            AttrName::OneOf(attrs) => attrs.iter().map(String::as_str).collect(),
+            _ if removes => return self.computed_name(&owner, Adds::Nothing, kind, span),
+            AttrName::KeyOf(sources) => {
+                return self.computed_name(&owner, Adds::UnlessKeysOf(sources), kind, span);
+            }
+            AttrName::Unknown => return self.computed_name(&owner, Adds::Any, kind, span),
+        };
+        for attr in attrs {
+            if removes && owner.is_self {
+                self.summary.invalidates_cached.insert(attr.to_owned());
+            }
+            self.write_owner_attr(owner.clone(), attr, kind, span);
+        }
     }
 
     /// [`Self::memo_fills`]: the writes of the parameters' own attributes that fill a memo or
@@ -4666,7 +4732,8 @@ impl<'a> Extractor<'a> {
                 in_place: true,
                 ..
             } if self.dict_of.contains_key(lhs) => {
-                self.container_method(*lhs, BinOpKind::BitOr.in_place_method(), &[], span);
+                let method = BinOpKind::BitOr.in_place_method();
+                self.container_method(*lhs, method, &[], false, span);
             }
             InstKind::BinOp {
                 dst,
@@ -4756,7 +4823,8 @@ impl<'a> Extractor<'a> {
                 // summary (`Stats.clear()` may change nothing).
                 let changes_recv = !calls_property && !matches!(callee, Callee::Project(..));
                 if container_mutator(method) && changes_recv {
-                    self.container_method(*recv, method, args, span);
+                    let plain = kwargs.is_empty() && star_from.is_none();
+                    self.container_method(*recv, method, args, plain, span);
                     for a in args {
                         if matches!(method.as_str(), "append" | "insert" | "add" | "setdefault") {
                             self.note_escape(*a);
@@ -5510,12 +5578,18 @@ impl<'a> Extractor<'a> {
 
     /// A computed attribute name written on `owner`'s object (`setattr(obj, name, v)`,
     /// `obj.__dict__[name] = v`): unresolved when the object has a project class, or when heki
-    /// knows nothing of its class.
-    fn computed_name(&mut self, owner: &Owner, kind: WriteKind, span: Span) {
+    /// knows nothing of its class. `adds` tells which of the classes it may add an attribute
+    /// to.
+    fn computed_name(&mut self, owner: &Owner, adds: Adds<'_>, kind: WriteKind, span: Span) {
         let Some(var) = owner.var else { return };
         self.change_object(var, span);
         for class in &owner.typed_classes {
-            self.unresolved(Unresolved::Name(class.clone()), Some(var), kind, span);
+            let what = if adds.to(self.cx.project, class) {
+                Unresolved::Name(class.clone())
+            } else {
+                Unresolved::Existing(class.clone())
+            };
+            self.unresolved(what, Some(var), kind, span);
         }
         if owner.typed_classes.is_empty() && self.unknown_class(var) {
             self.unresolved(Unresolved::Anything, Some(var), kind, span);
@@ -5975,14 +6049,11 @@ impl<'a> Extractor<'a> {
     ) {
         if let Some(owner) = self.dict_of.get(&obj).cloned() {
             // `x.__dict__["a"] = v` / `del self.__dict__["prop"]` / `x.__dict__[KEY] = v`.
-            if let Some(k) = self.key_of(key_const, index) {
-                if is_delete && owner.is_self {
-                    self.summary.invalidates_cached.insert(k.clone());
-                }
-                self.write_owner_attr(owner, &k, WriteKind::DictDirect, span);
-            } else {
-                self.computed_name(&owner, WriteKind::DictDirect, span);
-            }
+            let name = match key_const {
+                Some(k) => AttrName::Named(k.to_owned().into()),
+                None => self.key_name(index),
+            };
+            self.write_named(owner, &name, is_delete, WriteKind::DictDirect, span);
             return;
         }
         // The changed entry's key matters only for a typed attribute's container.
@@ -5999,26 +6070,40 @@ impl<'a> Extractor<'a> {
         self.container_mut(obj, method, false, key_const, item_key, span);
     }
 
-    fn container_method(&mut self, recv: VarId, method: &str, args: &[VarId], span: Span) {
+    /// A call of the container method `method` on `recv` with the positional arguments
+    /// `args` (`plain`: and no keyword or `*` argument).
+    fn container_method(
+        &mut self,
+        recv: VarId,
+        method: &str,
+        args: &[VarId],
+        plain: bool,
+        span: Span,
+    ) {
         if let Some(owner) = self.dict_of.get(&recv).cloned() {
-            match method {
-                "pop" | "__delitem__" | "setdefault" | "__setitem__" => {
-                    if let Some(k) = args.first().and_then(|a| self.resolved_str(*a)) {
-                        if owner.is_self && matches!(method, "pop" | "__delitem__") {
-                            self.summary.invalidates_cached.insert(k.clone());
-                        }
-                        self.write_owner_attr(owner, &k, WriteKind::DictDirect, span);
-                    } else {
-                        self.computed_name(&owner, WriteKind::DictDirect, span);
-                    }
+            let kind = WriteKind::DictDirect;
+            match (method, args) {
+                ("pop" | "__delitem__" | "setdefault" | "__setitem__", _) => {
+                    let name = args
+                        .first()
+                        .map_or(AttrName::Unknown, |a| self.key_name(*a));
+                    let removes = matches!(method, "pop" | "__delitem__");
+                    self.write_named(owner, &name, removes, kind, span);
                 }
-                // `update`, `popitem`, `clear`, `|=` (`__ior__`): attributes heki cannot name.
-                _ => {
+                ("update", [other]) if plain => match self.update_keys(*other) {
+                    AttrName::KeyOf(sources) => {
+                        self.computed_name(&owner, Adds::UnlessKeysOf(&sources), kind, span);
+                    }
+                    _ => self.computed_name(&owner, Adds::Any, kind, span),
+                },
+                ("popitem" | "clear", _) => {
                     if method == "clear" && owner.is_self {
                         self.summary.invalidates_cached.insert("*".to_owned());
                     }
-                    self.computed_name(&owner, WriteKind::DictDirect, span);
+                    self.computed_name(&owner, Adds::Nothing, kind, span);
                 }
+                // `update` of keywords, `|=` (`__ior__`): attributes heki cannot name.
+                _ => self.computed_name(&owner, Adds::Any, kind, span),
             }
             return;
         }
@@ -7530,13 +7615,9 @@ impl<'a> Extractor<'a> {
         let args = passed.args;
         if symbol == "builtins.setattr" || symbol == "builtins.object.__setattr__" {
             let Some(obj) = args.first() else { return };
-            match args.get(1).and_then(|a| self.resolved_str(*a)) {
-                Some(attr) => self.write_attr(*obj, &attr, WriteKind::SetAttr, span),
-                None => {
-                    let owner = self.owner_of(*obj);
-                    self.computed_name(&owner, WriteKind::SetAttr, span);
-                }
-            }
+            let name = args.get(1).map_or(AttrName::Unknown, |a| self.key_name(*a));
+            let owner = self.owner_of(*obj);
+            self.write_named(owner, &name, false, WriteKind::SetAttr, span);
             return;
         }
         if symbol == "builtins.getattr" || symbol == "builtins.object.__getattribute__" {
