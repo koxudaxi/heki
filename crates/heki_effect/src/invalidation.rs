@@ -921,7 +921,8 @@ pub(crate) fn propagate_facts(
             let facts = callee
                 .facts(d.from)
                 .expect("the body `body_runs_at` finds is a plain function's or a generator's");
-            for w in crate::callgraph::indirect_writes(bc, callee, facts) {
+            let lead = crate::callgraph::lead_hops(site, site_path, &bc.callee, d.via);
+            for w in crate::callgraph::indirect_writes(index, site, bc, callee, facts, &lead) {
                 let Some(targets) = &w.origin.targets else {
                     continue;
                 };
@@ -944,10 +945,10 @@ pub(crate) fn propagate_facts(
                         contract: k,
                         class_qualname: w.class.to_owned(),
                         attr: w.attr.to_owned(),
-                        kind: WriteKind::IndirectHelper,
+                        kind: w.kind,
                         span: site.span,
                         origin: site.span,
-                        via_chain: crate::callgraph::lead_hops(site, site_path, &bc.callee, d.via),
+                        via_chain: w.via_chain(&lead),
                         reach,
                         obj_params: w.obj_params,
                     });

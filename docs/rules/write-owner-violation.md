@@ -15,7 +15,12 @@ Checks writes to attributes and containers that a `[[tool.heki.write-owners]]` c
 reserves for a set of allowed writer functions. A write is reported when it happens outside the
 allowed writers:
 
-- directly (`model.fields = [...]`, `model.fields.append(...)`, `del model.fields`);
+- directly (`model.fields = [...]`, `model.fields.append(...)`, `del model.fields`), also by
+  calling on the attribute's value a project method that changes its own `self` in place, in
+  its body, through its calls on `self`, or through `super()` (`model.bag.add(x)` with
+  `def add(self, name): self[name] = 1`): the call changes the value as a builtin container's
+  changing method does, whether or not the contract allows the method itself. A method that
+  only reads its `self`, or changes only an object it builds, writes nothing;
 - through a local alias (`fields = model.fields; fields.append(...)`), also one a scope nested
   in the function reads from it (a nested function, a lambda, a comprehension, or a generator
   expression: `lambda: fields.append(x)`) unless a nested scope rebinds it (`nonlocal`), one
@@ -200,6 +205,8 @@ Its premises:
 - **Through helpers**: a helper's write, read, or call counts at its caller (with
   `attribution = "lexical"`: only a helper changing a typed object it is handed without knowing
   its class). Open: one path of the helper is enough.
+- **Changed by its method**: a project method called on the attribute's value changes its own
+  `self` in place. Open: one path of the method is enough.
 
 ## Why is this bad?
 Large code bases often have one component that owns a piece of shared state (a store, a
