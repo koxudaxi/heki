@@ -162,9 +162,16 @@ Each step of the chain is established, not assumed:
   connection opened from a value heki does not know waits. `sqlite3.connect` is the one
   exception, as its in-memory form is common: a SQLite connection waits only when heki
   establishes that it was opened on a file (a literal or a module constant without an in-memory
-  form, or a path built from such parts and `__file__`), and any other may be in memory. A local
-  or a module global annotated with the connection's or the cursor's class
-  (`cur: sqlite3.Cursor = conn.execute(...)`) keeps where it was opened.
+  form, or a path built from such parts and `__file__`, also a module constant bound to such a
+  path and read in a function or another module, unless another module rebinds it), and any
+  other may be in memory. A local or a module global annotated with the connection's or the
+  cursor's class (`cur: sqlite3.Cursor = conn.execute(...)`) keeps where it was opened, and so
+  does the result of a function annotated with the class whose every `return` gives a
+  connection opened where the same one is (`def connect() -> sqlite3.Connection: return
+  sqlite3.connect(DB_PATH)`), as its module's own code shows it. A function without a return
+  annotation, one whose returns open the database in different places, and one returning a
+  connection another module gives it or that another function of its module returns stay
+  open.
 
 Waits on another thread (`Thread.join()`, `Event.wait()`, acquiring a lock, `Queue.get()`,
 `put()` on a bounded queue, `Future.result()`, `Executor.shutdown()`) end at once when that
