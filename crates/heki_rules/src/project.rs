@@ -235,6 +235,18 @@ pub fn display_path(path: &Path) -> PathBuf {
 /// `working_dir` when that holds `start`, as Ruff and ty take it, but never a directory above the
 /// top of the working tree: then the top itself. Outside both, it is `start`'s own directory.
 pub fn find_root(start: &Path, working_dir: &Path) -> PathBuf {
+    locate_root(start, working_dir).dir
+}
+
+/// A project root [`find_root`] found.
+struct FoundRoot {
+    dir: PathBuf,
+    /// A configuration file or the top of a Git working tree is at or above `start`: the root
+    /// belongs to a project, not only to the place the run was started from.
+    marked: bool,
+}
+
+fn locate_root(start: &Path, working_dir: &Path) -> FoundRoot {
     let start = canonical_or_given(start);
     let dir = if start.is_dir() {
         start.clone()
@@ -244,7 +256,10 @@ pub fn find_root(start: &Path, working_dir: &Path) -> PathBuf {
     let mut git_top = None;
     for d in dir.ancestors() {
         if CONFIG_MARKERS.iter().any(|m| d.join(m).exists()) {
-            return d.to_path_buf();
+            return FoundRoot {
+                dir: d.to_path_buf(),
+                marked: true,
+            };
         }
         if d.join(".git").exists() {
             git_top = Some(d);
@@ -253,10 +268,66 @@ pub fn find_root(start: &Path, working_dir: &Path) -> PathBuf {
     }
     let working_dir = canonical_or_given(working_dir);
     let holds_start = dir.starts_with(&working_dir);
-    match git_top {
+    let marked = git_top.is_some();
+    let dir = match git_top {
         Some(top) if !(holds_start && working_dir.starts_with(top)) => top.to_path_buf(),
         _ if holds_start => working_dir,
         _ => dir,
+    };
+    FoundRoot { dir, marked }
+}
+
+/// What the paths of a command line name: the paths it analyzes, and the files whose reports
+/// `heki check` shows.
+///
+/// A file is checked in its project. Whether a report in it holds depends on its callers,
+/// subclasses, and rebindings anywhere in the project, so a file given alone, or with other
+/// files, names the project root [`find_root`] finds for the first of them: the run analyzes
+/// that root and reports on the files. With directories, the directories are analyzed (a chosen
+/// set of files, such as `src` without `tests`) and the files select what is shown. A file
+/// outside any project, with no configuration file and no Git working tree above it, is analyzed
+/// alone, as the whole program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandPaths {
+    pub analyzed: Vec<PathBuf>,
+    /// Empty when the run shows the reports of everything it analyzes.
+    pub files: Vec<PathBuf>,
+}
+
+impl CommandPaths {
+    /// The meaning of `paths` (the working directory when empty) for a run from the current
+    /// directory. A path that does not exist stays among the analyzed ones, where loading the
+    /// project reports it.
+    pub fn of(paths: &[PathBuf]) -> Self {
+        let (files, dirs): (Vec<PathBuf>, Vec<PathBuf>) =
+            paths.iter().cloned().partition(|p| p.is_file());
+        if files.is_empty() || !dirs.is_empty() {
+            let analyzed = if dirs.is_empty() {
+                vec![PathBuf::from(".")]
+            } else {
+                dirs
+            };
+            return Self { analyzed, files };
+        }
+        let working_dir = std::env::current_dir().unwrap_or_default();
+        let root = locate_root(&files[0], &working_dir);
+        if !root.marked {
+            return Self {
+                analyzed: files,
+                files: Vec::new(),
+            };
+        }
+        // The working directory is written `.`, so that the paths the run prints are those of a
+        // run from the root.
+        let analyzed = if canonical_or_given(&working_dir) == root.dir {
+            PathBuf::from(".")
+        } else {
+            root.dir
+        };
+        Self {
+            analyzed: vec![analyzed],
+            files,
+        }
     }
 }
 
@@ -389,20 +460,16 @@ pub fn files_left_out(
 }
 
 /// The Python files that discovery from the root of `project` finds (with the same ignore files
-/// and `exclude`) and the `paths` it was loaded from leave out ([`files_left_out`]: at most
+/// and `exclude`) and the paths it was loaded from leave out ([`files_left_out`]: at most
 /// `limit`, among the first `max_entries` entries of the walk, with whether it saw every entry).
 /// Paths that hold the root leave nothing out.
 pub fn paths_leave_out(
     project: &Project,
-    paths: &[PathBuf],
     limit: usize,
     max_entries: usize,
 ) -> Result<(Vec<PathBuf>, bool), ProjectError> {
     let env = &project.env;
-    let holds_root = paths
-        .iter()
-        .any(|p| canonical(p).is_ok_and(|p| env.root.starts_with(p)));
-    if holds_root {
+    if project.covered()("") {
         return Ok((Vec::new(), true));
     }
     let analyzed: FxHashSet<String> = project
@@ -420,6 +487,105 @@ pub fn paths_leave_out(
         limit,
         max_entries,
     ))
+}
+
+/// A project module that an analyzed file imports and the paths of the run leave out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeftOutImport {
+    pub module: String,
+    /// Keyed like [`ParsedFile::path`].
+    pub path: PathBuf,
+}
+
+/// The project modules that the analyzed files of `project` import (an import outside `if
+/// TYPE_CHECKING:`, wherever it runs) and its paths leave out ([`paths_leave_out`], among the
+/// first `max_entries` entries of the walk), sorted by name: code the run's own files run and
+/// the run did not analyze. A run over a chosen set of files (`src` without `tests`) imports
+/// none of the others.
+pub fn imports_left_out(
+    project: &Project,
+    max_entries: usize,
+) -> Result<Vec<LeftOutImport>, ProjectError> {
+    let (left_out, _) = paths_leave_out(project, usize::MAX, max_entries)?;
+    if left_out.is_empty() {
+        return Ok(Vec::new());
+    }
+    let env = &project.env;
+    let left_out: FxHashMap<String, PathBuf> = left_out
+        .into_iter()
+        .map(|path| {
+            let (module, _) = module_of(&rel_posix(&path, &env.root), &path, &env.layout);
+            (module, display_path(&path))
+        })
+        .collect();
+    let analyzed: FxHashSet<&str> = project
+        .files
+        .iter()
+        .map(|f| f.module_name.as_str())
+        .collect();
+    let mut found = std::collections::BTreeMap::new();
+    for file in &project.files {
+        for candidates in imported_modules(file) {
+            // The deepest name that is a module of the project: `pkg.sub` of `from pkg import
+            // sub` when it is a module, else `pkg`.
+            let Some(module) = candidates
+                .into_iter()
+                .flatten()
+                .find(|m| analyzed.contains(m.as_str()) || left_out.contains_key(m))
+            else {
+                continue;
+            };
+            if let Some((module, path)) = left_out.get_key_value(&module) {
+                found.entry(module).or_insert(path);
+            }
+        }
+    }
+    Ok(found
+        .into_iter()
+        .map(|(module, path)| LeftOutImport {
+            module: module.clone(),
+            path: path.clone(),
+        })
+        .collect())
+}
+
+/// For each import of `file` that runs (not under `if TYPE_CHECKING:`), the modules it may
+/// load, deepest first: `a.b` of `import a.b`, `m.name` then `m` of `from m import name`, with
+/// relative imports resolved. `None` for a relative import climbing past the top-level package.
+fn imported_modules(file: &ParsedFile) -> impl Iterator<Item = [Option<String>; 2]> + '_ {
+    let base = |level: u32, module: Option<&str>| {
+        heki_effect::resolver::resolve_relative_module(
+            &file.module_name,
+            file.is_package,
+            level,
+            module,
+            file.root_is_package,
+        )
+    };
+    let semantic = &file.semantic;
+    let imports = semantic
+        .imports
+        .iter()
+        .filter(|i| !i.in_type_checking)
+        .map(move |i| {
+            if !i.is_from {
+                return [Some(i.imported_name.clone()), None];
+            }
+            let from = base(i.level, i.module.as_deref());
+            // `from . import x` in a root that is a package names `x`.
+            let named = (from.as_ref()).map(|m| {
+                format!("{m}.{}", i.imported_name)
+                    .trim_start_matches('.')
+                    .to_owned()
+            });
+            [named, from]
+        });
+    let stars = semantic
+        .star_imports
+        .iter()
+        .filter(|s| !s.in_type_checking)
+        .map(move |s| [base(s.level, s.module.as_deref()), None]);
+    imports.chain(stars)
 }
 
 /// Whether [`collect_files`] over the directory `dir` finds `file` (both absolute): the same
@@ -517,6 +683,8 @@ pub fn unread_module(path: &Path, root: &Path, layout: &ModuleLayout) -> UnreadM
 /// Where a run looks for files and configuration.
 #[derive(Default)]
 pub struct ProjectOptions<'a> {
+    /// The files and directories to analyze, at least one: the commands default to the working
+    /// directory (`.`), and the language server names its workspace folder.
     pub paths: &'a [PathBuf],
     pub config: Option<&'a Path>,
     /// The directory the run works from, where a project without a configuration file is
@@ -716,6 +884,8 @@ impl std::fmt::Display for FileError {
 /// A discovered, parsed project.
 pub struct Project {
     pub env: ProjectEnv,
+    /// The paths discovery walked ([`ProjectOptions::paths`]).
+    pub paths: Vec<PathBuf>,
     pub files: Vec<ParsedFile>,
     pub errors: Vec<FileError>,
     /// The files of `errors` that heki could not read or parse: modules it knows nothing about.
@@ -726,11 +896,7 @@ impl Project {
     pub fn load(opts: &ProjectOptions<'_>) -> Result<Self, ProjectError> {
         let env = ProjectEnv::load(opts)?;
         let exclude = exclude_set(&env.cfg)?;
-        let paths = if opts.paths.is_empty() {
-            vec![PathBuf::from(".")]
-        } else {
-            opts.paths.to_vec()
-        };
+        let paths = opts.paths.to_vec();
         let mut found = collect_files(&paths, &env.root, &exclude)?;
         if let Some(removed) = opts.removed {
             found.retain(|p| !removed.contains(&display_path(p)));
@@ -769,10 +935,26 @@ impl Project {
         }
         Ok(Self {
             env,
+            paths,
             files,
             errors,
             unread,
         })
+    }
+
+    /// Whether the file at a project-relative path (one that exists or not) is in what the
+    /// paths of the run cover: below one of its directories, or one of its files. A run over
+    /// part of the project says nothing about the other files.
+    pub fn covered(&self) -> impl Fn(&str) -> bool + '_ {
+        let walked: Vec<PathBuf> = self
+            .paths
+            .iter()
+            .filter_map(|p| canonical(p).ok())
+            .collect();
+        move |rel| {
+            let file = self.env.root.join(rel);
+            walked.iter().any(|p| file.starts_with(p))
+        }
     }
 
     pub fn inputs(&self) -> Vec<ModuleInput<'_>> {

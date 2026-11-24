@@ -36,9 +36,10 @@ OPT103 = "warning"
    `pyproject.toml` without `[tool.heki]` still marks the root: its project gets the defaults.
 3. `--config <path>` names the file instead. The project root stays where step 1 finds it.
 
-One run checks one project: its configuration applies to every file of the run, also to files
-given from another project. `heki check a/one.py b/two.py` uses `a/`'s configuration for both, so
-check projects with their own configurations in separate runs: `heki check a/`, then
+One run checks one project: its configuration applies to every file of the run, also to
+directories given from another project. Files given name the project of the first one:
+`heki check a/one.py b/two.py` checks `a/`'s project and names `b/two.py` in a warning when it is
+not in it. Check projects with their own configurations in separate runs: `heki check a/`, then
 `heki check b/`.
 
 ### Which tables hold the settings
@@ -203,7 +204,22 @@ the installed release changed, and the changelog on GitHub lists every release.
 - Without paths, `heki check` checks every `.py` and `.pyi` file under the current directory.
 - Discovery skips hidden files and directories, the paths `exclude` and `extend-exclude` match,
   and the entries of `.gitignore` (inside a Git repository), `.ignore`, and `.hekiignore` files.
-- Files named on the command line are always checked.
+- Directories given are analyzed as given: heki takes the files it finds there as the whole
+  program, so a chosen set such as `src` without `tests` keeps the claims of the tests out.
+- A file given is checked in its project. Whether a report in it holds depends on its callers,
+  subclasses, and rebindings anywhere in the project, so `heki check app/api.py` analyzes the
+  project root heki finds for the file (as above, from wherever heki runs), shows and fails on
+  the reports that touch the file, and fixes only the file, as
+  [`--touched`](cli-reference.md#heki-check) does: `heki check <root> --touched app/api.py`.
+  Several files make one run over the project of the first. With directories, the directories
+  are analyzed and the files select what is shown. A file the project leaves out (excluded,
+  ignored, or not a `.py` or `.pyi` file) is named in a warning. `--update-baseline` and
+  `--watch` take directories.
+- A file outside any project, with no configuration file and no Git working tree above it, is
+  analyzed alone, whatever its extension.
+- A directory below the project root, given or the current directory, is analyzed as given. When
+  its files import project modules it leaves out, the run misses what they do, and says so in a
+  note naming them.
 
 ## Rule selection: `[tool.heki.lint]`
 
@@ -1077,12 +1093,17 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   included: it needs only what holds that part (`pkg.store` of `pkg.store:*`, the class of
   `Field._*`, the function of `run.*`). A glob without a literal holder (`*_helper`, `__*__`) is
   not judged.
+- The names offered are found by comparing an entry with the names that share its holder or its
+  last part. A run makes at most 64 such comparisons per function and class of the project (at
+  least 4,096) for all its entries, so of thousands of entries that name nothing in a large
+  module only the first get names. Every entry is still reported.
 - The warnings do not fail the run; with `unmatched-contract-entries = "error"` they are errors,
   which fail it, and `"ignore"` turns them off. A suppression comment or a baseline does not
   hide them.
 - Without the key, only a run over the whole project judges: one whose paths leave out Python
-  files below the project root (`heki check pkg/store.py`) would find unmatched the entries
-  naming code in the others. With the key set, every run judges the files it analyzes.
+  files below the project root (`heki check pkg/stores`) would find unmatched the entries naming
+  code in the others. A file given is checked in its project, so its run judges. With the key
+  set, every run judges the files it analyzes.
 - `--watch` and the language server do not report them.
 
 ## Imports: `[tool.heki.imports]`
@@ -1222,10 +1243,10 @@ a.py:6:12: unused-suppression No `EFF101` report on this line to suppress
   A suppression without codes is never reported as unused: a bare `# heki: ignore` covers rules
   that did not run, and a bare `# noqa` belongs to Ruff as much as to heki.
 - A run judges what it reported, under its configuration: with `relax-async-in-tests`, a
-  suppression of `EFF101` in a test suppresses nothing. A run over some files of a project misses
-  the reports that come from the others (`heki check a.py` when the blocking call is in `b.py`),
-  so judge, and fix, on the whole project: to look at some files, pass them to `--touched`, which
-  keeps the analysis whole, as the pre-commit hook does.
+  suppression of `EFF101` in a test suppresses nothing. A run over a directory of a project misses
+  the reports that come from the others (`heki check app` when the blocking call is in `lib/`),
+  so judge, and fix, on the whole project: to look at some files, name them or pass them to
+  `--touched`, which keeps the analysis whole, as the pre-commit hook does.
 - `heki check --fix` (and `--diff`) removes the unused codes, and the language server offers the
   same edit as a quick fix. The other codes stay; a suppression left without codes goes, with
   the blanks before it, and so does its line when the comment is alone on it. Other text of the

@@ -142,7 +142,9 @@ enum Commands {
 
 #[derive(Debug, Args)]
 struct CheckArgs {
-    /// Files or directories to check.
+    /// Directories to analyze, and files to report on: a file is checked in its project, as
+    /// `--touched` does from the project root (with directories, the directories are analyzed).
+    /// A file outside any project is analyzed alone.
     #[arg(default_value = ".")]
     paths: Vec<PathBuf>,
     /// Apply `safe` + `unconditional` fixes (`OPT101`/`OPT102`).
@@ -154,10 +156,10 @@ struct CheckArgs {
     /// Preview fixes as a unified diff without writing files.
     #[arg(long)]
     diff: bool,
-    /// Show, fix, and fail on only the diagnostics in one of these files or with a hop of their
-    /// call chain (`related`) in one, such as the files a commit or a pull request changed; the
-    /// analysis still covers PATHS (put PATHS before the option). A path that is not an analyzed
-    /// file is named in a warning.
+    /// Show and fail on only the diagnostics in one of these files or with a hop of their call
+    /// chain (`related`) in one, such as the files a commit or a pull request changed, and let
+    /// `--fix` and `--diff` rewrite only these files; the analysis still covers PATHS (put PATHS
+    /// before the option). A path that is not an analyzed file is named in a warning.
     #[arg(
         long,
         value_name = "FILE",
@@ -187,7 +189,8 @@ struct CheckArgs {
     /// anywhere), `always`, or `never`.
     #[arg(long, value_enum, value_name = "WHEN", default_value_t = ColorChoice::Auto)]
     color: ColorChoice,
-    /// Generate or shrink-update the Ratchet baseline file.
+    /// Generate or shrink-update the Ratchet baseline file, from directories: the entries of
+    /// files the paths leave out stay as they are.
     #[arg(long)]
     update_baseline: bool,
     /// Experimental: offline profile dump (collapsed stacks of CPython 3.15's profiler or py-spy, or `--gecko`
@@ -195,7 +198,7 @@ struct CheckArgs {
     /// `--include-size-dependent`).
     #[arg(long)]
     profile: Option<PathBuf>,
-    /// Watch for file changes and re-run incrementally.
+    /// Watch the directories given for file changes and re-run incrementally.
     #[arg(long)]
     watch: bool,
     /// Experimental: print a prompt for consulting a language model about this run instead of
@@ -390,7 +393,7 @@ fn activation_word(rule: &RuleMeta) -> &'static str {
 
 #[derive(Debug, Args)]
 struct SnapshotArgs {
-    /// Files or directories to summarize.
+    /// Directories to summarize; a file names its project, as for `heki check`.
     #[arg(default_value = ".")]
     paths: Vec<PathBuf>,
     /// Write `.heki-summary-snapshot.json` at the project root (default: print it).

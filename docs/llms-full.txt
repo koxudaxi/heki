@@ -958,11 +958,13 @@ reports it left out. `--heuristic` adds them; they can be wrong about the code, 
 labels them.
 
 heki checks every Python file under the current directory, except the
-[excluded and ignored ones](https://heki.koxudaxi.dev/configuration/#which-files-are-checked). Pass files or directories
-to narrow it:
+[excluded and ignored ones](https://heki.koxudaxi.dev/configuration/#which-files-are-checked). Pass directories to narrow
+it, or files to look at: a file is checked in its project, so heki still analyzes the whole
+project and shows the reports that touch the file.
 
 ```console
-$ heki check src/ tests/test_api.py
+$ heki check src/
+$ heki check app/api.py
 ```
 
 ## Read a diagnostic
@@ -1141,9 +1143,10 @@ OPT103 = "warning"
    `pyproject.toml` without `[tool.heki]` still marks the root: its project gets the defaults.
 3. `--config <path>` names the file instead. The project root stays where step 1 finds it.
 
-One run checks one project: its configuration applies to every file of the run, also to files
-given from another project. `heki check a/one.py b/two.py` uses `a/`'s configuration for both, so
-check projects with their own configurations in separate runs: `heki check a/`, then
+One run checks one project: its configuration applies to every file of the run, also to
+directories given from another project. Files given name the project of the first one:
+`heki check a/one.py b/two.py` checks `a/`'s project and names `b/two.py` in a warning when it is
+not in it. Check projects with their own configurations in separate runs: `heki check a/`, then
 `heki check b/`.
 
 ### Which tables hold the settings
@@ -1308,7 +1311,22 @@ the installed release changed, and the changelog on GitHub lists every release.
 - Without paths, `heki check` checks every `.py` and `.pyi` file under the current directory.
 - Discovery skips hidden files and directories, the paths `exclude` and `extend-exclude` match,
   and the entries of `.gitignore` (inside a Git repository), `.ignore`, and `.hekiignore` files.
-- Files named on the command line are always checked.
+- Directories given are analyzed as given: heki takes the files it finds there as the whole
+  program, so a chosen set such as `src` without `tests` keeps the claims of the tests out.
+- A file given is checked in its project. Whether a report in it holds depends on its callers,
+  subclasses, and rebindings anywhere in the project, so `heki check app/api.py` analyzes the
+  project root heki finds for the file (as above, from wherever heki runs), shows and fails on
+  the reports that touch the file, and fixes only the file, as
+  [`--touched`](https://heki.koxudaxi.dev/cli-reference/#heki-check) does: `heki check <root> --touched app/api.py`.
+  Several files make one run over the project of the first. With directories, the directories
+  are analyzed and the files select what is shown. A file the project leaves out (excluded,
+  ignored, or not a `.py` or `.pyi` file) is named in a warning. `--update-baseline` and
+  `--watch` take directories.
+- A file outside any project, with no configuration file and no Git working tree above it, is
+  analyzed alone, whatever its extension.
+- A directory below the project root, given or the current directory, is analyzed as given. When
+  its files import project modules it leaves out, the run misses what they do, and says so in a
+  note naming them.
 
 ## Rule selection: `[tool.heki.lint]`
 
@@ -2182,12 +2200,17 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   included: it needs only what holds that part (`pkg.store` of `pkg.store:*`, the class of
   `Field._*`, the function of `run.*`). A glob without a literal holder (`*_helper`, `__*__`) is
   not judged.
+- The names offered are found by comparing an entry with the names that share its holder or its
+  last part. A run makes at most 64 such comparisons per function and class of the project (at
+  least 4,096) for all its entries, so of thousands of entries that name nothing in a large
+  module only the first get names. Every entry is still reported.
 - The warnings do not fail the run; with `unmatched-contract-entries = "error"` they are errors,
   which fail it, and `"ignore"` turns them off. A suppression comment or a baseline does not
   hide them.
 - Without the key, only a run over the whole project judges: one whose paths leave out Python
-  files below the project root (`heki check pkg/store.py`) would find unmatched the entries
-  naming code in the others. With the key set, every run judges the files it analyzes.
+  files below the project root (`heki check pkg/stores`) would find unmatched the entries naming
+  code in the others. A file given is checked in its project, so its run judges. With the key
+  set, every run judges the files it analyzes.
 - `--watch` and the language server do not report them.
 
 ## Imports: `[tool.heki.imports]`
@@ -2327,10 +2350,10 @@ a.py:6:12: unused-suppression No `EFF101` report on this line to suppress
   A suppression without codes is never reported as unused: a bare `# heki: ignore` covers rules
   that did not run, and a bare `# noqa` belongs to Ruff as much as to heki.
 - A run judges what it reported, under its configuration: with `relax-async-in-tests`, a
-  suppression of `EFF101` in a test suppresses nothing. A run over some files of a project misses
-  the reports that come from the others (`heki check a.py` when the blocking call is in `b.py`),
-  so judge, and fix, on the whole project: to look at some files, pass them to `--touched`, which
-  keeps the analysis whole, as the pre-commit hook does.
+  suppression of `EFF101` in a test suppresses nothing. A run over a directory of a project misses
+  the reports that come from the others (`heki check app` when the blocking call is in `lib/`),
+  so judge, and fix, on the whole project: to look at some files, name them or pass them to
+  `--touched`, which keeps the analysis whole, as the pre-commit hook does.
 - `heki check --fix` (and `--diff`) removes the unused codes, and the language server offers the
   same edit as a quick fix. The other codes stay; a suppression left without codes goes, with
   the blanks before it, and so does its line when the comment is alone on it. Other text of the
@@ -2384,6 +2407,9 @@ $ heki check --fix --profile profile.txt         # size-dependent rewrites in ho
   another loop it is heuristic, and its fix applies with `--heuristic` or when its rule is
   selected.
 - `--diff` takes the same flags as `--fix` and writes nothing.
+- With `--touched`, or files given as paths, `--fix` and `--diff` rewrite only those files. A
+  shown report in another file (one whose call chain reaches a touched file) keeps its fix, and
+  the run says how many it left: a pre-commit hook never rewrites a file the commit left alone.
 - `--include-size-dependent` applies the size-dependent rewrites in every function, with or
   without `--profile`.
 - `--profile` alone applies them only in the functions a [profile](https://heki.koxudaxi.dev/fixes/#profiles) shows hot.
@@ -2595,6 +2621,12 @@ The recorded set can only shrink:
 
 To record new findings on purpose, delete the baseline and record it again.
 
+A run over part of the project (`heki check pkg_a --baseline heki-baseline.toml`) compares and
+updates only the entries of the files below its paths: the entries of the other files stay as
+they are, since the run did not analyze them. A baseline written before version 2 is updated
+whole first. `--update-baseline` takes directories: a file given to `heki check` selects what is
+shown, and a baseline records every report of what a run covers.
+
 ### What an entry counts
 
 Each entry counts violation sites, not reports (`sites` in JSON output):
@@ -2623,7 +2655,10 @@ and the reports whose call chain reaches one of them: after a change to `app/use
 files the commit left alone are not. A project can run the hook from its first commit, without a
 baseline. A change can also make a report appear in a file the commit left alone without a call chain
 through the change, for example when a type annotation that another module relied on is removed;
-such a report is not shown here, so run the whole project in continuous integration.
+such a report is not shown here, so run the whole project in continuous integration. A local hook
+may also pass the files as paths (`entry: heki check`): a file given to `heki check` is checked in
+its project, as with `--touched`. With `--fix`, the hook rewrites only the staged files: the fix
+of a shown report in another file is left, and the run says how many were.
 
 ```yaml
 # .pre-commit-config.yaml
@@ -3232,7 +3267,7 @@ Usage: heki check [OPTIONS] [PATHS]...
 
 Arguments:
   [PATHS]...
-          Files or directories to check
+          Directories to analyze, and files to report on: a file is checked in its project, as `--touched` does from the project root (with directories, the directories are analyzed). A file outside any project is analyzed alone
           
           [default: .]
 
@@ -3247,7 +3282,7 @@ Options:
           Preview fixes as a unified diff without writing files
 
       --touched <FILE>...
-          Show, fix, and fail on only the diagnostics in one of these files or with a hop of their call chain (`related`) in one, such as the files a commit or a pull request changed; the analysis still covers PATHS (put PATHS before the option). A path that is not an analyzed file is named in a warning
+          Show and fail on only the diagnostics in one of these files or with a hop of their call chain (`related`) in one, such as the files a commit or a pull request changed, and let `--fix` and `--diff` rewrite only these files; the analysis still covers PATHS (put PATHS before the option). A path that is not an analyzed file is named in a warning
 
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
@@ -3290,13 +3325,13 @@ Options:
           [possible values: auto, always, never]
 
       --update-baseline
-          Generate or shrink-update the Ratchet baseline file
+          Generate or shrink-update the Ratchet baseline file, from directories: the entries of files the paths leave out stay as they are
 
       --profile <PROFILE>
           Experimental: offline profile dump (collapsed stacks of CPython 3.15's profiler or py-spy, or `--gecko` JSON): apply the `size-dependent` fixes in its hot functions (in every function with `--include-size-dependent`)
 
       --watch
-          Watch for file changes and re-run incrementally
+          Watch the directories given for file changes and re-run incrementally
 
       --generate-prompt [<QUESTION>]
           Experimental: print a prompt for consulting a language model about this run instead of the report: the configuration, the rules that apply, the diagnostics, how to answer, and QUESTION when given (put PATHS before the option). `--output-format json` prints it as JSON. Writes no file and exits with 0
@@ -3327,6 +3362,8 @@ Exit codes:
 Examples:
   heki check src tests
       check two directories
+  heki check app/api.py
+      analyze the file's project, report only what touches the file
   heki check --select EFF,MUT101 --ignore OPT110
       choose the rules for one run
   heki check --touched app/users.py app/api.py
@@ -3444,7 +3481,7 @@ Usage: heki snapshot [OPTIONS] [PATHS]...
 
 Arguments:
   [PATHS]...
-          Files or directories to summarize
+          Directories to summarize; a file names its project, as for `heki check`
           
           [default: .]
 
@@ -4542,17 +4579,20 @@ inspect` says what one function does, so an agent does not read its callees to f
 
 ## Analyze the project, not one file
 
-heki follows calls across files. `heki check app/api.py` analyzes that file alone and misses what
-its callees do: run heki on the project (the default `.`).
+heki follows calls across files, so it analyzes a project, never one file alone: `heki check
+app/api.py` analyzes the project the file is in and shows the diagnostics that touch the file.
+A directory below the project root is analyzed as given and misses what its callees elsewhere do
+(heki notes the project modules its files import that it left out): run heki from the project
+root.
 
 A diagnostic sits where the problem shows, which is often not the file that was edited. In the
 [first example](https://heki.koxudaxi.dev/#a-blocking-call-two-helpers-below-an-async-def) of the overview, adding
 `requests.get` to `app/users.py` makes `EFF101` report at `app/api.py`, in the `async def` that
 reaches it through two helpers. To see the diagnostics an edit can have caused, pass the edited
-files to `--touched`: heki still analyzes the project, and shows only the diagnostics whose `path`
-or any `related[].path` is one of them, so the report in `app/api.py` stays while `app/users.py`
-is the only edited file. The summary, the exit code, and every output format follow the
-diagnostics shown.
+files to `--touched`, or name them as paths: heki still analyzes the project, and shows only the
+diagnostics whose `path` or any `related[].path` is one of them, so the report in `app/api.py`
+stays while `app/users.py` is the only edited file. The summary, the exit code, and every output
+format follow the diagnostics shown.
 
 ```console
 $ heki check --touched app/users.py --output-format json

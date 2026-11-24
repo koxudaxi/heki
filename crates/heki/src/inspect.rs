@@ -4,7 +4,7 @@
 //! that one analysis, as an array. Exit codes: 0 inspected, 2 when a symbol names no single
 //! function or a file could not be analyzed (the reports are still printed).
 
-use crate::check::{baseline_path, load_and_index, shown_errors};
+use crate::check::{baseline_path, load_and_index, shown_errors, warn_files_not_analyzed};
 use crate::{InspectArgs, OutputFormat, ReportFormat};
 use anyhow::{Context, Result};
 use heki_diagnostics::{Diagnostic, RatchetBaseline, path_text};
@@ -15,7 +15,7 @@ use heki_rules::inspect::{
     Functions, GlobMatches, InspectInputs, InspectQuery, InspectReport, Inspector, MAX_CALLERS,
     MAX_CANDIDATES, Resolution, Symbol, render_text, resolve_line,
 };
-use heki_rules::project::{Facts, Indexed, ParsedFile, canonical, regressed};
+use heki_rules::project::{CommandPaths, Facts, Indexed, ParsedFile, canonical, regressed};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
 use serde_json::json;
@@ -87,13 +87,15 @@ pub(crate) fn run(args: &InspectArgs) -> Result<ExitCode> {
 /// function: 2 when it names no module of the project, or a file could not be analyzed.
 fn run_imports(args: &InspectArgs) -> Result<ExitCode> {
     let json = args.output_format == ReportFormat::Json;
+    let paths = CommandPaths::of(&args.paths);
     let indexed = load_and_index(
-        &args.paths,
+        &paths.analyzed,
         &args.analysis,
         OutputFormat::Full,
         None,
         Facts::Imports,
     )?;
+    warn_files_not_analyzed(&paths, &indexed.project, OutputFormat::Full);
     let errors = shown_errors(&indexed.project.errors);
     let problems = crate::failure::of_files(&indexed.project.errors);
     let report = match imports_report(&indexed, &args.symbol) {
@@ -138,7 +140,16 @@ fn run_function(args: &InspectArgs) -> Result<ExitCode> {
         .any(std::result::Result::is_ok)
         .then(|| {
             let format = OutputFormat::Full;
-            load_and_index(&args.paths, &args.analysis, format, None, Facts::Inspect)
+            let paths = CommandPaths::of(&args.paths);
+            let indexed = load_and_index(
+                &paths.analyzed,
+                &args.analysis,
+                format,
+                None,
+                Facts::Inspect,
+            )?;
+            warn_files_not_analyzed(&paths, &indexed.project, format);
+            Ok::<_, anyhow::Error>(indexed)
         })
         .transpose()?;
     let (errors, problems) = indexed.as_ref().map_or_else(Default::default, |i| {

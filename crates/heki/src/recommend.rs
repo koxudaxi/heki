@@ -3,10 +3,13 @@
 //! printed, 2 configuration, I/O, or syntax errors (the report of the other files is still
 //! printed). It writes no file.
 
-use crate::check::{baseline_path, finish, load, shown_dir, shown_errors, shown_text};
+use crate::check::{
+    baseline_path, finish, load, shown_dir, shown_errors, shown_text, warn_files_not_analyzed,
+};
 use crate::{OutputFormat, RecommendArgs, ReportFormat};
 use anyhow::Result;
 use heki_diagnostics::RatchetBaseline;
+use heki_rules::project::CommandPaths;
 use heki_rules::recommend::{Request, recommend};
 use std::process::ExitCode;
 
@@ -16,7 +19,10 @@ pub(crate) fn run(args: &RecommendArgs) -> Result<ExitCode> {
         println!("{}", serde_json::to_string_pretty(&schema)?);
         return Ok(ExitCode::SUCCESS);
     }
-    let (project, current, snapshot) = load(&args.paths, &args.analysis, OutputFormat::Full, None)?;
+    let paths = CommandPaths::of(&args.paths);
+    let (project, current, snapshot) =
+        load(&paths.analyzed, &args.analysis, OutputFormat::Full, None)?;
+    warn_files_not_analyzed(&paths, &project, OutputFormat::Full);
     let baseline = match baseline_path(&args.analysis, &project.env) {
         Some(path) => Some(RatchetBaseline::load(&path)?),
         None => None,

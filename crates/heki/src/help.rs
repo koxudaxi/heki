@@ -80,6 +80,10 @@ pub(crate) const CHECK: LongHelp = LongHelp {
     examples: &[
         ("heki check src tests", "check two directories"),
         (
+            "heki check app/api.py",
+            "analyze the file's project, report only what touches the file",
+        ),
+        (
             "heki check --select EFF,MUT101 --ignore OPT110",
             "choose the rules for one run",
         ),

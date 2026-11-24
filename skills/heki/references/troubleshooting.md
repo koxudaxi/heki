@@ -17,12 +17,14 @@ interpreter to run.
 `0`: nothing fails the run. `1`: a diagnostic fails it (an `error`, or a `warning` with
 `--fail-on warning`); the output lists it. `2`: a configuration, I/O, or syntax error (below).
 
-## A diagnostic disappears when one file is checked
+## A diagnostic disappears when a directory is checked
 
-`heki check path/to/file.py` analyzes that file alone and misses what its callees in other files
-do. Check the project (`heki check`, the default `.`), and pass the edited files to `--touched`:
-a diagnostic sits where the problem shows, which is often a caller's file, and `--touched` keeps
-the ones whose `path` or a `related[].path` is an edited file.
+`heki check path/to/dir` (or `heki check` run in a directory below the project root) analyzes
+that directory alone and misses what its callees in other directories do; a note names the
+project modules its files import that the run left out. Check from the project root, and pass the
+edited files to `--touched` or name them as paths (a file is checked in its project): a diagnostic
+sits where the problem shows, which is often a caller's file, and the run keeps the ones whose
+`path` or a `related[].path` is an edited file.
 
 ## `heki inspect` exits with 2
 

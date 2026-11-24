@@ -10,14 +10,15 @@ use anyhow::Result;
 use heki_ast::LineIndex;
 use heki_diagnostics::{
     BASELINE_VERSION, BaselineKey, CountUnit, Diagnostic, FileFailure, RatchetBaseline, Stylesheet,
-    baseline_counts, fix_python_source, github_escape, path_text, render, unified_diff,
+    TextEdit, baseline_counts, fix_python_source, github_escape, path_text, render, unified_diff,
 };
 use heki_effect::{ProjectIndex, func_qualname};
 use heki_env::{Docs, LintConfig, Problem, Severity, UnmatchedEntries};
 use heki_profile::{HotFunctions, ProfileData, ProfiledFunction};
 use heki_rules::project::{
-    Facts, FileError, IndexFacts, Indexed, ParsedFile, Project, ProjectEnv, ProjectOptions,
-    RulesRun, baseline_key, canonical, paths_leave_out, rel_posix,
+    CommandPaths, Facts, FileError, IndexFacts, Indexed, ParsedFile, Project, ProjectEnv,
+    ProjectOptions, RulesRun, baseline_key, canonical, imports_left_out, paths_leave_out,
+    rel_posix,
 };
 use heki_rules::{
     RuleSelection, SNAPSHOT_FILE, Selectors, SummarySnapshot, find_rule, fixes_unconditionally,
@@ -179,11 +180,12 @@ impl Analyzed {
 
 fn analyze(
     args: &CheckArgs,
+    paths: &CommandPaths,
     profile: Option<&ProfileData>,
     overrides: Option<&FxHashMap<PathBuf, String>>,
 ) -> Result<Analyzed> {
     let indexed = load_and_index(
-        &args.paths,
+        &paths.analyzed,
         &args.analysis,
         args.output_format,
         overrides,
@@ -198,7 +200,7 @@ fn analyze(
     } = indexed;
     let hot = profile.map(|p| p.attribute(profiled_functions(&project)));
     annotate_hot(&mut diags, hot.as_ref());
-    let touched = Touched::of(&args.touched, &project);
+    let touched = Touched::of(&args.touched, &paths.files, &project);
     Ok(Analyzed {
         project,
         index,
@@ -290,28 +292,35 @@ pub(crate) fn shown_failures<'a>(
         .collect()
 }
 
-/// The files `--touched` names, among the files the run analyzed. A run with it shows, fixes,
-/// and fails on only the reports that touch one of them: in the file, or with a hop of the call
-/// chain (`related`) in it. The analysis still covers the whole of PATHS, since a report in a
-/// file the change left alone can come from a callee it changed.
+/// The files `--touched` names, and the files PATHS name in a project ([`CommandPaths`]), among
+/// the files the run analyzed. A run with them shows and fails on only the reports that touch
+/// one of them (in the file, or with a hop of the call chain, `related`, in it), and rewrites
+/// only them. The analysis still covers the whole of what it analyzes, since a report in a file
+/// the change left alone can come from a callee it changed.
 pub(crate) struct Touched {
     /// Keyed like [`ParsedFile::path`], as reports name files.
     files: FxHashSet<PathBuf>,
     /// The baseline paths of `files`.
     baseline_paths: FxHashSet<String>,
-    /// The given paths that name no analyzed file.
+    /// The paths `--touched` gives that name no analyzed file.
     unknown: Vec<PathBuf>,
+    /// The files PATHS give that are not analyzed.
+    unknown_files: Vec<PathBuf>,
 }
 
 impl Touched {
-    /// The files `given` names in `project`, or `None` when nothing is given (no `--touched`).
-    /// Paths are compared as the file system resolves them, so `./a.py`, an absolute path, and a
-    /// link name the same file.
-    pub(crate) fn of(given: &[PathBuf], project: &Project) -> Option<Self> {
-        if given.is_empty() {
+    /// The files `touched` (`--touched`) and `files` (of PATHS) name in `project`, or `None`
+    /// when both are empty. Paths are compared as the file system resolves them, so `./a.py`, an
+    /// absolute path, and a link name the same file.
+    pub(crate) fn of(touched: &[PathBuf], files: &[PathBuf], project: &Project) -> Option<Self> {
+        if touched.is_empty() && files.is_empty() {
             return None;
         }
-        let wanted: FxHashSet<PathBuf> = given.iter().filter_map(|p| canonical(p).ok()).collect();
+        let wanted: FxHashSet<PathBuf> = touched
+            .iter()
+            .chain(files)
+            .filter_map(|p| canonical(p).ok())
+            .collect();
         let root = &project.env.root;
         // A file that could not be parsed is touched too: its error is the report.
         let analyzed = project
@@ -325,24 +334,27 @@ impl Touched {
                     .map(|e| (&e.path, rel_posix(&e.path, root))),
             );
         let mut found = FxHashSet::default();
-        let (mut files, mut baseline_paths) = (FxHashSet::default(), FxHashSet::default());
+        let (mut analyzed_files, mut baseline_paths) = (FxHashSet::default(), FxHashSet::default());
         for (path, rel) in analyzed {
             let Some(resolved) = canonical(path).ok().filter(|p| wanted.contains(p)) else {
                 continue;
             };
             found.insert(resolved);
-            files.insert(path.clone());
+            analyzed_files.insert(path.clone());
             baseline_paths.insert(rel);
         }
-        let unknown = given
-            .iter()
-            .filter(|p| canonical(p).map_or(true, |p| !found.contains(&p)))
-            .cloned()
-            .collect();
+        let not_found = |given: &[PathBuf]| -> Vec<PathBuf> {
+            given
+                .iter()
+                .filter(|p| canonical(p).map_or(true, |p| !found.contains(&p)))
+                .cloned()
+                .collect()
+        };
         Some(Self {
-            files,
+            unknown: not_found(touched),
+            unknown_files: not_found(files),
+            files: analyzed_files,
             baseline_paths,
-            unknown,
         })
     }
 
@@ -359,6 +371,12 @@ impl Touched {
     /// Whether a run with `touched` shows `d`.
     pub(crate) fn shows(touched: Option<&Self>, d: &Diagnostic) -> bool {
         touched.is_none_or(|t| t.touches(d))
+    }
+
+    /// Whether `--fix` and `--diff` in a run with `touched` apply the fix of `d`, a report it
+    /// shows: only in a touched file.
+    fn rewrites(touched: Option<&Self>, d: &Diagnostic) -> bool {
+        touched.is_none_or(|t| t.files.contains(&d.path))
     }
 
     /// How many of `diags` a run with `touched` shows.
@@ -397,20 +415,43 @@ impl Touched {
 
     /// Warn once about the given paths that name no analyzed file.
     pub(crate) fn warn(&self, format: OutputFormat) {
-        if self.unknown.is_empty() {
-            return;
+        let listed = |paths: &[PathBuf]| -> Vec<String> {
+            paths
+                .iter()
+                .map(|p| format!("`{}`", path_text(p)))
+                .collect()
+        };
+        if !self.unknown_files.is_empty() {
+            let paths = listed(&self.unknown_files);
+            log!(
+                format,
+                "warning: PATHS name {} file(s) that are not among the analyzed files (not a Python file of the project or below the directories given, or excluded): {}",
+                paths.len(),
+                paths.join(", ")
+            );
         }
-        let paths: Vec<String> = self
-            .unknown
-            .iter()
-            .map(|p| format!("`{}`", path_text(p)))
-            .collect();
-        log!(
-            format,
-            "warning: `--touched` names {} path(s) that are not among the analyzed files (missing, not a Python file under PATHS, or excluded): {}",
-            paths.len(),
-            paths.join(", ")
-        );
+        if !self.unknown.is_empty() {
+            let paths = listed(&self.unknown);
+            log!(
+                format,
+                "warning: `--touched` names {} path(s) that are not among the analyzed files (missing, not a Python file under PATHS, or excluded): {}",
+                paths.len(),
+                paths.join(", ")
+            );
+        }
+    }
+}
+
+/// Warn about the files PATHS name that `project` does not analyze, for a command that reports
+/// on everything it analyzes (`heki recommend`, `heki inspect`, `heki snapshot`): a file names
+/// its project, and with directories, it is analyzed only below them.
+pub(crate) fn warn_files_not_analyzed(
+    paths: &CommandPaths,
+    project: &Project,
+    format: OutputFormat,
+) {
+    if let Some(named) = Touched::of(&[], &paths.files, project) {
+        named.warn(format);
     }
 }
 
@@ -438,31 +479,34 @@ struct FixRun {
     refused: Vec<String>,
     /// The files of `--touched` in the last pass.
     touched: Option<Touched>,
+    /// The fixes of shown reports in files that are not touched, left unapplied in the last
+    /// pass.
+    not_touched: usize,
 }
 
 /// Apply fixes in memory until nothing more applies.
-fn fix_in_memory(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<FixRun> {
+fn fix_in_memory(
+    args: &CheckArgs,
+    paths: &CommandPaths,
+    hot: Option<&ProfileData>,
+) -> Result<FixRun> {
     let mut overrides: FxHashMap<PathBuf, String> = FxHashMap::default();
     let mut originals: BTreeMap<PathBuf, String> = BTreeMap::new();
     let mut applied_to: FxHashMap<PathBuf, usize> = FxHashMap::default();
     let mut total = 0;
     let mut errors;
     let mut touched;
+    let mut not_touched;
     let mut passes = 0;
     let mut refused: Vec<String> = Vec::new();
     loop {
-        let a = analyze(args, hot, Some(&overrides))?;
+        let a = analyze(args, paths, hot, Some(&overrides))?;
         errors = a.project.errors;
         touched = a.touched;
-        let mut by_path: BTreeMap<&Path, Vec<&[heki_diagnostics::TextEdit]>> = BTreeMap::new();
-        for d in &a.diags {
-            if applicable(d, args, a.hot.as_ref())
-                && Touched::shows(touched.as_ref(), d)
-                && let Some(edits) = &d.fix
-            {
-                by_path.entry(d.path.as_path()).or_default().push(edits);
-            }
-        }
+        let by_path;
+        (by_path, not_touched) = fixes_to_apply(&a.diags, touched.as_ref(), &|d| {
+            applicable(d, args, a.hot.as_ref())
+        });
         let mut pass = 0;
         for file in &a.project.files {
             let Some(groups) = by_path.get(file.path.as_path()) else {
@@ -505,7 +549,44 @@ fn fix_in_memory(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<FixRun> 
         errors,
         refused,
         touched,
+        not_touched,
     })
+}
+
+/// The fixes of `diags` that `--fix` and `--diff` apply in a run with `touched`, by file, and how
+/// many fixes of shown reports in files that are not touched they leave: a run over touched files
+/// rewrites only them, since a pre-commit hook must never change a file the commit left alone.
+/// `applicable` says which fixes the options apply ([`applicable`]).
+fn fixes_to_apply<'d>(
+    diags: &'d [Diagnostic],
+    touched: Option<&Touched>,
+    applicable: &dyn Fn(&Diagnostic) -> bool,
+) -> (BTreeMap<&'d Path, Vec<&'d [TextEdit]>>, usize) {
+    let mut by_path: BTreeMap<&Path, Vec<&[TextEdit]>> = BTreeMap::new();
+    let mut not_touched = 0;
+    let shown = diags
+        .iter()
+        .filter(|d| applicable(d) && Touched::shows(touched, d));
+    for d in shown {
+        let Some(edits) = &d.fix else { continue };
+        if Touched::rewrites(touched, d) {
+            by_path.entry(d.path.as_path()).or_default().push(edits);
+        } else {
+            not_touched += 1;
+        }
+    }
+    (by_path, not_touched)
+}
+
+/// The line after the summary of `--fix` and `--diff` that says how many fixes a run over
+/// touched files left in the other files, empty when it left none.
+fn not_touched_note(not_touched: usize) -> String {
+    if not_touched == 0 {
+        return String::new();
+    }
+    format!(
+        "note: {not_touched} fix(es) in files outside the touched ones not applied; name the files to fix them\n"
+    )
 }
 
 pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
@@ -542,11 +623,12 @@ fn run_check(args: &CheckArgs) -> Result<ExitCode> {
         .map(heki_profile::load)
         .transpose()?;
     let styles = stdout_styles(args.color);
+    let paths = command_paths(args)?;
     if args.watch {
         return crate::watch::run(args, hot.as_ref(), &styles);
     }
     if args.diff {
-        let run = fix_in_memory(args, hot.as_ref())?;
+        let run = fix_in_memory(args, &paths, hot.as_ref())?;
         if let Some(touched) = &run.touched {
             touched.warn(args.output_format);
         }
@@ -561,6 +643,7 @@ fn run_check(args: &CheckArgs) -> Result<ExitCode> {
             run.fixes,
             run.files.len()
         );
+        eprint!("{}", not_touched_note(run.not_touched));
         let code = if run.fixes == 0 {
             ExitCode::SUCCESS
         } else {
@@ -573,13 +656,14 @@ fn run_check(args: &CheckArgs) -> Result<ExitCode> {
     let mut refused = Vec::new();
     let mut conflicts = Vec::new();
     if args.fix {
-        let run = fix_in_memory(args, hot.as_ref())?;
+        let run = fix_in_memory(args, &paths, hot.as_ref())?;
         let (fixes, written);
         (fixes, written, conflicts) = write_fixed(&run.files)?;
         eprintln!("Fixed {fixes} issue(s) in {written} file(s).");
+        eprint!("{}", not_touched_note(run.not_touched));
         refused = run.refused;
     }
-    let mut analyzed = analyze(args, hot.as_ref(), None)?;
+    let mut analyzed = analyze(args, &paths, hot.as_ref(), None)?;
     analyzed.project.errors.extend(conflicts);
     let diags = std::mem::take(&mut analyzed.diags);
     let code = report(args, &analyzed, diags, &styles)?;
@@ -590,6 +674,34 @@ fn run_check(args: &CheckArgs) -> Result<ExitCode> {
     std::mem::forget(project);
     let refused: Vec<Problem> = refused.iter().map(Problem::new).collect();
     finish(args.output_format, &refused, code)
+}
+
+/// What the PATHS of `args` name ([`CommandPaths`]). A file names the files to report on, which
+/// neither a baseline update nor a watch can take: a baseline records every report of what the
+/// run covers, and `--watch` shows every report of what it analyzes.
+pub(crate) fn command_paths(args: &CheckArgs) -> Result<CommandPaths> {
+    let paths = CommandPaths::of(&args.paths);
+    let Some(file) = paths.files.first() else {
+        return Ok(paths);
+    };
+    let file = path_text(file);
+    if args.update_baseline {
+        return Err(Problem::new(format!(
+            "`--update-baseline` records the reports of directories, and `{file}` is a file"
+        ))
+        .help("record the project with `heki check --update-baseline`, or the entries of one directory with `heki check <dir> --update-baseline`: the entries of the other files stay as they are")
+        .docs(Docs::Baselines)
+        .into());
+    }
+    if args.watch {
+        return Err(Problem::new(format!(
+            "`--watch` watches directories, and `{file}` is a file"
+        ))
+        .help("watch the project with `heki check --watch`, or run `heki server` in the editor")
+        .docs(Docs::CliCheck)
+        .into());
+    }
+    Ok(paths)
 }
 
 /// Write the fixed files whose disk text is still the text the fixes were proven on. A file
@@ -663,11 +775,15 @@ fn report(
     let mut refused_update = false;
     // A baseline entry matched no report (`lint.report-unused-suppressions`): an error.
     let mut unused_entries = false;
+    // A run over part of the project knows nothing of the other files' reports: it leaves their
+    // entries as they are.
+    let covered = project.covered();
     if let (Some(bp), Some(baseline)) = (&baseline_path, &recorded) {
         // An entry counts every report of its key, so the baseline compares all of them; a
         // `--touched` run judges only the entries in view.
         let in_view = touched.map(|t| t.baseline_view(&diags, &key_path));
-        let judged = |key: &BaselineKey| in_view.as_ref().is_none_or(|v| v.shows(key));
+        let judged =
+            |key: &BaselineKey| covered(&key.path) && in_view.as_ref().is_none_or(|v| v.shows(key));
         let unit = baseline.unit;
         if unit == CountUnit::Diagnostics && !args.update_baseline {
             log!(
@@ -724,6 +840,15 @@ fn report(
             failure::print(fmt, &not_written("baseline", bp, project.errors.len()));
             return finish(fmt, &failure::of_files(&project.errors), ExitCode::SUCCESS);
         }
+        let kept: Vec<(&BaselineKey, &u32)> = recorded
+            .iter()
+            .flat_map(|b| &b.counts)
+            .filter(|(key, _)| !covered(&key.path))
+            .collect();
+        let legacy_kept = !kept.is_empty()
+            && recorded
+                .as_ref()
+                .is_some_and(|b| b.unit == CountUnit::Diagnostics);
         if regressions > 0 {
             let refused = Problem::new(format!(
                 "baseline `{}` not updated: {regressions} entry(ies) grew",
@@ -733,8 +858,20 @@ fn report(
             .docs(Docs::Baselines);
             failure::print(fmt, &refused);
             refused_update = true;
+        } else if legacy_kept {
+            // Its other entries count diagnostics, and site counts beside them would mix units.
+            let refused = Problem::new(format!(
+                "baseline `{}` not updated: it counts diagnostics (written before version {BASELINE_VERSION}), and this run covers part of the project",
+                bp.display()
+            ))
+            .help("update it once from the project root with `heki check --update-baseline`, which rewrites it to count sites")
+            .docs(Docs::Baselines);
+            failure::print(fmt, &refused);
+            refused_update = true;
         } else {
-            let baseline = RatchetBaseline::from_counts(current);
+            let mut counts = current;
+            counts.extend(kept.into_iter().map(|(key, count)| (key.clone(), *count)));
+            let baseline = RatchetBaseline::from_counts(counts);
             baseline.save(bp)?;
             log!(
                 fmt,
@@ -747,6 +884,7 @@ fn report(
     }
 
     let unmatched_entries = report_unmatched_entries(args, analyzed)?;
+    note_imports_left_out(project, fmt)?;
     if let Some(touched) = touched {
         touched.keep(&mut diags);
     }
@@ -824,7 +962,7 @@ fn report_unmatched_entries(args: &CheckArgs, analyzed: &Analyzed) -> Result<boo
     // the paths leave out would look unmatched.
     if configured.is_none() {
         let limit = recommend::MAX_CENSUS_ENTRIES;
-        let (left_out, _) = paths_leave_out(&analyzed.project, &args.paths, 1, limit)?;
+        let (left_out, _) = paths_leave_out(&analyzed.project, 1, limit)?;
         if !left_out.is_empty() {
             return Ok(false);
         }
@@ -841,6 +979,49 @@ fn report_unmatched_entries(args: &CheckArgs, analyzed: &Analyzed) -> Result<boo
     Ok(severity == Severity::Error && !entries.is_empty())
 }
 
+/// Note the project modules the analyzed files import and the paths of the run leave out
+/// ([`imports_left_out`]): reports that need their code are missing, and an exact report may
+/// not hold for the project.
+fn note_imports_left_out(project: &Project, format: OutputFormat) -> Result<()> {
+    let left_out = imports_left_out(project, recommend::MAX_CENSUS_ENTRIES)?;
+    if left_out.is_empty() {
+        return Ok(());
+    }
+    let root = &project.env.root;
+    let mut modules: Vec<String> = left_out
+        .iter()
+        .take(recommend::MAX_EXAMPLES)
+        .map(|m| format!("`{}` ({})", m.module, rel_posix(&m.path, root)))
+        .collect();
+    if left_out.len() > recommend::MAX_EXAMPLES {
+        modules.push("...".to_owned());
+    }
+    log!(
+        format,
+        "note: the analyzed files import {} project module(s) that PATHS leave out: {}; reports that need their code are missing: check the project root `{}`, with `--touched` for the files to report on",
+        left_out.len(),
+        modules.join(", "),
+        shown_root(root)
+    );
+    Ok(())
+}
+
+/// [`shown_dir`] of the project root, written `..` for each level the working directory is
+/// below it.
+fn shown_root(root: &Path) -> String {
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|d| canonical(&d).ok());
+    let depth = cwd
+        .as_deref()
+        .and_then(|cwd| cwd.strip_prefix(root).ok())
+        .map(|below| below.components().count());
+    match depth {
+        Some(depth) if depth > 0 => vec![".."; depth].join("/"),
+        _ => shown_dir(root),
+    }
+}
+
 /// `heki snapshot [PATHS...] [--write]`: print or save the normalized summaries (`MUT103`).
 pub(crate) fn run_snapshot(args: &SnapshotArgs) -> Result<ExitCode> {
     // `heki snapshot summary --write` (ARCHITECTURE.md spelling) is accepted as an alias.
@@ -851,14 +1032,16 @@ pub(crate) fn run_snapshot(args: &SnapshotArgs) -> Result<ExitCode> {
         .filter(|(i, p)| !(*i == 0 && p.as_os_str() == "summary" && !p.exists()))
         .map(|(_, p)| p.clone())
         .collect();
+    let paths = CommandPaths::of(&paths);
     let project = Project::load(&ProjectOptions {
-        paths: &paths,
+        paths: &paths.analyzed,
         config: args.config.as_deref(),
         working_dir: None,
         target_version: args.target_version.as_deref(),
         overrides: None,
         removed: None,
     })?;
+    warn_files_not_analyzed(&paths, &project, OutputFormat::Full);
     let index = project.index(IndexFacts::snapshot());
     let units = project.units();
     let snap = SummarySnapshot::build(&units, &index);
@@ -1010,6 +1193,79 @@ pub(crate) fn format_of(f: OutputFormat) -> heki_diagnostics::OutputFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A report at `path` with a fix, and a hop of its call chain at each of `related`.
+    fn fixable(path: &str, related: &[&str]) -> Diagnostic {
+        let span = heki_ast::Span { start: 0, end: 1 };
+        Diagnostic {
+            path: PathBuf::from(path),
+            line: 1,
+            column: 1,
+            span,
+            qualname: "f".to_owned(),
+            rule_code: "OPT101".to_owned(),
+            rule_slug: "list-quadratic-concat".to_owned(),
+            target: "x".to_owned(),
+            severity: Severity::Warning,
+            certainty: heki_diagnostics::Certainty::Exact,
+            message: String::new(),
+            help: None,
+            evidence: None,
+            blocker: None,
+            related: related
+                .iter()
+                .map(|p| heki_diagnostics::RelatedLocation {
+                    path: PathBuf::from(p),
+                    line: 1,
+                    column: 1,
+                    span,
+                    message: String::new(),
+                })
+                .collect(),
+            fix: Some(vec![TextEdit {
+                span,
+                replacement: "y".to_owned(),
+            }]),
+            sites: 1,
+            fold_key: None,
+            open_records: Vec::new(),
+            contracts: Vec::new(),
+            allowed_examples: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_run_over_touched_files_fixes_only_them() {
+        // No rule's fixable report has a hop in another file yet, so the binary cannot show one.
+        let diags = [
+            fixable("a.py", &[]),
+            fixable("caller.py", &["a.py"]),
+            fixable("other.py", &[]),
+        ];
+        let touched = Touched {
+            files: FxHashSet::from_iter([PathBuf::from("a.py")]),
+            baseline_paths: FxHashSet::default(),
+            unknown: Vec::new(),
+            unknown_files: Vec::new(),
+        };
+        let all = |_: &Diagnostic| true;
+        let (by_path, not_touched) = fixes_to_apply(&diags, Some(&touched), &all);
+        assert_eq!(
+            by_path.keys().copied().collect::<Vec<_>>(),
+            [Path::new("a.py")]
+        );
+        assert_eq!(not_touched, 1);
+        let (by_path, not_touched) = fixes_to_apply(&diags, None, &all);
+        assert_eq!(by_path.len(), 3);
+        assert_eq!(not_touched, 0);
+        let (by_path, _) = fixes_to_apply(&diags, None, &|d: &Diagnostic| d.related.is_empty());
+        assert_eq!(by_path.len(), 2);
+        assert_eq!(
+            not_touched_note(1),
+            "note: 1 fix(es) in files outside the touched ones not applied; name the files to fix them\n"
+        );
+        assert_eq!(not_touched_note(0), "");
+    }
 
     #[test]
     fn fixes_are_not_written_over_a_save_made_while_fixing() {

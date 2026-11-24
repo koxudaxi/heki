@@ -1051,8 +1051,9 @@ fn touched_runs_show_and_fail_on_the_reports_that_touch_the_files() {
     assert!(!stderr.contains("warning:"), "{stderr}");
     std::fs::remove_file(p.dir.join("app/broken.py")).unwrap();
     // A file the paths leave out is not analyzed, so it touches nothing.
+    p.write("tools/report.py", "def report():\n    return 1\n");
     let (code, shown, stderr) = p.heki(&[
-        "app/jobs.py",
+        "tools",
         "--output-format",
         "concise",
         "--touched",
@@ -1060,6 +1061,24 @@ fn touched_runs_show_and_fail_on_the_reports_that_touch_the_files() {
     ]);
     assert_eq!((code, sites(&shown)), (0, vec![]), "{stderr}");
     assert!(stderr.contains("`app/users.py`"), "{stderr}");
+    std::fs::remove_dir_all(p.dir.join("tools")).unwrap();
+    // A file among the paths is checked in its project: it joins the touched files.
+    let (code, shown, stderr) = p.heki(&[
+        "app/jobs.py",
+        "--output-format",
+        "concise",
+        "--touched",
+        "app/users.py",
+    ]);
+    assert_eq!(
+        (code, sites(&shown)),
+        (1, vec!["app/api.py:5:12", "app/jobs.py:4:5"]),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Found 2 diagnostic(s) for 2 touched file(s) (4 file(s) analyzed)."),
+        "{stderr}"
+    );
 
     // Every format shows the same reports.
     let (code, stdout, stderr) = p.heki(&["--output-format", "json", "--touched", "app/users.py"]);
