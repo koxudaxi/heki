@@ -182,6 +182,8 @@ const GUARD_DEFAULT_USE: &str =
 const CATALOG_NAP: &str = "import time\n\n\ndef nap(n: float) -> None:\n    time.sleep(1)\n";
 const CATALOG_USE: &str =
     "from pkg.catalog_nap import nap\n\n\nasync def wait() -> None:\n    nap(0)\n";
+const CATALOG_QUERY: &str = "import sqlite3\n\n\ndef first(db: sqlite3.Connection) -> object:\n    return db.execute(\"SELECT 1\").fetchone()\n";
+const CATALOG_QUERY_USE: &str = "import sqlite3\n\nfrom pkg.catalog_nap import first\n\nDB = sqlite3.connect(\"cache.db\")\n\n\nasync def wait() -> object:\n    return first(DB)\n";
 const GUARD_CONN: &str = "from urllib.request import urlopen\n\n\nclass Conn:\n    def __init__(self):\n        self._sock = None\n\n    def send(self):\n        self._sock = urlopen(\"https://example.com\")\n";
 const GUARD_CONN_USE: &str = "from pkg.guard_conn import Conn\n\n\ndef run(c: Conn, xs):\n    for x in xs:\n        c.send()\n";
 const GUARD_GLOBAL: &str = "from urllib.request import urlopen\n\n_conn = None\n\n\ndef conn():\n    global _conn\n    _conn = urlopen(\"https://example.com\")\n    return _conn\n";
@@ -4725,8 +4727,8 @@ fn steps_initial_index() -> Vec<Step> {
         ("pkg/guard_use.py", "EFF102"),
         ("pkg/guard_default_use.py", "EFF102"),
         ("pkg/guard_conn_use.py", "EFF102"),
-        ("pkg/buf_use.py", "EFF101 [heuristic]"),
-        ("pkg/buf_default_use.py", "EFF101 [heuristic]"),
+        ("pkg/buf_use.py", "EFF101"),
+        ("pkg/buf_default_use.py", "EFF101"),
         ("pkg/guard_global_use.py", "EFF102"),
         ("pkg/fill.py", "MUT201"),
         ("pkg/fill_main.py", "MUT201"),
@@ -4961,10 +4963,34 @@ fn steps_guarded_effects() -> Vec<Step> {
                 &CATALOG_USE.replace("nap(0)", "nap(5)"),
             )],
         )
-        .present(&[("pkg/catalog_use.py", "EFF101 [heuristic]")]),
+        .present(&[("pkg/catalog_use.py", "EFF101")]),
         Step::new(
             "the caller passes zero again",
             vec![save("pkg/catalog_use.py", CATALOG_USE)],
+        )
+        .absent(&[
+            ("pkg/catalog_use.py", "EFF101"),
+            ("pkg/catalog_use.py", "EFF101 [heuristic]"),
+        ]),
+        Step::new(
+            "the helper sleeps for a constant again",
+            vec![save("pkg/catalog_nap.py", CATALOG_NAP)],
+        )
+        .present(&[("pkg/catalog_use.py", "EFF101")]),
+        Step::new(
+            "the helper queries the connection it is passed, a connection opened on a file",
+            vec![
+                save("pkg/catalog_nap.py", CATALOG_QUERY),
+                save("pkg/catalog_use.py", CATALOG_QUERY_USE),
+            ],
+        )
+        .present(&[("pkg/catalog_use.py", "EFF101")]),
+        Step::new(
+            "the caller passes a connection to a database in memory",
+            vec![save(
+                "pkg/catalog_use.py",
+                &CATALOG_QUERY_USE.replace("cache.db", ":memory:"),
+            )],
         )
         .absent(&[
             ("pkg/catalog_use.py", "EFF101"),
@@ -5026,8 +5052,8 @@ fn steps_guarded_effects() -> Vec<Step> {
             vec![save("pkg/buf_read.py", BUF_READ)],
         )
         .present(&[
-            ("pkg/buf_use.py", "EFF101 [heuristic]"),
-            ("pkg/buf_default_use.py", "EFF101 [heuristic]"),
+            ("pkg/buf_use.py", "EFF101"),
+            ("pkg/buf_default_use.py", "EFF101"),
         ]),
         Step::new(
             "a helper in another file keeps its connection in a module global",

@@ -518,27 +518,42 @@ fn must_through_calls(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut 
             .project_callees()
             .iter()
             .filter_map(|bc| index.summary(&bc.callee)?.must_exec.as_deref())
-            .flat_map(|m| m.effects.keys().copied())
+            .flat_map(|m| m.effects.keys().copied().chain(m.given.effects()))
             .collect();
         for e in kinds {
-            let Some(found) = site_must_chain(index, path, site, e) else {
+            let found = site_steps(index, path, site, e, true, &mut |_| ControlFlow::Break(()));
+            let Some(found) = found else {
                 continue;
             };
             let must = s.must_exec.get_or_insert_with(Box::default);
+            // The claim names every call the implementations end in, not only the kept
+            // chain's.
+            let witnesses = if found.witnesses.len() > 1 {
+                found.witnesses
+            } else {
+                Vec::new()
+            };
+            if !found.needs.is_empty() {
+                must.given.insert(e, found.needs, found.chain, witnesses);
+                continue;
+            }
             match must.effects.get(&e) {
                 Some(kept) if kept.len() <= found.chain.len() => {}
                 _ => {
                     must.effects.insert(e, found.chain);
-                    // The claim names every call the implementations end in, not only the
-                    // kept chain's.
-                    if found.witnesses.len() > 1 {
-                        must.alternatives.insert(e, found.witnesses);
-                    } else {
+                    if witnesses.is_empty() {
                         must.alternatives.remove(&e);
+                    } else {
+                        must.alternatives.insert(e, witnesses);
                     }
                 }
             }
         }
+    }
+    // What the function runs whatever its callers pass needs nothing of them.
+    if let Some(must) = &mut s.must_exec {
+        let crate::MustExec { effects, given, .. } = &mut **must;
+        given.retain(|c| effects.get(&c.effect).is_none());
     }
 }
 
@@ -555,6 +570,33 @@ pub(crate) fn site_must_chain(
     e: ExecEffectKind,
 ) -> Option<SiteMust> {
     site_must_steps(index, path, site, e, &mut |_| ControlFlow::Break(()))
+}
+
+/// The chain of `must`'s [`crate::MustExec::given`] chains of `e` that a call binding `bc`
+/// establishes: each test the chain needs is passed by the value the call binds there
+/// ([`guards::given`]), or, with `caller_binds`, handed on to the caller's own parameter the call
+/// passes. The chain needing the fewest of the caller's tests, then the shortest, with them.
+fn given_chain<'m>(
+    must: &'m crate::MustExec,
+    e: ExecEffectKind,
+    bc: &BoundCallee,
+    caller_binds: bool,
+) -> Option<(crate::ParamTests, &'m crate::GivenChain)> {
+    must.given
+        .of(e)
+        .filter_map(|g| {
+            let mut needs = Vec::new();
+            for (p, test) in &g.needs {
+                let b = bc.params.get(usize::from(*p))?.binding.as_ref()?;
+                match guards::given(b, test) {
+                    guards::Given::Holds => {}
+                    guards::Given::Caller(q) if caller_binds => needs.push((q, test.clone())),
+                    guards::Given::Caller(_) | guards::Given::Fails => return None,
+                }
+            }
+            Some((needs, g))
+        })
+        .min_by_key(|(needs, g)| (needs.len(), g.chain.len()))
 }
 
 /// A step of a must-fact that does not hold: why a call has not been established to have run
@@ -618,6 +660,19 @@ pub(crate) fn site_must_steps(
     e: ExecEffectKind,
     gaps: &mut impl FnMut(MustGap) -> ControlFlow<()>,
 ) -> Option<SiteMust> {
+    site_steps(index, path, site, e, false, gaps)
+}
+
+/// [`site_must_steps`], also taking, with `caller_binds`, the facts of the targets that hold
+/// when the caller's callers pass values passing tests of its parameters ([`SiteMust::needs`]).
+fn site_steps(
+    index: &ProjectIndex,
+    path: &Path,
+    site: &CallSite,
+    e: ExecEffectKind,
+    caller_binds: bool,
+    gaps: &mut impl FnMut(MustGap) -> ControlFlow<()>,
+) -> Option<SiteMust> {
     let mut steps = Steps { gaps, open: false };
     if !site.runs_targets_here() {
         steps.stops_at(MustGap::NotRunAtCall(None));
@@ -643,6 +698,7 @@ pub(crate) fn site_must_steps(
                 SiteMust {
                     chain: vec![Arc::clone(&hop)],
                     witnesses: vec![hop],
+                    needs: Vec::new(),
                 }
             })
         }
@@ -669,7 +725,19 @@ pub(crate) fn site_must_steps(
                 }
                 // A summary without facts has none.
                 let must = callee.and_then(|c| c.must_exec.as_deref());
-                let Some(chain) = must.and_then(|m| m.chain(e)) else {
+                // The chain, and the calls the callee's own implementations end in when they
+                // differ.
+                let found = match must.and_then(|m| Some((m.chain(e)?, m))) {
+                    Some((chain, m)) => {
+                        let ends = m.alternatives.get(&e).map_or(&[][..], Vec::as_slice);
+                        Some((Vec::new(), chain, ends))
+                    }
+                    None => must
+                        .filter(|m| !m.bound_twice)
+                        .and_then(|m| given_chain(m, e, bc, caller_binds))
+                        .map(|(needs, g)| (needs, g.chain.as_slice(), g.witnesses.as_slice())),
+                };
+                let Some((needs, chain, alternatives)) = found else {
                     let gap = if must.is_some_and(|m| m.bound_twice) {
                         MustGap::DefinedTwice(key())
                     } else {
@@ -680,13 +748,16 @@ pub(crate) fn site_must_steps(
                     }
                     continue;
                 };
+                out.needs.extend(needs);
                 let Some(sink) = chain.last() else {
                     continue;
                 };
                 // A callee whose own implementations end in different calls has each of them.
-                let ends = must
-                    .and_then(|m| m.alternatives.get(&e))
-                    .map_or(std::slice::from_ref(sink), Vec::as_slice);
+                let ends = if alternatives.is_empty() {
+                    std::slice::from_ref(sink)
+                } else {
+                    alternatives
+                };
                 for end in ends {
                     if !out.witnesses.contains(end) {
                         out.witnesses.push(Arc::clone(end));
@@ -849,6 +920,10 @@ pub struct SiteMust {
     /// Per implementation that returns normally, the call that has the effect at the end of its
     /// chain, where that call is (each call once).
     pub witnesses: SharedChain,
+    /// The tests of the caller's parameters the targets' facts need
+    /// ([`crate::MustExec::given`]); none for [`site_must_chain`], whose fact holds whatever the
+    /// caller is passed.
+    pub needs: crate::ParamTests,
 }
 
 impl SiteMust {

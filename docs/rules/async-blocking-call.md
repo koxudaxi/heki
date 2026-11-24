@@ -74,8 +74,8 @@ where the catalog decides them by the argument: `nap(0)` over `time.sleep(second
 in memory passed to a helper that queries its `sqlite3.Connection` parameter (`execute`, the
 cursor it gives, its fetches) do not wait, as the same calls written inline do not; also through
 more helpers passing the parameter on, and for an omitted parameter's literal default. Where the
-argument keeps the wait (`nap(5)`, a connection opened on a file), the report through the helper
-is heuristic.
+argument selects the wait (`nap(5)`, a connection opened on a file), the call through the helper
+waits on every call as the inline call does (see below).
 
 The rule reports the boundary: the call (or property read, or iteration) inside the `async def`
 that leads to the blocking operation, with the call chain as related information. Several
@@ -158,7 +158,14 @@ Each step of the chain is established, not assumed:
 - the waiting call is in the ecosystem catalog, waits on every call (a database call that may be
   answered by a session's identity map, a cache, an open connection, or that sends only pending
   changes does not), and no argument that may come from the caller can make it return at once
-  (`time.sleep(delay)` with `delay` a parameter is not established). A literal argument, and
+  (`time.sleep(delay)` with `delay` a parameter is not established). Such a call in a helper,
+  whose catalog case depends on the helper's own parameter (`time.sleep(seconds)`,
+  `urlopen(url)`, `sqlite3.connect(name)`) or that is made on its parameter or on what catalog
+  methods return of it (`db.execute(sql).fetchone()` on `db: sqlite3.Connection`), is decided at
+  each call of the helper by what the call passes there, as the call written inline is, also
+  through more helpers passing the parameter on: `nap(5)` waits, and so does a connection
+  opened on a file; an argument computed from the caller's own parameter leaves it to the
+  caller's callers. A literal argument, and
   a module constant bound once to one or computed from such constants (`PAUSE = 0`,
   `PAUSE = BASE - 2`; the module's constants as heki's other facts read them, also after a
   star import that comes before the binding; also imported from another module by the
@@ -256,6 +263,13 @@ async def handler() -> bytes:
 and `await asyncio.to_thread(load, key)` for the second.
 
 ## Known limitations
+These stay open through a helper: a helper that returns early on a test of its parameter before
+the waiting call; a connection opened from a path heki does not establish to name a file (a
+parameter, an attribute, configuration); a connection a factory returns, or one a module global
+holds that is opened lazily; a parameter without an annotation (nothing is reported); a call
+reached more than eight method calls from the parameter; and a `commit()`, which waits only
+with pending changes.
+
 These rebind a name without heki seeing it, so a call through the name still counts as running
 its definition: a `mock.patch` or `mock.patch.object` target patched outside tests, a store
 through `sys.modules` (`sys.modules[__name__] = shim`, `setattr(sys.modules[__name__], "f", g)`),

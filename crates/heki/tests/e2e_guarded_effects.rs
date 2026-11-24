@@ -23,7 +23,10 @@
 //!   opening the URL it is passed, or querying the connection it is passed does not wait where
 //!   the call passes `0`, a `data:` URL, or a connection to a database in memory, as the same
 //!   calls written inline do not; through two helpers and an omitted parameter too. A method
-//!   called more than eight calls from the parameter is not followed back to it.
+//!   called more than eight calls from the parameter is not followed back to it. Where the
+//!   argument selects the wait (`5`, an `https:` URL, a connection opened on a file, a value
+//!   heki cannot evaluate), the call through the helpers waits as the inline call does; one
+//!   computed from the caller's own parameter is the caller's callers' to decide.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# EFF102`); every other line must not be.
@@ -1215,12 +1218,14 @@ fn constant_arguments_switch_guarded_effects_off() {
 
 /// Helpers whose waits depend on their parameter as the catalog says: a sleep of the time
 /// passed, a URL passed, a connection passed (its `execute`, and the cursor it gives).
-const CATALOG_ARGUMENTS: &str = r#"import sqlite3
+const CATALOG_ARGUMENTS: &str = r#"import os
+import sqlite3
 import time
 import urllib.request
 
 memory = sqlite3.connect(":memory:")
 on_disk = sqlite3.connect("cache.db")
+DELAY = float(os.environ.get("DELAY", "1"))
 
 
 def pause(seconds: float) -> None:
@@ -1283,11 +1288,31 @@ async def omitted_pause() -> None:
 
 
 async def long_pause() -> None:
-    pause(5)  # EFF101 [heuristic]
+    pause(5)  # EFF101
 
 
 async def forwarded_pause(seconds: float) -> None:
     pause(seconds)  # EFF101 [heuristic]
+
+
+async def scaled_pause(seconds: float) -> None:
+    pause(seconds * 2)  # EFF101 [heuristic]
+
+
+async def long_pause_two_deep() -> None:
+    pause_twice(5)  # EFF101
+
+
+async def configured_pause() -> None:
+    pause(DELAY)  # EFF101
+
+
+class Poller:
+    def __init__(self, delay: float) -> None:
+        self.delay = delay
+
+    async def poll(self) -> None:
+        pause(self.delay)  # EFF101
 
 
 async def data_url() -> bytes:
@@ -1295,7 +1320,7 @@ async def data_url() -> bytes:
 
 
 async def web_url() -> bytes:
-    return download("https://example.com/")  # EFF101 [heuristic]
+    return download("https://example.com/")  # EFF101
 
 
 async def memory_row() -> object:
@@ -1319,11 +1344,11 @@ async def global_row() -> object:
 
 
 async def file_row() -> object:
-    return first_row(on_disk)  # EFF101 [heuristic]
+    return first_row(on_disk)  # EFF101
 
 
 async def file_via() -> object:
-    return via(on_disk)  # EFF101 [heuristic]
+    return via(on_disk)  # EFF101
 
 
 async def opened_in_memory() -> None:
@@ -1331,7 +1356,7 @@ async def opened_in_memory() -> None:
 
 
 async def opened_on_disk() -> None:
-    open_named("cache.db")  # EFF101 [heuristic]
+    open_named("cache.db")  # EFF101
 "#;
 
 #[test]
@@ -1896,5 +1921,54 @@ fn an_unpacked_display_decides_no_truthiness_test() {
         ],
         &[],
         &["EFF101"],
+    );
+}
+
+/// A helper forwarding its parameter to a method whose implementations end in different waits
+/// runs one of them whichever the argument selects: the exact report through it names each, as
+/// it does for a forwarded call that waits whatever it is passed.
+#[test]
+fn a_selected_wait_through_overrides_names_each_implementations_call() {
+    let p = Project::new("guards_selected_wait_overrides");
+    p.write(
+        "m.py",
+        r#"import socket
+import urllib.request
+
+
+class Base:
+    def run(self, url):
+        urllib.request.urlopen(url)
+
+
+class Resolver(Base):
+    def run(self, url):
+        socket.gethostbyname("example.com")
+
+
+def forward(obj: Base, url):
+    obj.run(url)
+
+
+async def caller(obj: Base):
+    forward(obj, "https://example.com")
+"#,
+    );
+    let (code, stdout, stderr) = p.check(&["--select", "EFF101", "--output-format", "json"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let got: Vec<(u64, &str, &str)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["certainty"].as_str().unwrap(),
+                d["target"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![(20, "exact", "socket.gethostbyname, urllib.request.urlopen")]
     );
 }
