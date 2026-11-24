@@ -1,15 +1,15 @@
-//! `heki inspect`: what heki knows about one function, read from the index `heki check` builds
+//! `heki inspect`: what heki knows about a function, read from the index `heki check` builds
 //! for the same configuration and selection. The effects it reaches, the inputs and shared
 //! state it changes, what it keeps and returns, whether it is pure in heki's sense, who calls
-//! it, what `heki check` reports in it, and the contracts naming it. The CLI and the language
-//! server build the report with [`inspect`], so both write one JSON object.
+//! it, what `heki check` reports in it, and the contracts naming it. [`Functions`] resolves the
+//! symbols of a run and [`Inspector`] builds a report on each function from one analysis.
 
 mod text;
 
 pub use text::render_text;
 
 use crate::eff_rules::effect_name;
-use crate::{DottedPattern, ModuleUnit, has_glob_syntax};
+use crate::{ContractRoles, DottedPattern, ModuleUnit, has_glob_syntax};
 use heki_ast::{LineIndex, Span};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
@@ -116,6 +116,11 @@ pub enum Resolution {
         /// How the text named it: `None` for an exact fully qualified name.
         from: Option<&'static str>,
     },
+    /// Every function a glob matches, when it names each ([`GlobMatches::Each`]).
+    Functions {
+        keys: Vec<FuncKey>,
+        from: &'static str,
+    },
     Ambiguous(Vec<FuncKey>),
     Unknown(Vec<FuncKey>),
     /// A class: its methods.
@@ -124,98 +129,142 @@ pub enum Resolution {
     Module(String, Vec<FuncKey>),
 }
 
-/// Every summarized function, from its defining file, sorted.
-fn all_functions(index: &ProjectIndex) -> Vec<&FuncKey> {
-    let mut keys: Vec<&FuncKey> = index
-        .files
-        .iter()
-        .flat_map(|(path, f)| {
-            f.local_functions
-                .keys()
-                .filter(move |k| index.file_of(k) == Some(path.as_path()))
-        })
-        .collect();
-    keys.sort();
-    keys
+/// What a glob that matches several functions names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlobMatches {
+    /// One function: the glob is ambiguous.
+    One,
+    /// Each function it matches.
+    Each,
 }
 
-/// Resolve a dotted name: an exact fully qualified name wins, else every key whose fully
-/// qualified name or qualname the text matches as a contract pattern does ([`DottedPattern`]).
-/// `within` limits the keys to one module.
-pub fn resolve_name(
-    index: &ProjectIndex,
-    decls: &ProjectDecls,
-    text: &str,
-    within: Option<&str>,
-) -> Resolution {
-    let keys: Vec<&FuncKey> = all_functions(index)
-        .into_iter()
-        .filter(|k| within.is_none_or(|m| k.module == m))
-        .collect();
-    let exact = |k: &&&FuncKey| match within {
-        Some(_) => k.qualname == text,
-        None => k.fqn() == text,
-    };
-    if let Some(k) = keys.iter().find(exact) {
-        return Resolution::Function {
-            key: (*k).clone(),
-            from: within.map(|_| "name"),
-        };
-    }
-    let found: Vec<FuncKey> = match DottedPattern::new(text, "inspect") {
-        Ok(p) => keys
+/// The summarized functions a symbol can name, each from its defining file, sorted by key with
+/// its fully qualified name: collected once for every symbol of a run.
+pub struct Functions<'i> {
+    index: &'i ProjectIndex,
+    decls: &'i ProjectDecls,
+    keys: Vec<(&'i FuncKey, String)>,
+}
+
+impl<'i> Functions<'i> {
+    pub fn new(index: &'i ProjectIndex, decls: &'i ProjectDecls) -> Self {
+        let mut keys: Vec<&FuncKey> = index
+            .files
             .iter()
-            .filter(|k| p.matches(&k.fqn()) || p.matches(&k.qualname))
-            .map(|k| (*k).clone())
-            .collect(),
-        Err(_) => Vec::new(),
-    };
-    match found.len() {
-        1 => {
-            let from = if within.is_some() {
-                "name"
-            } else if has_glob_syntax(text) {
-                "glob"
-            } else {
-                "suffix"
-            };
+            .flat_map(|(path, f)| {
+                f.local_functions
+                    .keys()
+                    .filter(move |k| index.file_of(k) == Some(path.as_path()))
+            })
+            .collect();
+        keys.sort();
+        Self {
+            index,
+            decls,
+            keys: keys.into_iter().map(|k| (k, k.fqn())).collect(),
+        }
+    }
+
+    /// The functions of `module` (every function for `None`).
+    fn of_module(&self, module: Option<&str>) -> &[(&'i FuncKey, String)] {
+        let Some(module) = module else {
+            return &self.keys;
+        };
+        let start = self
+            .keys
+            .partition_point(|(k, _)| k.module.as_str() < module);
+        let len = self.keys[start..].partition_point(|(k, _)| k.module == module);
+        &self.keys[start..start + len]
+    }
+
+    /// The function whose fully qualified name, or within a module whose qualname, is `text`.
+    /// Of two functions whose fully qualified names are the same text, the one of the shorter
+    /// module sorts first and is the one named.
+    fn exact(&self, text: &str, within: Option<&str>) -> Option<&'i FuncKey> {
+        let find = |module: &str, qualname: &str| {
+            let at = self.keys.binary_search_by(|(k, _)| {
+                (k.module.as_str(), k.qualname.as_str()).cmp(&(module, qualname))
+            });
+            at.ok().map(|i| self.keys[i].0)
+        };
+        match within {
+            Some(module) => find(module, text),
+            None => text
+                .match_indices('.')
+                .find_map(|(i, _)| find(&text[..i], &text[i + 1..])),
+        }
+    }
+
+    /// Resolve a dotted name: an exact fully qualified name wins, else every key whose fully
+    /// qualified name or qualname the text matches as a contract pattern does
+    /// ([`DottedPattern`]). `within` limits the keys to one module.
+    pub fn resolve_name(&self, text: &str, within: Option<&str>, globs: GlobMatches) -> Resolution {
+        if let Some(k) = self.exact(text, within) {
             return Resolution::Function {
-                key: found.into_iter().next().expect("one candidate"),
-                from: Some(from),
+                key: k.clone(),
+                from: within.map(|_| "name"),
             };
         }
-        n if n > 1 => return Resolution::Ambiguous(found),
-        _ => {}
-    }
-    if let Some(class) = named_class(decls, text, within) {
-        return Resolution::Class(class.clone(), decls.methods_of(&class));
-    }
-    if within.is_none() && index.files.values().any(|f| f.module_name == text) {
-        let functions = keys
+        let keys = self.of_module(within);
+        let found: Vec<FuncKey> = match DottedPattern::new(text, "inspect") {
+            Ok(p) => keys
+                .iter()
+                .filter(|(k, fqn)| p.matches(fqn) || p.matches(&k.qualname))
+                .map(|(k, _)| (*k).clone())
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        let from = if within.is_some() {
+            "name"
+        } else if has_glob_syntax(text) {
+            "glob"
+        } else {
+            "suffix"
+        };
+        match found.len() {
+            1 => {
+                return Resolution::Function {
+                    key: found.into_iter().next().expect("one candidate"),
+                    from: Some(from),
+                };
+            }
+            n if n > 1 && globs == GlobMatches::Each && has_glob_syntax(text) => {
+                return Resolution::Functions { keys: found, from };
+            }
+            n if n > 1 => return Resolution::Ambiguous(found),
+            _ => {}
+        }
+        if let Some(class) = named_class(self.decls, text, within) {
+            return Resolution::Class(class.clone(), self.decls.methods_of(&class));
+        }
+        if within.is_none() && self.index.files.values().any(|f| f.module_name == text) {
+            let functions = self
+                .of_module(Some(text))
+                .iter()
+                .filter(|(k, _)| !k.qualname.contains('.'))
+                .map(|(k, _)| (*k).clone())
+                .collect();
+            return Resolution::Module(text.to_owned(), functions);
+        }
+        let last = text.rsplit(['.', ':']).next().unwrap_or(text);
+        let name_of = |k: &FuncKey| k.qualname.rsplit('.').next().unwrap_or_default().to_owned();
+        let mut names: Vec<String> = keys.iter().map(|(k, _)| name_of(k)).collect();
+        names.sort_unstable();
+        names.dedup();
+        // The functions named `last` in other modules, else those whose names look like it.
+        let wanted: Vec<&str> = if names.iter().any(|n| n == last) {
+            vec![last]
+        } else {
+            heki_env::problem::nearest(last, names.iter().map(String::as_str))
+        };
+        let suggestions = wanted
             .iter()
-            .filter(|k| k.module == text && !k.qualname.contains('.'))
-            .map(|k| (*k).clone())
+            .flat_map(|name| keys.iter().filter(move |(k, _)| name_of(k) == *name))
+            .take(MAX_SUGGESTIONS)
+            .map(|(k, _)| (*k).clone())
             .collect();
-        return Resolution::Module(text.to_owned(), functions);
+        Resolution::Unknown(suggestions)
     }
-    let last = text.rsplit(['.', ':']).next().unwrap_or(text);
-    let name_of = |k: &FuncKey| k.qualname.rsplit('.').next().unwrap_or_default().to_owned();
-    let mut names: Vec<String> = keys.iter().map(|k| name_of(k)).collect();
-    names.sort_unstable();
-    names.dedup();
-    // The functions named `last` in other modules, else those whose names look like it.
-    let wanted: Vec<&str> = if names.iter().any(|n| n == last) {
-        vec![last]
-    } else {
-        heki_env::problem::nearest(last, names.iter().map(String::as_str))
-    };
-    let suggestions = wanted
-        .iter()
-        .flat_map(|name| keys.iter().filter(move |k| name_of(k) == *name))
-        .take(MAX_SUGGESTIONS)
-        .map(|k| (*k).clone())
-        .collect();
-    Resolution::Unknown(suggestions)
 }
 
 /// The project class `text` names: its fully qualified name, or (within a module, or as a
@@ -507,8 +556,8 @@ pub struct ContractRole {
     pub roles: Vec<&'static str>,
 }
 
-/// What the report is built from. The callbacks give the parts that differ between the CLI
-/// (every file in memory) and the language server (a warm index, open documents).
+/// What the reports are built from: the analysis, and what `heki check` reports in the files of
+/// the functions inspected. The callbacks give the parts that differ between callers.
 pub struct InspectInputs<'a> {
     pub index: &'a ProjectIndex,
     pub decls: &'a ProjectDecls,
@@ -517,17 +566,18 @@ pub struct InspectInputs<'a> {
     pub root: &'a Path,
     /// Whether an ownership contract is declared (`retains.kept`, `returns.new_object`).
     pub ownership: bool,
-    /// The IR of the target's file, for its definitions; `None` when it does not parse.
-    pub unit: Option<&'a ModuleUnit<'a>>,
+    /// The IR of the files of the functions inspected, for their definitions; a file that does
+    /// not parse has none.
+    pub units: &'a [ModuleUnit<'a>],
     /// The project-relative path of a file.
     pub rel_of: &'a dyn Fn(&Path) -> String,
     /// The text of a file, for the lines of hops in it.
     pub text_of: &'a dyn Fn(&Path) -> Option<String>,
-    /// The diagnostics `heki check` reports in the target's file (and with `callers`, in the
-    /// callers' files), each with its baseline status.
+    /// The diagnostics `heki check` reports in the files of the functions inspected (and with
+    /// `callers`, in their callers' files), in its order, each with its baseline status.
     pub reports: Vec<(Diagnostic, Option<&'static str>)>,
-    /// The contracts naming the function.
-    pub contracts: Vec<ContractRole>,
+    /// The roles of functions in the contracts.
+    pub contracts: &'a ContractRoles<'a>,
     /// Files that could not be read or parsed.
     pub errors: Vec<String>,
 }
@@ -573,12 +623,20 @@ struct Builder<'a, 'i> {
     /// How many project functions each call site may run, by file, caller, and position,
     /// indexed one file at a time on the first hop into it.
     candidates: RefCell<FxHashMap<&'i Path, CandidatesByCall<'i>>>,
+    units: FxHashMap<&'a Path, &'a ModuleUnit<'i>>,
+    /// The positions in [`InspectInputs::reports`] of the diagnostics of each file.
+    reports_by_file: FxHashMap<&'a Path, Vec<usize>>,
 }
 
 /// How many project functions each call site of one file may run, by caller and position.
 type CandidatesByCall<'i> = FxHashMap<(&'i FuncKey, Span), usize>;
 
 impl<'i> Builder<'_, 'i> {
+    /// The IR of `path`, a file of a function inspected (`None` when it does not parse).
+    fn unit(&self, path: &Path) -> Option<&ModuleUnit<'i>> {
+        self.units.get(path).copied()
+    }
+
     fn rel(&self, path: &Path) -> String {
         (self.inputs.rel_of)(path)
     }
@@ -680,69 +738,88 @@ fn slot_text(slot: &Slot) -> String {
     }
 }
 
-/// Build the report on `key`, a summarized function.
-pub fn inspect(
-    inputs: &InspectInputs<'_>,
-    key: &FuncKey,
-    query: &InspectQuery<'_>,
-) -> InspectReport {
-    let index = inputs.index;
-    assert!(
-        index.opt_in_facts().shared_state,
-        "heki inspect reads an index with heki_rules::inspect_facts"
-    );
-    let summary = index
-        .summary(key)
-        .expect("the resolved function is summarized");
-    let local = index
-        .local_summary(key)
-        .expect("the resolved function is summarized");
-    let path = index
-        .file_of(key)
-        .expect("the resolved function is summarized");
-    let b = Builder {
-        inputs,
-        lines: Lines {
-            text_of: inputs.text_of,
-            files: RefCell::default(),
-        },
-        calls: RefCell::new(index.calls_by_caller()),
-        candidates: RefCell::default(),
-    };
-    let decl = inputs.decls.function_decl(key);
-    let own_params: Vec<String> = decl.map(|d| d.param_names.clone()).unwrap_or_default();
-    let function = function_info(&b, key, path, summary, &own_params);
-    let params = with_captured_params(inputs.decls, key, own_params);
-    let effects = effects(&b, summary, &params);
-    let changes = changes(&b, key, summary, local, &params);
-    let retains = Retains {
-        stored: param_names(summary.escapes_params, &params),
-        kept: inputs
-            .ownership
-            .then(|| param_names(summary.retains_params, &params)),
-        kept_needs: (!inputs.ownership).then_some(OWNERSHIP_NEEDS),
-    };
-    let returns = returns(&b, summary, &params);
-    let callers = callers(&b, key, query);
-    let reports = reports(&b, key, path, query, &callers);
-    let purity = purity(&b, key, summary, &effects, &changes, function.stub);
-    InspectReport {
-        version: INSPECT_VERSION,
-        heki: env!("CARGO_PKG_VERSION"),
-        root: inputs.root.to_string_lossy().into_owned(),
-        query: query.text.to_owned(),
-        resolved_from: query.resolved_from,
-        complete: inputs.errors.is_empty(),
-        errors: inputs.errors.clone(),
-        function,
-        purity,
-        effects,
-        changes,
-        retains,
-        returns,
-        callers: callers.info,
-        reports,
-        contracts: inputs.contracts.clone(),
+/// The reports on the functions of one analysis ([`Self::report`]): they share what they look up
+/// in it, the calls of each function, the lines of each file, the candidates of each call site,
+/// and the diagnostics of each file.
+pub struct Inspector<'a, 'i>(Builder<'a, 'i>);
+
+impl<'a, 'i> Inspector<'a, 'i> {
+    pub fn new(inputs: &'a InspectInputs<'i>) -> Self {
+        let index = inputs.index;
+        assert!(
+            index.opt_in_facts().shared_state,
+            "heki inspect reads an index with heki_rules::inspect_facts"
+        );
+        let mut reports_by_file: FxHashMap<&Path, Vec<usize>> = FxHashMap::default();
+        for (i, (d, _)) in inputs.reports.iter().enumerate() {
+            reports_by_file.entry(d.path.as_path()).or_default().push(i);
+        }
+        Self(Builder {
+            inputs,
+            lines: Lines {
+                text_of: inputs.text_of,
+                files: RefCell::default(),
+            },
+            calls: RefCell::new(index.calls_by_caller()),
+            candidates: RefCell::default(),
+            units: inputs
+                .units
+                .iter()
+                .map(|u| (u.input.path.as_path(), u))
+                .collect(),
+            reports_by_file,
+        })
+    }
+
+    /// The report on `key`, a summarized function.
+    pub fn report(&self, key: &FuncKey, query: &InspectQuery<'_>) -> InspectReport {
+        let b = &self.0;
+        let inputs = b.inputs;
+        let index = inputs.index;
+        let summary = index
+            .summary(key)
+            .expect("the resolved function is summarized");
+        let local = index
+            .local_summary(key)
+            .expect("the resolved function is summarized");
+        let path = index
+            .file_of(key)
+            .expect("the resolved function is summarized");
+        let decl = inputs.decls.function_decl(key);
+        let own_params: Vec<String> = decl.map(|d| d.param_names.clone()).unwrap_or_default();
+        let function = function_info(b, key, path, summary, &own_params);
+        let params = with_captured_params(inputs.decls, key, own_params);
+        let effects = effects(b, summary, &params);
+        let changes = changes(b, key, summary, local, &params);
+        let retains = Retains {
+            stored: param_names(summary.escapes_params, &params),
+            kept: inputs
+                .ownership
+                .then(|| param_names(summary.retains_params, &params)),
+            kept_needs: (!inputs.ownership).then_some(OWNERSHIP_NEEDS),
+        };
+        let returns = returns(b, summary, &params);
+        let callers = callers(b, key, query);
+        let reports = reports(b, key, path, query, &callers);
+        let purity = purity(b, key, summary, &effects, &changes, function.stub);
+        InspectReport {
+            version: INSPECT_VERSION,
+            heki: env!("CARGO_PKG_VERSION"),
+            root: inputs.root.to_string_lossy().into_owned(),
+            query: query.text.to_owned(),
+            resolved_from: query.resolved_from,
+            complete: inputs.errors.is_empty(),
+            errors: inputs.errors.clone(),
+            function,
+            purity,
+            effects,
+            changes,
+            retains,
+            returns,
+            callers: callers.info,
+            reports,
+            contracts: inputs.contracts.of(key),
+        }
     }
 }
 
@@ -753,11 +830,9 @@ fn function_info(
     s: &EffectSummary,
     params: &[String],
 ) -> FunctionInfo {
-    let inputs = b.inputs;
-    let decl = inputs.decls.function_decl(key);
-    let definitions: Vec<(u32, u32)> = inputs
-        .unit
-        .filter(|u| u.input.path == path)
+    let decl = b.inputs.decls.function_decl(key);
+    let definitions: Vec<(u32, u32)> = b
+        .unit(path)
         .into_iter()
         .flat_map(|u| {
             u.input
@@ -1297,9 +1372,7 @@ fn reports(
 ) -> Vec<Report> {
     let index = b.inputs.index;
     let spans: Vec<Span> = b
-        .inputs
-        .unit
-        .filter(|u| u.input.path == path)
+        .unit(path)
         .into_iter()
         .flat_map(|u| &u.input.ir.functions)
         .filter(|f| func_qualname(f) == key.qualname && !f.is_class_body)
@@ -1321,8 +1394,18 @@ fn reports(
                         .any(|s| s.start <= r.span.start && r.span.end <= s.end))
         })
     };
+    // The diagnostics of the function's file and of its callers' files, in their order.
+    let callers_files = found.functions.iter().map(|(p, _)| p.as_path());
+    let files = std::iter::once(path).chain(callers_files.filter(|_| query.callers));
+    let mut at: Vec<usize> = files
+        .filter_map(|p| b.reports_by_file.get(p))
+        .flatten()
+        .copied()
+        .collect();
+    at.sort_unstable();
+    at.dedup();
     let mut out = Vec::new();
-    for (d, baseline) in &b.inputs.reports {
+    for (d, baseline) in at.into_iter().map(|i| &b.inputs.reports[i]) {
         let place = if d.path == path && d.qualname == key.qualname {
             "in"
         } else if query.callers

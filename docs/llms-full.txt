@@ -3350,7 +3350,7 @@ Usage: heki inspect [OPTIONS] <SYMBOL> [PATHS]...
 
 Arguments:
   <SYMBOL>
-          A dotted name (`pkg.mod.Class.method`, a dotted suffix such as `Class.method`, or a glob), `path.py:LINE`, or `path.py::NAME`
+          A dotted name (`pkg.mod.Class.method`, a dotted suffix such as `Class.method`, or a glob), `path.py:LINE`, or `path.py::NAME`. `-` reads such symbols from standard input, one per line, and reports on every function they name, a glob on each function it matches, from one analysis: a JSON array, or one text section per function
 
   [PATHS]...
           The project to analyze, as for `heki check`
@@ -3413,18 +3413,22 @@ Documentation:
   Agent Skill      https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental
 
 Exit codes:
-  0  the function's report is printed
-  2  the symbol names no single function (the error lists the candidates), or a file could not be analyzed
+  0  the report of each function is printed
+  2  a symbol names no single function (the error lists the candidates), or a file could not be analyzed
 
 Examples:
   heki inspect pkg.users.fetch
       a function by its full name
   heki inspect src/pkg/users.py:42 --callers
       the function at a line, with its callers
+  printf '%s\n' pkg.users.fetch 'pkg.orders.*' | heki inspect -
+      every function the symbols name, from one analysis
 
 Output for programs:
   heki inspect <SYMBOL> --output-format json
       the report as one object; on exit code 2, `error` with the candidates
+  heki inspect - --output-format json
+      an array: the object of each function the symbols on standard input name, in their order
 ```
 
 ## `heki recommend`
@@ -4443,6 +4447,7 @@ function's effects are in question, not before every edit.
 $ heki inspect app.users.load_user --output-format json
 $ heki inspect app/users.py:42
 $ heki inspect app/users.py::load_user --callers --depth 3
+$ printf '%s\n' app.users.load_user 'app.orders.*' | heki inspect - --output-format json
 ```
 
 | Field | Content |
@@ -4461,6 +4466,13 @@ $ heki inspect app/users.py::load_user --callers --depth 3
   says what to do (in JSON, `error.help`; a misspelled name gets the functions whose names look
   like it) and lists the functions to choose from (`error.candidates`, `error.suggestions`,
   `error.methods`, or `error.functions`).
+- With `-` for the name, the names are read from standard input, one per line, and heki analyzes
+  the project once for all of them: the JSON output is an array of the objects, in the order of
+  the names, and the text output one section per function. Here a glob names each function it
+  matches, in the order of their full names (on the command line, a glob matching several is
+  ambiguous). A name that names no single function takes its place in the array as the error
+  object it prints alone, the others are still reported, and the exit code is 2. No names give
+  an empty array.
 - `pure` means heki found no effect and no change of an input or of shared state, and resolved
   every call below. Libraries the [catalog](https://heki.koxudaxi.dev/configuration/#ecosystem-knowledge-toolhekiecosystem)
   does not list count as having no effects.
@@ -4473,8 +4485,8 @@ $ heki inspect app/users.py::load_user --callers --depth 3
   100; `truncated` says there are more. `purity.unknown_at` is the first of them. Both are given
   for an `impure` function too: what it changes may then be incomplete.
 - A field the configuration does not compute is `null`, with the setting that computes it.
-- Exit code 0 when the function was inspected, 2 otherwise or when a file could not be analyzed
-  (the report is still printed, with `complete: false`).
+- Exit code 0 when every function was inspected, 2 otherwise or when a file could not be
+  analyzed (the reports are still printed, with `complete: false`).
 
 To see what an edit changed in a function, inspect it before and after the edit and compare
 `effects`, `changes`, `retains`, and `returns`: a new entry is new behavior. Fact keys carry no line

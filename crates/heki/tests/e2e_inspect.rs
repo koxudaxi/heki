@@ -1460,6 +1460,19 @@ fn contracts_name_the_roles_a_function_has() {
             .unwrap()
             .is_empty()
     );
+    // The contracts compiled once name the roles of each function reported on in one run.
+    let symbols = [
+        "Store.read",
+        "render",
+        "Model.reset",
+        "Model.save",
+        "Store.refresh",
+    ];
+    let (code, entries) = inspect_each_json(&p, &symbols.join("\n"), &[]);
+    assert_eq!(code, 0);
+    for (e, symbol) in entries.iter().zip(symbols) {
+        assert_eq!(e["contracts"], report(&p, symbol)["contracts"], "{symbol}");
+    }
 }
 
 #[test]
@@ -1511,6 +1524,215 @@ fn names_within_a_file_and_names_that_are_no_pattern() {
     // An unclosed `[` is no glob: nothing matches it.
     let (code, v, _) = inspect(&p, &["pkg.[load"]);
     assert_eq!((code, v["error"]["kind"].as_str()), (2, Some("unknown")));
+}
+
+/// `heki inspect --heuristic - <args>` with `symbols` on standard input: exit code, stdout,
+/// stderr.
+fn inspect_each(p: &Project, symbols: &str, args: &[&str]) -> (i32, String, String) {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = common::heki_command()
+        .args(["inspect", "--heuristic", "-"])
+        .args(args)
+        .current_dir(&p.dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(symbols.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    (
+        out.status.code().unwrap(),
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+    )
+}
+
+/// [`inspect_each`] with `--output-format json`: exit code and the array.
+fn inspect_each_json(p: &Project, symbols: &str, args: &[&str]) -> (i32, Vec<Value>) {
+    let mut all = args.to_vec();
+    all.extend(["--output-format", "json"]);
+    let (code, out, err) = inspect_each(p, symbols, &all);
+    let v: Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}\n{err}"));
+    (code, v.as_array().unwrap().clone())
+}
+
+fn fqns(entries: &[Value]) -> Vec<&str> {
+    entries
+        .iter()
+        .map(|e| e["function"]["fqn"].as_str().unwrap_or("-"))
+        .collect()
+}
+
+#[test]
+fn symbols_on_standard_input_are_reported_from_one_analysis_in_their_order() {
+    let p = users_project("inspect_each");
+    let symbols = "pkg.users.fetch\nLoader.load\n\n  pkg/users.py:35  \n*.fet?h\nhandler\n";
+    let (code, entries) = inspect_each_json(&p, symbols, &[]);
+    assert_eq!(code, 0);
+    let queries: Vec<&str> = entries
+        .iter()
+        .map(|e| e["query"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        queries,
+        [
+            "pkg.users.fetch",
+            "Loader.load",
+            "pkg/users.py:35",
+            "*.fet?h",
+            "handler"
+        ]
+    );
+    assert_eq!(
+        fqns(&entries),
+        [
+            "pkg.users.fetch",
+            "pkg.users.Loader.load",
+            "pkg.users.fetch",
+            "pkg.users.fetch",
+            "pkg.users.handler"
+        ]
+    );
+    // Each is the object the symbol alone prints, its reports from `heki check` included.
+    assert!(!entries[4]["reports"].as_array().unwrap().is_empty());
+    for e in &entries {
+        assert_eq!(
+            *e,
+            report(&p, e["query"].as_str().unwrap()),
+            "{}",
+            e["query"]
+        );
+    }
+    // With the callers and their reports, and a baseline.
+    let (code, _, err) = p.check(&["--baseline", "b.toml", "--update-baseline"]);
+    assert_eq!(code, 0, "{err}");
+    let args = ["--callers", "--depth", "2", "--baseline", "b.toml"];
+    let (code, entries) = inspect_each_json(&p, "fetch\nLoader._remember\n", &args);
+    assert_eq!(code, 0);
+    assert_eq!(entries[0]["reports"][0]["where"], "through");
+    assert_eq!(entries[0]["reports"][0]["baseline"], "allowed");
+    for e in &entries {
+        let query = e["query"].as_str().unwrap();
+        let mut single = vec![query];
+        single.extend(args);
+        assert_eq!(*e, report_with(&p, &single), "{query}");
+    }
+    // Nothing on standard input: nothing to report.
+    let (code, entries) = inspect_each_json(&p, "\n \n", &[]);
+    assert_eq!((code, entries.len()), (0, 0));
+}
+
+#[test]
+fn a_glob_on_standard_input_names_each_function_it_matches() {
+    let p = users_project("inspect_each_glob");
+    let (code, entries) = inspect_each_json(&p, "pkg.users.Loader.*\npkg/users.py::*.make\n", &[]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        fqns(&entries),
+        [
+            "pkg.users.Loader.__init__",
+            "pkg.users.Loader._remember",
+            "pkg.users.Loader.load",
+            "pkg.users.Loader.make",
+            "pkg.users.Loader.parse",
+            "pkg.users.Loader.size",
+            "pkg.users.Loader.make"
+        ]
+    );
+    let from: Vec<&str> = entries
+        .iter()
+        .map(|e| e["resolved_from"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        from,
+        ["glob", "glob", "glob", "glob", "glob", "glob", "name"]
+    );
+    assert!(
+        entries[..6]
+            .iter()
+            .all(|e| e["query"] == "pkg.users.Loader.*")
+    );
+    // As the symbol on the command line, a glob names one function: several are ambiguous.
+    let (code, v, _) = inspect(&p, &["pkg.users.Loader.*"]);
+    assert_eq!((code, v["error"]["kind"].as_str()), (2, Some("ambiguous")));
+    // A name that matches several functions without a glob stays ambiguous.
+    let (code, entries) = inspect_each_json(&p, "load\n", &[]);
+    assert_eq!(
+        (code, entries[0]["error"]["kind"].as_str()),
+        (2, Some("ambiguous"))
+    );
+}
+
+#[test]
+fn symbols_on_standard_input_that_name_no_function_are_their_error_objects() {
+    let p = users_project("inspect_each_errors");
+    let symbols = [
+        "pkg.users.fetch",
+        "nothing.here",
+        "pkg.nothing.*",
+        "load",
+        "pkg.users.Loader",
+        "pkg.users",
+        "pkg/users.py",
+        "elsewhere.py:3",
+        "handler",
+    ];
+    let (code, entries) = inspect_each_json(&p, &symbols.join("\n"), &[]);
+    assert_eq!(code, 2);
+    let kinds: Vec<&str> = entries
+        .iter()
+        .map(|e| e["error"]["kind"].as_str().unwrap_or("report"))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "report",
+            "unknown",
+            "unknown",
+            "ambiguous",
+            "class",
+            "module",
+            "invalid",
+            "outside_project",
+            "report"
+        ]
+    );
+    // Each is the object the symbol alone prints.
+    for (e, symbol) in entries.iter().zip(symbols) {
+        assert_eq!(*e, inspect(&p, &[symbol]).1, "{symbol}");
+    }
+    // In text form the reports go to stdout, a blank line between two, and the errors to stderr.
+    let (code, out, err) = inspect_each(&p, &symbols.join("\n"), &[]);
+    assert_eq!(code, 2);
+    let text = |symbol| p.heki(&["inspect", "--heuristic", symbol]).1;
+    assert_eq!(
+        out,
+        format!("{}\n{}", text("pkg.users.fetch"), text("handler"))
+    );
+    assert!(
+        err.contains("no function of the project is named `nothing.here`"),
+        "{err}"
+    );
+    assert!(err.contains("ambiguous symbol `load`"), "{err}");
+    assert!(
+        err.contains("pkg.users.Loader.load  pkg/users.py:11"),
+        "{err}"
+    );
+    // Symbols that cannot name a function leave the project unanalyzed.
+    p.write("pkg/broken.py", "def f(:\n");
+    let (code, out, err) = inspect_each(&p, "pkg/users.py\n", &["--output-format", "json"]);
+    assert_eq!(code, 2);
+    assert!(out.contains("\"kind\": \"invalid\""), "{out}");
+    assert!(!err.contains("pkg/broken.py"), "{err}");
+    let (code, entries) = inspect_each_json(&p, "fetch\n", &[]);
+    assert_eq!((code, entries[0]["complete"].as_bool()), (2, Some(false)));
 }
 
 const MORE: &str = r#"import copy

@@ -376,7 +376,7 @@ Usage: heki inspect [OPTIONS] <SYMBOL> [PATHS]...
 
 Arguments:
   <SYMBOL>
-          A dotted name (`pkg.mod.Class.method`, a dotted suffix such as `Class.method`, or a glob), `path.py:LINE`, or `path.py::NAME`
+          A dotted name (`pkg.mod.Class.method`, a dotted suffix such as `Class.method`, or a glob), `path.py:LINE`, or `path.py::NAME`. `-` reads such symbols from standard input, one per line, and reports on every function they name, a glob on each function it matches, from one analysis: a JSON array, or one text section per function
 
   [PATHS]...
           The project to analyze, as for `heki check`
@@ -439,18 +439,22 @@ Documentation:
   Agent Skill      https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental
 
 Exit codes:
-  0  the function's report is printed
-  2  the symbol names no single function (the error lists the candidates), or a file could not be analyzed
+  0  the report of each function is printed
+  2  a symbol names no single function (the error lists the candidates), or a file could not be analyzed
 
 Examples:
   heki inspect pkg.users.fetch
       a function by its full name
   heki inspect src/pkg/users.py:42 --callers
       the function at a line, with its callers
+  printf '%s\n' pkg.users.fetch 'pkg.orders.*' | heki inspect -
+      every function the symbols name, from one analysis
 
 Output for programs:
   heki inspect <SYMBOL> --output-format json
       the report as one object; on exit code 2, `error` with the candidates
+  heki inspect - --output-format json
+      an array: the object of each function the symbols on standard input name, in their order
 ```
 
 ## `heki recommend`
