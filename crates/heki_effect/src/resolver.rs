@@ -21,18 +21,18 @@ use heki_ast::Span;
 use heki_env::HekiConfig;
 use heki_ir::walk::{Answer, Budget, FnShape, ReadLog, SharedMemo, Visit, reach};
 use heki_ir::{
-    BinOpKind, BlockId, ConstLiteral, FnIndex, FunctionKind, GlobalStores, Inst, InstKind,
-    IrFunction, LastBindings, ModuleIr, SmallDisplay, Terminator, VarId,
+    BinOpKind, BlockId, ConstLiteral, FnIndex, FunctionId, FunctionKind, GlobalStores, Inst,
+    InstKind, IrFunction, LastBindings, ModuleIr, SmallDisplay, Terminator, VarId,
 };
 use heki_kb::{
     ArgFact, CopyDepth, EcosystemEntry, EffectiveEcosystemKb, ExecEffectKind, LiteralValue,
 };
-use heki_semantic::{ModuleImport, ScopeKind, SemanticModel, StarImport, mangling};
+use heki_semantic::{ClassInfo, ModuleImport, ScopeKind, SemanticModel, StarImport, mangling};
 use rayon::prelude::*;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::BuildHasher;
 use std::ops::Bound;
@@ -1019,6 +1019,13 @@ pub struct ModuleDecls {
     /// [`Self::alias_paths`]).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub rebound_definitions: BTreeSet<String>,
+    /// The module's classes and functions whose `class` or `def` statement a function or a
+    /// class body runs under a `global` declaration of the name (`global Config`, then
+    /// `class Config: ...` in `_define`), by qualname, with the qualname of that scope
+    /// ([`made_in`]). CPython names them as module-level definitions, which they are once that
+    /// scope has run; the code written in them is that scope's. Boxed: few modules have one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub made_in: Option<Box<BTreeMap<String, String>>>,
     /// What the module's code stores into the globals of other project modules and into the
     /// instances of their classes (`stores::record`). Boxed: most modules store into none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5499,6 +5506,18 @@ fn module_read(
     }
 }
 
+/// Whether the module body runs the `class` statement `class` itself: the nearest block around
+/// it, past a PEP 695 type-parameter scope, is the module's. A class named as a module-level one
+/// may be made by a function declaring its name `global` ([`ModuleDecls::made_in`]).
+fn statement_in_module_body(semantic: &SemanticModel, class: &ClassInfo) -> bool {
+    let scope =
+        |id: heki_semantic::ScopeId| semantic.scopes.get(id.0 as usize).filter(|sc| sc.id == id);
+    let first = scope(class.scope).and_then(|sc| sc.parent).and_then(scope);
+    std::iter::successors(first, |sc| sc.parent.and_then(scope))
+        .find(|sc| sc.kind != ScopeKind::TypeParameters)
+        .is_some_and(|sc| sc.kind == ScopeKind::Module)
+}
+
 /// Pass 1: imports, classes (bases), functions (signatures) — no inference.
 fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     let semantic = input.semantic;
@@ -5535,13 +5554,16 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             decls.functions.insert(f.qualname.clone(), Box::default());
         }
     }
-    (decls.aliases, decls.alias_paths) = module_aliases(input, &decls);
+    let made_in = made_in(input);
+    decls.made_in = (!made_in.is_empty()).then(|| Box::new(made_in));
+    let bindings = BodyBindings::of(input, &decls);
+    (decls.aliases, decls.alias_paths) = module_aliases(input, &decls, &bindings);
     decls.type_vars = type_vars(input, &decls);
     let stores = GlobalStores::of(&input.ir.functions);
     decls.unknown_globals = unknown_globals(&stores, &decls);
     let rebound = rebound_imports(input, &stores, &decls);
     decls.rebound_imports = (!rebound.is_empty()).then(|| Box::new(rebound));
-    decls.rebound_definitions = rebound_definitions(input, &stores, &decls);
+    decls.rebound_definitions = rebound_definitions(input, &stores, &decls, &bindings);
     decls.private_members = (decls.classes.keys())
         .chain(decls.functions.keys())
         .any(|qualname| mangling::member_path(qualname).is_some());
@@ -5590,7 +5612,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                 .map(|(_, target, _, _)| target)
         };
         let mut bases: Vec<String> = Vec::new();
-        if !class.qualname.contains('.') {
+        if statement_in_module_body(semantic, class) {
             // The module body names its bases through the module's names; an expression
             // (`with_metaclass(Meta)`, `*bases`) is an unknown base.
             bases.extend(class.bases.iter().filter_map(|b| {
@@ -6635,6 +6657,7 @@ fn rebound_imports(
 fn module_aliases(
     input: &ModuleInput<'_>,
     decls: &ModuleDecls,
+    bindings: &BodyBindings<'_>,
 ) -> (BTreeMap<String, String>, BTreeMap<String, Vec<String>>) {
     let module = module_scope(input.semantic);
     let module_imports = || {
@@ -6710,7 +6733,9 @@ fn module_aliases(
         }
     }
     let mut paths = BTreeMap::new();
-    for (name, objects) in definitions_bound_again(input, decls, &stores, &named, &mut known) {
+    for (name, objects) in
+        definitions_bound_again(input, decls, bindings, &stores, &named, &mut known)
+    {
         match <[String; 1]>::try_from(objects) {
             Ok([target]) => {
                 if target != format!("{}.{name}", decls.module_name) {
@@ -6728,14 +6753,17 @@ fn module_aliases(
 /// The module-level classes and functions the module body binds again (`def fetch(...)`, then
 /// `fetch = _quiet`), each with the objects it may hold once the module has run (sorted, the
 /// definition as its own fqn): what the bindings that may be the last one bind
-/// ([`LastBindings::last_of`]; a path leaving the name unbound raises where it is called). A
-/// name another function stores or deletes, an import binds, or one of those bindings binds to
-/// anything but a named object is none, and so is every name where a star import, `exec`, or
-/// `globals()` may bind any. A definition of the module among the objects is the object its
-/// statement made, whatever its name holds later ([`ProjectDecls::named_on_paths`]).
+/// ([`LastBindings::last_of`]; a path leaving the name unbound raises where it is called), where
+/// running a scope that binds the definition under `global` binds the definition itself
+/// ([`BodyBindings`]). A name another function stores or deletes, an import binds, or one of
+/// those bindings binds to anything but a named object is none, and so is every name where a
+/// star import, `exec`, or `globals()` may bind any. A definition of the module among the
+/// objects is the object its statement made, whatever its name holds later
+/// ([`ProjectDecls::named_on_paths`]).
 fn definitions_bound_again<'i>(
-    input: &'i ModuleInput<'_>,
+    input: &ModuleInput<'_>,
     decls: &ModuleDecls,
+    bindings: &BodyBindings<'i>,
     stores: &GlobalStores<'_>,
     named: &Named<'_>,
     known: &mut FxHashMap<VarId, Option<String>>,
@@ -6744,47 +6772,196 @@ fn definitions_bound_again<'i>(
     if input.ir.constants.dynamic || input.ir.has_star_import {
         return out;
     }
-    let body = input.ir.function(input.ir.module_fn);
-    let defines =
-        |name: &str| decls.classes.contains_key(name) || decls.functions.contains_key(name);
-    let mut bindings: FxHashMap<&str, Vec<(BlockId, u32, VarId)>> = FxHashMap::default();
-    for bb in &body.blocks {
-        for inst in &bb.insts {
-            if let InstKind::StoreGlobal { name, value } = &inst.kind
-                && defines(name)
-            {
-                bindings
-                    .entry(name)
-                    .or_default()
-                    .push((bb.id, inst.span.start, *value));
-            }
-        }
-    }
-    bindings.retain(|name, binds| {
-        binds.len() > 1
-            && stores.exactly(name, binds.len() as u32)
-            && !decls.imports.contains_key(*name)
+    let candidates = bindings.by_name.iter().filter(|(name, binds)| {
+        binds.at.len() > 1
+            && stores.exactly(name, binds.stores)
+            && !decls.imports.contains_key(**name)
     });
-    if bindings.is_empty() {
-        return out;
-    }
-    let shape = FnShape::new(body);
-    let last = LastBindings::of(&shape);
-    for (name, binds) in bindings {
-        let at: Vec<(BlockId, u32)> = binds.iter().map(|&(b, start, _)| (b, start)).collect();
-        let (reaching, _) = last.last_of(&shape, &at);
+    for (name, binds) in candidates {
+        let (reaching, _) = bindings.last().last_of(&bindings.shape, &binds.at);
         let objects: Option<Vec<String>> = reaching
             .iter()
-            .map(|&i| named.object(binds[i].2, known))
+            .map(|&i| match binds.values[i] {
+                Some(value) => named.object(value, known),
+                None => Some(format!("{}.{name}", decls.module_name)),
+            })
             .collect();
         let Some(mut objects) = objects else { continue };
         objects.sort();
         objects.dedup();
         if (1..=crate::types::MAX_NAMED).contains(&objects.len()) {
-            out.push((name, objects));
+            out.push((*name, objects));
         }
     }
     out.sort();
+    out
+}
+
+/// Where the module body binds each of the module's classes and functions: its stores of the
+/// name, and where it runs a scope binding the name's definition on every path through it, by
+/// its `class` or `def` statement under a `global` declaration of the name, the scope's one
+/// store of the name ([`global_binders`]): a call of a module-level function (`_define()`
+/// running `global Config`, then `class Config: ...`), or the `class` statement of a class
+/// body.
+struct BodyBindings<'i> {
+    shape: FnShape<'i>,
+    /// Built on first use: most modules bind no definition again.
+    last: OnceCell<LastBindings>,
+    by_name: FxHashMap<&'i str, NameBindings>,
+}
+
+/// The module body's bindings of one name ([`BodyBindings`]).
+#[derive(Default)]
+struct NameBindings {
+    /// Each binding's block and start, in the module body's order.
+    at: Vec<(BlockId, u32)>,
+    /// What each binding binds: a store's value, or `None` for a scope binding the definition.
+    values: Vec<Option<VarId>>,
+    /// The stores of the name the bindings run: the module body's own, and one for each scope
+    /// they run.
+    stores: u32,
+}
+
+impl<'i> BodyBindings<'i> {
+    fn of(input: &'i ModuleInput<'_>, decls: &ModuleDecls) -> Self {
+        let body = input.ir.function(input.ir.module_fn);
+        let shape = FnShape::new(body);
+        let defines =
+            |name: &str| decls.classes.contains_key(name) || decls.functions.contains_key(name);
+        let binders = global_binders(input, decls);
+        let mut by_name: FxHashMap<&'i str, NameBindings> = FxHashMap::default();
+        let mut runs: FxHashSet<(FunctionId, &str)> = FxHashSet::default();
+        for bb in &body.blocks {
+            for inst in &bb.insts {
+                let mut bind = |name: &'i str, value: Option<VarId>, stores: u32| {
+                    let binds = by_name.entry(name).or_default();
+                    binds.at.push((bb.id, inst.span.start));
+                    binds.values.push(value);
+                    binds.stores += stores;
+                };
+                // The binder the instruction runs: a function it calls, or a class body its
+                // `class` statement runs.
+                let runs_binder = match &inst.kind {
+                    InstKind::StoreGlobal { name, value } if defines(name) => {
+                        bind(name, Some(*value), 1);
+                        continue;
+                    }
+                    _ if binders.is_empty() => continue,
+                    InstKind::Call {
+                        callee_var: Some(callee),
+                        ..
+                    } => match shape.inst(shape.copy_root(*callee)).map(|i| &i.kind) {
+                        Some(InstKind::MakeClosure {
+                            func_id: Some(id), ..
+                        }) if !input.ir.function(*id).is_class_body => *id,
+                        _ => continue,
+                    },
+                    InstKind::MakeClosure {
+                        func_id: Some(id), ..
+                    } if input.ir.function(*id).is_class_body => *id,
+                    _ => continue,
+                };
+                for &name in binders.get(&runs_binder).into_iter().flatten() {
+                    bind(name, None, u32::from(runs.insert((runs_binder, name))));
+                }
+            }
+        }
+        Self {
+            shape,
+            last: OnceCell::new(),
+            by_name,
+        }
+    }
+
+    fn last(&self) -> &LastBindings {
+        self.last.get_or_init(|| LastBindings::of(&self.shape))
+    }
+
+    /// Whether the module body binds `name` on every path ([`LastBindings::always_runs`]).
+    fn always_binds(&self, name: &str) -> bool {
+        self.by_name.get(name).is_some_and(|binds| {
+            (binds.at.iter()).any(|&(block, _)| self.last().always_runs(&self.shape, block))
+        })
+    }
+}
+
+/// The scopes the module body may run that bind definitions of the module under `global` on
+/// every path through them, with the names they bind: a module-level function the module body
+/// can call (a plain `def`: no decorator, which could replace it, and no generator or coroutine
+/// function, whose call runs nothing of its body) or a class body of a module-level `class`
+/// statement, storing the name once, by the `class` or `def` statement of a definition with
+/// that qualname ([`ModuleDecls::made_in`]), in a block every path through it to a return runs.
+fn global_binders<'i>(
+    input: &'i ModuleInput<'_>,
+    decls: &ModuleDecls,
+) -> FxHashMap<FunctionId, Vec<&'i str>> {
+    let mut out: FxHashMap<FunctionId, Vec<&'i str>> = FxHashMap::default();
+    let Some(made_in) = decls.made_in.as_deref() else {
+        return out;
+    };
+    let makers: FxHashSet<&str> = made_in.values().map(String::as_str).collect();
+    let binders = input.ir.functions.iter().filter(|f| {
+        f.enclosing == Some(input.ir.module_fn)
+            && makers.contains(f.qualname.as_str())
+            && (f.is_class_body
+                || (matches!(f.kind, FunctionKind::Sync) && f.decorators.is_empty()))
+    });
+    for f in binders {
+        // Each global's stores in `f`, with a deletion as a store of no value.
+        let mut stores: FxHashMap<&str, Vec<(BlockId, Option<VarId>)>> = FxHashMap::default();
+        for bb in &f.blocks {
+            for inst in &bb.insts {
+                let (name, value) = match &inst.kind {
+                    InstKind::StoreGlobal { name, value } => (name, Some(*value)),
+                    InstKind::Delete {
+                        name, global: true, ..
+                    } => (name, None),
+                    _ => continue,
+                };
+                stores.entry(name).or_default().push((bb.id, value));
+            }
+        }
+        let shape = FnShape::new(f);
+        let last = LastBindings::of(&shape);
+        let makes = |value: VarId| match shape.inst(value).map(|i| &i.kind) {
+            Some(InstKind::MakeClosure {
+                func_id: Some(id), ..
+            }) => Some(input.ir.function(*id).qualname.as_str()),
+            _ => None,
+        };
+        let bound: Vec<&'i str> = stores
+            .into_iter()
+            .filter_map(|(name, at)| match at[..] {
+                [(block, Some(value))]
+                    if makes(value) == Some(name)
+                        && made_in.get(name) == Some(&f.qualname)
+                        && last.always_runs(&shape, block) =>
+                {
+                    Some(name)
+                }
+                _ => None,
+            })
+            .collect();
+        if !bound.is_empty() {
+            out.insert(f.id, bound);
+        }
+    }
+    out
+}
+
+/// [`ModuleDecls::made_in`]: the definitions named as module-level ones (a `class` or a named
+/// `def`) whose scope is made by a function or a class body, with its qualname.
+fn made_in(input: &ModuleInput<'_>) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for f in &input.ir.functions {
+        let Some(maker) = f.enclosing.map(|id| input.ir.function(id)) else {
+            continue;
+        };
+        if !maker.is_module_body && !f.qualname.contains('.') && !f.qualname.starts_with('<') {
+            out.entry(f.qualname.clone())
+                .or_insert_with(|| maker.qualname.clone());
+        }
+    }
     out
 }
 
@@ -6877,6 +7054,7 @@ fn rebound_definitions(
     input: &ModuleInput<'_>,
     stores: &GlobalStores<'_>,
     decls: &ModuleDecls,
+    bindings: &BodyBindings<'_>,
 ) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut by_statement: FxHashMap<&str, u32> = FxHashMap::default();
@@ -6921,6 +7099,12 @@ fn rebound_definitions(
     // (`ModuleDecls::aliases`, `ModuleDecls::alias_paths`): a call through the name runs them,
     // and a value naming the definition is the object its statement made.
     let resolved = |q: &str| decls.aliases.contains_key(q) || decls.alias_paths.contains_key(q);
+    // A definition whose statement a function runs holds the name once that function has run
+    // (`ModuleDecls::made_in`): unless the module body binds the name on every path, a read
+    // may find it unbound, or bound to what that function binds at some other time.
+    let made_in = decls.made_in.as_deref();
+    let bound_late =
+        |q: &str| made_in.is_some_and(|m| m.contains_key(q)) && !bindings.always_binds(q);
     out.extend(
         decls
             .functions
@@ -6930,7 +7114,8 @@ fn rebound_definitions(
             .filter(|q| {
                 dynamic
                     || !(resolved(q)
-                        || stores.exactly(q, by_statement.get(q.as_str()).copied().unwrap_or(0)))
+                        || (stores.exactly(q, by_statement.get(q.as_str()).copied().unwrap_or(0))
+                            && !bound_late(q)))
             })
             .cloned(),
     );
@@ -8213,6 +8398,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     grown_globals: BTreeSet::new(),
     rebound_globals: BTreeSet::new(),
     rebound_definitions: BTreeSet::new(),
+    made_in: None,
     stores_elsewhere: None,
     store_fallbacks: None,
     calls_setstate: false,

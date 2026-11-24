@@ -2274,10 +2274,10 @@ impl<'a> Extractor<'a> {
     /// The enclosing function whose variable `name` is (the nearest one whose nested functions
     /// capture it), by qualname.
     fn cell_owner(&self, name: &str) -> Option<String> {
-        let qualname = func_qualname(self.f);
-        qualname
-            .rmatch_indices(".<locals>.")
-            .map(|(i, _)| &qualname[..i])
+        self.cx
+            .ir()
+            .enclosing_functions(self.f)
+            .map(func_qualname)
             .find(|outer| self.cx.captures(outer, name))
             .map(str::to_owned)
     }

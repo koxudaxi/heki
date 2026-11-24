@@ -454,9 +454,9 @@ pub(crate) fn captured_params(ir: &ModuleIr) -> FxHashMap<&str, resolver::Captur
     let mut own: FxHashMap<&str, usize> = FxHashMap::default();
     for f in &ir.functions {
         let qualname = f.qualname.as_str();
-        let enclosing = qualname
-            .match_indices(".<locals>.")
-            .filter_map(|(at, _)| read.get_key_value(&qualname[..at]));
+        let enclosing = ir
+            .enclosing_functions(f)
+            .filter_map(|g| read.get_key_value(resolver::func_qualname(g)));
         let mut params = enclosing
             .flat_map(|(owner, read)| read.iter().map(|i| (*owner, *i)))
             .peekable();

@@ -1394,7 +1394,8 @@ impl Allowance {
     /// "lexical"` the function whose code holds it. A lambda, comprehension, or generator
     /// expression has no name a pattern could give, so its code belongs to the function it is
     /// written in, and a class body's to the function running the class statement (the module
-    /// body at module level).
+    /// body at module level, and the function declaring the class's name `global` for a class
+    /// named as a module-level one, `ModuleDecls::made_in`).
     pub(crate) fn judged<'k>(
         &self,
         decls: &ProjectDecls,
@@ -1404,6 +1405,10 @@ impl Allowance {
             return std::borrow::Cow::Borrowed(func);
         }
         let mut qualname = func.qualname.as_str();
+        // `global` declarations in class bodies can make two classes each other's maker
+        // (`class A` holding `global B; class B`, whose body holds `global A; class A`): a maker
+        // passed already is not taken again, and the code goes to the class's holder instead.
+        let mut passed: Vec<&str> = Vec::new();
         loop {
             let (holder, last) = match qualname.rsplit_once('.') {
                 Some((holder, last)) => (Some(holder), last),
@@ -1413,7 +1418,14 @@ impl Allowance {
             if !synthetic && !decls.is_project_class(&format!("{}.{qualname}", func.module)) {
                 break;
             }
-            qualname = holder.map_or("<module>", |h| h.strip_suffix(".<locals>").unwrap_or(h));
+            passed.push(qualname);
+            let runner = (decls.module(&func.module))
+                .and_then(|m| m.made_in.as_deref()?.get(qualname))
+                .filter(|runner| !synthetic && !passed.contains(&runner.as_str()));
+            qualname = match runner {
+                Some(runner) => runner,
+                None => holder.map_or("<module>", |h| h.strip_suffix(".<locals>").unwrap_or(h)),
+            };
         }
         if qualname == func.qualname {
             return std::borrow::Cow::Borrowed(func);
