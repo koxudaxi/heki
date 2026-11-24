@@ -26,9 +26,8 @@ It takes the options of `heki check` that decide what is analyzed: `--select`,
   reports of exact rules that `lint.heuristic = false` withholds, and the heuristic rules it
   leaves off. With a baseline, the reports it allows and the regressions.
 - **What keeps reports heuristic**: the heuristic reports of exact claims (the heuristic reports
-  of exact rules, and those of `EFF111` and `EFF113`, which report the claims of `EFF101` and
-  `EFF103` with a premise open), counted by the premise of the claim each leaves open and why
-  ([Rule Precision](precision.md)), or by the condition of the exact tier that is no premise
+  of exact rules), counted by the premise of the claim each leaves open and why ([Rule
+  Precision](precision.md)), or by the condition of the exact tier that is no premise
   ("Trip count open": the claim holds, and the change pays off only over a loop the data
   sizes). Each row says what the cause states, how many reports leave it open, how many leave
   nothing else open, and what closes it: an annotation, which must be true; a change of the
@@ -78,10 +77,10 @@ one.
   inheritance or aliases). heki takes such a call to have no effect. For the 64 names with the
   most reach, a trial run gives each a catalog entry that waits on the network and sends a
   database query (`effects = ["blocking_net", "db_query"]`) and says what `heki check` would
-  then print through it: "if it waits" (`EFF101`, `EFF111`) and "if it sends a query"
-  (`EFF103`, `EFF113`). heki cannot know what a library call does, so no entry enters the
-  block, and the trial's counts are kept out of every count of reports: add an entry if you know
-  what the call does.
+  then print through it, exact and heuristic: "if it waits" (`EFF101`) and "if it sends a query"
+  (`EFF103`). heki cannot know what a library call does, so no entry enters the block, and the
+  trial's counts are kept out of every count of reports: add an entry if you know what the call
+  does.
 - **Names heki's catalog lacks in packages it covers**: the same, for the names the trial shows
   heki would report through. If such a call waits or sends a query, report it at heki's issue
   tracker: the catalog should list it.
@@ -283,7 +282,7 @@ def test_load_user() -> None:
 $ heki recommend app
 heki recommend (experimental) on .: 4 file(s), 13 function(s)
 
-Reports now  1 shown (1 exact, 0 heuristic), 0 heuristic withheld, 5 heuristic rule(s) off
+Reports now  1 shown (1 exact, 0 heuristic), 0 heuristic withheld, 3 heuristic rule(s) off
 
 What keeps reports heuristic
   1 heuristic report(s) of exact claims: OPT110 1
@@ -298,14 +297,14 @@ What keeps reports heuristic
 
 What heki cannot see (no report either way)
   calls of packages heki's catalog does not cover: 1 call(s) of 1 name(s) in 1 package(s)
-    name                  calls  async  loops  if it waits  if it sends a query
-    stripe.Charge.create      1      1      0  EFF101 1     -
+    name                  calls  async  loops  if it waits     if it sends a query
+    stripe.Charge.create      1      1      0  EFF101 1 exact  -
 
 Rules worth enabling here
   rule    reports  exact  consequence  right about the code (published)  real harm  block
   MUT106        1      -  bug          not measured                      -          yes
   OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
-  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF112, EFF113, EFF114, EFF115, EFF116, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, OPT103, OPT111, OPT112, OPT120, OPT121, OPT130
+  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF112, EFF114, EFF115, EFF116, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, OPT103, OPT111, OPT112, OPT120, OPT121, OPT130
   MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it.
 
 Contract candidates
@@ -334,7 +333,7 @@ pyproject.toml: keys to add or change
 ## JSON output
 
 `--output-format json` prints one object, described by the JSON Schema at
-[schemas/recommend-1.json](schemas/recommend-1.json), the URL its `$schema` field names, which
+[schemas/recommend-2.json](schemas/recommend-2.json), the URL its `$schema` field names, which
 `heki recommend --output-format-json-schema` prints.
 Within a `version`, fields are only added; the `version` changes when a field is removed or
 changes meaning.

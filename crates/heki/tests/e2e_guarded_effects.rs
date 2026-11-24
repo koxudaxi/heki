@@ -40,7 +40,7 @@ fn reported(p: &Project, args: &[&str], rules: &[&str]) -> Vec<(String, u64, Str
             (
                 d["path"].as_str().unwrap().to_owned(),
                 d["line"].as_u64().unwrap(),
-                d["rule_code"].as_str().unwrap().to_owned(),
+                common::tiered_code(d).to_owned(),
             )
         })
         .filter(|(_, _, r)| rules.contains(&r.as_str()))
@@ -66,7 +66,7 @@ fn marked(files: &[(&str, &str)], rules: &[&str]) -> Vec<(String, u64, String)> 
 }
 
 fn check_marks(name: &str, files: &[(&str, &str)], args: &[&str], rules: &[&str]) {
-    let rules = common::with_siblings(rules);
+    let rules = common::with_tiers(rules);
     let rules = rules.as_slice();
     let p = Project::new(name);
     for (path, text) in files {
@@ -278,7 +278,7 @@ def run_any(conn: Conn, cmds: list[str]) -> None:
 
 
 async def handler(conn: Conn) -> None:
-    conn.send("x")  # EFF111
+    conn.send("x")  # EFF101 [heuristic]
 "#;
 
 #[test]
@@ -418,7 +418,7 @@ def loops(d: Downloader, ds: list[Downloader], targets):
 
 
 async def handler(d: Downloader):
-    return d.db  # EFF111
+    return d.db  # EFF101 [heuristic]
 "#;
 
 #[test]
@@ -588,7 +588,7 @@ def prev_none(cur: sqlite3.Cursor, rows):
     prev = None
     for r in rows:
         if prev is None:
-            cur.execute("SELECT 1")  # EFF113
+            cur.execute("SELECT 1")  # EFF103 [heuristic]
         prev = r
 
 
@@ -596,7 +596,7 @@ def prev_reset(cur: sqlite3.Cursor, rows):
     prev = None
     for r in rows:
         if prev is None:
-            cur.execute("SELECT 1")  # EFF113
+            cur.execute("SELECT 1")  # EFF103 [heuristic]
         prev = r if r else None
 
 
@@ -604,7 +604,7 @@ def empty_reset(cur: sqlite3.Cursor, rows):
     cache = []
     for r in rows:
         if not cache:
-            cache = cur.execute("SELECT 1").fetchall()  # EFF113
+            cache = cur.execute("SELECT 1").fetchall()  # EFF103 [heuristic]
         if r:
             cache = []
 
@@ -842,7 +842,7 @@ class Holder:
 
     async def other(self, g: Future):
         if g.done():
-            return self._future.result()  # EFF111
+            return self._future.result()  # EFF101 [heuristic]
         return None
 
 
@@ -857,19 +857,19 @@ async def through_helper(f: Future):
 
 
 async def not_done(f: Future):
-    return f.result()  # EFF111
+    return f.result()  # EFF101 [heuristic]
 
 
 async def or_test(f: Future, ok: bool):
     if ok or f.done():
-        return f.result()  # EFF111
+        return f.result()  # EFF101 [heuristic]
     return None
 
 
 async def one_branch(f: Future, ok: bool):
     if ok:
         await asyncio.wrap_future(f)
-    return f.result()  # EFF111
+    return f.result()  # EFF101 [heuristic]
 
 
 async def handler_path(f: Future):
@@ -877,7 +877,7 @@ async def handler_path(f: Future):
         await asyncio.wrap_future(f)
     except OSError:
         pass
-    return f.result()  # EFF111
+    return f.result()  # EFF101 [heuristic]
 
 
 class Waiter:
@@ -887,12 +887,12 @@ class Waiter:
 
 async def call_instance(f: Future, w: Waiter):
     await w()
-    return f.result()  # EFF111
+    return f.result()  # EFF101 [heuristic]
 
 
 async def unpacked(fs: list[Future]):
     await asyncio.wrap_future(*fs)
-    return fs[0].result()  # EFF111
+    return fs[0].result()  # EFF101 [heuristic]
 
 
 async def event_set(f: Future):
@@ -900,7 +900,7 @@ async def event_set(f: Future):
     loop = asyncio.get_running_loop()
     f.add_done_callback(lambda _: loop.call_soon_threadsafe(done.set))
     await done.wait()
-    return f.result()  # EFF111
+    return f.result()  # EFF101 [heuristic]
 "#;
 
 #[test]
@@ -1151,7 +1151,7 @@ def run(xs: list[str], flag: bool, opts: dict, more: list, v: object) -> None:
 
 async def handler(x: str) -> None:
     load(x, cache=False)
-    load(x, cache=True)  # EFF111
+    load(x, cache=True)  # EFF101 [heuristic]
 "#;
 
 /// The decided call one call below the loop: `check_load_dataset(name)` calls
@@ -1555,10 +1555,10 @@ async def flags(t):
 async def reading(src, data):
     read_any(BytesIO(data))
     read_any(StringIO("x"))
-    read_any(src)  # EFF111
-    read_any("https://example.com/")  # EFF111
-    read_any(None)  # EFF111
-    read_any(...)  # EFF111
+    read_any(src)  # EFF101 [heuristic]
+    read_any("https://example.com/")  # EFF101 [heuristic]
+    read_any(None)  # EFF101 [heuristic]
+    read_any(...)  # EFF101 [heuristic]
 
 
 def read_all(srcs, blobs):
@@ -1663,7 +1663,7 @@ def run_wrap(xs):
 
 async def handler(x):
     list(rows(x, cache=False))
-    list(rows(x))  # EFF111
+    list(rows(x))  # EFF101 [heuristic]
 
 
 class Conn:
@@ -1749,7 +1749,7 @@ fn an_unpacked_display_decides_no_truthiness_test() {
             ),
             (
                 "pkg/use.py",
-                "from pkg.fetch import fetch\n\n\nasync def known(parts):\n    return fetch([1, *parts])\n\n\nasync def unpacked(parts):\n    return fetch([*parts])  # EFF111\n",
+                "from pkg.fetch import fetch\n\n\nasync def known(parts):\n    return fetch([1, *parts])\n\n\nasync def unpacked(parts):\n    return fetch([*parts])  # EFF101 [heuristic]\n",
             ),
         ],
         &[],

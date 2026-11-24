@@ -234,11 +234,11 @@ premises.
   decide counts as taken, a loop not shown to run a call once counts as running it on every
   iteration, a size heki cannot bound counts as data-sized (not fixed at 16 or fewer). The rule
   page names the premises a heuristic report may not have established.
-- **Codes and tiers**: a claim is one code. An effect rule whose claim needs a premise heki
-  cannot always establish gets a heuristic sibling code with the weaker claim ("can reach"
-  beside "reaches on every path"). An `OPT` rule keeps one code and a certainty per report: a
-  report whose rewrite is proven safe is the rule's exact tier, the others are heuristic. A
-  report is exact only when its rule is (`Certainty::at_most`).
+- **Codes and tiers**: a claim is one code, with a certainty per report: a report that
+  established every premise is the rule's exact tier, the others are heuristic and state the
+  weaker claim of the same premises ("can reach" beside "reaches on every path" for `EFF101`;
+  a rewrite not proven safe for an `OPT` rule). A gain in precision changes a report's
+  certainty, never its code. A report is exact only when its rule is (`Certainty::at_most`).
 - **Size is never claimed by an exact report.** A bound of 16 or fewer that the code states
   only removes reports. A larger fixed bound, or a size heki cannot bound, is no evidence: an
   exact loop claim names the input the loop steps through instead.

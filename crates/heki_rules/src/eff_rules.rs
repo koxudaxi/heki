@@ -37,9 +37,9 @@ use std::path::Path;
 use std::sync::{Arc, LazyLock};
 
 /// The rules whose reports are split by the must-facts of execution effects
-/// (`heki_effect::EffectSummary::must_exec`): an established report is the exact rule's, the
-/// rest its heuristic sibling's.
-pub(crate) const MUST_EFFECT_RULES: &[&str] = &["EFF101", "EFF111", "EFF103", "EFF113", "DATA101"];
+/// (`heki_effect::EffectSummary::must_exec`): an established report is exact, the rest
+/// heuristic.
+pub(crate) const MUST_EFFECT_RULES: &[&str] = &["EFF101", "EFF103", "DATA101"];
 
 /// Modules whose own code is an ORM implementation (EFF103 is about ORM *users*).
 const ORM_PACKAGES: &[&str] = &["sqlalchemy", "django.db", "sqlmodel"];
@@ -65,18 +65,19 @@ fn relaxed(s: &EffectSummary, key: &FuncKey, unit: &ModuleUnit<'_>, relax_tests:
     relax_tests && heki_effect::code_kind::is_test_code(&key.qualname, &unit.rel_path)
 }
 
-/// The code of a boundary report: `EFF105` for the file system, `EFF101` when whenever the call
-/// returns it has run a wait for input or output (`BoundaryReport::must`), `EFF111` otherwise.
+/// The code of a boundary report: `EFF105` for the file system, `EFF101` otherwise.
 fn boundary_code(r: &BoundaryReport) -> &'static str {
     if r.effect == ExecEffectKind::BlockingFs {
         "EFF105"
-    } else if premises::tier("EFF101", r.must.is_some() && waits_for_io(r.effect))
-        == Certainty::Exact
-    {
-        "EFF101"
     } else {
-        "EFF111"
+        "EFF101"
     }
+}
+
+/// The tier of an `EFF101` report: exact when whenever the call returns it has run a wait for
+/// input or output (`BoundaryReport::must`).
+fn boundary_tier(r: &BoundaryReport) -> Certainty {
+    premises::tier("EFF101", r.must.is_some() && waits_for_io(r.effect))
 }
 
 /// The half of `EFF101`'s "Waits" the effect decides: a wait for input or output, not for
@@ -85,10 +86,10 @@ fn waits_for_io(effect: ExecEffectKind) -> bool {
     effect.wait_kind() == Some(WaitKind::Io)
 }
 
-/// The premises of `EFF101`'s claim an `EFF111` report leaves open: the steps of its must-fact
+/// The premises of `EFF101`'s claim a heuristic report leaves open: the steps of its must-fact
 /// that do not hold along its chain (`BoundaryReport::gaps`), and the effect when it is no wait
 /// for input or output.
-fn eff111_open_premises(cx: &CheckContext<'_>, r: &BoundaryReport) -> Vec<OpenPremise> {
+fn boundary_open_premises(cx: &CheckContext<'_>, r: &BoundaryReport) -> Vec<OpenPremise> {
     let mut open = chain_open_premises(cx, &premises::CONDITIONAL_WAIT, &r.chain, &r.gaps);
     if !waits_for_io(r.effect) {
         let last = r.chain.last().map(|h| cx.hop_location(h));
@@ -96,7 +97,7 @@ fn eff111_open_premises(cx: &CheckContext<'_>, r: &BoundaryReport) -> Vec<OpenPr
     }
     debug_assert!(
         !open.is_empty(),
-        "an EFF111 report records why it is not EFF101"
+        "a heuristic EFF101 report records why it is not exact"
     );
     open
 }
@@ -169,7 +170,7 @@ fn each_witness(witnesses: &[Arc<CallHop>]) -> String {
 }
 
 pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
-    if !["EFF101", "EFF111", "EFF105"]
+    if !["EFF101", "EFF105"]
         .iter()
         .any(|code| cx.selection.is_enabled(code))
     {
@@ -177,7 +178,6 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     }
     let relax_tests = cx.config.lint.relax_async_in_tests.unwrap_or(true);
     let mut eff101: Vec<BoundaryReport> = Vec::new();
-    let mut eff111: Vec<BoundaryReport> = Vec::new();
     let mut eff105: Vec<BoundaryReport> = Vec::new();
     // The boundaries of the checked files: all of them for `heki check`, the edited one for
     // the LSP engine.
@@ -198,11 +198,10 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
         }
         match code {
             "EFF105" => eff105.push(r),
-            "EFF101" => eff101.push(r),
-            _ => eff111.push(r),
+            _ => eff101.push(r),
         }
     }
-    for (code, reports) in [("EFF101", eff101), ("EFF111", eff111), ("EFF105", eff105)] {
+    for (code, reports) in [("EFF101", eff101), ("EFF105", eff105)] {
         for r in &reports {
             let unit = cx.unit(&r.path).expect(REPORTS_OF_UNITS);
             let what = if code == "EFF105" {
@@ -216,10 +215,15 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 Some(h) if r.iterates => format!(" by iterating `{}`", h.callee),
                 _ => String::new(),
             };
+            // `EFF105` has no exact tier.
+            let tier = match code {
+                "EFF101" => boundary_tier(r),
+                _ => Certainty::Heuristic,
+            };
             // An exact report names, keys, and folds by the call it claims: the end of the chain
             // every implementation runs, not of the shortest chain the heuristic tier found.
             let (message, chain, target) = match &r.must {
-                Some(must) if code == "EFF101" => (
+                Some(must) if tier == Certainty::Exact => (
                     always_waits(&r.function.qualname, must),
                     must.related(),
                     must.target(),
@@ -234,11 +238,12 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 ),
             };
             let fold_key = format!("{target}|{}", effect_name(r.effect));
-            let open_premises = if cx.open_premises && code == "EFF111" {
-                eff111_open_premises(cx, r)
-            } else {
-                Vec::new()
-            };
+            let open_premises =
+                if cx.open_premises && code == "EFF101" && tier == Certainty::Heuristic {
+                    boundary_open_premises(cx, r)
+                } else {
+                    Vec::new()
+                };
             if let Some(d) = cx.emit(
                 out,
                 code,
@@ -250,6 +255,7 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 Some(unblocking_help(r.effect).to_owned()),
                 &chain,
             ) {
+                d.certainty = tier.at_most(d.certainty);
                 d.fold_key = Some(fold_key);
                 d.open_records = open_premises.into_iter().map(OpenRecord::from).collect();
             }
@@ -261,14 +267,19 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
 pub const ROOT_CAUSE_GROUP_THRESHOLD: usize = 10;
 
 /// Root-Cause Grouping of output: when more than [`ROOT_CAUSE_GROUP_THRESHOLD`] of `diags`
-/// share a rule and a [`Diagnostic::fold_key`], only the first (by path and position) stays,
-/// with the count of the others in its message. Run on the reports that are shown, after
-/// suppressions and baselines: each report is a site of its own for both.
+/// share a rule, a certainty, and a [`Diagnostic::fold_key`], only the first (by path and
+/// position) stays, with the count of the others in its message. Run on the reports that are
+/// shown, after suppressions and baselines: each report is a site of its own for both. The
+/// exact and the heuristic reports of a rule state different claims, so they never share a
+/// group.
 pub fn fold_root_causes(diags: &mut Vec<Diagnostic>) {
-    let mut groups: BTreeMap<(&str, &str), Vec<usize>> = BTreeMap::new();
+    let mut groups: BTreeMap<(&str, &str, &str), Vec<usize>> = BTreeMap::new();
     for (i, d) in diags.iter().enumerate() {
         if let Some(key) = &d.fold_key {
-            groups.entry((&d.rule_code, key)).or_default().push(i);
+            groups
+                .entry((&d.rule_code, d.certainty.word(), key))
+                .or_default()
+                .push(i);
         }
     }
     let mut folded: FxHashMap<usize, usize> = FxHashMap::default();
@@ -287,7 +298,7 @@ pub fn fold_root_causes(diags: &mut Vec<Diagnostic>) {
     for (&i, &more) in &folded {
         let d = &mut diags[i];
         // An exact report's group shares the call each of its reports claims.
-        d.message = if d.rule_code == "EFF101" {
+        d.message = if d.rule_code == "EFF101" && d.certainty == Certainty::Exact {
             format!(
                 "{} (+{more} more async call sites that always run `{}`)",
                 d.message, d.target
@@ -352,7 +363,7 @@ pub(crate) fn shortest(effects: &[SiteEffect], kind: ExecEffectKind) -> Option<&
 
 pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
     let want102 = cx.enabled("EFF102", unit);
-    let want103 = (cx.enabled("EFF103", unit) || cx.enabled("EFF113", unit))
+    let want103 = cx.enabled("EFF103", unit)
         && !ORM_PACKAGES.iter().any(|p| {
             unit.input.module_name == *p || unit.input.module_name.starts_with(&format!("{p}."))
         })
@@ -510,57 +521,48 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
         if queries.is_empty() {
             continue;
         }
-        // The split is the same whichever of the two rules runs: `EFF113` reports the rest.
         let origins = item_origins.get_or_init(|| ItemOrigins::new(unit.input.ir));
         let verdicts = established_queries(cx, unit, &tcx, f, origins, &queries);
         for (q, verdict) in queries.iter().zip(verdicts) {
-            let root = q.chain.last().map(|h| h.callee.clone()).unwrap_or_default();
-            let exact = verdict.exact;
-            let tier = premises::tier("EFF103", exact.is_some());
-            let reported = match exact.filter(|_| tier == Certainty::Exact) {
-                // An exact report names and keys the call it claims.
-                Some(e) if cx.enabled("EFF103", unit) => cx.emit(
-                    out,
-                    "EFF103",
-                    unit,
-                    q.span,
-                    &key.qualname,
-                    e.must.target(),
-                    e.message(),
-                    Some(query_help(&q.repeats)),
-                    &e.must.related(),
-                ),
-                Some(_) => None,
-                None if cx.enabled("EFF113", unit) => cx.emit(
-                    out,
-                    "EFF113",
-                    unit,
-                    q.span,
-                    &key.qualname,
-                    root,
+            let tier = premises::tier("EFF103", verdict.exact.is_some());
+            // An exact report names and keys the call it claims.
+            let (target, message, chain) = match &verdict.exact {
+                Some(e) => (e.must.target(), e.message(), e.must.related()),
+                None => (
+                    q.chain.last().map(|h| h.callee.clone()).unwrap_or_default(),
                     format!(
                         "`{}` runs a database query{} {}",
                         q.chain[0].callee,
                         through_helpers(&q.chain),
                         q.repeats.every()
                     ),
-                    Some(query_help(&q.repeats)),
-                    &q.chain,
+                    q.chain.clone(),
                 ),
-                None => None,
             };
-            if let Some(d) = reported.filter(|d| d.rule_code == "EFF113") {
-                debug_assert!(
-                    !cx.open_premises || !verdict.open.is_empty(),
-                    "an EFF113 report records why it is not EFF103"
-                );
-                d.open_records = verdict.open.into_iter().map(OpenRecord::from).collect();
-            }
+            let d = cx
+                .emit(
+                    out,
+                    "EFF103",
+                    unit,
+                    q.span,
+                    &key.qualname,
+                    target,
+                    message,
+                    Some(query_help(&q.repeats)),
+                    &chain,
+                )
+                .expect("the rule runs on the unit: it returned at its start otherwise");
+            d.certainty = tier.at_most(d.certainty);
+            debug_assert!(
+                !cx.open_premises || tier == Certainty::Exact || !verdict.open.is_empty(),
+                "a heuristic EFF103 report records why it is not exact"
+            );
+            d.open_records = verdict.open.into_iter().map(OpenRecord::from).collect();
         }
     }
 }
 
-/// A call in a loop that may run a database query on every iteration (`EFF103` / `EFF113`).
+/// A call in a loop that may run a database query on every iteration (`EFF103`).
 struct LoopQuery<'s> {
     /// The call's instruction (block, index).
     at: (BlockId, usize),
@@ -881,7 +883,7 @@ pub(crate) fn data_origin(
     Ok(named)
 }
 
-/// The advice of an `EFF103` / `EFF113` report, which its message leaves out.
+/// The advice of an `EFF103` report, which its message leaves out.
 fn query_help(repeats: &Repeats<'_>) -> String {
     format!(
         "batch the queries, or load the data once before the {}",

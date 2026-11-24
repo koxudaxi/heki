@@ -64,7 +64,7 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error] `app.users.load_user` alwa
   = help: offload it with `asyncio.to_thread`, or use an async client
 
 Found 1 diagnostic(s) in 2 file(s).
-note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+note: 3 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 EFF101 (async-blocking-call): `heki rule EFF101`, https://heki.koxudaxi.dev/rules/async-blocking-call/
 ```
 
@@ -96,7 +96,7 @@ app/orders.py:11:37: EFF103 (loop-db-query) [warning] every iteration over param
   = help: batch the queries, or load the data once before the loop
 
 Found 1 diagnostic(s) in 1 file(s).
-note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+note: 3 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 EFF103 (loop-db-query): `heki rule EFF103`, https://heki.koxudaxi.dev/rules/loop-db-query/
 ```
 
@@ -303,7 +303,7 @@ report names the missing obligation instead of offering a fix. See [Fixes and sa
 - 🎯 See what heki [covers and does not cover](scope.md).
 - 📦 [Install heki](installation.md) and 🚀 [run it on a project](getting-started.md).
 - ⚙️ [Configure](configuration.md) rule selection, contracts, and the Python version.
-- 📏 Browse the [46 rules](rules/index.md), and see [how precise each one is](precision.md).
+- 📏 Browse the [53 rules](rules/index.md), and see [how precise each one is](precision.md).
 - 🔧 Read how [fixes are proven safe](fixes.md).
 - 🪜 [Adopt it gradually](adoption.md) with a Ratchet baseline in CI.
 - 🖥️ Use it from [your editor](lsp.md) or 🤖 [a coding agent](coding-agents.md).

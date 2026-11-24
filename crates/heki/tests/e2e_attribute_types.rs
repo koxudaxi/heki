@@ -50,15 +50,15 @@ symbol = "acme.AsyncClient.with_options"
 return-type = "Self"
 "#;
 
-/// `(path, line, rule, qualname)` of every `EFF101` / `EFF111` report of `heki check` on the
-/// project holding `files`.
+/// `(path, line, rule, qualname)` of every `EFF101` report of `heki check` on the project holding
+/// `files`, the rule with its tier ([`common::tiered_code`]).
 fn check(name: &str, files: &[(&str, &str)]) -> Vec<(String, u64, String, String)> {
     let p = Project::new(name);
     p.write("pyproject.toml", CONFIG);
     for (rel, text) in files {
         p.write(rel, text);
     }
-    let (code, stdout, stderr) = p.check(&["--output-format", "json", "--select", "EFF101,EFF111"]);
+    let (code, stdout, stderr) = p.check(&["--output-format", "json", "--select", "EFF101"]);
     assert!(code == 0 || code == 1, "{stdout}{stderr}");
     let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
     diags
@@ -67,7 +67,7 @@ fn check(name: &str, files: &[(&str, &str)]) -> Vec<(String, u64, String, String
             (
                 d["path"].as_str().unwrap().to_owned(),
                 d["line"].as_u64().unwrap(),
-                d["rule_code"].as_str().unwrap().to_owned(),
+                common::tiered_code(d).to_owned(),
                 d["qualname"].as_str().unwrap().to_owned(),
             )
         })
@@ -308,7 +308,7 @@ async def handler(local: Local) -> None:
     local.chat.completions.create(model="m")
 "#,
     );
-    let (code, stdout, stderr) = p.check(&["--select", "EFF101,EFF111"]);
+    let (code, stdout, stderr) = p.check(&["--select", "EFF101"]);
     assert_eq!(code, 0, "{stdout}{stderr}");
 }
 

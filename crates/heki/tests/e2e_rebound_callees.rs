@@ -1,6 +1,6 @@
 //! A call through a name the project binds to another object (assumption R1), end to end
 //! through the real binary: the call's targets are no longer every implementation it can run,
-//! so `EFF101` does not claim the chain and `EFF111` reports it with "Every implementation"
+//! so `EFF101` does not claim the chain and reports it as heuristic, with "Every implementation"
 //! open. The stores are those of the module defining the name (a `del` of the global, a
 //! decorator applied by hand, a `del` in the class body, a store on the class object, also
 //! through `setattr`, `__code__`, also in a function, `__bases__`, `__class__` through `self`,
@@ -37,13 +37,13 @@ type Mark = (
 const MARKS: &[Mark] = &[
     ("# EFF101", "EFF101", &[]),
     (
-        "# EFF111",
-        "EFF111",
+        "# EFF101 [heuristic]",
+        "EFF101 [heuristic]",
         &[("Every implementation", "incomplete-targets")],
     ),
     (
-        "# EFF111 either",
-        "EFF111",
+        "# EFF101 [heuristic] either",
+        "EFF101 [heuristic]",
         &[("Every implementation", "implementation-without-the-fact")],
     ),
     (
@@ -57,7 +57,7 @@ const MARKS: &[Mark] = &[
 /// Every report of the rules [`MARKS`] names, before reports are grouped (`heki
 /// dump-open-premises`).
 fn reported(p: &Project) -> Vec<Report> {
-    let select = "EFF101,EFF111,MUT114";
+    let select = "EFF101,MUT114";
     let (code, stdout, stderr) = p.heki(&["dump-open-premises", "--select", select, "."]);
     assert_eq!(code, 0, "{stderr}");
     let out: Value = serde_json::from_str(&stdout).unwrap();
@@ -80,7 +80,11 @@ fn reported(p: &Project) -> Vec<Report> {
             (
                 r["path"].as_str().unwrap().to_owned(),
                 r["line"].as_u64().unwrap(),
-                r["rule"].as_str().unwrap().to_owned(),
+                common::with_tier(
+                    r["rule"].as_str().unwrap(),
+                    r["certainty"].as_str().unwrap(),
+                )
+                .to_owned(),
                 open,
             )
         })
@@ -256,19 +260,19 @@ async def assigned():
 
 
 async def branch():
-    lib.branch()  # EFF111 either
+    lib.branch()  # EFF101 [heuristic] either
 
 
 async def deleted():
-    lib.deleted()  # EFF111
+    lib.deleted()  # EFF101 [heuristic]
 
 
 async def recoded():
-    lib.recoded()  # EFF111
+    lib.recoded()  # EFF101 [heuristic]
 
 
 async def cached():
-    lib.cached()  # EFF111
+    lib.cached()  # EFF101 [heuristic]
 
 
 async def kept():
@@ -276,7 +280,7 @@ async def kept():
 
 
 async def late():
-    lib.late()  # EFF111
+    lib.late()  # EFF101 [heuristic]
 
 
 async def body():
@@ -284,19 +288,19 @@ async def body():
 
 
 async def removed():
-    lib.C().removed()  # EFF111
+    lib.C().removed()  # EFF101 [heuristic]
 
 
 async def stored():
-    lib.C().stored()  # EFF111
+    lib.C().stored()  # EFF101 [heuristic]
 
 
 async def set_by_name():
-    lib.C().set_by_name()  # EFF111
+    lib.C().set_by_name()  # EFF101 [heuristic]
 
 
 async def method_recoded():
-    lib.C().recoded()  # EFF111
+    lib.C().recoded()  # EFF101 [heuristic]
 
 
 async def method_kept():
@@ -304,7 +308,7 @@ async def method_kept():
 
 
 async def rebased():
-    lib.Rebased().run()  # EFF111
+    lib.Rebased().run()  # EFF101 [heuristic]
 
 
 async def plain():
@@ -312,7 +316,7 @@ async def plain():
 
 
 async def morph(m: lib.Morph):
-    m.run()  # EFF111
+    m.run()  # EFF101 [heuristic]
 
 
 async def made():
@@ -320,11 +324,11 @@ async def made():
 
 
 async def built():
-    lib.Built()  # EFF111
+    lib.Built()  # EFF101 [heuristic]
 
 
 async def swapped():
-    dynamic.swapped()  # EFF111
+    dynamic.swapped()  # EFF101 [heuristic]
 "#;
 
 #[test]
@@ -376,7 +380,7 @@ async def calls_kept():
 
 
 async def calls_stored(c: C):
-    c.stored()  # EFF111
+    c.stored()  # EFF101 [heuristic]
 
 
 async def calls_method_kept(c: C):
@@ -493,23 +497,23 @@ class Child(lib.Parent):
 
 
 async def stored():
-    lib.stored()  # EFF111
+    lib.stored()  # EFF101 [heuristic]
 
 
 async def set_by_name():
-    lib.set_by_name()  # EFF111
+    lib.set_by_name()  # EFF101 [heuristic]
 
 
 async def deleted():
-    lib.deleted()  # EFF111
+    lib.deleted()  # EFF101 [heuristic]
 
 
 async def deleted_by_call():
-    lib.deleted_by_call()  # EFF111
+    lib.deleted_by_call()  # EFF101 [heuristic]
 
 
 async def recoded():
-    lib.recoded()  # EFF111
+    lib.recoded()  # EFF101 [heuristic]
 
 
 async def kept():
@@ -517,15 +521,15 @@ async def kept():
 
 
 async def method_stored():
-    lib.C().stored()  # EFF111
+    lib.C().stored()  # EFF101 [heuristic]
 
 
 async def method_set_by_name():
-    lib.C().set_by_name()  # EFF111
+    lib.C().set_by_name()  # EFF101 [heuristic]
 
 
 async def method_recoded():
-    lib.C().recoded()  # EFF111
+    lib.C().recoded()  # EFF101 [heuristic]
 
 
 async def method_kept():
@@ -533,7 +537,7 @@ async def method_kept():
 
 
 async def on_the_class(c: lib.C):
-    lib.C.stored(c)  # EFF111
+    lib.C.stored(c)  # EFF101 [heuristic]
 
 
 async def kept_on_the_class(c: lib.C):
@@ -541,7 +545,7 @@ async def kept_on_the_class(c: lib.C):
 
 
 async def prop():
-    return lib.C().prop  # EFF111
+    return lib.C().prop  # EFF101 [heuristic]
 
 
 async def kept_prop():
@@ -549,15 +553,15 @@ async def kept_prop():
 
 
 async def rebased():
-    lib.Rebased().run()  # EFF111
+    lib.Rebased().run()  # EFF101 [heuristic]
 
 
 async def through_super():
-    Child().run()  # EFF111
+    Child().run()  # EFF101 [heuristic]
 
 
 async def swapped():
-    unnamed.swapped()  # EFF111
+    unnamed.swapped()  # EFF101 [heuristic]
 "#;
 
 #[test]
@@ -576,7 +580,7 @@ fn a_name_another_module_binds_again_is_no_exact_target() {
 /// Without the stores, every call keeps its exact report.
 #[test]
 fn the_same_names_bound_once_are_exact_targets() {
-    let calls = OTHER_MODULE_CALLS.replace("# EFF111", "# EFF101");
+    let calls = OTHER_MODULE_CALLS.replace("# EFF101 [heuristic]", "# EFF101");
     check_marks(
         "rebound_nowhere",
         &[
@@ -724,7 +728,7 @@ async def through_getattr() -> object:
 
 
 async def through_getattr_with_a_default() -> object:
-    return getattr(conn, "execute", None)("SELECT 1")  # EFF111
+    return getattr(conn, "execute", None)("SELECT 1")  # EFF101 [heuristic]
 
 
 async def through_partial() -> None:
@@ -739,7 +743,7 @@ async def project_method(box: Box) -> None:
 
 async def overridden(base: Base) -> None:
     work = base.work
-    work()  # EFF111 either
+    work()  # EFF101 [heuristic] either
 
 
 async def rebound_on_a_branch(flag: bool) -> object:

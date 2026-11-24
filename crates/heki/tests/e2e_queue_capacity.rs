@@ -1,26 +1,27 @@
 //! `queue.Queue.put` waits only while the queue is full, which only a queue its `maxsize`
-//! bounds can be: `EFF111` reports a `put` only on a queue known to be bounded. heki follows
-//! the queue from its construction into locals, `self` attributes the class family stores,
-//! module globals, and parameters whose callers bind known queues; a queue it cannot follow is
-//! not known to be bounded.
+//! bounds can be: `EFF101` reports a `put` (heuristic, as every wait on another thread) only on
+//! a queue known to be bounded. heki follows the queue from its construction into locals, `self`
+//! attributes the class family stores, module globals, and parameters whose callers bind known
+//! queues; a queue it cannot follow is not known to be bounded.
 
 mod common;
 
 use common::Project;
 use serde_json::Value;
 
-/// `(path, line, qualname)` of every `EFF111` report of `heki check` on `files`, sorted.
+/// `(path, line, qualname)` of every heuristic `EFF101` report of `heki check` on `files`,
+/// sorted.
 fn eff101(name: &str, files: &[(&str, &str)]) -> Vec<(String, u64, String)> {
     let p = Project::new(name);
     for (rel, text) in files {
         p.write(rel, text);
     }
-    let (code, stdout, stderr) = p.check(&["--output-format", "json", "--select", "EFF111"]);
+    let (code, stdout, stderr) = p.check(&["--output-format", "json", "--select", "EFF101"]);
     assert!(code == 0 || code == 1, "{stdout}{stderr}");
     let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
     let mut out: Vec<(String, u64, String)> = diags
         .iter()
-        .filter(|d| d["rule_code"] == "EFF111")
+        .filter(|d| common::tiered_code(d) == "EFF101 [heuristic]")
         .map(|d| {
             assert!(d["target"].as_str().unwrap().ends_with(".put"), "{d:#}");
             (
@@ -552,7 +553,7 @@ def tn_render_unbounded(item) -> None:
     UNBOUNDED.put(item)
 "#;
 
-/// An effect boundary forbidding synchronous waits counts a `put` as `EFF111` does.
+/// An effect boundary forbidding synchronous waits counts a `put` as `EFF101` does.
 #[test]
 fn effect_boundaries_count_only_waits_on_bounded_queues() {
     let p = Project::new("queue_effect_boundary");

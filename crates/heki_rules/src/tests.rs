@@ -726,6 +726,33 @@ fn eff101_root_cause_grouping() {
     );
 }
 
+/// The exact and the heuristic reports of `EFF101` state different claims: reaching the same
+/// blocking call, each tier folds on its own.
+#[test]
+fn eff101_tiers_fold_apart() {
+    let mut src = String::from(
+        "import time\n\ndef always():\n    time.sleep(1)\n\ndef sometimes(flag):\n    if flag:\n        time.sleep(1)\n",
+    );
+    for i in 0..6 {
+        src.push_str(&format!(
+            "\nasync def h{i:02}():\n    always()\n\nasync def g{i:02}(flag):\n    sometimes(flag)\n"
+        ));
+    }
+    let mut diags = check(&src, &HekiConfig::default());
+    let tiers = |diags: &[Diagnostic]| {
+        let exact = diags
+            .iter()
+            .filter(|d| d.rule_code == "EFF101" && d.certainty == Certainty::Exact)
+            .count();
+        (exact, diags.len() - exact)
+    };
+    assert_eq!(tiers(&diags), (6, 6));
+    assert!(diags.iter().all(|d| d.target == "time.sleep"));
+    // Twelve reports of one rule and one root cause, but six of each tier: nothing is folded.
+    fold_root_causes(&mut diags);
+    assert_eq!(tiers(&diags), (6, 6));
+}
+
 // ============================================================================ EFF102 / EFF103
 
 const LOOP_SRC: &str = r#"

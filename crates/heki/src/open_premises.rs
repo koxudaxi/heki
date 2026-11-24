@@ -16,8 +16,6 @@ use std::process::ExitCode;
 #[derive(Serialize)]
 struct Report<'d> {
     rule: &'d str,
-    /// The exact rule whose claim a heuristic side reports (`premises::exact_side_of`).
-    exact_side: Option<&'static str>,
     path: String,
     line: u32,
     column: u32,
@@ -93,7 +91,6 @@ impl<'d> Report<'d> {
     fn of(d: &'d Diagnostic) -> Self {
         Self {
             rule: &d.rule_code,
-            exact_side: premises::exact_side_of(&d.rule_code),
             path: shown_text(&d.path),
             line: d.line,
             column: d.column,
