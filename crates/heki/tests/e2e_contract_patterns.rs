@@ -323,7 +323,7 @@ fn a_module_part_in_invalidation_and_readonly_returns() {
     let invalidation = |targets: &str, rest: &str| {
         reports(
             &p,
-            "MUT109",
+            "MUT208",
             &format!(
                 "[[tool.heki.invalidation]]\nname = \"inv\"\ntargets = [\"{targets}\"]\n{rest}\n"
             ),

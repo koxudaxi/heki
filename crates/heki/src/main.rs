@@ -150,7 +150,9 @@ struct CheckArgs {
     /// Apply `safe` + `unconditional` fixes (`OPT101`/`OPT102`).
     #[arg(long)]
     fix: bool,
-    /// Also apply the proven-safe `size-dependent` fixes, in every function.
+    /// Also run the opt-in rules with a `size-dependent` rewrite (`OPT110`, `OPT111`, `OPT120`,
+    /// `OPT121`, `OPT130`), as if `--extend-select` named them, and with `--fix` or `--diff`
+    /// apply their proven-safe rewrites, in every function.
     #[arg(long)]
     include_size_dependent: bool,
     /// Preview fixes as a unified diff without writing files.
@@ -193,11 +195,6 @@ struct CheckArgs {
     /// files the paths leave out stay as they are.
     #[arg(long)]
     update_baseline: bool,
-    /// Experimental: offline profile dump (collapsed stacks of CPython 3.15's profiler or py-spy, or `--gecko`
-    /// JSON): apply the `size-dependent` fixes in its hot functions (in every function with
-    /// `--include-size-dependent`).
-    #[arg(long)]
-    profile: Option<PathBuf>,
     /// Watch the directories given for file changes and re-run incrementally.
     #[arg(long)]
     watch: bool,
@@ -210,7 +207,7 @@ struct CheckArgs {
         value_name = "QUESTION",
         num_args = 0..=1,
         default_missing_value = "",
-        conflicts_with_all = ["fix", "diff", "watch", "update_baseline", "profile", "include_size_dependent"]
+        conflicts_with_all = ["fix", "diff", "watch", "update_baseline", "include_size_dependent"]
     )]
     generate_prompt: Option<String>,
     /// Print the JSON Schema of a JSON output and exit: `generate-prompt`, the object of

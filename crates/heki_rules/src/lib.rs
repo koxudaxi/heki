@@ -1,8 +1,8 @@
 //! Rule registry spanning the families of heki's checks.
 //!
 //! - Family 1 (`MUT`): Mutation & State Effect (`MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`,
-//!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT114`, `MUT115`, `MUT118`, `MUT119`,
-//!   `MUT120`, `MUT201`, `MUT202`, `MUT203`, `MUT204`, `MUT205`, `MUT206`, `MUT207`)
+//!   `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT114`, `MUT115`, `MUT118`, `MUT119`, `MUT120`,
+//!   `MUT201`, `MUT202`, `MUT203`, `MUT204`, `MUT205`, `MUT206`, `MUT207`, `MUT208`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
 //!   `EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
@@ -47,7 +47,9 @@ pub use mut_rules::{
     family_readers, kept_removals_in, lazy_setup_files, reads_class_members, sentinel_tests_in,
     stale_writes_by_file,
 };
-pub use selection::{EffectiveSelectors, RuleSelection, SelectionError, Selectors, heuristic_hint};
+pub use selection::{
+    EffectiveSelectors, RECOMMEND_HINT, RuleSelection, SelectionError, Selectors, heuristic_hint,
+};
 pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};
 
 use globset::{Glob, GlobMatcher};
@@ -126,8 +128,7 @@ pub struct RuleMeta {
     pub activation: Activation,
     pub consequence: Consequence,
     pub auto_fix_default: bool,
-    /// A proven-safe rewrite that `--fix` applies only with `--include-size-dependent` or in a
-    /// function a `--profile` dump shows hot.
+    /// A proven-safe rewrite that `--fix` applies only with `--include-size-dependent`.
     pub size_dependent_fix: bool,
     pub summary: &'static str,
     /// Ruff-style documentation (`crates/heki_rules/rule-docs/<CODE>.md`): printed by
@@ -200,7 +201,8 @@ impl RuleMeta {
 /// The certainty of the eight Soundness-lane `OPT` rules (`OPT101`-`OPT103`, `OPT110`, `OPT111`,
 /// `OPT120`, `OPT121`, `OPT130`). Their exact tier is the reports whose rewrite is proven safe,
 /// the others are heuristic whatever this says (ADR-018, decision 9). They are certified
-/// together, so that whether the proven tier runs by default is this one value.
+/// together. Only `OPT101` and `OPT102`, whose rewrite is faster for every input, run by default
+/// (ADR-018, decision 13 and its amendment).
 const PROVEN_OPT_TIER: Certainty = Certainty::Exact;
 
 /// Core v1.0 rule catalog (empirically validated in Stage 0-A + `dcg` study).
@@ -264,18 +266,6 @@ pub const CORE_RULES: &[RuleMeta] = &[
         auto_fix_default: false,
         summary: "Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper.",
         doc: include_str!("../rule-docs/MUT108.md"),
-    },
-    RuleMeta {
-        code: "MUT109",
-        slug: "write-without-invalidation",
-        family: RuleFamily::Mut,
-        certainty: Certainty::Heuristic,
-        activation: Activation::Contract,
-        consequence: Consequence::Bug,
-        size_dependent_fix: false,
-        auto_fix_default: false,
-        summary: "Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return.",
-        doc: include_str!("../rule-docs/MUT109.md"),
     },
     RuleMeta {
         code: "MUT110",
@@ -468,6 +458,18 @@ pub const CORE_RULES: &[RuleMeta] = &[
         auto_fix_default: false,
         summary: "Strict mode of a `call-owners` contract (`unresolved = \"report\"`): calling a method named like a target on an object of unknown class.",
         doc: include_str!("../rule-docs/MUT207.md"),
+    },
+    RuleMeta {
+        code: "MUT208",
+        slug: "write-without-invalidation",
+        family: RuleFamily::Mut,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Contract,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return.",
+        doc: include_str!("../rule-docs/MUT208.md"),
     },
     RuleMeta {
         code: "EFF101",
@@ -774,11 +776,11 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "immutable-quadratic-concat",
         family: RuleFamily::Opt,
         certainty: PROVEN_OPT_TIER,
-        activation: Activation::Default,
+        activation: Activation::OptIn,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
-        summary: "Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).",
+        summary: "Opt-in: size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).",
         doc: include_str!("../rule-docs/OPT103.md"),
     },
     RuleMeta {
@@ -786,11 +788,11 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "loop-linear-membership",
         family: RuleFamily::Opt,
         certainty: PROVEN_OPT_TIER,
-        activation: Activation::Default,
+        activation: Activation::OptIn,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
-        summary: "Size-dependent `e in lst` inside a loop -> hoist `set` outside loop.",
+        summary: "Opt-in: size-dependent `e in lst` inside a loop -> hoist `set` outside loop.",
         doc: include_str!("../rule-docs/OPT110.md"),
     },
     RuleMeta {
@@ -798,11 +800,11 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "loop-linear-dedup",
         family: RuleFamily::Opt,
         certainty: PROVEN_OPT_TIER,
-        activation: Activation::Default,
+        activation: Activation::OptIn,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
-        summary: "Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.",
+        summary: "Opt-in: size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.",
         doc: include_str!("../rule-docs/OPT111.md"),
     },
     RuleMeta {
@@ -834,11 +836,11 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "list-front-pop",
         family: RuleFamily::Opt,
         certainty: PROVEN_OPT_TIER,
-        activation: Activation::Default,
+        activation: Activation::OptIn,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
-        summary: "Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.",
+        summary: "Opt-in: size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.",
         doc: include_str!("../rule-docs/OPT120.md"),
     },
     RuleMeta {
@@ -846,11 +848,11 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "list-front-insert",
         family: RuleFamily::Opt,
         certainty: PROVEN_OPT_TIER,
-        activation: Activation::Default,
+        activation: Activation::OptIn,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
-        summary: "Size-dependent `q.insert(0, v)` -> `collections.deque`.",
+        summary: "Opt-in: size-dependent `q.insert(0, v)` -> `collections.deque`.",
         doc: include_str!("../rule-docs/OPT121.md"),
     },
     RuleMeta {
@@ -858,11 +860,11 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "loop-invariant-container-rebuild",
         family: RuleFamily::Opt,
         certainty: PROVEN_OPT_TIER,
-        activation: Activation::Default,
+        activation: Activation::OptIn,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
-        summary: "Size-dependent loop-invariant container reconstruction (`e in set(keys)`).",
+        summary: "Opt-in: size-dependent loop-invariant container reconstruction (`e in set(keys)`).",
         doc: include_str!("../rule-docs/OPT130.md"),
     },
 ];
@@ -1256,7 +1258,7 @@ pub fn check_project(
     mut_rules::readonly_rules(&cx, &mut out);
     mut_rules::mut112(&cx, &mut out);
     mut_rules::mut118(&cx, &mut out);
-    mut_rules::mut109(&cx, &mut out)?;
+    mut_rules::mut208(&cx, &mut out)?;
     mut_rules::mut201(&cx, &mut out)?;
     mut_rules::mut203(&cx, &mut out)?;
     mut_rules::mut204(&cx, &mut out)?;
@@ -2002,6 +2004,28 @@ mod registry_tests {
                 RuleFamily::Mut => assert_ne!(r.consequence, Consequence::Slowdown, "{}", r.code),
                 RuleFamily::Eff | RuleFamily::Data | RuleFamily::Imp => {}
             }
+        }
+    }
+
+    #[test]
+    fn a_rules_hundreds_digit_says_what_it_needs() {
+        // In every family, 1xx rules need no configuration and 2xx rules a declared contract,
+        // so `MUT2` selects the contract rules of `MUT`; `IMP3xx` rules read the dependencies
+        // the project declares.
+        for r in CORE_RULES {
+            let number = r.code.trim_start_matches(|c: char| c.is_ascii_uppercase());
+            let band = number.chars().next().unwrap();
+            let bands = match (r.activation, r.family) {
+                (Activation::Contract, _) => "2",
+                (_, RuleFamily::Imp) => "13",
+                _ => "1",
+            };
+            assert!(
+                number.len() == 3 && bands.contains(band),
+                "{}: {:?}",
+                r.code,
+                r.activation
+            );
         }
     }
 

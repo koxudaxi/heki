@@ -4,7 +4,9 @@
 //! that one analysis, as an array. Exit codes: 0 inspected, 2 when a symbol names no single
 //! function or a file could not be analyzed (the reports are still printed).
 
-use crate::check::{baseline_path, load_and_index, shown_errors, warn_files_not_analyzed};
+use crate::check::{
+    baseline_path, load_and_index, selectors, shown_errors, warn_files_not_analyzed,
+};
 use crate::{InspectArgs, OutputFormat, ReportFormat};
 use anyhow::{Context, Result};
 use heki_diagnostics::{Diagnostic, RatchetBaseline, path_text};
@@ -91,6 +93,7 @@ fn run_imports(args: &InspectArgs) -> Result<ExitCode> {
     let indexed = load_and_index(
         &paths.analyzed,
         &args.analysis,
+        &selectors(&args.analysis),
         OutputFormat::Full,
         None,
         Facts::Imports,
@@ -144,6 +147,7 @@ fn run_function(args: &InspectArgs) -> Result<ExitCode> {
             let indexed = load_and_index(
                 &paths.analyzed,
                 &args.analysis,
+                &selectors(&args.analysis),
                 format,
                 None,
                 Facts::Inspect,

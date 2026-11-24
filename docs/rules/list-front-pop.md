@@ -2,19 +2,21 @@
 
 # list-front-pop (OPT120)
 
-Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Opt-in · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
-Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.
+Opt-in: size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.
 
 ## What it does
 Checks loops that remove the first element of a list: `q.pop(0)`, `del q[0]`, and
 `q = q[1:]`, and suggests a `collections.deque` with `popleft()`.
 
-Size-dependent: applied only with `--fix --include-size-dependent` or in profiled hot
-functions. The rewrite changes the list's creation to `collections.deque(...)`, rewrites the
-variable's `list[...]` annotation to `collections.deque[...]`, and adds `import collections`
-when needed: in sorted position among the module's standard-library imports, or after the
-docstring and `__future__` imports of a module without other imports.
+Opt-in and size-dependent: it runs when `extend-select` names it or with
+`--include-size-dependent`, which also applies its proven rewrites with `--fix`.
+
+The rewrite changes the list's creation to `collections.deque(...)`, rewrites the variable's
+`list[...]` annotation to `collections.deque[...]`, and adds `import collections` when needed: in
+sorted position among the module's standard-library imports, or after the docstring and
+`__future__` imports of a module without other imports.
 
 Not reported: a small display that the loop only drains (`expected = [b"a", b""]` and
 `expected.pop(0)` in the loop: it never holds more than its items), and a list rebuilt in every

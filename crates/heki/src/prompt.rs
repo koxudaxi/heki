@@ -6,7 +6,7 @@
 //! command writes no file and exits with 0 once the prompt is printed.
 
 use crate::check::{
-    Touched, baseline_path, fail_on, load_and_index, selectors, show_paths, shown_dir,
+    Touched, baseline_path, check_selectors, fail_on, load_and_index, show_paths, shown_dir,
     shown_errors, shown_text,
 };
 use crate::{CheckArgs, JsonSchemaTarget, OutputFormat};
@@ -157,6 +157,7 @@ pub(crate) fn run(args: &CheckArgs, question: &str) -> Result<ExitCode> {
     let indexed = load_and_index(
         &paths.analyzed,
         &args.analysis,
+        &check_selectors(args),
         args.output_format,
         None,
         Facts::Check,
@@ -242,7 +243,7 @@ impl Configuration {
 impl Selection {
     fn of(args: &CheckArgs, env: &ProjectEnv, heuristic: bool) -> Self {
         let lint = &env.cfg.lint;
-        let selectors = EffectiveSelectors::of(lint, &selectors(&args.analysis));
+        let selectors = EffectiveSelectors::of(lint, &check_selectors(args));
         Self {
             select: selectors.select,
             extend_select: selectors.extend_select,

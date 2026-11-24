@@ -4,7 +4,7 @@
 //! the exact tier that are no premise (`heki_rules::premises::ConditionCause`). Exit codes: 0,
 //! or 2 when a file could not be analyzed (the reports of the others are still printed).
 
-use crate::check::{load_and_index, shown_text};
+use crate::check::{load_and_index, selectors, shown_text};
 use crate::{DumpOpenPremisesArgs, OutputFormat};
 use anyhow::Result;
 use heki_diagnostics::{Axis, Certainty, Diagnostic, OpenCondition, OpenPremise, OpenRecord};
@@ -123,6 +123,7 @@ pub(crate) fn run(args: &DumpOpenPremisesArgs) -> Result<ExitCode> {
     let indexed = load_and_index(
         &args.paths,
         &args.analysis,
+        &selectors(&args.analysis),
         OutputFormat::Json,
         None,
         Facts::Check,

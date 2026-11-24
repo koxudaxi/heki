@@ -7,9 +7,9 @@ heki's diagnostics and fixes while you edit, with the results `heki check` repor
 
 === "VS Code"
 
-    heki does not ship its own extension yet. Any generic LSP client extension that starts a
-    command for a language works; configure it to run `heki server` for `python` documents, for
-    example:
+    heki ships no extension of its own: `heki server` speaks LSP, so any generic LSP client
+    extension that starts a command for a language runs it. Configure it to run `heki server`
+    for `python` documents, for example:
 
     ```json
     {

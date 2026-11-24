@@ -1,4 +1,4 @@
-//! `MUT202` and `MUT114` return flow and `MUT109` `write-without-invalidation` end to end.
+//! `MUT202` and `MUT114` return flow and `MUT208` `write-without-invalidation` end to end.
 //!
 //! - `MUT202` (declared producers) and `MUT114` (`@lru_cache` / `@cache` functions): a function
 //!   returning a protected value (or a part of it) is a producer itself, without configuration:
@@ -7,7 +7,7 @@
 //!   method on the call result itself, external and attribute producers, cached wrappers and
 //!   property getters; generators, coroutines, and values stored in an attribute are not
 //!   followed.
-//! - `MUT109`: writes to `invalidation` targets (direct, through an alias, through private
+//! - `MUT208`: writes to `invalidation` targets (direct, through an alias, through private
 //!   helpers) must reach an invalidator on every normal path, directly or through a helper
 //!   that announces on all of its paths; not before the write, not only on one branch, not
 //!   from an unawaited coroutine. Exempt writers, construction, objects of unknown origin,
@@ -531,7 +531,7 @@ fn mut202_comprehension_collecting_wrapper_results_mutates_nothing() {
     }
 }
 
-// ============================================================================== MUT109
+// ============================================================================== MUT208
 
 const INV_CONFIG: &str = r#"[project]
 name = "t"
@@ -1001,9 +1001,9 @@ fn inv_project(name: &str) -> Project {
 }
 
 #[test]
-fn mut109_requires_an_invalidator_on_every_path_after_a_write() {
-    let p = inv_project("mut109_paths");
-    let diags = diagnostics(&p, &["--select", "MUT109"]);
+fn mut208_requires_an_invalidator_on_every_path_after_a_write() {
+    let p = inv_project("mut208_paths");
+    let diags = diagnostics(&p, &["--select", "MUT208"]);
     let s = "pkg/passes.py";
     // Not reported: an invalidator after the write (`narrow_ok`), one in each branch, a helper
     // that always announces, a helper write the caller announces, a raising path, a store
@@ -1026,28 +1026,28 @@ fn mut109_requires_an_invalidator_on_every_path_after_a_write() {
     assert_eq!(
         found(&diags),
         vec![
-            d(s, 14, "MUT109", "narrow"),
-            d(s, 35, "MUT109", "before_write"),
-            d(s, 53, "MUT109", "through_conditional_helper"),
-            d(s, 66, "MUT109", "helper_write"),
-            d(s, 75, "MUT109", "two_level_helper"),
-            d(s, 112, "MUT109", "unannounced_writer"),
-            d(s, 146, "MUT109", "loop_last_write"),
-            d(s, 167, "MUT109", "deferred"),
-            d(s, 176, "MUT109", "not_awaited"),
-            d(s, 186, "MUT109", "reset_root"),
-            d(s, 199, "MUT109", "Typed.retype"),
-            d(s, 215, "MUT109", "flag_not_set"),
-            d(s, 232, "MUT109", "dead_branch"),
-            d(s, 239, "MUT109", "phi_write"),
-            d(s, 260, "MUT109", "awrite"),
-            d(s, 279, "MUT109", "recurse"),
-            d(s, 288, "MUT109", "reset_twice"),
-            d(s, 293, "MUT109", "by_key"),
-            d(s, 297, "MUT109", "many_flags"),
-            d(s, 348, "MUT109", "iterate_fill"),
-            d(s, 364, "MUT109", "drain_fill"),
-            d(s, 370, "MUT109", "announce_before_iterating"),
+            d(s, 14, "MUT208", "narrow"),
+            d(s, 35, "MUT208", "before_write"),
+            d(s, 53, "MUT208", "through_conditional_helper"),
+            d(s, 66, "MUT208", "helper_write"),
+            d(s, 75, "MUT208", "two_level_helper"),
+            d(s, 112, "MUT208", "unannounced_writer"),
+            d(s, 146, "MUT208", "loop_last_write"),
+            d(s, 167, "MUT208", "deferred"),
+            d(s, 176, "MUT208", "not_awaited"),
+            d(s, 186, "MUT208", "reset_root"),
+            d(s, 199, "MUT208", "Typed.retype"),
+            d(s, 215, "MUT208", "flag_not_set"),
+            d(s, 232, "MUT208", "dead_branch"),
+            d(s, 239, "MUT208", "phi_write"),
+            d(s, 260, "MUT208", "awrite"),
+            d(s, 279, "MUT208", "recurse"),
+            d(s, 288, "MUT208", "reset_twice"),
+            d(s, 293, "MUT208", "by_key"),
+            d(s, 297, "MUT208", "many_flags"),
+            d(s, 348, "MUT208", "iterate_fill"),
+            d(s, 364, "MUT208", "drain_fill"),
+            d(s, 370, "MUT208", "announce_before_iterating"),
         ],
         "{diags:#?}"
     );
@@ -1108,7 +1108,7 @@ fn mut109_requires_an_invalidator_on_every_path_after_a_write() {
     );
     // Without a contract the rule reports nothing.
     p.write("pyproject.toml", "[project]\nname = \"t\"\n");
-    assert!(diagnostics(&p, &["--select", "MUT109"]).is_empty());
+    assert!(diagnostics(&p, &["--select", "MUT208"]).is_empty());
 }
 
 const BINDING_CONFIG: &str = r#"[[tool.heki.invalidation]]
@@ -1161,12 +1161,12 @@ class Filled(Model):
 "#;
 
 #[test]
-fn mut109_initializers_build_only_their_own_self() {
-    let p = Project::new("mut109_initializers");
+fn mut208_initializers_build_only_their_own_self() {
+    let p = Project::new("mut208_initializers");
     p.write("pyproject.toml", BINDING_CONFIG)
         .write("pkg/__init__.py", "")
         .write("pkg/models.py", INITIALIZERS);
-    let diags = diagnostics(&p, &["--select", "MUT109"]);
+    let diags = diagnostics(&p, &["--select", "MUT208"]);
     let m = "pkg/models.py";
     // An initializer builds its own `self`, also through a helper it hands `self` to and a
     // generator expression using it; an object reached through `self`'s attributes existed
@@ -1174,9 +1174,9 @@ fn mut109_initializers_build_only_their_own_self() {
     assert_eq!(
         found(&diags),
         vec![
-            d(m, 20, "MUT109", "Holder.__init__"),
-            d(m, 28, "MUT109", "Keeper.__init__"),
-            d(m, 42, "MUT109", "Filled.refill"),
+            d(m, 20, "MUT208", "Holder.__init__"),
+            d(m, 28, "MUT208", "Keeper.__init__"),
+            d(m, 42, "MUT208", "Filled.refill"),
         ],
         "{diags:#?}"
     );
@@ -1249,12 +1249,12 @@ def set_positioned(p: Positioned) -> None:
 "#;
 
 #[test]
-fn mut109_follows_the_fields_and_instances_bound_to_untyped_helper_arguments() {
-    let p = Project::new("mut109_binding");
+fn mut208_follows_the_fields_and_instances_bound_to_untyped_helper_arguments() {
+    let p = Project::new("mut208_binding");
     p.write("pyproject.toml", BINDING_CONFIG)
         .write("pkg/__init__.py", "")
         .write("pkg/models.py", BINDING);
-    let diags = diagnostics(&p, &["--select", "MUT109"]);
+    let diags = diagnostics(&p, &["--select", "MUT208"]);
     let m = "pkg/models.py";
     // A helper changing an argument it does not type writes the field or the instance the
     // caller binds to it (`fill`, `set_x`, `set_positioned`, and `other.items` in
@@ -1262,11 +1262,11 @@ fn mut109_follows_the_fields_and_instances_bound_to_untyped_helper_arguments() {
     assert_eq!(
         found(&diags),
         vec![
-            d(m, 11, "MUT109", "Model.__init__"),
-            d(m, 32, "MUT109", "fill"),
-            d(m, 41, "MUT109", "set_x"),
+            d(m, 11, "MUT208", "Model.__init__"),
+            d(m, 32, "MUT208", "fill"),
+            d(m, 41, "MUT208", "set_x"),
             // An object typed with a protocol `Model` implements.
-            d(m, 57, "MUT109", "set_positioned"),
+            d(m, 57, "MUT208", "set_positioned"),
         ],
         "{diags:#?}"
     );
@@ -1313,15 +1313,15 @@ def set_positioned(p: Positioned) -> None:
 /// (`Model.x` once, not once per class the object may be), and a target on the protocol covers
 /// the write too.
 #[test]
-fn mut109_ties_a_helper_write_through_a_protocol_to_each_class_once() {
-    let p = Project::new("mut109_protocol_binding");
+fn mut208_ties_a_helper_write_through_a_protocol_to_each_class_once() {
+    let p = Project::new("mut208_protocol_binding");
     p.write(
         "pyproject.toml",
         "[[tool.heki.invalidation]]\nname = \"model\"\ntargets = [\"Model.x\"]\ninvalidators = [\"notify\"]\n\n[[tool.heki.invalidation]]\nname = \"positioned\"\ntargets = [\"Positioned.x\"]\ninvalidators = [\"notify\"]\n",
     )
     .write("pkg/__init__.py", "")
     .write("pkg/models.py", PROTOCOL_BINDING);
-    let diags = diagnostics(&p, &["--select", "MUT109"]);
+    let diags = diagnostics(&p, &["--select", "MUT208"]);
     let mut messages: Vec<&str> = diags
         .iter()
         .map(|d| d["message"].as_str().unwrap())
@@ -1338,14 +1338,14 @@ fn mut109_ties_a_helper_write_through_a_protocol_to_each_class_once() {
 }
 
 #[test]
-fn mut109_configuration_errors() {
-    let p = inv_project("mut109_config");
+fn mut208_configuration_errors() {
+    let p = inv_project("mut208_config");
     let fails = |config: &str, needle: &str| {
         p.write(
             "pyproject.toml",
             &format!("[project]\nname = \"t\"\n\n{config}"),
         );
-        let (code, _, stderr) = p.check(&["--select", "MUT109"]);
+        let (code, _, stderr) = p.check(&["--select", "MUT208"]);
         assert_eq!(code, 2, "{stderr}");
         assert!(stderr.contains(needle), "{stderr}");
     };
@@ -1400,8 +1400,8 @@ fn save(lsp: &mut Lsp, p: &Project, rel: &str, version: i32, text: &str) {
 }
 
 #[test]
-fn lsp_mut109_follows_a_helper_that_stops_announcing() {
-    let p = Project::new("lsp_mut109");
+fn lsp_mut208_follows_a_helper_that_stops_announcing() {
+    let p = Project::new("lsp_mut208");
     p.write("heki.toml", LSP_CONFIG)
         .write("pkg/__init__.py", "")
         .write("pkg/nodes.py", NODES)
@@ -1422,7 +1422,7 @@ fn lsp_mut109_follows_a_helper_that_stops_announcing() {
     lsp.open(&uri(&p.dir.join("pkg/announce.py")), ANNOUNCE);
     save(&mut lsp, &p, "pkg/announce.py", 2, ANNOUNCE_SILENT);
     let diags = lsp.diagnostics(&add, |d| !d.is_empty());
-    assert_eq!(codes(&diags), vec!["MUT109"]);
+    assert_eq!(codes(&diags), vec!["MUT208"]);
     assert_eq!(
         diags[0]["range"]["start"],
         json!({"line": 9, "character": 4})
@@ -1446,10 +1446,10 @@ const PLANTER: &str = "from pkg.nodes import Index, Node\nfrom pkg.relay import 
 const PLANTER_SILENT: &str = "from pkg.nodes import Index, Node\nfrom pkg.relay import forward\n\n\ndef plant(index: Index, node: Node, kid):\n    forward(node, kid)\n";
 
 #[test]
-fn lsp_mut109_follows_a_distant_caller_that_stops_announcing() {
+fn lsp_mut208_follows_a_distant_caller_that_stops_announcing() {
     // Only an `invalidation` contract is configured: the walk over the callers above a writer
     // alone makes the writer's file depend on every caller above it.
-    let p = Project::new("lsp_mut109_distant");
+    let p = Project::new("lsp_mut208_distant");
     p.write("heki.toml", LSP_CONFIG)
         .write("pkg/__init__.py", "")
         .write("pkg/nodes.py", NODES)
@@ -1471,7 +1471,7 @@ fn lsp_mut109_follows_a_distant_caller_that_stops_announcing() {
     lsp.open(&uri(&p.dir.join("pkg/planter.py")), PLANTER);
     save(&mut lsp, &p, "pkg/planter.py", 2, PLANTER_SILENT);
     let diags = lsp.diagnostics(&graft, |d| !d.is_empty());
-    assert_eq!(codes(&diags), vec!["MUT109"]);
+    assert_eq!(codes(&diags), vec!["MUT208"]);
     assert_eq!(
         diags[0]["range"]["start"],
         json!({"line": 4, "character": 4})
@@ -1479,4 +1479,62 @@ fn lsp_mut109_follows_a_distant_caller_that_stops_announcing() {
     save(&mut lsp, &p, "pkg/planter.py", 3, PLANTER);
     lsp.diagnostics(&graft, <[Value]>::is_empty);
     lsp.stop(true);
+}
+
+/// One `MUT208` report: a write to a declared target with no invalidator after it.
+const UNANNOUNCED: &str = "\
+class Store:
+    def changed(self) -> None:
+        pass
+
+
+class Model:
+    def __init__(self) -> None:
+        self.fields: list[str] = []
+
+
+def add(model: Model, name: str) -> None:
+    model.fields.append(name)
+";
+
+const UNANNOUNCED_CONFIG: &str = "[project]\nname = \"t\"\n\n[[tool.heki.invalidation]]\nname = \"index\"\ntargets = [\"Model.fields\"]\ninvalidators = [\"Store.changed\"]\n";
+
+/// `MUT109` names no rule (no code is an alias of another): a selector, a suppression, and a
+/// baseline entry with it are read like any unknown code.
+#[test]
+fn the_former_code_of_the_invalidation_rule_names_no_rule() {
+    let p = Project::new("mut208_former_code");
+    p.write("pyproject.toml", UNANNOUNCED_CONFIG)
+        .write("m.py", UNANNOUNCED);
+    let (code, _, stderr) = p.heki(&["check", "--select", "MUT109"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("unknown rule selector `MUT109` in `--select`"),
+        "{stderr}"
+    );
+    // A suppression with the former code suppresses nothing.
+    p.write(
+        "m.py",
+        &UNANNOUNCED.replace(
+            "model.fields.append(name)",
+            "model.fields.append(name)  # heki: ignore[MUT109]",
+        ),
+    );
+    let reported = found(&diagnostics(&p, &[]));
+    assert_eq!(reported, vec![d("m.py", 12, "MUT208", "add")]);
+    // A baseline entry with the former code allows nothing: the report is a regression, and the
+    // entry can only be removed by recording the baseline again.
+    p.write("m.py", UNANNOUNCED);
+    let (code, _, stderr) = p.check(&["--baseline", "b.toml", "--update-baseline"]);
+    assert_eq!(code, 0, "{stderr}");
+    let recorded = p.read("b.toml");
+    assert!(recorded.contains("rule_code = \"MUT208\""), "{recorded}");
+    p.write("b.toml", &recorded.replace("MUT208", "MUT109"));
+    let (code, _, stderr) = p.check(&["--baseline", "b.toml"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("Found 1 Ratchet regression(s)")
+            && stderr.contains("MUT109 `index:Model.fields` can shrink 1 -> 0"),
+        "{stderr}"
+    );
 }

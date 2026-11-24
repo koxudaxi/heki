@@ -11,7 +11,10 @@ and what it does when it cannot tell.
    write, read, call, reach an effect, and import what. Which modules may import which, and
    import cycles, are walls
    ([ADR-022](https://github.com/koxudaxi/heki/blob/main/docs/DESIGN_HISTORY_AND_ADR.md#adr-022)).
-   heki's import rules are not released yet; until they are, tach or import-linter check imports.
+   heki's import rules ship as experimental: the `import-owners` contracts, and opt-in rules for
+   import cycles, circular imports that fail, and imports of test code or of dependencies
+   declared only for development or in an extra. Reading tach's and import-linter's contracts is
+   planned.
 3. Patterns and style that one file decides belong to linters such as Ruff and isort, and type
    correctness to type checkers.
 4. An idea from another language's tools is taken when it fits the core or the walls and passes
@@ -135,8 +138,7 @@ checker cover most of what matters, and heki reports little.
 
 - heki does not change your code's shape: it adds no decorators, contract types, or runtime
   checks, and it does not compile or rewrite code at build time.
-- heki never runs or instruments your program. `--profile` only reads a profile you recorded
-  yourself.
+- heki never runs or instruments your program, and reads no profile of it.
 
 ## Where heki's knowledge comes from
 
@@ -516,8 +518,8 @@ The proofs heki can make, on five axes:
 
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
-| Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT109`, `MUT113`, `EFF102`, `EFF103`, `EFF106`, `EFF109`, `EFF110`, `EFF114`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT120`, `MUT112`, `MUT113`, `MUT119`, `MUT201`–`MUT204` |
+| Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT113`, `MUT208`, `EFF102`, `EFF103`, `EFF106`, `EFF109`, `EFF110`, `EFF114`, `DATA101`, `OPT` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `MUT103`, `MUT108`, `MUT110`, `MUT120`, `MUT112`, `MUT113`, `MUT119`, `MUT201`–`MUT204`, `MUT208` |
 | Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `MUT120`, `MUT112`, `MUT119`, `EFF107`, `EFF109`, `EFF110`, `EFF112`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
-| State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT120`, `MUT111`, `MUT112`, `MUT113`, `MUT201`–`MUT204` |
+| State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT110`, `MUT120`, `MUT111`, `MUT112`, `MUT113`, `MUT201`–`MUT204`, `MUT208` |

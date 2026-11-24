@@ -304,7 +304,7 @@ fn judged_keys<'c>(config: &'c HekiConfig, selection: &RuleSelection) -> Vec<Key
         ];
         push(&mut out, (i, &r.name), &lists);
     }
-    let invalidation = running(&config.invalidation, &["MUT109"], selection);
+    let invalidation = running(&config.invalidation, &["MUT208"], selection);
     for (i, r) in invalidation.iter().enumerate() {
         let lists = [
             ("invalidation.targets", &r.targets[..], Attribute),

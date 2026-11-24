@@ -1,4 +1,4 @@
-//! `heki check --fix` / `--diff` / `--profile` and `heki snapshot` + `MUT103`, end to end
+//! `heki check --fix` / `--diff` and `heki snapshot` + `MUT103`, end to end
 //! (docs/fixes.md, ARCHITECTURE.md section 3.3).
 //!
 //! The differential gate runs `tests/difftest/opt_rewrites.py` on real CPython before and after
@@ -192,49 +192,6 @@ fn touched_runs_fix_only_the_reports_they_show() {
     );
     assert_eq!(p.read("a.py"), src);
     assert!(p.read("b.py").contains("x.append(i)"));
-}
-
-#[test]
-fn profile_hot_functions_promote_size_dependent_fixes() {
-    let p = Project::new("fix_profile");
-    let body = |name: &str| {
-        format!(
-            "def {name}(n):\n    allowed = list(range(0, 50, 3))\n    hits = []\n    for p in range(n):\n        if p in allowed:\n            hits.append(p)\n    return hits\n\n\n"
-        )
-    };
-    p.write("app.py", &format!("{}{}", body("hot"), body("cold")));
-    // Tachyon `--collapsed` and py-spy stacks.
-    p.write("tachyon.txt", "tid:1;app.py:main:20;app.py:hot:5 95\ntid:1;app.py:main:20;app.py:cold:13 0\ntid:1;other.py:idle:1 5\n");
-    let (code, stdout, stderr) = p.check(&["--profile", "tachyon.txt", "--output-format", "json"]);
-    assert_eq!(code, 1, "{stderr}");
-    let diags: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
-    let hot = diags.iter().find(|d| d["qualname"] == "hot").unwrap();
-    assert!(
-        hot["evidence"]
-            .as_str()
-            .unwrap()
-            .contains("95.0% of samples"),
-        "{hot}"
-    );
-    assert!(hot["fix"].is_array());
-    let (_, _, stderr) = p.check(&["--fix", "--profile", "tachyon.txt"]);
-    assert!(
-        stderr.contains("Fixed 1 issue(s) in 1 file(s)."),
-        "{stderr}"
-    );
-    let fixed = p.read("app.py");
-    assert!(fixed.contains(
-        "    allowed_set = set(allowed)\n    for p in range(n):\n        if p in allowed_set:"
-    ));
-    assert_eq!(
-        fixed.matches("allowed_set = set(allowed)").count(),
-        1,
-        "only `hot`"
-    );
-    // A gecko dump works the same way; a broken dump is a configuration error.
-    p.write("bad.json", "{\"threads\": []}");
-    assert_eq!(p.check(&["--profile", "bad.json"]).0, 2);
-    assert_eq!(p.check(&["--profile", "missing.txt"]).0, 2);
 }
 
 #[test]

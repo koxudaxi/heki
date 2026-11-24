@@ -9,7 +9,6 @@ members = [
     "crates/heki_soundness",
     "crates/heki_effect",
     "crates/heki_rules",
-    "crates/heki_profile",
     "crates/heki_diagnostics",
     "crates/heki_lsp",
 ]
@@ -35,7 +34,6 @@ heki_kb = { path = "crates/heki_kb", version = "0.2.7" }
 heki_soundness = { path = "crates/heki_soundness", version = "0.2.7" }
 heki_effect = { path = "crates/heki_effect", version = "0.2.7" }
 heki_rules = { path = "crates/heki_rules", version = "0.2.7" }
-heki_profile = { path = "crates/heki_profile", version = "0.2.7" }
 heki_diagnostics = { path = "crates/heki_diagnostics", version = "0.2.7" }
 heki_lsp = { path = "crates/heki_lsp", version = "0.2.7" }
 

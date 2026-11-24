@@ -34,8 +34,9 @@ async def get_cached(user_id: int, fresh: bool) -> dict[str, str]:
     return maybe_load(user_id, fresh)
 ";
 
-/// `OPT101` exact once; `OPT110` heuristic twice (the rewrite of a list the loop body may see
-/// is not proven), withheld unless named or with `lint.heuristic`.
+/// `OPT101` exact once, and heuristic once (the rewrite of a list the loop body hands to a call
+/// is not proven), withheld unless named or with `lint.heuristic`; `OPT110` heuristic once, an
+/// opt-in rule's report.
 const LISTS: &str = "\
 def collect(rows):
     acc = []
@@ -52,17 +53,15 @@ def known_names(names, source):
     return found
 
 def logged_names(names, source, log):
-    known = list(source)
     found = []
     for name in names:
-        log(known)
-        if name in known:
-            found.append(name)
+        log(found)
+        found = found + [name]
     return found
 ";
 
-/// A project with an exact `EFF101` and `OPT101` report, two heuristic `OPT110` reports, an
-/// `EFF111` report, and four test files.
+/// A project with an exact `EFF101` and `OPT101` report, a heuristic `OPT101` and `OPT110`
+/// report, an `EFF111` report, and four test files.
 fn shop(name: &str) -> Project {
     let p = Project::new(name);
     p.write("app/__init__.py", "")
@@ -130,18 +129,21 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
         rest,
         "heki recommend (experimental) on .: 8 file(s), 20 function(s)\n\
          \n\
-         Reports now  2 shown (2 exact, 0 heuristic), 2 heuristic withheld, 5 heuristic rule(s) \
+         Reports now  2 shown (2 exact, 0 heuristic), 1 heuristic withheld, 5 heuristic rule(s) \
          off\n\
          \n\
          Rules worth enabling here\n\
          \x20 rule    reports  exact  consequence  right about the code (published)  real harm  \
          block\n\
-         \x20 OPT110        2      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         \
-         no: slower code, not a bug\n\
          \x20 EFF111        1      -  slowdown     not measured                      -          \
          no: slower code, not a bug\n\
+         \x20 OPT101        1      0  slowdown     78% (45-94%), n=9, 2026-11-21     0%         \
+         no: slower code, not a bug\n\
+         \x20 OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         \
+         no: slower code, not a bug\n\
          \x20 No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF112, EFF113, EFF114, EFF115, EFF116, \
-         IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT106, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, OPT112\n\
+         IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT106, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, \
+         OPT103, OPT111, OPT112, OPT120, OPT121, OPT130\n\
          \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then \
          select it.\n\
          \n\
@@ -161,7 +163,7 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
     );
     let (_, _, note) = p.heki(&["check"]);
     assert!(
-        note.contains("5 heuristic rule(s) are off and 2 heuristic report(s) are not shown"),
+        note.contains("5 heuristic rule(s) are off and 1 heuristic report(s) are not shown"),
         "{note}"
     );
     // The same counts as `heki check` for every selection, also with `lint.heuristic`.
@@ -191,16 +193,17 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
     let (_, heuristic, _) = recommend_json(&p, &["--heuristic"]);
     assert_eq!(
         heuristic["reports_now"],
-        json!({"shown": 5, "exact": 2, "heuristic": 3, "withheld_heuristic": 0,
+        json!({"shown": 4, "exact": 2, "heuristic": 2, "withheld_heuristic": 0,
                "heuristic_rules_off": 0, "baseline": null})
     );
-    let (_, named, _) = recommend_json(&p, &["--extend-select", "OPT110"]);
+    // Naming the exact rule shows its heuristic report.
+    let (_, named, _) = recommend_json(&p, &["--extend-select", "OPT101"]);
     assert_eq!(
         (
             &named["reports_now"]["withheld_heuristic"],
             &named["reports_now"]["heuristic"]
         ),
-        (&json!(0), &json!(2))
+        (&json!(0), &json!(1))
     );
     // An inline suppression counts as in `heki check`.
     p.write(
@@ -652,13 +655,14 @@ fn rules_worth_enabling_follow_the_policy() {
         "  rule    reports  exact  consequence  right about the code (published)  real harm  block\n\
         \x20 EFF107        1      -  bug          not measured                      -          yes\n\
         \x20 MUT106        1      -  bug          not measured                      -          yes\n\
-        \x20 OPT110        2      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug\n\
         \x20 EFF111        1      -  slowdown     not measured                      -          no: slower code, not a bug\n\
         \x20 MUT107        1      -  bug          78% (65-87%), n=50, 2026-11-21    4%         no: real harm below 10%\n\
+        \x20 OPT101        1      0  slowdown     78% (45-94%), n=9, 2026-11-21     0%         no: slower code, not a bug\n\
+        \x20 OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug\n\
         \x20 Optional (experimental, never in the block)\n\
         \x20 EFF109        1      -  bug          not measured                      -          no: experimental\n\
         \x20 No reports here: EFF102, EFF105, EFF106, EFF110, EFF112, EFF113, EFF114, EFF115, EFF116, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT108, MUT111, MUT112, MUT113, \
-        MUT115, MUT118, MUT120, OPT112\n\
+        MUT115, MUT118, MUT120, OPT103, OPT111, OPT112, OPT120, OPT121, OPT130\n\
         \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it."
     );
     assert!(
@@ -678,20 +682,40 @@ fn rules_worth_enabling_follow_the_policy() {
                 "caveats": ["not measured"]})
     );
     // The heuristic reports an exact rule withholds, with its measurement quoted.
+    let opt101 = rule(&report, "OPT101");
+    assert_eq!(
+        (
+            &opt101["enabled_now"],
+            &opt101["reports"],
+            &opt101["heuristic"]
+        ),
+        (&json!(true), &json!(1), &json!(1))
+    );
+    assert_eq!(
+        opt101["measurement"],
+        json!({"rule": "OPT101", "round": 3, "date": "2026-11-21", "sample": 9, "confirmed": 0,
+               "plausible": 0, "benign": 7, "false_claims": 2, "right_percent": 78,
+               "interval_percent": [45, 94], "real_harm_percent": 0})
+    );
+    // An opt-in exact rule: every report naming it would add.
     let opt110 = rule(&report, "OPT110");
     assert_eq!(
         (
+            &opt110["activation"],
             &opt110["enabled_now"],
             &opt110["reports"],
-            &opt110["heuristic"]
+            &opt110["exact"],
+            &opt110["in_block"],
+            &opt110["reason"]
         ),
-        (&json!(true), &json!(2), &json!(2))
-    );
-    assert_eq!(
-        opt110["measurement"],
-        json!({"rule": "OPT110", "round": 3, "date": "2026-11-21", "sample": 50, "confirmed": 0,
-               "plausible": 3, "benign": 36, "false_claims": 11, "right_percent": 78,
-               "interval_percent": [65, 87], "real_harm_percent": 6})
+        (
+            &json!("opt-in"),
+            &json!(false),
+            &json!(1),
+            &json!(0),
+            &json!(false),
+            &json!("slower code, not a bug")
+        )
     );
     assert_eq!(rule(&report, "MUT103")["reports"], Value::Null);
     assert_eq!(
@@ -699,7 +723,7 @@ fn rules_worth_enabling_follow_the_policy() {
         json!({"extend-select": ["EFF107", "MUT106"]})
     );
     // Rules the current selection runs in full, and contract rules, are not listed.
-    for code in ["EFF101", "OPT101", "MUT201", "EFF201"] {
+    for code in ["EFF101", "OPT102", "MUT201", "EFF201"] {
         assert!(
             report["rules"]
                 .as_array()
@@ -834,10 +858,10 @@ fn a_baseline_splits_each_rules_reports() {
         rule(&report, "MUT106")["baseline"],
         json!({"allowed": 0, "regressions": 1})
     );
-    // The baseline holds the two heuristic `OPT110` reports; the third is new.
+    // The baseline holds the heuristic `OPT110` report; the second is new.
     assert_eq!(
         rule(&report, "OPT110")["baseline"],
-        json!({"allowed": 2, "regressions": 1})
+        json!({"allowed": 1, "regressions": 1})
     );
     let (_, out, _) = p.heki(&["recommend", "--baseline", "b.toml"]);
     assert!(

@@ -665,15 +665,6 @@ impl Workspace {
         ))
     }
 
-    /// Every indexed function as `(file, qualname)` (summaries keep no definition lines).
-    pub fn functions(&self) -> impl Iterator<Item = (&Path, &str)> {
-        self.index.files.values().flat_map(|f| {
-            f.local_functions
-                .keys()
-                .map(move |k| (f.path.as_path(), k.qualname.as_str()))
-        })
-    }
-
     pub fn stats(&self) -> &EngineStats {
         &self.stats
     }

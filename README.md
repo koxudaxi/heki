@@ -101,6 +101,23 @@ EFF103 (loop-db-query): `heki rule EFF103`, https://heki.koxudaxi.dev/rules/loop
 
 Ruff, ty, Pyrefly, pyright, and mypy report nothing for either example with their default settings.
 
+### How heki differs
+
+The difference is the model, not reaching across files: type checkers already follow types
+across modules. heki models effects and aliases, what code does:
+
+| Tool | Models | heki adds |
+| --- | --- | --- |
+| Ruff | syntax and style | the effects behind a call: a blocking call, a query, or a write, wherever it happens |
+| ty, Pyrefly, pyright, mypy | declared types | in-place changes, through aliases and helpers, to `frozen`, `ReadOnly`, and `Final` fields and to `Sequence` / `Mapping` arguments |
+| tach, import-linter | which modules may import which | which functions write or read a field, call a function, or reach I/O; which modules may import which, knowing when each import runs (experimental); planned: these tools' contracts read as heki contracts |
+
+Their stricter settings do not close the gap. The second example above is fully annotated and
+passes Ruff's annotation rules (`ANN`), `mypy --strict`, pyright's strict mode, and Pyrefly's
+`strict` preset, yet it sends one query per order: the types are right, and what the code does
+is slow. heki leaves syntax, style, and types to these tools, and keeps doing so as they grow:
+use it next to them.
+
 ### What a first run shows
 
 Run `uvx heki check` (or `heki check` once installed) in the directory with `pyproject.toml`:
@@ -110,12 +127,16 @@ Run `uvx heki check` (or `heki check` once installed) in the directory with `pyp
 - Warnings are printed and do not fail the run (exit code 0). Errors fail it (exit code 1).
   `--fail-on warning` (`lint.fail-on = "warning"`) makes warnings fail it too.
 - A note at the end says how many heuristic rules were left off; `--heuristic` runs them.
+- Next, [`heki recommend`](https://heki.koxudaxi.dev/recommend/) (experimental) says which rules
+  would report on the project, what heki could not see, and the contracts the code already
+  keeps, with the keys to add.
 
-### Your own conventions, too
+### Your conventions, checked instead of reviewed
 
 The checks above need no configuration: `EFF101` and `EFF103` are exact and run by default.
 The rules of your own project, which you keep today by review, by AST scripts, or by run-time
-guards in tests, can be added as a few lines of it.
+guards in tests, and which a coding agent cannot know unless a check tells it, can be added as a
+few lines of it.
 
 For example, these lines say that only the functions in `app.store` may change `Order.items`:
 
@@ -156,6 +177,16 @@ time. Each kind of rule has its own contract:
 
 See [Contracts](https://heki.koxudaxi.dev/configuration/#contracts) for every key.
 
+### A safety net for reviews and coding agents
+
+- The language server checks while you edit and re-checks only what an edit can affect.
+- `heki snapshot` records what each public function does, and `MUT103` reports a function that gained an
+  effect, which a diff does not show.
+- Coding agents get the same checks as JSON, and an
+  [Agent Skill](https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental) teaches them the workflow.
+- [`heki inspect`](https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental)
+  (experimental) says what one function does, so an agent does not read its callees to find out.
+
 > [!WARNING]
 > 🧪 **Experimental.** The exact rules are certified, but heki is still under active development:
 > rules, configuration keys, diagnostics, and output formats can change between releases without
@@ -184,7 +215,11 @@ These rules are exact and run by default. Each report shows the chain of calls t
 | A list, dict, or set that an `lru_cache` / `cache` function returned, changed in place | `MUT114` |
 | A change of a builtin container that is lost because the object is new and nothing holds it (`list(xs).sort()`) | `MUT119` |
 | A DataFrame or array concatenated with itself on every loop iteration | `DATA101` |
-| A quadratic list, dict, set, bytes, or queue pattern | `OPT101`-`OPT103`, `OPT110`, `OPT111`, `OPT113`, `OPT120`, `OPT121`, `OPT130` |
+| A list rebuilt, or a dict or set merged, on every loop iteration, and a nested-loop join | `OPT101`, `OPT102`, `OPT113` |
+
+The size-dependent rewrites (`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`) are exact
+too, but opt-in: the loops they report were rarely large enough to matter
+([Rule precision](https://heki.koxudaxi.dev/precision/#certifications)).
 
 To certify a rule, two reviewers check by hand every exact report it makes on the development
 corpus (378 packages and 30.75 million lines, plus packages added for rules with few reports), and
@@ -199,16 +234,6 @@ every output labels them.
 The other rules are heuristic or opt-in, and the contract rules run once you declare a contract:
 see [Rules](https://heki.koxudaxi.dev/rules/) and
 [Rule precision](https://heki.koxudaxi.dev/precision/).
-
-### A safety net for reviews and coding agents
-
-- The language server checks while you edit and re-checks only what an edit can affect.
-- `heki snapshot` records what each public function does, and `MUT103` reports a function that gained an
-  effect, which a diff does not show.
-- Coding agents get the same checks as JSON, and an
-  [Agent Skill](https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental) teaches them the workflow.
-- [`heki inspect`](https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental)
-  (experimental) says what one function does, so an agent does not read its callees to find out.
 
 ### Fast, quiet, and easy to adopt
 
@@ -225,20 +250,6 @@ Rust enforces ownership, Haskell puts `IO` in the type, and static types let a c
 rewrite. Python enforces none of these. heki checks what they would catch: objects changed
 through helpers, effects behind a call, stale shared state, and quadratic patterns. See the
 [comparison](https://heki.koxudaxi.dev/#what-python-leaves-open).
-
-## 🔍 How heki differs
-
-Ruff models syntax, and type checkers model declared types. heki models effects and aliases,
-what code does, so use it next to them: the second example passes `mypy --strict` and pyright's
-strict mode, yet sends one query per order. Import contracts (experimental) know when each import
-runs: in a function, lazily, by a constant name, or never under `TYPE_CHECKING`, and so does the
-opt-in import cycle rule, which counts only the imports that run while modules load. Another
-opt-in rule finds, with no configuration, the circular imports that fail: a `from` import that
-raises `ImportError` when one module of the cycle is imported before the others. Other opt-in
-rules read `pyproject.toml` and find package code that imports test code, and dependencies
-declared only for development or in an extra that loading the package loads. Reading the
-contracts of tach and import-linter is planned. See the
-[comparison](https://heki.koxudaxi.dev/#how-heki-differs).
 
 ## 🔧 Rewrites proven under CPython's semantics
 
@@ -274,8 +285,9 @@ $ heki check --diff --include-size-dependent jobs.py
 Would fix 1 issue(s) in 1 file(s).
 ```
 
-`--fix` alone applies the rewrites that are faster for every input (`OPT101`, `OPT102`); a
-size-dependent one like this needs `--include-size-dependent`.
+`--fix` alone applies the rewrites that are faster for every input (`OPT101`, `OPT102`). A
+size-dependent one like this comes from an opt-in rule: `--include-size-dependent` runs those
+rules and applies their rewrites.
 
 The scope analysis is checked against CPython's `symtable` on 3.11 to 3.15, and adversarial
 programs that break a naive rewrite must all be blocked on CPython. When a proof fails, the
@@ -354,6 +366,7 @@ repos:
         types: [python]
         pass_filenames: true
         require_serial: true
+        verbose: true      # show warnings: they do not fail the hook
 ```
 
 A GitHub Actions workflow with code-scanning alerts (SARIF) and annotations:

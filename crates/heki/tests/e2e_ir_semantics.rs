@@ -326,7 +326,7 @@ fn a_refutable_case_may_not_match() {
     let p = Project::new("ir_refutable_cases");
     p.write("pyproject.toml", INVALIDATION)
         .write("case.py", &src);
-    let got: Vec<String> = diagnostics(&p, &["--select", "MUT109"])
+    let got: Vec<String> = diagnostics(&p, &["--select", "MUT208"])
         .iter()
         .map(|d| d["qualname"].as_str().unwrap().to_owned())
         .collect();
@@ -913,7 +913,7 @@ fn a_return_break_or_continue_runs_the_finally_body() {
     let p = Project::new("ir_finally_paths");
     p.write("pyproject.toml", INVALIDATION)
         .write("case.py", &src);
-    let got: Vec<String> = diagnostics(&p, &["--select", "MUT109"])
+    let got: Vec<String> = diagnostics(&p, &["--select", "MUT208"])
         .iter()
         .map(|d| d["qualname"].as_str().unwrap().to_owned())
         .collect();

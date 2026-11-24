@@ -198,8 +198,8 @@ def rules_index(rules: list[dict], policy: str) -> str:
         "## Legend",
         "",
         "- 🛠️ The fix is applied by `heki check --fix` when heki proves it safe.",
-        "- 🔧 A proven-safe rewrite applied only with `--fix --include-size-dependent` or in "
-        "functions a `--profile` dump shows hot (it can be slower for tiny inputs).",
+        "- 🔧 A proven-safe rewrite applied only with `--fix --include-size-dependent` (it can be "
+        "slower for tiny inputs).",
         "- ≈ Heuristic rule: a report can be wrong about the code. Every output labels its "
         "reports `heuristic`.",
         "- 🔌 Opt-in rule.",
@@ -431,6 +431,26 @@ def certifications_table(precision: dict, rules: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def harm_table(precision: dict) -> str:
+    """The harm of the exact reports of the certifications whose census and holdout run classed
+    it."""
+    lines = [
+        "| Rule | Census: C / P / B / not classified | Holdout: C / P / B / not classified |",
+        "| ---- | ---------------------------------- | ----------------------------------- |",
+    ]
+
+    def classes(harm: dict) -> str:
+        return " / ".join(
+            str(harm[k]) for k in ("confirmed", "plausible", "benign", "unclassified")
+        )
+
+    for c in precision["certifications"]:
+        census, holdout = c["census"].get("harm"), c["holdout"].get("harm")
+        if census is not None and holdout is not None:
+            lines.append(f"| `{c['rule']}` | {classes(census)} | {classes(holdout)} |")
+    return "\n".join(lines) + "\n"
+
+
 def measurements_table(precision: dict, rules: list[dict]) -> str:
     """The measurements, each with the rule's certainty now."""
     certainty = {r["code"]: r["certainty"] for r in rules}
@@ -450,11 +470,12 @@ def measurements_table(precision: dict, rules: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def exact_rules_list(rules: list[dict]) -> str:
+def default_rules_list(rules: list[dict]) -> str:
+    """The rules a run without configuration runs: the exact rules that are not opt-in."""
     return "".join(
         f"- [`{r['code']}` ({r['slug']})](rules/{r['slug']}.md)\n"
         for r in rules
-        if r["certainty"] == "exact"
+        if r["certainty"] == "exact" and r["activation"] == "default"
     )
 
 
@@ -483,12 +504,13 @@ def outputs(heki: Path, rules: list[dict], registry: dict, precision: dict) -> d
             PRECISION_PAGE,
             {
                 "certifications": certifications_table(precision, rules),
+                "harm": harm_table(precision),
                 "measurements": measurements_table(precision, rules),
             },
         ),
         RECOMMEND_PAGE: with_generated_parts(RECOMMEND_PAGE, {"report": recommend_example(heki)}),
         GETTING_STARTED_PAGE: with_generated_parts(
-            GETTING_STARTED_PAGE, {"exact-rules": exact_rules_list(rules)}
+            GETTING_STARTED_PAGE, {"default-rules": default_rules_list(rules)}
         ),
         RECOMMEND_SCHEMA: run(heki, "recommend", "--output-format-json-schema"),
         EXAMPLE_IMAGE: example_image(heki),

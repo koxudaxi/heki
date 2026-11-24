@@ -541,7 +541,6 @@ dependencies = [
  "heki_ir",
  "heki_kb",
  "heki_lsp",
- "heki_profile",
  "heki_rules",
  "heki_semantic",
  "heki_soundness",
@@ -648,15 +647,6 @@ dependencies = [
  "tokio",
  "tower-lsp",
  "tower-service",
-]
-
-[[package]]
-name = "heki_profile"
-version = "0.2.7"
-dependencies = [
- "heki_env",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]

@@ -12,9 +12,8 @@ use heki_diagnostics::{
     BASELINE_VERSION, BaselineKey, CountUnit, Diagnostic, FileFailure, RatchetBaseline, Stylesheet,
     TextEdit, baseline_counts, fix_python_source, github_escape, path_text, render, unified_diff,
 };
-use heki_effect::{ProjectIndex, func_qualname};
+use heki_effect::ProjectIndex;
 use heki_env::{Docs, LintConfig, Problem, Severity, UnmatchedEntries};
-use heki_profile::{HotFunctions, ProfileData, ProfiledFunction};
 use heki_rules::project::{
     CommandPaths, Facts, FileError, IndexFacts, Indexed, ParsedFile, Project, ProjectEnv,
     ProjectOptions, RulesRun, baseline_key, canonical, imports_left_out, paths_leave_out,
@@ -37,15 +36,21 @@ pub(crate) fn selectors(args: &AnalysisArgs) -> Selectors {
         extend_select: args.extend_select.clone(),
         ignore: args.ignore.clone(),
         heuristic: args.heuristic.value(),
+        size_dependent_rewrites: false,
     }
 }
 
-/// Rule selection of a run (the command line over the config).
-pub(crate) fn selection(args: &AnalysisArgs, project: &Project) -> Result<RuleSelection> {
-    Ok(RuleSelection::resolve(
-        &project.env.cfg.lint,
-        &selectors(args),
-    )?)
+/// The selection options of `heki check`: [`selectors`] and `--include-size-dependent`.
+pub(crate) fn check_selectors(args: &CheckArgs) -> Selectors {
+    Selectors {
+        size_dependent_rewrites: args.include_size_dependent,
+        ..selectors(&args.analysis)
+    }
+}
+
+/// Rule selection of a run (the command line's `selectors` over the config).
+pub(crate) fn selection(selectors: &Selectors, project: &Project) -> Result<RuleSelection> {
+    Ok(RuleSelection::resolve(&project.env.cfg.lint, selectors)?)
 }
 
 /// `--fail-on` over `lint.fail-on`: the least severity whose reports make the run fail.
@@ -84,44 +89,13 @@ fn snapshot_for(
     Ok(None)
 }
 
-/// Every function of the project with the lines of its definition, for attributing profile
-/// frames.
-fn profiled_functions(project: &Project) -> Vec<ProfiledFunction<'_>> {
-    let mut out = Vec::new();
-    for file in &project.files {
-        let lines = LineIndex::from_source(&file.source);
-        out.extend(file.ir.functions.iter().map(|f| ProfiledFunction {
-            path: &file.path,
-            qualname: func_qualname(f),
-            lines: Some(lines.line(f.span.start)..=lines.line(f.span.end)),
-        }));
-    }
-    out
-}
-
-/// Append `profile: ...` evidence to `OPT` diagnostics of profiled functions.
-pub(crate) fn annotate_hot(diags: &mut [Diagnostic], hot: Option<&HotFunctions>) {
-    let Some(hot) = hot else {
-        return;
-    };
-    for d in diags.iter_mut().filter(|d| d.rule_code.starts_with("OPT")) {
-        if let Some(pct) = hot.cum_pct(&d.path, &d.qualname) {
-            let note = format!(
-                "profile: `{}` is on the stack in {pct:.1}% of samples",
-                d.qualname
-            );
-            let parts: Vec<String> = d.evidence.take().into_iter().chain([note]).collect();
-            d.evidence = Some(parts.join("; "));
-        }
-    }
-}
-
-/// The project at `paths` (with `overrides` in place of files' text), with the rule selection and
-/// the saved summary snapshot `heki check` uses for `analysis`. `format` is the output format the
-/// run's warnings follow.
+/// The project at `paths` (with `overrides` in place of files' text), with the rule selection of
+/// `selectors` and the saved summary snapshot `heki check` uses for `analysis`. `format` is the
+/// output format the run's warnings follow.
 pub(crate) fn load(
     paths: &[PathBuf],
     analysis: &AnalysisArgs,
+    selectors: &Selectors,
     format: OutputFormat,
     overrides: Option<&FxHashMap<PathBuf, String>>,
 ) -> Result<(Project, RuleSelection, Option<SummarySnapshot>)> {
@@ -133,7 +107,7 @@ pub(crate) fn load(
         overrides,
         removed: None,
     })?;
-    let selection = selection(analysis, &project)?;
+    let selection = selection(selectors, &project)?;
     let snapshot = snapshot_for(&selection, &project.env.root, format)?;
     Ok((project, selection, snapshot))
 }
@@ -142,21 +116,20 @@ pub(crate) fn load(
 pub(crate) fn load_and_index(
     paths: &[PathBuf],
     analysis: &AnalysisArgs,
+    selectors: &Selectors,
     format: OutputFormat,
     overrides: Option<&FxHashMap<PathBuf, String>>,
     facts: Facts,
 ) -> Result<Indexed> {
-    let (project, selection, snapshot) = load(paths, analysis, format, overrides)?;
+    let (project, selection, snapshot) = load(paths, analysis, selectors, format, overrides)?;
     Ok(Indexed::build(project, selection, snapshot, facts)?)
 }
 
-/// One analysis pass: the project, its index, its diagnostics after inline suppressions, and
-/// the shares of its functions in the profile.
+/// One analysis pass: the project, its index, and its diagnostics after inline suppressions.
 struct Analyzed {
     project: Project,
     index: ProjectIndex,
     diags: Vec<Diagnostic>,
-    hot: Option<HotFunctions>,
     /// The heuristic rules that did not run only because `lint.heuristic` is off.
     heuristic_off: usize,
     /// The heuristic reports of exact rules withheld because `lint.heuristic` is off.
@@ -181,31 +154,28 @@ impl Analyzed {
 fn analyze(
     args: &CheckArgs,
     paths: &CommandPaths,
-    profile: Option<&ProfileData>,
     overrides: Option<&FxHashMap<PathBuf, String>>,
 ) -> Result<Analyzed> {
     let indexed = load_and_index(
         &paths.analyzed,
         &args.analysis,
+        &check_selectors(args),
         args.output_format,
         overrides,
         Facts::Check,
     )?;
-    let (mut diags, withheld) = indexed.diagnose()?;
+    let (diags, withheld) = indexed.diagnose()?;
     let Indexed {
         project,
         index,
         selection,
         snapshot,
     } = indexed;
-    let hot = profile.map(|p| p.attribute(profiled_functions(&project)));
-    annotate_hot(&mut diags, hot.as_ref());
     let touched = Touched::of(&args.touched, &paths.files, &project);
     Ok(Analyzed {
         project,
         index,
         diags,
-        hot,
         heuristic_off: selection.heuristic_off().len(),
         withheld,
         selection,
@@ -216,13 +186,11 @@ fn analyze(
 
 /// Whether `--fix` / `--diff` applies this diagnostic's fix: `safe` + `unconditional` rules
 /// (`OPT101` / `OPT102`) and reports on suppression comments always; `size-dependent` ones with
-/// `--include-size-dependent` or in a function the profile shows hot.
-fn applicable(d: &Diagnostic, args: &CheckArgs, hot: Option<&HotFunctions>) -> bool {
+/// `--include-size-dependent`.
+fn applicable(d: &Diagnostic, args: &CheckArgs) -> bool {
     d.fix.is_some()
         && (fixes_unconditionally(d)
-            || find_rule(&d.rule_code).is_some()
-                && (args.include_size_dependent
-                    || hot.is_some_and(|h| h.is_hot(&d.path, &d.qualname))))
+            || find_rule(&d.rule_code).is_some() && args.include_size_dependent)
 }
 
 /// Fix passes before `--fix` / `--diff` stop (each pass re-proves every candidate on the text
@@ -485,11 +453,7 @@ struct FixRun {
 }
 
 /// Apply fixes in memory until nothing more applies.
-fn fix_in_memory(
-    args: &CheckArgs,
-    paths: &CommandPaths,
-    hot: Option<&ProfileData>,
-) -> Result<FixRun> {
+fn fix_in_memory(args: &CheckArgs, paths: &CommandPaths) -> Result<FixRun> {
     let mut overrides: FxHashMap<PathBuf, String> = FxHashMap::default();
     let mut originals: BTreeMap<PathBuf, String> = BTreeMap::new();
     let mut applied_to: FxHashMap<PathBuf, usize> = FxHashMap::default();
@@ -500,13 +464,12 @@ fn fix_in_memory(
     let mut passes = 0;
     let mut refused: Vec<String> = Vec::new();
     loop {
-        let a = analyze(args, paths, hot, Some(&overrides))?;
+        let a = analyze(args, paths, Some(&overrides))?;
         errors = a.project.errors;
         touched = a.touched;
         let by_path;
-        (by_path, not_touched) = fixes_to_apply(&a.diags, touched.as_ref(), &|d| {
-            applicable(d, args, a.hot.as_ref())
-        });
+        (by_path, not_touched) =
+            fixes_to_apply(&a.diags, touched.as_ref(), &|d| applicable(d, args));
         let mut pass = 0;
         for file in &a.project.files {
             let Some(groups) = by_path.get(file.path.as_path()) else {
@@ -617,18 +580,13 @@ pub(crate) fn recording_steps(
 }
 
 fn run_check(args: &CheckArgs) -> Result<ExitCode> {
-    let hot = args
-        .profile
-        .as_deref()
-        .map(heki_profile::load)
-        .transpose()?;
     let styles = stdout_styles(args.color);
     let paths = command_paths(args)?;
     if args.watch {
-        return crate::watch::run(args, hot.as_ref(), &styles);
+        return crate::watch::run(args, &styles);
     }
     if args.diff {
-        let run = fix_in_memory(args, &paths, hot.as_ref())?;
+        let run = fix_in_memory(args, &paths)?;
         if let Some(touched) = &run.touched {
             touched.warn(args.output_format);
         }
@@ -656,14 +614,14 @@ fn run_check(args: &CheckArgs) -> Result<ExitCode> {
     let mut refused = Vec::new();
     let mut conflicts = Vec::new();
     if args.fix {
-        let run = fix_in_memory(args, &paths, hot.as_ref())?;
+        let run = fix_in_memory(args, &paths)?;
         let (fixes, written);
         (fixes, written, conflicts) = write_fixed(&run.files)?;
         eprintln!("Fixed {fixes} issue(s) in {written} file(s).");
         eprint!("{}", not_touched_note(run.not_touched));
         refused = run.refused;
     }
-    let mut analyzed = analyze(args, &paths, hot.as_ref(), None)?;
+    let mut analyzed = analyze(args, &paths, None)?;
     analyzed.project.errors.extend(conflicts);
     let diags = std::mem::take(&mut analyzed.diags);
     let code = report(args, &analyzed, diags, &styles)?;
@@ -928,6 +886,15 @@ fn report(
             analyzed.heuristic_off,
             Touched::shown(touched, &analyzed.withheld),
         );
+        // A file given as a path selects what is shown, as `--touched` does.
+        if diags.is_empty()
+            && project.errors.is_empty()
+            && touched.is_none()
+            && baseline_path.is_none()
+            && !project.env.cfg.declares_contracts()
+        {
+            eprintln!("{}", heki_rules::RECOMMEND_HINT);
+        }
     }
     if matches!(args.output_format, OutputFormat::Full) {
         rule_pages(&diags);

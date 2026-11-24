@@ -954,10 +954,10 @@ pub struct EffectSummary {
     /// from the project callees whose result it returns).
     pub returns_protected: Option<ProtectedReturn>,
     /// `invalidation` contracts (bits) whose invalidators every normal path of the function
-    /// reaches, directly or through calls (`MUT109`; propagated).
+    /// reaches, directly or through calls (`MUT208`; propagated).
     pub must_invalidate: u64,
     /// Writes to `invalidation` targets that some normal path leaves unannounced: the function's
-    /// own, and those the private helpers it calls pass up (`MUT109`; propagated).
+    /// own, and those the private helpers it calls pass up (`MUT208`; propagated).
     pub unmet_invalidation: BTreeSet<UnmetWrite>,
     /// Parameters the function may keep beyond the call: stored in an object, a container, a
     /// global, or a closure cell, yielded, captured by a closure, handed to code heki does not
@@ -1816,11 +1816,11 @@ pub struct ArgOrigin {
     pub may_params: u64,
     /// The argument is an instance the caller constructs (`Model(...)`), or an attribute of one.
     pub fresh: bool,
-    /// Where the argument comes from among the objects that existed before the call (`MUT109`;
+    /// Where the argument comes from among the objects that existed before the call (`MUT208`;
     /// only computed when an `invalidation` contract is configured).
     pub reach: Reach,
     /// The `invalidation` targets a callee may write through the argument without knowing them
-    /// (`MUT109`; `None` unless a contract names `typed_field`, or an attribute of
+    /// (`MUT208`; `None` unless a contract names `typed_field`, or an attribute of
     /// `typed_instance`'s class).
     pub targets: Option<Box<ArgTargets>>,
     /// What the caller knows about the parameter's value (`None`: not bound exactly).
@@ -1983,7 +1983,7 @@ pub struct CallSite {
     /// The calling function may return the call's result, through this step (`MUT202` return
     /// flow: a read-only callee makes the caller a producer).
     pub returned: Option<ReturnStep>,
-    /// What follows the call on every normal path of the caller (`MUT109`; only computed when
+    /// What follows the call on every normal path of the caller (`MUT208`; only computed when
     /// an `invalidation` contract is configured).
     pub flow: Option<SiteFlow>,
     /// Tests of the caller's inputs that hold whenever the call runs (`guards`).
@@ -2251,7 +2251,7 @@ pub struct FileSummary {
     /// for the language server's index only (`summarize_project_with_reads`, the incremental
     /// updates); empty otherwise.
     pub decl_reads: DeclKeys,
-    /// The `MUT109` flow facts of the file's functions (local, IR-free; empty unless an
+    /// The `MUT208` flow facts of the file's functions (local, IR-free; empty unless an
     /// `invalidation` contract is configured).
     pub flows: FxHashMap<FuncKey, FuncFlow>,
     /// The `MUT101` facts of the file's methods that write a `self` attribute themselves, one
@@ -2526,7 +2526,7 @@ pub fn analyze_project(modules: &[ModuleInput<'_>], kb: &EffectiveEcosystemKb) -
 }
 
 /// [`analyze_project`] with the declared contracts the summaries depend on (`MUT202` producers,
-/// `MUT109` invalidation contracts); the index keeps them for incremental updates.
+/// `MUT208` invalidation contracts); the index keeps them for incremental updates.
 pub fn analyze_project_with(
     modules: &[ModuleInput<'_>],
     kb: &EffectiveEcosystemKb,

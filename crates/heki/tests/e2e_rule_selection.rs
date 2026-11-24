@@ -364,3 +364,114 @@ fn a_proven_opt_report_in_a_loop_the_code_fixes_is_never_exact() {
         "{json}"
     );
 }
+
+/// A tuple grown on every iteration of a loop over an input: an exact `OPT103` report.
+const TUPLE_GROWTH: &str = "\
+def collect(items):
+    out = ()
+    for item in items:
+        out = out + (item,)
+    return out
+";
+
+#[test]
+fn the_size_dependent_rewrites_are_opt_in_and_the_option_applying_them_selects_them() {
+    let p = Project::new("size_dependent_opt_in");
+    p.write("app.py", TRIPS).write("acc.py", TUPLE_GROWTH);
+    let lines = |args: &[&str]| -> Vec<(String, u64)> {
+        let all = [&["check", "--output-format", "json"][..], args].concat();
+        let (code, stdout, stderr) = p.heki(&all);
+        assert!(code == 0 || code == 1, "{stdout}{stderr}");
+        let diags: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+        diags
+            .iter()
+            .map(|d| {
+                let code = d["rule_code"].as_str().unwrap().to_owned();
+                (code, d["line"].as_u64().unwrap())
+            })
+            .collect()
+    };
+    // A run without configuration, a prefix, `ALL`, and `--heuristic` leave them off.
+    for args in [
+        &[][..],
+        &["--heuristic"],
+        &["--select", "OPT"],
+        &["--select", "ALL", "--heuristic"],
+    ] {
+        assert_eq!(lines(args), [], "{args:?}");
+    }
+    // Their codes select them, with their heuristic reports.
+    let named = [("OPT103".to_owned(), 4), ("OPT110".to_owned(), 5)];
+    assert_eq!(
+        lines(&["--extend-select", "OPT103,OPT110"]),
+        [
+            named[0].clone(),
+            named[1].clone(),
+            ("OPT110".to_owned(), 14)
+        ]
+    );
+    // `--include-size-dependent` selects the rules whose rewrites it applies, so not `OPT103`;
+    // `ignore` still removes them.
+    let with_rewrites = [("OPT110".to_owned(), 5), ("OPT110".to_owned(), 14)];
+    assert_eq!(lines(&["--include-size-dependent"]), with_rewrites);
+    let ignored = ["--include-size-dependent", "--ignore", "OPT110"];
+    assert_eq!(lines(&ignored), []);
+    // It applies the proven rewrite over the loop the code fixes at 50 trips too.
+    let (code, _, stderr) = p.heki(&["check", "--diff", "--include-size-dependent"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("Would fix 2 issue(s) in 1 file(s)."),
+        "{stderr}"
+    );
+    let (code, stdout, stderr) = p.heki(&["check", "--diff"]);
+    assert_eq!((code, stdout.as_str()), (0, ""), "{stderr}");
+}
+
+#[test]
+fn a_clean_text_run_of_a_project_without_contracts_points_to_recommend() {
+    let hint = "hint: `heki recommend` (experimental) lists the rules and contracts that fit \
+                this project, and what heki could not see\n";
+    let p = Project::new("recommend_hint");
+    p.write("pyproject.toml", "[project]\nname = \"t\"\n")
+        .write("app/__init__.py", "")
+        .write("app/util.py", "def add(a, b):\n    return a + b\n");
+    let stderr = |args: &[&str]| {
+        let (code, _, stderr) = p.heki(&[&["check"][..], args].concat());
+        assert!(code == 0 || code == 1, "{stderr}");
+        stderr
+    };
+    // The last line of a clean run, in both text formats.
+    for args in [&[][..], &["--output-format", "concise"], &["app"]] {
+        let out = stderr(args);
+        assert!(out.ends_with(hint), "{args:?}: {out}");
+        assert_eq!(out.matches("hint:").count(), 1, "{out}");
+    }
+    // Not in the other formats, not for a file or the files of `--touched`, and not with a
+    // baseline.
+    let none: [&[&str]; 6] = [
+        &["--output-format", "json"],
+        &["--output-format", "github"],
+        &["--output-format", "sarif"],
+        &["app/util.py"],
+        &[".", "--touched", "app/util.py"],
+        &["--baseline", "b.toml"],
+    ];
+    p.write("b.toml", "version = 2\n");
+    for args in none {
+        assert!(!stderr(args).contains("hint:"), "{args:?}");
+    }
+    // Not when the run shows a report.
+    p.write("app/api.py", BLOCKING);
+    assert!(!stderr(&[]).contains("hint:"));
+    std::fs::remove_file(p.dir.join("app/api.py")).unwrap();
+    // Not once a contract is declared.
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.effect-boundaries]]\nname = \"pure\"\nscopes = [\"app.util:*\"]\nforbid = [\"blocking\"]\n",
+    );
+    let out = stderr(&[]);
+    assert!(
+        out.starts_with("All checks passed") && !out.contains("hint:"),
+        "{out}"
+    );
+}

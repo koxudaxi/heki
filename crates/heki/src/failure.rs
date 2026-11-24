@@ -109,7 +109,6 @@ fn explained(cause: &(dyn std::error::Error + 'static)) -> Option<Problem> {
         heki_rules::recommend::RecommendError,
         heki_rules::SnapshotError,
         heki_diagnostics::BaselineError,
-        heki_profile::ProfileError,
         heki_kb::KbError,
         heki_lsp::EngineError,
     )

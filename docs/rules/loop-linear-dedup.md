@@ -2,16 +2,16 @@
 
 # loop-linear-dedup (OPT111)
 
-Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Opt-in · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
-Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.
+Opt-in: size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.
 
 ## What it does
 Checks the de-duplication idiom `if v not in seen: seen.append(v)` inside a loop and suggests
 keeping an auxiliary `set` next to the list.
 
-Size-dependent: applied only with `--fix --include-size-dependent` or in profiled hot
-functions.
+Opt-in and size-dependent: it runs when `extend-select` names it or with
+`--include-size-dependent`, which also applies its proven rewrites with `--fix`.
 
 ## What a report states
 

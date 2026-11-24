@@ -141,8 +141,8 @@ by crate boundaries, carrying three rule families and a planned fourth, imports.
   pure Python is a premise).
 - **Framework-specific heuristics** (`__getattr__` proxies, Pydantic model construction,
   `-X importtime` tuning, and other application-architecture topics).
-- **Forcing profiler runs or instrumenting processes** (reading an existing profile dump is an
-  optional add-on).
+- **Profiler runs, profile dumps, or instrumenting processes** (the optional reader of recorded
+  dumps was removed in 0.3.0: ADR-013).
 - Changing CPython, its bytecode, or its VM; run-time hooks; being a judge for Ruff's unsafe
   fixes; a general type checker.
 
@@ -204,12 +204,11 @@ Automatic rewrites (family 3, `OPT`) are judged on two orthogonal axes: **behavi
 
 #### Automatic fixes (`heki check --fix`) and realistic expectations
 - The default `heki check --fix` applies **only `safety == safe` and `profitability ==
-  unconditional` (`OPT101`, `OPT102`)**, and only for the rules that run: while `OPT101` and
-  `OPT102` are heuristic, a run without configuration applies none (select them, or set
-  `lint.heuristic = true`).
-- A `safe` but `size-dependent` fix is offered by default as a **suggestion proven to preserve
-  behavior**, and applied only with `--include-size-dependent`, or in functions an external
-  profile dump (`--profile`) shows hot.
+  unconditional` (`OPT101`, `OPT102`)**, and only for the reports shown: their exact reports run
+  by default, so a run without configuration applies their fixes.
+- The size-dependent rules are opt-in (ADR-018, decision 13 as amended). A `safe` but
+  `size-dependent` fix is a **suggestion proven to preserve behavior**, applied only with
+  `--include-size-dependent`, which also runs the rules that offer one.
 - Measured: the default `heki check --fix` applies very rarely (about 20 provable cases in 13.2
   million lines of mature code, 1 in 6.5 million lines of new code, 0 in datamodel-code-
   generator's 196,000 lines). heki's everyday CI value is in **family 1 (mutation, state, and
@@ -537,7 +536,7 @@ The 46 rules are listed in the [rules reference](docs/rules/index.md).
 | **MUT106** | Opt-in (heuristic) | **A single-pass `Iterator` / `Generator` consumed twice**: an iterator that SSA does not rebind (generator expressions, `iter` / `zip` / `map` / ..., project generator functions, `Iterator` / `Generator` annotations) is consumed a second time and silently yields nothing | Reported only when the second consumption is reachable in the CFG from the first (exclusive branches never are); a partial first pass (`break`, `any` / `all`) and `next()` stepping do not count; an iterator created outside a loop and consumed inside it is found too; consumption by a called function is followed through the summary |
 | **MUT107** | Opt-in (heuristic) | **Attributes `__hash__` depends on changing**: a method other than the initialization hooks (subclasses included) rebinds or changes in place, with a plain store, a `self.<attr>` that the `__hash__` of its instances reads, each `self` call in the hash resolved along the writer's MRO (an instance already in a `set` or a `dict` is filed under its old hash) | The `MUT101` filters (two-phase initialization, memo dicts, disjoint constant keys), plus lazy initialization under a `None` guard and the cache attributes of `__hash__` itself (`self._hash`, ...); silent where the write may run code (a property, `__setattr__` / `__delattr__`, a metaclass other than `type`, a base heki names no class for) (Wave 2: 21.2% of mature projects) |
 | **MUT108** | Opt-in (heuristic) | **In-place changes to read-only fields**: a field of a `@dataclass(frozen=True)`, `NamedTuple`, or `dataclass_transform(frozen_default=True)` class, a `Final` / `ReadOnly` attribute, or a `ReadOnly` `TypedDict` key changed in place, directly, through an alias, or through a helper (type checkers stop only rebinding) | Rebinding and `del` (type checkers' domain), `setattr` / `object.__setattr__` / `__dict__` bypasses, initializers and helpers that only run inside them, instances the function constructs itself, `field(compare=False)` fields, value-side changes (dcg: 4 reports, all correct and deliberate; Stage 0-A: 99 field reports, deliberate in-place updates of frozen records, hence opt-in) |
-| **MUT109** | When configured (contract, heuristic) | **Announced changes**: a write to a `[[tool.heki.invalidation]]` target (directly, through an alias, or through a helper) must reach one of the contract's invalidators on every path to the function's normal return, directly, in each branch, behind a boolean flag set after the write, or through calls; private helpers pass the obligation to their callers, and a function every caller path of which announces the change after the call is not reported | Writes a helper makes through an argument it does not type count at the call; an initializer is exempt only for its own `self`. Exception paths, objects the function constructs, copies, or gets from a call, `exempt-writers`; deferred context managers are not followed (dcg: every current site passes; 1 design-level report, `DataType.replace_reference`) |
+| **MUT208** | When configured (contract, heuristic) | **Announced changes**: a write to a `[[tool.heki.invalidation]]` target (directly, through an alias, or through a helper) must reach one of the contract's invalidators on every path to the function's normal return, directly, in each branch, behind a boolean flag set after the write, or through calls; private helpers pass the obligation to their callers, and a function every caller path of which announces the change after the call is not reported | Writes a helper makes through an argument it does not type count at the call; an initializer is exempt only for its own `self`. Exception paths, objects the function constructs, copies, or gets from a call, `exempt-writers`; deferred context managers are not followed (dcg: every current site passes; 1 design-level report, `DataType.replace_reference`) |
 | **MUT110** | On (exact, `warning`) | **Read-only parameters changed by a helper**: a `Sequence` / `Mapping` / `ReadOnly[...]` parameter (after `Optional` / `\| None` / `Annotated`) handed, as itself or through a local alias, to a function that changes it in place, directly or through further helpers (type checkers trust the helper's signature, so an unannotated or `Any` helper hides the change), reported at the call with the chain and the line of the change, which changes the caller's object whenever it runs (a `warning`: a bug that is rarely harmful) | Shares `MUT108`'s analysis; changes in the function itself (type checkers), value-side changes, copies, helper parameters annotated mutable or read-only, variadic parameters (Stage 0-A: 5 reports, all genuine; datamodel-code-generator and the heki corpus: none) |
 | **MUT111** | Opt-in (experimental, exact) | **Readers of a stale `@cached_property`**: a function whose own body reads a cached property (on `self` or on any object of the class, also through `getattr` and `__dict__`) that a `MUT101` write leaves stale on the instances the object may be, reported once per function and property with the writers as related locations: under a Ratchet baseline, a new reader of a value known to go stale is one new diagnostic; exact when every class the object may be runs a write whose `MUT101` report is exact, its other reports outside the exact tier; opt-in because the real-harm share of its exact reports is below 10% | `MUT101`'s findings, whatever is selected (no second notion of staleness); a writer counts for the instances that run it (the first definition along the MRO, or one reached through `super()` by overrides that do not invalidate); the functions calling a reading getter or helper are not reported (datamodel-code-generator: 11 readers, all of the three stale properties; the corpus: 38 in mkdocs, of two `File` properties its setters leave stale) |
 | **MUT112** | Opt-in (experimental, heuristic) | **A container that is a new object on one path and borrowed state on another, changed in place**: a value made by the function (a display, a comprehension, a copy, a constructor, an operator, a project function returning a new object) on one path and a parameter, attribute, global, enclosing variable, an element of one, or a project function returning such state on another (`items = given or []`, `d.get(k, {})`, `getattr(obj, "tags", [])`), changed in place directly, through a helper, or in a closure; also a store of such a value in `self.<attr>` that a method of the class family changes in place | Values new or borrowed on every path, copies before the change, the accumulator idiom (`if out is None: out = []`) unless the value is also stored on `self`, new objects stored in other state before the paths meet, values stored back where they borrow from, memo attributes; a function's return ownership (new, borrowed, or both, through wrappers) is part of its `EffectSummary` (5 of 5 fixed upstream bugs caught at their parents; datamodel-code-generator: 13 reports, 4 plausible; the corpus: 36, none false, hence opt-in) |
@@ -587,13 +586,13 @@ single-expression lints.)*
 |---|---|---|---|---|---|
 | **OPT101** | On (exact: the proven reports) | `x = x + [e]`, `x = x + [e1, *it]` (a list display on the right) → `x.append(e)` / `x.extend([...])` | `unconditional` | **Applied (when `safe`)** | Safety: `Unique(x)`, `ExclusiveAccessAtWrite(x)` (every alias and derived reference dead), `ExactType(x / rhs, list)`, `ExceptionStateSafe`, `EvalOrderPreserved` / Profit: `LoopCarried(x)` |
 | **OPT102** | On (exact: the proven reports) | `s = s \| {e}`, `d = {**d, k: v}`, `d = {**d, **other}` → `s \|= {e}`, `d[k] = v`, `d.update(other)` | `unconditional` | **Applied (when `safe`)** | Safety: as above (dict views and iterators dead; **the accumulated dict `d` comes first: `{**other, **d}` would reverse the override order**, `DictUnpackLeading`; **the set is only tested afterwards, with `in`, `len`, truthiness, or `==`, since growing it in place can change its iteration order**, `SetOrderUnobserved`) / Profit: `LoopCarried` |
-| **OPT103** | On (exact: the proven reports over a loop the data sizes) | Quadratic accumulation of immutable values (`tuple +=`, `bytes +=`, `self.s +=`, ...) → a buffer and one final conversion | `size-dependent` | Suggestion only | Safety: `Unique`, `ExclusiveAccessAtWrite`, `ExactType(lhs / rhs)`, no intermediate reads (`NoIntermediateReads`), `ExceptionStateSafe` / Profit: `LoopCarried`, `NotConstSmall` (local `s += x` excluded: CPython already appends in place) |
-| **OPT110** | On (exact: the proven reports over a loop the data sizes) | `e in lst` in a loop → a `set` built before the loop | `size-dependent` | With `--include-size-dependent` | Safety: `ValueLoopInvariant(lst)`, `ExactType(lst, list \| tuple)`, hash-consistent builtin elements (`HashConsistentProbe`), `ZeroTripExceptionSafe` / Profit: `NotConstSmall(lst)` |
-| **OPT111** | On (exact: the proven reports over a loop the data sizes) | `if v not in seen: seen.append(v)` in a loop → an auxiliary `set` | `size-dependent` | With `--include-size-dependent` | Safety: `Unique(seen)`, `ExclusiveAccessAtWrite`, `ExactType(seen, list)`, hash-consistent builtin elements, no removals (`OnlyPairedAppends`) / Profit: `NotConstSmall` |
+| **OPT103** | Opt-in (exact: the proven reports over a loop the data sizes) | Quadratic accumulation of immutable values (`tuple +=`, `bytes +=`, `self.s +=`, ...) → a buffer and one final conversion | `size-dependent` | Suggestion only | Safety: `Unique`, `ExclusiveAccessAtWrite`, `ExactType(lhs / rhs)`, no intermediate reads (`NoIntermediateReads`), `ExceptionStateSafe` / Profit: `LoopCarried`, `NotConstSmall` (local `s += x` excluded: CPython already appends in place) |
+| **OPT110** | Opt-in (exact: the proven reports over a loop the data sizes) | `e in lst` in a loop → a `set` built before the loop | `size-dependent` | With `--include-size-dependent` | Safety: `ValueLoopInvariant(lst)`, `ExactType(lst, list \| tuple)`, hash-consistent builtin elements (`HashConsistentProbe`), `ZeroTripExceptionSafe` / Profit: `NotConstSmall(lst)` |
+| **OPT111** | Opt-in (exact: the proven reports over a loop the data sizes) | `if v not in seen: seen.append(v)` in a loop → an auxiliary `set` | `size-dependent` | With `--include-size-dependent` | Safety: `Unique(seen)`, `ExclusiveAccessAtWrite`, `ExactType(seen, list)`, hash-consistent builtin elements, no removals (`OnlyPairedAppends`) / Profit: `NotConstSmall` |
 | **OPT112** | Off (heuristic) | `list.index` / `list.remove` / `list.count` in a loop ($O(n^2)$ scans) → a `dict` / `set` index built before the loop | `size-dependent` | None (Advisory-lane suggestion) | The receiver is certainly a builtin `list` (literal, `list(...)`, PEP 484 annotation) that lives across iterations of an `Unbounded` loop; small constant lists (`NotConstSmall`) and calls that always leave the loop are excluded |
 | **OPT113** | On (exact: the reports whose premises all hold) | Nested-loop equi-join (`for a in A: for b in B: if a.k == b.k:`, $O(n \cdot m)$) → index `B` in a `dict` ($O(n + m)$) | `size-dependent` | None (Advisory-lane suggestion) | Both loops `Unbounded`; the inner iterable does not depend on the outer element; an equality between values derived from the outer and the inner element; one report per inner loop |
-| **OPT120** / **OPT121** | On (exact: the proven reports over a loop the data sizes) | `q.pop(0)` / `q.insert(0, v)` / `del q[0]` / `q = q[1:]` → `collections.deque` | `size-dependent` | With `--include-size-dependent` | Safety: `Unique(q)`, no escape, only operations `deque` supports equally (`DequeEquivalentOps`) / Profit: `NotConstSmall`, **no index `q[i]` other than the ends (`0`, `-1`)** |
-| **OPT130** | On (exact: the proven reports over a loop the data sizes) | Containers rebuilt in a loop although invariant (`e in set(keys)`, ...) → hoisted before the loop | `size-dependent` | With `--include-size-dependent` | Safety: every argument `ValueLoopInvariant`, no side effects (`SideEffectFree`), `ZeroTripExceptionSafe`, no changes / Profit: `NotConstSmall` |
+| **OPT120** / **OPT121** | Opt-in (exact: the proven reports over a loop the data sizes) | `q.pop(0)` / `q.insert(0, v)` / `del q[0]` / `q = q[1:]` → `collections.deque` | `size-dependent` | With `--include-size-dependent` | Safety: `Unique(q)`, no escape, only operations `deque` supports equally (`DequeEquivalentOps`) / Profit: `NotConstSmall`, **no index `q[i]` other than the ends (`0`, `-1`)** |
+| **OPT130** | Opt-in (exact: the proven reports over a loop the data sizes) | Containers rebuilt in a loop although invariant (`e in set(keys)`, ...) → hoisted before the loop | `size-dependent` | With `--include-size-dependent` | Safety: every argument `ValueLoopInvariant`, no side effects (`SideEffectFree`), `ZeroTripExceptionSafe`, no changes / Profit: `NotConstSmall` |
 
 *(`OPT112` / `OPT113` are Advisory-lane diagnostics in `heki_rules` without a rewrite; they are
 not part of `heki_soundness` (ADR-004).)*
@@ -673,7 +672,6 @@ heki/
 │   ├── heki_soundness/         # Soundness lane (never depends on heki_effect, checked at compile time)
 │   ├── heki_effect/            # Advisory lane: call graph, EffectSummary, incremental ProjectIndex (Early Cutoff)
 │   ├── heki_rules/             # family 1 (MUT1xx / MUT2xx), family 2 (EFF / DATA), family 3 (OPT), rule docs
-│   ├── heki_profile/           # optional: reads profile dumps (collapsed stacks, Tachyon --gecko)
 │   ├── heki_diagnostics/       # full / concise / json / github / sarif, suppressions, line-number-independent Ratchet baseline
 │   ├── heki_lsp/               # incremental LSP server (tower-lsp): related call chains, code actions
 │   └── heki/                   # CLI (check / server [lsp] / rule [explain] / snapshot / assumptions)
@@ -732,7 +730,7 @@ heki/
 
 ---
 
-## 9. CLI, configuration, Ratchet baseline, and profile dumps (one interface with Ruff and `t-linter`)
+## 9. CLI, configuration, and Ratchet baseline (one interface with Ruff and `t-linter`)
 
 ### 9.1 Commands (exit codes: `0` clean or only warnings / `1` errors, and warnings with `--fail-on warning` / `2` configuration, I/O, or syntax errors)
 ```bash
@@ -749,7 +747,6 @@ heki check --color auto|always|never          # colored full / concise / --diff 
 heki check --baseline heki-baseline.toml      # Ratchet: more findings fail, fewer ask to shrink the file
 heki check --update-baseline                  # record a new baseline or shrink an existing one (growth is refused; entries of files PATHS leave out stay)
 heki check [PATHS...] --touched FILE...       # analyze PATHS, show and fail on the reports in FILEs or whose call chain reaches one
-heki check --profile dump.collapsed [PATHS]   # optional: rank fixes with a recorded profile dump
 heki check --watch [PATHS...]                 # re-check on file changes
 
 heki server                                   # incremental LSP server (alias: heki lsp)
@@ -825,10 +822,6 @@ message = "render entry points must not mutate model state"
   stay) and baseline entries that matched nothing, and `--fix` removes the codes;
   `lint.require-suppression-codes` reports a bare `# heki: ignore`. They are settings, not rules:
   the rules are the claims of the Effect & Alias theory about the code.
-- **Profile dumps**: running a program under a profiler costs overhead and permissions (macOS
-  needs `sudo` for Tachyon and `py-spy`), so it is never required. heki **reads dumps that were
-  already recorded** as an optional add-on: collapsed stacks (Tachyon `--collapsed`, `py-spy`)
-  and Tachyon `--gecko` JSON.
 
 ---
 
@@ -853,11 +846,11 @@ message = "render entry points must not mutate model state"
 | M3 | `heki_kb`: embedded Layer 1 / Layer 2 TOML with `deny_unknown_fields`, sentinel verification on CPython 3.11–3.15 |
 | M4 | `heki_effect`: call resolution, Tarjan SCC fixpoint of `EffectSummary`, Early Cutoff, offload wrappers, sync-over-async, boundary-only reporting |
 | M5 | `MUT101` / `MUT201` / `MUT202` / `EFF101`–`EFF103` / `EFF105` / `DATA101`, the CLI, output formats, suppressions, and the Ratchet baseline (datamodel-code-generator checked in 1.72 s) |
-| M6 | `heki_soundness`, the `OPT` rules, `--fix` / `--diff` / `--profile`, and `MUT103` snapshots; every counterexample blocked or disproved, zero unsafe rewrites in CPython differential tests |
+| M6 | `heki_soundness`, the `OPT` rules, `--fix` / `--diff`, and `MUT103` snapshots; every counterexample blocked or disproved, zero unsafe rewrites in CPython differential tests |
 | M7 | The incremental LSP server and `--watch` |
 | M8 | End-to-end test suite through the real binary and LSP process; 100% of reachable lines |
 | M9 | CI / release / documentation workflows and the user guide |
-| v1.x | `MUT106`, `MUT107`, `MUT203`, `EFF106`, `EFF107`, `EFF201`, `OPT112`, `OPT113`, `MUT108`, `MUT109`, `MUT110`, `MUT204`, the `EFF201` extensions, the `MUT201` extensions, the `MUT202` return flow, `MUT205`, `MUT111`, and contract keys, entries, and fresh objects (31 rules) |
+| v1.x | `MUT106`, `MUT107`, `MUT203`, `EFF106`, `EFF107`, `EFF201`, `OPT112`, `OPT113`, `MUT108`, `MUT208`, `MUT110`, `MUT204`, the `EFF201` extensions, the `MUT201` extensions, the `MUT202` return flow, `MUT205`, `MUT111`, and contract keys, entries, and fresh objects (31 rules) |
 | v0.2.0 | `MUT206`, `MUT207`, `MUT112`, `MUT113`, string constants bound once and class constants as keys (35 rules) |
 | v0.2.1 | `EFF109` and `EFF110`: a non-reentrant lock taken again while it is held, and an object allowing one operation at a time used by tasks started together |
 | v0.2.4 | `EFF112`: the iteration order of a set of strings reaching an output across a call |

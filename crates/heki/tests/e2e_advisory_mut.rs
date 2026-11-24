@@ -995,7 +995,7 @@ fn mut201_counts_a_method_changing_its_receiver_as_an_in_place_write() {
     );
 }
 
-/// `MUT109` counts the same call as the caller's own in-place write of the target, also when a
+/// `MUT208` counts the same call as the caller's own in-place write of the target, also when a
 /// private helper hands it to its caller.
 const RECEIVER_INVALIDATION: &str = r#"class Bag(dict[str, int]):
     def add(self, name: str) -> None:
@@ -1028,19 +1028,19 @@ def outer(h: Holder) -> None:
 "#;
 
 #[test]
-fn mut109_counts_a_method_changing_its_receiver_as_an_in_place_write() {
-    let p = Project::new("mut109_receiver_changes");
+fn mut208_counts_a_method_changing_its_receiver_as_an_in_place_write() {
+    let p = Project::new("mut208_receiver_changes");
     p.write(
         "pyproject.toml",
         "[project]\nname = \"t\"\n\n[[tool.heki.invalidation]]\nname = \"index\"\ntargets = [\"Holder.bag\"]\ninvalidators = [\"Holder.refresh\"]\n",
     )
     .write("app.py", RECEIVER_INVALIDATION);
-    let diags = diagnostics(&p, &["--select", "MUT109"]);
+    let diags = diagnostics(&p, &["--select", "MUT208"]);
     assert_eq!(
         found(&diags),
         vec![
-            d("app.py", 15, "MUT109", "run"),
-            d("app.py", 28, "MUT109", "outer")
+            d("app.py", 15, "MUT208", "run"),
+            d("app.py", 28, "MUT208", "outer")
         ],
         "{diags:#?}"
     );

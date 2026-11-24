@@ -18,6 +18,11 @@ use std::time::{Duration, Instant};
 /// growth from a smaller one instead.
 pub const HANG: Duration = Duration::from_secs(300);
 
+/// The opt-in `OPT` rules with a size-dependent rewrite. `--heuristic` does not select them, so
+/// a run meant to take every rule `--heuristic` selects and every Soundness-lane rule names them
+/// too.
+pub const SIZE_DEPENDENT_OPT_RULES: &str = "OPT103,OPT110,OPT111,OPT120,OPT121,OPT130";
+
 /// The exit status of `child`, which is killed, failing the test, once it runs past [`HANG`].
 pub fn wait_or_hang(child: &mut Child, what: &str) -> ExitStatus {
     let started = Instant::now();

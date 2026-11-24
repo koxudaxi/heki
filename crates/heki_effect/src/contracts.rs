@@ -1,5 +1,5 @@
 //! Declared contracts that summaries depend on: the producers of `[[tool.heki.readonly-returns]]`
-//! (`MUT202`), the `[[tool.heki.invalidation]]` contracts (`MUT109`), whether any ownership
+//! (`MUT202`), the `[[tool.heki.invalidation]]` contracts (`MUT208`), whether any ownership
 //! contract is declared, the names whose unresolved reads and calls the strict contracts count
 //! (`MUT206`, `MUT207`), whether a call contract counts references as calls (`MUT204`,
 //! `EFF201`), and what the effect boundaries forbid outside the project (`EFF201`).

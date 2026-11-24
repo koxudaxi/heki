@@ -4,7 +4,8 @@
 //! printed). It writes no file.
 
 use crate::check::{
-    baseline_path, finish, load, shown_dir, shown_errors, shown_text, warn_files_not_analyzed,
+    baseline_path, finish, load, selectors, shown_dir, shown_errors, shown_text,
+    warn_files_not_analyzed,
 };
 use crate::{OutputFormat, RecommendArgs, ReportFormat};
 use anyhow::Result;
@@ -20,8 +21,13 @@ pub(crate) fn run(args: &RecommendArgs) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
     let paths = CommandPaths::of(&args.paths);
-    let (project, current, snapshot) =
-        load(&paths.analyzed, &args.analysis, OutputFormat::Full, None)?;
+    let (project, current, snapshot) = load(
+        &paths.analyzed,
+        &args.analysis,
+        &selectors(&args.analysis),
+        OutputFormat::Full,
+        None,
+    )?;
     warn_files_not_analyzed(&paths, &project, OutputFormat::Full);
     let baseline = match baseline_path(&args.analysis, &project.env) {
         Some(path) => Some(RatchetBaseline::load(&path)?),

@@ -243,7 +243,7 @@ $ heki check --output-format-json-schema generate-prompt
 - The prompt comes from the analysis `heki check` runs with the same options and configuration.
   The command writes no file and exits with 0 once the prompt is printed, also when a file could
   not be analyzed; a configuration error exits with 2, as for `heki check`.
-- It cannot be combined with `--fix`, `--diff`, `--watch`, `--update-baseline`, `--profile`, or
+- It cannot be combined with `--fix`, `--diff`, `--watch`, `--update-baseline`, or
   `--include-size-dependent`.
 - `--output-format json` prints the same content as one object, and
   `--output-format-json-schema generate-prompt` prints its JSON Schema. Its `version` changes

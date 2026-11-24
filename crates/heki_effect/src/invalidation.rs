@@ -1,4 +1,4 @@
-//! `MUT109` facts (docs/ANALYSIS_AND_KB_SPEC.md section 2.3): after a write to a declared
+//! `MUT208` facts (docs/ANALYSIS_AND_KB_SPEC.md section 2.3): after a write to a declared
 //! `invalidation` target, every path to the function's normal return must reach a call that
 //! announces the change.
 //!
@@ -26,7 +26,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::Path;
 
-/// What follows one point of a function on every normal path to a return (`MUT109`).
+/// What follows one point of a function on every normal path to a return (`MUT208`).
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -39,7 +39,7 @@ pub struct SiteFlow {
 }
 
 /// Where an object a function holds may come from, among the objects that existed before the
-/// call (`MUT109`): its parameters and what they reach (attributes, items, iteration elements,
+/// call (`MUT208`): its parameters and what they reach (attributes, items, iteration elements,
 /// through copies of the reference), and module or closure state. An object the function
 /// constructs, copies, or gets from a call reaches nothing: no fact can describe it yet, or its
 /// origin is unknown, so writing it announces nothing a caller has to know.
@@ -67,7 +67,7 @@ impl Reach {
     }
 }
 
-/// One write to a contract target in a function's own body (`MUT109`).
+/// One write to a contract target in a function's own body (`MUT208`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlowWrite {
     /// Contracts whose targets the written attribute is (the function's exempt ones removed).
@@ -84,7 +84,7 @@ pub struct FlowWrite {
     pub flow: SiteFlow,
 }
 
-/// The `MUT109` facts of one function that propagation reads: the flow from its entry and its
+/// The `MUT208` facts of one function that propagation reads: the flow from its entry and its
 /// own target writes. Kept in `FileSummary::flows` (local facts, no IR); only computed when an
 /// `invalidation` contract is configured.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,7 +95,7 @@ pub struct FuncFlow {
 }
 
 /// A write to a contract target that some normal path of the summary owner leaves unannounced
-/// (`MUT109`): the owner's own write, or one a private helper it calls passes up.
+/// (`MUT208`): the owner's own write, or one a private helper it calls passes up.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct UnmetWrite {
     /// Index of the `invalidation` contract.
@@ -805,11 +805,11 @@ impl<'i> CoveredAfter<'i> {
     }
 }
 
-/// Where the body of `callee` (where its `MUT109` writes and announcements are) runs at `site`
+/// Where the body of `callee` (where its `MUT208` writes and announcements are) runs at `site`
 /// inside the body of the site's caller ([`ProjectIndex::delivery`]): a plain function, or a
 /// coroutine awaited or driven, at its call; a generator where its result is iterated or handed
 /// to a function that iterates it. What iterating a plain function's result runs
-/// (`EffectSummary::iterated`) carries no `MUT109` facts, and a body that runs where the
+/// (`EffectSummary::iterated`) carries no `MUT208` facts, and a body that runs where the
 /// caller's own result is iterated is not followed.
 pub fn body_runs_at<'s>(
     index: &ProjectIndex,
@@ -823,14 +823,14 @@ pub fn body_runs_at<'s>(
 
 /// A private function (`_helper`, not a dunder) or a synthetic scope (`<lambda>`, `<genexpr>`,
 /// `<listcomp>`): neither is an API of its own, so either hands its reports, and its
-/// unannounced writes (`MUT109`), to its callers.
+/// unannounced writes (`MUT208`), to its callers.
 pub fn delegates_to_callers(qualname: &str) -> bool {
     let last = qualname.rsplit('.').next().unwrap_or(qualname);
     last.starts_with('<')
         || last.starts_with('_') && !(last.starts_with("__") && last.ends_with("__"))
 }
 
-/// Initializers that construct their own `self` (`MUT109` writes to it need no announcement).
+/// Initializers that construct their own `self` (`MUT208` writes to it need no announcement).
 pub const INITIALIZERS: &[&str] = &[
     "__init__",
     "__post_init__",

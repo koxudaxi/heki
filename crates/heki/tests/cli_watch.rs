@@ -740,33 +740,6 @@ fn watch_reads_changed_files_in_their_declared_encoding() {
 }
 
 #[test]
-fn watch_marks_the_functions_a_profile_shows_hot_like_check() {
-    let p = Project::new("watch_profile");
-    // A method with a size-dependent `OPT110` rewrite (`allowed` becomes a set).
-    p.write(
-        "app.py",
-        "class A:\n    def run(self, n):\n        allowed = list(range(0, 50, 3))\n        hits = []\n        for p in range(n):\n            if p in allowed:\n                hits.append(p)\n        return hits\n",
-    )
-    .write("p.txt", "tid:1;app.py:A.run:4 95\ntid:1;other.py:idle:1 5\n");
-    let args = ["--profile", "p.txt", "--output-format", "json"];
-    let (code, check, _) = p.check(&args);
-    assert_eq!(code, 1);
-    assert!(
-        check.contains("profile: `A.run` is on the stack in 95.0% of samples"),
-        "{check}"
-    );
-    let watch = common::heki_command()
-        .args(["check", "--heuristic", "--watch"])
-        .args(args)
-        .current_dir(&p.dir)
-        .env("HEKI_WATCH_MAX_RUNS", "0")
-        .output()
-        .unwrap();
-    let json = |text: &[u8]| -> serde_json::Value { serde_json::from_slice(text).unwrap() };
-    assert_eq!(json(&watch.stdout), json(check.as_bytes()));
-}
-
-#[test]
 fn watch_drops_a_package_moved_away_with_its_modules() {
     let p = Project::new("watch_package_moved");
     p.write("main.py", "x = 1\n")

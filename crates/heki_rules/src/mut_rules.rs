@@ -1,4 +1,4 @@
-//! Family 1 rules: `MUT101`, `MUT106`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT112`,
+//! Family 1 rules: `MUT101`, `MUT106`, `MUT107`, `MUT108`, `MUT208`, `MUT110`, `MUT112`,
 //! `MUT113`, `MUT119`, `MUT120`, `MUT201`, `MUT202`, `MUT203`, `MUT204`
 //! (docs/ANALYSIS_AND_KB_SPEC.md section 2.3).
 
@@ -659,7 +659,7 @@ impl CacheEvents {
     }
 
     /// Every normal path from just after the instruction to a return passes an invalidation.
-    /// Raising paths carry no obligation (as for `MUT109`), and a loop that never returns adds
+    /// Raising paths carry no obligation (as for `MUT208`), and a loop that never returns adds
     /// none.
     fn invalidated_after(&self, flow: &CacheFlow, block: BlockId, index: u32) -> bool {
         let b = &flow.blocks[block.0 as usize];
@@ -4494,13 +4494,13 @@ mod conditional_ownership;
 
 pub(crate) use conditional_ownership::mut112;
 
-// ==================================================================================== MUT109
+// ==================================================================================== MUT208
 
 mod invalidation;
 
-/// `MUT109`: writes to declared `invalidation` targets that some normal path leaves
+/// `MUT208`: writes to declared `invalidation` targets that some normal path leaves
 /// unannounced (no call reaches one of the contract's invalidators).
-pub(crate) fn mut109(
+pub(crate) fn mut208(
     cx: &CheckContext<'_>,
     out: &mut Vec<Diagnostic>,
 ) -> Result<(), RuleConfigError> {

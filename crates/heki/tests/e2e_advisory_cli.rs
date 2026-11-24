@@ -466,98 +466,6 @@ fn ratchet_baseline_files_that_cannot_be_read_or_written() {
     assert!(stderr.contains("All checks passed"), "{stderr}");
 }
 
-const PROFILED: &str = "def hot(n):\n    allowed = list(range(0, 50, 3))\n    hits = []\n    for p in range(n):\n        if p in allowed:\n            hits.append(p)\n    return hits\n\n\ndef cold(n):\n    allowed = list(range(0, 50, 3))\n    hits = []\n    for p in range(n):\n        if p in allowed:\n            hits.append(p)\n    return hits\n";
-
-#[test]
-fn profile_dumps_empty_blank_lines_cyclic_and_unprofiled_functions() {
-    let p = Project::new("profiles");
-    p.write("app.py", PROFILED)
-        .write("empty.txt", "")
-        .write(
-            "blank.txt",
-            "\ntid:1;app.py:main:20;app.py:hot:5 95\n\n   \ntid:1;other.py:idle:1 5\n",
-        )
-        .write(
-            "cyclic.json",
-            r#"{"threads": [{"samples": {"stack": [0]}, "stackTable": {"frame": [0], "prefix": [0]}, "frameTable": {"func": [0]}, "funcTable": {"name": [0], "fileName": [1]}}], "shared": {"stringArray": ["hot", "app.py"]}}"#,
-        );
-    // An empty dump has no samples: nothing is hot, nothing size-dependent is fixed.
-    let (code, _, stderr) = p.check(&["--fix", "--profile", "empty.txt"]);
-    assert_eq!(code, 1);
-    assert!(
-        stderr.contains("Fixed 0 issue(s) in 0 file(s)."),
-        "{stderr}"
-    );
-    assert_eq!(p.read("app.py"), PROFILED);
-    // Blank lines are skipped; a function the profile never saw gets no profile note.
-    let (_, stdout, _) = p.check(&["--profile", "blank.txt", "--output-format", "json"]);
-    let diags = json(&stdout);
-    let evidence = |q: &str| {
-        diags
-            .iter()
-            .find(|d| d["qualname"] == q)
-            .unwrap()
-            .get("evidence")
-            .and_then(Value::as_str)
-            .unwrap()
-            .to_owned()
-    };
-    assert!(
-        evidence("hot").ends_with("; profile: `hot` is on the stack in 95.0% of samples"),
-        "{stdout}"
-    );
-    assert!(!evidence("cold").contains("profile:"), "{stdout}");
-    let (code, _, stderr) = p.check(&["--profile", "cyclic.json"]);
-    assert_eq!(code, 2);
-    assert!(stderr.contains("cyclic gecko stack table"), "{stderr}");
-}
-
-#[test]
-fn profile_dumps_with_weights_several_matching_sites_and_malformed_shapes() {
-    let p = Project::new("profiles_shapes");
-    p.write("app.py", PROFILED)
-        // `hot` is recorded under its file and under no file: both frames are that function.
-        .write("shared.txt", "app.py:hot:5 30\nhot 50\nidle 20\n")
-        // Sample weights: `main;hot` three times, `main` once.
-        .write(
-            "weighted.json",
-            r#"{"threads": [{"samples": {"stack": [1, 0], "weight": [3, 1]}, "stackTable": {"frame": [0, 1], "prefix": [null, 0]}, "frameTable": {"func": [0, 1]}, "funcTable": {"name": [0, 1], "fileName": [2, 2]}}], "shared": {"stringArray": ["main", "hot", "app.py"]}}"#,
-        )
-        .write("no-threads.json", r#"{"shared": {"stringArray": []}}"#)
-        .write("no-count.txt", "app.py:main:20;app.py:hot:5\n");
-    let hot_note = |dump: &str| {
-        let (_, stdout, _) = p.check(&["--profile", dump, "--output-format", "json"]);
-        json(&stdout)
-            .iter()
-            .find(|d| d["qualname"] == "hot")
-            .and_then(|d| d["evidence"].as_str())
-            .unwrap_or_else(|| panic!("{stdout}"))
-            .rsplit("; ")
-            .next()
-            .unwrap()
-            .to_owned()
-    };
-    assert_eq!(
-        hot_note("shared.txt"),
-        "profile: `hot` is on the stack in 80.0% of samples"
-    );
-    assert_eq!(
-        hot_note("weighted.json"),
-        "profile: `hot` is on the stack in 75.0% of samples"
-    );
-    for (dump, error) in [
-        ("no-threads.json", "gecko dump without `threads`"),
-        ("no-count.txt", "app.py:main:20;app.py:hot:5"),
-    ] {
-        let (code, _, stderr) = p.check(&["--profile", dump]);
-        assert_eq!(code, 2, "{dump}: {stderr}");
-        assert!(
-            stderr.contains(&format!("unsupported or malformed profile dump: {error}")),
-            "{dump}: {stderr}"
-        );
-    }
-}
-
 #[test]
 fn snapshots_record_keyed_self_writes_and_effect_kinds() {
     let p = Project::new("snapshot_kinds");
@@ -660,7 +568,7 @@ fn opt_rules_without_edits_and_per_rule_selection() {
         "a.py",
         "def member_while(n):\n    allowed = list(range(0, 50, 3))\n    hits = []\n    i = 0\n    while i < n:\n        if i in allowed:\n            hits.append(i)\n        i += 1\n    return hits\n\n\ndef build(items):\n    x = []\n    for i in items:\n        x = x + [i]\n    return x\n",
     );
-    let (code, stdout, _) = p.check(&["--output-format", "json"]);
+    let (code, stdout, _) = p.check(&["--extend-select", "OPT110", "--output-format", "json"]);
     assert_eq!(code, 1);
     let diags = json(&stdout);
     // Hoisting out of a `while` loop has no edit: the rewrite is proven safe but manual.
@@ -673,8 +581,9 @@ fn opt_rules_without_edits_and_per_rule_selection() {
         "{stdout}"
     );
     assert!(diags[0]["fix"].is_null());
-    // One `OPT` rule can be ignored while the others still run.
-    let (_, stdout, _) = p.check(&["--ignore", "OPT110", "--output-format", "json"]);
+    // One `OPT` rule can be ignored while the others still run, also when it is selected.
+    let ignored = ["--extend-select", "OPT110", "--ignore", "OPT110"];
+    let (_, stdout, _) = p.check(&[&ignored[..], &["--output-format", "json"]].concat());
     assert_eq!(hits(&stdout), vec![hit("a.py", 15, "OPT101")]);
 }
 

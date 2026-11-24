@@ -255,6 +255,15 @@ that need no configuration, the import contracts of other tools, and heki's own 
 - **Decision**: ahead-of-time native extensions, build-time rewriting, and framework-specific
   heuristics are non-goals; profile integration is limited to reading offline dumps, without
   touching the program (an optional add-on).
+- **Amended in 0.3.0**: the optional add-on is removed (`heki check --profile` and the
+  `heki_profile` crate). A profile could only choose among the proven size-dependent rewrites the
+  run shows: on the development corpus (378 packages, 30.75 million lines) the default run of 0.2.6
+  had 3 such reports, and a run of every rule with `--heuristic` 85. Since 0.2.4 a proven rewrite
+  over a loop whose trip count the data does not decide is heuristic and not shown, so
+  `--fix --profile` skipped it even in a function on the stack in every sample: the README's own
+  `drain` example fixed nothing. The reader had no known user and nothing was built on it after
+  0.1.0, and `--include-size-dependent` applies the same rewrites in every function. heki still
+  never runs or instruments the program.
 
 <a id="adr-014"></a>
 ### ADR-014: Rule decisions from the Stage 0-A measurement (`MUT102` / `DATA102` rejected, SSA required for `DATA101`, strict `MUT101`)
@@ -477,6 +486,17 @@ that need no configuration, the import contracts of other tools, and heki's own 
       stay heuristic. *Rejected*: every exact rule by default (a rule whose reports are right but rarely
       harmful, such as `MUT107` with 4% real harm in round 3, would print lines nobody acts
       on); releasing 0.2.0 with the earlier default set.
+      *Amended in 0.3.0*: the six size-dependent `OPT` rules (`OPT103`, `OPT110`, `OPT111`,
+      `OPT120`, `OPT121`, `OPT130`) are opt-in, by this decision's own criterion read on their
+      exact tier: of their exact reports, 2 of the 203 the census classified and 1 of the 233 of
+      the holdout run were of real harm, and a run of the 0.3.0 build on the holdout has 126,
+      all benign ([docs/precision.md](precision.md#harm-of-the-exact-reports)). A benign report
+      of theirs is also a rewrite that does not pay (ADR-007). `OPT101` and `OPT102` stay in the
+      default set, as the one exception: their rewrite is faster for every input and the
+      default `--fix` applies it. `OPT113` stays on its own share (2 of 8 census reports).
+      `--include-size-dependent` selects the five rules whose rewrites it applies, as if
+      `extend-select` named them. *Rejected*: keeping them on with an exception for proven
+      rewrites (the published bar and the published default set would disagree).
 - **Status**: the certainty and activation of every rule, a report's own certainty (the `OPT`
   reports whose rewrite is not proven are heuristic), the `heuristic` key and options, the
   withholding of an exact rule's heuristic reports, the note, the labels in every output, the

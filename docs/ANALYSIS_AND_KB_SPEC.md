@@ -3,7 +3,7 @@
 > **What this document is**
 > The technical supplement to [ARCHITECTURE.md](../ARCHITECTURE.md): the frontend and IR, the
 > Advisory lane's summaries and rules, the Soundness lane's abstract domain and proof
-> obligations, the knowledge bases, the Ratchet baseline, profile dumps, and the Stage 0-A
+> obligations, the knowledge bases, the Ratchet baseline, and the Stage 0-A
 > measurements. Crates are named `heki_*` (`crates/heki_ast` to `crates/heki_lsp`), and
 > configuration keys live under `[tool.heki]` in kebab-case. Parts marked **(planned)** are
 > designed but not implemented.
@@ -769,7 +769,7 @@ EffectSummary(f) = {
     returns_protected:        Option<ProtectedReturn>,     // may return a protected value: producer, depth,
                                                            // call chain (MUT202)
     must_invalidate:          Bitset,                      // invalidation contracts announced on every
-                                                           // normal path (MUT109)
+                                                           // normal path (MUT208)
     unmet_invalidation:       Set<UnmetWrite>,             // target writes, own or passed up by private
                                                            // helpers, some normal path leaves unannounced
     retains_params:           Bitset,                      // parameters the function keeps (stores, returns)
@@ -1260,7 +1260,7 @@ differ); every file that read one of them is re-analyzed. This covers names reso
 re-exports, class hierarchy analysis across modules, and property getters, without depending on
 which module imports which.
 
-### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT109` / `MUT111` / `MUT112` / `MUT113` / `MUT118` / `MUT119` / `MUT201` / `MUT202` / `MUT203` / `MUT204`)
+### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT111` / `MUT112` / `MUT113` / `MUT118` / `MUT119` / `MUT201` / `MUT202` / `MUT203` / `MUT204` / `MUT208`)
 
 #### `MUT101`: mutation of attributes a `@cached_property` depends on, without invalidation (strict Stage 0-A version)
 1. For every `@cached_property` method `p` of a class `C` (with its subclasses; a nested class is
@@ -1839,7 +1839,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      Only plain functions are followed: a generator's `return` value is not what calling it
      returns.
 
-#### `MUT109`: announced changes
+#### `MUT208`: announced changes
 - `[[tool.heki.invalidation]]` (`targets`, `invalidators`, `exempt-writers`, `message`):
   extraction records the target writes whose object is reached from parameters or globals, and
   the direct invalidator calls. A greatest-fixpoint coverage dataflow over normal edges (raising
@@ -2523,7 +2523,7 @@ for that premise.
 
 ---
 
-## 4. Knowledge bases, the Ratchet baseline, and profile dumps
+## 4. Knowledge bases and the Ratchet baseline
 
 ### 4.1 Layer 1 (`kb/soundness/*.toml`, Soundness lane only)
 No advisory `effects` field at all: an entry has only `symbol`, `return_exact_type`,
@@ -2738,21 +2738,6 @@ an annotation, or a constructor call produces), and the `heki_kb` unit tests pin
   - a key whose current count **exceeds** the baseline **fails** (a new violation);
   - a key whose current count is **below** the baseline (or has disappeared) prints a note asking
     to shrink the file with `heki check --update-baseline`.
-
-### 4.4 Optional profile dumps (`heki_profile`)
-- **Offline reading only (the program is never run or touched)**: collapsed stacks (CPython 3.15
-  Tachyon `--collapsed`: `tid:N;file.py:func:line;... count`; py-spy: `func (file.py:line);...
-  count`) and Tachyon `--gecko` JSON are read into their distinct stacks and sample weights
-  (gecko samples summed per stack first; every table reference checked; a total that overflows
-  is a malformed dump); `heki check --profile` uses it to apply proven size-dependent rewrites in
-  hot functions.
-- **Attribution to project functions**: each frame counts for the one project function its name
-  (on a dotted boundary), file (on a path boundary), and line (inside the definition) can denote;
-  a frame several functions fit counts for none, so an ambiguous profile never promotes a fix.
-  A function's share is the weight of the stacks it is on, divided by the total weight.
-- **Constraints checked on real tools**: Tachyon on CPython 3.15 cannot combine `--opcodes` with
-  `--jsonl` (`--gecko` / `--binary` are needed), and macOS needs `sudo` to read another process's
-  memory. Profile integration is therefore never required, only an optional add-on for tuning.
 
 ---
 

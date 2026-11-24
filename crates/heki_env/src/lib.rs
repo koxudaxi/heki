@@ -364,7 +364,7 @@ pub struct ReadOnlyReturnRule {
     pub deep: bool,
 }
 
-/// `[[tool.heki.invalidation]]` contract for `MUT109`: a write to one of `targets` must be
+/// `[[tool.heki.invalidation]]` contract for `MUT208`: a write to one of `targets` must be
 /// followed, on every path to a normal return, by a call that reaches one of `invalidators`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
@@ -377,7 +377,7 @@ pub struct InvalidationRule {
     /// Functions (dotted patterns) whose writes need no announcement of their own: the
     /// owner's operations, which announce or batch the change themselves.
     pub exempt_writers: Vec<String>,
-    /// The help of every `MUT109` report of this contract.
+    /// The help of every `MUT208` report of this contract.
     pub message: Option<String>,
 }
 
@@ -1034,6 +1034,17 @@ impl HekiConfig {
         "invalidation",
         "import-owners",
     ];
+
+    /// Whether a contract is declared: a table of one of [`Self::CONTRACT_KEYS`].
+    pub fn declares_contracts(&self) -> bool {
+        !(self.write_owners.is_empty()
+            && self.read_owners.is_empty()
+            && self.call_owners.is_empty()
+            && self.effect_boundaries.is_empty()
+            && self.readonly_returns.is_empty()
+            && self.invalidation.is_empty()
+            && self.import_owners.is_empty())
+    }
 
     /// Load an explicit configuration file ([`ConfigLayout`]): the `[tool.heki]` table of a
     /// `pyproject.toml` (empty config when absent), the top-level keys of any other file.

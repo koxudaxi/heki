@@ -13,6 +13,8 @@
 //! - An exact rule whose single reports can be heuristic (an `OPT` report whose rewrite is not
 //!   proven) shows those reports only where a heuristic rule would run: with `lint.heuristic`,
 //!   when its code or slug is selected, or for a contract rule.
+//! - `--include-size-dependent` selects the rules whose size-dependent rewrites it applies, as if
+//!   `extend-select` named them.
 
 use crate::{CORE_RULES, Certainty, RuleMeta, find_rule};
 use globset::{Glob, GlobMatcher};
@@ -127,7 +129,7 @@ pub fn unknown_rule(problem: Problem, selector: &str, prefixes: bool) -> Problem
 }
 
 /// The selection options of the command line, over the configuration (`--select`,
-/// `--extend-select`, `--ignore`, `--heuristic` / `--no-heuristic`).
+/// `--extend-select`, `--ignore`, `--heuristic` / `--no-heuristic`, `--include-size-dependent`).
 #[derive(Debug, Clone, Default)]
 pub struct Selectors {
     pub select: Vec<String>,
@@ -135,6 +137,10 @@ pub struct Selectors {
     pub ignore: Vec<String>,
     /// `None`: `lint.heuristic` decides.
     pub heuristic: Option<bool>,
+    /// `--include-size-dependent`: the rules with a size-dependent rewrite
+    /// ([`RuleMeta::size_dependent_fix`]) run as if `extend-select` named them, since applying
+    /// their rewrites is what the option asks for.
+    pub size_dependent_rewrites: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -265,10 +271,12 @@ fn enabled_before_ignore(
     for list in extend {
         enabled.extend(codes(list, &unnamed)?);
     }
+    enabled.extend(size_dependent_rules(cli));
     Ok(enabled)
 }
 
-/// The rules `select` / `extend-select` name by their code or slug.
+/// The rules `select` / `extend-select` name by their code or slug, and those
+/// `--include-size-dependent` names.
 fn named_rules(lint: &LintConfig, cli: &Selectors) -> BTreeSet<&'static str> {
     let (select, extend) = selecting(lint, cli);
     select
@@ -276,7 +284,16 @@ fn named_rules(lint: &LintConfig, cli: &Selectors) -> BTreeSet<&'static str> {
         .chain(extend)
         .flat_map(|(list, _)| list)
         .filter_map(|s| named(s).map(|r| r.code))
+        .chain(size_dependent_rules(cli))
         .collect()
+}
+
+/// The rules `--include-size-dependent` selects ([`Selectors::size_dependent_rewrites`]).
+fn size_dependent_rules(cli: &Selectors) -> impl Iterator<Item = &'static str> {
+    CORE_RULES
+        .iter()
+        .filter(move |r| cli.size_dependent_rewrites && r.size_dependent_fix)
+        .map(|r| r.code)
 }
 
 impl RuleSelection {
@@ -405,6 +422,11 @@ pub fn heuristic_hint(rules_off: usize, reports_withheld: usize) -> Option<Strin
     ))
 }
 
+/// The line a text run ends with when it shows nothing on a whole project without contracts: what
+/// to do next is `heki recommend`'s question (ADR-020).
+pub const RECOMMEND_HINT: &str = "hint: `heki recommend` (experimental) lists the rules and \
+    contracts that fit this project, and what heki could not see";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,6 +440,7 @@ mod tests {
             extend_select: v(extend),
             ignore: v(ignore),
             heuristic: None,
+            size_dependent_rewrites: false,
         };
         RuleSelection::resolve(lint, &cli).unwrap()
     }

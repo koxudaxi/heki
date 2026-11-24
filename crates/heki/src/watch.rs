@@ -13,7 +13,6 @@ use heki_diagnostics::{Diagnostic, Stylesheet, render, sort_diagnostics};
 use heki_effect::ModuleLayout;
 use heki_env::{LintConfig, Problem};
 use heki_lsp::{CONFIG_FILES, EditOutcome, Source, Workspace};
-use heki_profile::{ProfileData, ProfiledFunction};
 use heki_rules::project::{
     Facts, FileError, ProjectEnv, ProjectOptions, collect_files, display_path, exclude_set,
 };
@@ -144,7 +143,6 @@ fn stamps_of<'p>(paths: impl IntoIterator<Item = &'p PathBuf>, earlier: &Stamps)
 
 struct Watcher<'a> {
     args: &'a CheckArgs,
-    hot: Option<&'a ProfileData>,
     styles: &'a Stylesheet,
 }
 
@@ -182,7 +180,7 @@ impl Watcher<'_> {
         drop(env);
         let (ws, errors) = Workspace::load(
             &self.opts(),
-            &crate::check::selectors(&self.args.analysis),
+            &crate::check::check_selectors(self.args),
             self.args.analysis.baseline.as_deref(),
             Facts::Check,
         )?;
@@ -227,15 +225,6 @@ impl Watcher<'_> {
     /// they make `heki check` fail.
     fn print(&self, report: &Report, ws: Option<&Workspace>) -> bool {
         let mut all: Vec<Diagnostic> = report.diags.values().flatten().cloned().collect();
-        // The index keeps no definition lines: a frame is told apart by its names only.
-        let hot = self.hot.zip(ws).map(|(profile, ws)| {
-            profile.attribute(ws.functions().map(|(path, qualname)| ProfiledFunction {
-                path,
-                qualname,
-                lines: None,
-            }))
-        });
-        crate::check::annotate_hot(&mut all, hot.as_ref());
         // The paths `heki check` prints.
         crate::check::show_paths(&mut all);
         sort_diagnostics(&mut all);
@@ -397,17 +386,13 @@ impl Report {
     }
 }
 
-pub(crate) fn run(
-    args: &CheckArgs,
-    hot: Option<&ProfileData>,
-    styles: &Stylesheet,
-) -> Result<ExitCode> {
+pub(crate) fn run(args: &CheckArgs, styles: &Stylesheet) -> Result<ExitCode> {
     if args.fix || args.diff || args.update_baseline {
         eprintln!(
             "warning: `--watch` only reports diagnostics; `--fix`, `--diff`, and `--update-baseline` are ignored."
         );
     }
-    let w = Watcher { args, hot, styles };
+    let w = Watcher { args, styles };
     let max_runs: Option<usize> = std::env::var(MAX_RUNS_ENV)
         .ok()
         .and_then(|v| v.parse().ok());
