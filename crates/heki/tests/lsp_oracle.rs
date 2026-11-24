@@ -6326,6 +6326,11 @@ const BOUND_DEFS_PATCHING: &str =
 const BOUND_MODULE_USE: &str =
     "from pkg.defs import ops\n\n\ndef use(field):\n    ops().require(field)\n";
 const BOUND_TYPE_VAR_USE: &str = "from pkg.defs import V\n\n\ndef use(view: V):\n    for field in view.fields:\n        field.required = True\n";
+// The items of a list attribute another module appends to (`StoredElsewhere::changed`).
+const BOUND_LISTED: &str = "from pkg.model import Field\n\n\nclass Model:\n    def __init__(self, fields: list[Field]):\n        self.fields = self.validate(fields) if fields else []\n\n    def validate(self, fields: list[Field]) -> list[Field]:\n        return fields\n";
+const BOUND_LIST_USE: &str = "from pkg.listed import Model\n\n\ndef use(model: Model):\n    for field in model.fields:\n        field.required = True\n";
+const BOUND_APPENDING: &str = "from pkg.listed import Model\nfrom pkg.model import Field\n\n\ndef add(model: Model, field: Field):\n    model.fields.append(field)\n";
+const BOUND_REGISTERING: &str = "from pkg.defs import TABLE\nfrom pkg.helpers import require\n\n\ndef register():\n    TABLE[\"other\"] = require\n";
 
 #[test]
 fn lsp_diagnostics_equal_a_full_check_through_bound_values_across_modules() {
@@ -6441,6 +6446,55 @@ fn lsp_diagnostics_equal_a_full_check_through_bound_values_across_modules() {
                 ("pkg/use_alias.py", "EFF201"),
                 ("pkg/use_alias_read.py", "EFF201"),
             ]),
+        // What another module's changes in place add joins the items (`StoredElsewhere::changed`).
+        Step::new(
+            "another module appends a field to a list attribute",
+            vec![
+                Action::Create("pkg/listed.py", BOUND_LISTED.to_owned()),
+                Action::Create("pkg/use_list.py", BOUND_LIST_USE.to_owned()),
+                Action::Create("pkg/appending.py", BOUND_APPENDING.to_owned()),
+            ],
+        )
+        .present(&[("pkg/use_list.py", "EFF201")]),
+        Step::new(
+            "it appends a value of unknown type",
+            vec![save(
+                "pkg/appending.py",
+                &BOUND_APPENDING.replace("field: Field", "field"),
+            )],
+        )
+        .absent(&[("pkg/use_list.py", "EFF201")]),
+        Step::new(
+            "it appends a field again",
+            vec![save("pkg/appending.py", BOUND_APPENDING)],
+        )
+        .present(&[("pkg/use_list.py", "EFF201")]),
+        Step::new(
+            "the table binds the key to the function that writes nothing, and another module adds the writer",
+            vec![
+                save(
+                    "pkg/defs.py",
+                    &BOUND_DEFS.replace("{\"run\": require, \"skip\": skip}", "{\"run\": skip}"),
+                ),
+                Action::Create("pkg/register.py", BOUND_REGISTERING.to_owned()),
+            ],
+        )
+        .present(&[("pkg/use_table.py", "EFF201")]),
+        Step::new(
+            "it adds a function of unknown type",
+            vec![save(
+                "pkg/register.py",
+                &BOUND_REGISTERING
+                    .replace("def register():", "def register(run):")
+                    .replace("= require", "= run"),
+            )],
+        )
+        .absent(&[("pkg/use_table.py", "EFF201")]),
+        Step::new(
+            "it adds the writer again",
+            vec![save("pkg/register.py", BOUND_REGISTERING)],
+        )
+        .present(&[("pkg/use_table.py", "EFF201")]),
     ];
     run_steps(s, &steps);
 }

@@ -6772,6 +6772,49 @@ fn class_aliases_past_the_dispatch_limit_run_unknown_code() {
     assert_eq!(blocking(check_linear(512, shape)), 0);
 }
 
+/// `n` module lists of a function that does not block, a function choosing one of them through a
+/// chain of `n` branches and appending to the one it holds after each, then appending a
+/// blocking function, and an `async def` calling what the last list holds.
+fn merged_lists(n: usize) -> String {
+    let mut out = vec![
+        "import time".to_owned(),
+        "\n\ndef run():\n    time.sleep(1)\n".to_owned(),
+        "\ndef quiet():\n    pass\n\n".to_owned(),
+    ];
+    out.extend((0..n).map(|k| format!("L{k} = [quiet]")));
+    out.push("\n\ndef fill(c):\n    xs = L0\n    xs.append(quiet)".to_owned());
+    for k in 1..n {
+        out.push(format!(
+            "    if c == {k}:\n        xs = L{k}\n    xs.append(quiet)"
+        ));
+    }
+    out.push("    xs.append(run)\n".to_owned());
+    out.push(format!(
+        "\nasync def handle():\n    for f in L{}:\n        f()\n",
+        n - 1
+    ));
+    out.join("\n")
+}
+
+/// Changes in place of what a chain of branches may hold, each of the lists the chain merges:
+/// the changes and the aliases they reach are listed once (`FnIndex::changes_in_place`), and what
+/// they add is joined once per alias (`store additions`), so each list gets the blocking function.
+#[test]
+fn changes_through_a_chain_of_merged_lists_are_joined_once_per_alias() {
+    let shape = |n: usize| {
+        let p = Project::new(&format!("bounds_merged_lists_{n}"));
+        p.write("m.py", &merged_lists(n));
+        p
+    };
+    let blocking = |found: Vec<Value>| {
+        (found.iter())
+            .filter(|d| d["rule_code"] == "EFF111" || d["rule_code"] == "EFF101")
+            .count()
+    };
+    assert_eq!(blocking(check(&shape(8))), 1);
+    assert_eq!(blocking(check_linear(2048, shape)), 1);
+}
+
 /// A memo-shaped store whose key is a tuple of thousands of values, built once for the test and
 /// once for the store (`if (a, a, ...) not in p.items: p.items[(a, a, ...)] = 0`): the two keys
 /// are compared value by value, each pair once.

@@ -577,6 +577,16 @@ struct Lifetimes {
     answered: FxHashMap<VarId, (bool, bool)>,
 }
 
+/// The changes in place a function makes itself ([`FnIndex::changes_in_place`]).
+pub struct InPlaceChanges<'a> {
+    /// Each variable whose object a change may change, with the variables aliasing it in one
+    /// step (a copy of it, a phi it enters) whose object a change may change too: a change of
+    /// one of those changes the variable's object.
+    pub aliased_by: FxHashMap<VarId, Vec<VarId>>,
+    /// The changes, by the variable each changes the object of.
+    pub by_receiver: FxHashMap<VarId, Vec<&'a Inst>>,
+}
+
 /// Methods that add at most one item to the builtin container they are called on.
 const ONE_ITEM_METHODS: &[(&str, usize)] = &[
     ("append", 1),
@@ -1391,35 +1401,57 @@ impl<'a> FnIndex<'a> {
         self.alias_sources(&budget, ops)
     }
 
-    /// The variables whose object this function itself may add items to or replace items of,
-    /// directly or through an alias (copies and phis): an item store (`xs[k] = v`) or a method
-    /// call that may add items (`append`, `update`, `setdefault`). An in-place operator
-    /// (`xs += ys`) binds its result again, where the store says what it binds. What code the
-    /// object is handed to or returned to does is not followed.
-    pub fn changed_vars(&self) -> FxHashSet<VarId> {
-        let mut ops = Vec::new();
+    /// The changes this function itself makes in place: an item store (`xs[k] = v`), a call of
+    /// a method that may add items (`append`, `update`, `setdefault`), or an in-place operator
+    /// (`xs += ys`, which also binds its result again), on a variable or on an alias of it
+    /// (copies and phis). What code the object is handed to or returned to does is not
+    /// followed. `Open` past the budget: any change may change any variable.
+    pub fn changes_in_place(&self) -> Answer<InPlaceChanges<'a>> {
+        let mut by_receiver: FxHashMap<VarId, Vec<&'a Inst>> = FxHashMap::default();
         for inst in self.f.blocks.iter().flat_map(|b| &b.insts) {
-            match &inst.kind {
-                InstKind::SubscriptStore { obj, .. } => ops.push(*obj),
+            let recv = match &inst.kind {
+                InstKind::SubscriptStore { obj, .. } => *obj,
                 InstKind::MethodCall { recv, method, .. }
                     if !NON_GROWING_METHODS.contains(&method.as_str()) =>
                 {
-                    ops.push(*recv);
+                    *recv
                 }
-                _ => {}
-            }
+                InstKind::BinOp {
+                    lhs,
+                    in_place: true,
+                    ..
+                } => *lhs,
+                _ => continue,
+            };
+            by_receiver.entry(recv).or_default().push(inst);
         }
-        let budget = Budget::of_function("heki_ir::facts::FnIndex::changed_vars", self.f);
-        self.alias_sources(&budget, ops)
+        let budget = Budget::of_function("heki_ir::facts::FnIndex::changes_in_place", self.f);
+        let mut aliased_by: FxHashMap<VarId, Vec<VarId>> = FxHashMap::default();
+        let mut sources = Vec::new();
+        let walked = reach(
+            &budget,
+            by_receiver.keys().copied(),
+            |v, out| self.alias_sources_of(v, out),
+            |v| {
+                aliased_by.entry(v).or_default();
+                sources.clear();
+                self.alias_sources_of(v, &mut sources);
+                for &source in &sources {
+                    aliased_by.entry(source).or_default().push(v);
+                }
+                Visit::<()>::Expand
+            },
+        );
+        walked.map(|_| InPlaceChanges {
+            aliased_by,
+            by_receiver,
+        })
     }
 
-    /// `ops` and the variables they alias (the sources of copies and phis, transitively): every
-    /// variable when the walk runs past `budget`.
-    fn alias_sources(&self, budget: &Budget, ops: Vec<VarId>) -> FxHashSet<VarId> {
+    /// The variables `v` aliases in one step: the incoming values of a phi, the source of a copy.
+    fn alias_sources_of(&self, v: VarId, out: &mut Vec<VarId>) {
         let f = self.f;
-        let mut grown: FxHashSet<VarId> = FxHashSet::default();
-        // An alias's growth is its source's.
-        let sources = |v: VarId, out: &mut Vec<VarId>| match self.shape.def(v) {
+        match self.shape.def(v) {
             Def::Phi(b, k) => {
                 out.extend(f.block(b).phis[k as usize].incoming.iter().map(|(_, x)| *x));
             }
@@ -1429,7 +1461,16 @@ impl<'a> FnIndex<'a> {
                 }
             }
             Def::Param | Def::None => {}
-        };
+        }
+    }
+
+    /// `ops` and the variables they alias (the sources of copies and phis, transitively): every
+    /// variable when the walk runs past `budget`.
+    fn alias_sources(&self, budget: &Budget, ops: Vec<VarId>) -> FxHashSet<VarId> {
+        let f = self.f;
+        let mut grown: FxHashSet<VarId> = FxHashSet::default();
+        // An alias's growth is its source's.
+        let sources = |v: VarId, out: &mut Vec<VarId>| self.alias_sources_of(v, out);
         let walked = reach(budget, ops, sources, |v| {
             grown.insert(v);
             Visit::<()>::Expand
