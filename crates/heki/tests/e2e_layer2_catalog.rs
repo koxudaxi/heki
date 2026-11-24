@@ -1374,8 +1374,10 @@ fn only_a_named_file_makes_a_sqlite_connection_wait() {
     let (code, stdout, stderr) = p.check(&["--output-format", "json", "--select", "EFF101"]);
     assert!(code == 0 || code == 1, "{stdout}{stderr}");
     let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    // The exact reports: a heuristic one does not establish that the connection waits.
     let mut got: Vec<(String, u64)> = diags
         .iter()
+        .filter(|d| d["certainty"] == "exact")
         .map(|d| {
             (
                 d["path"].as_str().unwrap().to_owned(),
