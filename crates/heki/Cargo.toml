@@ -32,7 +32,6 @@ heki_env.workspace = true
 heki_ir.workspace = true
 heki_kb.workspace = true
 heki_lsp.workspace = true
-heki_profile.workspace = true
 heki_rules.workspace = true
 heki_semantic.workspace = true
 heki_soundness.workspace = true

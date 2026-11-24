@@ -10,7 +10,6 @@ must prove.
 $ heki check --diff                              # preview (exit code 1 when something would change)
 $ heki check --fix                               # apply safe, unconditional fixes
 $ heki check --fix --include-size-dependent      # also the proven-safe size-dependent rewrites
-$ heki check --fix --profile profile.txt         # size-dependent rewrites in hot functions only
 ```
 
 - A fix comes with a report: `--fix` applies only the fixes of the reports shown. A report whose
@@ -21,9 +20,7 @@ $ heki check --fix --profile profile.txt         # size-dependent rewrites in ho
   another loop it is heuristic, and its fix applies with `--heuristic` or when its rule is
   selected.
 - `--diff` takes the same flags as `--fix` and writes nothing.
-- `--include-size-dependent` applies the size-dependent rewrites in every function, with or
-  without `--profile`.
-- `--profile` alone applies them only in the functions a [profile](#profiles) shows hot.
+- `--include-size-dependent` applies the size-dependent rewrites in every function.
 
 ## What each finding offers
 
@@ -48,7 +45,7 @@ Two independent questions decide whether heki offers the rewrite:
 | Profitability | Rules | Certainty | Applied by |
 | ------------- | ----- | --------- | ---------- |
 | Unconditional (faster from the first iteration) | `OPT101`, `OPT102` | exact (the proven reports) | `heki check --fix` |
-| Size-dependent | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | exact (the proven reports over a loop the data sizes) | `heki check --fix --include-size-dependent`, or `--fix --profile <dump>` in hot functions |
+| Size-dependent | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | exact (the proven reports over a loop the data sizes) | `heki check --fix --include-size-dependent` |
 | Size-dependent, no rewrite | `OPT103`, `OPT112`, `OPT113` | `OPT103` exact (the proven reports over a loop the data sizes), `OPT113` exact (its exact tier), `OPT112` heuristic | none: suggestion only |
 
 ### When the size is fixed
@@ -153,26 +150,3 @@ Would fix 1 issue(s) in 1 file(s).
   unconditionally (not under `if TYPE_CHECKING:`), nothing else binds or deletes the name (no
   other store, no `del` in a function declaring it `global`, no star import that may rebind it),
   and it names the standard library's module (not `from .collections import deque`).
-
-## Profiles
-
-`--profile` reads a sampling profile you recorded offline. It is experimental; see [experimental.md](experimental.md).
-
-| Profiler | Command |
-| -------- | ------- |
-| CPython 3.15's sampling profiler | `python -m profiling.sampling run --collapsed -o stacks.txt app.py`, or `--gecko -o profile.json` |
-| py-spy | `py-spy record --format raw -o stacks.txt -- python app.py` |
-
-- A function is hot when it is on the stack in at least 1 % of the samples.
-- The profile promotes size-dependent fixes in hot functions and adds the sample share to the
-  diagnostics' evidence. It never makes an unsafe rewrite safe.
-
-A frame counts for a function when all of these hold:
-
-- its name names the function on a dotted boundary: `run` or `A.run` for `A.run`, never `BA.run`;
-- its file is the function's file, as a basename, a relative path, or an absolute path;
-- its line, when the profiler recorded one, lies inside the function.
-
-A frame that fits several functions counts for none: a plain `run` without a line in a file with
-two `run` methods, or a `models.py` that two packages have. `--watch` matches frames by their
-names only.

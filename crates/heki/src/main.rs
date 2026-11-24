@@ -190,11 +190,6 @@ struct CheckArgs {
     /// Generate or shrink-update the Ratchet baseline file.
     #[arg(long)]
     update_baseline: bool,
-    /// Experimental: offline profile dump (collapsed stacks of CPython 3.15's profiler or py-spy, or `--gecko`
-    /// JSON): apply the `size-dependent` fixes in its hot functions (in every function with
-    /// `--include-size-dependent`).
-    #[arg(long)]
-    profile: Option<PathBuf>,
     /// Watch for file changes and re-run incrementally.
     #[arg(long)]
     watch: bool,
@@ -207,7 +202,7 @@ struct CheckArgs {
         value_name = "QUESTION",
         num_args = 0..=1,
         default_missing_value = "",
-        conflicts_with_all = ["fix", "diff", "watch", "update_baseline", "profile", "include_size_dependent"]
+        conflicts_with_all = ["fix", "diff", "watch", "update_baseline", "include_size_dependent"]
     )]
     generate_prompt: Option<String>,
     /// Print the JSON Schema of a JSON output and exit: `generate-prompt`, the object of

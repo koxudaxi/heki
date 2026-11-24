@@ -135,8 +135,7 @@ checker cover most of what matters, and heki reports little.
 
 - heki does not change your code's shape: it adds no decorators, contract types, or runtime
   checks, and it does not compile or rewrite code at build time.
-- heki never runs or instruments your program. `--profile` only reads a profile you recorded
-  yourself.
+- heki never runs or instruments your program, and reads no profile of it.
 
 ## Where heki's knowledge comes from
 

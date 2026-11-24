@@ -478,20 +478,12 @@ fn file_errors_say_what_to_do_with_the_file() {
         ],
     );
     std::fs::remove_file(p.dir.join(".heki-summary-snapshot.json")).unwrap();
-    let profiles = docs("fixes/#profiles");
-    p.write("p.txt", "junk\n");
-    fails_with(
-        &p,
-        &["check", "--profile", "p.txt"],
-        &[
-            "error: unsupported or malformed profile dump: junk",
-            &profiles,
-        ],
-    );
-    fails_with(
-        &p,
-        &["check", "--profile", "nope.txt"],
-        &["error: nope.txt: cannot read the profile dump: ", &profiles],
+    // A removed option is refused like any unknown one.
+    let (code, _, stderr) = p.heki(&["check", "--profile", "p.txt"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("unexpected argument '--profile'"),
+        "{stderr}"
     );
     // A file that does not parse is reported after the others are checked.
     p.write("b.py", "def f(:\n");

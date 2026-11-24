@@ -12,7 +12,7 @@ heki has 55 rules in four families. A rule is exact when it reports only what it
 ## Legend
 
 - 🛠️ The fix is applied by `heki check --fix` when heki proves it safe.
-- 🔧 A proven-safe rewrite applied only with `--fix --include-size-dependent` or in functions a `--profile` dump shows hot (it can be slower for tiny inputs).
+- 🔧 A proven-safe rewrite applied only with `--fix --include-size-dependent` (it can be slower for tiny inputs).
 - ≈ Heuristic rule: a report can be wrong about the code. Every output labels its reports `heuristic`.
 - 🔌 Opt-in rule.
 - 📜 Contract rule: it reports only what a declared contract asks for.

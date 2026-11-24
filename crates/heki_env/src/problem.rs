@@ -71,7 +71,6 @@ docs_pages! {
     Baselines => "adoption/#ratchet-baselines",
     Snapshots => "adoption/#effect-snapshots-mut103",
     Fixes => "fixes/#how-fix-applies-fixes",
-    Profiles => "fixes/#profiles",
     CliCheck => "cli-reference/#heki-check",
     CliServer => "cli-reference/#heki-server",
     CliRule => "cli-reference/#heki-rule",

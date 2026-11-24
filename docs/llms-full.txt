@@ -454,8 +454,7 @@ checker cover most of what matters, and heki reports little.
 
 - heki does not change your code's shape: it adds no decorators, contract types, or runtime
   checks, and it does not compile or rewrite code at build time.
-- heki never runs or instruments your program. `--profile` only reads a profile you recorded
-  yourself.
+- heki never runs or instruments your program, and reads no profile of it.
 
 ## Where heki's knowledge comes from
 
@@ -2373,7 +2372,6 @@ must prove.
 $ heki check --diff                              # preview (exit code 1 when something would change)
 $ heki check --fix                               # apply safe, unconditional fixes
 $ heki check --fix --include-size-dependent      # also the proven-safe size-dependent rewrites
-$ heki check --fix --profile profile.txt         # size-dependent rewrites in hot functions only
 ```
 
 - A fix comes with a report: `--fix` applies only the fixes of the reports shown. A report whose
@@ -2384,9 +2382,7 @@ $ heki check --fix --profile profile.txt         # size-dependent rewrites in ho
   another loop it is heuristic, and its fix applies with `--heuristic` or when its rule is
   selected.
 - `--diff` takes the same flags as `--fix` and writes nothing.
-- `--include-size-dependent` applies the size-dependent rewrites in every function, with or
-  without `--profile`.
-- `--profile` alone applies them only in the functions a [profile](https://heki.koxudaxi.dev/fixes/#profiles) shows hot.
+- `--include-size-dependent` applies the size-dependent rewrites in every function.
 
 ## What each finding offers
 
@@ -2411,7 +2407,7 @@ Two independent questions decide whether heki offers the rewrite:
 | Profitability | Rules | Certainty | Applied by |
 | ------------- | ----- | --------- | ---------- |
 | Unconditional (faster from the first iteration) | `OPT101`, `OPT102` | exact (the proven reports) | `heki check --fix` |
-| Size-dependent | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | exact (the proven reports over a loop the data sizes) | `heki check --fix --include-size-dependent`, or `--fix --profile <dump>` in hot functions |
+| Size-dependent | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | exact (the proven reports over a loop the data sizes) | `heki check --fix --include-size-dependent` |
 | Size-dependent, no rewrite | `OPT103`, `OPT112`, `OPT113` | `OPT103` exact (the proven reports over a loop the data sizes), `OPT113` exact (its exact tier), `OPT112` heuristic | none: suggestion only |
 
 ### When the size is fixed
@@ -2516,29 +2512,6 @@ Would fix 1 issue(s) in 1 file(s).
   unconditionally (not under `if TYPE_CHECKING:`), nothing else binds or deletes the name (no
   other store, no `del` in a function declaring it `global`, no star import that may rebind it),
   and it names the standard library's module (not `from .collections import deque`).
-
-## Profiles
-
-`--profile` reads a sampling profile you recorded offline. It is experimental; see [experimental.md](https://heki.koxudaxi.dev/experimental/).
-
-| Profiler | Command |
-| -------- | ------- |
-| CPython 3.15's sampling profiler | `python -m profiling.sampling run --collapsed -o stacks.txt app.py`, or `--gecko -o profile.json` |
-| py-spy | `py-spy record --format raw -o stacks.txt -- python app.py` |
-
-- A function is hot when it is on the stack in at least 1 % of the samples.
-- The profile promotes size-dependent fixes in hot functions and adds the sample share to the
-  diagnostics' evidence. It never makes an unsafe rewrite safe.
-
-A frame counts for a function when all of these hold:
-
-- its name names the function on a dotted boundary: `run` or `A.run` for `A.run`, never `BA.run`;
-- its file is the function's file, as a basename, a relative path, or an absolute path;
-- its line, when the profiler recorded one, lies inside the function.
-
-A frame that fits several functions counts for none: a plain `run` without a line in a file with
-two `run` methods, or a `models.py` that two packages have. `--watch` matches frames by their
-names only.
 
 
 ---
@@ -3292,9 +3265,6 @@ Options:
       --update-baseline
           Generate or shrink-update the Ratchet baseline file
 
-      --profile <PROFILE>
-          Experimental: offline profile dump (collapsed stacks of CPython 3.15's profiler or py-spy, or `--gecko` JSON): apply the `size-dependent` fixes in its hot functions (in every function with `--include-size-dependent`)
-
       --watch
           Watch for file changes and re-run incrementally
 
@@ -3792,7 +3762,7 @@ heki has 55 rules in four families. A rule is exact when it reports only what it
 ## Legend
 
 - 🛠️ The fix is applied by `heki check --fix` when heki proves it safe.
-- 🔧 A proven-safe rewrite applied only with `--fix --include-size-dependent` or in functions a `--profile` dump shows hot (it can be slower for tiny inputs).
+- 🔧 A proven-safe rewrite applied only with `--fix --include-size-dependent` (it can be slower for tiny inputs).
 - ≈ Heuristic rule: a report can be wrong about the code. Every output labels its reports `heuristic`.
 - 🔌 Opt-in rule.
 - 📜 Contract rule: it reports only what a declared contract asks for.
@@ -4120,7 +4090,6 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | ID | Kind | Target | Since | Tracking |
 | -- | ---- | ------ | ----- | -------- |
 | `cli-option.generate-prompt` | cli-option | `heki check --generate-prompt` | 0.2.2 | - |
-| `cli-option.profile` | cli-option | `heki check --profile` | 0.1.1 | - |
 | `command.inspect` | command | `heki inspect` | 0.2.1 | - |
 | `command.recommend` | command | `heki recommend` | 0.2.2 | - |
 | `command.skill` | command | `heki skill` | 0.2.5 | - |
@@ -4150,14 +4119,6 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 - **Since:** 0.2.2
 
 What the prompt holds and how it says it can still change as it is tried with models, and so can its JSON object, whose schema `heki check --output-format-json-schema generate-prompt` prints; the object's `version` changes when a field is removed or changes meaning.
-
-## `cli-option.profile`
-
-- **Kind:** cli-option
-- **Target:** `heki check --profile`
-- **Since:** 0.1.1
-
-It reads the output of CPython 3.15's sampling profiler, and that format can still change.
 
 ## `command.inspect`
 
@@ -4775,7 +4736,7 @@ $ heki check --output-format-json-schema generate-prompt
 - The prompt comes from the analysis `heki check` runs with the same options and configuration.
   The command writes no file and exits with 0 once the prompt is printed, also when a file could
   not be analyzed; a configuration error exits with 2, as for `heki check`.
-- It cannot be combined with `--fix`, `--diff`, `--watch`, `--update-baseline`, `--profile`, or
+- It cannot be combined with `--fix`, `--diff`, `--watch`, `--update-baseline`, or
   `--include-size-dependent`.
 - `--output-format json` prints the same content as one object, and
   `--output-format-json-schema generate-prompt` prints its JSON Schema. Its `version` changes
@@ -5471,7 +5432,6 @@ The workspace is split by responsibility (`crates/`):
 | `heki_soundness` | the alias analysis and proof obligations behind `OPT` rewrites (never depends on `heki_effect`, never reads annotations) |
 | `heki_rules` | the rules, rule selection, project discovery and indexing |
 | `heki_diagnostics` | output formats, inline suppressions, Ratchet baselines, fix application |
-| `heki_profile` | offline profile dumps |
 | `heki_lsp` | the incremental LSP server and the `--watch` engine |
 | `heki` | the command-line interface |
 
@@ -8676,8 +8636,7 @@ Size-dependent `q.insert(0, v)` -> `collections.deque`.
 Checks loops that insert at the front of a list, `q.insert(0, v)`, and suggests a
 `collections.deque` with `appendleft(v)`.
 
-Size-dependent: applied only with `--fix --include-size-dependent` or in profiled hot
-functions. A list rebuilt in every iteration of the loop is not reported: its front insert
+Size-dependent: applied only with `--fix --include-size-dependent`. A list rebuilt in every iteration of the loop is not reported: its front insert
 costs no more than building it.
 
 ## What a report states
@@ -8750,8 +8709,7 @@ Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.
 Checks loops that remove the first element of a list: `q.pop(0)`, `del q[0]`, and
 `q = q[1:]`, and suggests a `collections.deque` with `popleft()`.
 
-Size-dependent: applied only with `--fix --include-size-dependent` or in profiled hot
-functions. The rewrite changes the list's creation to `collections.deque(...)`, rewrites the
+Size-dependent: applied only with `--fix --include-size-dependent`. The rewrite changes the list's creation to `collections.deque(...)`, rewrites the
 variable's `list[...]` annotation to `collections.deque[...]`, and adds `import collections`
 when needed: in sorted position among the module's standard-library imports, or after the
 docstring and `__future__` imports of a module without other imports.
@@ -9363,8 +9321,7 @@ Checks loops that rebuild the same container on every iteration just to test mem
 `e in set(keys)` (also `list(...)`, `tuple(...)`, `dict(...)`), and suggests building it once
 before the loop.
 
-Size-dependent: applied only with `--fix --include-size-dependent` or in profiled hot
-functions.
+Size-dependent: applied only with `--fix --include-size-dependent`.
 
 ## What a report states
 
@@ -9450,8 +9407,7 @@ Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.
 Checks the de-duplication idiom `if v not in seen: seen.append(v)` inside a loop and suggests
 keeping an auxiliary `set` next to the list.
 
-Size-dependent: applied only with `--fix --include-size-dependent` or in profiled hot
-functions.
+Size-dependent: applied only with `--fix --include-size-dependent`.
 
 ## What a report states
 
@@ -9628,8 +9584,7 @@ Checks membership tests against a list or tuple inside a loop, `e in lst`, where
 not change during the loop, and suggests building a `set` once before the loop.
 
 This is a size-dependent rewrite: it is reported as a suggestion and applied only with
-`heki check --fix --include-size-dependent`, or for functions that a `--profile` dump shows
-hot. Not reported:
+`heki check --fix --include-size-dependent`. Not reported:
 
 - small containers: at most 16 items that nothing grows, whatever the items are
   (`x in ("a", "b")`, `x in [b"1", b"2"]`, also through a name bound to one, a comprehension

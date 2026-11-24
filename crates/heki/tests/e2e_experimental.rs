@@ -119,7 +119,7 @@ fn docs_check_fails_on_a_stale_experimental_page() {
         "{page}"
     );
     assert!(
-        page.contains("| `cli-option.profile` | cli-option | `heki check --profile` | 0.1.1 | - |"),
+        page.contains("| `command.inspect` | command | `heki inspect` | 0.2.1 | - |"),
         "{page}"
     );
     let index = docs.0.read("docs/rules/index.md");
@@ -232,7 +232,7 @@ fn docs_check_fails_where_a_page_marks_a_rule_differently_from_the_registry() {
     assert_eq!(code, 0, "{out}");
 
     // The changelog section of the release an entry names as `since` calls its target
-    // experimental: a rule by its code, an option by the command and the option.
+    // experimental: a rule by its code, a command by its name.
     let (code, out) = docs.check_with(
         "CHANGELOG.md",
         "`MUT112` (`conditional-ownership-mutation`, opt-in, experimental)",
@@ -246,13 +246,13 @@ fn docs_check_fails_where_a_page_marks_a_rule_differently_from_the_registry() {
     );
     let (code, out) = docs.check_with(
         "CHANGELOG.md",
-        "- `MUT111` and `heki check --profile` are experimental:",
-        "- `MUT111` is experimental, and so is the option:",
+        "- `heki inspect <SYMBOL> [PATHS]...` (experimental) says",
+        "- `heki inspect <SYMBOL> [PATHS]...` says",
     );
     assert_eq!(code, 1);
     assert!(
-        out.contains("CHANGELOG.md: [0.1.1] does not call heki check --profile experimental")
-            && !out.contains("MUT111"),
+        out.contains("CHANGELOG.md: [0.2.1] does not call heki inspect experimental")
+            && !out.contains("recommend"),
         "{out}"
     );
 }

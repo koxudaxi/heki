@@ -126,8 +126,7 @@ pub struct RuleMeta {
     pub activation: Activation,
     pub consequence: Consequence,
     pub auto_fix_default: bool,
-    /// A proven-safe rewrite that `--fix` applies only with `--include-size-dependent` or in a
-    /// function a `--profile` dump shows hot.
+    /// A proven-safe rewrite that `--fix` applies only with `--include-size-dependent`.
     pub size_dependent_fix: bool,
     pub summary: &'static str,
     /// Ruff-style documentation (`crates/heki_rules/rule-docs/<CODE>.md`): printed by

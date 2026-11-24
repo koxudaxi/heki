@@ -10,8 +10,7 @@ Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.
 Checks the de-duplication idiom `if v not in seen: seen.append(v)` inside a loop and suggests
 keeping an auxiliary `set` next to the list.
 
-Size-dependent: applied only with `--fix --include-size-dependent` or in profiled hot
-functions.
+Size-dependent: applied only with `--fix --include-size-dependent`.
 
 ## What a report states
 

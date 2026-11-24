@@ -3,7 +3,7 @@
 > **What this document is**
 > The technical supplement to [ARCHITECTURE.md](../ARCHITECTURE.md): the frontend and IR, the
 > Advisory lane's summaries and rules, the Soundness lane's abstract domain and proof
-> obligations, the knowledge bases, the Ratchet baseline, profile dumps, and the Stage 0-A
+> obligations, the knowledge bases, the Ratchet baseline, and the Stage 0-A
 > measurements. Crates are named `heki_*` (`crates/heki_ast` to `crates/heki_lsp`), and
 > configuration keys live under `[tool.heki]` in kebab-case. Parts marked **(planned)** are
 > designed but not implemented.
@@ -2523,7 +2523,7 @@ for that premise.
 
 ---
 
-## 4. Knowledge bases, the Ratchet baseline, and profile dumps
+## 4. Knowledge bases and the Ratchet baseline
 
 ### 4.1 Layer 1 (`kb/soundness/*.toml`, Soundness lane only)
 No advisory `effects` field at all: an entry has only `symbol`, `return_exact_type`,
@@ -2738,21 +2738,6 @@ an annotation, or a constructor call produces), and the `heki_kb` unit tests pin
   - a key whose current count **exceeds** the baseline **fails** (a new violation);
   - a key whose current count is **below** the baseline (or has disappeared) prints a note asking
     to shrink the file with `heki check --update-baseline`.
-
-### 4.4 Optional profile dumps (`heki_profile`)
-- **Offline reading only (the program is never run or touched)**: collapsed stacks (CPython 3.15
-  Tachyon `--collapsed`: `tid:N;file.py:func:line;... count`; py-spy: `func (file.py:line);...
-  count`) and Tachyon `--gecko` JSON are read into their distinct stacks and sample weights
-  (gecko samples summed per stack first; every table reference checked; a total that overflows
-  is a malformed dump); `heki check --profile` uses it to apply proven size-dependent rewrites in
-  hot functions.
-- **Attribution to project functions**: each frame counts for the one project function its name
-  (on a dotted boundary), file (on a path boundary), and line (inside the definition) can denote;
-  a frame several functions fit counts for none, so an ambiguous profile never promotes a fix.
-  A function's share is the weight of the stacks it is on, divided by the total weight.
-- **Constraints checked on real tools**: Tachyon on CPython 3.15 cannot combine `--opcodes` with
-  `--jsonl` (`--gecko` / `--binary` are needed), and macOS needs `sudo` to read another process's
-  memory. Profile integration is therefore never required, only an optional add-on for tuning.
 
 ---
 

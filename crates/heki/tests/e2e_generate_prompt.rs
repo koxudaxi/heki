@@ -699,8 +699,6 @@ fn the_prompt_writes_no_file_and_does_not_combine_with_the_options_that_do() {
         assert_eq!((code, out.as_str()), (2, ""), "{option}: {err}");
         assert!(err.contains("cannot be used with"), "{option}: {err}");
     }
-    let (code, _, err) = p.heki(&["check", "--profile", "x.collapsed", "--generate-prompt"]);
-    assert!(code == 2 && err.contains("cannot be used with"), "{err}");
     assert_eq!(tree(&p.dir), before);
     // A configuration error is an error, as for `heki check`.
     let (code, out, err) = p.heki(&["check", "--select", "NOPE1", "--generate-prompt"]);

@@ -255,6 +255,15 @@ that need no configuration, the import contracts of other tools, and heki's own 
 - **Decision**: ahead-of-time native extensions, build-time rewriting, and framework-specific
   heuristics are non-goals; profile integration is limited to reading offline dumps, without
   touching the program (an optional add-on).
+- **Amended in 0.2.8**: the optional add-on is removed (`heki check --profile` and the
+  `heki_profile` crate). A profile could only choose among the proven size-dependent rewrites the
+  run shows: on the development corpus (378 packages, 30.75 million lines) the default run of 0.2.6
+  had 3 such reports, and a run of every rule with `--heuristic` 85. Since 0.2.4 a proven rewrite
+  over a loop whose trip count the data does not decide is heuristic and not shown, so
+  `--fix --profile` skipped it even in a function on the stack in every sample: the README's own
+  `drain` example fixed nothing. The reader had no known user and nothing was built on it after
+  0.1.0, and `--include-size-dependent` applies the same rewrites in every function. heki still
+  never runs or instruments the program.
 
 <a id="adr-014"></a>
 ### ADR-014: Rule decisions from the Stage 0-A measurement (`MUT102` / `DATA102` rejected, SSA required for `DATA101`, strict `MUT101`)

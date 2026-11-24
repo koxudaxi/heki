@@ -141,8 +141,8 @@ by crate boundaries, carrying three rule families and a planned fourth, imports.
   pure Python is a premise).
 - **Framework-specific heuristics** (`__getattr__` proxies, Pydantic model construction,
   `-X importtime` tuning, and other application-architecture topics).
-- **Forcing profiler runs or instrumenting processes** (reading an existing profile dump is an
-  optional add-on).
+- **Profiler runs, profile dumps, or instrumenting processes** (the optional reader of recorded
+  dumps was removed in 0.2.8: ADR-013).
 - Changing CPython, its bytecode, or its VM; run-time hooks; being a judge for Ruff's unsafe
   fixes; a general type checker.
 
@@ -208,8 +208,7 @@ Automatic rewrites (family 3, `OPT`) are judged on two orthogonal axes: **behavi
   `OPT102` are heuristic, a run without configuration applies none (select them, or set
   `lint.heuristic = true`).
 - A `safe` but `size-dependent` fix is offered by default as a **suggestion proven to preserve
-  behavior**, and applied only with `--include-size-dependent`, or in functions an external
-  profile dump (`--profile`) shows hot.
+  behavior**, and applied only with `--include-size-dependent`.
 - Measured: the default `heki check --fix` applies very rarely (about 20 provable cases in 13.2
   million lines of mature code, 1 in 6.5 million lines of new code, 0 in datamodel-code-
   generator's 196,000 lines). heki's everyday CI value is in **family 1 (mutation, state, and
@@ -673,7 +672,6 @@ heki/
 │   ├── heki_soundness/         # Soundness lane (never depends on heki_effect, checked at compile time)
 │   ├── heki_effect/            # Advisory lane: call graph, EffectSummary, incremental ProjectIndex (Early Cutoff)
 │   ├── heki_rules/             # family 1 (MUT1xx / MUT2xx), family 2 (EFF / DATA), family 3 (OPT), rule docs
-│   ├── heki_profile/           # optional: reads profile dumps (collapsed stacks, Tachyon --gecko)
 │   ├── heki_diagnostics/       # full / concise / json / github / sarif, suppressions, line-number-independent Ratchet baseline
 │   ├── heki_lsp/               # incremental LSP server (tower-lsp): related call chains, code actions
 │   └── heki/                   # CLI (check / server [lsp] / rule [explain] / snapshot / assumptions)
@@ -732,7 +730,7 @@ heki/
 
 ---
 
-## 9. CLI, configuration, Ratchet baseline, and profile dumps (one interface with Ruff and `t-linter`)
+## 9. CLI, configuration, and Ratchet baseline (one interface with Ruff and `t-linter`)
 
 ### 9.1 Commands (exit codes: `0` clean or only warnings / `1` errors, and warnings with `--fail-on warning` / `2` configuration, I/O, or syntax errors)
 ```bash
@@ -748,7 +746,6 @@ heki check --color auto|always|never          # colored full / concise / --diff 
 heki check --baseline heki-baseline.toml      # Ratchet: more findings fail, fewer ask to shrink the file
 heki check --update-baseline                  # record a new baseline or shrink an existing one (growth is refused)
 heki check [PATHS...] --touched FILE...       # analyze PATHS, show and fail on the reports in FILEs or whose call chain reaches one
-heki check --profile dump.collapsed [PATHS]   # optional: rank fixes with a recorded profile dump
 heki check --watch [PATHS...]                 # re-check on file changes
 
 heki server                                   # incremental LSP server (alias: heki lsp)
@@ -824,10 +821,6 @@ message = "render entry points must not mutate model state"
   stay) and baseline entries that matched nothing, and `--fix` removes the codes;
   `lint.require-suppression-codes` reports a bare `# heki: ignore`. They are settings, not rules:
   the rules are the claims of the Effect & Alias theory about the code.
-- **Profile dumps**: running a program under a profiler costs overhead and permissions (macOS
-  needs `sudo` for Tachyon and `py-spy`), so it is never required. heki **reads dumps that were
-  already recorded** as an optional add-on: collapsed stacks (Tachyon `--collapsed`, `py-spy`)
-  and Tachyon `--gecko` JSON.
 
 ---
 
@@ -852,7 +845,7 @@ message = "render entry points must not mutate model state"
 | M3 | `heki_kb`: embedded Layer 1 / Layer 2 TOML with `deny_unknown_fields`, sentinel verification on CPython 3.11–3.15 |
 | M4 | `heki_effect`: call resolution, Tarjan SCC fixpoint of `EffectSummary`, Early Cutoff, offload wrappers, sync-over-async, boundary-only reporting |
 | M5 | `MUT101` / `MUT201` / `MUT202` / `EFF101`–`EFF103` / `EFF105` / `DATA101`, the CLI, output formats, suppressions, and the Ratchet baseline (datamodel-code-generator checked in 1.72 s) |
-| M6 | `heki_soundness`, the `OPT` rules, `--fix` / `--diff` / `--profile`, and `MUT103` snapshots; every counterexample blocked or disproved, zero unsafe rewrites in CPython differential tests |
+| M6 | `heki_soundness`, the `OPT` rules, `--fix` / `--diff`, and `MUT103` snapshots; every counterexample blocked or disproved, zero unsafe rewrites in CPython differential tests |
 | M7 | The incremental LSP server and `--watch` |
 | M8 | End-to-end test suite through the real binary and LSP process; 100% of reachable lines |
 | M9 | CI / release / documentation workflows and the user guide |

@@ -11,8 +11,7 @@ Checks membership tests against a list or tuple inside a loop, `e in lst`, where
 not change during the loop, and suggests building a `set` once before the loop.
 
 This is a size-dependent rewrite: it is reported as a suggestion and applied only with
-`heki check --fix --include-size-dependent`, or for functions that a `--profile` dump shows
-hot. Not reported:
+`heki check --fix --include-size-dependent`. Not reported:
 
 - small containers: at most 16 items that nothing grows, whatever the items are
   (`x in ("a", "b")`, `x in [b"1", b"2"]`, also through a name bound to one, a comprehension

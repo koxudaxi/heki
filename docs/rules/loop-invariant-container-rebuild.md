@@ -11,8 +11,7 @@ Checks loops that rebuild the same container on every iteration just to test mem
 `e in set(keys)` (also `list(...)`, `tuple(...)`, `dict(...)`), and suggests building it once
 before the loop.
 
-Size-dependent: applied only with `--fix --include-size-dependent` or in profiled hot
-functions.
+Size-dependent: applied only with `--fix --include-size-dependent`.
 
 ## What a report states
 
