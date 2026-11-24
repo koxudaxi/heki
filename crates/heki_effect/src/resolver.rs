@@ -530,6 +530,11 @@ pub struct ClassDecl {
     /// value.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stores_any_attr: bool,
+    /// One of those stores may add an attribute an instance did not have: its name is no key of
+    /// the namespace of an instance of the class or a subclass (a copy,
+    /// `self.__dict__.update(other.__dict__)`, [`ProjectDecls::keys_exist_in`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adds_unnamed_attrs: bool,
     /// The attributes the module's code rebinds to what an in-place operator gives on their own
     /// value (`self.items += [x]`), sorted: such a store binds the object it read when the
     /// attribute holds a value the operator changes in place ([`ProjectDecls::join_family`]).
@@ -1208,6 +1213,7 @@ impl ModuleDecls {
             class.attr_types.clear();
             class.attr_stores = Box::default();
             class.stores_any_attr = false;
+            class.adds_unnamed_attrs = false;
             class.restores_state = false;
             class.in_place_attrs = Box::default();
             class.attr_capacities.clear();
@@ -3507,10 +3513,11 @@ impl ProjectDecls {
         self.class(fqn).is_some()
     }
 
-    /// Whether the module of the project class `class` stores attributes of its instances that
-    /// heki cannot name (`setattr(self, name, v)`, `self.__dict__.update(other)`).
-    pub fn stores_unnamed_attrs(&self, class: &str) -> bool {
-        self.class(class).is_some_and(|c| c.stores_any_attr)
+    /// Whether the module of the project class `class` may add attributes heki cannot name to
+    /// its instances (`setattr(self, name, v)`, `self.__dict__.update(other)`), past the copies
+    /// of the namespaces of instances of the class family ([`ClassDecl::adds_unnamed_attrs`]).
+    pub fn adds_unnamed_attrs(&self, class: &str) -> bool {
+        self.class(class).is_some_and(|c| c.adds_unnamed_attrs)
     }
 
     /// The names the project class `class` declares itself: its members (class-body names and
@@ -4265,6 +4272,15 @@ impl ProjectDecls {
     /// Whether `sub` derives (transitively) from `base`, both canonical.
     pub(crate) fn is_subclass(&self, sub: &str, base: &str) -> bool {
         self.mro(sub).iter().skip(1).any(|c| c == base)
+    }
+
+    /// Whether a key of the namespace of an instance of the project class `source` names an
+    /// attribute an instance of the project class `class` may have already:
+    /// `source` is `class` or derives from it, so its instances hold only attributes of the
+    /// family of `class`, and a copy of such a namespace adds none.
+    pub(crate) fn keys_exist_in(&self, source: &str, class: &str) -> bool {
+        let (source, class) = (self.canonical(source), self.canonical(class));
+        source == class || self.is_subclass(&source, &class)
     }
 
     /// The method resolution order of `class`: Python's C3 linearization of its project bases;
@@ -6001,8 +6017,8 @@ fn attr_calls<'f>(
         Some(InstKind::Const {
             literal: ConstLiteral::Str(s),
             ..
-        }) => Some(s.clone()),
-        _ => None,
+        }) => stores::AttrName::Named(Cow::Owned(s.clone())),
+        _ => stores::AttrName::Unknown,
     };
     calls
         .iter()

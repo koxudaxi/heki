@@ -41,7 +41,9 @@ allowed writers:
   A `Final` name of a dataclass (or of a class a `dataclass_transform` builds) is a field, which
   each instance holds itself (`Keys("x").KEY`): it names an attribute only when read on the
   class object of a dataclass whose default no class along the way replaces (one with
-  `slots=True` or built by a transform);
+  `slots=True` or built by a transform); a name a loop takes from a tuple, list, or set of such
+  constants (`for key in ("fields", FIELDS_KEY): setattr(model, key, [])`) writes each of them,
+  when no code changes the list or set (`keys.append(name)` makes the name unknown);
 - into the entries of the container the attribute holds (`model.meta["kw"][name] = v`,
   `model.meta["kw"].append(v)`, through a local alias of the entry): an `item_mut` write;
 - through a helper that mutates the container or object it receives (`helper(model.fields)`),

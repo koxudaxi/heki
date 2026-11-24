@@ -375,7 +375,11 @@ the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores
 - **The stores.** `obj.attr = v`, `setattr(obj, "attr", v)`, `object.__setattr__(obj, "attr", v)`,
   `super().__setattr__("attr", v)`, the same calls through an alias (`_set = object.__setattr__`),
   and writes of the namespace (`obj.__dict__["attr"] = v`, `vars(obj).setdefault("attr", v)`).
-  The name may be a literal or a string constant of a module or a class (`KEY: Final`).
+  The name may be a literal or a string constant of a module or a class (`KEY: Final`), or one
+  of the string constants of the tuple, list, or set display a loop takes it from
+  (`for key in ("a", "b")`; a list or set only while nothing but loops, copies, and `list`,
+  `tuple`, `sorted`, or `dict` reads it), which stores each (`stores::key_name`, the one
+  decision of the names these stores and the ownership facts read).
 - **What a store binds.** A store of `None` adds nothing (a call on it raises). A store of a value
   of unknown type, or values no tracked type covers, leaves the name untyped. `obj.attr += v`
   binds what the operator gives on the attribute's own value: nothing new when the name holds a
@@ -390,6 +394,11 @@ the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores
   `__reduce__` / `__reduce_ex__` and no `__getstate__` building the state from anything but the
   instance's own attributes (`FunctionDecl::state_of_self`, which holds only when every
   definition of the method does).
+  A store under a key of the namespace of an instance of the class or a subclass
+  (`for key, value in other.__dict__.items()`, `vars(other)`, their keys, a `list`, `tuple`,
+  `sorted`, or copy of them, `update(other.__dict__)`) binds any value too, but adds no
+  attribute an instance did not have: only the others set `ClassDecl::adds_unnamed_attrs`,
+  which the unmatched contract entries read.
 - **Globals the module may rebind.** In a module whose globals `globals()` or `exec` may change,
   every store of a global binds a value of unknown type. A module-body store does too when a star
   import that runs (not one under `if TYPE_CHECKING:`) may bind the name after it: the store comes

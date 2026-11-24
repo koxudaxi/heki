@@ -347,7 +347,7 @@ changes meaning.
 | `contracts` | each contract candidate the block declares: its kind, what it is about, its entry, confidence, evidence, what the trial reported, and caveats |
 | `rejected_contracts` | the candidates a run reported for, with the run and its reports |
 | `contracts_not_tried` | per kind, the candidates past the trial's places (32 of each kind, the configuration's own `write-owners` contracts taking `write-owners` places), which no trial declared |
-| `unmatched_entries` | each entry of "Contract entries that match nothing": the contracts' kind, the key, the entry, the contracts holding it (a name, or `#` and its position), what it names none of, and the existing names like it |
+| `unmatched_entries` | each entry of "Contract entries that match nothing": the contracts' kind, the key, the entry, the contracts holding it (a name, or `#` and its position), what it names none of, the existing names like it, and `named_at_run_time` when its class family gets attributes named at run time (only with `unmatched-contract-entries = "error"`) |
 | `notes` | the notes |
 | `config`, `config_toml` | the keys to add or change, as keys and values and as TOML |
 | `content` | the report as the text output prints it |

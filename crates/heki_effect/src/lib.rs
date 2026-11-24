@@ -589,6 +589,11 @@ pub enum Unresolved {
     /// A computed attribute name written on an object of unknown class: any attribute of any
     /// class.
     Anything,
+    /// An attribute an instance of this project class (fqn) has already, written under a name
+    /// heki cannot read: removed (`del obj.__dict__[name]`), or copied from the namespace of an
+    /// instance of the class or a subclass (`for key, value in src.__dict__.items():
+    /// obj.__dict__[key] = value`). It adds no attribute.
+    Existing(String),
 }
 
 /// A read or a call heki cannot tie to a class (`MUT206`, `MUT207`): an attribute read, or a

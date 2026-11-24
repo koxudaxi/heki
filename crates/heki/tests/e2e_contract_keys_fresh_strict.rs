@@ -3516,6 +3516,144 @@ fn unlisted_dict_keys_on_objects_of_unknown_class_are_unresolved_writes() {
     assert_eq!(found(&diagnostics(&p, &[])), vec![listed]);
 }
 
+const COPY_STORE: &str = r#"from pkg.model import Field
+
+
+def copy_field(field: Field) -> Field:
+    new = Field()
+    for key, value in field.__dict__.items():
+        new.__dict__[key] = value
+    return new
+"#;
+
+const COPY_PASSES: &str = r#"from pkg.model import Field
+
+
+def copy_into(new: Field, field: Field) -> None:
+    for key, value in field.__dict__.items():
+        new.__dict__[key] = value
+
+
+def constants(new: Field) -> None:
+    for key in ("_type_cache", "_other_cache"):
+        new.__dict__[key] = None
+"#;
+
+/// A copy of the namespace of an instance writes the keys it has already, which `MUT205` judges
+/// as before with `unlisted-dict-keys = "report"`: none in an allowed writer, and elsewhere a
+/// write of an attribute named at run time, never one of an unlisted key. A key a loop takes from
+/// a tuple of string constants writes each of them: the target and the key no target names.
+#[test]
+fn a_copy_of_the_namespace_writes_no_unlisted_key() {
+    let p = Project::new("unlisted_keys_copy");
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT205\"]\n\n{}",
+            write_owner(
+                "caches",
+                "pkg.model.Field._type_cache",
+                "pkg.store:*",
+                "unlisted-dict-keys = \"report\"\nunresolved = \"report\"\n",
+            ),
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/model.py",
+        "class Field:\n    def __init__(self) -> None:\n        self.kind = \"str\"\n",
+    )
+    .write("pkg/store.py", COPY_STORE)
+    .write("pkg/passes.py", COPY_PASSES);
+    let u = "pkg/passes.py";
+    let diags = diagnostics(&p, &[]);
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(u, 6, "MUT205", "copy_into", "Field"),
+            d(u, 11, "MUT201", "constants", "Field._other_cache"),
+        ]
+    );
+    assert_eq!(
+        message_at(&diags, u, 6),
+        "`copy_into` writes an attribute named at run time (as a `__dict__` item) on `Field` outside the write owners of `caches`: heki cannot tell whether it writes `pkg.model.Field._type_cache`"
+    );
+    assert_eq!(
+        message_at(&diags, u, 11),
+        "`constants` writes `pkg.model.Field._other_cache` (as a `__dict__` item), a `__dict__` key no target names, outside the write owners of `caches` (also `pkg.model.Field._type_cache`)"
+    );
+}
+
+const CHANGED_DISPLAYS: &str = r#"from pkg.model import Field
+
+
+def grown(new: Field) -> None:
+    keys = ["kind"]
+    keys.append("_type_cache")
+    for key in keys:
+        setattr(new, key, None)
+
+
+def replaced(new: Field) -> None:
+    keys = ["_type_cache"]
+    keys[0] = "kind"
+    for key in keys:
+        setattr(new, key, None)
+
+
+def copied(new: Field) -> None:
+    keys = ["kind", "_type_cache"]
+    for key in list(keys):
+        setattr(new, key, None)
+
+
+def grown_on_one_path(new: Field, fresh: bool) -> None:
+    keys = ["kind"]
+    names = keys
+    if fresh:
+        names = []
+    names.append("_type_cache")
+    for key in keys:
+        setattr(new, key, None)
+"#;
+
+/// A key a loop takes from a list display names one of the display's constants only while
+/// nothing changes the list: a list that grows, also through a name that is the list on only
+/// one path, or has an item replaced, may hold any name (`MUT205`), not only those it was made
+/// with (a write of `_type_cache` the list no longer holds would be a false `MUT201`).
+#[test]
+fn a_list_display_the_code_changes_names_any_key() {
+    let p = Project::new("changed_display_keys");
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT205\"]\n\n{}",
+            write_owner(
+                "caches",
+                "pkg.model.Field._type_cache",
+                "pkg.store:*",
+                "unresolved = \"report\"\n",
+            ),
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/model.py",
+        "class Field:\n    def __init__(self) -> None:\n        self.kind = \"str\"\n",
+    )
+    .write("pkg/passes.py", CHANGED_DISPLAYS);
+    let u = "pkg/passes.py";
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![
+            d(u, 8, "MUT205", "grown", "Field"),
+            d(u, 15, "MUT205", "replaced", "Field"),
+            d(u, 21, "MUT201", "copied", "pkg.model.Field._type_cache"),
+            d(u, 31, "MUT205", "grown_on_one_path", "Field"),
+        ]
+    );
+}
+
 /// A star import binds the names its module exports, which heki does not read, so it may bind
 /// the name of any builtin: `len(globals())` may hand the dict to another `len` (the one
 /// `pkg.writer` defines), which may bind a name declared `Final`. That holds for a star import

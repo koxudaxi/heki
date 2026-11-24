@@ -381,8 +381,10 @@ class names the key, in this contract or in any other `write-owners` contract, s
 needs a target first. A target names the keys its attribute pattern matches (`Field._*` names
 `_cache`), and an entry target names its container. A key another contract names is that
 contract's to guard: its writes are judged by that contract's allowance alone. The contract's
-allowance applies to an unlisted key as to a target write. A key computed at run time has no name
-to check (`MUT205`, with `unresolved = "report"`), and neither has a write on an object heki
+allowance applies to an unlisted key as to a target write. A key a loop takes from a tuple,
+list, or set of string constants writes each of them. A key computed at run time has no name
+to check (`MUT205`, with `unresolved = "report"`), nor has a copy of the keys of an instance's
+namespace, whose keys exist already, and neither has a write on an object heki
 cannot type, a helper's parameter that no annotation types included: with `unresolved = "report"`
 too, `MUT205` reports such a key (below). A key every function may write is listed by a contract
 that allows every writer:
@@ -967,9 +969,18 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   class body binds (a method, an annotation, an assignment), one its methods or its module set
   on its instances, one of a project base, an attribute or a constant `__dict__` key the code
   writes or reads on an object typed with the class or a subclass, or one written on an object
-  heki cannot type. A class whose module stores attributes heki cannot name
-  (`setattr(self, name, v)`), or that the code gives a name computed at run time, may have any
-  attribute. An attribute that only a base outside the project defines matches when the code
+  heki cannot type. A key a loop takes from a tuple, list, or set of string constants
+  (`for key in ("_a", "_b")`) names each of them, a list or set only while no code changes it.
+  A class whose module stores attributes heki
+  cannot name (`setattr(self, name, v)`), or that the code gives a name computed at run time,
+  may have any attribute: an entry naming none of its known ones is not reported, except with
+  `unmatched-contract-entries = "error"`, as one that names nothing "unless it is one the code
+  names at run time". A key taken from the namespace of an instance of the class or a
+  subclass (`for key, value in other.__dict__.items()`, `.keys()`, iterating it or
+  `vars(other)`, also through `list`, `tuple`, `sorted`, or a copy, and
+  `obj.__dict__.update(other.__dict__)`) names an attribute the instance has already, as a
+  `__deepcopy__` copying it does, and a deletion adds none: neither gives the class a name.
+  An attribute that only a base outside the project defines matches when the code
   uses it on the class. An entry target (`Class.attr["key"]`) is judged by its attribute.
 - An entry whose last part is a glob is a rule about every name it may match, later ones
   included: it needs only what holds that part (`pkg.store` of `pkg.store:*`, the class of

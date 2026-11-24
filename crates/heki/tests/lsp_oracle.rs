@@ -6932,6 +6932,60 @@ fn lsp_diagnostics_equal_a_full_check_for_new_keys_on_objects_of_unknown_class()
     s.lsp.stop(true);
 }
 
+// ------------------------------------- `__dict__` keys a loop takes from a tuple of constants
+
+const TUPLE_KEYS_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201"]
+
+[[tool.heki.write-owners]]
+name = "caches"
+targets = ["pkg.model.Field._type_cache"]
+allowed-writers = ["pkg.store:*"]
+"#;
+
+const TUPLE_KEYS_KEYS: &str = "TYPE_KEY = \"_type_cache\"\nNAME_KEY = \"_name_cache\"\n";
+const TUPLE_KEYS_PASSES: &str = "from pkg.keys import NAME_KEY, TYPE_KEY\nfrom pkg.model import Field\n\n\ndef reset(field: Field) -> None:\n    for key in (TYPE_KEY, NAME_KEY):\n        field.__dict__[key] = None\n";
+
+/// A key a loop takes from a tuple of string constants another module defines writes each of
+/// them: the write of the target is reported, not once the constant names another key, and again
+/// when it names the target.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_keys_from_a_tuple_of_constants() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/keys.py", TUPLE_KEYS_KEYS.to_owned()),
+        ("pkg/model.py", "class Field:\n    pass\n".to_owned()),
+        ("pkg/passes.py", TUPLE_KEYS_PASSES.to_owned()),
+    ];
+    let mut s = Session::start_with("lsp_oracle_tuple_keys", TUPLE_KEYS_CONFIG, files, false);
+    let reported: &[(&str, &str)] = &[("pkg/passes.py", "MUT201")];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(reported),
+        Step::new(
+            "the constant names another key",
+            vec![save(
+                "pkg/keys.py",
+                &TUPLE_KEYS_KEYS.replace("\"_type_cache\"", "\"_kind_cache\""),
+            )],
+        )
+        .absent(reported),
+        Step::new(
+            "it names the target again",
+            vec![save("pkg/keys.py", TUPLE_KEYS_KEYS)],
+        )
+        .present(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
 // ------------------------------------------- a target whose attribute is renamed and back
 
 const RENAMED_TARGET_CONFIG: &str = r#"[project]

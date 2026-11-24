@@ -1458,6 +1458,10 @@
           "description": "The contracts' kind (`write-owners`).",
           "type": "string"
         },
+        "named_at_run_time": {
+          "description": "The class family gets attributes named at run time, which may include the entry's:\nheki cannot tell whether it names one (judged only with\n`unmatched-contract-entries = \"error\"`).",
+          "type": "boolean"
+        },
         "names_no": {
           "description": "What it names none of, in the words of the message (`function or method`).",
           "type": "string"
