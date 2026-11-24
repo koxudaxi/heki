@@ -5,6 +5,137 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
+## [0.4.0] - Unreleased
+
+### Breaking changes
+
+- `EFF111` (`async-possibly-blocking-call`) is now the heuristic tier of `EFF101`
+  (`async-blocking-call`), and `EFF113` (`loop-possible-db-query`) that of `EFF103`
+  (`loop-db-query`): each rule carries both tiers under one code with a certainty per report, as
+  `DATA101`, `MUT114`, and the `OPT` rewrite rules do. A report whose premises are all established
+  is exact; the others are heuristic and state the weaker claim ("can reach", "can run a query").
+  Until now a gain in precision moved a report from one code to the other, so an inline
+  suppression stopped matching it and a baseline counted it as new. The old codes are not kept:
+  `EFF111` or `EFF113` in `select`, `extend-select`, `ignore`, `per-file-ignores`, or `severity`
+  is an unknown rule (exit code 2), a `# heki: ignore[EFF111]` or `# noqa: EFF113` comment no
+  longer suppresses the report, and a baseline entry with `rule_code = "EFF111"` or `"EFF113"`
+  allows nothing: write `EFF101` for `EFF111` and `EFF103` for `EFF113` in the configuration, the
+  comments, and the baseline (or record it again). Naming `EFF101` or `EFF103` now shows its
+  heuristic reports too, as naming any exact rule does. JSON, SARIF, and GitHub output carry the
+  new code with `certainty = "heuristic"`. `heki recommend --output-format json` is version 2
+  (`recommend-2.json`): a rule's heuristic reports are counted under its own code, and the
+  `reported_as` field of a cause is gone. The default output is unchanged (heuristic reports are
+  not shown by default): on our corpus the default run is identical, and with
+  `--select ALL --heuristic` the reports are the same with the old codes read as the new ones.
+  (#355)
+- `EFF101` (`async-blocking-call`) is now an `error`: a call that blocks the event loop holds up
+  every other task while it waits, as the deadlock `EFF106` reports does. The rules that report
+  slower code (`EFF102`, `EFF103`, `EFF105`, `DATA101`, and the `OPT` rules) stay warnings. A
+  heuristic report no longer fails a run at the default `fail-on`, whatever its rule's severity:
+  it counts as a warning, because it can be wrong about the code. It keeps its rule's severity in
+  every output and in the SARIF level. `fail-on = "warning"` fails on warnings and heuristic
+  reports, as before, and is how a project makes its contracts (heuristic until certified) stop a
+  run. A Ratchet baseline keeps passing: only new failing reports are regressions.
+  `heki recommend` counts the reports that would make `heki check` fail
+  (`reports_now.failing` in `recommend-2.json`), says how to keep the run passing (a baseline or
+  `fail-on`), and recommends `EFF101` as a bug. ADR-019 is amended: only a certain bug that can
+  be critical fails a run. Exit code with no configuration: an exact `EFF101` report now exits 1,
+  and a heuristic report of an error rule (the heuristic tier of `EFF101`, `MUT114`, a contract
+  rule) now exits 0. On our corpus (364 packages analyzed) 36 packages exit 1 instead of 7 (29
+  newly, none fewer; the median newly failing package has 2 exact `EFF101` reports, the largest
+  13), with the same reports. With `--select ALL --heuristic`: 36 instead of 16 (27 more on exact
+  `EFF101`, 7 fewer whose only errors were heuristic `MUT114` or `MUT119` reports). (#360)
+- `[[tool.heki.import-owners]]` is now `[[tool.heki.import-boundaries]]` (`[[import-boundaries]]`
+  in a `heki.toml`), with the same keys: rename the table header, nothing else. A configuration
+  that still writes `import-owners` is a configuration error (exit 2) whose help names the new
+  table; there is no alias. The import contract is drawn around its `importers`, like
+  `effect-boundaries` around its `scopes`, while the `*-owners` contracts protect their `targets`.
+  `IMP201`'s rule name is now `import-boundary-violation`, and its page is
+  `rules/import-boundary-violation/`. (#376)
+- A run over given files (file PATHS, or `--touched`) reports and fails on the read and syntax
+  errors of those files only, as it does with diagnostics, and names the other files it could
+  not analyze in one note: a pre-commit run on one file no longer exits with 2 because a fixture
+  elsewhere in the project does not parse. A given file that does not parse still fails the run,
+  and a run over directories reports every file error and exits with 2 as before. A module a
+  given file imports does not count as given. A run that reports a file error, or that another
+  error fails without a diagnostic (a contract entry that matches nothing with
+  `unmatched-contract-entries = "error"`, a baseline entry that matches no report, a refused
+  baseline update), no longer prints "All checks passed": the summary counts the files that could
+  not be analyzed, or says that the errors above fail the run. A script that read the old summary
+  line or relied on exit code 2 for an unrelated file must change. (#378)
+
+### Changed
+
+- `EFF101`: a call of a helper whose library call depends on the helper's parameter is decided at
+  each call by the argument passed there, as the same call written inline is. It is exact when
+  the argument selects the wait: `nap(5)` over `time.sleep(seconds)`, `fetch("https://...")` over
+  `urllib.request.urlopen(url)`, and a connection opened on a file passed to a helper that
+  queries its `sqlite3.Connection` parameter, also through more helpers passing the parameter on.
+  It gives no heuristic report when the argument selects no wait: `nap(0)`,
+  `fetch("data:text/plain,hi")`, a connection to a database in memory, also for an omitted
+  parameter's literal default (#353). An argument heki cannot evaluate (an attribute, a constant
+  read from the environment) counts as one the call waits on (R6); one computed from the caller's
+  own parameter leaves the report heuristic. `EFF103` and `DATA101` read the same facts. The
+  default output gains exact `EFF101` reports where such a helper is called from an `async def`
+  (on our corpus 4 more of 248, each a real wait on the event loop). (#365, #368)
+- `EFF103` follows the rows a project function returns: a loop over what every `return` of a
+  function gives (the rows of a query it runs, or what another function of its module returns),
+  called directly, from another module, awaited, through `functools.partial`, or through an API
+  that hands back what a callable returns (`await asyncio.to_thread(list_authors, conn)`), is an
+  exact report when the inline loop is one. The rows a module global holds, a function returning
+  rows of a value another module gives it, and a helper calling itself are not followed. (#361)
+- A loop over rows whose number the query fixes is no longer an exact `EFF103` report: a `LIMIT`
+  with a literal count at the end of the statement, `fetchmany` of a constant, or a `SELECT` of
+  aggregates only without `GROUP BY` (#351). The size checks of `DATA101` and the `OPT` rules read
+  the same counts. (#361)
+- A call of a function annotated with a class gives what every `return` of it gives when that is
+  narrower than the annotation: a factory annotated `-> sqlite3.Connection` that opens a file
+  gives a connection on a file (exact `EFF101` at the calls on it, also through
+  `asyncio.to_thread`, `functools.partial`, and a module global bound to its result), one that
+  opens a database in memory gives none, and a factory annotated with a base class that returns
+  a subclass gives the subclass. A factory without a return annotation, and the literal a
+  function returns, are not followed. (#375)
+- A module constant bound to a path that names a file (`DB_PATH = Path(__file__).parent /
+  "app.db"`) names it where a function or another module reads it, unless another module rebinds
+  it (#352). (#375)
+- A key of another table written in a contract table (`targets` in
+  `[[tool.heki.import-boundaries]]`) also gets a help line with the keys that table takes (#372).
+  (#376)
+- `heki inspect`: the contracts section says what it lists, and lists the contracts the reports
+  shown with the function are of, with the role `reported` (#372). (#378)
+- `heki --help` opens with what heki is, as the README does, and describes `check` by what it
+  checks (#372). (#378)
+
+### Fixed
+
+- A comprehension or generator expression whose outermost iterable is `globals()` (`tuple(n for n
+  in globals() if ...)`) no longer makes every constant of its module unknown, as a `for` loop
+  over `globals()` never did: a module `__getattr__` that iterates its globals and caches what it
+  serves keeps its `Final` keys, so `__dict__` writes of them are reported under their names and
+  contract targets naming them match. A comprehension only iterates its outermost iterable, so a
+  key display, a copy (`MUT115`), or a list filled by appends that one iterates keeps what it
+  holds, also before Python 3.12, where these reports differed from 3.12 on. A comprehension whose
+  body changes the dict still may bind any name. (#356, #362)
+- `typing.cast` (and `typing_extensions.cast`) keeps the class its value is known to have, as an
+  annotated local does: `cast(Any, parser).imports.append(...)` and `cast("Any", parser)` are
+  read as calls on a `Parser`, so `MUT201`, `MUT203`, and `MUT204` see them; a cast types only a
+  value nothing else types (a parameter annotated `Any` stays unresolved). (#357, #364)
+- A method called on a `str`, `bytes`, `int`, `float`, or `bool` constant, or on a local or
+  module name bound only to constants, is no longer an unresolved call (`", ".join(xs)`,
+  `"  hi  ".strip()`, `sep = ", "; sep.join(xs)`, `b",".join(xs)`, `(42).bit_length()`): a
+  constant has its builtin class, as a display or an f-string does. `heki inspect` calls such
+  functions pure instead of unknown, and `heki recommend` no longer lists these calls among
+  what heki cannot see. `EFF112` (opt-in) now also reports a module `frozenset` of strings built
+  from a call of string constants (`frozenset(sorted(["a", "b"]))`). The default output is
+  unchanged on our corpus, by default and with `--select ALL --heuristic`. (#377)
+- `heki recommend`: the `effect-boundaries` scope it proposes for a package names the package's
+  own module as well as the modules below it (`scopes = ["ns:*", "ns.*:*"]`), also for a package
+  without an `__init__.py`: code added to `ns/__init__.py` later is inside the boundary (#371).
+  (#379)
+- `heki version --changelog` of a released binary dates its section: the release builds give the
+  tag's CHANGELOG section the publish date and the compare link the sync pull request gives it on
+  `main` (#373). (#379)
+
 ## [0.3.0] - 2026-11-24
 
 ### Breaking changes
@@ -2076,6 +2207,7 @@ The first public preview.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
+[0.4.0]: https://github.com/koxudaxi/heki/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/koxudaxi/heki/compare/v0.2.7...v0.3.0
 [0.2.7]: https://github.com/koxudaxi/heki/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/koxudaxi/heki/compare/v0.2.5...v0.2.6
