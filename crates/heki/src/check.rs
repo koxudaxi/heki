@@ -48,12 +48,9 @@ pub(crate) fn check_selectors(args: &CheckArgs) -> Selectors {
     }
 }
 
-/// Rule selection of a run (the command line over the config).
-pub(crate) fn selection(args: &AnalysisArgs, project: &Project) -> Result<RuleSelection> {
-    Ok(RuleSelection::resolve(
-        &project.env.cfg.lint,
-        &selectors(args),
-    )?)
+/// Rule selection of a run (the command line's `selectors` over the config).
+pub(crate) fn selection(selectors: &Selectors, project: &Project) -> Result<RuleSelection> {
+    Ok(RuleSelection::resolve(&project.env.cfg.lint, selectors)?)
 }
 
 /// `--fail-on` over `lint.fail-on`: the least severity whose reports make the run fail.
@@ -110,7 +107,7 @@ pub(crate) fn load(
         overrides,
         removed: None,
     })?;
-    let selection = RuleSelection::resolve(&project.env.cfg.lint, selectors)?;
+    let selection = selection(selectors, &project)?;
     let snapshot = snapshot_for(&selection, &project.env.root, format)?;
     Ok((project, selection, snapshot))
 }
