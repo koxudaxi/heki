@@ -69,14 +69,18 @@ merge of two baselines).
 
 ## pre-commit
 
-heki's checks follow calls across files, so the hook checks the whole project instead of the
-staged files only:
+The hook passes the staged Python files to `heki check --touched`. heki follows calls across files,
+so it still analyzes the whole project, but it shows and fails on only the reports in those files
+and the reports whose call chain reaches one of them: after a change to `app/users.py`, the
+`EFF101` in `app/api.py` that reaches the change through two helpers is shown, and old findings in
+files the commit left alone are not. A project can run the hook from its first commit, without a
+baseline.
 
 ```yaml
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.2.3
+    rev: v0.2.7
     hooks:
       - id: heki
 ```
@@ -101,10 +105,11 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
         hooks:
           - id: heki
             name: heki
-            entry: uvx heki check
+            entry: uvx heki check --touched
             language: system   # needs uv on PATH
             types: [python]
-            pass_filenames: false
+            pass_filenames: true
+            require_serial: true
     ```
 
 === "Without uv"
@@ -116,16 +121,25 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
         hooks:
           - id: heki
             name: heki
-            entry: heki check
+            entry: heki check --touched
             language: python
             additional_dependencies: [heki]
             types: [python]
-            pass_filenames: false
+            pass_filenames: true
+            require_serial: true
     ```
 
+pre-commit appends the files after the hook's `args`, so `--touched` comes last: options for the
+`heki` hook go before it (`args: [--fail-on, warning, --touched]`). To check the whole project on
+every commit instead, set `args: []` and `pass_filenames: false` on the hook, or drop `--touched`
+from a local hook's `entry` and set `pass_filenames: false`.
+
 The hook fails on errors and passes with warnings, which it prints. To make warnings fail it too,
-set `fail-on = "warning"` in `[tool.heki.lint]`, or add `--fail-on warning` to `entry`. With a
-baseline configured, the hook fails only on new findings.
+set `fail-on = "warning"` in `[tool.heki.lint]`, or add `--fail-on warning` before `--touched`.
+With a baseline configured, the hook fails only on new findings. A baseline entry counts every
+report of its key, so a run with `--touched` compares all of them, and judges the entries of the
+touched files and of the reports it shows: a grown entry fails the run when one of its reports
+touches a staged file, and a stale entry elsewhere is left to a run over the whole project.
 
 ## Continuous integration
 
@@ -151,6 +165,18 @@ Warnings become annotations without failing the step; `fail-on = "warning"` in
 In GitHub Actions (`GITHUB_ACTIONS=true`), `heki check` writes these annotations without
 `--output-format github`. To keep the text output there, pass `--output-format full`, or set
 `HEKI_OUTPUT_FORMAT` (any format) in the job's `env`: it applies whenever the option is not given.
+
+On a pull request, a project with old findings can report only what the change touches, as the
+pre-commit hook does (the checkout needs `fetch-depth: 0` for the base branch):
+
+```yaml
+- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' | xargs -0 -r uvx heki check --touched
+  env:
+    BASE: ${{ github.base_ref }}
+```
+
+`--diff-filter=d` leaves out deleted files, and `xargs -r` skips the run when no Python file
+changed.
 
 With SARIF:
 

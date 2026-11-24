@@ -6,8 +6,8 @@
 //! command writes no file and exits with 0 once the prompt is printed.
 
 use crate::check::{
-    baseline_path, fail_on, load_and_index, selectors, show_paths, shown_dir, shown_errors,
-    shown_text,
+    Touched, baseline_path, fail_on, load_and_index, selectors, show_paths, shown_dir,
+    shown_errors, shown_text,
 };
 use crate::{CheckArgs, JsonSchemaTarget, OutputFormat};
 use anyhow::Result;
@@ -97,6 +97,9 @@ struct Configuration {
     member_packages: Vec<String>,
     selection: Selection,
     baseline: Option<String>,
+    /// The analyzed files `--touched` names; absent without it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    touched: Option<Vec<String>>,
     /// Each contract key with its tables, each table with the keys it sets.
     contracts: BTreeMap<&'static str, Vec<Map<String, Value>>>,
 }
@@ -162,6 +165,11 @@ pub(crate) fn run(args: &CheckArgs, question: &str) -> Result<ExitCode> {
     if let Some(path) = &baseline {
         RatchetBaseline::load(path)?.keep_regressions(&mut diags, &baseline_key(&project.files));
     }
+    let touched = Touched::of(&args.touched, project);
+    if let Some(touched) = &touched {
+        touched.warn(args.output_format);
+        touched.keep(&mut diags);
+    }
     fold_root_causes(&mut diags);
     show_paths(&mut diags);
     let selection = &indexed.selection;
@@ -175,6 +183,7 @@ pub(crate) fn run(args: &CheckArgs, question: &str) -> Result<ExitCode> {
             &project.env,
             selection.heuristic(),
             baseline.as_deref(),
+            touched.as_ref(),
         ),
         rules: CORE_RULES
             .iter()
@@ -185,7 +194,7 @@ pub(crate) fn run(args: &CheckArgs, question: &str) -> Result<ExitCode> {
         diagnostics: Diagnostics::of(
             &diags,
             project.files.len(),
-            withheld.len(),
+            Touched::shown(touched.as_ref(), &withheld),
             shown_errors(&project.errors),
         ),
         guidance: GUIDANCE,
@@ -200,8 +209,15 @@ pub(crate) fn run(args: &CheckArgs, question: &str) -> Result<ExitCode> {
 
 impl Configuration {
     /// The configuration of `env` for the run of `args`, whose selection resolved
-    /// `lint.heuristic` to `heuristic` and which compares with `baseline`.
-    fn of(args: &CheckArgs, env: &ProjectEnv, heuristic: bool, baseline: Option<&Path>) -> Self {
+    /// `lint.heuristic` to `heuristic`, which compares with `baseline`, and which shows the
+    /// reports that touch `touched`.
+    fn of(
+        args: &CheckArgs,
+        env: &ProjectEnv,
+        heuristic: bool,
+        baseline: Option<&Path>,
+        touched: Option<&Touched>,
+    ) -> Self {
         Self {
             root: shown_dir(&env.root),
             config_file: env.config_file.as_deref().map(shown_text),
@@ -215,6 +231,7 @@ impl Configuration {
             },
             selection: Selection::of(args, env, heuristic),
             baseline: baseline.map(shown_text),
+            touched: touched.map(Touched::shown_files),
             contracts: contracts(&env.cfg),
         }
     }
@@ -354,11 +371,7 @@ impl Prompt {
         out.push('\n');
         write_configuration(&mut out, &self.configuration)?;
         write_rules(&mut out, &self.rules, &self.heuristic_rules_off);
-        write_diagnostics(
-            &mut out,
-            &self.diagnostics,
-            self.configuration.baseline.is_some(),
-        );
+        write_diagnostics(&mut out, &self.diagnostics, &self.configuration);
         out.push_str("\n## How to answer\n\n");
         for line in self.guidance {
             let _ = writeln!(out, "- {line}");
@@ -420,6 +433,12 @@ fn write_configuration(out: &mut String, c: &Configuration) -> Result<()> {
             )
         ),
     ]);
+    if let Some(touched) = &c.touched {
+        lines.push(format!(
+            "Touched files: {} (only the reports in one of them, or with a hop of their call chain in one, are shown)",
+            code_list(touched)
+        ));
+    }
     out.push_str("\n## Configuration\n\n");
     for line in lines {
         let _ = writeln!(out, "- {line}");
@@ -498,12 +517,15 @@ fn write_rules(out: &mut String, rules: &[AppliedRule], off: &[&str]) {
     }
 }
 
-fn write_diagnostics(out: &mut String, d: &Diagnostics, baseline: bool) {
+fn write_diagnostics(out: &mut String, d: &Diagnostics, c: &Configuration) {
     out.push_str("\n## Diagnostics\n\n");
-    let scope = if baseline {
-        ", among the reports the baseline does not allow"
-    } else {
-        ""
+    let scope = match (c.baseline.is_some(), c.touched.is_some()) {
+        (false, false) => "",
+        (true, false) => ", among the reports the baseline does not allow",
+        (false, true) => ", among the reports that touch the touched files",
+        (true, true) => {
+            ", among the reports the baseline does not allow that touch the touched files"
+        }
     };
     if d.total == 0 {
         let _ = writeln!(

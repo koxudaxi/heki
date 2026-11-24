@@ -2091,7 +2091,8 @@ a.py:6:12: unused-suppression No `EFF101` report on this line to suppress
 - A run judges what it reported, under its configuration: with `relax-async-in-tests`, a
   suppression of `EFF101` in a test suppresses nothing. A run over some files of a project misses
   the reports that come from the others (`heki check a.py` when the blocking call is in `b.py`),
-  so judge, and fix, on the whole project, as a pre-commit hook with `pass_filenames: false` does.
+  so judge, and fix, on the whole project: to look at some files, pass them to `--touched`, which
+  keeps the analysis whole, as the pre-commit hook does.
 - `heki check --fix` (and `--diff`) removes the unused codes, and the language server offers the
   same edit as a quick fix. The other codes stay; a suppression left without codes goes, with
   the blanks before it, and so does its line when the comment is alone on it. Other text of the
@@ -2377,14 +2378,18 @@ merge of two baselines).
 
 ## pre-commit
 
-heki's checks follow calls across files, so the hook checks the whole project instead of the
-staged files only:
+The hook passes the staged Python files to `heki check --touched`. heki follows calls across files,
+so it still analyzes the whole project, but it shows and fails on only the reports in those files
+and the reports whose call chain reaches one of them: after a change to `app/users.py`, the
+`EFF101` in `app/api.py` that reaches the change through two helpers is shown, and old findings in
+files the commit left alone are not. A project can run the hook from its first commit, without a
+baseline.
 
 ```yaml
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.2.3
+    rev: v0.2.7
     hooks:
       - id: heki
 ```
@@ -2409,10 +2414,11 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
         hooks:
           - id: heki
             name: heki
-            entry: uvx heki check
+            entry: uvx heki check --touched
             language: system   # needs uv on PATH
             types: [python]
-            pass_filenames: false
+            pass_filenames: true
+            require_serial: true
     ```
 
 === "Without uv"
@@ -2424,16 +2430,25 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
         hooks:
           - id: heki
             name: heki
-            entry: heki check
+            entry: heki check --touched
             language: python
             additional_dependencies: [heki]
             types: [python]
-            pass_filenames: false
+            pass_filenames: true
+            require_serial: true
     ```
 
+pre-commit appends the files after the hook's `args`, so `--touched` comes last: options for the
+`heki` hook go before it (`args: [--fail-on, warning, --touched]`). To check the whole project on
+every commit instead, set `args: []` and `pass_filenames: false` on the hook, or drop `--touched`
+from a local hook's `entry` and set `pass_filenames: false`.
+
 The hook fails on errors and passes with warnings, which it prints. To make warnings fail it too,
-set `fail-on = "warning"` in `[tool.heki.lint]`, or add `--fail-on warning` to `entry`. With a
-baseline configured, the hook fails only on new findings.
+set `fail-on = "warning"` in `[tool.heki.lint]`, or add `--fail-on warning` before `--touched`.
+With a baseline configured, the hook fails only on new findings. A baseline entry counts every
+report of its key, so a run with `--touched` compares all of them, and judges the entries of the
+touched files and of the reports it shows: a grown entry fails the run when one of its reports
+touches a staged file, and a stale entry elsewhere is left to a run over the whole project.
 
 ## Continuous integration
 
@@ -2459,6 +2474,18 @@ Warnings become annotations without failing the step; `fail-on = "warning"` in
 In GitHub Actions (`GITHUB_ACTIONS=true`), `heki check` writes these annotations without
 `--output-format github`. To keep the text output there, pass `--output-format full`, or set
 `HEKI_OUTPUT_FORMAT` (any format) in the job's `env`: it applies whenever the option is not given.
+
+On a pull request, a project with old findings can report only what the change touches, as the
+pre-commit hook does (the checkout needs `fetch-depth: 0` for the base branch):
+
+```yaml
+- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' | xargs -0 -r uvx heki check --touched
+  env:
+    BASE: ${{ github.base_ref }}
+```
+
+`--diff-filter=d` leaves out deleted files, and `xargs -r` skips the run when no Python file
+changed.
 
 With SARIF:
 
@@ -2979,6 +3006,9 @@ Options:
       --diff
           Preview fixes as a unified diff without writing files
 
+      --touched <FILE>...
+          Show, fix, and fail on only the diagnostics in one of these files or with a hop of their call chain (`related`) in one, such as the files a commit or a pull request changed; the analysis still covers PATHS (put PATHS before the option). A path that is not an analyzed file is named in a warning
+
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
 
@@ -3059,6 +3089,8 @@ Examples:
       check two directories
   heki check --select EFF,MUT101 --ignore OPT110
       choose the rules for one run
+  heki check --touched app/users.py app/api.py
+      analyze the project, report only what touches the two files (pre-commit, a pull request)
   heki check --diff
       show the fixes heki proves safe; `--fix` applies them
   heki check --baseline heki-baseline.toml --update-baseline
@@ -4177,10 +4209,18 @@ its callees do: run heki on the project (the default `.`).
 A diagnostic sits where the problem shows, which is often not the file that was edited. In the
 [first example](https://heki.koxudaxi.dev/#a-blocking-call-two-helpers-below-an-async-def) of the overview, adding
 `requests.get` to `app/users.py` makes `EFF101` report at `app/api.py`, in the `async def` that
-reaches it through two helpers. To find the diagnostics an edit caused, keep those whose `path`
-or any `related[].path` is an edited file: a filter on `path` alone drops the ones in callers'
-files. Or compare with the run before the edit: record the findings once in a baseline outside
-the project, and each check with it reports only the new ones.
+reaches it through two helpers. To see the diagnostics an edit can have caused, pass the edited
+files to `--touched`: heki still analyzes the project, and shows only the diagnostics whose `path`
+or any `related[].path` is one of them, so the report in `app/api.py` stays while `app/users.py`
+is the only edited file. The summary, the exit code, and every output format follow the
+diagnostics shown.
+
+```console
+$ heki check --touched app/users.py --output-format json
+```
+
+Or compare with the run before the edit: record the findings once in a baseline outside the
+project, and each check with it reports only the new ones.
 
 ```console
 $ heki check --baseline /tmp/heki-before.toml --update-baseline   # before the first edit
@@ -4191,16 +4231,16 @@ $ heki check --baseline /tmp/heki-before.toml --output-format json   # after eac
 
 A typical instruction for the agent:
 
-> After changing Python files, run `heki check --output-format json` on the project. Act on the
-> diagnostics whose `path` or a `related[].path` is a file you changed. For each, read its `help`
-> and `heki rule <rule_code>`, follow `related` to the root cause, and fix it there. A
-> diagnostic whose `certainty` is `heuristic` can be wrong about the code: confirm what its
-> message says before changing anything. Apply `heki check --fix` for the safe rewrites. Never
-> silence a diagnostic with `# heki: ignore` unless the rule's documentation describes the case
-> as intended. When unsure, run `heki check --generate-prompt "<question>"`.
+> After changing Python files, run `heki check --touched <the files you changed> --output-format
+> json` in the project: it shows the diagnostics whose `path` or a `related[].path` is a file you
+> changed. For each, read its `help` and `heki rule <rule_code>`, follow `related` to the root
+> cause, and fix it there. A diagnostic whose `certainty` is `heuristic` can be wrong about the
+> code: confirm what its message says before changing anything. Apply `heki check --fix` for the
+> safe rewrites. Never silence a diagnostic with `# heki: ignore` unless the rule's documentation
+> describes the case as intended. When unsure, run `heki check --generate-prompt "<question>"`.
 
 ```console
-$ heki check --output-format json
+$ heki check --touched app/users.py app/api.py --output-format json
 ```
 
 The configuration decides which rules run; `--heuristic` also runs the heuristic rules that are

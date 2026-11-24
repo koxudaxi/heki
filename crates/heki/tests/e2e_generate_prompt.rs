@@ -583,6 +583,85 @@ fn a_baseline_withheld_heuristic_reports_and_files_heki_cannot_parse_are_said() 
     );
 }
 
+#[test]
+fn a_touched_run_holds_the_reports_that_touch_the_files() {
+    let p = Project::new("prompt_touched");
+    p.write("app/__init__.py", "")
+        .write(
+            "app/slow.py",
+            "import time\n\n\ndef load():\n    time.sleep(1)\n",
+        )
+        .write(
+            "app/api.py",
+            "from app.slow import load\n\n\nasync def handler():\n    load()\n",
+        )
+        .write(
+            "app/jobs.py",
+            "import time\n\n\nasync def tick():\n    time.sleep(1)\n",
+        );
+    let args = ["--touched", "app/slow.py", "gone.py", "--generate-prompt"];
+    let (code, text, err) = p.heki(&[&["check"][..], &args[..]].concat());
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        err.matches("warning: `--touched` names 1 path(s)").count(),
+        1,
+        "{err}"
+    );
+    let configuration = section(&text, "Configuration");
+    assert!(
+        configuration.contains(
+            "- Touched files: `app/slow.py` (only the reports in one of them, or with a hop of their call chain in one, are shown)\n"
+        ),
+        "{configuration}"
+    );
+    let shown = concise(&p, &["--touched", "app/slow.py"]);
+    assert!(
+        shown.len() == 1 && shown[0].starts_with("app/api.py:5:5: EFF101 "),
+        "{shown:?}"
+    );
+    let diagnostics = section(&text, "Diagnostics");
+    assert!(
+        diagnostics.starts_with(&format!(
+            "`heki check` reported 1 diagnostic(s) in 4 file(s), among the reports that touch \
+             the touched files:\n\n```text\n{}\n```\n",
+            shown[0]
+        )),
+        "{diagnostics}"
+    );
+    let object = prompt_json(&p, &args);
+    assert_eq!(object["configuration"]["touched"], json!(["app/slow.py"]));
+    assert_eq!(object["diagnostics"]["total"], 1);
+    assert_eq!(object["diagnostics"]["shown"][0]["path"], "app/api.py");
+    let whole = prompt_json(&p, &["--generate-prompt"]);
+    assert!(whole["configuration"].get("touched").is_none(), "{whole:#}");
+    assert_eq!(whole["diagnostics"]["total"], 2);
+    // With a baseline, the reports it does not allow among those that touch the files.
+    let (code, _, err) = p.heki(&["check", "--baseline", "b.toml", "--update-baseline"]);
+    assert_eq!(code, 0, "{err}");
+    p.write(
+        "app/more.py",
+        "from app.slow import load\n\n\nasync def more():\n    load()\n",
+    );
+    let text = prompt(
+        &p,
+        &[
+            "--baseline",
+            "b.toml",
+            "--touched",
+            "app/slow.py",
+            "--generate-prompt",
+        ],
+    );
+    let diagnostics = section(&text, "Diagnostics");
+    assert!(
+        diagnostics.starts_with(
+            "`heki check` reported 1 diagnostic(s) in 5 file(s), among the reports the baseline \
+             does not allow that touch the touched files:\n\n```text\napp/more.py:5:5: EFF101 "
+        ),
+        "{diagnostics}"
+    );
+}
+
 /// Every file below `dir` with its contents.
 fn tree(dir: &std::path::Path) -> BTreeSet<(String, Vec<u8>)> {
     let mut out = BTreeSet::new();

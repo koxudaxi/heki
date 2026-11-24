@@ -13,10 +13,18 @@ its callees do: run heki on the project (the default `.`).
 A diagnostic sits where the problem shows, which is often not the file that was edited. In the
 [first example](index.md#a-blocking-call-two-helpers-below-an-async-def) of the overview, adding
 `requests.get` to `app/users.py` makes `EFF101` report at `app/api.py`, in the `async def` that
-reaches it through two helpers. To find the diagnostics an edit caused, keep those whose `path`
-or any `related[].path` is an edited file: a filter on `path` alone drops the ones in callers'
-files. Or compare with the run before the edit: record the findings once in a baseline outside
-the project, and each check with it reports only the new ones.
+reaches it through two helpers. To see the diagnostics an edit can have caused, pass the edited
+files to `--touched`: heki still analyzes the project, and shows only the diagnostics whose `path`
+or any `related[].path` is one of them, so the report in `app/api.py` stays while `app/users.py`
+is the only edited file. The summary, the exit code, and every output format follow the
+diagnostics shown.
+
+```console
+$ heki check --touched app/users.py --output-format json
+```
+
+Or compare with the run before the edit: record the findings once in a baseline outside the
+project, and each check with it reports only the new ones.
 
 ```console
 $ heki check --baseline /tmp/heki-before.toml --update-baseline   # before the first edit
@@ -27,16 +35,16 @@ $ heki check --baseline /tmp/heki-before.toml --output-format json   # after eac
 
 A typical instruction for the agent:
 
-> After changing Python files, run `heki check --output-format json` on the project. Act on the
-> diagnostics whose `path` or a `related[].path` is a file you changed. For each, read its `help`
-> and `heki rule <rule_code>`, follow `related` to the root cause, and fix it there. A
-> diagnostic whose `certainty` is `heuristic` can be wrong about the code: confirm what its
-> message says before changing anything. Apply `heki check --fix` for the safe rewrites. Never
-> silence a diagnostic with `# heki: ignore` unless the rule's documentation describes the case
-> as intended. When unsure, run `heki check --generate-prompt "<question>"`.
+> After changing Python files, run `heki check --touched <the files you changed> --output-format
+> json` in the project: it shows the diagnostics whose `path` or a `related[].path` is a file you
+> changed. For each, read its `help` and `heki rule <rule_code>`, follow `related` to the root
+> cause, and fix it there. A diagnostic whose `certainty` is `heuristic` can be wrong about the
+> code: confirm what its message says before changing anything. Apply `heki check --fix` for the
+> safe rewrites. Never silence a diagnostic with `# heki: ignore` unless the rule's documentation
+> describes the case as intended. When unsure, run `heki check --generate-prompt "<question>"`.
 
 ```console
-$ heki check --output-format json
+$ heki check --touched app/users.py app/api.py --output-format json
 ```
 
 The configuration decides which rules run; `--heuristic` also runs the heuristic rules that are

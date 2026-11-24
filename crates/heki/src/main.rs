@@ -154,6 +154,17 @@ struct CheckArgs {
     /// Preview fixes as a unified diff without writing files.
     #[arg(long)]
     diff: bool,
+    /// Show, fix, and fail on only the diagnostics in one of these files or with a hop of their
+    /// call chain (`related`) in one, such as the files a commit or a pull request changed; the
+    /// analysis still covers PATHS (put PATHS before the option). A path that is not an analyzed
+    /// file is named in a warning.
+    #[arg(
+        long,
+        value_name = "FILE",
+        num_args = 1..,
+        conflicts_with_all = ["watch", "update_baseline"]
+    )]
+    touched: Vec<PathBuf>,
     #[command(flatten)]
     analysis: AnalysisArgs,
     /// Exit with code 1 on reports of this severity or higher: `error` (the default), or
