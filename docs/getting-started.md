@@ -31,8 +31,9 @@ false ([Rule Precision](precision.md#certifications)). Without configuration, it
 <!-- End of the generated default-rules. -->
 
 `MUT101`, `MUT111`, and the size-dependent `OPT` rules (`OPT103`, `OPT110`, `OPT111`, `OPT120`,
-`OPT121`, `OPT130`) are exact too, but run only when `extend-select` names them: their reports
-were rarely harmful ([Rule Precision](precision.md)).
+`OPT121`, `OPT130`) are exact too, but run only when `select` or `extend-select` names them (in `pyproject.toml` or on the command
+line, by code or name), or, for the five with a rewrite (not `OPT103`), when
+`--include-size-dependent` is given: their reports were rarely harmful ([Rule Precision](precision.md)).
 
 A report of an exact rule that did not establish every premise of its claim, such as an `OPT`
 rewrite heki could not prove safe, is heuristic. A text run says how many heuristic rules and

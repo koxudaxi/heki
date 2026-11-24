@@ -954,8 +954,9 @@ false ([Rule Precision](https://heki.koxudaxi.dev/precision/#certifications)). W
 - [`OPT113` (nested-loop-equijoin)](https://heki.koxudaxi.dev/rules/nested-loop-equijoin/)
 
 `MUT101`, `MUT111`, and the size-dependent `OPT` rules (`OPT103`, `OPT110`, `OPT111`, `OPT120`,
-`OPT121`, `OPT130`) are exact too, but run only when `extend-select` names them: their reports
-were rarely harmful ([Rule Precision](https://heki.koxudaxi.dev/precision/)).
+`OPT121`, `OPT130`) are exact too, but run only when `select` or `extend-select` names them (in `pyproject.toml` or on the command
+line, by code or name), or, for the five with a rewrite (not `OPT103`), when
+`--include-size-dependent` is given: their reports were rarely harmful ([Rule Precision](https://heki.koxudaxi.dev/precision/)).
 
 A report of an exact rule that did not establish every premise of its claim, such as an `OPT`
 rewrite heki could not prove safe, is heuristic. A text run says how many heuristic rules and
@@ -2472,7 +2473,9 @@ $ heki check --fix --include-size-dependent      # also the proven-safe size-dep
 ```
 
 - A fix comes with a report: `--fix` applies only the fixes of the reports shown. A report whose
-  rewrite heki proves safe is [exact](https://heki.koxudaxi.dev/precision/#certifications), and `OPT101` and `OPT102`
+  rewrite heki proves safe has a safe fix, and it is [exact](https://heki.koxudaxi.dev/precision/#certifications) only
+  when its other premises hold too: an `OPT120` report in a `while` loop is heuristic even when
+  its rewrite is proven safe, because the loop's trip count is open. `OPT101` and `OPT102`
   run by default, so a run without configuration applies their fixes. Over another loop than one
   the data sizes, an `OPT101` or `OPT102` rewrite is heuristic, and its fix applies with
   `--heuristic` or when its rule is selected.
@@ -2480,9 +2483,10 @@ $ heki check --fix --include-size-dependent      # also the proven-safe size-dep
   opt-in: their rewrites are proven, but the loops they report were rarely large enough to matter
   ([Rule precision](https://heki.koxudaxi.dev/precision/#certifications)).
 - `--include-size-dependent` runs the size-dependent rules with a rewrite (`OPT110`, `OPT111`,
-  `OPT120`, `OPT121`, `OPT130`), as if `extend-select` named them, and applies their proven
-  rewrites in every function, also over a loop whose trip count the data does not decide. After
-  the fixes, the run lists their reports it could not rewrite, each with the obligation that
+  `OPT120`, `OPT121`, `OPT130`; not `OPT103`, which has no rewrite), as if `extend-select`
+  named them. The flag alone changes no file: with `--fix` it applies their proven
+  rewrites in every function (with `--diff`, it shows them), also over a loop whose trip count
+  the data does not decide. After the fixes, the run lists their reports it could not rewrite, each with the obligation that
   blocks it.
 - `--diff` takes the same flags as `--fix` and writes nothing.
 - With `--touched`, or files given as paths, `--fix` and `--diff` rewrite only those files. A
@@ -2853,7 +2857,7 @@ For custom tooling, `--output-format json` gives every field: see
     | [`MUT103`](https://heki.koxudaxi.dev/rules/summary-effect-regression/) | heuristic | library APIs (with [effect snapshots](https://heki.koxudaxi.dev/adoption/#effect-snapshots-mut103)) |
     | [`MUT106`](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) | heuristic | code that passes iterators and generators around |
     | [`MUT108`](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) | heuristic | code that relies on frozen dataclasses and `ReadOnly` fields |
-    | `OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | exact | loops over large inputs; `--include-size-dependent` runs the ones with a rewrite and applies it |
+    | `OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | exact | loops over large inputs; `--include-size-dependent` runs all of them except `OPT103` (which has no rewrite), and `--fix` then applies the rewrites |
 
 5. Use `per-file-ignores` rather than broad `ignore` lists, so new code stays covered.
 
@@ -2864,8 +2868,11 @@ exact ones that are not opt-in do ([Getting Started](https://heki.koxudaxi.dev/g
 
 - `lint.heuristic = true` restores the rules of 0.1, now labelled `heuristic` in every output,
   except the size-dependent `OPT` rules, which are opt-in since 0.3.0: name them in
-  `extend-select` (`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`).
-- A baseline keeps its entries: their keys (file, function, rule, target) do not change.
+  `extend-select` or `--select`, or pass `--include-size-dependent` for all but `OPT103` (`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`).
+- A baseline keeps its entries: their keys (file, function, rule, target) do not change, with one
+  exception. `MUT109` is now `MUT208` and the old code is no alias, so an entry with rule `MUT109`
+  no longer matches: its report counts as a regression. Change `rule_code = "MUT109"` to
+  `"MUT208"` in those entries, or record the baseline anew.
 - `heki check --fix` applies the proven fixes of `OPT101` and `OPT102` by default, as in 0.1.
 
 ## Effect snapshots (`MUT103`)

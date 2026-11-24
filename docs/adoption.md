@@ -228,7 +228,7 @@ For custom tooling, `--output-format json` gives every field: see
     | [`MUT103`](rules/summary-effect-regression.md) | heuristic | library APIs (with [effect snapshots](#effect-snapshots-mut103)) |
     | [`MUT106`](rules/iterator-double-consumption.md) | heuristic | code that passes iterators and generators around |
     | [`MUT108`](rules/readonly-type-mutation.md) | heuristic | code that relies on frozen dataclasses and `ReadOnly` fields |
-    | `OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | exact | loops over large inputs; `--include-size-dependent` runs the ones with a rewrite and applies it |
+    | `OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | exact | loops over large inputs; `--include-size-dependent` runs all of them except `OPT103` (which has no rewrite), and `--fix` then applies the rewrites |
 
 5. Use `per-file-ignores` rather than broad `ignore` lists, so new code stays covered.
 
@@ -239,8 +239,11 @@ exact ones that are not opt-in do ([Getting Started](getting-started.md#run-it) 
 
 - `lint.heuristic = true` restores the rules of 0.1, now labelled `heuristic` in every output,
   except the size-dependent `OPT` rules, which are opt-in since 0.3.0: name them in
-  `extend-select` (`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`).
-- A baseline keeps its entries: their keys (file, function, rule, target) do not change.
+  `extend-select` or `--select`, or pass `--include-size-dependent` for all but `OPT103` (`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`).
+- A baseline keeps its entries: their keys (file, function, rule, target) do not change, with one
+  exception. `MUT109` is now `MUT208` and the old code is no alias, so an entry with rule `MUT109`
+  no longer matches: its report counts as a regression. Change `rule_code = "MUT109"` to
+  `"MUT208"` in those entries, or record the baseline anew.
 - `heki check --fix` applies the proven fixes of `OPT101` and `OPT102` by default, as in 0.1.
 
 ## Effect snapshots (`MUT103`)
