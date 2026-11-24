@@ -71,6 +71,10 @@ Each diagnostic has:
 
 A text run ends with one line per reported rule: `heki rule <CODE>` and the rule's page.
 
+The run exits with 1 when it shows an exact `error`, a bug that can be critical, or with
+`fail-on = "warning"` any report: a heuristic report counts as a warning, whatever its
+`severity`.
+
 When the run cannot check (exit code 2: a configuration, path, or file error), the error says
 where the cause is, what to write instead, and which section of the documentation explains it.
 With `--output-format json`, an error that stops the run (the configuration or a path) is an
@@ -113,10 +117,16 @@ Do not describe the architecture in the project's `AGENTS.md` or `CLAUDE.md`. De
 > Do not edit the contracts or the baseline, and do not add a suppression, unless the maintainer
 > asks.
 
-The `message` of a contract is what the agent reads as the fix, so write it as an instruction:
+The `message` of a contract is what the agent reads as the fix, so write it as an instruction.
+Contract reports are heuristic, and a heuristic report fails a run only with
+`fail-on = "warning"`: set it with the contracts, so that `heki check` exits with 1 on a crossed
+wall.
 
 ```toml
 # heki.toml
+[lint]
+fail-on = "warning"
+
 [[write-owners]]
 name = "generation-store"
 targets = ["pkg.model.DataModel.fields"]
@@ -124,18 +134,18 @@ allowed-writers = ["Store.*"]
 message = "use GenerationStore.set_fields() instead"
 ```
 
-Put the contracts and the baseline path in `heki.toml`, and give that file an owner (`CODEOWNERS`,
-or the host's rule for protected files). A change to a wall is then a reviewed change, and an agent
-cannot move a wall to make a report go away.
+Put the contracts, `fail-on`, and the baseline path in `heki.toml`, and give that file an owner
+(`CODEOWNERS`, or the host's rule for protected files). A change to a wall is then a reviewed
+change, and an agent cannot move a wall to make a report go away.
 
 ### A Stop hook for Claude Code
 
 A [Stop hook](https://code.claude.com/docs/en/hooks) runs when Claude Code is about to end its turn.
-The script below runs `heki check` and, when it exits with 1 (findings), sends the text to the agent
-and keeps it working. Exit code 2 of the hook means "block, and read stderr". heki's own failure (exit
-code 2, or no `heki` on the path) lets the turn end, so a configuration error does not loop. The hook
-input has `stop_hook_active`, which is `true` while Claude Code is already continuing because of a
-stop hook; the script stops blocking then.
+The script below runs `heki check` and, when it exits with 1 (findings that fail the run), sends
+the text to the agent and keeps it working. Exit code 2 of the hook means "block, and read
+stderr". heki's own failure (exit code 2, or no `heki` on the path) lets the turn end, so a
+configuration error does not loop. The hook input has `stop_hook_active`, which is `true` while
+Claude Code is already continuing because of a stop hook; the script stops blocking then.
 
 ```sh
 #!/bin/sh

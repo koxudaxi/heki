@@ -152,7 +152,15 @@ fn the_class_a_function_binds_is_a_class_of_the_module() {
         .write("pkg/__init__.py", "")
         .write("pkg/config.py", REPRO_MODULE)
         .write("pkg/use.py", REPRO_USE);
-    let (code, stdout, stderr) = p.heki(&["check", "--output-format", "json", "."]);
+    // The contract's report is heuristic: it fails the run at `fail-on = "warning"`.
+    let (code, stdout, stderr) = p.heki(&[
+        "check",
+        "--fail-on",
+        "warning",
+        "--output-format",
+        "json",
+        ".",
+    ]);
     assert_eq!(code, 1, "{stdout}\n{stderr}");
     assert!(!stderr.contains("names no"), "{stderr}");
     let reports: Value = serde_json::from_str(&stdout).unwrap();
@@ -474,10 +482,10 @@ def _define(engine: Engine):
 _define(Engine())
 "#,
         );
-    let (code, stdout, stderr) = p.heki(&["check", "."]);
+    let (code, stdout, stderr) = p.heki(&["check", "--fail-on", "warning", "."]);
     assert_eq!(code, 0, "{stdout}\n{stderr}");
     p.write("pyproject.toml", &config("pkg.base:Engine"));
-    let (code, stdout, stderr) = p.heki(&["check", "."]);
+    let (code, stdout, stderr) = p.heki(&["check", "--fail-on", "warning", "."]);
     assert_eq!(code, 1, "{stdout}\n{stderr}");
     assert!(
         stdout.contains("`_define` calls `pkg.base.Engine._run` outside the call owners"),
@@ -515,7 +523,7 @@ class A:
             value = (lambda: Engine()._run())()
 "#,
     );
-    let (code, stdout, stderr) = p.heki(&["check", "."]);
+    let (code, stdout, stderr) = p.heki(&["check", "--fail-on", "warning", "."]);
     assert_eq!(code, 1, "{stdout}\n{stderr}");
     assert!(
         stdout.contains("`<module>` calls `pkg.base.Engine._run` outside the call owners"),

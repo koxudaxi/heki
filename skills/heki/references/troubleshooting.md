@@ -14,8 +14,8 @@ interpreter to run.
 
 ## What the exit code says
 
-`0`: nothing fails the run. `1`: a diagnostic fails it (an `error`, or a `warning` with
-`--fail-on warning`); the output lists it. `2`: a configuration, I/O, or syntax error (below).
+`0`: nothing fails the run. `1`: a diagnostic fails it (an exact `error`, or any diagnostic with
+`--fail-on warning`: a heuristic one counts as a warning); the output lists it. `2`: a configuration, I/O, or syntax error (below).
 
 ## A diagnostic disappears when a directory is checked
 

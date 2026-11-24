@@ -2,7 +2,7 @@
 
 # async-possibly-blocking-call (EFF111)
 
-Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `error` (a bug) · No automatic fix
 
 Heuristic sibling of `EFF101`: a call in `async def` that can reach a blocking call on the event loop.
 

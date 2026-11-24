@@ -136,7 +136,7 @@ fn a_file_outside_any_project_is_analyzed_alone() {
     let (code, sites, stderr) = concise_in(&dir, &["a.py", "tool"]);
     assert_eq!(
         (code, sites),
-        (0, vec!["a.py:5:5".into(), "tool:5:5".into()]),
+        (1, vec!["a.py:5:5".into(), "tool:5:5".into()]),
         "{stderr}"
     );
     assert!(

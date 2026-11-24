@@ -23,7 +23,7 @@ use crate::project::{
 use crate::selection::{RuleSelection, SelectionError, Selectors};
 use crate::{CORE_RULES, Certainty, RuleConfigError, SummarySnapshot, fold_root_causes};
 use heki_diagnostics::{Diagnostic, RatchetBaseline};
-use heki_env::{ConfigLayout, HekiConfig, LintConfig};
+use heki_env::{ConfigLayout, HekiConfig, LintConfig, Severity};
 use rustc_hash::FxHashSet;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -221,6 +221,10 @@ pub struct ReportsNow {
     pub heuristic_rules_off: usize,
     /// With a baseline: the reports it allows, and the regressions `heki check` prints.
     pub baseline: Option<BaselineSplit>,
+    /// The reports `heki check` judges, those shown or with a baseline the regressions, that
+    /// make it fail (exit code 1) at the configuration's `fail-on`: the exact errors, or every
+    /// one at `fail-on = "warning"`.
+    pub failing: usize,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -275,7 +279,8 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         files: files_analyzed,
         discovery: &diags,
     });
-    let reports_now = reports_now(&current, baseline.as_ref(), files_analyzed, &diags);
+    let fail_on = discovery.project.env.cfg.lint.fail_on_severity();
+    let reports_now = reports_now(&current, baseline.as_ref(), files_analyzed, &diags, fail_on);
     let configured_now = contracts::configured_reports(&discovery.project.env.cfg, &diags);
     drop(diags);
     let env = &discovery.project.env;
@@ -386,6 +391,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     if left_out.python_files > 0 || left_out.truncated {
         notes.push(left_out_note(&left_out));
     }
+    notes.extend(exit_notes(&reports_now, fail_on));
     notes.extend(blind_spots::notes(&blind_spots, &trial));
     notes.extend(section.notes());
     if unverified {
@@ -508,12 +514,14 @@ fn additions(
     }
 }
 
-/// The discovery run's reports that `current` shows, counted as `heki check` prints them.
+/// The discovery run's reports that `current` shows, counted as `heki check` prints them, and
+/// judged at `fail_on`.
 fn reports_now(
     current: &RuleSelection,
     baseline: Option<&RatchetBaseline>,
     files: &[ParsedFile],
     diags: &[Diagnostic],
+    fail_on: Severity,
 ) -> ReportsNow {
     let mut now: Vec<Diagnostic> = diags
         .iter()
@@ -521,6 +529,8 @@ fn reports_now(
         .cloned()
         .collect();
     let withheld_heuristic = current.withhold_heuristic(&mut now);
+    let failing = |judged: &[Diagnostic]| judged.iter().filter(|d| d.fails_run(fail_on)).count();
+    let mut judged_failing = None;
     let baseline = baseline.map(|baseline| {
         let regressed = regressed(baseline, &now, files);
         let (regressions, allowed): (Vec<_>, Vec<_>) = now
@@ -529,9 +539,11 @@ fn reports_now(
             .zip(regressed)
             .partition(|(_, regressed)| *regressed);
         let printed = |split: Vec<(Diagnostic, bool)>| printed(split.into_iter().map(|(d, _)| d));
+        let regressions = printed(regressions);
+        judged_failing = Some(failing(&regressions));
         BaselineSplit {
             allowed: printed(allowed).len(),
-            regressions: printed(regressions).len(),
+            regressions: regressions.len(),
         }
     });
     let shown = printed(now);
@@ -546,7 +558,35 @@ fn reports_now(
         withheld_heuristic,
         heuristic_rules_off: current.heuristic_off().len(),
         baseline,
+        failing: judged_failing.unwrap_or_else(|| failing(&shown)),
     }
+}
+
+/// What makes `heki check` fail on the reports it judges now, and the keys that change it: a
+/// Ratchet baseline for the reports that fail it, `fail-on = "warning"` for those that do not.
+fn exit_notes(now: &ReportsNow, fail_on: Severity) -> Vec<String> {
+    let (judged, which) = match &now.baseline {
+        Some(split) => (split.regressions, "regression(s)"),
+        None => (now.shown, "report(s) shown now"),
+    };
+    let mut notes = Vec::new();
+    if now.failing > 0 && now.baseline.is_none() {
+        notes.push(format!(
+            "heki check fails on {} {which} (exit code 1): a Ratchet baseline records them, so \
+             that it fails only on new ones (`heki check --baseline heki-baseline.toml \
+             --update-baseline`, then `baseline = \"heki-baseline.toml\"` in the configuration).",
+            now.failing
+        ));
+    }
+    if fail_on == Severity::Error && judged > now.failing {
+        notes.push(format!(
+            "heki check does not fail on {} {which}: warnings, and heuristic reports, which can \
+             be wrong about the code and count as warnings; `fail-on = \"warning\"` in the lint \
+             settings makes them fail it.",
+            judged - now.failing
+        ));
+    }
+    notes
 }
 
 /// `diags` as `heki check` prints them: reports sharing a root cause folded into one.

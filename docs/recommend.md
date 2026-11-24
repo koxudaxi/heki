@@ -52,10 +52,14 @@ It takes the options of `heki check` that decide what is analyzed: `--select`,
   ([Entries that match nothing](configuration.md#entries-that-match-nothing)). They are listed
   whatever `lint.unmatched-contract-entries` says, and the section is left out when there is
   none.
-- **Notes**: what to know to weigh the advice. When the paths given leave out Python files
-  below the project root, the note names them: heki takes the files it analyzed as the whole
-  project, so what it says about callers, readers, and writers holds for those files only. It
-  counts up to 50 such files, among the first 10,000 entries below the root.
+- **Notes**: what to know to weigh the advice. How many of the reports shown now (with a
+  baseline, the regressions) make `heki check` fail, with the Ratchet baseline that records them
+  so that only new ones fail; and at the default `fail-on`, how many do not (warnings, and
+  heuristic reports, which count as warnings), which `fail-on = "warning"` would make fail it.
+  When the paths given leave out Python files below the project root, the note names them: heki
+  takes the files it analyzed as the whole project, so what it says about callers, readers, and
+  writers holds for those files only. It counts up to 50 such files, among the first 10,000
+  entries below the root.
 - **The keys to add or change**, for the file the project reads its configuration from:
   `[tool.heki...]` tables in a `pyproject.toml`, tables at the top level in `heki.toml`,
   `.heki.toml`, or a `--config` file. Without a configuration file, the keys go into a new
@@ -312,6 +316,7 @@ Contract candidates
 
 Notes
   - 1 Python file(s) below the project root were not analyzed (tests/test_users.py): heki takes the analyzed files as the whole project, so what it says about callers, readers, and writers holds for those files only.
+  - heki check fails on 1 report(s) shown now (exit code 1): a Ratchet baseline records them, so that it fails only on new ones (`heki check --baseline heki-baseline.toml --update-baseline`, then `baseline = "heki-baseline.toml"` in the configuration).
   - "if it waits" and "if it sends a query" come from a trial run that gives each library name tried a catalog entry with `effects = ["blocking_net", "db_query"]`: what `heki check` would print if the call waited on the network or sent a database query. heki cannot see what these calls do, so no entry for them is in the block; add one in `[[tool.heki.ecosystem]]` if you know.
 
 pyproject.toml: keys to add or change
@@ -340,7 +345,7 @@ changes meaning.
 | `root`, `config_file`, `table_prefix` | the project root, the configuration file (`null` without one), and the table its keys are under (`tool.heki`, or empty) |
 | `analyzed` | the files and functions analyzed, the files that could not be read or parsed, the paths given, and the Python files below the root they leave out |
 | `runs` | the analyses the report was computed from: `discovery`, then `source-roots` (the source-root trial) and `hypothetical-catalog` (the trial of library names) when they ran, `contract-trial` when it tried a contract candidate (none when the block sets `src`, or when every candidate is past the places of its kind), and `verification` when the block adds rules or contracts and does not set `src` |
-| `reports_now` | the counts of "Reports now" |
+| `reports_now` | the counts of "Reports now", and `failing`: the reports shown (with a baseline, the regressions) that make `heki check` fail at the configuration's `fail-on` |
 | `open_premises` | the counts of "What keeps reports heuristic": by code; by premise or condition and cause, with what the cause states, what closes it, the reports, the reports it is the only open cause of, and the first 50 reports; the sets of causes that reports leave open together |
 | `blind_spots` | the counts of "What heki cannot see": the calls of library names without a catalog entry, by package and name, with what the trial run found; the names heki's catalog lacks in packages it covers; the calls heki does not resolve, by function and reason; the source-root candidates and their trials; the functions with an A1 hazard; the totals |
 | `rules` | each rule of "Rules worth enabling here": its metadata, the reports it would add, its published measurement, whether the block enables it, and why |

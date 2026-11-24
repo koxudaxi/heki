@@ -18,8 +18,10 @@ A list of diagnostics. Each one has:
 | `sites` | the violation sites a contract report stands for, when more than one |
 | `allowed_examples` | for a contract report, up to three public functions (`fqn`, `path`) that do the same from a place the contract allows, which `help` names |
 
-`severity` is `error` for a bug (a wrong result, an exception, a lost update, a deadlock, a
-broken contract) and `warning` for slower code or a bug that is rarely harmful.
+`severity` is `error` for a bug that can be critical (a wrong result, an exception, a lost
+update, a deadlock, an event loop held up for every other task, a broken contract) and `warning`
+for slower code or a bug that is rarely harmful. Only an exact `error` fails the run by default:
+a heuristic report counts as a warning.
 
 ## `heki inspect --output-format json` (experimental)
 

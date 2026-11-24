@@ -15,7 +15,7 @@ extend-select = ["EFF105"]
 ignore = ["OPT110"]
 per-file-ignores = { "tests/**" = ["EFF"], "scripts/*.py" = ["OPT"] }
 relax-async-in-tests = true
-fail-on = "warning"                 # warnings fail heki check too (default: "error")
+fail-on = "warning"                 # warnings and heuristic reports fail heki check too (default: "error")
 
 [tool.heki.lint.severity]
 OPT103 = "warning"
@@ -229,10 +229,10 @@ the installed release changed, and the changelog on GitHub lists every release.
 | `extend-select` | `[]` | Rules to add. |
 | `ignore` | `[]` | Rules to disable. |
 | `per-file-ignores` | `{}` | Glob → rules disabled in matching files (project-relative POSIX paths). As in Ruff, `*` also matches `/`: `scripts/*.py` covers `scripts/tools/worker.py` too. |
-| `severity` | `"warning"` for the rules that report slower code (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF111`, `EFF113`, `DATA101`, and the `OPT` rules) and for `MUT110`, which reports a bug that is rarely harmful; `"error"` for the others, which report bugs | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level. By default only errors make `heki check` fail; `fail-on = "warning"` makes warnings fail it too. |
+| `severity` | `"warning"` for the rules that report slower code (`EFF102`, `EFF103`, `EFF105`, `EFF113`, `DATA101`, and the `OPT` rules) and for `MUT110`, which reports a bug that is rarely harmful; `"error"` for the others, which report bugs that can be critical (`EFF101` and `EFF111`: a blocked event loop holds up every other task) | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level. By default only exact errors make `heki check` fail: a heuristic report counts as a warning, whatever its severity; `fail-on = "warning"` makes warnings and heuristic reports fail it too. |
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF111`, `EFF105`, and `EFF106` in test code as pytest finds it: `test_*` functions and the functions nested in them, `test_*.py` and `*_test.py` files, and files under `test/` or `tests/`. |
 | `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
-| `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. Warnings are reported either way, and the language server shows them. `--fail-on` overrides it. |
+| `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. A heuristic report counts as a warning, whatever its severity: it can be wrong about the code, so at `"error"` only exact errors fail the run. Warnings and heuristic reports are reported either way, and the language server shows them. `--fail-on` overrides it. |
 | `report-unused-suppressions` | `false` | Report the codes of suppression comments that suppressed no report, and the baseline entries that matched none. See [Unused suppressions](#unused-suppressions). |
 | `require-suppression-codes` | `false` | Report the `# heki: ignore` comments that name no rule. See [Suppressions that name no rule](#suppressions-that-name-no-rule). |
 | `unmatched-contract-entries` | a warning, in a run over the whole project | `"warning"`, `"error"`, or `"ignore"`: what `heki check` does with a contract entry that matches nothing in the analyzed files. An error fails the run. See [Entries that match nothing](#entries-that-match-nothing). |
@@ -282,6 +282,10 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 - These rules report nothing until a contract exists. The results of `functools.lru_cache` /
   `functools.cache` functions are checked without one by `MUT114` (`cached-result-mutation`).
 - Declaring a contract selects its rule, whatever its certainty.
+- Their reports are heuristic, so they count as warnings for
+  [`fail-on`](#rule-selection-toolhekilint): to make a broken contract fail `heki check`, the
+  pre-commit hook, and CI, set `fail-on = "warning"` next to the contracts (with a
+  [baseline](adoption.md#ratchet-baselines), only new reports fail).
 - Every name in a contract but `import-owners`, whose names are
   [module patterns](#import-owners), is a dotted pattern. It matches the full name or any dotted suffix
   (`DataModel.fields` matches `pkg.model.DataModel.fields`, not `pkg.BigModel.fields`), and it
