@@ -2357,10 +2357,15 @@ an import itself.
   provide a module outside the project are the ones `[tool.heki.imports] module-distributions`
   lists for the longest of the module and its packages it names; without one, the catalog's
   `[[provides]]` rows for it and the distributions named like it or a package holding it (PEP
-  503 names). A distribution is declared only for development when it is in a development group
-  and no dependency or extra, only in extras when it is in an extra and no dependency; a module
-  is judged when the project declares one of its distributions and all of them alike, and its
-  `[project] dynamic` lists neither `dependencies` nor `optional-dependencies`.
+  503 names), unless the project holds a copy: a module or package (a namespace package too) of
+  the module's top-level name in a directory of the project without `__init__.py`
+  (`ImportGraph::loose_names`, from the module names), which a `sys.path` entry the code adds may
+  name. The project's own name is no distribution. A
+  distribution is declared only for development when it is in a development group and no
+  dependency or extra, only in extras when it is in an extra and no dependency; a module is judged
+  when the project declares one of its distributions and all of them alike, and its `[project]
+  dynamic` lists neither `dependencies` nor `optional-dependencies`. One report per module and
+  set of distributions, at the first import of them.
 - **Early Cutoff**: `IncrementalUpdate::imports_changed` tells whether a file's sites or body
   order changed, without positions (`ModuleImports::same_facts`), or appeared or disappeared
   with the file.

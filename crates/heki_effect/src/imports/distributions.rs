@@ -7,6 +7,7 @@
 
 use heki_env::{Declared, HekiConfig, normalize_distribution};
 use heki_kb::EffectiveEcosystemKb;
+use rustc_hash::FxHashSet;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Where the project declares every distribution that may provide a module, when it declares
@@ -34,15 +35,24 @@ pub struct Distributions<'d> {
     declared: &'d Declared,
     kb: &'d EffectiveEcosystemKb,
     user: &'d BTreeMap<String, Vec<String>>,
-    /// Every distribution the project declares anywhere, normalized.
+    /// Every distribution the project declares anywhere, normalized, but the project's own: a
+    /// requirement naming the project (`all = ["acme[redis,yaml]"]`) adds its extras, not a
+    /// distribution.
     names: BTreeSet<&'d str>,
+    /// The top-level names of the project's own copies of modules.
+    copies: FxHashSet<&'d str>,
 }
 
 impl<'d> Distributions<'d> {
-    /// The declarations of the project `cfg` describes, `None` when they do not say what
-    /// installing the package installs: no `pyproject.toml` declaring the distribution, or
-    /// dependencies or extras a build backend computes (`[project] dynamic`).
-    pub fn of(cfg: &'d HekiConfig, kb: &'d EffectiveEcosystemKb) -> Option<Self> {
+    /// The declarations of the project `cfg` describes, with the top-level names of its own
+    /// copies of modules (`copies`, [`super::ImportGraph::loose_names`]); `None` when they do not
+    /// say what installing the package installs: no `pyproject.toml` declaring the
+    /// distribution, or dependencies or extras a build backend computes (`[project] dynamic`).
+    pub fn of(
+        cfg: &'d HekiConfig,
+        kb: &'d EffectiveEcosystemKb,
+        copies: FxHashSet<&'d str>,
+    ) -> Option<Self> {
         let declared = cfg.declared.as_ref()?;
         let computed = ["dependencies", "optional-dependencies"];
         if computed
@@ -51,9 +61,11 @@ impl<'d> Distributions<'d> {
         {
             return None;
         }
+        let own = cfg.project_name.as_deref().map(normalize_distribution);
         let names = (declared.dependencies.iter())
             .chain(declared.extras.values().flatten())
             .chain(declared.groups.values().flatten())
+            .filter(|d| own.as_ref() != Some(*d))
             .map(String::as_str)
             .collect();
         Some(Self {
@@ -61,6 +73,7 @@ impl<'d> Distributions<'d> {
             kb,
             user: &cfg.imports.module_distributions,
             names,
+            copies,
         })
     }
 
@@ -68,7 +81,10 @@ impl<'d> Distributions<'d> {
     /// normalized and ascending: the user's map for the longest of `module` and the packages
     /// holding it that it names; without one, the catalog's distributions for it and the
     /// distributions named like it or a package holding it. A distribution the project does not
-    /// declare is left out. Empty for a module of the standard library.
+    /// declare is left out. Empty for a module of the standard library, and, without the user's
+    /// map, for one the project may hold a copy of: a module or package of its top-level name in
+    /// a directory of the project that is no regular package, which a `sys.path` entry may name
+    /// (`setuptools/_vendor/packaging/`, which `setuptools` puts on `sys.path`).
     pub fn providing(&self, module: &str) -> Vec<&'d str> {
         if heki_env::is_stdlib_module(module) {
             return Vec::new();
@@ -76,8 +92,10 @@ impl<'d> Distributions<'d> {
         let packages = || {
             (module.match_indices('.').map(|(i, _)| &module[..i])).chain(std::iter::once(module))
         };
+        let top = packages().next().unwrap_or(module);
         let candidates: BTreeSet<String> = match packages().rev().find_map(|p| self.user.get(p)) {
             Some(listed) => listed.iter().map(|d| normalize_distribution(d)).collect(),
+            None if self.copies.contains(top) => BTreeSet::new(),
             None => (self.kb.distributions_providing(module))
                 .chain(packages())
                 .map(normalize_distribution)
@@ -140,7 +158,7 @@ mod tests {
         let declared = Declared {
             dependencies: set(&["requests", "psycopg2-binary", "zope.interface"]),
             extras: tables(&[
-                ("redis", &["redis", "hiredis"]),
+                ("redis", &["redis", "hiredis", "acme"]),
                 ("yaml", &["PyYAML"]),
                 ("both", &["orjson"]),
             ]),
@@ -152,6 +170,7 @@ mod tests {
             ..Declared::default()
         };
         let mut cfg = HekiConfig {
+            project_name: Some("Acme".to_owned()),
             declared: Some(declared),
             ..HekiConfig::default()
         };
@@ -170,7 +189,7 @@ mod tests {
                 ..d
             })
         };
-        let distributions = Distributions::of(&cfg, &kb).unwrap();
+        let distributions = Distributions::of(&cfg, &kb, FxHashSet::default()).unwrap();
         for (module, found) in [
             ("pytest", dev(&[("pytest", &["test"])])),
             // The catalog: `pytest` installs `_pytest`.
@@ -198,9 +217,19 @@ mod tests {
             ("numpy", None),
             ("json", None),
             ("os.path", None),
+            // The project's own name in an extra adds that extra, no distribution.
+            ("acme.plugins", None),
         ] {
             assert_eq!(distributions.declared_only(module), found, "{module}");
         }
+        // A copy of `ruamel` the project holds outside its packages may be the one imported.
+        let copies = Distributions::of(&cfg, &kb, ["ruamel", "packaging"].into_iter().collect());
+        let copies = copies.unwrap();
+        assert_eq!(copies.declared_only("ruamel.yaml.main"), None);
+        assert_eq!(
+            copies.declared_only("pytest"),
+            dev(&[("pytest", &["test"])])
+        );
         // The user's map decides for the module and the modules below it.
         cfg.imports.module_distributions = BTreeMap::from([
             ("zope.interface".to_owned(), vec!["Zope".to_owned()]),
@@ -210,7 +239,7 @@ mod tests {
                 vec!["PyYAML".to_owned(), "requests".to_owned()],
             ),
         ]);
-        let distributions = Distributions::of(&cfg, &kb).unwrap();
+        let distributions = Distributions::of(&cfg, &kb, FxHashSet::default()).unwrap();
         for (module, found) in [
             ("zope.interface.verify", dev(&[("zope", &["test"])])),
             ("cv2", None),
@@ -224,8 +253,8 @@ mod tests {
             dynamic: set(&["dependencies"]),
             ..Declared::default()
         });
-        assert!(Distributions::of(&cfg, &kb).is_none());
+        assert!(Distributions::of(&cfg, &kb, FxHashSet::default()).is_none());
         cfg.declared = None;
-        assert!(Distributions::of(&cfg, &kb).is_none());
+        assert!(Distributions::of(&cfg, &kb, FxHashSet::default()).is_none());
     }
 }

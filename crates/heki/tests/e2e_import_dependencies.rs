@@ -160,7 +160,7 @@ fn each_rule_reports_its_imports_in_a_src_layout() {
             "src/acme/clock.py:1 IMP301 [freezegun]",
             "src/acme/report.py:1 IMP104 [tests.factories]",
             "src/acme/report.py:5 IMP104 [scripts.seed]",
-            "src/acme/serve.py:1 IMP302 [yaml]",
+            "src/acme/serve.py:1 IMP302 [pyyaml]",
             "src/acme/test_runners.py:1 IMP301 [pytest]",
             "src/acme/tests/helpers.py:1 IMP301 [pytest]",
         ]
@@ -172,8 +172,8 @@ fn each_rule_reports_its_imports_in_a_src_layout() {
     assert_eq!(
         message,
         "`<module>` imports `redis` while `acme.cache` loads, which importing `acme` loads, and \
-         the project declares `redis`, which provides it, only in the extra `redis`: without it, \
-         `import acme` raises `ImportError`"
+         the project declares `redis`, which provides it, only in the extra `redis`: `import acme` \
+         needs it"
     );
     assert_eq!(
         related,
@@ -184,8 +184,7 @@ fn each_rule_reports_its_imports_in_a_src_layout() {
     assert_eq!(
         message,
         "`<module>` imports `yaml` while `acme.serve` loads, and the project declares `pyyaml`, \
-         which provides it, only in the extra `yaml`: without it, `import acme.serve` raises \
-         `ImportError`"
+         which provides it, only in the extra `yaml`: `import acme.serve` needs it"
     );
     assert!(related.is_empty(), "{related:?}");
     let (message, _) = report_at(&p, "src/acme/clock.py");
@@ -243,10 +242,10 @@ fn the_users_map_decides_the_distribution() {
         reports(&p),
         [
             "src/acme/cache.py:1 IMP302 [redis]",
-            "src/acme/installed.py:3 IMP301 [cv2]",
+            "src/acme/installed.py:3 IMP301 [opencv-python]",
             "src/acme/report.py:1 IMP104 [tests.factories]",
             "src/acme/report.py:5 IMP104 [scripts.seed]",
-            "src/acme/serve.py:1 IMP302 [yaml]",
+            "src/acme/serve.py:1 IMP302 [pyyaml]",
             "src/acme/test_runners.py:1 IMP301 [pytest]",
             "src/acme/tests/helpers.py:1 IMP301 [pytest]",
         ]
@@ -287,7 +286,10 @@ fn a_distribution_in_an_extra_and_a_group_is_an_extras() {
         found.contains(&"src/acme/clock.py:1 IMP302 [freezegun]".to_owned()),
         "{found:#?}"
     );
-    assert!(!found.iter().any(|r| r.contains("IMP301 [freezegun]")), "{found:#?}");
+    assert!(
+        !found.iter().any(|r| r.contains("IMP301 [freezegun]")),
+        "{found:#?}"
+    );
 }
 
 /// A handler around an import on the way from the base module: importing it does not fail.
@@ -415,7 +417,7 @@ lint = ["pytest"]
         [
             "`<module>` imports `cv2` while `acme` loads, and the project declares \
              `opencv-python` and `opencv-python-headless`, which may provide it, only in the \
-             extras `cv` and `headless`: without them, `import acme` raises `ImportError`",
+             extras `cv` and `headless`: `import acme` needs them",
             "`<module>` imports `pytest` while `acme` loads, and the project declares `pytest`, \
              which provides it, only in the development groups `lint` and `test`",
             "`<module>` imports `ruamel.yaml` while `acme` loads, and the project declares \
@@ -443,4 +445,33 @@ fn test_modules_in_the_package_install_with_it() {
     );
     let found = reports(&p);
     assert!(!found.iter().any(|r| r.contains("runner.py")), "{found:#?}");
+}
+
+/// The project's own name in a group adds that group's extras, no distribution, and a copy of a
+/// module the project holds in a directory that is no package (a vendored package the code may
+/// put on `sys.path`) may be the one an import finds: neither gives a report. `acme` is a
+/// namespace package whose `acme.plugins` another distribution provides.
+#[test]
+fn the_projects_own_name_and_copies_provide_nothing() {
+    let p = project(
+        "import_dependencies_own",
+        r#"[project]
+name = "acme"
+dependencies = []
+
+[project.optional-dependencies]
+redis = ["redis"]
+
+[dependency-groups]
+dev = ["acme[redis]", "packaging", "pytest"]
+"#,
+        &[
+            (
+                "acme/core.py",
+                "import acme.plugins\nimport packaging\nimport pytest\n",
+            ),
+            ("acme/_vendor/packaging/__init__.py", ""),
+        ],
+    );
+    assert_eq!(reports(&p), ["acme/core.py:3 IMP301 [pytest]"]);
 }

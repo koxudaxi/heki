@@ -104,7 +104,7 @@ fn findings(
 ) -> Vec<Finding> {
     // Per module outside the project, how its distributions are declared.
     let mut only: FxHashMap<ModuleRef, Option<DeclaredOnly>> = FxHashMap::default();
-    let mut candidates: FxHashMap<u32, Vec<(usize, ModuleRef)>> = FxHashMap::default();
+    let mut judged: Vec<(u32, usize, ModuleRef)> = Vec::new();
     for m in 0..graph.module_count() {
         for (j, (site, target)) in graph.sites(m).into_iter().flatten().enumerate() {
             let Some(e @ ModuleRef::External(_)) = target.certain() else {
@@ -117,12 +117,18 @@ fn findings(
                 .entry(e)
                 .or_insert_with(|| declared.declared_only(graph.name(e)));
             if found.as_ref().is_some_and(|d| d.only == rule.only()) {
-                let sites = candidates.entry(m).or_default();
-                // The names of one `from` statement are one import.
-                if !sites.iter().any(|&(_, seen)| seen == e) {
-                    sites.push((j, e));
-                }
+                judged.push((m, j, e));
             }
+        }
+    }
+    // Per module, its first import of each set of distributions: the module loads them there,
+    // and its other imports of them (the names of one `from` statement, other modules of the
+    // same distribution) say no more.
+    let mut candidates: FxHashMap<u32, Vec<(usize, ModuleRef)>> = FxHashMap::default();
+    for (m, j, e) in judged {
+        let sites = candidates.entry(m).or_default();
+        if !sites.iter().any(|(_, seen)| only[seen] == only[&e]) {
+            sites.push((j, e));
         }
     }
     if candidates.is_empty() {
@@ -192,10 +198,10 @@ pub(crate) fn imp301_imp302(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     if rules.is_empty() || cx.units.is_empty() {
         return;
     }
-    let Some(declared) = Distributions::of(cx.config, cx.kb) else {
+    let graph = ImportGraph::build(cx.index.files.values(), cx.decls);
+    let Some(declared) = Distributions::of(cx.config, cx.kb, graph.loose_names()) else {
         return;
     };
-    let graph = ImportGraph::build(cx.index.files.values(), cx.decls);
     let kind = |m: u32| cx.code_kind(graph.path(m), graph.name(ModuleRef::Project(m)));
     let kinds = Kinds::new(&graph, &kind);
     for rule in rules {
@@ -289,14 +295,13 @@ fn report(
             if finding.start != finding.module {
                 message.push_str(&format!(", which importing `{start}` loads"));
             }
-            let without = if finding.declared.distributions.len() == 1 {
+            let needs = if finding.declared.distributions.len() == 1 {
                 "it"
             } else {
                 "them"
             };
             message.push_str(&format!(
-                ", and the project declares {declared}: without {without}, `import {start}` \
-                 raises `ImportError`"
+                ", and the project declares {declared}: `import {start}` needs {needs}"
             ));
             let help = format!(
                 "import `{imported}` only inside the functions that use it, catch its \
@@ -325,7 +330,7 @@ fn report(
         unit,
         site.span,
         &site.qualname,
-        imported.clone(),
+        names.join("|"),
         message,
         Some(help),
         &[],
@@ -346,10 +351,13 @@ pub fn dependency_report_files(
     decls: &ProjectDecls,
 ) -> Vec<PathBuf> {
     let rules = Rule::selected(selection);
-    let Some(declared) = Distributions::of(config, kb).filter(|_| !rules.is_empty()) else {
+    if rules.is_empty() {
+        return Vec::new();
+    }
+    let graph = ImportGraph::build(index.files.values(), decls);
+    let Some(declared) = Distributions::of(config, kb, graph.loose_names()) else {
         return Vec::new();
     };
-    let graph = ImportGraph::build(index.files.values(), decls);
     let kind = |m: u32| layout.code_kind(graph.path(m), graph.name(ModuleRef::Project(m)), config);
     let kinds = Kinds::new(&graph, &kind);
     let mut files: Vec<PathBuf> = (rules.into_iter())

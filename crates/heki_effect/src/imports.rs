@@ -1255,6 +1255,29 @@ impl<'i> ImportGraph<'i> {
         self.paths[m as usize]
     }
 
+    /// The names the project's modules and packages, namespace packages included, have in a
+    /// directory that is no regular package (the project root, a source root, `scripts/`,
+    /// `setuptools/_vendor/`, a namespace package's directory): the top-level names a `sys.path`
+    /// entry naming that directory makes importable. Under the source roots they are the
+    /// project's top-level modules; elsewhere they may be copies of modules from outside the
+    /// project that the code puts on `sys.path`.
+    pub fn loose_names(&self) -> FxHashSet<&str> {
+        let mut names = FxHashSet::default();
+        for module in &self.modules {
+            let mut holder = None;
+            for (i, part) in module.split('.').enumerate() {
+                // The directory holding `part`: the root, or a prefix of the name that is no
+                // module of the project (a directory without `__init__.py`).
+                if holder.is_none_or(|prefix: &str| !self.module_ids.contains_key(prefix)) {
+                    names.insert(part);
+                }
+                let end = (module.match_indices('.').nth(i)).map_or(module.len(), |(at, _)| at);
+                holder = Some(&module[..end]);
+            }
+        }
+        names
+    }
+
     /// How many project modules there are: their ids are `0..` it, in the order of their names.
     pub fn module_count(&self) -> u32 {
         self.modules.len() as u32
