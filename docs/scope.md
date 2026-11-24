@@ -144,7 +144,7 @@ checker cover most of what matters, and heki reports little.
 | ------ | ------------------ | -------------- |
 | Its own analysis | an SSA form of every function; aliases (copies, attributes, and the iterators and views derived from an object); what each function mutates and which effects it reaches, propagated over the project's call graph until nothing changes | - |
 | A catalog of library behavior | `requests.get` blocks on the network; `asyncio.to_thread(fn)` and `@sync_to_async` run a function on another thread; `logging` calls are never reported; `sqlite3.connect()` returns a `Connection`; `threading.Lock` is a synchronous lock | [`[[tool.heki.ecosystem]]`](configuration.md#ecosystem-knowledge-toolhekiecosystem) |
-| Contracts you declare | who may write, read, or call (`write-owners`, `read-owners`, `call-owners`); which returned objects are shared (`readonly-returns`); which changes must be announced (`invalidation`); which functions must not reach I/O or writes (`effect-boundaries`) | [contracts](configuration.md#contracts) in the configuration |
+| Contracts you declare | who may write, read, or call (`write-owners`, `read-owners`, `call-owners`); which returned objects are shared (`readonly-returns`); which changes must be announced (`invalidation`); which functions must not reach I/O or writes (`effect-boundaries`); which modules a module may import (`import-owners`) | [contracts](configuration.md#contracts) in the configuration |
 | Type annotations, as hints only | which class an object has and which method a call reaches: `session: Session` makes `session.execute(...)` a database call | annotations in your code |
 
 - heki does not analyze the source of the standard library or of installed packages: the

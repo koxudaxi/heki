@@ -48,9 +48,11 @@ pub fn build_module_ir(
         class_by_span.insert(ci.span, (ci.id, ci.qualname.clone()));
     }
     let mut lazy_import_names = FxHashSet::default();
+    let mut lazy_import_spans = FxHashSet::default();
     for imp in &semantic.imports {
         if imp.is_lazy {
             lazy_import_names.insert(imp.bound_name.clone());
+            lazy_import_spans.insert(imp.span);
         }
     }
 
@@ -85,6 +87,7 @@ pub fn build_module_ir(
         module_aliases,
         class_by_span,
         lazy_import_names,
+        lazy_import_spans,
         functions: Vec::new(),
         class_bases: Vec::new(),
         statement_uses: Vec::new(),
@@ -94,6 +97,7 @@ pub fn build_module_ir(
         loop_hints: Vec::new(),
         next_comp_id: 0,
         has_star_import: false,
+        star_imports: Vec::new(),
     };
 
     let full_span = Span {
@@ -150,6 +154,7 @@ pub fn build_module_ir(
         module_fn,
         has_future_annotations: semantic.has_future_annotations,
         has_star_import: ctx.has_star_import,
+        star_imports: ctx.star_imports,
         constants,
         class_bases,
         statement_uses,
@@ -329,6 +334,9 @@ struct ModuleLowerer<'a> {
     module_aliases: FxHashMap<String, String>,
     class_by_span: FxHashMap<Span, (ClassId, String)>,
     lazy_import_names: FxHashSet<String>,
+    /// The import aliases that bind lazily: a `lazy` statement, or a module `__lazy_modules__`
+    /// lists (`ModuleImport::is_lazy`).
+    lazy_import_spans: FxHashSet<Span>,
     functions: Vec<IrFunction>,
     /// The class bases of every lowered function (`ModuleIr::class_bases`).
     class_bases: Vec<(FunctionId, VarId, u32)>,
@@ -345,6 +353,8 @@ struct ModuleLowerer<'a> {
     loop_hints: Vec<(FunctionId, Vec<LoopHint>)>,
     next_comp_id: u32,
     has_star_import: bool,
+    /// [`ModuleIr::star_imports`].
+    star_imports: Vec<(BlockId, Span)>,
 }
 
 impl<'a> ModuleLowerer<'a> {
@@ -1499,7 +1509,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                             dst,
                             module: None,
                             name: alias.name.to_string(),
-                            is_lazy: imp.is_lazy,
+                            is_lazy: self.module.lazy_import_spans.contains(&span),
                             relative: false,
                         },
                         span,
@@ -1512,6 +1522,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 for alias in &imp.names {
                     if alias.name.as_str() == "*" {
                         self.module.has_star_import = true;
+                        (self.module.star_imports).push((self.cur_bb, Span::from(imp.range)));
                         continue;
                     }
                     let span = Span::from(alias.range);
@@ -1533,7 +1544,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                             dst,
                             module: module.clone(),
                             name: alias.name.to_string(),
-                            is_lazy: imp.is_lazy,
+                            is_lazy: self.module.lazy_import_spans.contains(&span),
                             relative: imp.level > 0,
                         },
                         span,
@@ -4004,6 +4015,11 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.str_heads.clear();
         self.statement_uses.clear();
         self.annotations.clear();
+        if self.is_module_body {
+            // The blocks the star imports were lowered in are gone; a star import runs only in
+            // the module body.
+            self.module.star_imports.clear();
+        }
         self.a1_hazards.push(A1Hazard {
             kind: crate::UNMODELED.to_owned(),
             span: self.span,

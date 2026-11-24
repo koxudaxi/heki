@@ -9,6 +9,7 @@ use anyhow::Result;
 use heki_diagnostics::{Diagnostic, RatchetBaseline, path_text};
 use heki_effect::{FuncKey, ProjectDecls};
 use heki_env::{Docs, Problem};
+use heki_rules::import_view::{ImportsFailure, imports_report, render_imports_text};
 use heki_rules::inspect::{
     InspectInputs, InspectQuery, MAX_CANDIDATES, Resolution, Symbol, inspect, render_text,
     resolve_line, resolve_name,
@@ -55,6 +56,52 @@ impl Failure {
 const SYMBOL_FORMS: &str = "name a function as `module.function`, `module.Class.method`, `path.py::NAME`, or `path.py:LINE`";
 
 pub(crate) fn run(args: &InspectArgs) -> Result<ExitCode> {
+    crate::check::recording_steps(args.walk_steps.as_deref(), || {
+        if args.imports {
+            run_imports(args)
+        } else {
+            run_function(args)
+        }
+    })
+}
+
+/// `--imports`: the import facts of the modules the symbol names. Exit codes as for a
+/// function: 2 when it names no module of the project, or a file could not be analyzed.
+fn run_imports(args: &InspectArgs) -> Result<ExitCode> {
+    let json = args.output_format == ReportFormat::Json;
+    let indexed = load_and_index(
+        &args.paths,
+        &args.analysis,
+        OutputFormat::Full,
+        None,
+        Facts::Imports,
+    )?;
+    let errors = shown_errors(&indexed.project.errors);
+    let problems = crate::failure::of_files(&indexed.project.errors);
+    let report = match imports_report(&indexed, &args.symbol) {
+        Ok(report) => report,
+        Err(failure) => {
+            let kind = match failure {
+                ImportsFailure::Invalid(_) => "invalid",
+                ImportsFailure::Unknown(_) => "unknown",
+            };
+            let failure = Failure {
+                kind,
+                message: failure.to_string(),
+                listed: None,
+            };
+            return fail(args, json, &failure, Some(&indexed), &errors, &problems);
+        }
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", render_imports_text(&report));
+    }
+    crate::check::finish(OutputFormat::Full, &problems, ExitCode::SUCCESS)
+}
+
+fn run_function(args: &InspectArgs) -> Result<ExitCode> {
     let json = args.output_format == ReportFormat::Json;
     let symbol = match Symbol::parse(&args.symbol) {
         Ok(s) => s,
