@@ -1055,7 +1055,8 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   on its instances, one of a project base, an attribute or a constant `__dict__` key the code
   writes or reads on an object typed with the class or a subclass, or one written on an object
   heki cannot type. A key a loop takes from a tuple, list, or set of string constants
-  (`for key in ("_a", "_b")`) names each of them. A class whose module stores attributes heki
+  (`for key in ("_a", "_b")`) names each of them, a list or set only while no code changes it.
+  A class whose module stores attributes heki
   cannot name (`setattr(self, name, v)`), or that the code gives a name computed at run time,
   may have any attribute: an entry naming none of its known ones is not reported, except with
   `unmatched-contract-entries = "error"`, as one that names nothing "unless it is one the code

@@ -3639,6 +3639,65 @@ fn a_copy_of_the_declared_fields_is_a_write_named_at_run_time() {
     );
 }
 
+const CHANGED_DISPLAYS: &str = r#"from pkg.model import Field
+
+
+def grown(new: Field) -> None:
+    keys = ["kind"]
+    keys.append("_type_cache")
+    for key in keys:
+        setattr(new, key, None)
+
+
+def replaced(new: Field) -> None:
+    keys = ["_type_cache"]
+    keys[0] = "kind"
+    for key in keys:
+        setattr(new, key, None)
+
+
+def copied(new: Field) -> None:
+    keys = ["kind", "_type_cache"]
+    for key in list(keys):
+        setattr(new, key, None)
+"#;
+
+/// A key a loop takes from a list display names one of the display's constants only while
+/// nothing changes the list: a list that grows, or has an item replaced, may hold any name
+/// (`MUT205`), not only those it was made with (a write of `_type_cache` the list no longer
+/// holds would be a false `MUT201`).
+#[test]
+fn a_list_display_the_code_changes_names_any_key() {
+    let p = Project::new("changed_display_keys");
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT205\"]\n\n{}",
+            write_owner(
+                "caches",
+                "pkg.model.Field._type_cache",
+                "pkg.store:*",
+                "unresolved = \"report\"\n",
+            ),
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/model.py",
+        "class Field:\n    def __init__(self) -> None:\n        self.kind = \"str\"\n",
+    )
+    .write("pkg/passes.py", CHANGED_DISPLAYS);
+    let u = "pkg/passes.py";
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![
+            d(u, 8, "MUT205", "grown", "Field"),
+            d(u, 15, "MUT205", "replaced", "Field"),
+            d(u, 21, "MUT201", "copied", "pkg.model.Field._type_cache"),
+        ]
+    );
+}
+
 /// A star import binds the names its module exports, which heki does not read, so it may bind
 /// the name of any builtin: `len(globals())` may hand the dict to another `len` (the one
 /// `pkg.writer` defines), which may bind a name declared `Final`. That holds for a star import

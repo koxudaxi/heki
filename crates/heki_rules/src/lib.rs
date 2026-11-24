@@ -38,13 +38,14 @@ pub use contracts::{
 pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
 pub use heki_diagnostics::Certainty;
 pub use imp_rules::{
-    circular_failure_files, dependency_report_files, import_cycle_files, walking_importers,
-    walks_imports,
+    circular_failure_files, dependency_report_files, import_cycle_files, judges_imports,
+    walking_importers, walks_imports,
 };
 pub use mut_rules::{
-    CHAIN_RULES, ChainFacts, EXAMPLE_RULES, ExampleOwners, SentinelTestKey, StaleWriteKey,
-    chain_facts, deep_copy_files, example_digest, family_readers, kept_removals_in,
-    lazy_setup_files, sentinel_tests_in, stale_writes_by_file,
+    CHAIN_RULES, ChainFacts, EXAMPLE_RULES, ExampleOwners, MemberName, SentinelTestKey,
+    StaleWriteKey, chain_facts, class_member_names, deep_copy_files, example_digest,
+    family_readers, kept_removals_in, lazy_setup_files, reads_class_members, sentinel_tests_in,
+    stale_writes_by_file,
 };
 pub use selection::{EffectiveSelectors, RuleSelection, SelectionError, Selectors, heuristic_hint};
 pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};

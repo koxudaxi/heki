@@ -853,10 +853,7 @@ impl IndexFacts {
                 .iter()
                 .any(|b| b.unresolved.as_deref() == Some("report"));
         // `IMP201` and `IMP202` read the import facts of every file once a contract is declared.
-        opt_in.imports |= ["IMP201", "IMP202"]
-            .iter()
-            .any(|code| selection.is_enabled(code))
-            && !config.import_owners.is_empty();
+        opt_in.imports |= crate::judges_imports(config, selection);
         Ok(Self {
             contracts: crate::summary_contracts(config, kb)?,
             typed_writes: crate::typed_writes(config, selection),

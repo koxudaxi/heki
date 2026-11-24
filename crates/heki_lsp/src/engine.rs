@@ -16,11 +16,11 @@ use heki_rules::project::{
     RulesRun, discovers, exclude_set, parse_source, retain_unsuppressed, unread_module,
 };
 use heki_rules::{
-    CHAIN_RULES, ChainFacts, CheckExtras, EXAMPLE_RULES, ExampleOwners, ProjectLayout,
+    CHAIN_RULES, ChainFacts, CheckExtras, EXAMPLE_RULES, ExampleOwners, MemberName, ProjectLayout,
     RuleSelection, SNAPSHOT_FILE, SelectionError, SentinelTestKey, SnapshotError, StaleWriteKey,
-    SummarySnapshot, chain_facts, check_project, circular_failure_files, deep_copy_files,
-    dependency_report_files, example_digest, family_readers, import_cycle_files, kept_removals_in,
-    lazy_setup_files, sentinel_tests_in, stale_writes_by_file,
+    SummarySnapshot, chain_facts, check_project, circular_failure_files, class_member_names,
+    deep_copy_files, dependency_report_files, example_digest, family_readers, import_cycle_files,
+    kept_removals_in, lazy_setup_files, sentinel_tests_in, stale_writes_by_file,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
@@ -291,6 +291,10 @@ pub struct Workspace {
     /// The indexed files that may patch `builtins` (they import it or touch `__builtins__`):
     /// while there is one, no module trusts builtin names (Assumption A1(b)).
     patching_builtins: FxHashSet<PathBuf>,
+    /// The member names the code gives instances of project classes, as of the latest analysis
+    /// ([`heki_rules::class_member_names`]); kept while a strict glob target reads them
+    /// ([`ContractReach::class_members`]).
+    class_members: BTreeSet<MemberName<String>>,
     /// The writes that leave a `@cached_property` stale (`MUT101`'s) in the methods of each file,
     /// as of the file's latest analysis; kept while `MUT111` is selected: the files reading a
     /// property whose writes change need a new check.
@@ -450,9 +454,14 @@ struct ContractReach {
     /// `allowed-callees` may allow one by one) and counts them, while the summaries keep the
     /// effects with one chain each and no such access.
     ecosystem_calls: bool,
-    /// An `import-owners` contract walking what its importers import (`reach`): an importer's
-    /// report reads the imports of every module its walk reaches, and the walks share a budget.
+    /// An `import-owners` contract walking what its importers import (`reach`), judged by a
+    /// selected rule: an importer's report reads the imports of every module its walk reaches,
+    /// and the walks share a budget.
     import_walks: bool,
+    /// A strict `read-owners` or `call-owners` contract with a glob target: whether it matches
+    /// an access on an object of unknown class depends on the member names the code of every
+    /// file writes ([`heki_rules::class_member_names`]).
+    class_members: bool,
 }
 
 /// Per function of one file: its project call sites without positions, and the cached
@@ -552,7 +561,8 @@ impl Workspace {
                     .iter()
                     .any(|b| b.forbid.iter().any(|t| t == "calls")),
             ecosystem_calls: !env_cfg.effect_boundaries.is_empty(),
-            import_walks: heki_rules::walks_imports(env_cfg),
+            import_walks: heki_rules::walks_imports(env_cfg, &selection),
+            class_members: heki_rules::reads_class_members(env_cfg),
         };
         let example_owners = ExampleOwners::new(env_cfg);
         // Every file's IR, semantic model, and text go before propagation: only the index stays.
@@ -614,6 +624,13 @@ impl Workspace {
         };
         let import_report_files = import_report_files(&env, &selection, &index, decls.completed())
             .map_err(EngineError::Rules)?;
+        let class_members = if reach.class_members {
+            (class_member_names(&index).into_iter())
+                .map(MemberName::into_owned)
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
         let stats = EngineStats {
             indexed_files: index.files.len(),
             ..EngineStats::default()
@@ -636,6 +653,7 @@ impl Workspace {
                 withheld: FxHashMap::default(),
                 check_reads: CheckReads::default(),
                 patching_builtins,
+                class_members,
                 stale_writes,
                 sentinel_tests,
                 kept_removals,
@@ -912,6 +930,21 @@ impl Workspace {
         if before == self.patching_builtins.is_empty() {
             return Vec::new();
         }
+        self.check_reads.paths().cloned().collect()
+    }
+
+    /// Record the member names the code gives instances of project classes; when they changed, a
+    /// strict glob target may match another access on an object of unknown class, in any file:
+    /// returns every checked file.
+    fn note_class_members(&mut self) -> Vec<PathBuf> {
+        if !self.reach.class_members {
+            return Vec::new();
+        }
+        let now = class_member_names(&self.index);
+        if (now.iter().copied()).eq(self.class_members.iter().map(MemberName::as_str)) {
+            return Vec::new();
+        }
+        self.class_members = now.into_iter().map(MemberName::into_owned).collect();
         self.check_reads.paths().cloned().collect()
     }
 
@@ -1292,6 +1325,7 @@ impl Workspace {
             (&ecosystem_before, &ecosystem_after),
         );
         affected.extend(self.note_builtins(&parsed.path, parsed.patches_builtins()));
+        affected.extend(self.note_class_members());
         affected.extend(self.note_stale_writes(&parsed.path));
         affected.extend(self.note_sentinel_tests(&parsed.path));
         affected.extend(self.note_kept_removals(&parsed.path));
@@ -1410,6 +1444,7 @@ impl Workspace {
             (&ecosystem_before, &EcosystemView::new()),
         );
         affected.extend(self.note_builtins(path, false));
+        affected.extend(self.note_class_members());
         affected.extend(self.note_stale_writes(path));
         affected.extend(self.note_sentinel_tests(path));
         affected.extend(self.note_kept_removals(path));
