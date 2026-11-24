@@ -183,7 +183,7 @@ impl<'a, 'c> TripCounts<'a, 'c> {
                 ir.function(f),
             )
         });
-        let origin = DataOrigins::of_loop_items(cx, tcx, &self.origins, budget, (f, li)).err()?;
+        let origin = DataOrigins::of_loop_items(tcx, &self.origins, budget, (f, li)).err()?;
         Some(premises::trip_count_cause(origin).open_at(None, None))
     }
 }
@@ -258,8 +258,14 @@ impl<'a, 'c> Sizes<'a, 'c> {
     }
 
     /// How many items a load of a global or an attribute gives, when the declarations fix it
-    /// and this function does not grow it.
+    /// and this function does not grow it, or a call at most, when the code fixes it
+    /// (`TypeCtx::fixed_call_items`).
     fn leaf_len(&self, inst: &Inst) -> Option<u32> {
+        if let InstKind::Call { .. } | InstKind::MethodCall { .. } = inst.kind {
+            return self
+                .tcx
+                .fixed_call_items(self.types, &|v| self.ix.shape.inst(v), inst);
+        }
         let d = self.leaf_display(inst)?;
         self.ix.load_unchanged(inst.kind.dst()?).then_some(d.len)
     }

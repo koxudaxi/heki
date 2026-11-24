@@ -9481,10 +9481,17 @@ on every path on which it returns.
 Each step is established, not assumed:
 
 - the loop steps through items of such an origin, through wrappers that keep them (`sorted`,
-  `list`, `filter`, slices, dict views, the components of `enumerate` and `zip`); through `map`,
-  a comprehension's element, or a project function only their number carries, and that is not
-  an origin; a loop whose number of iterations the code fixes (a constant range, a display) gives
-  no exact report, whatever the number;
+  `list`, `filter`, slices, dict views, the components of `enumerate` and `zip`); through `map`
+  or a comprehension's element only their number carries. The items a project function returns
+  are those every `return` of it gives, read from its module's own code: the rows of a query it
+  runs (also on a parameter annotated with the connection's class) or of another function of
+  the module it returns, whether the loop calls it directly, awaits it, calls it through a
+  `functools.partial` object, or awaits an API that hands back what it returns (`await
+  asyncio.to_thread(load_rows, conn)`). A loop whose number of iterations the code fixes gives no
+  exact report, whatever the number: a constant range, a display, or rows whose number the query
+  fixes (a `LIMIT` with a literal count at the end of its text, `fetchmany` of a constant, a
+  `SELECT` of aggregates only without `GROUP BY`), in the loop or in the function returning
+  them;
 - the call runs on every iteration that completes, exception edges included: an `except`
   handler that `continue`s before it is an iteration without it;
 - every implementation each call on the chain can run is followed and makes the next call on
@@ -9509,9 +9516,12 @@ open.
 Its premises:
 
 - **Origin**: the loop steps through items of a parameter, the rows of a query, the lines of a
-  file, or the entries of a directory, and the code does not fix their number. Open in a
-  heuristic report: a loop whose size the code does not fix at 16 or fewer counts, and a size
-  heki cannot bound counts as data-sized.
+  file, or the entries of a directory, also as a project function returns them, and the code does
+  not fix their number. Open in a heuristic report: a loop whose size the code does not fix at 16
+  or fewer counts, and a size heki cannot bound counts as data-sized. Not followed, so open: the
+  rows a module global holds (`ROWS = conn.execute(...).fetchall()`), the rows a function returns
+  of a value another module gives it or of a parameter without an annotation, a function calling
+  itself, and a chain of more than eight functions each returning what the next returns.
 - **Every iteration**: the call runs on every iteration that completes, exception edges into
   handlers included. Open in a heuristic report: the call counts as running on every iteration
   unless heki shows that it runs once per object, per process, or per run of the loop (the cases

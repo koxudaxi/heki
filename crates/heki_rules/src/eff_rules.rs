@@ -18,6 +18,7 @@ use crate::{
 use heki_ast::Span;
 use heki_diagnostics::{Certainty, Diagnostic, OpenPremise, OpenRecord};
 use heki_effect::guards::{loop_bit, per_item_bit};
+use heki_effect::resolver::NoItems;
 use heki_effect::with_paths;
 use heki_effect::{
     AccessKind, BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget,
@@ -29,7 +30,7 @@ use heki_env::EffectBoundaryRule;
 pub(crate) use heki_ir::ItemOrigins;
 use heki_ir::walk::{self, Answer, Budget, FnShape, JoinMap, Or, Sparse, fixpoint};
 use heki_ir::{BlockId, Carries, InstKind, IrFunction, ItemOrigin, ItemSource, Must, Progress};
-use heki_kb::{EcosystemEntry, EnvironmentAccess, ExecEffectKind, ResultItems, WaitKind};
+use heki_kb::{EcosystemEntry, EnvironmentAccess, ExecEffectKind, WaitKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::ControlFlow;
@@ -606,7 +607,6 @@ impl DataOrigins {
     /// `while` loop, an iterable the walk does not decide, a budget spent), or the first source
     /// that is not the data's.
     pub(crate) fn of_loop_items(
-        cx: &CheckContext<'_>,
         tcx: &TypeCtx<'_>,
         origins: &ItemOrigins<'_>,
         budget: &Budget,
@@ -615,22 +615,27 @@ impl DataOrigins {
         let Answer::Known(found) = origins.of_loop(budget, f, li) else {
             return Err(&premises::NO_ITEMS_FOLLOWED);
         };
-        Self::of(cx, tcx, tcx.ir(), &found)
+        Self::of(tcx, tcx.ir(), &found)
     }
 
     /// The origins of every item of `found`, or why the first one that is not the data's is not
     /// (a cause of "Origin").
     fn of(
-        cx: &CheckContext<'_>,
         tcx: &TypeCtx<'_>,
         ir: &heki_ir::ModuleIr,
         found: &std::collections::BTreeSet<ItemOrigin>,
     ) -> Result<Self, &'static OpenCause> {
-        let names = found
+        let named = found
             .iter()
-            .map(|o| data_origin(cx, tcx, ir, *o))
-            .collect::<Result<Vec<String>, _>>()?;
-        let counts_only = found.iter().any(|o| o.carries == Carries::Count);
+            .map(|o| data_origin(tcx, ir, *o))
+            .collect::<Result<Vec<(String, bool)>, _>>()?;
+        let counts_only = named.iter().any(|(_, counted)| *counted);
+        let mut names: Vec<String> = Vec::new();
+        for (name, _) in named {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
         (!names.is_empty())
             .then_some(Self { names, counts_only })
             .ok_or(&premises::NO_ITEMS_FOLLOWED)
@@ -705,13 +710,16 @@ fn established_queries(
                     return None;
                 }
             }
-            if !ix.fixed_trips(&f.loops[li], &mut |_| None).is_open() {
+            let call_items = &mut |inst: &heki_ir::Inst| {
+                tcx.fixed_call_items(&types, &|v| ix.shape.inst(v), inst)
+            };
+            if !ix.fixed_trips(&f.loops[li], call_items).is_open() {
                 open = true;
                 if steps(&premises::FIXED_BY_THE_CODE).is_break() {
                     return None;
                 }
             }
-            match DataOrigins::of_loop_items(cx, tcx, origins, &budget, (f.id, li)) {
+            match DataOrigins::of_loop_items(tcx, origins, &budget, (f.id, li)) {
                 Ok(origins) => (!open).then_some(origins),
                 Err(cause) => {
                     let _ = steps(cause);
@@ -824,18 +832,19 @@ fn query_chain_open_premises(
     chain_open_premises(cx, &premises::CONDITIONAL_STATEMENT, &q.chain, &gaps)
 }
 
-/// How a report names `origin` when the data decides the number of its items: a parameter or
-/// a part of one, or a catalog call sizing its result (`heki_kb::EcosystemEntry::items`), in
-/// the function the origin names (a generator expression's loop reads its creator's iterable).
-/// Otherwise why the data does not (a cause of "Origin"): a fixed collection, a method's
-/// receiver or a call heki does not take as the data, or a library call the catalog does not
-/// size.
+/// How a report names `origin` when the data decides the number of its items, and whether only
+/// their count follows it: a parameter or a part of one, or a call whose result's items the
+/// data decides ([`TypeCtx::call_items`]: a catalog call sizing its result,
+/// `heki_kb::EcosystemEntry::items`, a project function returning such items, or a call handing
+/// back what one of them returns), in the function the origin names (a generator expression's
+/// loop reads its creator's iterable). Otherwise why the data does not (a cause of "Origin"): a
+/// fixed collection, a method's receiver or a call heki does not follow to such items, or a
+/// library call the catalog does not size.
 pub(crate) fn data_origin(
-    cx: &CheckContext<'_>,
     tcx: &TypeCtx<'_>,
     ir: &heki_ir::ModuleIr,
     origin: ItemOrigin,
-) -> Result<String, &'static OpenCause> {
+) -> Result<(String, bool), &'static OpenCause> {
     let not_the_data = &premises::ITEMS_NOT_FROM_THE_DATA;
     let f = ir.function(origin.function);
     let param = |p: u8| {
@@ -844,6 +853,7 @@ pub(crate) fn data_origin(
             .map(|p| p.name.as_str())
             .ok_or(not_the_data)
     };
+    let counted = origin.carries == Carries::Count;
     let named = match origin.source {
         ItemSource::Param(p) => format!("parameter `{}`", param(p)?),
         ItemSource::ParamPart(p) => format!("a part of parameter `{}`", param(p)?),
@@ -853,34 +863,32 @@ pub(crate) fn data_origin(
                 .and_then(|i| f.block(block).insts.get(i))
                 .ok_or(not_the_data)?;
             let types = tcx.infer(f);
-            let callee = match &inst.kind {
-                InstKind::Call { callee_var, .. } => {
-                    tcx.resolve_call(callee_var.and_then(|v| types.get(&v)))
-                }
-                InstKind::MethodCall { recv, method, .. } => {
-                    tcx.resolve_method(types.get(recv), method)
-                }
-                _ => return Err(not_the_data),
-            };
-            let heki_effect::Callee::External(symbol) = callee else {
-                return Err(not_the_data);
-            };
+            let shape = FnShape::new(f);
             let unsized_call = &premises::LIBRARY_CALL_WITHOUT_ITEMS;
-            let entry = cx.kb.lookup(&symbol).ok_or(unsized_call)?;
-            let what = match (entry.items.ok_or(unsized_call)?, origin.text) {
-                (ResultItems::Rows, false) => "the rows",
-                (ResultItems::Lines, false) => "the lines",
-                (ResultItems::Entries, false) => "the entries",
-                (ResultItems::Text, true) => "the lines of the text",
-                _ => return Err(unsized_call),
-            };
-            // A catalog class's method is named by the library API it is.
-            format!("{what} of `{}`", entry.api.as_deref().unwrap_or(&symbol))
+            let called = tcx
+                .call_items_by_declarations(&types, &|v| shape.inst(v), inst)
+                .map_err(|e| match e {
+                    NoItems::NotFollowed => not_the_data,
+                    NoItems::Unsized => unsized_call,
+                })?;
+            let items = called
+                .items
+                .read_through(origin.text, origin.dropped, counted)
+                .ok_or(unsized_call)?;
+            let what = items.named().ok_or(unsized_call)?;
+            let returned = called
+                .through
+                .map(|key| format!(" that `{}` returns", key.fqn()))
+                .unwrap_or_default();
+            return Ok((
+                format!("{what} of `{}`{returned}", items.api),
+                items.counted,
+            ));
         }
         ItemSource::Receiver => return Err(not_the_data),
         ItemSource::Fixed => return Err(&premises::FIXED_BY_THE_CODE),
     };
-    Ok(named)
+    Ok((named, counted))
 }
 
 /// The advice of an `EFF103` report, which its message leaves out.

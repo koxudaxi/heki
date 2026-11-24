@@ -84,6 +84,10 @@ pub struct ItemOrigin {
     /// `strip`-like methods), which holds only when the source is text.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub text: bool,
+    /// Some of the source's items may be left out (a filter, a condition of a comprehension, a
+    /// set): no count of them follows.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dropped: bool,
 }
 
 /// Methods of `str` (and `bytes`) that cut their receiver's text into pieces.
@@ -184,6 +188,7 @@ impl Steps {
                 Carries::Items
             },
             text: source != ItemSource::Fixed && self.has(Self::TEXT | Self::PIECES),
+            dropped: self.has(Self::DROPS),
         })
     }
 }
@@ -225,6 +230,17 @@ impl<'m> ItemOrigins<'m> {
         let Some(iterable) = ix.f.loops.get(li).and_then(|lp| ix.loop_iterable(lp)) else {
             return Answer::Open;
         };
+        self.of_value(budget, f, iterable)
+    }
+
+    /// Where the items of the value `v` of function `f` come from, charged to `budget`: what a
+    /// loop over it would step through (a function's returned value, [`Self::of_loop`]).
+    pub fn of_value(
+        &self,
+        budget: &Budget,
+        f: FunctionId,
+        v: VarId,
+    ) -> Answer<BTreeSet<ItemOrigin>> {
         // `own` decides a question's successors with its own fact; `next` hands them on.
         let pending: RefCell<Vec<Key>> = RefCell::new(Vec::new());
         let own = |key: Key| {
@@ -234,7 +250,7 @@ impl<'m> ItemOrigins<'m> {
         };
         let next = |_: Key, out: &mut Vec<Key>| out.append(&mut pending.borrow_mut());
         self.closure
-            .ask(budget, (f, iterable, Steps::default()), own, next)
+            .ask(budget, (f, v, Steps::default()), own, next)
             .and_then(|fact| match &fact.0 {
                 Some(origins) => Answer::Known(origins.iter().copied().collect()),
                 None => Answer::Open,

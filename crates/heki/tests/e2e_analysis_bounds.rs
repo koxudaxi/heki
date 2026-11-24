@@ -1073,10 +1073,12 @@ fn phi_inputs_after_many_is_tests_find_their_sides_once_per_edge() {
 /// (`x1000 = identity(x999) if flag else x999`): each phi is walked once and referred to by the
 /// walks that meet it, instead of every argument walking all the phis before it. The calls each
 /// argument may be the result of are those of every link before it, so the iterations' facts
-/// grow with the square of the chain: they pass their budget instead.
+/// grow with the square of the chain: they pass their budget instead, and so do the origins of
+/// the returned value's items that the function's return fact follows (each link adds a call).
 #[test]
 fn returned_phis_of_calls_on_the_previous_value_are_walked_once() {
-    let found = check_past_budgets(1_000, &["consumption::IterFlow"], |links| {
+    let owners = ["consumption::IterFlow", "heki_effect::resolver::returns"];
+    let found = check_past_budgets(1_000, &owners, |links| {
         let mut lines = vec![
             "def identity(x):".to_owned(),
             "    return x".to_owned(),
@@ -7097,6 +7099,63 @@ fn memo_keys_of_many_values_are_compared_once() {
     });
     assert!(
         found.iter().all(|d| d["rule_code"] != "MUT114"),
+        "{found:#?}"
+    );
+}
+
+/// A chain of `links` functions, each returning what the next one returns, the last the rows
+/// of a query, and for each a loop over what it returns that sends a query per row.
+fn helpers_returning_rows(links: usize) -> String {
+    let mut out = vec![
+        "import sqlite3".to_owned(),
+        String::new(),
+        "CONN = sqlite3.connect(\"app.db\")".to_owned(),
+        String::new(),
+        String::new(),
+        "def book(i):".to_owned(),
+        "    return CONN.execute(\"SELECT * FROM b WHERE a = ?\", (i,)).fetchone()".to_owned(),
+    ];
+    for k in 0..links {
+        let returned = if k + 1 == links {
+            "CONN.execute(\"SELECT id FROM a\").fetchall()".to_owned()
+        } else {
+            format!("h{}()", k + 1)
+        };
+        out.extend([
+            String::new(),
+            String::new(),
+            format!("def h{k}():"),
+            format!("    return {returned}"),
+            String::new(),
+            String::new(),
+            format!("def each_{k}():"),
+            format!("    for r in h{k}():"),
+            "        book(r[0])".to_owned(),
+        ]);
+    }
+    out.join("\n") + "\n"
+}
+
+/// A module's return facts are decided in a bounded number of passes, each from the facts of
+/// the pass before: the rows a function returns through a chain of helpers longer than the bound
+/// are not followed, and the loop over them is a heuristic report.
+#[test]
+fn return_facts_past_the_pass_bound_are_not_followed() {
+    let shape = |links: usize| {
+        let p = Project::new(&format!("bounds_return_passes_{links}"));
+        p.write("m.py", &helpers_returning_rows(links));
+        p
+    };
+    let found = check_linear(64, shape);
+    let queries = |certainty: &str| {
+        found
+            .iter()
+            .filter(|d| d["rule_code"] == "EFF103" && d["certainty"] == certainty)
+            .count()
+    };
+    assert_eq!(
+        (queries("exact"), queries("heuristic")),
+        (8, 56),
         "{found:#?}"
     );
 }
