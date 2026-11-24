@@ -450,8 +450,9 @@ pub struct EcosystemEntry {
     pub builds_receiver: Option<FieldValues>,
     /// Calling the function imports the module its arguments name, with its parent packages
     /// (`importlib.import_module`, `__import__`): an import site of the caller
-    /// (`heki_effect::imports`). `importlib.util.find_spec` only finds one.
-    pub loads_module: Option<LoadsModule>,
+    /// (`heki_effect::imports`). `importlib.util.find_spec` only finds one. Boxed: a few of the
+    /// catalog's entries have one, and every entry holds the field.
+    pub loads_module: Option<Box<LoadsModule>>,
 }
 
 /// Where a call building an instance of its receiver's class takes the values of the fields
@@ -2012,22 +2013,22 @@ mod tests {
             (
                 s(&["importlib.import_module"]),
                 EcosystemEntry {
-                    loads_module: Some(LoadsModule {
+                    loads_module: Some(Box::new(LoadsModule {
                         name: slot(0, "name"),
                         package: Some(slot(1, "package")),
                         level: None,
-                    }),
+                    })),
                     ..tagged(EnvironmentAccess::Import)
                 },
             ),
             (
                 s(&["builtins.__import__"]),
                 EcosystemEntry {
-                    loads_module: Some(LoadsModule {
+                    loads_module: Some(Box::new(LoadsModule {
                         name: slot(0, "name"),
                         package: None,
                         level: Some(slot(4, "level")),
-                    }),
+                    })),
                     ..entry(&[])
                 },
             ),
@@ -4841,7 +4842,10 @@ mod tests {
     #[test]
     fn module_loads_and_providing_distributions() {
         let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
-        let loads = |symbol: &str| kb.lookup(symbol).and_then(|e| e.loads_module.clone());
+        let loads = |symbol: &str| {
+            kb.lookup(symbol)
+                .and_then(|e| e.loads_module.as_deref().cloned())
+        };
         assert_eq!(
             loads("importlib.import_module"),
             Some(LoadsModule {
