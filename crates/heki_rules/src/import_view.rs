@@ -6,7 +6,7 @@ use crate::DottedPattern;
 use crate::project::{Indexed, ParsedFile, rel_posix};
 use heki_effect::ProjectDecls;
 use heki_effect::code_kind::{CodeKind, code_kind};
-use heki_effect::imports::{ImportForm, ImportGraph, ImportSite, ModuleRef, Target};
+use heki_effect::imports::{ImportForm, ImportGraph, ImportSite, ModuleRef, Spelling, Target};
 use heki_ir::walk::Answer;
 use rustc_hash::FxHashMap;
 use serde::Serialize;
@@ -50,6 +50,10 @@ pub struct SiteReport {
     pub name: Option<String>,
     /// The function the site is in (`<module>`: the module body and its class bodies).
     pub function: String,
+    /// How the site names its modules: `absolute`, `relative` to its own module (`from . import
+    /// b`, `importlib.import_module(".b", __package__)`), or `mixed` (a by-name import given
+    /// both kinds of names); `None` when heki cannot name them.
+    pub spelling: Option<&'static str>,
     /// `body`, `lazy`, `function`, `type-checking`; `None` when heki cannot tell.
     pub timing: Option<&'static str>,
     pub guarded: bool,
@@ -193,6 +197,12 @@ fn site_report(
         form,
         name,
         function: site.qualname.clone(),
+        spelling: match (&site.modules, &site.spelling) {
+            (Answer::Open, _) => None,
+            (_, Spelling::Absolute) => Some("absolute"),
+            (_, Spelling::Relative) => Some("relative"),
+            (_, Spelling::Mixed(_)) => Some("mixed"),
+        },
         timing: match site.timing {
             Answer::Known(t) => Some(t.as_str()),
             Answer::Open => None,
@@ -284,6 +294,11 @@ fn site_text(s: &SiteReport) -> String {
         (None, _) => "import".to_owned(),
     };
     let mut notes = vec![s.timing.unwrap_or("timing unknown").to_owned()];
+    match s.spelling {
+        Some("relative") => notes.push("relative".to_owned()),
+        Some("mixed") => notes.push("relative and absolute names".to_owned()),
+        _ => {}
+    }
     if s.function != "<module>" {
         notes.push(format!("in `{}`", s.function));
     }

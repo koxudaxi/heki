@@ -2254,13 +2254,18 @@ an import itself.
   `__import__`; `loads_module`, 4.2), with the modules it names made absolute (a relative one
   from the module's name and package flag, none when it climbs past its top-level package; a
   by-name call's every text, as `EFF201`'s `imports_project_module` reads them, open when one is
-  unknown or `__import__` is passed a `level` other than `0`). Each site carries its function
-  (`<module>` for the module body and the class bodies it runs), whether an `ImportError`
-  handler takes its failure (around the import, or around the class statement holding it),
-  whether a handler may take it (`caught`: also `except Exception`, a bare `except`, a type
-  heki cannot tell is another builtin exception, a `with` block's exit or a `finally` body;
-  `environment::may_take_import_error`), whether it is lazy, and whether it runs on every path
-  to a normal return of its function, outside loops (never established in a class body).
+  unknown or `__import__` is passed a `level` other than `0`), and how it names them
+  (`imports::Spelling`): relatively for a statement with leading dots and for a relative text
+  anchored at the module's own `__package__` or `__name__`, absolutely otherwise (a relative text
+  anchored at a package the code spells included), per module for a by-name call given both
+  kinds, a module some absolute text gives counting as named absolutely. Each site carries its
+  function (`<module>` for the module body and the class bodies it runs), whether an
+  `ImportError` handler takes its failure (around the import, or around the class statement
+  holding it), whether a handler may take it (`caught`: also `except Exception`, a bare
+  `except`, a type heki cannot tell is another builtin exception, a `with` block's exit or a
+  `finally` body; `environment::may_take_import_error`), whether it is lazy, and whether it runs
+  on every path to a normal return of its function, outside loops (never established in a class
+  body).
 - **Body order** (`ModuleImports::bound_before`, `any_bound_before`, `code_before`): what the
   module body does between its sites, by the first site it happens before, so that the facts do
   not move with the code: each module global it may bind before a site (a store of the body; a
@@ -2311,9 +2316,11 @@ an import itself.
   parents of every site's module, whatever its timing) a step, keeping the step into each module
   from the nearest one, so the chain reported is a shortest one. The packages holding the
   importer load before it and are no step. The importers of one contract walk in the order of
-  the modules and share one `Budget::of_graph`; past it they answer open and report nothing. A
-  check without such a contract resolves only the checked modules' sites
-  (`ImportGraph::resolving`), so the language server records only the declarations they read.
+  the modules and share one `Budget::of_graph`; past it they answer open and report nothing.
+  How a site names its modules (`relative-imports`) is judged only at the importer's own sites;
+  a module of the key that a walk reaches is allowed. A check without such a contract resolves
+  only the checked modules' sites (`ImportGraph::resolving`), so the language server records
+  only the declarations they read.
 - **Cycle groups** (`ImportGraph::cycle_groups`, for `IMP101`): a site of the classes asked
   steps into the module it certainly loads and into the parent packages that load first, except
   the packages holding its own module, which loaded before it ran (`ImportGraph::hops`,

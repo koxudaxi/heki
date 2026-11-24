@@ -1,8 +1,8 @@
 //! `import-owners` contracts end to end (`IMP201`, and `IMP202` with `unresolved = "report"`):
 //! which modules a module may import, wherever the import runs (module body, class body,
 //! function, by a constant name), with a `from` import of a submodule counted as an import of
-//! the submodule, `TYPE_CHECKING` imports only with the key, and with `reach` the modules a
-//! chain of imports loads.
+//! the submodule, `TYPE_CHECKING` imports only with the key, with `reach` the modules a chain of
+//! imports loads, and `relative-imports`, the modules an importer may name only relatively.
 
 mod common;
 
@@ -720,6 +720,15 @@ fn invalid_contracts_are_configuration_errors() {
             "forbidden-imports = [\"pkg.[\"]",
             "invalid glob `pkg.[` in import-owners.forbidden-imports",
         ),
+        (
+            "relative-imports = [\"<stdlib>\"]",
+            "group `<stdlib>` in import-owners.relative-imports: a relative import reaches only \
+             the modules of the importer's own top-level package",
+        ),
+        (
+            "relative-imports = [\"<django>\"]",
+            "group `<django>` in import-owners.relative-imports",
+        ),
     ] {
         let p = project(
             "imp_invalid",
@@ -729,5 +738,270 @@ fn invalid_contracts_are_configuration_errors() {
         let (code, out, err) = p.check(&[]);
         assert_eq!(code, 2, "{contract}: {out}\n{err}");
         assert!(err.contains(expected), "{contract}: {err}");
+    }
+}
+
+const RUNTIME_A: &str = r#"from . import b
+
+
+def relative() -> int:
+    return b.helper()
+
+
+def absolute() -> int:
+    from pkg._runtime import b as absolute_b
+
+    return absolute_b.helper()
+"#;
+
+fn runtime_package(p: &Project) {
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/_runtime/__init__.py", "");
+    p.write("pkg/_runtime/b.py", "def helper() -> int:\n    return 1\n");
+    p.write("pkg/_runtime/c.py", "");
+}
+
+/// A package copied into other packages under another name, whose modules may import each other
+/// only relatively: `relative-imports` lists them once, and an import naming one by its full
+/// name is reported, also when `allowed-imports` lists it too.
+#[test]
+fn relative_imports_allow_a_module_only_through_a_relative_import() {
+    for allowed in [
+        r#""<stdlib>""#,
+        r#""<stdlib>", "pkg._runtime", "pkg._runtime.*""#,
+    ] {
+        let p = project(
+            "imp_relative",
+            &format!(
+                "[[tool.heki.import-owners]]\nname = \"runtime-leaf\"\nimporters = [\"pkg._runtime\", \"pkg._runtime.*\"]\nallowed-imports = [{allowed}]\nrelative-imports = [\"pkg._runtime\", \"pkg._runtime.*\"]\n"
+            ),
+        );
+        runtime_package(&p);
+        p.write("pkg/_runtime/a.py", RUNTIME_A);
+        assert_eq!(
+            reports(&p),
+            ["pkg/_runtime/a.py:9 IMP201 absolute pkg._runtime.b"],
+            "{allowed}"
+        );
+        assert_eq!(
+            message(&p, "pkg/_runtime/a.py:9"),
+            "`absolute` imports `pkg._runtime.b` when it runs, which `runtime-leaf` allows only \
+             through a relative import"
+        );
+    }
+}
+
+const SPELLINGS: &str = r#"import importlib
+from typing import TYPE_CHECKING
+
+from . import b
+from .b import helper
+from .. import shared
+import pkg._runtime.b
+from pkg import shared as shared_again
+lazy from . import c
+lazy from pkg._runtime import c as c_again
+
+if TYPE_CHECKING:
+    from pkg._runtime import c as checked
+
+
+def by_name(flag: bool, name: str) -> object:
+    importlib.import_module(".b", __package__)
+    importlib.import_module(".c" if flag else ".b", __package__)
+    importlib.import_module("pkg._runtime.b")
+    importlib.import_module(".b", "pkg._runtime")
+    __import__("pkg._runtime.c")
+    __import__("b", globals(), None, [], 1)
+    importlib.import_module(".b" if flag else "pkg._runtime.b", __package__)
+    importlib.import_module(".b" if flag else "pkg._runtime.c", __package__)
+    importlib.import_module(".b" if flag else "json", __package__)
+    importlib.import_module(f"pkg._runtime.{name}")
+    return importlib.import_module(f".plugins.{name}", __package__)
+"#;
+
+/// What names a module relatively: leading dots, and a relative name anchored at the module's
+/// own `__package__` or `__name__`. A full name, a relative name anchored at a package the code
+/// spells, and a by-name import whose names include the full name of the module are reported;
+/// with `unresolved = "report"`, so are a by-name import some of whose names break the contract,
+/// a head that may name a module of the key, and `__import__` with a `level`, whose module heki
+/// cannot name. Lazy imports count, and those under `TYPE_CHECKING` only with the key.
+#[test]
+fn relative_imports_judge_every_spelling_of_an_import() {
+    let contract = |keys: &str| {
+        format!(
+            "[tool.heki]\ntarget-version = \"py315\"\n\n[[tool.heki.import-owners]]\nname = \"runtime-leaf\"\nimporters = [\"pkg._runtime\", \"pkg._runtime.*\"]\nallowed-imports = [\"<stdlib>\"]\nrelative-imports = [\"pkg\", \"pkg.*\"]\n{keys}\n"
+        )
+    };
+    let exact = [
+        "pkg/_runtime/a.py:7 IMP201 <module> pkg._runtime.b",
+        "pkg/_runtime/a.py:8 IMP201 <module> pkg.shared",
+        "pkg/_runtime/a.py:10 IMP201 <module> pkg._runtime.c",
+        "pkg/_runtime/a.py:19 IMP201 by_name pkg._runtime.b",
+        "pkg/_runtime/a.py:20 IMP201 by_name pkg._runtime.b",
+        "pkg/_runtime/a.py:21 IMP201 by_name pkg._runtime.c",
+        "pkg/_runtime/a.py:23 IMP201 by_name pkg._runtime.b",
+    ];
+    let open = [
+        "pkg/_runtime/a.py:22 IMP202 by_name *",
+        "pkg/_runtime/a.py:24 IMP202 by_name pkg._runtime.b|pkg._runtime.c",
+        "pkg/_runtime/a.py:26 IMP202 by_name pkg._runtime.*",
+    ];
+    for (keys, expected) in [
+        ("", exact.to_vec()),
+        (
+            "type-checking = \"report\"\nunresolved = \"report\"",
+            [
+                exact[..3].to_vec(),
+                vec!["pkg/_runtime/a.py:13 IMP201 <module> pkg._runtime.c"],
+                exact[3..].to_vec(),
+                open.to_vec(),
+            ]
+            .concat(),
+        ),
+    ] {
+        let p = project("imp_relative_spellings", &contract(keys));
+        runtime_package(&p);
+        p.write("pkg/shared.py", "");
+        p.write(
+            "pkg/_runtime/__init__.py",
+            "import importlib\n\nimportlib.import_module(\".c\", __name__)\n",
+        );
+        p.write("pkg/_runtime/a.py", SPELLINGS);
+        let mut found = reports(&p);
+        found.sort();
+        let mut expected = expected;
+        expected.sort_unstable();
+        assert_eq!(found, expected, "{keys}");
+        if !keys.is_empty() {
+            assert_eq!(
+                message(&p, "pkg/_runtime/a.py:24"),
+                "`by_name` imports `pkg._runtime.b` or `pkg._runtime.c` by name when it runs, \
+                 which may be a module `runtime-leaf` allows only through a relative import"
+            );
+            assert_eq!(
+                message(&p, "pkg/_runtime/a.py:26"),
+                "`by_name` imports a module whose name starts with `pkg._runtime.` by name when \
+                 it runs, which may be a module `runtime-leaf` allows only through a relative \
+                 import"
+            );
+        }
+    }
+}
+
+const COMBINED: &str = "import json\nimport pkg._runtime.b\nimport pkg.other\nfrom . import b\n";
+
+/// `relative-imports` alone allows only the relative imports of its modules; with
+/// `forbidden-imports`, a relative import of a module both name is allowed and only the forbidden
+/// modules are reported besides; an `ignored-imports` pair accepts an import by the full name.
+#[test]
+fn relative_imports_combine_with_the_other_lists() {
+    let relative = "relative-imports = [\"pkg._runtime.*\"]";
+    for (keys, expected) in [
+        (
+            relative.to_owned(),
+            vec![
+                "pkg/_runtime/a.py:1 IMP201 <module> json",
+                "pkg/_runtime/a.py:2 IMP201 <module> pkg._runtime.b",
+                "pkg/_runtime/a.py:3 IMP201 <module> pkg.other",
+            ],
+        ),
+        (
+            format!("{relative}\nforbidden-imports = [\"pkg\", \"pkg.*\"]"),
+            vec![
+                "pkg/_runtime/a.py:2 IMP201 <module> pkg._runtime.b",
+                "pkg/_runtime/a.py:3 IMP201 <module> pkg.other",
+            ],
+        ),
+        (
+            format!("{relative}\nallowed-imports = [\"<stdlib>\", \"pkg.*\"]"),
+            vec!["pkg/_runtime/a.py:2 IMP201 <module> pkg._runtime.b"],
+        ),
+        (
+            format!("{relative}\nignored-imports = [\"pkg._runtime.a -> pkg._runtime.b\"]"),
+            vec![
+                "pkg/_runtime/a.py:1 IMP201 <module> json",
+                "pkg/_runtime/a.py:3 IMP201 <module> pkg.other",
+            ],
+        ),
+    ] {
+        let p = project(
+            "imp_relative_lists",
+            &format!(
+                "[[tool.heki.import-owners]]\nname = \"rt\"\nimporters = [\"pkg._runtime.a\"]\n{keys}\n"
+            ),
+        );
+        runtime_package(&p);
+        p.write("pkg/other.py", "");
+        p.write("pkg/_runtime/a.py", COMBINED);
+        assert_eq!(reports(&p), expected, "{keys}");
+        if keys == relative {
+            assert_eq!(
+                message(&p, "pkg/_runtime/a.py:1"),
+                "`<module>` imports `json` while `pkg._runtime.a` loads, not among the allowed \
+                 imports of `rt`"
+            );
+        }
+    }
+}
+
+/// A relative import reaches only the importer's own top-level package: an importer outside the
+/// package of a module the key names cannot import it without a report.
+#[test]
+fn an_importer_outside_the_package_cannot_import_its_modules() {
+    let p = project(
+        "imp_relative_outside",
+        "[[tool.heki.import-owners]]\nname = \"rt\"\nimporters = [\"app\"]\nallowed-imports = [\"<stdlib>\"]\nrelative-imports = [\"pkg._runtime.*\"]\n",
+    );
+    runtime_package(&p);
+    p.write("app.py", "import json\nfrom pkg._runtime import b\n");
+    assert_eq!(reports(&p), ["app.py:2 IMP201 <module> pkg._runtime.b"]);
+}
+
+const REACH_A: &str = r#"from . import b
+import pkg._runtime.c
+
+
+def later() -> None:
+    import pkg._runtime.b
+"#;
+
+/// With `reach`, how an import names its module is judged at the importer's own imports that the
+/// contract counts; a module of the key that a chain reaches is allowed, however the modules on
+/// the chain import it.
+#[test]
+fn reach_judges_how_only_the_importer_names_its_imports() {
+    for (reach, expected) in [
+        (
+            "import-time",
+            vec![
+                "pkg/_runtime/a.py:1 IMP201 <module> torch",
+                "pkg/_runtime/a.py:2 IMP201 <module> pkg._runtime.c",
+            ],
+        ),
+        (
+            "all",
+            vec![
+                "pkg/_runtime/a.py:1 IMP201 <module> torch",
+                "pkg/_runtime/a.py:2 IMP201 <module> pkg._runtime.c",
+                "pkg/_runtime/a.py:6 IMP201 later pkg._runtime.b",
+            ],
+        ),
+    ] {
+        let p = project(
+            "imp_relative_reach",
+            &format!(
+                "[[tool.heki.import-owners]]\nname = \"rt\"\nimporters = [\"pkg._runtime.a\"]\nforbidden-imports = [\"torch\"]\nrelative-imports = [\"pkg._runtime.*\"]\nreach = \"{reach}\"\n"
+            ),
+        );
+        runtime_package(&p);
+        p.write("pkg/_runtime/b.py", "import pkg._runtime.c\nimport torch\n");
+        p.write("pkg/_runtime/a.py", REACH_A);
+        assert_eq!(reports(&p), expected, "{reach}");
+        assert_eq!(
+            message(&p, "pkg/_runtime/a.py:2"),
+            "`<module>` imports `pkg._runtime.c` while `pkg._runtime.a` loads, which `rt` allows \
+             only through a relative import"
+        );
     }
 }

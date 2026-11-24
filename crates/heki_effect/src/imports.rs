@@ -79,6 +79,46 @@ pub enum ImportForm {
     ByName,
 }
 
+/// How an import site writes the names of the modules it imports.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Spelling {
+    /// By the full name: `import a.b`, `from a import b`, `importlib.import_module("a.b")`, and
+    /// a relative name anchored at a package the code spells (`import_module(".b", "a")`).
+    #[default]
+    Absolute,
+    /// Relative to the site's own module, which stays right in a copy of its package under
+    /// another name: `from . import b`, `from ..a import b`, and a relative name anchored at the
+    /// module's own `__package__` or `__name__` (`import_module(".b", __package__)`).
+    Relative,
+    /// A by-name call giving both kinds of names: per module of [`ImportSite::modules`],
+    /// whether only relative names give it.
+    Mixed(Vec<bool>),
+}
+
+impl Spelling {
+    /// The spelling of a by-name call, from whether only relative names give each of its
+    /// modules.
+    pub(crate) fn of_each(relative: Vec<bool>) -> Self {
+        if !relative.contains(&true) {
+            Self::Absolute
+        } else if !relative.contains(&false) {
+            Self::Relative
+        } else {
+            Self::Mixed(relative)
+        }
+    }
+
+    /// Whether the site names module `i` of its [`ImportSite::modules`] only relatively.
+    pub fn relative(&self, i: usize) -> bool {
+        match self {
+            Self::Absolute => false,
+            Self::Relative => true,
+            Self::Mixed(each) => each[i],
+        }
+    }
+}
+
 /// A module name an import site gives, made absolute.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -104,6 +144,9 @@ pub struct ImportSite {
     /// its top-level package, which imports nothing and raises; open when the code does not
     /// fix a name.
     pub modules: Answer<Vec<Named>>,
+    /// How the site writes the names of `modules`; `Absolute` while they are open.
+    #[serde(default)]
+    pub spelling: Spelling,
     pub timing: Answer<Timing>,
     /// An `ImportError` handler takes the failure of the import (the `try` around it, or
     /// around the class statement whose body holds it).
@@ -861,6 +904,11 @@ fn statement_site(
         qualname: crate::resolver::func_qualname(runner).to_owned(),
         form,
         modules,
+        spelling: if level > 0 {
+            Spelling::Relative
+        } else {
+            Spelling::Absolute
+        },
         timing,
         guarded,
         caught,

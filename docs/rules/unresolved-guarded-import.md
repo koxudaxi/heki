@@ -22,7 +22,8 @@ the module they load, when that module may be one the contract does not allow:
 - a by-name import (`importlib.import_module`, `__import__`) of a name the code does not fix;
 - a by-name import of a name built from a known start (`f"pkg.plugins.{name}"`), unless no
   forbidden pattern can match a module under it, or an allowed glob covers every one
-  (`pkg.plugins.*`);
+  (`pkg.plugins.*`); a full name may also be one of a module `relative-imports` allows only
+  through a relative import;
 - a by-name import of one of several names, some breaking the contract and some not;
 - `from a import c` where heki cannot tell whether `c` is the submodule `a.c`: a package outside
   the project, one whose `__init__.py` binds `c` before the submodule may be imported, one that
@@ -37,7 +38,7 @@ of the importer that starts the chain to them.
 ## What a report states
 
 A report states that the importer has an import whose module heki cannot name, that may be one
-the contract forbids or does not allow.
+the contract forbids or does not allow, or one it allows only through a relative import.
 
 ## Why is this bad?
 A contract that passes says nothing about the imports heki cannot follow. `IMP202` reports them
