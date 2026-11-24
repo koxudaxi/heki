@@ -35,7 +35,7 @@ const CHECK_EXITS: &[(u8, &str)] = &[
     (0, "no diagnostic fails the run"),
     (
         1,
-        "a diagnostic at the `fail-on` severity (an `error` by default), a refused `--update-baseline`, or pending `--diff` changes",
+        "a diagnostic at the `fail-on` severity (an exact `error` by default; a heuristic one counts as a `warning`), a refused `--update-baseline`, or pending `--diff` changes",
     ),
     ERROR_EXIT,
 ];

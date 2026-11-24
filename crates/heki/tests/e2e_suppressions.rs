@@ -326,7 +326,7 @@ fn github_actions_get_annotations_unless_a_format_is_chosen() {
         String::from_utf8(out.stdout).unwrap()
     };
     let github = run(&[("GITHUB_ACTIONS", "true")], &[]);
-    assert!(github.starts_with("::warning "), "{github}");
+    assert!(github.starts_with("::error "), "{github}");
     for (env, args, start) in [
         (
             &[("GITHUB_ACTIONS", "false")][..],
@@ -343,7 +343,7 @@ fn github_actions_get_annotations_unless_a_format_is_chosen() {
             &[],
             "a.py:5:5: EFF101 ",
         ),
-        (&[("HEKI_OUTPUT_FORMAT", "github")], &[], "::warning "),
+        (&[("HEKI_OUTPUT_FORMAT", "github")], &[], "::error "),
         (
             &[("HEKI_OUTPUT_FORMAT", "github")],
             &["--output-format", "concise"],

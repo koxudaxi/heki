@@ -63,7 +63,7 @@ async def get_user(user_id: int) -> dict[str, str]:
 
 ```console
 $ heki check
-app/api.py:5:12: EFF101 (async-blocking-call) [warning] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)
+app/api.py:5:12: EFF101 (async-blocking-call) [error] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)
   |
 5 |     return load_user(user_id)
   |            ^
@@ -133,11 +133,14 @@ use it next to them.
 Run `uvx heki check` (or `heki check` once [installed](https://heki.koxudaxi.dev/installation/)) in the directory with
 `pyproject.toml`:
 
-- An error reports a bug: a wrong result, an exception, a lost update, a deadlock, or a broken
-  contract. A warning reports slower code, like the two above, or a bug that is rarely harmful.
-- Warnings are printed and do not fail the run (exit code 0). Errors fail it (exit code 1).
+- An error reports a bug that can be critical: a wrong result, an exception, a lost update, a
+  deadlock, an event loop held up for every other task, like the first example above, or a
+  broken contract. A warning reports slower code, like the second, or a bug that is rarely
+  harmful.
+- An exact error fails the run (exit code 1). Warnings, and heuristic reports, which can be
+  wrong about the code, are printed and do not fail it (exit code 0).
   [`--fail-on warning`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint)
-  (`lint.fail-on = "warning"`) makes warnings fail it too.
+  (`lint.fail-on = "warning"`) makes them fail it too.
 - A note at the end says how many heuristic rules were left off; `--heuristic` runs them.
 - Next, [`heki recommend`](https://heki.koxudaxi.dev/recommend/) (experimental) says which rules would report on the
   project, what heki could not see, and the contracts the code already keeps, with the keys to
@@ -989,7 +992,7 @@ See [Configuration Advice](https://heki.koxudaxi.dev/recommend/).
 ## Read a diagnostic
 
 ```console
-app/api.py:5:12: EFF101 (async-blocking-call) [warning] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (1 call down, on every path)
+app/api.py:5:12: EFF101 (async-blocking-call) [error] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (1 call down, on every path)
   |
 5 |     user = load_user(user_id)
   |            ^
@@ -1002,7 +1005,7 @@ app/api.py:5:12: EFF101 (async-blocking-call) [warning] `app.users.load_user` al
 | ---- | ------- |
 | `app/api.py:5:12` | where to look |
 | `EFF101 (async-blocking-call)` | the rule's code and name |
-| `[warning]` | its severity: `error` for a bug (a wrong result, an exception, a lost update, a deadlock, a broken contract), `warning` for slower code, as here, or for a bug that is rarely harmful. An error makes `heki check` fail; a warning is shown without failing it, unless `--fail-on warning` (`lint.fail-on = "warning"`) is set. A heuristic report adds `heuristic` (`[warning, heuristic]`): it can be wrong about the code, as a premise of its claim can be open |
+| `[error]` | its severity: `error` for a bug that can be critical (a wrong result, an exception, a lost update, a deadlock, an event loop held up for every other task, as here, a broken contract), `warning` for slower code or for a bug that is rarely harmful. An exact error makes `heki check` fail; a warning is shown without failing it, unless `--fail-on warning` (`lint.fail-on = "warning"`) is set. A heuristic report adds `heuristic` (`[error, heuristic]`): it can be wrong about the code, as a premise of its claim can be open, so it counts as a warning and fails the run only with `--fail-on warning` |
 | the message | what heki established, in one sentence: here, that the call to `load_user` always runs `requests.get`, a call that waits on the network, on the event loop |
 | `related` lines | the hops of the chain of calls behind it, to follow it across files; editors show them as related information you can jump to |
 | `help` line | what to do about it |
@@ -1115,8 +1118,8 @@ writes to stderr are not colored.
 
 | Code | Meaning |
 | ---- | ------- |
-| `0` | no diagnostics, or only warnings (they are printed) |
-| `1` | an error found, or a warning with `--fail-on warning` (`lint.fail-on = "warning"`), among the Ratchet regressions when a baseline is used; also when `--update-baseline` refuses a grown entry, a baseline entry matched nothing with [`report-unused-suppressions`](https://heki.koxudaxi.dev/configuration/#unused-suppressions), or `--diff` would change files |
+| `0` | no diagnostics, or only warnings and heuristic reports (they are printed) |
+| `1` | an exact error found, or any report with `--fail-on warning` (`lint.fail-on = "warning"`), among the Ratchet regressions when a baseline is used; also when `--update-baseline` refuses a grown entry, a baseline entry matched nothing with [`report-unused-suppressions`](https://heki.koxudaxi.dev/configuration/#unused-suppressions), or `--diff` would change files |
 | `2` | configuration error, unreadable file, unknown rule, or syntax error |
 
 
@@ -1141,7 +1144,7 @@ extend-select = ["EFF105"]
 ignore = ["OPT110"]
 per-file-ignores = { "tests/**" = ["EFF"], "scripts/*.py" = ["OPT"] }
 relax-async-in-tests = true
-fail-on = "warning"                 # warnings fail heki check too (default: "error")
+fail-on = "warning"                 # warnings and heuristic reports fail heki check too (default: "error")
 
 [tool.heki.lint.severity]
 OPT103 = "warning"
@@ -1355,10 +1358,10 @@ the installed release changed, and the changelog on GitHub lists every release.
 | `extend-select` | `[]` | Rules to add. |
 | `ignore` | `[]` | Rules to disable. |
 | `per-file-ignores` | `{}` | Glob → rules disabled in matching files (project-relative POSIX paths). As in Ruff, `*` also matches `/`: `scripts/*.py` covers `scripts/tools/worker.py` too. |
-| `severity` | `"warning"` for the rules that report slower code (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`, and the `OPT` rules) and for `MUT110`, which reports a bug that is rarely harmful; `"error"` for the others, which report bugs | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level. By default only errors make `heki check` fail; `fail-on = "warning"` makes warnings fail it too. |
+| `severity` | `"warning"` for the rules that report slower code (`EFF102`, `EFF103`, `EFF105`, `DATA101`, and the `OPT` rules) and for `MUT110`, which reports a bug that is rarely harmful; `"error"` for the others, which report bugs that can be critical (`EFF101`: a blocked event loop holds up every other task) | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level. By default only exact errors make `heki check` fail: a heuristic report counts as a warning, whatever its severity; `fail-on = "warning"` makes warnings and heuristic reports fail it too. |
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF105`, and `EFF106` in test code as pytest finds it: `test_*` functions and the functions nested in them, `test_*.py` and `*_test.py` files, and files under `test/` or `tests/`. |
 | `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
-| `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. Warnings are reported either way, and the language server shows them. `--fail-on` overrides it. |
+| `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. A heuristic report counts as a warning, whatever its severity: it can be wrong about the code, so at `"error"` only exact errors fail the run. Warnings and heuristic reports are reported either way, and the language server shows them. `--fail-on` overrides it. |
 | `report-unused-suppressions` | `false` | Report the codes of suppression comments that suppressed no report, and the baseline entries that matched none. See [Unused suppressions](https://heki.koxudaxi.dev/configuration/#unused-suppressions). |
 | `require-suppression-codes` | `false` | Report the `# heki: ignore` comments that name no rule. See [Suppressions that name no rule](https://heki.koxudaxi.dev/configuration/#suppressions-that-name-no-rule). |
 | `unmatched-contract-entries` | a warning, in a run over the whole project | `"warning"`, `"error"`, or `"ignore"`: what `heki check` does with a contract entry that matches nothing in the analyzed files. An error fails the run. See [Entries that match nothing](https://heki.koxudaxi.dev/configuration/#entries-that-match-nothing). |
@@ -1408,6 +1411,10 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 - These rules report nothing until a contract exists. The results of `functools.lru_cache` /
   `functools.cache` functions are checked without one by `MUT114` (`cached-result-mutation`).
 - Declaring a contract selects its rule, whatever its certainty.
+- Their reports are heuristic, so they count as warnings for
+  [`fail-on`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint): to make a broken contract fail `heki check`, the
+  pre-commit hook, and CI, set `fail-on = "warning"` next to the contracts (with a
+  [baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines), only new reports fail).
 - Every name in a contract but `import-owners`, whose names are
   [module patterns](https://heki.koxudaxi.dev/configuration/#import-owners), is a dotted pattern. It matches the full name or any dotted suffix
   (`DataModel.fields` matches `pkg.model.DataModel.fields`, not `pkg.BigModel.fields`), and it
@@ -2672,7 +2679,7 @@ The recorded set can only shrink:
 | --------- | ------------ | ------------------------------ |
 | No baseline file yet | an error (exit code 2) | records today's findings |
 | A finding was fixed | a note that the entry can shrink; with [`report-unused-suppressions`](https://heki.koxudaxi.dev/configuration/#unused-suppressions), an entry that matches nothing is an error (exit code 1) | records the smaller entry |
-| An entry grew, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1 for an error, and for a warning with [`fail-on = "warning"`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint)) | reports it the same way and leaves the file as it is (exit code 1) |
+| An entry grew, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1 for an exact error, and for a warning or a heuristic report with [`fail-on = "warning"`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint)) | reports it the same way and leaves the file as it is (exit code 1) |
 | A file could not be analyzed (a syntax error, an unreadable file) | reports the error and the other files' findings (exit code 2) | writes nothing, so the entries of that file are not lost (exit code 2) |
 
 To record new findings on purpose, delete the baseline and record it again.
@@ -2776,14 +2783,24 @@ pre-commit appends the files after the hook's `args`, so `--touched` comes last:
 every commit instead, set `args: []` and `pass_filenames: false` on the hook, or drop `--touched`
 from a local hook's `entry` and set `pass_filenames: false`.
 
-The hook fails on errors and passes with warnings, which it prints. To make warnings fail it too,
-set `fail-on = "warning"` in `[tool.heki.lint]`, or add `--fail-on warning` before `--touched`.
+The hook fails on exact errors and passes with warnings and heuristic reports, which it prints. To
+make them fail it too, set `fail-on = "warning"` in `[tool.heki.lint]`, or add `--fail-on warning`
+before `--touched`.
 With a baseline configured, the hook fails only on new findings. A baseline entry counts every
 report of its key, so a run with `--touched` compares all of them, and judges the entries of the
 touched files and of the reports it shows: a grown entry fails the run when one of its reports
 touches a staged file, and a stale entry elsewhere is left to a run over the whole project.
 
 ## Continuous integration
+
+A run fails (exit code 1) on an exact report of an `error` rule: a bug that can be critical, such
+as a call that blocks the event loop (`EFF101`). Warnings (slower code, or a bug that is rarely
+harmful) and heuristic reports, which can be wrong about the code, are reported without failing
+it, whatever their rule's severity: a contract report, heuristic today, is one of them.
+`fail-on = "warning"` in `[tool.heki.lint]` (or `--fail-on warning`) makes them fail it too. A
+code base with errors today records them in a [Ratchet baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) first, so
+that the job fails only on new ones; [`heki recommend`](https://heki.koxudaxi.dev/recommend/) says how many reports fail
+the run now.
 
 === "GitHub Actions annotations"
 
@@ -2801,8 +2818,9 @@ touches a staged file, and a stale entry elsewhere is left to a run over the who
         sarif_file: heki.sarif
     ```
 
-Warnings become annotations without failing the step; `fail-on = "warning"` in
-`[tool.heki.lint]` (or `--fail-on warning`) makes them fail it, as in pre-commit.
+Warnings and heuristic reports become annotations without failing the step (a heuristic report
+of an `error` rule is an `error` annotation); `fail-on = "warning"` in `[tool.heki.lint]` (or
+`--fail-on warning`) makes them fail it, as in pre-commit.
 
 In GitHub Actions (`GITHUB_ACTIONS=true`), `heki check` writes these annotations without
 `--output-format github`. To keep the text output there, pass `--output-format full`, or set
@@ -2966,10 +2984,14 @@ It takes the options of `heki check` that decide what is analyzed: `--select`,
   ([Entries that match nothing](https://heki.koxudaxi.dev/configuration/#entries-that-match-nothing)). They are listed
   whatever `lint.unmatched-contract-entries` says, and the section is left out when there is
   none.
-- **Notes**: what to know to weigh the advice. When the paths given leave out Python files
-  below the project root, the note names them: heki takes the files it analyzed as the whole
-  project, so what it says about callers, readers, and writers holds for those files only. It
-  counts up to 50 such files, among the first 10,000 entries below the root.
+- **Notes**: what to know to weigh the advice. How many of the reports shown now (with a
+  baseline, the regressions) make `heki check` fail, with the Ratchet baseline that records them
+  so that only new ones fail; and at the default `fail-on`, how many do not (warnings, and
+  heuristic reports, which count as warnings), which `fail-on = "warning"` would make fail it.
+  When the paths given leave out Python files below the project root, the note names them: heki
+  takes the files it analyzed as the whole project, so what it says about callers, readers, and
+  writers holds for those files only. It counts up to 50 such files, among the first 10,000
+  entries below the root.
 - **The keys to add or change**, for the file the project reads its configuration from:
   `[tool.heki...]` tables in a `pyproject.toml`, tables at the top level in `heki.toml`,
   `.heki.toml`, or a `--config` file. Without a configuration file, the keys go into a new
@@ -3224,6 +3246,7 @@ Contract candidates
 
 Notes
   - 1 Python file(s) below the project root were not analyzed (tests/test_users.py): heki takes the analyzed files as the whole project, so what it says about callers, readers, and writers holds for those files only.
+  - heki check fails on 1 report(s) shown now (exit code 1): a Ratchet baseline records them, so that it fails only on new ones (`heki check --baseline heki-baseline.toml --update-baseline`, then `baseline = "heki-baseline.toml"` in the configuration).
   - "if it waits" and "if it sends a query" come from a trial run that gives each library name tried a catalog entry with `effects = ["blocking_net", "db_query"]`: what `heki check` would print if the call waited on the network or sent a database query. heki cannot see what these calls do, so no entry for them is in the block; add one in `[[tool.heki.ecosystem]]` if you know.
 
 pyproject.toml: keys to add or change
@@ -3250,7 +3273,7 @@ changes meaning.
 | `root`, `config_file`, `table_prefix` | the project root, the configuration file (`null` without one), and the table its keys are under (`tool.heki`, or empty) |
 | `analyzed` | the files and functions analyzed, the files that could not be read or parsed, the paths given, and the Python files below the root they leave out |
 | `runs` | the analyses the report was computed from: `discovery`, then `source-roots` (the source-root trial) and `hypothetical-catalog` (the trial of library names) when they ran, `contract-trial` when it tried a contract candidate (none when the block sets `src`, or when every candidate is past the places of its kind), and `verification` when the block adds rules or contracts and does not set `src` |
-| `reports_now` | the counts of "Reports now" |
+| `reports_now` | the counts of "Reports now", and `failing`: the reports shown (with a baseline, the regressions) that make `heki check` fail at the configuration's `fail-on` |
 | `open_premises` | the counts of "What keeps reports heuristic": by code; by premise or condition and cause, with what the cause states, what closes it, the reports, the reports it is the only open cause of, and the first 50 reports; the sets of causes that reports leave open together |
 | `blind_spots` | the counts of "What heki cannot see": the calls of library names without a catalog entry, by package and name, with what the trial run found; the names heki's catalog lacks in packages it covers; the calls heki does not resolve, by function and reason; the source-root candidates and their trials; the functions with an A1 hazard; the totals |
 | `rules` | each rule of "Rules worth enabling here": its metadata, the reports it would add, its published measurement, whether the block enables it, and why |
@@ -3273,7 +3296,7 @@ Source: https://heki.koxudaxi.dev/cli-reference/
 
 # CLI Reference
 
-Exit codes: `0` no diagnostic that fails the run (warnings are reported without failing it), `1` an `error` diagnostic, or a `warning` with `--fail-on warning` (`lint.fail-on`), among the Ratchet regressions when a baseline is used (or a refused `--update-baseline`, or pending `--diff` changes), `2` configuration / I/O / syntax errors.
+Exit codes: `0` no diagnostic that fails the run (warnings and heuristic reports are reported without failing it), `1` an exact `error` diagnostic, or any diagnostic with `--fail-on warning` (`lint.fail-on`), among the Ratchet regressions when a baseline is used (or a refused `--update-baseline`, or pending `--diff` changes), `2` configuration / I/O / syntax errors.
 
 A file that cannot be read or does not parse does not stop the run: `heki check` reports its error, checks and reports the other files, and exits with `2`, also when it reports diagnostics. A file that does not parse cannot run either, so nothing it would do is assumed; the names under its module resolve to nothing. SARIF output lists such files as `error` notifications of a run that did not execute successfully (`invocations[0].toolExecutionNotifications`, `executionSuccessful: false`); JSON output holds the diagnostics only.
 
@@ -3314,7 +3337,7 @@ Documentation:
 
 Exit codes:
   0  no diagnostic fails the run
-  1  a diagnostic at the `fail-on` severity (an `error` by default), a refused `--update-baseline`, or pending `--diff` changes
+  1  a diagnostic at the `fail-on` severity (an exact `error` by default; a heuristic one counts as a `warning`), a refused `--update-baseline`, or pending `--diff` changes
   2  a configuration, path, read, or syntax error; the error says what to do and links the documentation
 
 Examples:
@@ -3389,7 +3412,7 @@ Options:
           Ratchet baseline TOML file (line-number-independent)
 
       --fail-on <FAIL_ON>
-          Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`)
+          Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`). A heuristic report counts as a warning
           
           [possible values: error, warning]
 
@@ -3433,7 +3456,7 @@ Documentation:
 
 Exit codes:
   0  no diagnostic fails the run
-  1  a diagnostic at the `fail-on` severity (an `error` by default), a refused `--update-baseline`, or pending `--diff` changes
+  1  a diagnostic at the `fail-on` severity (an exact `error` by default; a heuristic one counts as a `warning`), a refused `--update-baseline`, or pending `--diff` changes
   2  a configuration, path, read, or syntax error; the error says what to do and links the documentation
 
 Examples:
@@ -4033,6 +4056,10 @@ default, and only those of the exact rules that are not opt-in.
 - A contract rule runs when its contract is declared, whatever its certainty.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   ends with a note saying how many.
+- Only an exact report fails a run by default: a heuristic report counts as a warning for
+  [`fail-on`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint), whatever its rule's severity, and
+  fails the run only with `fail-on = "warning"`. A false heuristic report never stops a CI or a
+  hook that keeps the default.
 
 See [Rule selection](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint). `EFF101`, `EFF103`,
 `DATA101`, `MUT101`, `MUT110`, `MUT111`, `MUT114`, `MUT119`, the proven tier of the eight `OPT`
@@ -4758,6 +4785,10 @@ Each diagnostic has:
 
 A text run ends with one line per reported rule: `heki rule <CODE>` and the rule's page.
 
+The run exits with 1 when it shows an exact `error`, a bug that can be critical, or with
+`fail-on = "warning"` any report: a heuristic report counts as a warning, whatever its
+`severity`.
+
 When the run cannot check (exit code 2: a configuration, path, or file error), the error says
 where the cause is, what to write instead, and which section of the documentation explains it.
 With `--output-format json`, an error that stops the run (the configuration or a path) is an
@@ -4800,10 +4831,16 @@ Do not describe the architecture in the project's `AGENTS.md` or `CLAUDE.md`. De
 > Do not edit the contracts or the baseline, and do not add a suppression, unless the maintainer
 > asks.
 
-The `message` of a contract is what the agent reads as the fix, so write it as an instruction:
+The `message` of a contract is what the agent reads as the fix, so write it as an instruction.
+Contract reports are heuristic, and a heuristic report fails a run only with
+`fail-on = "warning"`: set it with the contracts, so that `heki check` exits with 1 on a crossed
+wall.
 
 ```toml
 # heki.toml
+[lint]
+fail-on = "warning"
+
 [[write-owners]]
 name = "generation-store"
 targets = ["pkg.model.DataModel.fields"]
@@ -4811,18 +4848,18 @@ allowed-writers = ["Store.*"]
 message = "use GenerationStore.set_fields() instead"
 ```
 
-Put the contracts and the baseline path in `heki.toml`, and give that file an owner (`CODEOWNERS`,
-or the host's rule for protected files). A change to a wall is then a reviewed change, and an agent
-cannot move a wall to make a report go away.
+Put the contracts, `fail-on`, and the baseline path in `heki.toml`, and give that file an owner
+(`CODEOWNERS`, or the host's rule for protected files). A change to a wall is then a reviewed
+change, and an agent cannot move a wall to make a report go away.
 
 ### A Stop hook for Claude Code
 
 A [Stop hook](https://code.claude.com/docs/en/hooks) runs when Claude Code is about to end its turn.
-The script below runs `heki check` and, when it exits with 1 (findings), sends the text to the agent
-and keeps it working. Exit code 2 of the hook means "block, and read stderr". heki's own failure (exit
-code 2, or no `heki` on the path) lets the turn end, so a configuration error does not loop. The hook
-input has `stop_hook_active`, which is `true` while Claude Code is already continuing because of a
-stop hook; the script stops blocking then.
+The script below runs `heki check` and, when it exits with 1 (findings that fail the run), sends
+the text to the agent and keeps it working. Exit code 2 of the hook means "block, and read
+stderr". heki's own failure (exit code 2, or no `heki` on the path) lets the turn end, so a
+configuration error does not loop. The hook input has `stop_hook_active`, which is `true` while
+Claude Code is already continuing because of a stop hook; the script stops blocking then.
 
 ```sh
 #!/bin/sh
@@ -5674,7 +5711,7 @@ Source: https://heki.koxudaxi.dev/rules/async-blocking-call/
 
 # async-blocking-call (EFF101)
 
-Family: Execution Effects (EFF) · Exact · Enabled by default · Severity `warning` (slower code) · No automatic fix
+Family: Execution Effects (EFF) · Exact · Enabled by default · Severity `error` (a bug) · No automatic fix
 
 A call in `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop; its heuristic reports, a call that can reach a blocking call.
 
@@ -5872,7 +5909,8 @@ Not part of the claim: how long the call waits, and how often the reported call 
 
 ## Why is this bad?
 A call that waits inside a coroutine stops the whole event loop: every other request, timer, and
-task waits until it returns.
+task waits until it returns, as in a deadlock while the call lasts. An exact report is therefore
+an `error`, which fails the run.
 
 ## Example
 ```python
@@ -8390,7 +8428,7 @@ No automatic fix.
 ## Options
 - `[tool.heki.imports]`: `cycle-edges`, the timing classes of the imports that count
   ([configuration](https://heki.koxudaxi.dev/configuration/#imports-toolhekiimports)).
-- Its reports are warnings: `lint.severity = { IMP101 = "error" }` makes a cycle fail the run.
+- Its reports are heuristic warnings: `lint.fail-on = "warning"` makes a cycle fail the run.
 
 ## Known limitations
 - Imports heki does not see (`exec`, `runpy`, a module loaded from a file path, a write to

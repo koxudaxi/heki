@@ -321,11 +321,11 @@ def cli_page(heki: Path) -> str:
         GENERATED,
         "# CLI Reference",
         "",
-        "Exit codes: `0` no diagnostic that fails the run (warnings are reported without failing "
-        "it), `1` an `error` diagnostic, or a `warning` with `--fail-on warning` "
-        "(`lint.fail-on`), among the Ratchet regressions when a baseline is used (or a refused "
-        "`--update-baseline`, or pending `--diff` changes), `2` configuration / I/O / syntax "
-        "errors.",
+        "Exit codes: `0` no diagnostic that fails the run (warnings and heuristic reports are "
+        "reported without failing it), `1` an exact `error` diagnostic, or any diagnostic with "
+        "`--fail-on warning` (`lint.fail-on`), among the Ratchet regressions when a baseline is "
+        "used (or a refused `--update-baseline`, or pending `--diff` changes), `2` configuration "
+        "/ I/O / syntax errors.",
         "",
         "A file that cannot be read or does not parse does not stop the run: `heki check` reports "
         "its error, checks and reports the other files, and exits with `2`, also when it reports "
@@ -407,8 +407,9 @@ def example_image(heki: Path) -> str:
     the files of all of them, drawn as a terminal shows what it prints."""
     command, files = readme_examples(README.read_text(encoding="utf-8"))
     out = run_in_project(heki, files, [*command.split()[1:], "--color", "always"])
-    # The examples report warnings: printed, and the run passes.
-    if out.returncode != 0:
+    # The first example's exact error fails the run (exit code 1); exit code 2 says the examples
+    # could not be checked.
+    if out.returncode not in (0, 1):
         sys.exit(f"`{command}` on the README's examples failed ({out.returncode}):\n{out.stderr}")
     prompt = f"\x1b[36m$\x1b[0m {command}\n"
     return ansi_svg.render(prompt + out.stdout + out.stderr, TERMINAL_COLUMNS, EXAMPLE_IMAGE_TITLE)
