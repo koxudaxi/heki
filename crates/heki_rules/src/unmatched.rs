@@ -359,6 +359,91 @@ struct ProjectNames<'a> {
     /// ([`heki_effect::FileSummary::external_accesses`]).
     outside_calls: FxHashSet<&'a str>,
     outside_reads: FxHashSet<&'a str>,
+    /// The forms of the functions and of the classes ([`WrittenForms`]) and the last parts of
+    /// the functions' qualnames, sorted and each once: what the names like an entry that matches
+    /// nothing are found among, built when an entry first needs them.
+    function_forms: Option<WrittenForms>,
+    class_forms: Option<WrittenForms>,
+    method_names: Option<Vec<&'a str>>,
+    /// The comparisons finding names like the entries may still take.
+    nearest_left: NearestBudget,
+}
+
+/// The comparisons that finding the names like the entries that match nothing
+/// ([`UnmatchedEntry::nearest`]) may take in a run, per function and class of the project, and
+/// at least. Each entry is compared with every name one part away from it, so thousands of
+/// entries naming nothing in a module of thousands of functions would compare every pair. An
+/// entry past the budget is reported without names.
+const NEAREST_COMPARISONS_PER_DEFINITION: usize = 64;
+const MIN_NEAREST_COMPARISONS: usize = 4_096;
+
+/// The comparisons left to find names like the entries ([`NEAREST_COMPARISONS_PER_DEFINITION`]).
+struct NearestBudget(usize);
+
+impl NearestBudget {
+    /// The names `nearest` finds by `comparisons` more, when they fit the budget, which they then
+    /// take; else none. Comparisons that do not fit take nothing, so a later entry with fewer
+    /// names one part away may still get its names.
+    fn offer<T>(&mut self, comparisons: usize, nearest: impl FnOnce() -> Vec<T>) -> Vec<T> {
+        let Some(left) = self.0.checked_sub(comparisons) else {
+            return Vec::new();
+        };
+        self.0 = left;
+        nearest()
+    }
+}
+
+/// The forms one kind of definition is written in, but the names heki makes up (`<module>`,
+/// `<lambda>`), in the order of the definitions, each with the index of its definition. They
+/// are indexed by what holds their last part and by that part, apart for the forms with a
+/// module part, so that an entry is compared only with the forms one part away from it
+/// ([`nearest_written`]).
+struct WrittenForms {
+    forms: Vec<(usize, String)>,
+    /// Positions in `forms` by whether the form has a module part (1) or not (0), then by what
+    /// holds its last part ([`split_holder`]).
+    by_holder: [FxHashMap<String, Vec<usize>>; 2],
+    /// Positions in `forms` by whether the form has a module part, then by its last part.
+    by_last: [FxHashMap<String, Vec<usize>>; 2],
+}
+
+impl WrittenForms {
+    fn new(definitions: impl Iterator<Item = Vec<String>>) -> Self {
+        let mut out = Self {
+            forms: Vec::new(),
+            by_holder: Default::default(),
+            by_last: Default::default(),
+        };
+        for (i, forms) in definitions.enumerate() {
+            for form in forms.into_iter().filter(|f| !f.contains('<')) {
+                let with_module = usize::from(form.contains(':'));
+                let (holder, last) = split_holder(&form);
+                let at = out.forms.len();
+                (out.by_holder[with_module].entry(holder.to_owned()))
+                    .or_default()
+                    .push(at);
+                (out.by_last[with_module].entry(last.to_owned()))
+                    .or_default()
+                    .push(at);
+                out.forms.push((i, form));
+            }
+        }
+        out
+    }
+
+    /// The positions of the forms written as `entry` is (with a module part or without one)
+    /// that have its holder, and of those that have its last part.
+    fn one_part_away(&self, entry: &str) -> [&[usize]; 2] {
+        fn at<'i>(index: &'i FxHashMap<String, Vec<usize>>, key: &str) -> &'i [usize] {
+            index.get(key).map_or(&[], Vec::as_slice)
+        }
+        let with_module = usize::from(entry.contains(':'));
+        let (holder, last) = split_holder(entry);
+        [
+            at(&self.by_holder[with_module], holder),
+            at(&self.by_last[with_module], last),
+        ]
+    }
 }
 
 impl<'a> ProjectNames<'a> {
@@ -437,6 +522,7 @@ impl<'a> ProjectNames<'a> {
             .map(|fqn| top_level(fqn))
             .filter(|m| !project_modules.contains(m))
             .collect();
+        let definitions = defined.len() + classes.len();
         Self {
             project_modules,
             imported_outside,
@@ -452,7 +538,63 @@ impl<'a> ProjectNames<'a> {
             computed,
             strict: cx.config.lint.unmatched_contract_entries == Some(UnmatchedEntries::Error),
             names: FxHashMap::default(),
+            function_forms: None,
+            class_forms: None,
+            method_names: None,
+            nearest_left: NearestBudget(
+                (NEAREST_COMPARISONS_PER_DEFINITION * definitions).max(MIN_NEAREST_COMPARISONS),
+            ),
         }
+    }
+
+    /// The functions whose names look like `entry`, written as `entry` is ([`nearest_written`]).
+    fn nearest_functions(&mut self, entry: &str) -> Vec<String> {
+        let functions = &self.functions;
+        let written = (self.function_forms).get_or_insert_with(|| {
+            WrittenForms::new(functions.iter().map(|k| {
+                vec![
+                    k.qualname.clone(),
+                    k.fqn(),
+                    format!("{}:{}", k.module, k.qualname),
+                ]
+            }))
+        });
+        nearest_written(entry, written, &mut self.nearest_left)
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect()
+    }
+
+    /// The classes (by index in [`Self::classes`]) whose names look like `entry`
+    /// ([`nearest_written`]).
+    fn nearest_classes(&mut self, entry: &str) -> Vec<(usize, String)> {
+        let classes = &self.classes;
+        let written = (self.class_forms)
+            .get_or_insert_with(|| WrittenForms::new(classes.iter().map(written_forms)));
+        nearest_written(entry, written, &mut self.nearest_left)
+    }
+
+    /// The method names like `entry`, an exempt method. One with a holder or a glob is matched
+    /// as a function pattern ([`Self::nearest_functions`]).
+    fn nearest_methods(&mut self, entry: &str) -> Vec<String> {
+        if entry.contains(['.', ':']) || has_glob_syntax(entry) {
+            return self.nearest_functions(entry);
+        }
+        // An exempt method without its class matches the last part as written
+        // (`Allowance::exempts`), never the spelling its class holds.
+        let functions = &self.functions;
+        let methods = self.method_names.get_or_insert_with(|| {
+            let mut methods: Vec<&str> =
+                functions.iter().map(|&k| last_part(&k.qualname)).collect();
+            methods.sort_unstable();
+            methods.dedup();
+            methods
+        });
+        self.nearest_left.offer(methods.len(), || {
+            (heki_env::problem::nearest(entry, methods.iter().copied()).into_iter())
+                .map(str::to_owned)
+                .collect()
+        })
     }
 
     /// Whether `entry` of the `call-owners` or `read-owners` targets (`context`) names code
@@ -636,11 +778,11 @@ fn judge<'a>(
         return Ok(None);
     }
     let nearest = match definition {
-        Definition::Exempt => nearest_methods(names, name),
-        Definition::Class => (nearest_classes(names, name).into_iter())
+        Definition::Exempt => names.nearest_methods(name),
+        Definition::Class => (names.nearest_classes(name).into_iter())
             .map(|(_, n)| n)
             .collect(),
-        _ => nearest_functions(names, name),
+        _ => names.nearest_functions(name),
     };
     Ok(Some(Missing::new(
         definition.names_no().to_owned(),
@@ -756,7 +898,7 @@ fn judge_attribute<'a>(
     }
     if family.is_empty() {
         let mut nearest = Vec::new();
-        for (i, class) in nearest_classes(names, class_part) {
+        for (i, class) in names.nearest_classes(class_part) {
             let fqn = names.classes[i].fqn.clone();
             if names
                 .names_of(cx, &fqn)
@@ -786,9 +928,11 @@ fn judge_attribute<'a>(
     }
     known.sort_unstable();
     known.dedup();
-    let nearest = (heki_env::problem::nearest(attr, known).into_iter())
-        .map(|n| format!("{class_part}.{n}{item}"))
-        .collect();
+    let nearest = names.nearest_left.offer(known.len(), || {
+        (heki_env::problem::nearest(attr, known).into_iter())
+            .map(|n| format!("{class_part}.{n}{item}"))
+            .collect()
+    });
     Ok(Some(Missing {
         names_no: format!("attribute, method, or `__dict__` key of `{class_part}`"),
         nearest,
@@ -806,29 +950,53 @@ fn written_forms(class: &ContractClass) -> Vec<String> {
     out
 }
 
-/// The definitions (by index in `forms`) whose names look like `entry`, each once and written
+/// The definitions (by index in `written`) whose names look like `entry`, each once and written
 /// as `entry` is (with a module part when it has one, else as a qualname or a fqn), the closest
 /// first. One part of the name changed, as a rename or a move changes it: a name in the same
 /// module or class whose last part looks like the entry's, or one with the same last part
 /// whose holder looks like the entry's (`pkg.models:Model` for `pkg.model:Model`). None for a
-/// glob, nor a name heki makes up (`<module>`, `<lambda>`).
-fn nearest_written(entry: &str, forms: impl Iterator<Item = Vec<String>>) -> Vec<(usize, String)> {
+/// glob, nor past the budget `left`, which the forms one part away take.
+fn nearest_written(
+    entry: &str,
+    written: &WrittenForms,
+    left: &mut NearestBudget,
+) -> Vec<(usize, String)> {
     if has_glob_syntax(entry) {
         return Vec::new();
     }
-    let with_module = entry.contains(':');
+    let [same_holder, same_last] = written.one_part_away(entry);
+    left.offer(same_holder.len() + same_last.len(), || {
+        nearest_one_part_away(entry, written, [same_holder, same_last])
+    })
+}
+
+/// [`nearest_written`] among the forms one part away from `entry`, at the positions
+/// [`WrittenForms::one_part_away`] gives.
+fn nearest_one_part_away(
+    entry: &str,
+    written: &WrittenForms,
+    [same_holder, same_last]: [&[usize]; 2],
+) -> Vec<(usize, String)> {
     let (holder, last) = split_holder(entry);
-    let one_part_changed = |f: &str| {
-        let (h, l) = split_holder(f);
-        h == holder && looks_like(last, l) || l == last && looks_like(holder, h)
-    };
-    let candidates: Vec<(usize, String)> = (forms.enumerate())
-        .flat_map(|(i, f)| f.into_iter().map(move |f| (i, f)))
-        .filter(|(_, f)| f.contains(':') == with_module && !f.contains('<') && one_part_changed(f))
+    let form = |at: usize| split_holder(&written.forms[at].1);
+    let mut at: Vec<usize> = (same_holder.iter())
+        .filter(|&&at| looks_like(last, form(at).1))
+        .chain(
+            same_last
+                .iter()
+                .filter(|&&at| looks_like(holder, form(at).0)),
+        )
+        .copied()
         .collect();
-    let of: FxHashMap<&str, usize> = candidates.iter().map(|(i, f)| (f.as_str(), *i)).collect();
+    // In the order of the definitions and their forms: of names as close, the first is offered.
+    at.sort_unstable();
+    at.dedup();
+    let candidates: Vec<(usize, &str)> = (at.into_iter())
+        .map(|at| (written.forms[at].0, written.forms[at].1.as_str()))
+        .collect();
+    let of: FxHashMap<&str, usize> = candidates.iter().map(|&(i, f)| (f, i)).collect();
     let mut out: Vec<(usize, String)> = Vec::new();
-    for name in heki_env::problem::nearest(entry, candidates.iter().map(|(_, f)| f.as_str())) {
+    for name in heki_env::problem::nearest(entry, candidates.iter().map(|&(_, f)| f)) {
         let i = of[name];
         if out.iter().all(|(j, _)| *j != i) {
             out.push((i, name.to_owned()));
@@ -846,39 +1014,4 @@ fn split_holder(name: &str) -> (&str, &str) {
 /// Whether `name` looks like `word`, as [`heki_env::problem::nearest`] judges it.
 fn looks_like(word: &str, name: &str) -> bool {
     !heki_env::problem::nearest(word, [name]).is_empty()
-}
-
-fn nearest_functions(names: &ProjectNames<'_>, entry: &str) -> Vec<String> {
-    let forms = names.functions.iter().map(|k| {
-        vec![
-            k.qualname.clone(),
-            k.fqn(),
-            format!("{}:{}", k.module, k.qualname),
-        ]
-    });
-    nearest_written(entry, forms)
-        .into_iter()
-        .map(|(_, n)| n)
-        .collect()
-}
-
-fn nearest_classes(names: &ProjectNames<'_>, entry: &str) -> Vec<(usize, String)> {
-    nearest_written(entry, names.classes.iter().map(written_forms))
-}
-
-fn nearest_methods(names: &ProjectNames<'_>, entry: &str) -> Vec<String> {
-    if entry.contains(['.', ':']) || has_glob_syntax(entry) {
-        return nearest_functions(names, entry);
-    }
-    // An exempt method without its class matches the last part as written
-    // (`Allowance::exempts`), never the spelling its class holds.
-    let mut methods: Vec<&str> = (names.functions.iter())
-        .map(|k| last_part(&k.qualname))
-        .collect();
-    methods.sort_unstable();
-    methods.dedup();
-    heki_env::problem::nearest(entry, methods)
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
 }
