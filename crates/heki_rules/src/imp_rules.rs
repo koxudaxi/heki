@@ -4,7 +4,7 @@
 
 use crate::mut_rules::{contract_places, mode, reports_unresolved};
 use crate::patterns::PartIndex;
-use crate::{CheckContext, GLOB_CHARACTERS, NamePart, RuleConfigError};
+use crate::{CheckContext, GLOB_CHARACTERS, NamePart, RuleConfigError, RuleSelection};
 use heki_diagnostics::{Diagnostic, RelatedLocation};
 use heki_effect::imports::{ImportForm, ImportGraph, ImportSite, ModuleRef, Target, Timing};
 use heki_env::{HekiConfig, ImportOwnerRule};
@@ -521,9 +521,7 @@ pub(crate) fn imp201_imp202(
     cx: &CheckContext<'_>,
     out: &mut Vec<Diagnostic>,
 ) -> Result<(), RuleConfigError> {
-    if cx.config.import_owners.is_empty()
-        || !cx.selection.is_enabled("IMP201") && !cx.selection.is_enabled("IMP202")
-    {
+    if !judges_imports(cx.config, cx.selection) {
         return Ok(());
     }
     let contracts = ImportContracts::new(&cx.config.import_owners)?;
@@ -903,11 +901,23 @@ fn when_text(site: &ImportSite, module: Option<&str>) -> String {
     format!("{by_name}{when}")
 }
 
-/// Whether `config` declares an `import-owners` contract walking what its importers import
-/// (`reach` other than `"statement"`): its reports change with the imports of every module its
-/// walks reach.
-pub fn walks_imports(config: &HekiConfig) -> bool {
-    (config.import_owners.iter()).any(|r| r.reach.as_deref().is_some_and(|r| r != "statement"))
+/// Whether `IMP201` or `IMP202` judges the `import-owners` contracts of `config`: one is
+/// declared, and `selection` runs one of the rules.
+pub fn judges_imports(config: &HekiConfig, selection: &RuleSelection) -> bool {
+    !config.import_owners.is_empty()
+        && ["IMP201", "IMP202"]
+            .iter()
+            .any(|code| selection.is_enabled(code))
+}
+
+/// Whether the rules `selection` runs judge an `import-owners` contract of `config` walking what
+/// its importers import (`reach` other than `"statement"`): its reports change with the imports
+/// of every module its walks reach. A contract no selected rule judges is not read, so its
+/// patterns are not validated either.
+pub fn walks_imports(config: &HekiConfig, selection: &RuleSelection) -> bool {
+    judges_imports(config, selection)
+        && (config.import_owners.iter())
+            .any(|r| r.reach.as_deref().is_some_and(|r| r != "statement"))
 }
 
 /// The modules among `modules`, each with what it stands for (its file), that an
