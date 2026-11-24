@@ -128,7 +128,8 @@ pub struct LintConfig {
     /// as the exact ones do (Ruff's `preview`). Defaults to `false`.
     pub heuristic: Option<bool>,
     /// The least severity whose reports make `heki check` fail (exit code 1). Defaults to
-    /// `error`: warnings are reported without failing the run.
+    /// `error`: warnings, and heuristic reports, which count as warnings, are reported without
+    /// failing the run.
     pub fail_on: Option<Severity>,
     /// Report the codes of suppression comments that suppressed no report of a rule that ran,
     /// and the baseline entries that matched no report. Defaults to `false`.
@@ -138,6 +139,13 @@ pub struct LintConfig {
     /// What `heki check` does with a contract entry that matches nothing in the analyzed files.
     /// Unset, a run over the whole project warns about them.
     pub unmatched_contract_entries: Option<UnmatchedEntries>,
+}
+
+impl LintConfig {
+    /// `fail-on`, or its default `error`.
+    pub fn fail_on_severity(&self) -> Severity {
+        self.fail_on.unwrap_or(Severity::Error)
+    }
 }
 
 /// `lint.unmatched-contract-entries`: how `heki check` reports a contract entry that names no

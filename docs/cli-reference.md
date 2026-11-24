@@ -2,7 +2,7 @@
 
 # CLI Reference
 
-Exit codes: `0` no diagnostic that fails the run (warnings are reported without failing it), `1` an `error` diagnostic, or a `warning` with `--fail-on warning` (`lint.fail-on`), among the Ratchet regressions when a baseline is used (or a refused `--update-baseline`, or pending `--diff` changes), `2` configuration / I/O / syntax errors.
+Exit codes: `0` no diagnostic that fails the run (warnings and heuristic reports are reported without failing it), `1` an exact `error` diagnostic, or any diagnostic with `--fail-on warning` (`lint.fail-on`), among the Ratchet regressions when a baseline is used (or a refused `--update-baseline`, or pending `--diff` changes), `2` configuration / I/O / syntax errors.
 
 A file that cannot be read or does not parse does not stop the run: `heki check` reports its error, checks and reports the other files, and exits with `2`, also when it reports diagnostics. A file that does not parse cannot run either, so nothing it would do is assumed; the names under its module resolve to nothing. SARIF output lists such files as `error` notifications of a run that did not execute successfully (`invocations[0].toolExecutionNotifications`, `executionSuccessful: false`); JSON output holds the diagnostics only.
 
@@ -43,7 +43,7 @@ Documentation:
 
 Exit codes:
   0  no diagnostic fails the run
-  1  a diagnostic at the `fail-on` severity (an `error` by default), a refused `--update-baseline`, or pending `--diff` changes
+  1  a diagnostic at the `fail-on` severity (an exact `error` by default; a heuristic one counts as a `warning`), a refused `--update-baseline`, or pending `--diff` changes
   2  a configuration, path, read, or syntax error; the error says what to do and links the documentation
 
 Examples:
@@ -118,7 +118,7 @@ Options:
           Ratchet baseline TOML file (line-number-independent)
 
       --fail-on <FAIL_ON>
-          Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`)
+          Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`). A heuristic report counts as a warning
           
           [possible values: error, warning]
 
@@ -162,7 +162,7 @@ Documentation:
 
 Exit codes:
   0  no diagnostic fails the run
-  1  a diagnostic at the `fail-on` severity (an `error` by default), a refused `--update-baseline`, or pending `--diff` changes
+  1  a diagnostic at the `fail-on` severity (an exact `error` by default; a heuristic one counts as a `warning`), a refused `--update-baseline`, or pending `--diff` changes
   2  a configuration, path, read, or syntax error; the error says what to do and links the documentation
 
 Examples:

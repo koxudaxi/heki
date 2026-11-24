@@ -56,16 +56,13 @@ pub(crate) fn selection(selectors: &Selectors, project: &Project) -> Result<Rule
 /// `--fail-on` over `lint.fail-on`: the least severity whose reports make the run fail.
 pub(crate) fn fail_on(args: &CheckArgs, lint: &LintConfig) -> Severity {
     args.fail_on
-        .map(Severity::from)
-        .or(lint.fail_on)
-        .unwrap_or(Severity::Error)
+        .map_or_else(|| lint.fail_on_severity(), Severity::from)
 }
 
-/// Whether one of the reports `diags` makes the run fail (exit code 1) at `fail_on`.
+/// Whether one of the reports `diags` makes the run fail (exit code 1) at `fail_on`
+/// ([`Diagnostic::fails_run`]).
 pub(crate) fn any_failing(diags: &[Diagnostic], fail_on: Severity) -> bool {
-    diags
-        .iter()
-        .any(|d| d.severity == Severity::Error || fail_on == Severity::Warning)
+    diags.iter().any(|d| d.fails_run(fail_on))
 }
 
 /// The saved summary snapshot when `MUT103` is enabled (`None` with a warning if missing).

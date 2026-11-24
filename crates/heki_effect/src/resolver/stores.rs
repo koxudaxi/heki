@@ -1616,9 +1616,9 @@ impl<'i> Iterated<'_, 'i> {
     }
 
     /// Whether the list or set display `display` still holds the items it was made with where a
-    /// loop reads it: nothing but copies, loops, and the `wrappers` reads it or a variable that
-    /// may be it, so no method adds, removes, or replaces an item, and no other call is handed
-    /// it (`keys = ["a"]; keys.append(name)` may hold any name).
+    /// loop reads it: nothing but copies, loops (a comprehension's too), and the `wrappers` reads
+    /// it or a variable that may be it, so no method adds, removes, or replaces an item, and no
+    /// other call is handed it (`keys = ["a"]; keys.append(name)` may hold any name).
     fn holds_its_items(&self, display: VarId, wrappers: &'static [&'static str]) -> bool {
         let held = aliases_of(self.f, [display]);
         let phis_hold = self.f.blocks.iter().flat_map(|b| &b.phis).all(|phi| {
@@ -1627,6 +1627,9 @@ impl<'i> Iterated<'_, 'i> {
         phis_hold
             && insts(self.f).all(|inst| match &inst.kind {
                 InstKind::Copy { .. } | InstKind::MakeIter { .. } => true,
+                kind if let Some((_, captured)) = kind.comprehension_operands() => {
+                    !captured.iter().any(|v| held.contains(v))
+                }
                 kind => {
                     !kind.operands().iter().any(|v| held.contains(v))
                         || super::plain_call(kind, wrappers, |v| self.types.get(&v)).is_some()

@@ -1177,6 +1177,7 @@ impl<'a> Mut202Fn<'a> {
             | InstKind::BuildString { .. }
             | InstKind::Compare { .. }
             | InstKind::UnaryOp { .. } => true,
+            _ if kind.comprehension_operands().is_some() => kind.only_iterates(v),
             InstKind::SubscriptLoad { obj, .. } => *obj == v,
             InstKind::SubscriptStore {
                 obj, value, index, ..

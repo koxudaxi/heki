@@ -2,7 +2,7 @@
 
 # async-blocking-call (EFF101)
 
-Family: Execution Effects (EFF) · Exact · Enabled by default · Severity `warning` (slower code) · No automatic fix
+Family: Execution Effects (EFF) · Exact · Enabled by default · Severity `error` (a bug) · No automatic fix
 
 A call in `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop; its heuristic reports, a call that can reach a blocking call.
 
@@ -216,7 +216,8 @@ Not part of the claim: how long the call waits, and how often the reported call 
 
 ## Why is this bad?
 A call that waits inside a coroutine stops the whole event loop: every other request, timer, and
-task waits until it returns.
+task waits until it returns, as in a deadlock while the call lasts. An exact report is therefore
+an `error`, which fails the run.
 
 ## Example
 ```python

@@ -63,8 +63,10 @@ fn the_readme_examples_print_what_the_readme_shows() {
             .collect();
         assert_eq!(args[0], "check", "{command}");
         let (code, stdout, stderr) = p.heki(&args);
-        // The examples report warnings: printed, and the run passes.
-        assert_eq!(code, 0, "{stderr}");
+        // An example whose report is an exact error fails the run; a warning is printed, and
+        // the run passes.
+        let fails = expected.lines().any(|line| line.contains(") [error] "));
+        assert_eq!(code, i32::from(fails), "{stderr}");
         assert_eq!(format!("{stdout}{stderr}"), expected, "{section}");
     }
 }

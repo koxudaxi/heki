@@ -225,7 +225,7 @@ const NEW_OBJECT_CALLS: &[&str] = &[
 ];
 
 /// `typing.cast(T, value)` returns `value`.
-const CASTS: &[&str] = &["typing.cast", "typing_extensions.cast"];
+pub(crate) const CASTS: &[&str] = &["typing.cast", "typing_extensions.cast"];
 
 /// What the instruction `kind` of `f` makes of the object its result holds. A call's resolution
 /// is `callee` (`None` for any other instruction); `constructs` says the call constructs a

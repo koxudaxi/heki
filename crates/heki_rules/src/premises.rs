@@ -275,7 +275,7 @@ pub const FIXED_BY_THE_CODE: OpenCause = OpenCause {
 pub const ITEMS_NOT_FROM_THE_DATA: OpenCause = OpenCause {
     id: "items-not-from-the-data",
     premise: &ORIGIN,
-    states: "the loop's items come from something heki does not take as the data: a method's receiver, a project function's result, or a call heki does not resolve",
+    states: "the loop's items come from something heki does not take as the data: a method's receiver, a project function's result whose returns heki does not follow to such items, or a call heki does not resolve",
     closer: Closer::None,
 };
 
@@ -976,7 +976,7 @@ pub const TRIPS_FIXED_BY_THE_CODE: ConditionCause = ConditionCause {
 pub const TRIPS_NOT_FROM_THE_DATA: ConditionCause = ConditionCause {
     id: ITEMS_NOT_FROM_THE_DATA.id,
     condition: &TRIP_COUNT_OPEN,
-    states: "the loop's items come from something heki does not take as the data: a method's receiver (`self.layers`), a project function's result, or a call heki does not resolve, so the program's structure may decide their number",
+    states: "the loop's items come from something heki does not take as the data: a method's receiver (`self.layers`), a project function's result whose returns heki does not follow to such items, or a call heki does not resolve, so the program's structure may decide their number",
     closer: ITEMS_NOT_FROM_THE_DATA.closer,
 };
 

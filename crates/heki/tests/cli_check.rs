@@ -41,13 +41,28 @@ impl Project {
     }
 
     fn heki(&self, args: &[&str]) -> (i32, String, String) {
-        let out = self.command(args).output().unwrap();
-        (
-            out.status.code().unwrap(),
-            String::from_utf8(out.stdout).unwrap(),
-            String::from_utf8(out.stderr).unwrap(),
-        )
+        outcome(self.command(args))
     }
+
+    /// `heki check <args>` in the project directory, as a user runs it: without `--heuristic`.
+    fn plain(&self, args: &[&str]) -> (i32, String, String) {
+        let mut cmd = common::heki_command();
+        cmd.arg("check").args(args).current_dir(&self.dir);
+        for var in COLOR_VARIABLES {
+            cmd.env_remove(var);
+        }
+        outcome(cmd)
+    }
+}
+
+/// The exit code, stdout, and stderr of `cmd`.
+fn outcome(mut cmd: Command) -> (i32, String, String) {
+    let out = cmd.output().unwrap();
+    (
+        out.status.code().unwrap(),
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+    )
 }
 
 impl Drop for Project {
@@ -56,7 +71,13 @@ impl Drop for Project {
     }
 }
 
+/// A call that always blocks the event loop: an exact `EFF101` report, an `error`.
 const BLOCKING: &str = "import time\n\nasync def handler():\n    time.sleep(1)\n";
+/// A blocking call one branch of a helper makes: a heuristic report of a blocking call on the
+/// event loop, an `error` whose claim that the call always runs is open.
+const MAYBE_BLOCKING: &str = "import time\n\n\ndef pause(seconds: float) -> None:\n    if seconds > 0:\n        time.sleep(seconds)\n\n\nasync def handler(seconds: float) -> None:\n    pause(seconds)\n";
+/// A quadratic concatenation in a loop: an exact `OPT101` report, a `warning` (slower code).
+const SLOW: &str = "def concat(items):\n    out = []\n    for x in items:\n        out = out + [x]\n    return out\n";
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -109,11 +130,20 @@ fn exit_codes_and_clean_runs() {
     assert!(stderr.contains("All checks passed"));
 
     // A warning is reported without failing the run.
+    p.write("pkg/slow.py", SLOW);
+    let (code, stdout, stderr) = p.heki(&[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.starts_with("pkg/slow.py:4:9: OPT101 (list-quadratic-concat) [warning] "),
+        "{stdout}"
+    );
+    std::fs::remove_file(p.dir.join("pkg/slow.py")).unwrap();
+    // An exact error fails it.
     p.write("pkg/bad.py", BLOCKING);
     let (code, stdout, stderr) = p.heki(&[]);
-    assert_eq!(code, 0);
+    assert_eq!(code, 1);
     assert!(
-        stdout.starts_with("pkg/bad.py:4:5: EFF101 (async-blocking-call) [warning] "),
+        stdout.starts_with("pkg/bad.py:4:5: EFF101 (async-blocking-call) [error] "),
         "{stdout}"
     );
     assert!(stdout.contains("4 |     time.sleep(1)"));
@@ -133,6 +163,51 @@ fn exit_codes_and_clean_runs() {
     assert!(stderr.contains("error: pkg/broken.py:1:7: "), "{stderr}");
 }
 
+/// Only a certain bug that can be critical stops a run by default: an exact report of an
+/// `error` rule. A heuristic report counts as a warning, whatever its rule's severity.
+#[test]
+fn only_exact_errors_fail_a_run_by_default() {
+    let p = Project::new("exact_errors_fail");
+    // No configuration: a call that always blocks the event loop fails the run.
+    p.write("app.py", BLOCKING);
+    let (code, stdout, stderr) = p.plain(&[]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stdout.starts_with("app.py:4:5: EFF101 (async-blocking-call) [error] "),
+        "{stdout}"
+    );
+    let (code, stdout, _) = p.plain(&["--output-format", "json"]);
+    let diags: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        (code, &diags[0]["severity"], &diags[0]["certainty"]),
+        (1, &"error".into(), &"exact".into()),
+        "{stdout}"
+    );
+    std::fs::remove_file(p.dir.join("app.py")).unwrap();
+    // A blocking call the event loop may run: a heuristic report, shown with `--heuristic` as
+    // an error, which passes the run unless `fail-on = "warning"`.
+    p.write("maybe.py", MAYBE_BLOCKING);
+    let (code, stdout, stderr) = p.plain(&[]);
+    assert_eq!((code, stdout.as_str()), (0, ""), "{stderr}");
+    let (code, stdout, stderr) = p.plain(&["--heuristic", "--output-format", "json"]);
+    assert_eq!(code, 0, "{stderr}");
+    let diags: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let diags = diags.as_array().unwrap();
+    assert_eq!(diags.len(), 1, "{stdout}");
+    assert_eq!(
+        (&diags[0]["severity"], &diags[0]["certainty"]),
+        (&"error".into(), &"heuristic".into()),
+        "{stdout}"
+    );
+    assert_eq!(p.plain(&["--heuristic", "--fail-on", "warning"]).0, 1);
+    p.write(
+        "heki.toml",
+        "[lint]\nheuristic = true\nfail-on = \"warning\"\n",
+    );
+    assert_eq!(p.plain(&[]).0, 1);
+    assert_eq!(p.plain(&["--fail-on", "error"]).0, 0);
+}
+
 #[test]
 fn inline_suppressions_ignore_hashes_in_strings() {
     let p = Project::new("noqa");
@@ -141,7 +216,7 @@ fn inline_suppressions_ignore_hashes_in_strings() {
         "import time\n\nasync def h():\n    time.sleep(len(\"# heki: ignore[EFF101]\"))\n    time.sleep(1)  # heki: ignore[EFF101]\n    time.sleep(2)  # noqa: async-blocking-call\n    time.sleep(3)  # heki: ignore[MUT201]\n",
     );
     let (code, stdout, _) = p.heki(&["--output-format", "concise"]);
-    assert_eq!(code, 0);
+    assert_eq!(code, 1);
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 2, "{stdout}");
     assert!(lines[0].starts_with("a.py:4:5: EFF101 "), "{stdout}");
@@ -164,7 +239,7 @@ fn inline_suppressions_and_source_lines_in_files_with_cr_or_crlf_line_breaks() {
         p.write(file, &src);
     }
     let (code, stdout, _) = p.heki(&["--output-format", "concise"]);
-    assert_eq!(code, 0);
+    assert_eq!(code, 1);
     // Each file reports only the unsuppressed call, on its own line 5.
     let starts: Vec<&str> = stdout
         .lines()
@@ -305,7 +380,7 @@ async def handler():
 "#;
 
 #[test]
-fn slower_code_defaults_to_warning() {
+fn slower_code_defaults_to_warning_and_a_blocked_event_loop_to_error() {
     let p = Project::new("opt_warning");
     p.write("app.py", SLOW_AND_BLOCKING);
     let severities = |args: &[&str]| -> Vec<(String, String)> {
@@ -322,13 +397,14 @@ fn slower_code_defaults_to_warning() {
             .collect()
     };
     let pair = |rule: &str, severity: &str| (rule.to_owned(), severity.to_owned());
-    // These rules report slower code, not wrong code: `warning` (a bug is an `error`).
+    // The `OPT` rules report slower code, not wrong code: `warning`. A call that blocks the
+    // event loop holds up every other task, as a deadlock does: an `error`, as a bug is.
     assert_eq!(
         severities(&[]),
         vec![
             pair("OPT101", "warning"),
             pair("OPT113", "warning"),
-            pair("EFF101", "warning"),
+            pair("EFF101", "error"),
         ]
     );
     // Warnings alone do not fail the check; the label and the SARIF level change.
@@ -344,7 +420,7 @@ fn slower_code_defaults_to_warning() {
     // `lint.severity` still overrides the default, by code or by name.
     p.write(
         "heki.toml",
-        "[lint.severity]\nOPT101 = \"error\"\nnested-loop-equijoin = \"error\"\n",
+        "[lint.severity]\nOPT101 = \"error\"\nnested-loop-equijoin = \"error\"\nEFF101 = \"warning\"\n",
     );
     assert_eq!(
         severities(&[]),
@@ -356,6 +432,7 @@ fn slower_code_defaults_to_warning() {
     );
     // An error fails it.
     assert_eq!(p.heki(&["--select", "OPT"]).0, 1);
+    assert_eq!(p.heki(&["--select", "EFF101"]).0, 0);
 }
 
 /// A write of `Model.fields` outside the functions its contract ([`WRITE_OWNERS`]) allows:
@@ -367,12 +444,12 @@ const FORMATS: [&str; 5] = ["full", "concise", "json", "github", "sarif"];
 #[test]
 fn warnings_do_not_fail_the_check_unless_fail_on_says_so() {
     let p = Project::new("fail_on");
-    p.write("app.py", BLOCKING);
+    p.write("app.py", SLOW);
     // Only warnings: they are printed, and the run passes.
     let (code, stdout, stderr) = p.heki(&[]);
     assert_eq!(code, 0, "{stderr}");
     assert!(
-        stdout.starts_with("app.py:4:5: EFF101 (async-blocking-call) [warning] "),
+        stdout.starts_with("app.py:4:9: OPT101 (list-quadratic-concat) [warning] "),
         "{stdout}"
     );
     assert!(stderr.contains("Found 1 diagnostic(s)"), "{stderr}");
@@ -389,18 +466,34 @@ fn warnings_do_not_fail_the_check_unless_fail_on_says_so() {
     for format in FORMATS {
         let (code, stdout, _) = p.heki(&["--output-format", format]);
         assert_eq!(code, 0, "{format}: {stdout}");
-        assert!(stdout.contains("EFF101"), "{format}: {stdout}");
+        assert!(stdout.contains("OPT101"), "{format}: {stdout}");
         let (code, _, _) = p.heki(&["--output-format", format, "--fail-on", "warning"]);
         assert_eq!(code, 1, "{format}");
     }
-    // An error fails the run at either setting, in every format.
+    // A heuristic report counts as a warning, whatever its severity: a broken contract (an
+    // `error` the registry keeps heuristic) fails the run only at `warning`.
     p.write("models.py", CONTRACT_BREACH)
         .write("heki.toml", WRITE_OWNERS);
+    for format in FORMATS {
+        for (fail_on, expected) in [("error", 0), ("warning", 1)] {
+            let (code, stdout, _) = p.heki(&["--output-format", format, "--fail-on", fail_on]);
+            assert_eq!(code, expected, "{format} {fail_on}: {stdout}");
+            assert!(stdout.contains("MUT201"), "{format}: {stdout}");
+        }
+    }
+    let (code, stdout, _) = p.heki(&["--output-format", "full"]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        stdout.contains(": MUT201 (write-owner-violation) [error, heuristic] "),
+        "{stdout}"
+    );
+    // An exact error fails the run at either setting, in every format.
+    p.write("blocking.py", BLOCKING);
     for format in FORMATS {
         for fail_on in ["error", "warning"] {
             let (code, stdout, _) = p.heki(&["--output-format", format, "--fail-on", fail_on]);
             assert_eq!(code, 1, "{format} {fail_on}: {stdout}");
-            assert!(stdout.contains("MUT201"), "{format}: {stdout}");
+            assert!(stdout.contains("EFF101"), "{format}: {stdout}");
         }
     }
     let (code, stdout, _) = p.heki(&["--output-format", "concise"]);
@@ -424,25 +517,35 @@ fn ratchet_regressions_fail_at_the_fail_on_severity() {
         );
     let (code, _, stderr) = p.heki(&["--update-baseline"]);
     assert_eq!(code, 0, "{stderr}");
+    // The recorded exact error keeps passing, at either setting.
     assert_eq!(p.heki(&[]).0, 0);
-    // A new error is a regression that fails the run.
-    p.write(
-        "more.py",
-        "from models import Model\n\n\ndef add_more(m: Model):\n    m.fields.append(2)\n",
-    );
+    assert_eq!(p.heki(&["--fail-on", "warning"]).0, 0);
+    // A new exact error is a regression that fails the run.
+    p.write("b.py", BLOCKING);
     let (code, stdout, _) = p.heki(&["--output-format", "concise"]);
     assert_eq!(code, 1, "{stdout}");
-    assert!(stdout.starts_with("more.py:5:5: MUT201 "), "{stdout}");
-    assert_eq!(stdout.lines().count(), 1, "{stdout}");
-    std::fs::remove_file(p.dir.join("more.py")).unwrap();
-    // A new warning is a regression that is reported without failing the run, unless
-    // `fail-on` says so.
-    p.write("b.py", BLOCKING);
-    let (code, stdout, stderr) = p.heki(&["--output-format", "concise"]);
-    assert_eq!(code, 0, "{stderr}");
     assert!(stdout.starts_with("b.py:4:5: EFF101 "), "{stdout}");
-    assert!(stderr.contains("Found 1 Ratchet regression(s)"), "{stderr}");
-    assert_eq!(p.heki(&["--fail-on", "warning"]).0, 1);
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    std::fs::remove_file(p.dir.join("b.py")).unwrap();
+    // A new warning, and a new heuristic report of an error rule, are regressions reported
+    // without failing the run, unless `fail-on` says so.
+    for (file, text, report) in [
+        ("slow.py", SLOW, "slow.py:4:9: OPT101 "),
+        (
+            "more.py",
+            "from models import Model\n\n\ndef add_more(m: Model):\n    m.fields.append(2)\n",
+            "more.py:5:5: MUT201 ",
+        ),
+    ] {
+        p.write(file, text);
+        let (code, stdout, stderr) = p.heki(&["--output-format", "concise"]);
+        assert_eq!(code, 0, "{stderr}");
+        assert!(stdout.starts_with(report), "{stdout}");
+        assert!(stderr.contains("Found 1 Ratchet regression(s)"), "{stderr}");
+        assert_eq!(p.heki(&["--fail-on", "warning"]).0, 1);
+        std::fs::remove_file(p.dir.join(file)).unwrap();
+    }
+    p.write("b.py", BLOCKING);
     // A baseline that is not updated because an entry grew fails the run, whatever the
     // regressions' severity: the update did not happen.
     let (code, _, stderr) = p.heki(&["--update-baseline"]);
@@ -651,7 +754,7 @@ fn folded_blocking_calls_are_suppressed_and_baselined_one_by_one() {
     p.write("a.py", &sleeps(11));
     let concise = ["--output-format", "concise"];
     let (code, stdout, _) = p.heki(&concise);
-    assert_eq!(code, 0);
+    assert_eq!(code, 1);
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
     // Exact reports fold by the call each of them always runs, and say it.
     assert!(
@@ -664,7 +767,7 @@ fn folded_blocking_calls_are_suppressed_and_baselined_one_by_one() {
         &sleeps(11).replacen("time.sleep(1)", "time.sleep(1)  # heki: ignore[EFF101]", 1),
     );
     let (code, stdout, _) = p.heki(&concise);
-    assert_eq!(code, 0);
+    assert_eq!(code, 1);
     assert_eq!(stdout.lines().count(), 10, "{stdout}");
     assert!(stdout.starts_with("a.py:5:5: EFF101 "), "{stdout}");
     // The baseline records every site: a twelfth call is a regression.
@@ -681,7 +784,7 @@ fn folded_blocking_calls_are_suppressed_and_baselined_one_by_one() {
     );
     p.write("a.py", &sleeps(12));
     let (code, stdout, stderr) = p.heki(&[&baseline[..], &concise[..]].concat());
-    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(code, 1, "{stderr}");
     assert!(stderr.contains("allows 11 site(s), found 12"), "{stderr}");
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
     assert!(stdout.contains("(+11 more async call sites"), "{stdout}");
@@ -941,11 +1044,10 @@ const USERS: &str = "import requests\n\n\ndef fetch_name(user_id):\n    return r
 const API: &str = "from app.users import load_user\n\n\nasync def get_user(user_id):\n    return load_user(user_id)\n";
 
 /// `app/api.py` blocks on `requests.get` in `app/users.py`, two helpers down; `app/jobs.py`
-/// blocks on its own; `app/__init__.py` reports nothing. Warnings fail the run.
+/// blocks on its own; `app/__init__.py` reports nothing. Each report is an exact error.
 fn touched_project(name: &str) -> Project {
     let p = Project::new(name);
-    p.write("heki.toml", "[lint]\nfail-on = \"warning\"\n")
-        .write("app/__init__.py", "")
+    p.write("app/__init__.py", "")
         .write("app/users.py", USERS)
         .write("app/api.py", API)
         .write("app/jobs.py", BLOCKING);
@@ -1099,7 +1201,7 @@ fn touched_runs_show_and_fail_on_the_reports_that_touch_the_files() {
     assert_eq!(code, 1);
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
     assert!(
-        stdout.starts_with("::warning file=app/jobs.py,line=4,"),
+        stdout.starts_with("::error file=app/jobs.py,line=4,"),
         "{stdout}"
     );
     let (code, stdout, _) = p.heki(&["--output-format", "sarif", "--touched", "app/users.py"]);
@@ -1129,7 +1231,7 @@ fn touched_runs_judge_only_the_baseline_entries_of_the_reports_they_show() {
     let p = touched_project("touched_baseline");
     p.write(
         "heki.toml",
-        "baseline = \"b.toml\"\n\n[lint]\nfail-on = \"warning\"\nreport-unused-suppressions = true\n",
+        "baseline = \"b.toml\"\n\n[lint]\nreport-unused-suppressions = true\n",
     )
     .write(
         "app/orders.py",
@@ -1218,7 +1320,7 @@ fn touched_runs_fold_only_the_reports_they_show() {
     assert!(stdout.contains("(+10 more async call sites"), "{stdout}");
     // One caller's report alone, although the folded report of the whole run is another file's.
     let (code, stdout, stderr) = p.heki(&[&concise[..], &["--touched", "app/c07.py"]].concat());
-    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(code, 1, "{stderr}");
     assert_eq!(sites(&stdout), ["app/c07.py:5:5"], "{stdout}");
     assert!(!stdout.contains("more async call sites"), "{stdout}");
     // Every caller reaches the touched helper: they fold as in the whole run.

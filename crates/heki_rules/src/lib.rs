@@ -84,8 +84,8 @@ pub enum RuleFamily {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Consequence {
-    /// A bug that can be critical: a wrong result, an exception, a lost update, a deadlock, or a
-    /// broken contract.
+    /// A bug that can be critical: a wrong result, an exception, a lost update, a deadlock, an
+    /// event loop held up for every other task, or a broken contract.
     Bug,
     /// A bug that is rarely harmful: a promise the code makes is broken, such as a read-only
     /// annotation, where the callers seldom notice.
@@ -477,7 +477,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Eff,
         certainty: Certainty::Exact,
         activation: Activation::Default,
-        consequence: Consequence::Slowdown,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "A call in `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop; its heuristic reports, a call that can reach a blocking call.",

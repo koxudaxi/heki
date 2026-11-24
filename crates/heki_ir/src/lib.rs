@@ -592,6 +592,38 @@ impl InstKind {
         )
     }
 
+    /// The outermost iterable and the captured values of the generator expression this
+    /// instruction makes, or of the comprehension function (before 3.12) it calls. Python calls
+    /// `iter()` on the iterable in the enclosing scope and hands the child scope only the
+    /// iterator, so the instruction iterates the iterable as a `for` loop's `MakeIter` does; the
+    /// captured values are the child's to use as its body does.
+    pub fn comprehension_operands(&self) -> Option<(VarId, &[VarId])> {
+        match self {
+            Self::MakeGenExpr {
+                outer_iter,
+                captured,
+                ..
+            } => Some((*outer_iter, captured)),
+            Self::Call {
+                callee_var,
+                callee,
+                args,
+                ..
+            } if comprehension_id(*callee_var, callee).is_some() => {
+                let (iterable, captured) = args.split_first()?;
+                Some((*iterable, captured))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the instruction uses `v` only as the outermost iterable of a comprehension
+    /// ([`Self::comprehension_operands`]), so it only iterates it.
+    pub fn only_iterates(&self, v: VarId) -> bool {
+        self.comprehension_operands()
+            .is_some_and(|(iterable, captured)| iterable == v && !captured.contains(&v))
+    }
+
     /// Collect all SSA operand `VarId`s read by this instruction.
     pub fn operands(&self) -> Vec<VarId> {
         match self {

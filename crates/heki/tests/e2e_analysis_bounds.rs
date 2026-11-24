@@ -7103,6 +7103,63 @@ fn memo_keys_of_many_values_are_compared_once() {
     );
 }
 
+/// A chain of `links` functions, each returning what the next one returns, the last the rows
+/// of a query, and for each a loop over what it returns that sends a query per row.
+fn helpers_returning_rows(links: usize) -> String {
+    let mut out = vec![
+        "import sqlite3".to_owned(),
+        String::new(),
+        "CONN = sqlite3.connect(\"app.db\")".to_owned(),
+        String::new(),
+        String::new(),
+        "def book(i):".to_owned(),
+        "    return CONN.execute(\"SELECT * FROM b WHERE a = ?\", (i,)).fetchone()".to_owned(),
+    ];
+    for k in 0..links {
+        let returned = if k + 1 == links {
+            "CONN.execute(\"SELECT id FROM a\").fetchall()".to_owned()
+        } else {
+            format!("h{}()", k + 1)
+        };
+        out.extend([
+            String::new(),
+            String::new(),
+            format!("def h{k}():"),
+            format!("    return {returned}"),
+            String::new(),
+            String::new(),
+            format!("def each_{k}():"),
+            format!("    for r in h{k}():"),
+            "        book(r[0])".to_owned(),
+        ]);
+    }
+    out.join("\n") + "\n"
+}
+
+/// A module's return facts are decided in a bounded number of passes, each from the facts of
+/// the pass before: the rows a function returns through a chain of helpers longer than the bound
+/// are not followed, and the loop over them is a heuristic report.
+#[test]
+fn return_facts_past_the_pass_bound_are_not_followed() {
+    let shape = |links: usize| {
+        let p = Project::new(&format!("bounds_return_passes_{links}"));
+        p.write("m.py", &helpers_returning_rows(links));
+        p
+    };
+    let found = check_linear(64, shape);
+    let queries = |certainty: &str| {
+        found
+            .iter()
+            .filter(|d| d["rule_code"] == "EFF103" && d["certainty"] == certainty)
+            .count()
+    };
+    assert_eq!(
+        (queries("exact"), queries("heuristic")),
+        (8, 56),
+        "{found:#?}"
+    );
+}
+
 /// `(function, certainty)` of each `EFF101` report among `found`.
 fn blocking_reports(found: &[Value]) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = found

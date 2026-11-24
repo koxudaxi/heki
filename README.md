@@ -53,7 +53,7 @@ async def get_user(user_id: int) -> dict[str, str]:
 
 ```console
 $ heki check
-app/api.py:5:12: EFF101 (async-blocking-call) [warning] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)
+app/api.py:5:12: EFF101 (async-blocking-call) [error] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)
   |
 5 |     return load_user(user_id)
   |            ^
@@ -122,10 +122,13 @@ use it next to them.
 
 Run `uvx heki check` (or `heki check` once installed) in the directory with `pyproject.toml`:
 
-- An error reports a bug: a wrong result, an exception, a lost update, a deadlock, or a broken
-  contract. A warning reports slower code, like the two above, or a bug that is rarely harmful.
-- Warnings are printed and do not fail the run (exit code 0). Errors fail it (exit code 1).
-  `--fail-on warning` (`lint.fail-on = "warning"`) makes warnings fail it too.
+- An error reports a bug that can be critical: a wrong result, an exception, a lost update, a
+  deadlock, an event loop held up for every other task, like the first example above, or a
+  broken contract. A warning reports slower code, like the second, or a bug that is rarely
+  harmful.
+- An exact error fails the run (exit code 1). Warnings, and heuristic reports, which can be
+  wrong about the code, are printed and do not fail it (exit code 0). `--fail-on warning`
+  (`lint.fail-on = "warning"`) makes them fail it too.
 - A note at the end says how many heuristic rules were left off; `--heuristic` runs them.
 - Next, [`heki recommend`](https://heki.koxudaxi.dev/recommend/) (experimental) says which rules
   would report on the project, what heki could not see, and the contracts the code already
@@ -391,10 +394,12 @@ jobs:
       - run: uvx heki check --output-format github
 ```
 
-Errors fail the hook and the last step. Warnings, such as `EFF101` and `EFF103` reports, do not,
-unless you add `--fail-on warning` or set `fail-on = "warning"` in `[tool.heki.lint]`. The SARIF
-step keeps findings as alerts and fails only on a configuration, read, or syntax error. See
-[Adopting heki](https://heki.koxudaxi.dev/adoption/) for a hook without uv and a Ratchet baseline.
+Exact errors, such as `EFF101` reports, fail the hook and the last step. Warnings, such as
+`EFF103` reports, and heuristic reports do not, unless you add `--fail-on warning` or set
+`fail-on = "warning"` in `[tool.heki.lint]`. The SARIF step keeps findings as alerts and fails
+only on a configuration, read, or syntax error. See
+[Adopting heki](https://heki.koxudaxi.dev/adoption/) for a hook without uv and a Ratchet baseline
+that records today's errors, so that only new ones fail.
 
 ## 📚 Documentation
 

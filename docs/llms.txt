@@ -20,7 +20,7 @@
 - [Fixes and Safety](https://heki.koxudaxi.dev/fixes/): heki check --fix rewrites an OPT finding only when heki proves that the rewrite keeps what the program does
 - [Adopting heki in a Code Base](https://heki.koxudaxi.dev/adoption/): An existing code base usually has findings you cannot fix at once
 - [Configuration Advice](https://heki.koxudaxi.dev/recommend/): heki recommend analyzes a project as heki check does and prints advice on its configuration, with counts from the project and the keys to add to [tool.heki]
-- [CLI Reference](https://heki.koxudaxi.dev/cli-reference/): Exit codes: 0 no diagnostic that fails the run (warnings are reported without failing it), 1 an error diagnostic, or a warning with --fail-on warning (lint.fail-on), among the Ratchet regressions when a baseline is used (or a refused --update-baseline, or pending --diff changes), 2 configuration / I/O / syntax errors
+- [CLI Reference](https://heki.koxudaxi.dev/cli-reference/): Exit codes: 0 no diagnostic that fails the run (warnings and heuristic reports are reported without failing it), 1 an exact error diagnostic, or any diagnostic with --fail-on warning (lint.fail-on), among the Ratchet regressions when a baseline is used (or a refused --update-baseline, or pending --diff changes), 2 configuration / I/O / syntax errors
 
 ## Integrations
 
@@ -29,7 +29,7 @@
 
 ## Rules
 
-- [async-blocking-call (EFF101)](https://heki.koxudaxi.dev/rules/async-blocking-call/): Family: Execution Effects (EFF) · Exact · Enabled by default · Severity warning (slower code) · No automatic fix
+- [async-blocking-call (EFF101)](https://heki.koxudaxi.dev/rules/async-blocking-call/): Family: Execution Effects (EFF) · Exact · Enabled by default · Severity error (a bug) · No automatic fix
 - [async-blocking-fs (EFF105)](https://heki.koxudaxi.dev/rules/async-blocking-fs/): Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity warning (slower code) · No automatic fix
 - [async-def-as-sync-callback (EFF115)](https://heki.koxudaxi.dev/rules/async-def-as-sync-callback/): Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
 - [cached-property-stale-mutation (MUT101)](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/): Family: Mutation & State (MUT) · Exact · Opt-in · Experimental · Severity error (a bug) · No automatic fix

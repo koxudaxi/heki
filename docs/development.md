@@ -80,7 +80,7 @@ The Layer 2 rows of the distributions the catalog lists (`[[distributions]]`) ar
 releases of each distribution:
 
 ```console
-$ uv run --no-project --python 3.12 --with "packaging==25.0" python tests/sentinel/verify_ecosystem_kb.py [--only DIST] [--version DIST==VERSION]
+$ uv run --only-group sentinel --isolated --python 3.12 python tests/sentinel/verify_ecosystem_kb.py [--only DIST] [--version DIST==VERSION]
 ```
 
 For the oldest and the newest release the `verified` range admits, and the first and the last of
@@ -454,7 +454,7 @@ project may take tens of times more per byte than the rest.
 $ cargo build --release
 $ python scripts/build_docs.py --heki target/release/heki   # rules and CLI reference pages
 $ python scripts/build_llms_txt.py                          # llms.txt / llms-full.txt
-$ uvx --from "zensical==0.1.2" zensical serve
+$ uv run --only-group docs --isolated zensical serve
 ```
 
 - Rule documentation lives in `crates/heki_rules/rule-docs/<CODE>.md`: `heki rule <CODE>` prints
@@ -617,8 +617,17 @@ token of a Claude subscription (`claude setup-token` creates one). No other step
 The scripts of the workflow have tests, which CI runs on every pull request:
 
 ```console
-$ uvx --python 3.12 --from "pytest==8.4.2" --with "pyyaml==6.0.3" --with "jsonschema==4.25.1" pytest scripts/tests
+$ uv run --only-group scripts-tests --isolated --python 3.12 pytest scripts/tests
 ```
+
+The tools CI runs (pytest, zensical, twine, pre-commit, zizmor) are the dependency groups of
+`pyproject.toml`, locked in `uv.lock`: a workflow runs one group with `uv run --only-group
+<group> --isolated <tool>`, and `UV_LOCKED=1` makes uv fail instead of updating the lock.
+`exclude-newer = "3d"` keeps a release younger than three days out of the lock, and
+`no-build = true` allows wheels only. Change a version in the group, run `uv lock`, and commit
+both files. Dependabot opens the weekly updates, with a three day cooldown. The `workflow lint`
+job runs zizmor over `.github/workflows`; a finding is fixed, or kept with an inline
+`# zizmor: ignore[<audit>]` and its reason.
 
 ## Architecture
 
