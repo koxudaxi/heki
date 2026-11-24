@@ -2467,7 +2467,7 @@ fn state_calls_follow_the_classes_the_catalog_returns() {
     );
     let call = |methods: &[&str]| {
         let methods: Vec<String> = methods.iter().map(|m| (*m).to_owned()).collect();
-        summary::state_call(&kb, "S", &methods).map(|c| c.has(BlockingDb))
+        summary::state_call(&kb, "S", &methods).map(|c| c.may_have(BlockingDb))
     };
     assert_eq!(call(&["step", "last"]), Some(true));
     assert_eq!(call(&["fluent", "last"]), Some(false));
