@@ -196,14 +196,14 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
         json!({"shown": 4, "exact": 2, "heuristic": 2, "withheld_heuristic": 0,
                "heuristic_rules_off": 0, "baseline": null})
     );
-    // Naming the exact rule shows its heuristic report.
+    // Naming the exact rule shows its heuristic report; `EFF101`'s, not named, stays withheld.
     let (_, named, _) = recommend_json(&p, &["--extend-select", "OPT101"]);
     assert_eq!(
         (
             &named["reports_now"]["withheld_heuristic"],
             &named["reports_now"]["heuristic"]
         ),
-        (&json!(0), &json!(1))
+        (&json!(1), &json!(1))
     );
     // An inline suppression counts as in `heki check`.
     p.write(
@@ -723,7 +723,7 @@ fn rules_worth_enabling_follow_the_policy() {
         json!({"extend-select": ["EFF107", "MUT106"]})
     );
     // Rules the current selection runs in full, and contract rules, are not listed.
-    for code in ["EFF101", "OPT102", "MUT201", "EFF201"] {
+    for code in ["EFF103", "OPT102", "MUT201", "EFF201"] {
         assert!(
             report["rules"]
                 .as_array()
@@ -1274,7 +1274,15 @@ fn library_names_without_a_catalog_entry_are_listed_with_what_heki_would_report(
     let keys: Vec<&String> = report["config"].as_object().unwrap().keys().collect();
     assert_eq!(keys, ["effect-boundaries"]);
     assert_eq!(report["reports_now"]["shown"], json!(0));
-    assert_eq!(rule(&report, "EFF101")["reports"], json!(0));
+    // `EFF101` withholds no report here, so it is not listed.
+    assert!(
+        report["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["code"] != "EFF101"),
+        "{report:#}"
+    );
     assert!(
         report["notes"][0]
             .as_str()

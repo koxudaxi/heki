@@ -105,7 +105,7 @@ pub struct RecommendReport {
     pub kind: ReportKind,
     /// The version of the object's fields: it changes when a field is removed or changes
     /// meaning; fields are only added within a version.
-    #[schemars(range(min = 1, max = 1))]
+    #[schemars(range(min = RECOMMEND_VERSION, max = RECOMMEND_VERSION))]
     pub version: u32,
     /// The version of heki that wrote the report.
     pub heki: String,

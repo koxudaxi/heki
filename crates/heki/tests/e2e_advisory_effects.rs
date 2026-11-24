@@ -244,13 +244,13 @@ fn eff101_resolves_receivers_through_imports_globals_annotations_and_classes() {
             // A class method calling a static method through `cls`.
             d(h, 67, "EFF101 [heuristic]", "app.models.K.make"),
             // A generator expression runs where it is consumed.
-            d(h, 71, "EFF102", "requests.get"),
             d(
                 h,
                 71,
                 "EFF101 [heuristic]",
                 "app.handlers.via_genexpr.<locals>.<genexpr>"
             ),
+            d(h, 71, "EFF102", "requests.get"),
         ],
         "{diags:#?}"
     );
@@ -1296,13 +1296,13 @@ fn exact_claims_establish_each_premise() {
             ),
             (
                 177,
-                "EFF101",
-                "`pkg.premises.with_connection` always runs the waiting call `time.sleep` on the event loop (1 call down, on every path)"
+                "EFF101 [heuristic]",
+                "`tp_method_manager` reaches the blocking call `sqlalchemy.engine.Engine.connect` on the event loop"
             ),
             (
                 177,
-                "EFF101 [heuristic]",
-                "`tp_method_manager` reaches the blocking call `sqlalchemy.engine.Engine.connect` on the event loop"
+                "EFF101",
+                "`pkg.premises.with_connection` always runs the waiting call `time.sleep` on the event loop (1 call down, on every path)"
             ),
             (
                 183,
@@ -1912,8 +1912,8 @@ fn an_offloaded_call_hands_back_what_its_callable_returns() {
             (44, "EFF101", "sqlite3.Cursor.fetchone"),
             (49, "EFF101", "sqlite3.Cursor.fetchone"),
             // An executor's future hands the cursor back through `result()`.
-            (53, "EFF101", "sqlite3.Cursor.fetchone"),
             (53, "EFF101 [heuristic]", "concurrent.futures.Future.result"),
+            (53, "EFF101", "sqlite3.Cursor.fetchone"),
             // A project function typed by its annotation, as written out; one without an
             // annotation returns nothing known.
             (57, "EFF101", "sqlite3.Connection.execute"),

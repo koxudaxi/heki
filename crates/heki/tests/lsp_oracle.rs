@@ -704,6 +704,7 @@ const TALLY_COUNTING: &str = "from pkg.tally import Tally\n\n\ndef _counting(t: 
 // blocking call, then with another one, and the base's call becomes conditional.
 const EXACT_BASE: &str = "import requests\n\n\nclass Base:\n    def fetch(self, url):\n        return requests.get(url)\n";
 const EXACT_BASE_CONDITIONAL: &str = "import requests\n\n\nclass Base:\n    def fetch(self, url):\n        if url:\n            return requests.get(url)\n        return None\n";
+const EXACT_BASE_QUIET: &str = "class Base:\n    def fetch(self, url):\n        return url\n";
 const EXACT_SUB: &str = "class Quiet:\n    def fetch(self, url):\n        return url\n";
 const EXACT_SUB_OVERRIDING: &str = "from pkg.exact_base import Base\n\n\nclass Quiet(Base):\n    def fetch(self, url):\n        return url\n";
 const EXACT_SUB_BLOCKING: &str = "import requests\n\nfrom pkg.exact_base import Base\n\n\nclass Quiet(Base):\n    def fetch(self, url):\n        return requests.post(url)\n";
@@ -1669,9 +1670,10 @@ fn steps_store_types() -> Vec<Step> {
     ]
 }
 
-/// `report-unused-suppressions`: a suppression of `EFF101` in a caller's file turns unused, and
-/// back, as a subclass in another file stops and starts blocking (`unused-suppression` follows
-/// the reports of other files' changes, as the reports it judges do).
+/// `report-unused-suppressions`: a suppression of `EFF101` in a caller's file still matches the
+/// report when a subclass in another file makes it heuristic, and turns unused, and back, as the
+/// base class in a third file stops and starts blocking (`unused-suppression` follows the reports
+/// of other files' changes, as the reports it judges do).
 fn steps_unused_suppressions() -> Vec<Step> {
     let reporting = CONFIG.replacen(
         "[tool.heki.lint]\n",
@@ -1695,19 +1697,26 @@ fn steps_unused_suppressions() -> Vec<Step> {
             ("pkg/exact_use.py", "unused-suppression"),
         ]),
         Step::new(
-            "a subclass in another file overrides the method without blocking: the suppression is unused",
+            "a subclass in another file overrides the method without blocking: the report is \
+             heuristic, under the code the suppression names",
             vec![save("pkg/exact_sub.py", EXACT_SUB_OVERRIDING)],
-        )
-        .present(&[
-            ("pkg/exact_use.py", "unused-suppression"),
-            ("pkg/exact_use.py", "EFF101 [heuristic]"),
-        ]),
-        Step::new(
-            "the override blocks too: the suppression is used again",
-            vec![save("pkg/exact_sub.py", EXACT_SUB_BLOCKING)],
         )
         .absent(&[
             ("pkg/exact_use.py", "EFF101"),
+            ("pkg/exact_use.py", "EFF101 [heuristic]"),
+            ("pkg/exact_use.py", "unused-suppression"),
+        ]),
+        Step::new(
+            "the base's method stops blocking: the suppression is unused",
+            vec![save("pkg/exact_base.py", EXACT_BASE_QUIET)],
+        )
+        .present(&[("pkg/exact_use.py", "unused-suppression")]),
+        Step::new(
+            "the base blocks again: the suppression is used again",
+            vec![save("pkg/exact_base.py", EXACT_BASE)],
+        )
+        .absent(&[
+            ("pkg/exact_use.py", "EFF101 [heuristic]"),
             ("pkg/exact_use.py", "unused-suppression"),
         ]),
     ]

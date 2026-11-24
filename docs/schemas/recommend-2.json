@@ -1643,8 +1643,8 @@
     "version": {
       "description": "The version of the object's fields: it changes when a field is removed or changes\nmeaning; fields are only added within a version.",
       "format": "uint32",
-      "maximum": 1,
-      "minimum": 1,
+      "maximum": 2,
+      "minimum": 2,
       "type": "integer"
     }
   },
