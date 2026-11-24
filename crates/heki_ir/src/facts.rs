@@ -27,7 +27,7 @@ mod paths;
 pub use origin::{Carries, ItemOrigin, ItemOrigins, ItemSource};
 pub use paths::{Decided, ModuleBindings, Must, PathReader, Paths, Progress};
 
-use crate::walk::{Answer, Budget, Def, FnShape, Use, Visit, reach};
+use crate::walk::{Answer, Budget, Def, FnShape, Recursion, Use, Visit, reach};
 use crate::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, FunctionId,
     FunctionKind, Inst, InstKind, IrFunction, LenCap, LoopBound, NaturalLoop, Terminator,
@@ -38,6 +38,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::Hash;
 use std::sync::Arc;
 
 /// The most items a container display, or a loop's fixed trip count, may have to count as
@@ -476,6 +477,10 @@ pub struct FnIndex<'a> {
     /// [`Self::display_at`] of each value and sink asked so far, in the same way: two lists that
     /// extend each other hold no display the code fixes.
     sink_displays: RefCell<FxHashMap<(VarId, Sink), Option<SmallDisplay>>>,
+    /// The questions of the three memos above being decided. Their decisions ask each other (the
+    /// size of a list asks for the size of each list extending it) as deep as chains in the code
+    /// go, which this keeps to a bounded depth on the native stack.
+    sizes: Recursion<SizeQuestion>,
     /// The values `f` passes to `len()` (after copies): only their lengths can be tested.
     measured: OnceCell<FxHashSet<VarId>>,
     /// The length caps the branches of `f` establish ([`Self::guarded_len`]).
@@ -569,6 +574,16 @@ enum Sink {
     Return,
 }
 
+/// A question of [`FnIndex`] whose answer is kept: [`FnIndex::container_bound`] of a value
+/// asked at a depth, [`FnIndex::display_at`] of a value and a sink, and
+/// [`FnIndex::trip_count`] of a loop.
+#[derive(Clone, Copy)]
+enum SizeQuestion {
+    Bound(VarId, u32),
+    Display(VarId, Sink),
+    Trips(usize),
+}
+
 /// The walk of [`FnIndex::lives_across`]: the phis it reached, and the answer of each
 /// instruction.
 #[derive(Default)]
@@ -619,6 +634,7 @@ impl<'a> FnIndex<'a> {
             bounds: RefCell::default(),
             trips: RefCell::default(),
             sink_displays: RefCell::default(),
+            sizes: Recursion::default(),
             measured: OnceCell::new(),
             guards: OnceCell::new(),
             decided: OnceCell::new(),
@@ -666,13 +682,54 @@ impl<'a> FnIndex<'a> {
     }
 
     fn container_bound_nested(&self, v: VarId, depth: u32) -> Option<u32> {
-        if let Some(known) = self.bounds.borrow().get(&v) {
-            return *known;
+        let q = SizeQuestion::Bound(v, depth);
+        self.kept(&self.bounds, v, q, || self.decide_bound(v, depth))
+    }
+
+    /// The answer `memo` keeps for `key`, decided by `decide` the first time it is asked, as the
+    /// question `q` of [`Self::sizes`]. A key asked while it is being decided reads as `None`.
+    fn kept<K: Clone + Eq + Hash, A: Clone>(
+        &self,
+        memo: &RefCell<FxHashMap<K, Option<A>>>,
+        key: K,
+        q: SizeQuestion,
+        decide: impl FnOnce() -> Option<A>,
+    ) -> Option<A> {
+        if let Some(known) = memo.borrow().get(&key) {
+            return known.clone();
         }
-        self.bounds.borrow_mut().insert(v, None);
-        let bound = self.decide_bound(v, depth);
-        self.bounds.borrow_mut().insert(v, bound);
-        bound
+        if self.sizes.outermost() {
+            self.sizes.settle(q, |q| self.ask_again(q));
+            return memo.borrow().get(&key).cloned().flatten();
+        }
+        if !self.sizes.enter(q) {
+            return None;
+        }
+        memo.borrow_mut().insert(key.clone(), None);
+        let answer = decide();
+        if !self.sizes.leave() {
+            return None;
+        }
+        memo.borrow_mut().insert(key, answer.clone());
+        answer
+    }
+
+    /// Ask `q` as [`Recursion::settle`] does: an open question's mark is removed first.
+    fn ask_again(&self, q: SizeQuestion) {
+        match q {
+            SizeQuestion::Bound(v, depth) => {
+                self.bounds.borrow_mut().remove(&v);
+                self.container_bound_nested(v, depth);
+            }
+            SizeQuestion::Display(value, sink) => {
+                self.sink_displays.borrow_mut().remove(&(value, sink));
+                self.display_at(value, sink);
+            }
+            SizeQuestion::Trips(li) => {
+                self.trips.borrow_mut().remove(&li);
+                self.trip_count(li);
+            }
+        }
     }
 
     fn decide_bound(&self, v: VarId, depth: u32) -> Option<u32> {
@@ -709,15 +766,10 @@ impl<'a> FnIndex<'a> {
     }
 
     fn display_at(&self, value: VarId, sink: Sink) -> Option<SmallDisplay> {
-        if let Some(known) = self.sink_displays.borrow().get(&(value, sink)) {
-            return known.clone();
-        }
-        self.sink_displays.borrow_mut().insert((value, sink), None);
-        let display = self.decide_display(value, sink);
-        self.sink_displays
-            .borrow_mut()
-            .insert((value, sink), display.clone());
-        display
+        let q = SizeQuestion::Display(value, sink);
+        self.kept(&self.sink_displays, (value, sink), q, || {
+            self.decide_display(value, sink)
+        })
     }
 
     fn decide_display(&self, value: VarId, sink: Sink) -> Option<SmallDisplay> {
@@ -1863,21 +1915,18 @@ impl<'a> FnIndex<'a> {
     /// recorded bound, else what its iterable yields or a test before it caps
     /// ([`Self::fixed_trip`]).
     fn trip_count(&self, li: usize) -> Option<u32> {
-        if let Some(known) = self.trips.borrow().get(&li) {
-            return *known;
-        }
         let lp = self.f.loops.get(li)?;
-        let trips = match lp.bound {
+        match lp.bound {
             LoopBound::ConstSmall(n) if self.recorded_trips => Some(n),
             LoopBound::DaemonPolling => None,
             // A retry loop over a fixed range records no count.
             LoopBound::ConstSmall(_) | LoopBound::RetryPattern | LoopBound::Unbounded => {
-                self.trips.borrow_mut().insert(li, None);
-                self.fixed_trip(lp, &mut |_| None, SMALL_MAX)
+                let q = SizeQuestion::Trips(li);
+                self.kept(&self.trips, li, q, || {
+                    self.fixed_trip(lp, &mut |_| None, SMALL_MAX)
+                })
             }
-        };
-        self.trips.borrow_mut().insert(li, trips);
-        trips
+        }
     }
 
     /// The trip count the code fixes for the `for` loop `lp`, up to `cap`: what its iterable
