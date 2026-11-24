@@ -113,6 +113,10 @@ async def th_rebound_path_constant() -> object:
 
 async def tp_subclass_factory() -> object:
     return db.fetcher().fetch()
+
+
+async def tp_module_attribute_path() -> object:
+    return sqlite3.connect(db.DB_PATH).execute("SELECT 1")
 "#;
 
 const ELSEWHERE: &str = r#"from pkg import db
@@ -173,6 +177,8 @@ fn a_factory_gives_what_every_return_gives_and_a_path_constant_names_its_file() 
              (1 call down, on every path)"
                 .to_owned(),
         ),
+        runs(42, "tp_module_attribute_path", "sqlite3.Connection.execute"),
+        runs(42, "tp_module_attribute_path", "sqlite3.connect"),
     ];
     expected.sort();
     assert_eq!(reports(&p), expected);

@@ -3258,12 +3258,11 @@ impl ProjectDecls {
     /// Whether the module constant `fqn` names a file ([`ModuleDecls::file_constants`]),
     /// through re-exports, unless another module rebinds it.
     pub fn file_constant(&self, fqn: &str) -> bool {
-        let Some(fqn) = self.canonical_value(fqn) else {
-            return false;
-        };
-        self.split_module(&fqn)
-            .is_some_and(|(m, rest)| m.file_constants.contains(rest))
-            && !self.constant_rebound(&fqn, true)
+        self.canonical_value(fqn).is_some_and(|fqn| {
+            self.split_module(&fqn)
+                .is_some_and(|(m, rest)| m.file_constants.contains(rest))
+                && !self.constant_rebound(&fqn, true)
+        })
     }
 
     /// The value of the string constant `fqn` (`pkg.keys.KEY`, `pkg.model.Model.KEY`), through
