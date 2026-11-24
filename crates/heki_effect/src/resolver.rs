@@ -3627,7 +3627,7 @@ impl ProjectDecls {
             })
         });
         declared.or_else(|| {
-            if !self.is_view_along(&mro) {
+            if !self.is_readonly_view(&mro) {
                 return None;
             }
             let (c, decl) = mro
@@ -3643,17 +3643,12 @@ impl ProjectDecls {
         })
     }
 
-    /// Whether `class` is a read-only view: a project class, a protocol or not, that defines,
-    /// with every project class along its MRO, nothing but properties without a setter or
-    /// deleter (`@property` getters), at least one; no plain attribute, method, or
+    /// Whether the class whose MRO is `mro` is a read-only view: a project class, a protocol or
+    /// not, that defines, with every project class along its MRO, nothing but properties without
+    /// a setter or deleter (`@property` getters), at least one; no plain attribute, method, or
     /// `__setattr__`, no metaclass heki does not know, and no other base than those defining no
     /// attribute ([`VIEW_BASES`]). Code holding a value through such a class can only read it.
-    pub fn is_readonly_view(&self, class: &str) -> bool {
-        self.is_view_along(&self.mro(class))
-    }
-
-    /// [`Self::is_readonly_view`] of the class whose MRO is `mro`.
-    fn is_view_along(&self, mro: &[String]) -> bool {
+    fn is_readonly_view(&self, mro: &[String]) -> bool {
         let mut getters = false;
         let views = mro.iter().all(|c| {
             self.read(|k| note(&mut k.class_facts, c));
@@ -4671,11 +4666,12 @@ impl ProjectDecls {
     }
 
     /// Whether the inferred type `t` is narrower than the declared `declared`, so that a value
-    /// keeps it: anything for a declaration of `Any` / `object`, an instance of a project
-    /// subclass of the declared class (`x: Base = Sub()`), and for a declared class object, a
-    /// class named exactly or the class object of a subclass (`kind: type[Base] = Base`, `=
-    /// Sub`, `= type(sub)`).
-    pub(crate) fn narrower(&self, t: &Ty, declared: &Ty) -> bool {
+    /// keeps it: anything for a declaration of `Any` / `object`, an instance of a class that
+    /// specializes the declared one ([`Self::specializes`]: `x: Base = Sub()`, `cur:
+    /// sqlite3.Cursor = conn.execute(...)` on a file), and for a declared class object, a class
+    /// named exactly or the class object of a subclass (`kind: type[Base] = Base`, `= Sub`, `=
+    /// type(sub)`).
+    pub(crate) fn narrower(&self, t: &Ty, declared: &Ty, kb: &EffectiveEcosystemKb) -> bool {
         if let Ty::Class(d) = declared {
             return match t {
                 Ty::Ref(c) => c == d || self.is_subclass(c, d),
@@ -4687,8 +4683,16 @@ impl ProjectDecls {
             of_any_class(&d.class)
                 || (is_any_callable(&d.class) && t.obj().is_none())
                 || t.obj()
-                    .is_some_and(|i| i.class != d.class && self.is_subclass(&i.class, &d.class))
+                    .is_some_and(|i| self.specializes(&i.class, &d.class, kb))
         })
+    }
+
+    /// Whether every instance of `class` is an instance of `base` that says more than `base`
+    /// does: `class` is a project subclass of it, or a catalog class with the methods of the
+    /// library class `base` ([`EffectiveEcosystemKb::api_class`]: `sqlite3.connect(file)`, a
+    /// `sqlite3.Connection` on a file).
+    pub(crate) fn specializes(&self, class: &str, base: &str, kb: &EffectiveEcosystemKb) -> bool {
+        class != base && (self.is_subclass(class, base) || kb.api_class(class) == Some(base))
     }
 
     /// The declared type `declared` with what the inferred `t` says beyond it: `t` when it is
@@ -4696,8 +4700,8 @@ impl ProjectDecls {
     /// item slot of `t` that is narrower than the declared one or that the declaration leaves
     /// unknown (`dict[str, Callable]` declared, a display of functions stored); else
     /// `declared`.
-    pub(crate) fn refine(&self, t: &Ty, declared: &Ty) -> Ty {
-        if self.narrower(t, declared) {
+    pub(crate) fn refine(&self, t: &Ty, declared: &Ty, kb: &EffectiveEcosystemKb) -> Ty {
+        if self.narrower(t, declared, kb) {
             return t.clone();
         }
         let (Some(i), Some(d)) = (t.obj(), declared.obj()) else {
@@ -4707,7 +4711,7 @@ impl ProjectDecls {
             return declared.clone();
         }
         let slot = |a: &Elem, b: &Elem| match (a, b) {
-            (Elem::Of(x), Elem::Of(y)) if self.narrower(x, y) => a.clone(),
+            (Elem::Of(x), Elem::Of(y)) if self.narrower(x, y, kb) => a.clone(),
             (Elem::Of(_), Elem::Unknown) => a.clone(),
             _ => b.clone(),
         };
@@ -4853,20 +4857,18 @@ impl ProjectDecls {
         })
     }
 
-    /// How reading `attr` on the project class `class`, or on an instance of it, holds the
-    /// fields the class declares (`heki_kb::DeclaredFields`, R3): the catalog lists the
-    /// attribute for the library base, or for a decorator of the project class, that each class
-    /// the value may be under R2 finds first along its MRO, the same way for all of them, as
-    /// [`Self::catalog_attribute`] decides a row.
+    /// How reading `attr`, a name the catalog keeps fields in
+    /// ([`EffectiveEcosystemKb::keeps_fields_in`]), on the project class `class`, or on an
+    /// instance of it, holds the fields the class declares (`heki_kb::DeclaredFields`, R3): the
+    /// catalog lists the attribute for the library base, or for a decorator of the project class,
+    /// that each class the value may be under R2 finds first along its MRO, the same way for all
+    /// of them, as [`Self::catalog_attribute`] decides a row.
     pub(crate) fn declared_fields_attr(
         &self,
         class: &str,
         attr: &str,
         kb: &EffectiveEcosystemKb,
     ) -> Option<FieldItems> {
-        if !kb.keeps_fields_in(attr) {
-            return None;
-        }
         let decorated = |d: &ClassDecl| {
             (d.decorators.iter()).find_map(|(head, _)| kb.decorator_fields(head, attr))
         };

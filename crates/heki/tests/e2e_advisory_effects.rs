@@ -1743,9 +1743,9 @@ fn a_call_of_a_property_value_is_as_complete_as_calling_the_value() {
 
 /// Calls through an offloading API: what awaiting it gives (or a future's `result()`) is what
 /// the callable it runs returns, called with the arguments the API passes on, as certain as the
-/// call written out: a catalog class is exact, a project function's annotation (R2) and an
-/// annotated local heuristic, a function without an annotation unknown. The offloaded call itself
-/// runs on a worker.
+/// call written out: a catalog class is exact, also in a local annotated with its library class,
+/// a project function's annotation (R2) heuristic, a function without an annotation unknown. The
+/// offloaded call itself runs on a worker.
 const OFFLOADED: &str = r#"import asyncio
 import concurrent.futures
 import functools
@@ -1818,12 +1818,12 @@ async def through_untyped_function() -> object:
 
 async def annotated_direct() -> object:
     cur: sqlite3.Cursor = conn.execute("SELECT 1")
-    return cur.fetchone()
+    return cur.fetchall()
 
 
 async def annotated() -> object:
     cur: sqlite3.Cursor = await asyncio.to_thread(conn.execute, "SELECT 1")
-    return cur.fetchone()
+    return cur.fetchall()
 
 
 async def described() -> object:
@@ -1931,19 +1931,21 @@ fn an_offloaded_call_hands_back_what_its_callable_returns() {
             (57, "EFF101", "sqlite3.Connection.execute"),
             (57, "EFF111", "sqlite3.Cursor.fetchone"),
             (62, "EFF111", "sqlite3.Cursor.fetchone"),
-            // An annotated local has its annotation, which names no file connection.
+            // A local annotated with the cursor's library class keeps the cursor of a file
+            // connection it holds.
             (72, "EFF101", "sqlite3.Connection.execute"),
-            (73, "EFF111", "sqlite3.Cursor.fetchone"),
-            (78, "EFF111", "sqlite3.Cursor.fetchone"),
+            (73, "EFF101", "sqlite3.Cursor.fetchall"),
+            (78, "EFF101", "sqlite3.Cursor.fetchall"),
             // Reading the cursor's `description` waits for nothing. The arguments are passed
             // on: a file connection waits, an in-memory one does not (the keyword `to_thread`
             // passes on), and nothing is known where a mapping may replace the keyword a partial
             // object holds or `*` may move the callable. A cursor of either connection may come
             // back, as written out.
             (88, "EFF101", "sqlite3.Connection.execute"),
-            // A bound method held by a variable returns what calling it written out does.
+            // A bound method held by a variable is the method: its statement waits, and it
+            // returns what calling it written out does.
+            (119, "EFF101", "sqlite3.Connection.execute"),
             (119, "EFF101", "sqlite3.Cursor.fetchone"),
-            (119, "EFF111", "sqlite3.Connection.execute"),
             // A future kept in an attribute hands back the cursor where it is awaited.
             (129, "EFF101", "sqlite3.Cursor.fetchone"),
             // A lambda reading a function its creator does not read is typed by its body too.

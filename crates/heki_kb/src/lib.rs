@@ -1048,6 +1048,9 @@ pub struct EffectiveEcosystemKb {
     /// `run_in_executor`), so a call of another name is known to hand nothing back without
     /// resolving it ([`Self::may_hand_back`]).
     pub result_of_names: BTreeSet<String>,
+    /// Catalog class -> the library class whose methods it has, by the [`EcosystemEntry::api`]
+    /// of its methods' entries ([`Self::api_class`]).
+    pub api_classes: BTreeMap<String, String>,
     pub digest: String,
 }
 
@@ -1072,6 +1075,14 @@ impl EffectiveEcosystemKb {
             .filter(|e| e.result_of.is_some())
             .map(|e| e.symbol.rsplit('.').next().unwrap_or(&e.symbol).to_owned())
             .collect();
+        let api_classes = entries
+            .values()
+            .filter_map(|e| {
+                let (class, method) = e.symbol.rsplit_once('.')?;
+                let (api_class, api_method) = e.api.as_deref()?.rsplit_once('.')?;
+                (method == api_method).then(|| (class.to_owned(), api_class.to_owned()))
+            })
+            .collect();
         Self {
             entries,
             opaque_packages,
@@ -1084,6 +1095,7 @@ impl EffectiveEcosystemKb {
             distributions: Vec::new(),
             provides: Vec::new(),
             result_of_names,
+            api_classes,
             digest,
         }
     }
@@ -1283,6 +1295,13 @@ impl EffectiveEcosystemKb {
     /// [`EcosystemEntry::result_of`].
     pub fn may_hand_back(&self, name: &str) -> bool {
         self.result_of_names.contains(name)
+    }
+
+    /// The library class whose methods the catalog class `class` has
+    /// (`sqlite3.connect(file).cursor()` -> `sqlite3.Cursor`): an instance of `class` is an
+    /// instance of that class in a state the catalog knows (on a file, in memory).
+    pub fn api_class(&self, class: &str) -> Option<&str> {
+        self.api_classes.get(class).map(String::as_str)
     }
 
     /// Whether a row of the catalog types an attribute named `attr`, on any class.
@@ -4073,6 +4092,26 @@ mod tests {
             .collect();
         assert!(unpinned.is_empty(), "{unpinned:?}");
         assert_eq!(kb.digest.len(), 64);
+    }
+
+    /// Every method a catalog class lists is the method of the same name of one library class,
+    /// the class [`EffectiveEcosystemKb::api_class`] gives: an instance of the catalog class is
+    /// one of that class.
+    #[test]
+    fn a_catalog_class_has_the_methods_of_one_library_class() {
+        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        for entry in kb.entries.values() {
+            let Some(api) = &entry.api else {
+                continue;
+            };
+            let (class, method) = entry.symbol.rsplit_once('.').unwrap();
+            let (api_class, api_method) = api.rsplit_once('.').unwrap();
+            assert_eq!((kb.api_class(class), api_method), (Some(api_class), method));
+        }
+        let file_cursor = format!("{SQLITE3_FILE}.cursor()");
+        assert_eq!(kb.api_class(&file_cursor), Some("sqlite3.Cursor"));
+        assert_eq!(kb.api_class(SQLITE3_MEMORY), Some("sqlite3.Connection"));
+        assert_eq!(kb.api_class("sqlite3.Connection"), None);
     }
 
     /// No async API can fire `EFF101`: async APIs are often called without a direct `await`

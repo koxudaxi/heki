@@ -624,6 +624,14 @@ fn a_query_naming_no_module_fails() {
         err.contains("no module of the project is named `nothing.here`"),
         "{err}"
     );
+    // As text, the error is all the output.
+    let (code, out, err) = p.heki(&["inspect", "--imports", "nothing.here"]);
+    assert_eq!(code, 2);
+    assert!(out.is_empty(), "{out}");
+    assert!(
+        err.contains("no module of the project is named `nothing.here`"),
+        "{err}"
+    );
     let (code, v, _) = imports(&p, "a:b:c", &[]);
     assert_eq!(code, 2);
     assert_eq!(v["error"]["kind"], "invalid");

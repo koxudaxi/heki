@@ -1094,3 +1094,28 @@ def through_the_class(obj: dict) -> dict:
         )]
     );
 }
+
+/// A parameter typed by a `TypeVar` without a bound, imported from another module, may hold
+/// any class, and no protocol: its accesses stay the strict rules' whatever protocols the
+/// contract allows.
+#[test]
+fn a_type_variable_without_a_bound_names_no_protocol() {
+    let p = class_object_project("class_object_type_var", "[\"*Host\"]");
+    p.write(
+        "pkg/parser/types.py",
+        "from typing import TypeVar\n\nT = TypeVar(\"T\")\n",
+    )
+    .write(
+        "pkg/parser/_keywords.py",
+        "from pkg.parser.types import T\n\n\ndef through_type_var(cls: T, obj: dict) -> dict:\n    return cls._items_constraints(obj)\n",
+    );
+    assert_eq!(
+        named(&p),
+        vec![(
+            5,
+            "MUT207".to_owned(),
+            "through_type_var".to_owned(),
+            "_items_constraints".to_owned()
+        )]
+    );
+}

@@ -1350,7 +1350,7 @@ impl<'e, 'a> Engine<'e, 'a> {
     fn unnarrowed(&self, var: VarId) -> Result<Option<&Ty>, Pending> {
         let inferred = &self.facts[var.0 as usize];
         match (inferred, self.declared.get(&var)) {
-            (Fact::Known(t), Some(d)) if !self.cx.project.narrower(t, d) => Ok(Some(d)),
+            (Fact::Known(t), Some(d)) if !self.cx.project.narrower(t, d, self.cx.kb) => Ok(Some(d)),
             (Fact::Known(t), _) => Ok(Some(t)),
             (_, Some(d)) => Ok(Some(d)),
             (Fact::Unset, None) => Err(Pending),
@@ -1489,8 +1489,12 @@ impl<'e, 'a> Engine<'e, 'a> {
     /// the instances of those classes among what it may be (or is an instance of them); false
     /// drops them from a union.
     fn narrow(&self, t: Option<&Ty>, classes: &[String], truth: bool) -> Option<Ty> {
-        let project = self.cx.project;
-        let is_a = |c: &str| classes.iter().any(|k| c == k || project.is_subclass(c, k));
+        let (project, kb) = (self.cx.project, self.cx.kb);
+        let is_a = |c: &str| {
+            classes
+                .iter()
+                .any(|k| c == k || project.specializes(c, k, kb))
+        };
         let members = t.map_or(&[][..], Ty::members);
         if truth {
             let kept: Vec<Obj> = members.iter().filter(|o| is_a(&o.class)).cloned().collect();
@@ -2176,13 +2180,15 @@ impl<'e, 'a> Engine<'e, 'a> {
             }
             // A copy (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`) has its original's
             // type.
-            _ => {
-                let entry = self.cx.catalog(fqn);
-                if !args.is_empty() && entry.is_some_and(|e| e.copy_sanitizer.is_some()) {
-                    return Ok(self.need(args[0])?.cloned());
-                }
-                return Ok(self.cx.call_result(fqn, |i, k| self.passed(call, i, k)));
+            _ if !args.is_empty()
+                && self
+                    .cx
+                    .catalog(fqn)
+                    .is_some_and(|e| e.copy_sanitizer.is_some()) =>
+            {
+                return Ok(self.need(args[0])?.cloned());
             }
+            _ => return Ok(self.cx.call_result(fqn, |i, k| self.passed(call, i, k))),
         }))
     }
 
