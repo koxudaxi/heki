@@ -5,10 +5,11 @@
 //! and read, the stores through namespaces and `setattr`, the classes whose code may store into
 //! an instance, the size of the Soundness lane's proof state, the values `EFF107` follows from a
 //! task factory, the walk to the callable a builtin calls once per item, contracts with many call
-//! targets and argument lists, the mappings a call unpacks, the walk to the uses handing a
-//! reference to a call target on, the locks `EFF109` follows, the values class statements pass as
-//! bases, the bindings the deque rewrite's candidates check, the star imports a name is bound
-//! through, many or nested deep, and the walks over the import graph (`heki inspect --imports`).
+//! targets and argument lists, the names offered for contract entries that match nothing, the
+//! mappings a call unpacks, the walk to the uses handing a reference to a call target on, the
+//! locks `EFF109` follows, the values class statements pass as bases, the bindings the deque
+//! rewrite's candidates check, the star imports a name is bound through, many or nested deep,
+//! and the walks over the import graph (`heki inspect --imports`).
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -3593,6 +3594,32 @@ fn argument_lists_are_looked_up_from_the_bound_parameters() {
     // Only the forbidden caller's hundred calls passing the constants are reported.
     assert_eq!(diags.len(), 100, "{diags:#?}");
     assert!(diags.iter().all(|d| d["qualname"] == "u0"));
+}
+
+/// The names offered for a contract entry that matches nothing are found among the names one
+/// part away from it, under one budget for the run that grows with the project's functions and
+/// classes, not with the entries: each of a thousand functions of a module is one part away from
+/// every entry naming a function of that module that does not exist, and eleven thousand such
+/// entries get names for as many entries as five hundred do, the first ones. Every entry is still
+/// reported.
+#[test]
+fn names_like_entries_that_match_nothing_are_found_under_a_budget() {
+    let named = |lists: usize| {
+        let p = argument_marks(lists, 1_000, 1, 1, 1);
+        let (code, stdout, stderr) = p.heki(&["check", "."]);
+        assert!(matches!(code, 0 | 1), "{stdout}{stderr}");
+        let offers: Vec<bool> = (stderr.lines())
+            .filter(|l| l.starts_with("warning: `targets` entry"))
+            .map(|l| l.ends_with(" exist") || l.ends_with(" exists"))
+            .collect();
+        assert_eq!(offers.len(), lists - 1_000, "{stderr}");
+        let named = offers.iter().take_while(|&&offered| offered).count();
+        assert!(offers[named..].iter().all(|&offered| !offered), "{stderr}");
+        named
+    };
+    let few = named(1_500);
+    assert!((1..500).contains(&few), "{few}");
+    assert_eq!(named(12_000), few);
 }
 
 /// A long chain of mappings, each merging the one before it (`f2 = {**f1, "kind": True}`) or
