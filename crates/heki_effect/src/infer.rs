@@ -899,9 +899,12 @@ struct Engine<'e, 'a> {
     /// and depth, while one block is entered: a condition reaches the same phi through many
     /// paths (a loop header's phi is an input of itself on each `continue`).
     implied_memo: RefCell<FxHashMap<(VarId, bool, BlockId, u8), Narrowed>>,
-    /// The value of the body of each lambda the function makes (by the variable holding it),
-    /// as the function's cells held where the pass made it: what calling the lambda gives.
+    /// The value of the body of each lambda the function makes and calls (by the variable
+    /// holding it), as the function's cells hold in this pass: what calling the lambda gives.
     lambda_bodies: RefCell<FxHashMap<VarId, Elem>>,
+    /// The lambdas a call's transfer called before the pass typed their bodies: the variable
+    /// holding each, and its scope.
+    lambdas_called: RefCell<Vec<(VarId, FunctionId)>>,
 }
 
 /// A closure cell the function binds.
@@ -1013,6 +1016,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             cur: FxHashMap::default(),
             implied_memo: RefCell::default(),
             lambda_bodies: RefCell::default(),
+            lambdas_called: RefCell::default(),
         };
         engine.seed_params();
         if let Some(seed) = seed.iterated {
@@ -1204,6 +1208,8 @@ impl<'e, 'a> Engine<'e, 'a> {
             self.changed = false;
             self.added_changed = false;
             self.cells_deferred.set(false);
+            // The cells the lambdas' bodies read may have grown.
+            self.lambda_bodies.get_mut().clear();
             for &bb in shape.rpo() {
                 let block = self.f.block(bb);
                 self.enter(bb);
@@ -1673,15 +1679,9 @@ impl<'e, 'a> Engine<'e, 'a> {
                 }
             }
             InstKind::MakeClosure {
-                dst,
-                func_id: Some(id),
-                ..
+                func_id: Some(id), ..
             } => {
                 let f = cx.ir().function(*id);
-                if is_plain_lambda(f) {
-                    let body = cx.child_output(*id, None, self.child_cells(*id));
-                    self.lambda_bodies.borrow_mut().insert(*dst, body);
-                }
                 Some(Ty::Ref(format!("{}.{}", cx.module_name(), f.qualname)))
             }
             InstKind::Call {
@@ -1696,7 +1696,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                     kwargs,
                     star_from: *star_from,
                 };
-                return self.call_of(Called::Value(*c), call);
+                return self.typed_call(Called::Value(*c), call);
             }
             // A non-inlined comprehension (Python 3.11) returns the container it builds from the
             // value it iterates.
@@ -1723,7 +1723,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                     kwargs,
                     star_from: *star_from,
                 };
-                return self.call_of(Called::Method(*recv, method), call);
+                return self.typed_call(Called::Method(*recv, method), call);
             }
             _ => None,
         })
@@ -1900,6 +1900,21 @@ impl<'e, 'a> Engine<'e, 'a> {
             .unwrap_or_else(any)
     }
 
+    /// [`Self::call_of`], with the bodies of the lambdas the call calls typed first: a lambda
+    /// is typed only where the function calls it.
+    fn typed_call(&self, called: Called<'_>, call: Passed<'_>) -> Step {
+        let typed = self.call_of(called, call);
+        let lambdas = self.lambdas_called.take();
+        if lambdas.is_empty() {
+            return typed;
+        }
+        for (made, id) in lambdas {
+            let body = self.cx.child_output(id, None, self.child_cells(id));
+            self.lambda_bodies.borrow_mut().insert(made, body);
+        }
+        self.call_of(called, call)
+    }
+
     /// What a call returns. A call of a catalog API that runs a callable it is handed and hands
     /// back what that returns ([`ResultOf`]: `asyncio.to_thread(f, x)`) returns the future the
     /// catalog's `return_type` names holding that result, or the coroutine of an `async def`
@@ -1975,13 +1990,21 @@ impl<'e, 'a> Engine<'e, 'a> {
     /// The catalog API a call runs when it hands back what a call of a callable it is handed
     /// returns ([`ResultOf`]), as the call targets resolve it.
     fn hands_back(&self, called: Called<'_>) -> Option<(String, ResultOf)> {
+        let kb = self.cx.kb;
+        let named = |fqn: &String| kb.may_hand_back(fqn.rsplit('.').next().unwrap_or(fqn));
+        let method = match called {
+            Called::Value(v) => self.bound_method(v),
+            Called::Method(recv, method) => Some((recv, method)),
+        };
         let val = |v: VarId| self.need(v).ok().flatten().and_then(Ty::val);
-        let callee = match called {
-            Called::Value(v) => match self.bound_method(v) {
-                Some((recv, method)) => self.cx.resolve_method(val(recv).as_ref(), method),
-                None => self.cx.resolve_call(val(v).as_ref()),
-            },
-            Called::Method(recv, method) => self.cx.resolve_method(val(recv).as_ref(), method),
+        let callee = match (called, method) {
+            (_, Some((recv, method))) if kb.may_hand_back(method) => {
+                self.cx.resolve_method(val(recv).as_ref(), method)
+            }
+            (Called::Value(v), None) if self.need(v).ok()??.named().iter().any(named) => {
+                self.cx.resolve_call(val(v).as_ref())
+            }
+            _ => return None,
         };
         let Callee::External(symbol) = callee else {
             return None;
@@ -2007,8 +2030,19 @@ impl<'e, 'a> Engine<'e, 'a> {
             return self.method_call(recv, method, call);
         }
         let root = self.shape.copy_root(callable);
-        if let Some(body) = self.lambda_bodies.borrow().get(&root) {
-            return item_ty(body.clone());
+        if let Some(InstKind::MakeClosure {
+            func_id: Some(id), ..
+        }) = self.shape.inst(root).map(|i| &i.kind)
+            && is_plain_lambda(self.cx.ir().function(*id))
+        {
+            // Typed by [`Self::typed_call`] when the pass first calls it.
+            return match self.lambda_bodies.borrow().get(&root) {
+                Some(body) => item_ty(body.clone()),
+                None => {
+                    self.lambdas_called.borrow_mut().push((root, *id));
+                    Err(Pending)
+                }
+            };
         }
         Ok(match self.need(callable)? {
             Some(Ty::Ref(fqn)) if fqn == "builtins.super" && call.args.is_empty() => {

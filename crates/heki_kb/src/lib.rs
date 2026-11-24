@@ -1007,6 +1007,10 @@ pub struct EffectiveEcosystemKb {
     pub distributions: Vec<Distribution>,
     /// The modules distributions install under other names than their own ([`Provides`]).
     pub provides: Vec<Provides>,
+    /// The last name of every symbol with a [`EcosystemEntry::result_of`] (`to_thread`,
+    /// `run_in_executor`), so a call of another name is known to hand nothing back without
+    /// resolving it ([`Self::may_hand_back`]).
+    pub result_of_names: BTreeSet<String>,
     pub digest: String,
 }
 
@@ -1026,6 +1030,11 @@ impl EffectiveEcosystemKb {
         )
         .to_hex()
         .to_string();
+        let result_of_names = entries
+            .values()
+            .filter(|e| e.result_of.is_some())
+            .map(|e| e.symbol.rsplit('.').next().unwrap_or(&e.symbol).to_owned())
+            .collect();
         Self {
             entries,
             opaque_packages,
@@ -1036,6 +1045,7 @@ impl EffectiveEcosystemKb {
             attributes: BTreeMap::new(),
             distributions: Vec::new(),
             provides: Vec::new(),
+            result_of_names,
             digest,
         }
     }
@@ -1184,6 +1194,12 @@ impl EffectiveEcosystemKb {
                     ..UnawaitedCall::default()
                 })
             })
+    }
+
+    /// Whether a call of a function or method named `name` may be one of an entry with a
+    /// [`EcosystemEntry::result_of`].
+    pub fn may_hand_back(&self, name: &str) -> bool {
+        self.result_of_names.contains(name)
     }
 
     /// Whether a row of the catalog types an attribute named `attr`, on any class.
@@ -4060,7 +4076,12 @@ mod tests {
                 e.offloads_blocking_arg.is_none_or(|k| k == of.arg),
                 "{symbol}"
             );
+            assert!(
+                kb.may_hand_back(symbol.rsplit('.').next().unwrap()),
+                "{symbol}"
+            );
         }
+        assert!(!kb.may_hand_back("execute"));
     }
 
     /// Every case names its argument, tests it, and changes something; a case's return type

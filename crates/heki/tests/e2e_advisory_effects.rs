@@ -1885,6 +1885,13 @@ def serve():
         return await asyncio.to_thread(lambda: receive(c))
 
     return handle
+
+
+async def imported() -> object:
+    from asyncio import to_thread
+
+    cur = await to_thread(conn.execute, "SELECT 1")
+    return cur.fetchone()
 "#;
 
 #[test]
@@ -1940,6 +1947,8 @@ fn an_offloaded_call_hands_back_what_its_callable_returns() {
             // A future kept in an attribute hands back the cursor where it is awaited.
             (129, "EFF101", "sqlite3.Cursor.fetchone"),
             // A lambda reading a function its creator does not read is typed by its body too.
+            // An imported `to_thread` is the same API.
+            (146, "EFF101", "sqlite3.Cursor.fetchone"),
         ]
     );
 }
