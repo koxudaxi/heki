@@ -237,7 +237,7 @@ across modules. heki models effects and aliases, what code does:
 | --- | --- | --- |
 | Ruff | syntax and style | the effects behind a call: a blocking call, a query, or a write, wherever it happens |
 | ty, Pyrefly, pyright, mypy | declared types | in-place changes, through aliases and helpers, to `frozen`, `ReadOnly`, and `Final` fields and to `Sequence` / `Mapping` arguments |
-| tach, import-linter | which modules may import which | which functions write or read a field, call a function, or reach I/O; planned: when each import runs, with these tools' contracts read as heki contracts |
+| tach, import-linter | which modules may import which | which functions write or read a field, call a function, or reach I/O; which modules may import which, knowing when each import runs (experimental); planned: these tools' contracts read as heki contracts |
 
 Their stricter settings do not close the gap. The second example above is fully annotated and
 passes Ruff's annotation rules (`ANN`), `mypy --strict`, pyright's strict mode, and Pyrefly's
