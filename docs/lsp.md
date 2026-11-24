@@ -133,6 +133,7 @@ On a save, the edit reaches other files only through what it changes:
 | a function's own in-place changes or its calls, while its effects stay the same | the files with `MUT108` / `MUT110` reports above it: a report's call chain ends at the first function whose body makes the change |
 | the position of a call site, also when its bytes stay where they were | the files whose call chains show that call site |
 | the position of a method's own change of a container | the files whose `MUT113` reports show it |
+| the position of an import | the files whose `import-owners` chains show it |
 
 Contracts reach further when a function changes its calls:
 
@@ -141,6 +142,7 @@ Contracts reach further when a function changes its calls:
 | an ownership or `invalidation` contract | every function below it | whether a function only runs inside allowed callers, or whether its callers announce its writes, depends on all callers above it |
 | a contract on calls (`call-owners`, an effect boundary forbidding `calls`) | every function above it | a call of a target is reported at the callers of the private helper making it, and at the scope functions reaching it |
 | an effect boundary, when the function changes its calls of library APIs, or the calls, module attribute reads, and import probes outside the project that a boundary forbids | every function above it | a boundary may allow one API and forbid another of the same effect, counts every call it reaches, and no summary records an access outside the project |
+| an `import-owners` contract with `reach`, when a file's imports change | every module the contract judges | an importer's report follows the imports of every module its walk reaches, and the walks share one budget |
 
 Edits that change none of these, such as most comments, stop at the edited file.
 

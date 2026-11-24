@@ -198,6 +198,17 @@ impl Budget {
         Self::new(owner, None, None)
     }
 
+    /// [`Self::STEPS_PER_UNIT`] per node and edge of a project graph built per check (the
+    /// import graph), at least [`Self::MIN_STEPS`]. Its walks ask in the order of the graph's
+    /// nodes, which `heki check` and the language server build alike, so they spend it alike.
+    pub fn of_graph(owner: &'static str, units: usize) -> Self {
+        Self::new(
+            owner,
+            Some((units.saturating_mul(Self::STEPS_PER_UNIT)).max(Self::MIN_STEPS)),
+            None,
+        )
+    }
+
     fn new(owner: &'static str, limit: Option<usize>, f: Option<&IrFunction>) -> Self {
         let function = f
             .filter(|_| RECORDING.load(Ordering::Relaxed))

@@ -13,6 +13,7 @@ use crate::environment::{self, AccessKind, ExternalAccess};
 use crate::fresh;
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
 use crate::held;
+use crate::imports::{ImportSite, module_imports};
 use crate::infer::CellKey;
 use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
 use crate::invokes;
@@ -141,6 +142,7 @@ fn extract_module(
         .map(func_qualname)
         .collect();
     let mut cell_aliases = CellAliases::default();
+    let mut imported_by_name: Vec<ImportSite> = Vec::new();
     for f in &input.ir.functions {
         if f.is_class_body || (is_overload(f) && implemented.contains(func_qualname(f))) {
             continue;
@@ -160,6 +162,7 @@ fn extract_module(
             kept_points,
             types,
             mut blind,
+            imports: by_name,
             mut unawaited,
             fresh_return,
             mut class_runs,
@@ -174,6 +177,7 @@ fn extract_module(
         )
         .run();
         cell_aliases.extend(cells);
+        imported_by_name.extend(by_name);
         // A `class` statement runs its body where it runs, in a function or the module body:
         // the body's effects, calls (a class attribute's value, a decorator, a default
         // argument), and accesses are that code's (its methods run only when they are called).
@@ -193,6 +197,7 @@ fn extract_module(
             absorb_class_body(&mut summary, facts.summary, &key);
             external.extend(facts.external);
             blind.extend(facts.blind);
+            imported_by_name.extend(facts.imports);
             unawaited.extend(facts.unawaited);
             let in_function = |site: CallSite| CallSite {
                 flow: None,
@@ -283,6 +288,11 @@ fn extract_module(
                 file.local_functions.insert(key, Arc::new(summary));
             }
         }
+    }
+    if opt_in.imports
+        && let Some(imports) = module_imports(input, imported_by_name)
+    {
+        file.opt_in_tables_mut().imports = Some(Box::new(imports));
     }
     release_spare_capacity(&mut file);
     file
@@ -690,6 +700,8 @@ struct Extracted {
     types: FxHashMap<VarId, Val>,
     /// [`FileSummary::blind_calls`].
     blind: Vec<BlindCall>,
+    /// The calls importing a module by name ([`FileSummary::imports`]).
+    imports: Vec<ImportSite>,
     /// [`FileSummary::unawaited_handoffs`].
     unawaited: Vec<UnawaitedHandoff>,
     /// The local fact of [`crate::OptInTables::fresh_returns`].
@@ -879,6 +891,8 @@ struct Extractor<'a> {
     /// The calls heki is blind to (`OptInTables::blind_spots`), with
     /// [`OptInFacts::blind_spots`].
     blind: Vec<BlindCall>,
+    /// The calls importing a module by name, with [`OptInFacts::imports`].
+    imports: Vec<ImportSite>,
     /// The project functions handed to a library call that calls them without awaiting what
     /// they return (`OptInTables::unawaited_handoffs`), with
     /// [`OptInFacts::unawaited_handoffs`].
@@ -1238,6 +1252,7 @@ impl<'a> Extractor<'a> {
             established: OnceCell::new(),
             followed_callables: OnceCell::new(),
             blind: Vec::new(),
+            imports: Vec::new(),
             unawaited: Vec::new(),
         };
         ex.ownership = contracts.is_some_and(|c| c.ownership());
@@ -2760,6 +2775,7 @@ impl<'a> Extractor<'a> {
             kept_points: self.kept_points,
             types: self.types,
             blind: self.blind,
+            imports: self.imports,
             unawaited: self.unawaited,
             fresh_return,
             class_runs: self.class_runs,
@@ -6316,6 +6332,9 @@ impl<'a> Extractor<'a> {
         self.call_escapes(callee, call);
         match callee {
             Callee::External(symbol) => {
+                if self.opt_in.imports {
+                    self.import_by_name(bb, symbol, call);
+                }
                 if let Some(c) = self.contracts {
                     if c.external_call(symbol) {
                         let imports = self.cx.catalog(symbol).and_then(|e| e.environment_access())

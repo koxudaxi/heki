@@ -64,6 +64,7 @@ docs_pages! {
     EffectBoundaries => "configuration/#effect-boundaries",
     ReadonlyReturns => "configuration/#readonly-returns",
     Invalidation => "configuration/#invalidation",
+    ImportOwners => "configuration/#import-owners",
     Ecosystem => "configuration/#ecosystem-knowledge-toolhekiecosystem",
     Rules => "rules/",
     Baselines => "adoption/#ratchet-baselines",
@@ -98,6 +99,7 @@ impl Docs {
             "effect-boundaries" => Self::EffectBoundaries,
             "readonly-returns" => Self::ReadonlyReturns,
             "invalidation" => Self::Invalidation,
+            "import-owners" => Self::ImportOwners,
             "ecosystem" => Self::Ecosystem,
             _ => Self::TopLevel,
         }
@@ -514,6 +516,7 @@ mod tests {
             ("effect-boundaries", "forbid", Docs::EffectBoundaries),
             ("readonly-returns", "deep", Docs::ReadonlyReturns),
             ("invalidation", "invalidators", Docs::Invalidation),
+            ("import-owners", "reach", Docs::ImportOwners),
             ("lint.severity", "MUT101", Docs::Lint),
         ] {
             assert_eq!(Docs::of_key(table, key), docs, "{table}.{key}");
