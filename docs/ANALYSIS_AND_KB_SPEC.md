@@ -27,7 +27,15 @@ resolution are heki's own (`heki_semantic`).
     lazily in `__annotate__` scopes.
   - **3.15+ PEP 810 (checked on CPython 3.15.0)**: `lazy import m` / `lazy from m import x`
     (`Import(is_lazy=1)` / `ImportFrom(is_lazy=1)`) are recognized and modeled as bindings
-    materialized when the name is first evaluated, not when the module loads.
+    materialized when the name is first evaluated, not when the module loads. The module
+    body's `__lazy_modules__` makes the later imports of the modules it lists lazy as well
+    (`import a.b` is listed as `a.b`, `from a.b import c` as `a.b`), in the module body only,
+    outside the body and the `except` clauses of a `try` statement. heki reads the list only
+    when the module body binds it once, at its top level, to a list, tuple, or set of string
+    literals that nothing else in the module reads or changes; otherwise, for a relative
+    import (whose absolute name the semantic model does not know), and in the `else` and
+    `finally` clauses of a `try` statement, where CPython 3.15 makes some imports lazy and not
+    others, whether the import is lazy is open (`ModuleImport::lazy_open`).
 - **Bidirectional comparison with CPython `symtable` (quality assurance)**:
   - Following datamodel-code-generator's `scripts/_source_model.py:verify()`, the scope tree
     (kind, name, line, and parent), bound names and parameters, `global` / `nonlocal`
@@ -1166,8 +1174,8 @@ Early Cutoff compares summaries without their source positions, so an edit that 
 changes no caller's facts. The positions callers copy (call chains, write sites) are still
 re-propagated into their summaries, so that the incremental index always equals a full build, and
 the language server re-checks the files whose diagnostics show a moved call site. The call chains
-of `MUT108` / `MUT110` reports are no summary facts: the rule walks the own summaries and project
-calls of the functions below the call (`FileSummary::local_functions` and `call_sites`) down to
+of `MUT108` / `MUT110` / `MUT120` reports are no summary facts: the rule walks the own summaries
+and project calls of the functions below the call (`FileSummary::local_functions` and `call_sites`) down to
 the first function whose body makes the change. A heuristic `MUT110` report, whose chain names no
 line, records "Changed at the line" open when the run asks (`CheckExtras::open_premises`): no
 function on the chain makes the change in its own body (a generator another function returns is
@@ -1810,7 +1818,11 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      `heki_effect::with_paths`: the module's bindings, the members of modules, and the context
      managers whose exit never suppresses, `exit_suppresses`) say whether the function has made
      the call whenever it returns normally (`CallSite::on_every_return`: made, returned, or
-     reachable at all).
+     reachable at all). A call of a class body the function runs is made or returned whenever
+     the function returns only when the body's own paths say so and the function has run the
+     `class` statement to its end whenever it returns (a nested class's statement through the
+     statements around it; a statement a `finally` body repeats, through one of its copies), and
+     reachable only when the statement is.
    - A call's targets are complete (`CallSite::complete`) when they are every implementation
      the call can run under R2 and R5: for each of the receiver's class and its project
      subclasses (at most `DISPATCH_CLASS_LIMIT`, 64), the definition its MRO finds is a target;
@@ -2174,6 +2186,87 @@ deep = true   # changes to attributes and nested containers below are forbidden 
 - **Disk cache key**: `(heki_version, effective_kb_digest, env_packages_digest, package_name,
   package_version, rel_path, file_hash)`.
 
+### 2.6 Import facts and the import-time closure (`heki_effect::imports`, ADR-022)
+`heki_effect::imports` is the one home of which module an import site loads; no rule resolves
+an import itself.
+
+- **Sites** (`FileSummary::imports`, per file, local and IR-free; extracted with
+  `OptInFacts::imports` only, and never for a typing stub, whose imports never run): every
+  `import a.b` and every name of `from m import x` (`ImportForm::Import`, `From`), every
+  `from m import *` (`Star`; the IR keeps where each runs, `ModuleIr::star_imports`), and every
+  call the catalog says loads a module by name (`ByName`: `importlib.import_module`,
+  `__import__`; `loads_module`, 4.2), with the modules it names made absolute (a relative one
+  from the module's name and package flag, none when it climbs past its top-level package; a
+  by-name call's every text, as `EFF201`'s `imports_project_module` reads them, open when one is
+  unknown or `__import__` is passed a `level` other than `0`). Each site carries its function
+  (`<module>` for the module body and the class bodies it runs), whether an `ImportError`
+  handler takes its failure (around the import, or around the class statement holding it), and
+  whether it runs on every path to a normal return of its function, outside loops (never
+  established in a class body).
+- **Timing** (`imports::Timing`): `type-checking` under `if TYPE_CHECKING:` (the semantic
+  model's guards); `function` in a function body; `lazy` for a lazy import (1.1) whose binding
+  no read of the module body (or of a class body it runs) reaches, `body` when one may (the
+  first such read loads the module there: the site is `unconditional` when a read only its
+  binding reaches runs on every path, and guarded when an `ImportError` handler takes every
+  such read). A read sees the bindings of its name (stores and star imports, which may bind any
+  name) that reach it through the module body's blocks, an exception edge passing on every
+  binding of the block it leaves (`walk::Closure` per name and block, one budget of
+  `Budget::STEPS_PER_UNIT` per IR unit of the module body); a read heki cannot place, in a class
+  body or past that budget, of a name bound more than once leaves the lazy imports of the name
+  open. `body` for any other import of the module body or of a class body it runs. An import
+  `__lazy_modules__` may make lazy has an open timing. A site's timing says where the import is
+  written and its class, never that a branch is taken.
+- **The graph** (`ImportGraph`, built per check from the summaries and the declarations, never
+  kept in the index): what each site loads (`Target`). `import a.b.c` loads `a.b.c`, after its
+  parent packages. `from p import n` loads `p.n` when the project has that module and
+  `ProjectDecls::from_import` says the name is the submodule, `p` when it is the package's
+  attribute or `n` is no module, and `p` with `p.n` open when the package binds `n` before the
+  submodule is imported (`PackageOrSubmodule`); for a package outside the project, `p`, with `p.n`
+  open. A module below a project package that the project does not have is `Missing`; one the
+  project has but an import may find elsewhere first (`ProjectDecls::holds_module`), or a name the
+  code does not fix, is open. The lookups are declaration reads (`DeclKeys::modules`).
+- **Loads while it loads** (`ImportGraph::loads`): a module's `body` sites that run on every
+  path through the body (`unconditional`) and that no `ImportError` handler guards
+  (`ImportSite::loads_while_its_module_loads`) load what they certainly load
+  (`Target::certain`: the module, or the package of a `from` import) with its parent packages;
+  a site on one branch (`if sys.platform == "win32": import winreg`), in a class body, or whose
+  timing or module is open adds nothing, so what follows is what loading a module loads at
+  least.
+  `ImportGraph::loaded_while_loading` walks it from one module (`walk::reach`), and
+  `ImportGraph::import_time` (`walk::Closure`, the members of an import cycle sharing one fact)
+  gives every module the modules outside the project it loads that way. Both spend one budget of
+  `Budget::STEPS_PER_UNIT` per module and site (`Budget::of_graph`), asked in the order of the
+  modules, which `heki check` and the language server build alike; past it the answer is open.
+- **Contract walks** (`heki_rules::imp_rules`, `import-owners` with `reach`): from an importer,
+  breadth first over the sites of the classes the contract counts (`walk::reach_breadth_first`),
+  each certainly loaded module and its parent packages (`ImportGraph::parents`, which names the
+  parents of every site's module, whatever its timing) a step, keeping the step into each module
+  from the nearest one, so the chain reported is a shortest one. The packages holding the
+  importer load before it and are no step. The importers of one contract walk in the order of
+  the modules and share one `Budget::of_graph`; past it they answer open and report nothing. A
+  check without such a contract resolves only the checked modules' sites
+  (`ImportGraph::resolving`), so the language server records only the declarations they read.
+- **Early Cutoff**: `IncrementalUpdate::imports_changed` tells whether a file's sites changed,
+  without positions (`ModuleImports::same_facts`), or appeared or disappeared with the file.
+- **Kinds of code** (`heki_effect::code_kind`): a test module (under `tests/` or `test/`,
+  `test_*.py`, `*_test.py`, `conftest.py`) is development code; in the project's own src
+  layout, the code below a source root is the package's and the code outside every root
+  (`scripts/`, `tools/`) is development code; otherwise a module is the package's when its
+  top-level package is named like `[project] name` (normalized) or by the build backend's
+  settings (`heki_env::Declared::packages`), and open when not.
+- **Declarations** (`heki_env::Declared`, read with `requires-python`): the runtime
+  dependencies (`[project] dependencies`, Poetry's non-optional ones), the extras, the
+  development groups (PEP 735 `[dependency-groups]` with `include-group`, `[tool.uv]
+  dev-dependencies`, Poetry's groups and `dev-dependencies`, `[tool.pdm.dev-dependencies]`), the
+  `dynamic` fields, the entry points, and the packages the build backend names, distribution
+  names normalized as PEP 503 does.
+- **Checked against CPython** (`tests/import_verify/verify_imports.py`, CPython 3.11 to 3.15):
+  each fixture module is imported first in a fresh interpreter that records the imports the
+  module bodies run, and the `body` edges are compared both ways; an `ast` reader checks the
+  function, `TYPE_CHECKING`, and `lazy` classes.
+- `heki inspect --imports MODULE` shows the sites of the modules a name or glob names, with what
+  each loads, and what loading the module loads.
+
 ---
 
 ## 3. Soundness / Alias lane (`heki_soundness`): family 3
@@ -2345,7 +2438,11 @@ in, `os.getenv`, `platform.system`, `shutil.which`; `"read"`: reading the module
 finds the module its argument `name` names, a relative name anchored at its argument
 `package`, which reads the environment unless the module is the project's,
 `importlib.import_module`, `importlib.util.find_spec`: what `EFF201`'s `reads-environment`
-forbids; such an entry has no other fact), and
+forbids; such an entry has no other fact but `loads_module`), `loads_module` (calling the function
+imports the module its arguments name, an import site of the caller (2.6): the argument holding
+the name, the one a relative name is anchored at, and the one giving how many packages up a
+relative name starts, which must be absent or `0`; `importlib.import_module`, `__import__`;
+`importlib.util.find_spec` only finds one), and
 `opaque_to_layer3` (reserved for Layer 3), and `cases`: what the call does instead when one
 argument (by position, the receiver not counted, or by keyword) is a given literal (an
 argument is the literal it is, or the one a module constant bound once holds:
@@ -2441,6 +2538,12 @@ twins) to `chat.completions`, `responses`, and `embeddings`, anthropic's to `mes
 google-genai's `Client` to `models` and to its async client `aio`; the synchronous requests
 (`create`, `generate_content`, `embed_content`) wait on the network, the asynchronous ones are
 `async_safe`, and `with_options()` / `copy()` return `"Self"`.
+
+`[[provides]]` (`heki_kb::Provides`) lists the modules a distribution installs under names
+other than its own (`PyYAML`: `yaml`, `_yaml`; `Pillow`: `PIL`; `protobuf`: `google.protobuf`),
+which `EffectiveEcosystemKb::distributions_providing` looks up by a module or a package holding
+it; a dependency's other modules are those whose top-level name, normalized like a distribution
+name, is its own.
 
 A third table, `[[cached_properties]]` (`heki_kb::CachedPropertyDecorator`), lists the
 cached-property decorators known to keep the getter's value in the instance `__dict__` under the

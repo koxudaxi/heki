@@ -55,11 +55,11 @@ const GUIDANCE: &[&str] = &[
     "Rely on proven fixes only: `heki check --fix` applies the rewrites heki proved safe, and the \
      `blocker` of a diagnostic names what keeps its rewrite from being safe.",
     "To make heki enforce a rule of the code base that no type states (who may write, read, or \
-     call something, or what a scope must not reach), write a contract: an array of tables under \
-     `[tool.heki]` in `pyproject.toml`, at the top level of a `heki.toml` (`write-owners`, \
-     `read-owners`, `call-owners`, `effect-boundaries`, `readonly-returns`, `invalidation`), \
-     whose names are dotted patterns or globs. See \
-     https://heki.koxudaxi.dev/configuration/#contracts.",
+     call something, what a scope must not reach, or which modules a module may import), write \
+     a contract: an array of tables under `[tool.heki]` in `pyproject.toml`, at the top level of \
+     a `heki.toml` (`write-owners`, `read-owners`, `call-owners`, `effect-boundaries`, \
+     `readonly-returns`, `invalidation`, `import-owners`), whose names are dotted patterns or \
+     globs. See https://heki.koxudaxi.dev/configuration/#contracts.",
     "Answer with the files and functions to change, the change itself, and the `heki check` \
      command that confirms it.",
 ];

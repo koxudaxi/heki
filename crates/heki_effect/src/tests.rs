@@ -603,6 +603,25 @@ fn reanalyze(index: &mut ProjectIndex, rel: &str, src: &str) -> IncrementalUpdat
     index.reanalyze_module(&input(&b), &kb())
 }
 
+/// The import graph changes with a file's import sites, not with where they are written: an
+/// edit moving them keeps it (Early Cutoff); a new import, a module appearing or leaving with
+/// its imports, changes it.
+#[test]
+fn import_facts_change_with_the_sites_not_their_positions() {
+    let mut index = project(&[("pkg/__init__.py", ""), ("pkg/a.py", "import json\n")]);
+    let moved = reanalyze(&mut index, "pkg/a.py", "# shifted\n\nimport json\n");
+    assert!(!moved.imports_changed);
+    let added = reanalyze(&mut index, "pkg/a.py", "import json\nimport csv\n");
+    assert!(added.imports_changed);
+    let changed = reanalyze(&mut index, "pkg/a.py", "import json\nimport pickle\n");
+    assert!(changed.imports_changed);
+    let created = reanalyze(&mut index, "pkg/b.py", "");
+    assert!(created.imports_changed);
+    let removed = index.remove_file(Path::new("pkg/b.py"));
+    assert!(removed.imports_changed);
+    assert!(!index.remove_file(Path::new("pkg/none.py")).imports_changed);
+}
+
 #[test]
 fn gate_5_update_file_early_cutoff() {
     let mut index = project(&[

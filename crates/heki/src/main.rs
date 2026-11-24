@@ -251,7 +251,9 @@ struct AnalysisArgs {
 #[derive(Debug, Args)]
 struct InspectArgs {
     /// A dotted name (`pkg.mod.Class.method`, a dotted suffix such as `Class.method`, or a
-    /// glob), `path.py:LINE`, or `path.py::NAME`.
+    /// glob), `path.py:LINE`, or `path.py::NAME`. `-` reads such symbols from standard input,
+    /// one per line, and reports on every function they name, a glob on each function it
+    /// matches, from one analysis: a JSON array, or one text section per function.
     symbol: String,
     /// The project to analyze, as for `heki check`.
     #[arg(default_value = ".")]
@@ -265,8 +267,17 @@ struct InspectArgs {
     /// How many caller levels `--callers` lists.
     #[arg(long, requires = "callers", default_value_t = 3, value_parser = clap::value_parser!(u16).range(1..=100))]
     depth: u16,
+    /// Show the imports of the project modules SYMBOL names (a module name or a glob over
+    /// module names): each import with when it runs and what it loads, and what loading the
+    /// module loads while it loads.
+    #[arg(long, conflicts_with = "callers")]
+    imports: bool,
     #[command(flatten)]
     analysis: AnalysisArgs,
+    /// Internal: write the steps each owner's walks took to this JSON file
+    /// (`crates/heki/tests/e2e_analysis_bounds.rs`).
+    #[arg(long, hide = true)]
+    walk_steps: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

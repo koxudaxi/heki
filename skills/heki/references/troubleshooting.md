@@ -30,7 +30,8 @@ The symbol names no single function: it is ambiguous, unknown, a class, or a mod
 says what to do (`error.help` with `--output-format json`; a misspelled name gets the functions
 whose names look like it) and lists the functions to choose from (`error.candidates`,
 `error.suggestions`, `error.methods`, or `error.functions`); inspect one of them, by its dotted
-name, `path.py:LINE`, or `path.py::NAME`.
+name, `path.py:LINE`, or `path.py::NAME`. With `-`, that error object stands in the array in the
+name's place, after and before the reports of the other names.
 
 ## A command exits with 2 before checking anything
 

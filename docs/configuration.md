@@ -234,7 +234,7 @@ the installed release changed, and the changelog on GitHub lists every release.
   says how many.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
   `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `MUT101`, `MUT103`, `MUT106`, `MUT107`,
-  `MUT108`, `MUT111`, `MUT112`, `MUT113`, `MUT115`): they need their exact code or name. In `ignore`, a prefix covers every
+  `MUT108`, `MUT111`, `MUT112`, `MUT113`, `MUT115`, `MUT120`): they need their exact code or name. In `ignore`, a prefix covers every
   rule it matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
@@ -256,11 +256,13 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 | [`effect-boundaries`](#effect-boundaries) | what a scope must not reach: I/O, writes, reads, or calls | `EFF201` | heuristic |
 | [`readonly-returns`](#readonly-returns) | results every caller shares | `MUT202` | heuristic |
 | [`invalidation`](#invalidation) | writes that must be announced | `MUT109` | heuristic |
+| [`import-owners`](#import-owners) | which modules a module may import (experimental) | `IMP201`; `IMP202` with `unresolved = "report"` | heuristic |
 
 - These rules report nothing until a contract exists. The results of `functools.lru_cache` /
   `functools.cache` functions are checked without one by `MUT114` (`cached-result-mutation`).
 - Declaring a contract selects its rule, whatever its certainty.
-- Every name in a contract is a dotted pattern. It matches the full name or any dotted suffix
+- Every name in a contract but `import-owners`, whose names are
+  [module patterns](#import-owners), is a dotted pattern. It matches the full name or any dotted suffix
   (`DataModel.fields` matches `pkg.model.DataModel.fields`, not `pkg.BigModel.fields`), and it
   may be a glob (`*`, `?`, `[...]`, `{a,b}`).
 - A glob's `*` spans dots (`pkg.parser.*` covers the functions of every module under
@@ -301,9 +303,10 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, a name with more than one colon or an empty module or qualified name, call
   targets whose globs are too many to match together (tens of thousands of complex ones), an
-  argument list heki cannot read, an invalid glob in `allowed-protocols`, or an unknown value of
-  `forbid`, `fresh-objects`, `unresolved`, `references`, `attribution`, `own-receiver`, or
-  `unlisted-dict-keys`.
+  argument list heki cannot read, an invalid glob in `allowed-protocols`, an unknown group or an
+  `ignored-imports` entry without `->` in `import-owners`, or an unknown value of `forbid`,
+  `fresh-objects`, `unresolved`, `references`, `attribution`, `own-receiver`,
+  `unlisted-dict-keys`, `type-checking`, or `reach`.
 - With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
   method named like a target, accessed on an object of unknown class (an unannotated parameter,
@@ -778,6 +781,88 @@ A write is followed through local aliases (also in the scopes nested in the func
 container methods, `setattr` / `__dict__`, and helpers. A helper changing an argument it does
 not type writes the field or instance its caller binds to it. At most 64 `invalidation`
 contracts can be declared.
+
+### `import-owners`
+
+```toml
+[[tool.heki.import-owners]]
+name = "facts-leaf"
+importers = ["pkg.facts"]
+allowed-imports = ["<stdlib>", "pkg._records"]
+
+[[tool.heki.import-owners]]
+name = "shared-model-backends"
+importers = ["pkg.model.shared"]
+forbidden-imports = ["pkg.model.backend", "pkg.model.backend.*"]
+
+[[tool.heki.import-owners]]
+name = "no-root-import"
+importers = ["pkg.*"]
+forbidden-imports = ["pkg"]
+```
+
+Which modules the modules of `importers` may import, checked by
+[`IMP201`](rules/import-owner-violation.md). Its names are module patterns: a whole module name
+or a glob whose `*` spans dots, never a suffix (`pkg.*` names `pkg.facts` and
+`pkg.model.shared`, not `pkg`), or one of the groups `<stdlib>` (the standard library),
+`<project>` (the project's modules), and `<third-party>` (every other module).
+
+| Key | Default | Meaning |
+| --- | ------- | ------- |
+| `name` | `""` | The contract's name in reports. |
+| `importers` | every module | The modules judged. |
+| `exempt-importers` | `[]` | Modules of `importers` that are not judged. |
+| `allowed-imports` | `[]` | The modules the importers may import: every other import is reported. |
+| `forbidden-imports` | `[]` | When set, only imports of these modules are reported, less the allowed ones, as in [Allowed and forbidden functions](#allowed-and-forbidden-functions). A contract setting neither list allows no imports. |
+| `ignored-imports` | `[]` | `"importer -> imported"` pairs of module patterns whose imports the contract accepts (`"pkg.cli -> pkg.db"`). |
+| `type-checking` | `"ignore"` | `"ignore"` or `"report"`: whether the imports under `if TYPE_CHECKING:`, which never run, count. |
+| `reach` | `"statement"` | `"statement"`: each import of an importer is judged. `"import-time"`: every module loading an importer loads while it loads. `"all"`: every module a chain of imports that run leads to. |
+| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the imports whose module heki cannot name are reported under [`IMP202`](rules/unresolved-guarded-import.md). |
+| `message` | none | The help of every report of the contract. |
+
+- An import counts wherever it runs: in the module body, a class body, a function, or lazily,
+  with or without an `ImportError` handler around it. `importlib.import_module` and
+  `__import__` with a constant name count as imports of that module.
+- `import a.b.c` imports `a.b.c`, not `a` or `a.b`, which it loads first. `from a.b import c`
+  imports the submodule `a.b.c` when the package has one and binds no `c` before importing it,
+  and `a.b` otherwise. An import of a module the project lacks below one of its packages fails,
+  and is no import.
+- One report per import and module. A report's target, which a
+  [baseline](adoption.md#ratchet-baselines) counts it by, is the module imported.
+- With `reach`, each module reached is reported once per importer, at the import of the importer
+  that starts a shortest chain to it, with the other steps as related locations. A step through
+  a parent package counts: loading `pkg.models.base` runs `pkg/models/__init__.py` first. The
+  packages holding the importer load before it and are never reached. The walks of one contract
+  share a budget proportional to the import graph, in the order of the modules; past it, the
+  importers left get no report.
+- Definitions are not import targets: who may use a class or a function is a
+  [`call-owners`](#call-owners) or [`read-owners`](#read-owners) contract.
+
+Outside a package, only its public entry: every module but the package's own may import
+`app.billing`, and none of the modules under it.
+
+```toml
+[[tool.heki.import-owners]]
+name = "billing-entry"
+exempt-importers = ["app.billing", "app.billing.*"]
+forbidden-imports = ["app.billing.*"]
+message = "import `app.billing` and use what it exports"
+```
+
+`from app.billing import Invoice` imports the package, while `from app.billing import invoice`,
+`import app.billing.invoice`, and `from app.billing.invoice import Invoice` import the
+submodule.
+
+A start-up contract: loading `pkg.cli` must not load `torch`, however many modules lie between
+them.
+
+```toml
+[[tool.heki.import-owners]]
+name = "startup"
+importers = ["pkg.cli"]
+forbidden-imports = ["torch", "torch.*"]
+reach = "import-time"
+```
 
 ### How contracts report
 

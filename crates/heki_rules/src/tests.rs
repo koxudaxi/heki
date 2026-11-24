@@ -1049,23 +1049,3 @@ fn discovery_of_single_files_matches_the_walk() {
     ));
     std::fs::remove_dir_all(&dir).unwrap();
 }
-
-#[test]
-fn test_code_is_what_pytest_discovers() {
-    use crate::eff_rules::is_test_code;
-    for (qualname, path, test) in [
-        ("test_login", "app/views.py", true),
-        ("TestLogin.test_redirect", "app/views.py", true),
-        ("test_login.<locals>.helper", "app/views.py", true),
-        ("handler", "tests/api.py", true),
-        ("handler", "src/test/api.py", true),
-        ("handler", "evals/web/test_flows.py", true),
-        ("handler", "app/views_test.py", true),
-        ("handler", "app/views.py", false),
-        ("handler", "app/testing.py", false),
-        ("handler", "app/tests.py", false),
-        ("contest", "app/contest/views.py", false),
-    ] {
-        assert_eq!(is_test_code(qualname, path), test, "{qualname} {path}");
-    }
-}

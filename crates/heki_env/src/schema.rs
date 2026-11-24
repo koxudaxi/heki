@@ -6,8 +6,8 @@
 use crate::problem::{settings_root, table_items, table_name};
 use crate::{
     CallOwnerRule, ConfigError, ConfigLayout, EcosystemOverride, EffectBoundaryRule, HekiConfig,
-    InvalidationRule, LintConfig, OrderedOutputSetting, ReadOnlyReturnRule, ReadOwnerRule,
-    WriteOwnerRule,
+    ImportOwnerRule, InvalidationRule, LintConfig, OrderedOutputSetting, ReadOnlyReturnRule,
+    ReadOwnerRule, WriteOwnerRule,
 };
 use crate::{Docs, Problem};
 use serde::Serialize;
@@ -51,6 +51,7 @@ fn tables() -> &'static [Table] {
             table("effect-boundaries", keys_of::<EffectBoundaryRule>()),
             table("readonly-returns", keys_of::<ReadOnlyReturnRule>()),
             table("invalidation", keys_of::<InvalidationRule>()),
+            table("import-owners", keys_of::<ImportOwnerRule>()),
             table("ecosystem", keys_of::<EcosystemOverride>()),
             table(
                 "ecosystem.writes-in-order",
@@ -150,6 +151,19 @@ const EXAMPLES: &[(&str, &str)] = &[
         "invalidation.exempt-writers",
         r#"["pkg.parser.generation.*"]"#,
     ),
+    ("import-owners.importers", r#"["pkg.model.*"]"#),
+    ("import-owners.exempt-importers", r#"["pkg.model.testing"]"#),
+    (
+        "import-owners.allowed-imports",
+        r#"["<stdlib>", "pkg.model.*"]"#,
+    ),
+    ("import-owners.forbidden-imports", r#"["pkg.backends.*"]"#),
+    (
+        "import-owners.ignored-imports",
+        r#"["pkg.model.legacy -> pkg.backends.sql"]"#,
+    ),
+    ("import-owners.type-checking", r#""report""#),
+    ("import-owners.reach", r#""import-time""#),
     ("ecosystem.symbol", r#""mypkg.db.run_query""#),
     ("ecosystem.effects", r#"["blocking_db", "db_query"]"#),
     ("ecosystem.async-safe", "true"),

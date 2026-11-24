@@ -159,10 +159,10 @@ pub(crate) const ASSUMPTIONS: LongHelp = LongHelp {
 pub(crate) const INSPECT: LongHelp = LongHelp {
     reference: Some(Docs::CliInspect),
     exit_codes: &[
-        (0, "the function's report is printed"),
+        (0, "the report of each function is printed"),
         (
             2,
-            "the symbol names no single function (the error lists the candidates), or a file could not be analyzed",
+            "a symbol names no single function (the error lists the candidates), or a file could not be analyzed",
         ),
     ],
     examples: &[
@@ -174,11 +174,21 @@ pub(crate) const INSPECT: LongHelp = LongHelp {
             "heki inspect src/pkg/users.py:42 --callers",
             "the function at a line, with its callers",
         ),
+        (
+            "printf '%s\\n' pkg.users.fetch 'pkg.orders.*' | heki inspect -",
+            "every function the symbols name, from one analysis",
+        ),
     ],
-    machine_output: &[(
-        "heki inspect <SYMBOL> --output-format json",
-        "the report as one object; on exit code 2, `error` with the candidates",
-    )],
+    machine_output: &[
+        (
+            "heki inspect <SYMBOL> --output-format json",
+            "the report as one object; on exit code 2, `error` with the candidates",
+        ),
+        (
+            "heki inspect - --output-format json",
+            "an array: the object of each function the symbols on standard input name, in their order",
+        ),
+    ],
 };
 
 pub(crate) const RECOMMEND: LongHelp = LongHelp {
