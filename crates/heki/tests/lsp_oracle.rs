@@ -4921,8 +4921,8 @@ fn steps_configuration() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"EFF115\", \"EFF116\", \"MUT115\", \"MUT118\", \"MUT119\"]",
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"EFF115\", \"EFF116\", \"MUT115\", \"MUT118\", \"MUT119\"]\nselect = [\"NOPE1\"]",
+                "[tool.heki.lint]\n",
+                "[tool.heki.lint]\nselect = [\"NOPE1\"]\n",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),
