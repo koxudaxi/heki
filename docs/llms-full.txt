@@ -5138,7 +5138,7 @@ The Layer 2 rows of the distributions the catalog lists (`[[distributions]]`) ar
 releases of each distribution:
 
 ```console
-$ uv run --no-project --python 3.12 --with "packaging==25.0" python tests/sentinel/verify_ecosystem_kb.py [--only DIST] [--version DIST==VERSION]
+$ uv run --only-group sentinel --isolated --python 3.12 python tests/sentinel/verify_ecosystem_kb.py [--only DIST] [--version DIST==VERSION]
 ```
 
 For the oldest and the newest release the `verified` range admits, and the first and the last of
@@ -5512,7 +5512,7 @@ project may take tens of times more per byte than the rest.
 $ cargo build --release
 $ python scripts/build_docs.py --heki target/release/heki   # rules and CLI reference pages
 $ python scripts/build_llms_txt.py                          # llms.txt / llms-full.txt
-$ uvx --from "zensical==0.1.2" zensical serve
+$ uv run --only-group docs --isolated zensical serve
 ```
 
 - Rule documentation lives in `crates/heki_rules/rule-docs/<CODE>.md`: `heki rule <CODE>` prints
@@ -5554,8 +5554,8 @@ release. A draft is published by hand, and only while no Release Draft run is qu
 The release tag is the version (`v` + the version), so nothing is bumped before a release. Right
 after checking out the tag, every `release.yml` job that builds writes the version into
 `pyproject.toml`, `Cargo.toml` (`workspace.package.version` and the internal crates under
-`workspace.dependencies`), and the workspace entries of `Cargo.lock`
-(`scripts/set_release_versions.py`, which fails when a value it rewrites is not found exactly
+`workspace.dependencies`), the workspace entries of `Cargo.lock`, and the project's entry of
+`uv.lock` (`scripts/set_release_versions.py`, which fails when a value it rewrites is not found exactly
 once), and the release fails unless every wheel, the source distribution, and the executable
 declare it. Nothing is committed: `main` declares the newest release once the sync pull request
 is merged.
@@ -5618,7 +5618,7 @@ changes in an exact rule.
    (the run then warns), and a draft page loaded before the run's update publishes without it.
 3. The Release Sync workflow opens the pull request `chore: sync release metadata for <version>`
    from the branch `release/sync-<version>`, labeled `maintenance` to keep it out of the next
-   draft's changes. It writes the version into the manifests and `Cargo.lock`, renames the
+   draft's changes. It writes the version into the manifests and the lock files, renames the
    section heading to `## [<version>] - <publish date>` (the UTC date), and makes the
    `[<version>]` compare link end at the release tag instead of `HEAD` (a missing link compares
    the previous release with the tag). When a section is headed `[Unreleased]`, its link compares
@@ -5675,8 +5675,17 @@ token of a Claude subscription (`claude setup-token` creates one). No other step
 The scripts of the workflow have tests, which CI runs on every pull request:
 
 ```console
-$ uvx --python 3.12 --from "pytest==8.4.2" --with "pyyaml==6.0.3" --with "jsonschema==4.25.1" pytest scripts/tests
+$ uv run --only-group scripts-tests --isolated --python 3.12 pytest scripts/tests
 ```
+
+The tools CI runs (pytest, zensical, twine, pre-commit, zizmor) are the dependency groups of
+`pyproject.toml`, locked in `uv.lock`: a workflow runs one group with `uv run --only-group
+<group> --isolated <tool>`, and `UV_LOCKED=1` makes uv fail instead of updating the lock.
+`exclude-newer = "3d"` keeps a release younger than three days out of the lock, and
+`no-build = true` allows wheels only. Change a version in the group, run `uv lock`, and commit
+both files. Dependabot opens the weekly updates, with a three day cooldown. The `workflow lint`
+job runs zizmor over `.github/workflows`; a finding is fixed, or kept with an inline
+`# zizmor: ignore[<audit>]` and its reason.
 
 ## Architecture
 

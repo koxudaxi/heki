@@ -3,8 +3,8 @@ name: Release Sync
 # The tag is the version: release.yml writes it into the manifests of the checkout it builds and
 # commits nothing. After a release is published, this workflow opens the pull request that brings
 # `main` to it, `chore: sync release metadata for <version>` from the branch
-# `release/sync-<version>`: the version in `pyproject.toml`, `Cargo.toml`, and `Cargo.lock`, and
-# the release's CHANGELOG section dated with the publish date (`scripts/set_release_versions.py`).
+# `release/sync-<version>`: the version in `pyproject.toml`, `Cargo.toml`, `Cargo.lock`, and
+# `uv.lock`, and the release's CHANGELOG section dated with the publish date (`scripts/set_release_versions.py`).
 # A pre-release, and a release older than the version `main` declares, leave `main` as it is.
 #
 # - `workflow_dispatch` syncs `main` with a published release again, for example after the
@@ -32,6 +32,9 @@ concurrency:
   group: release-sync-${{ github.event.release.tag_name || inputs.tag }}
   cancel-in-progress: false
 
+env:
+  UV_LOCKED: "1"
+
 jobs:
   patch:
     name: release metadata patch
@@ -50,6 +53,7 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
+          version: "0.13.4"
           enable-cache: false
       - name: Read the release
         id: release
@@ -135,7 +139,7 @@ jobs:
 
           body="$RUNNER_TEMP/release-sync-body.md"
           cat > "$body" <<EOF
-          Brings \`main\` to the release v$VERSION: the version in \`pyproject.toml\`, \`Cargo.toml\`, and \`Cargo.lock\`, and the date of its CHANGELOG section (\`scripts/set_release_versions.py\`).
+          Brings \`main\` to the release v$VERSION: the version in \`pyproject.toml\`, \`Cargo.toml\`, \`Cargo.lock\`, and \`uv.lock\`, and the date of its CHANGELOG section (\`scripts/set_release_versions.py\`).
 
           A workflow opened this pull request with \`GITHUB_TOKEN\`, so GitHub holds its CI runs: close and reopen it to start them, or select **Approve workflows to run** in the merge box.
           EOF
