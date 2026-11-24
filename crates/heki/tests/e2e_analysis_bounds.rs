@@ -6571,6 +6571,48 @@ fn dependency_groups_included_along_many_paths_are_read_once_each() {
     check(&layered_dependency_groups(40));
 }
 
+/// [`import_chain`] with an `import-owners` contract walking what `importers` import, which
+/// forbids the module at the end of the chain.
+fn import_chain_with_contract(modules: usize, importers: &str) -> Project {
+    let p = import_chain(modules);
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[[tool.heki.import-owners]]\nname = \"no-json\"\nimporters = [\"{importers}\"]\nforbidden-imports = [\"json\"]\nreach = \"all\"\n"
+        ),
+    );
+    p
+}
+
+/// The walk of an `import-owners` contract with `reach` from the head of a long chain of
+/// imports visits each module once, and reports the module at its end with the whole chain.
+#[test]
+fn an_import_contract_walks_a_long_chain_once() {
+    let modules = 10_000;
+    let diags = check_past_budgets(modules, &[], |n| import_chain_with_contract(n, "c.m0"));
+    let report: Vec<&Value> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP201")
+        .collect();
+    assert_eq!(report.len(), 1, "{report:#?}");
+    assert_eq!(report[0]["target"], "json");
+    assert_eq!(report[0]["related"].as_array().unwrap().len(), modules - 1);
+}
+
+/// Every module of a long chain judged at once: each walks the rest of the chain, so the walks
+/// of the contract share one budget, past which the importers left report nothing.
+#[test]
+fn the_importers_of_an_import_contract_share_one_budget() {
+    let diags = check_past_budgets(2_000, &["import_owners"], |n| {
+        import_chain_with_contract(n, "c.*")
+    });
+    let reported: Vec<&str> = (diags.iter())
+        .filter(|d| d["rule_code"] == "IMP201")
+        .map(|d| d["path"].as_str().unwrap())
+        .collect();
+    assert!(reported.contains(&"c/m0.py"), "{reported:?}");
+    assert!(!reported.contains(&"c/m1999.py"), "{reported:?}");
+}
+
 /// `levels` levels of two modules each, every module star-importing both modules of the next
 /// level and the last level's second module importing the first module back, with a blocking
 /// `near` two levels down and a blocking `far` on the last level, which a function calls each

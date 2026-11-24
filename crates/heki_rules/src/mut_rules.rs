@@ -2520,7 +2520,7 @@ pub(crate) fn reports_import_probes(
 }
 
 /// The value of a contract's mode key, one of `values` (the first when unset).
-fn mode(
+pub(crate) fn mode(
     value: Option<&str>,
     values: &'static [&'static str],
     expected: &'static str,

@@ -15,6 +15,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::cell::OnceCell;
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::rc::Rc;
 
 /// When an import site runs.
@@ -680,6 +681,8 @@ pub struct ImportGraph<'i> {
     module_ids: FxHashMap<String, u32>,
     externals: Vec<String>,
     external_ids: FxHashMap<String, u32>,
+    /// Per project module, the file defining it.
+    paths: Vec<&'i Path>,
     /// Per project module, its sites and what each loads; `None` for a module heki has no
     /// import facts of (a file it could not read).
     sites: Vec<Option<Vec<(&'i ImportSite, Target)>>>,
@@ -693,6 +696,18 @@ impl<'i> ImportGraph<'i> {
     /// The graph of the project `files` summarize, with `decls` their declarations. A module
     /// several files define is the one of its owner (`module_precedence`).
     pub fn build(files: impl IntoIterator<Item = &'i FileSummary>, decls: &ProjectDecls) -> Self {
+        Self::resolving(files, decls, |_| true)
+    }
+
+    /// [`Self::build`] with the sites of the modules `resolves` selects only, the others left
+    /// without import facts: what those modules import, without reading the declarations the
+    /// imports of the others name (which the language server records as what a check of one
+    /// file depends on). Walks over it see the others as modules that load nothing.
+    pub fn resolving(
+        files: impl IntoIterator<Item = &'i FileSummary>,
+        decls: &ProjectDecls,
+        resolves: impl Fn(&str) -> bool,
+    ) -> Self {
         let mut files: Vec<&'i FileSummary> = files.into_iter().collect();
         files.sort_by(|a, b| {
             crate::module_precedence(&a.path).cmp(&crate::module_precedence(&b.path))
@@ -715,24 +730,33 @@ impl<'i> ImportGraph<'i> {
             module_ids,
             externals: Vec::new(),
             external_ids: FxHashMap::default(),
+            paths: Vec::new(),
             sites: Vec::new(),
             loads: Vec::new(),
             size: 0,
         };
         for i in 0..graph.modules.len() {
-            let facts = owners[graph.modules[i].as_str()].imports();
+            let name = graph.modules[i].as_str();
+            let owner = owners[name];
+            graph.paths.push(&owner.path);
+            let facts = owner.imports().filter(|_| resolves(name));
             let resolved: Option<Vec<(&'i ImportSite, Target)>> = facts.map(|facts| {
                 (facts.sites.iter())
                     .map(|site| (site, graph.target(site, decls)))
                     .collect()
             });
             let mut loads: BTreeSet<ModuleRef> = BTreeSet::new();
+            let mut later: BTreeSet<ModuleRef> = BTreeSet::new();
             for (site, target) in resolved.iter().flatten() {
-                if !site.loads_while_its_module_loads() {
+                let Some(m) = target.certain() else {
                     continue;
-                }
-                if let Some(m) = target.certain() {
+                };
+                // The parents of every site's module are named, so that [`Self::parents`]
+                // finds them for a site of any timing.
+                if site.loads_while_its_module_loads() {
                     graph.with_parents(m, &mut loads);
+                } else {
+                    graph.with_parents(m, &mut later);
                 }
             }
             graph.size += 1 + resolved.as_ref().map_or(0, Vec::len);
@@ -839,12 +863,32 @@ impl<'i> ImportGraph<'i> {
         out.insert(m);
     }
 
+    /// The parent packages importing the module `m` of a site loads first, outermost first:
+    /// those of the project's that the project has, and every one outside it.
+    pub fn parents(&self, m: ModuleRef) -> Vec<ModuleRef> {
+        let name = self.name(m);
+        let prefixes = name.match_indices('.').map(|(i, _)| &name[..i]);
+        match m {
+            ModuleRef::Project(_) => (prefixes.filter_map(|p| self.module_ids.get(p)))
+                .map(|&p| ModuleRef::Project(p))
+                .collect(),
+            ModuleRef::External(_) => (prefixes.filter_map(|p| self.external_ids.get(p)))
+                .map(|&p| ModuleRef::External(p))
+                .collect(),
+        }
+    }
+
     /// The name of `m`.
     pub fn name(&self, m: ModuleRef) -> &str {
         match m {
             ModuleRef::Project(i) => &self.modules[i as usize],
             ModuleRef::External(i) => &self.externals[i as usize],
         }
+    }
+
+    /// The file defining the project module `m`.
+    pub fn path(&self, m: u32) -> &'i Path {
+        self.paths[m as usize]
     }
 
     /// The id of the project module named `name`.

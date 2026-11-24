@@ -110,14 +110,16 @@ enum ShownAt {
     /// A function's own comparison of an attribute with an `object()` sentinel (the tests
     /// `MUT118` names), by function, attribute, and sentinel.
     SentinelTest(String, String, String),
+    /// An import site, by the function holding it (the steps of import chains).
+    Import(String),
 }
 
 /// The places in its text `source` of the spans of `file` that other files' diagnostics can
 /// show: its call and reference sites and the calls outside the project an effect boundary
 /// forbids (the hops of call chains), the changes its methods make to their own containers (the
 /// methods `MUT113` names), the in-place changes its functions make to their parameters (the
-/// lines `MUT110` names), and the comparisons with sentinels its functions make (the tests
-/// `MUT118` names).
+/// lines `MUT110` names), the comparisons with sentinels its functions make (the tests
+/// `MUT118` names), and its import sites (the steps of import chains).
 fn shown_places(file: &heki_effect::FileSummary, source: &str) -> Vec<SitePlace> {
     let lines = heki_ast::LineIndex::from_source(source);
     let place = |offset: u32| {
@@ -174,9 +176,12 @@ fn shown_places(file: &heki_effect::FileSummary, source: &str) -> Vec<SitePlace>
         .map(|a| (a.span, ShownAt::ExternalCall(a.name.clone())))
         .collect();
     external.sort();
+    let imports = (file.imports().into_iter().flat_map(|i| &i.sites))
+        .map(|site| (site.span, ShownAt::Import(site.qualname.clone())));
     calls
         .chain(external)
         .chain(changes)
+        .chain(imports)
         .map(|(span, at)| (span, [place(span.start), place(span.end)], at))
         .collect()
 }
@@ -413,6 +418,10 @@ struct ContractReach {
     /// `allowed-callees` may allow one by one) and counts them, while the summaries keep the
     /// effects with one chain each and no such access.
     ecosystem_calls: bool,
+    /// An `import-owners` contract walking what its importers import (`reach`), judged by a
+    /// selected rule: an importer's report reads the imports of every module its walk reaches,
+    /// and the walks share a budget.
+    import_walks: bool,
 }
 
 /// Per function of one file: its project call sites without positions, and the cached
@@ -512,6 +521,7 @@ impl Workspace {
                     .iter()
                     .any(|b| b.forbid.iter().any(|t| t == "calls")),
             ecosystem_calls: !env_cfg.effect_boundaries.is_empty(),
+            import_walks: heki_rules::walks_imports(env_cfg, &selection),
         };
         let example_owners = ExampleOwners::new(env_cfg);
         // Every file's IR, semantic model, and text go before propagation: only the index stays.
@@ -1063,6 +1073,9 @@ impl Workspace {
         if self.reach.calls {
             affected.extend(self.above_files(&changed));
         }
+        if self.reach.import_walks && update.imports_changed {
+            affected.extend(self.walking_importers());
+        }
         if self.reach.ecosystem_calls {
             let calling_differently: Vec<&FuncKey> = ecosystem
                 .0
@@ -1087,6 +1100,16 @@ impl Workspace {
             affected.extend(above.into_iter().filter(|f| self.chain_reports.contains(f)));
         }
         affected
+    }
+
+    /// The files of the modules an `import-owners` contract walking imports judges.
+    fn walking_importers(&self) -> Vec<PathBuf> {
+        let modules = (self.files.iter()).map(|(path, meta)| (meta.module_name.as_str(), path));
+        heki_rules::walking_importers(&self.env.cfg, modules)
+            .expect("invalid contract options fail `Workspace::load`")
+            .into_iter()
+            .cloned()
+            .collect()
     }
 
     /// Files of every function below the `changed` callers (their callees before and after
