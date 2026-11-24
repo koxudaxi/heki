@@ -2808,7 +2808,7 @@ heki 0.1 ran every rule that is not opt-in by default. Since rules have a certai
 exact ones that are not opt-in do ([Getting Started](https://heki.koxudaxi.dev/getting-started/#run-it) lists them).
 
 - `lint.heuristic = true` restores the rules of 0.1, now labelled `heuristic` in every output,
-  except the size-dependent `OPT` rules, which are opt-in since 0.2.8: name them in
+  except the size-dependent `OPT` rules, which are opt-in since 0.3.0: name them in
   `extend-select` (`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`).
 - A baseline keeps its entries: their keys (file, function, rule, target) do not change.
 - `heki check --fix` applies the proven fixes of `OPT101` and `OPT102` by default, as in 0.1.
@@ -4144,7 +4144,7 @@ none.
 | `OPT130` | 0 / 0 / 1 / 0 | 0 / 0 / 0 / 0 |
 | `OPT113` | 0 / 2 / 6 / 0 | 0 / 0 / 6 / 0 |
 
-A run of the 0.2.8 build on the frozen holdout corpus (2026-11-24), with the eight rewrite rules
+A run of the 0.3.0 build on the frozen holdout corpus (2026-11-24), with the eight rewrite rules
 and `OPT113` selected by code, has 134 exact reports. Each is a report the certification's holdout
 run checked by hand, and each is benign: the tier that asks the data to decide the trip count
 left out the one plausible report. 108 of the 122 `OPT103` reports are one function body, copied
@@ -4219,12 +4219,12 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `rule.EFF115` | rule | [`EFF115`](https://heki.koxudaxi.dev/rules/async-def-as-sync-callback/) | 0.2.5 | - |
 | `rule.EFF116` | rule | [`EFF116`](https://heki.koxudaxi.dev/rules/generator-never-iterated/) | 0.2.6 | - |
 | `rule.IMP101` | rule | [`IMP101`](https://heki.koxudaxi.dev/rules/import-cycle/) | 0.2.7 | - |
-| `rule.IMP102` | rule | [`IMP102`](https://heki.koxudaxi.dev/rules/circular-import-failure/) | 0.2.8 | - |
-| `rule.IMP104` | rule | [`IMP104`](https://heki.koxudaxi.dev/rules/development-code-import/) | 0.2.8 | - |
+| `rule.IMP102` | rule | [`IMP102`](https://heki.koxudaxi.dev/rules/circular-import-failure/) | 0.3.0 | - |
+| `rule.IMP104` | rule | [`IMP104`](https://heki.koxudaxi.dev/rules/development-code-import/) | 0.3.0 | - |
 | `rule.IMP201` | rule | [`IMP201`](https://heki.koxudaxi.dev/rules/import-owner-violation/) | 0.2.7 | - |
 | `rule.IMP202` | rule | [`IMP202`](https://heki.koxudaxi.dev/rules/unresolved-guarded-import/) | 0.2.7 | - |
-| `rule.IMP301` | rule | [`IMP301`](https://heki.koxudaxi.dev/rules/development-dependency-at-import-time/) | 0.2.8 | - |
-| `rule.IMP302` | rule | [`IMP302`](https://heki.koxudaxi.dev/rules/optional-dependency-at-import-time/) | 0.2.8 | - |
+| `rule.IMP301` | rule | [`IMP301`](https://heki.koxudaxi.dev/rules/development-dependency-at-import-time/) | 0.3.0 | - |
+| `rule.IMP302` | rule | [`IMP302`](https://heki.koxudaxi.dev/rules/optional-dependency-at-import-time/) | 0.3.0 | - |
 | `rule.MUT101` | rule | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | 0.1.0 | - |
 | `rule.MUT111` | rule | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | 0.2.0 | - |
@@ -4323,7 +4323,7 @@ It is new: its reports are heuristic until a review of its reports on real code 
 
 - **Kind:** rule
 - **Target:** [`IMP102`](https://heki.koxudaxi.dev/rules/circular-import-failure/)
-- **Since:** 0.2.8
+- **Since:** 0.3.0
 
 It is new: every report rests on established premises only, but its reports are heuristic until a review of its reports on real code bases certifies its claim, and which imports and code stop a run can still change.
 
@@ -4331,7 +4331,7 @@ It is new: every report rests on established premises only, but its reports are 
 
 - **Kind:** rule
 - **Target:** [`IMP104`](https://heki.koxudaxi.dev/rules/development-code-import/)
-- **Since:** 0.2.8
+- **Since:** 0.3.0
 
 It is new: every report rests on established premises only, but its reports are heuristic until a review of its reports on real code bases certifies its claim, and which modules count as package and development code can still change.
 
@@ -4355,7 +4355,7 @@ It is the strict mode of `IMP201`, which is experimental.
 
 - **Kind:** rule
 - **Target:** [`IMP301`](https://heki.koxudaxi.dev/rules/development-dependency-at-import-time/)
-- **Since:** 0.2.8
+- **Since:** 0.3.0
 
 It is new: every report rests on established premises only, but its reports are heuristic until a review of its reports on real code bases certifies its claim, and which distributions provide a module can still change.
 
@@ -4363,7 +4363,7 @@ It is new: every report rests on established premises only, but its reports are 
 
 - **Kind:** rule
 - **Target:** [`IMP302`](https://heki.koxudaxi.dev/rules/optional-dependency-at-import-time/)
-- **Since:** 0.2.8
+- **Since:** 0.3.0
 
 It is new: every report rests on established premises only, but its reports are heuristic until a review of its reports on real code bases certifies its claim, and which distributions provide a module and which modules are base modules can still change.
 

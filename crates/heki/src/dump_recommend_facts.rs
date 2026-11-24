@@ -9,7 +9,7 @@
 
 use crate::DumpRecommendFactsArgs;
 use crate::OutputFormat;
-use crate::check::{finish, selection, shown_text};
+use crate::check::{finish, selection, selectors, shown_text};
 use anyhow::Result;
 use heki_ast::LineIndex;
 use heki_rules::blind_spots::{
@@ -143,7 +143,7 @@ pub(crate) fn run(args: &DumpRecommendFactsArgs) -> Result<ExitCode> {
         overrides: None,
         removed: None,
     })?;
-    let selection = selection(&args.analysis, &project)?;
+    let selection = selection(&selectors(&args.analysis), &project)?;
     let Indexed { project, index, .. } =
         Indexed::build(project, selection, None, project::Facts::Recommend)?;
     let lines: FxHashMap<&Path, LineIndex> = project

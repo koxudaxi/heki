@@ -1175,7 +1175,7 @@ class Runner:
         self, text: str, watch: bool, steps: Path | None = None, timeout: float = TIMEOUT_SECONDS
     ) -> tuple[float, float, int]:
         args = ["--select", self.select, "--config", "shapes.toml"]
-        args, env = check_command([*args, "--output-format", "json", "m.py"], watch)
+        args, env = check_command([*args, "--output-format", "json"], watch)
         if steps is not None:
             args[1:1] = ["--walk-steps", str(steps)]
         return self.measure(text, args, env, timeout)
@@ -1215,11 +1215,11 @@ class Runner:
 
 
 def check_command(args: list[str], watch: bool) -> tuple[list[str], dict[str, str]]:
-    """The arguments and environment of `heki check` with `args`, or of the `--watch` engine
-    stopping after its first check."""
+    """The arguments and environment of `heki check` with `args` on `m.py`, or of the `--watch`
+    engine on its directory (`--watch` takes directories) stopping after its first check."""
     if watch:
-        return ["check", "--watch", *args], {"HEKI_WATCH_MAX_RUNS": "0"}
-    return ["check", *args], {}
+        return ["check", "--watch", *args, "."], {"HEKI_WATCH_MAX_RUNS": "0"}
+    return ["check", *args, "m.py"], {}
 
 
 def shard(text: str) -> tuple[int, int]:
@@ -1257,7 +1257,7 @@ def time_limits(root: Path) -> dict[str, tuple[float, float]] | None:
 def least_reference_seconds(released: Runner, mode: str) -> dict[str, float] | None:
     """The least of three `mode` runs of the empty module and of each reference, or `None` when
     none of one ended cleanly."""
-    command, env = check_command(["--select", released.select, "--output-format", "json", "m.py"],
+    command, env = check_command(["--select", released.select, "--output-format", "json"],
                                  mode == "watch")
     least: dict[str, float] = {}
     for kind, text in [("empty", ""), *((r[0], reference_source(r[0], r[1])) for r in REFERENCES)]:
@@ -1285,7 +1285,12 @@ def main() -> int:
     shapes = [(f, placement) for f in families for placement in f.placements][first - 1 :: step]
     problems: list[str] = []
     with tempfile.TemporaryDirectory(prefix="heki-walk-shapes-") as tmp:
-        runner = Runner(heki, Path(tmp))
+        # The shapes and the references get a project each, side by side: a file given to `heki
+        # check` is checked in its project, and `--watch` watches the directory, so a run
+        # analyzes every module below its root.
+        root = Path(tmp) / "shapes"
+        root.mkdir()
+        runner = Runner(heki, root)
         # Only runs that end cleanly measure anything: a crash or a stopped run would make the
         # baseline or a reference say nothing, or inflate the limit.
         base: dict[str, tuple[float, float]] = {}

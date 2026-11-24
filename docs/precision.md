@@ -218,7 +218,7 @@ none.
 
 <!-- End of the generated harm. -->
 
-A run of the 0.2.8 build on the frozen holdout corpus (2026-11-24), with the eight rewrite rules
+A run of the 0.3.0 build on the frozen holdout corpus (2026-11-24), with the eight rewrite rules
 and `OPT113` selected by code, has 134 exact reports. Each is a report the certification's holdout
 run checked by hand, and each is benign: the tier that asks the data to decide the trip count
 left out the one plausible report. 108 of the 122 `OPT103` reports are one function body, copied
