@@ -117,9 +117,12 @@ impl TypeCtx<'_> {
         let mut handed_calls = 0;
         loop {
             if let Called::Value(v) = called
-                && let Some(held) = self.partial_held(types, def, v)
+                && let Some(partial) = self.partial_object(types, def, v)
             {
-                called = Called::Value(held);
+                let (callable, args) = passed
+                    .through_partial(partial)
+                    .ok_or(NoItems::NotFollowed)?;
+                (called, passed) = (Called::Value(callable), args);
             }
             let callee = match called {
                 Called::Value(v) => match bound_method(def, v) {
@@ -162,14 +165,13 @@ impl TypeCtx<'_> {
         self.call_items(types, def, inst, &|key| returned_items(project, key))
     }
 
-    /// The callable calling `v` calls when it holds a `functools.partial` object this function
-    /// makes ([`Partial::of`]).
-    fn partial_held<'i>(
+    /// The `functools.partial` object this function makes that `v` holds ([`Partial::of`]).
+    fn partial_object<'i>(
         &self,
         types: &FxHashMap<VarId, Val>,
         def: &dyn Fn(VarId) -> Option<&'i Inst>,
         v: VarId,
-    ) -> Option<VarId> {
+    ) -> Option<Partial> {
         let copied = |v: VarId| {
             let mut cur = v;
             while let Some(InstKind::Copy { src, .. }) = def(cur).map(|i| &i.kind) {
@@ -180,7 +182,6 @@ impl TypeCtx<'_> {
         Partial::of(v, copied, |object| {
             self.partial_parts(&def(object)?.kind, &|v| types.get(&v))
         })
-        .map(|p| p.callable)
     }
 
     /// The parts of a `functools.partial(f, ...)` call `kind` ([`crate::partial::parts`]): `f`,
