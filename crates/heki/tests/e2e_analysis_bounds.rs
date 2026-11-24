@@ -11,8 +11,8 @@
 //! rewrite's candidates check, the star imports a name is bound through, many or nested deep,
 //! the sizes of a thousand lists each extending the next or of one list extending many deep
 //! chains, the walks over the import graph (`heki inspect --imports`), and the tests of their
-//! arguments that helpers hand on to their callers, through a long chain of helpers or for many
-//! parameters.
+//! arguments that helpers hand on to their callers, through a long chain of helpers, for many
+//! parameters, or from many implementations of one call.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -7262,4 +7262,52 @@ fn many_sleeps_on_parameters_keep_a_bounded_number_of_chains() {
             ("waits".to_owned(), "exact".to_owned())
         ]
     );
+}
+
+/// A family of `implementations` classes whose `run` sleeps for a parameter of its own, called
+/// through a helper passing every parameter on, and a coroutine calling the helper with `5` for
+/// each.
+fn implementations_sleeping_on_their_own_parameter(implementations: usize) -> String {
+    let names: Vec<String> = (0..implementations).map(|i| format!("p{i}")).collect();
+    let typed: Vec<String> = names.iter().map(|n| format!("{n}: float")).collect();
+    let mut out = vec!["import time".to_owned()];
+    for (i, name) in names.iter().enumerate() {
+        let base = if i == 0 { "" } else { "(C0)" };
+        out.extend([
+            String::new(),
+            String::new(),
+            format!("class C{i}{base}:"),
+            format!("    def run(self, {}) -> None:", typed.join(", ")),
+            format!("        time.sleep({name})"),
+        ]);
+    }
+    out.extend([
+        String::new(),
+        String::new(),
+        format!("def relay(obj: C0, {}) -> None:", typed.join(", ")),
+        format!("    obj.run({})", names.join(", ")),
+        String::new(),
+        String::new(),
+        "async def waits(obj: C0) -> None:".to_owned(),
+        format!("    relay(obj, {})", vec!["5"; implementations].join(", ")),
+    ]);
+    out.join("\n") + "\n"
+}
+
+/// The implementations a call can run each hand on a test of another parameter: the helper's
+/// fact needs all of them, and a fact needing more than `heki_effect::MAX_GIVEN_TESTS` is not
+/// kept, so the call through it is a heuristic report.
+#[test]
+fn a_fact_needing_more_tests_than_the_bound_is_not_kept() {
+    let certainty = |implementations: usize| {
+        let p = Project::new(&format!("bounds_given_tests_{implementations}"));
+        p.write(
+            "m.py",
+            &implementations_sleeping_on_their_own_parameter(implementations),
+        );
+        blocking_reports(&check_counted(&p).0)
+    };
+    let waits = |certainty: &str| vec![("waits".to_owned(), certainty.to_owned())];
+    assert_eq!(certainty(4), waits("exact"));
+    assert_eq!(certainty(5), waits("heuristic"));
 }
