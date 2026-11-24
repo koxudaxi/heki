@@ -48,7 +48,7 @@ impl Extractor<'_> {
         let Some(loads) = self
             .cx
             .catalog(symbol)
-            .and_then(|e| e.loads_module.as_ref())
+            .and_then(|e| e.loads_module.as_deref())
         else {
             return;
         };
