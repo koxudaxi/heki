@@ -529,6 +529,112 @@ fn a_key_from_the_fields_a_class_declares_names_an_attribute() {
     );
 }
 
+const WRAPPED_MODEL: &str = r#"class Config:
+    timeout = 1
+
+
+class Dicted:
+    kind: str = "str"
+
+
+class DictPairs:
+    kind: str = "str"
+
+
+class Updated:
+    kind: str = "str"
+
+
+class Values:
+    kind: str = "str"
+
+
+class FromClass:
+    kind: str = "str"
+
+
+class Copied:
+    kind: str = "str"
+
+
+class Wrapped:
+    kind: str = "str"
+
+
+class Picked:
+    kind: str = "str"
+"#;
+
+const WRAPPED_COPIES: &str = r#"from pkg.model import (
+    Config, Copied, DictPairs, Dicted, FromClass, Picked, Updated, Values, Wrapped,
+)
+
+
+def dicted(new: Dicted, old: Dicted) -> None:
+    for name in dict(vars(old)):
+        setattr(new, name, getattr(old, name))
+
+
+def dict_pairs(new: DictPairs, old: DictPairs) -> None:
+    for name in dict(old.__dict__.items()):
+        setattr(new, name, getattr(old, name))
+
+
+def updated(new: Updated, old: Updated) -> None:
+    new.__dict__.update(dict(vars(old)))
+
+
+def values(new: Values, old: Values) -> None:
+    for name in vars(old).values():
+        setattr(new, name, None)
+
+
+def from_class(new: FromClass) -> None:
+    for name in vars(Config):
+        setattr(new, name, getattr(Config, name))
+
+
+def copied(new: Copied) -> None:
+    for name in ["kind"].copy():
+        setattr(new, name, None)
+
+
+def wrapped(new: Wrapped, old: Wrapped) -> None:
+    for name in list(list(list(list(list(vars(old)))))):
+        setattr(new, name, getattr(old, name))
+
+
+def picked(new: Picked, old: Picked) -> None:
+    pair = next(iter(vars(old).items()))
+    setattr(new, pair[0], pair[1])
+"#;
+
+/// The classes of [`WRAPPED_MODEL`] the contract names.
+const WRAPPED_CLASSES: [&str; 8] = [
+    "Dicted",
+    "DictPairs",
+    "Updated",
+    "Values",
+    "FromClass",
+    "Copied",
+    "Wrapped",
+    "Picked",
+];
+
+/// A `dict` of the namespace of an instance or of its pairs gives its keys, to a loop and to
+/// `update`. The values of a namespace, the namespace of a class object, a copy of a display of
+/// constants (only the keys of a namespace or a mapping go through `copy()`), more than four
+/// wrappers around a namespace, and the first of a pair no loop takes may give any name.
+#[test]
+fn a_dict_of_a_namespace_gives_its_keys() {
+    assert_stale(
+        "unmatched_wrapped",
+        (WRAPPED_MODEL, WRAPPED_COPIES),
+        (&WRAPPED_CLASSES, &[]),
+        &["Values", "FromClass", "Copied", "Wrapped", "Picked"],
+    );
+}
+
 /// Without the key, a run over some files of the project judges nothing: an entry naming code
 /// in a file the paths leave out would look unmatched. With the key, the files given are the
 /// project.

@@ -194,8 +194,8 @@ fn run_function(args: &InspectArgs) -> Result<ExitCode> {
         reports,
         files.as_ref(),
         &errors,
-    )?;
-    let code = if failed {
+    );
+    let code = if failed? {
         ExitCode::from(2)
     } else {
         ExitCode::SUCCESS
