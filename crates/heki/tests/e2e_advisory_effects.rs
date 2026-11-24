@@ -241,8 +241,9 @@ fn eff101_resolves_receivers_through_imports_globals_annotations_and_classes() {
             d(h, 57, "EFF101", "app.models.Base.save"),
             // A function-local import.
             d(h, 63, "EFF101", "time.sleep"),
-            // A class method calling a static method through `cls`.
-            d(h, 67, "EFF101 [heuristic]", "app.models.K.make"),
+            // A class method calling a static method through `cls`, which sleeps for the
+            // seconds the call passes.
+            d(h, 67, "EFF101", "app.models.K.make"),
             // A generator expression runs where it is consumed.
             d(
                 h,
