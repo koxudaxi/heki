@@ -331,7 +331,7 @@ pub const NOT_THE_CATALOG_CALL: OpenCause = OpenCause {
 
 pub const READ_ONLY_PARAMETER: Premise = Premise {
     name: "Read-only parameter",
-    states: "the parameter is annotated `Sequence`, `Mapping`, or `ReadOnly`",
+    states: "the parameter is annotated `Sequence`, `Mapping`, `AbstractSet`, or `ReadOnly`",
     decided_in: &["heki_effect::resolver::param_access"],
 };
 

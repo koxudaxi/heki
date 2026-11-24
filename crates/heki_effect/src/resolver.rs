@@ -618,7 +618,7 @@ pub struct ClassDecl {
     /// The `@property` getters whose return annotation is a container type, as for
     /// `container_fields`, with the access the type promises: reading the attribute gives a
     /// container, which a type checker stops changing in place when the type is read-only
-    /// (`Sequence`, `Mapping`) (`MUT120`).
+    /// (`Sequence`, `Mapping`, `AbstractSet`) (`MUT120`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub container_properties: BTreeMap<String, ParamAccess>,
     /// Every name the class defines (`members`), at least one, is a property without a setter
@@ -778,8 +778,8 @@ pub struct FunctionDecl {
     /// writes.
     pub is_property: bool,
     /// Parameters (bit `i`: parameter `i < 64`) annotated with a read-only container type:
-    /// `Sequence[...]`, `Mapping[...]`, or `ReadOnly[...]` after `Optional` / `| None` /
-    /// `Annotated` (`MUT108`). Variadic parameters never are.
+    /// `Sequence[...]`, `Mapping[...]`, `AbstractSet[...]`, or `ReadOnly[...]` after `Optional`
+    /// / `| None` / `Annotated` (`MUT108`). Variadic parameters never are.
     pub readonly_params: u64,
     /// Parameters annotated with a mutable container type (`list`, `dict`, `set`,
     /// `bytearray`, `MutableSequence`, `MutableMapping`, `MutableSet`, `deque`, ...): a type
@@ -1682,18 +1682,22 @@ fn container_annotation(
 /// What a parameter annotation promises about changing the argument (`MUT108`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParamAccess {
-    /// `Sequence[...]` / `Mapping[...]` / `ReadOnly[...]`: the argument is only read.
+    /// `Sequence[...]` / `Mapping[...]` / `AbstractSet[...]` / `ReadOnly[...]`: the argument
+    /// is only read.
     ReadOnly,
     /// A mutable container type: the argument may be changed in place.
     Mutable,
 }
 
-/// Read-only container types (`ParamAccess::ReadOnly`).
+/// Read-only container types (`ParamAccess::ReadOnly`): the abstract sequence, mapping, and set
+/// (`typing.AbstractSet` is `collections.abc.Set`; `typing.Set` is the builtin `set`).
 const READONLY_TYPES: &[&str] = &[
     "typing.Sequence",
     "typing.Mapping",
+    "typing.AbstractSet",
     "collections.abc.Sequence",
     "collections.abc.Mapping",
+    "collections.abc.Set",
 ];
 
 /// Mutable container types (`ParamAccess::Mutable`).
@@ -2127,8 +2131,8 @@ pub struct ReadOnlyAttr {
     /// do (`ClassDecl::container_fields`, `readonly_attrs`); a view's property holds one when
     /// its getter's return annotation is a container type (`ClassDecl::container_properties`).
     pub holds_container: bool,
-    /// A view's property annotated with a read-only container type (`Sequence`, `Mapping`): a
-    /// type checker stops changing in place what it returns, through the view.
+    /// A view's property annotated with a read-only container type (`Sequence`, `Mapping`,
+    /// `AbstractSet`): a type checker stops changing in place what it returns, through the view.
     pub typed_read_only: bool,
 }
 

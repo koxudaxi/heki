@@ -354,8 +354,8 @@ Catalog lookups are exact. These contribute no effect until you add them with
 
 ### Read-only types
 
-- `MUT110` follows `Sequence` / `Mapping` / `ReadOnly` parameters into the helpers they are
-  handed to, any number of calls deep. A helper parameter annotated with a mutable type is left
+- `MUT110` follows `Sequence` / `Mapping` / `AbstractSet` / `ReadOnly` parameters into the
+  helpers they are handed to, any number of calls deep. A helper parameter annotated with a mutable type is left
   to the type checker, and a container inside the argument does not count.
 - `MUT108` (opt-in) follows frozen dataclasses, `NamedTuple`s, classes that a
   `dataclass_transform(frozen_default=True)` in the checked files builds, `Final` / `ReadOnly`

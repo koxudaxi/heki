@@ -109,7 +109,7 @@ across modules. heki models effects and aliases, what code does:
 | Tool | Models | heki adds |
 | --- | --- | --- |
 | Ruff | syntax and style | the effects behind a call: a blocking call, a query, or a write, wherever it happens |
-| ty, Pyrefly, pyright, mypy | declared types | in-place changes, through aliases and helpers, to `frozen`, `ReadOnly`, and `Final` fields and to `Sequence` / `Mapping` arguments |
+| ty, Pyrefly, pyright, mypy | declared types | in-place changes, through aliases and helpers, to `frozen`, `ReadOnly`, and `Final` fields and to `Sequence` / `Mapping` / `AbstractSet` arguments |
 | tach, import-linter | which modules may import which | which functions write or read a field, call a function, or reach I/O; which modules may import which, knowing when each import runs (experimental); planned: these tools' contracts read as heki contracts |
 
 Their stricter settings do not close the gap. The second example above is fully annotated and
@@ -214,7 +214,7 @@ These rules are exact and run by default. Each report shows the chain of calls t
 | --- | --- |
 | A blocking call that a call in an `async def` always runs, several helpers below | `EFF101` |
 | A database statement on every iteration of a loop over data | `EFF103` |
-| A `Sequence` / `Mapping` argument changed in place by a helper | `MUT110` |
+| A `Sequence` / `Mapping` / `AbstractSet` argument changed in place by a helper | `MUT110` |
 | A list, dict, or set that an `lru_cache` / `cache` function returned, changed in place | `MUT114` |
 | A change of a builtin container that is lost because the object is new and nothing holds it (`list(xs).sort()`) | `MUT119` |
 | A DataFrame or array concatenated with itself on every loop iteration | `DATA101` |
