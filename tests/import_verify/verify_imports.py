@@ -16,6 +16,10 @@ For each fixture project, compares `heki inspect --imports '*' --output-format j
   timing of the same alias must agree (`function`, `type-checking`, `lazy` or `body` for a lazy
   import the body loads, or open when heki cannot tell which binding a read sees, and `body`,
   `lazy` or open for the others, which `__lazy_modules__` may make lazy).
+- Circular imports that fail (`IMP102`): importing a module first must raise the `ImportError`
+  of a partially initialized module exactly at the statement an `IMP102` report names it at, and
+  every module no report names must import cleanly. The body edges a failing statement cuts off
+  in every import are not required.
 
 Fixtures under a directory named `py315` need CPython 3.15 (`lazy import`). A run that
 compares no fixture fails.
@@ -92,7 +96,13 @@ importlib.import_module = recorded_import_module
 try:
     original_import_module(first)
 except BaseException as error:
-    print(json.dumps(["error", repr(error)]))
+    # Where the error was raised: the innermost frame of a file of the project.
+    tb, where = error.__traceback__, None
+    while tb is not None:
+        if tb.tb_frame.f_code.co_filename.startswith(root):
+            where = [tb.tb_frame.f_code.co_filename[len(root) + 1:], tb.tb_lineno]
+        tb = tb.tb_next
+    print(json.dumps(["error", type(error).__name__, str(error), where]))
 for edge in edges:
     print(json.dumps(edge))
 """
@@ -110,8 +120,35 @@ def heki_report(heki: str, root: Path) -> list[dict]:
     return json.loads(result.stdout)["modules"]
 
 
-def recorded_edges(root: Path, modules: list[str]) -> set[tuple[str, str]]:
+def circular_failures(heki: str, root: Path) -> dict[str, tuple[str, int]]:
+    """Per module, where heki says importing it first of its import cycle raises `ImportError`:
+    the path and line of each `IMP102` report, for each module its message names."""
+    target = f"py3{min(max(sys.version_info[1], 11), 15)}"
+    result = subprocess.run(
+        [str(Path(heki).resolve()), "check", "--select", "IMP102", "--output-format", "json",
+         "--target-version", target, "."],
+        capture_output=True, text=True, check=False, cwd=root,
+    )
+    if result.returncode not in (0, 1):
+        raise SystemExit(f"{root}: heki check exited with {result.returncode}\n{result.stderr}")
+    failing: dict[str, tuple[str, int]] = {}
+    for report in json.loads(result.stdout):
+        named = report["message"].split(": importing ", 1)[1].split(" before the other modules")[0]
+        if " other module" in named:
+            raise SystemExit(f"{root}: {report['path']}: a report names too many modules to compare")
+        where = (Path(report["path"]).as_posix(), report["line"])
+        for entry in named.split("`")[1::2]:
+            failing[entry] = where
+    return failing
+
+
+def recorded_edges(
+    root: Path, modules: list[str]
+) -> tuple[set[tuple[str, str]], dict[str, tuple[str, str, tuple[str, int] | None]]]:
+    """The body edges importing each module first records, and per module whose import raised,
+    the error's type, message, and where in the project it was raised."""
     edges: set[tuple[str, str]] = set()
+    errors: dict[str, tuple[str, str, tuple[str, int] | None]] = {}
     for module in modules:
         result = subprocess.run(
             [sys.executable, "-I", "-c", RECORDER, str(root.resolve()), module],
@@ -120,11 +157,41 @@ def recorded_edges(root: Path, modules: list[str]) -> set[tuple[str, str]]:
         if result.returncode != 0:
             raise SystemExit(f"{root}: importing {module} failed\n{result.stderr}")
         for line in result.stdout.splitlines():
-            importer, target = json.loads(line)
-            if importer == "error":
-                raise SystemExit(f"{root}: importing {module} raised {target}")
-            edges.add((importer, target))
-    return edges
+            record = json.loads(line)
+            if record[0] == "error":
+                where = tuple(record[3]) if record[3] else None
+                errors[module] = (record[1], record[2], where)
+                continue
+            edges.add((record[0], record[1]))
+    return edges, errors
+
+
+def compare_failures(
+    root: Path,
+    failing: dict[str, tuple[str, int]],
+    errors: dict[str, tuple[str, str, tuple[str, int] | None]],
+    modules: list[str],
+) -> list[str]:
+    problems = []
+    for module in modules:
+        expected = failing.get(module)
+        error = errors.get(module)
+        if expected is None and error is not None:
+            problems.append(f"{root.name}: importing {module} first raised {error[0]}: {error[1]}")
+        elif expected is not None and error is None:
+            problems.append(
+                f"{root.name}: heki: importing {module} first fails at {expected[0]}:{expected[1]}; "
+                f"CPython imported it"
+            )
+        elif expected is not None and error is not None:
+            kind, message, where = error
+            circular = kind == "ImportError" and "partially initialized module" in message
+            if not circular or where != expected:
+                problems.append(
+                    f"{root.name}: heki: importing {module} first fails at "
+                    f"{expected[0]}:{expected[1]}; CPython raised {kind} at {where}: {message}"
+                )
+    return problems
 
 
 def matches(site: dict, target: str) -> bool:
@@ -137,9 +204,18 @@ def matches(site: dict, target: str) -> bool:
     return site["form"] == "by_name" and not site.get("target") and not site.get("may_load")
 
 
-def compare_edges(root: Path, report: list[dict], edges: set[tuple[str, str]]) -> list[str]:
+def compare_edges(
+    root: Path,
+    report: list[dict],
+    edges: set[tuple[str, str]],
+    failing: dict[str, tuple[str, int]],
+) -> list[str]:
     problems = []
     by_module = {m["module"]: m for m in report}
+    # The first line each file fails at: no import runs the body past it.
+    cut: dict[str, int] = {}
+    for path, line in failing.values():
+        cut[path] = min(cut.get(path, line), line)
     for importer, target in sorted(edges):
         module = by_module.get(importer)
         if module is None:
@@ -151,6 +227,8 @@ def compare_edges(root: Path, report: list[dict], edges: set[tuple[str, str]]) -
         for site in module["imports"] or []:
             must = site["timing"] == "body" and site["unconditional"] and not site["guarded"]
             if not must or not (site.get("target") or site.get("may_load")):
+                continue
+            if site["line"] > cut.get(module["path"], site["line"]):
                 continue
             if not any(i == module["module"] and matches(site, t) for i, t in edges):
                 problems.append(
@@ -244,7 +322,10 @@ def main() -> int:
             continue
         report = heki_report(args.heki, root)
         modules = [m["module"] for m in report if m["imports"] is not None]
-        problems += compare_edges(root, report, recorded_edges(root, modules))
+        failing = circular_failures(args.heki, root)
+        edges, errors = recorded_edges(root, modules)
+        problems += compare_failures(root, failing, errors, modules)
+        problems += compare_edges(root, report, edges, failing)
         problems += compare_classes(root, report)
         compared += 1
     for problem in problems:

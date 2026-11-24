@@ -6,11 +6,18 @@
 //! [`crate::FileSummary::imports`] with [`crate::OptInFacts::imports`]. The graph is built per
 //! check from them and the project declarations, and never kept in the index (ADR-017).
 
+mod circular;
+
+pub use circular::CircularFailure;
+
 use crate::resolver::{FromImport, ProjectDecls, resolve_relative_module};
 use crate::{FileSummary, ModuleInput, environment, is_stub, scc};
 use heki_ast::Span;
 use heki_ir::walk::{Answer, BitSet, Budget, Closure, FnShape, Visit, reach, reach_breadth_first};
-use heki_ir::{BlockId, FunctionId, Inst, InstKind, IrFunction, LastBindings, ModuleIr};
+use heki_ir::{
+    BasicBlock, BlockId, BuiltinKind, CompareOpKind, FunctionId, Inst, InstKind, IrFunction,
+    LastBindings, ModuleIr, Terminator,
+};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, OnceCell};
@@ -99,9 +106,18 @@ pub struct ImportSite {
     /// An `ImportError` handler takes the failure of the import (the `try` around it, or
     /// around the class statement whose body holds it).
     pub guarded: bool,
+    /// A handler may take an `ImportError` the import raises, so that the code after it runs
+    /// on (`environment::may_take_import_error`): one `guarded` names, `except Exception`, a
+    /// bare `except`, a type heki cannot tell passes it on, or the exit of a `with` block.
+    #[serde(default)]
+    pub caught: bool,
     /// The site runs on every path through its function's body to a normal return, outside
     /// loops; never established in a class body.
     pub unconditional: bool,
+    /// A lazy import (PEP 810): it loads where a read of its name first runs, not where it is
+    /// written.
+    #[serde(default)]
+    pub lazy: bool,
 }
 
 impl ImportSite {
@@ -110,6 +126,14 @@ impl ImportSite {
     /// sys.platform == "win32": import winreg`) is not one.
     pub fn loads_while_its_module_loads(&self) -> bool {
         self.timing == Answer::Known(Timing::Body) && self.unconditional && !self.guarded
+    }
+
+    /// Whether the site imports where it is written whenever its module loads, and an
+    /// `ImportError` it raises leaves the module: in the module body, on every path through it,
+    /// not lazy, and no handler may take the error ([`Self::caught`]). A handler of only
+    /// `ModuleNotFoundError` guards the site but does not take the error.
+    pub fn always_imports_uncaught(&self) -> bool {
+        self.timing == Answer::Known(Timing::Body) && self.unconditional && !self.lazy && !self.caught
     }
 
     /// The site with its positions zeroed: what Early Cutoff compares.
@@ -122,10 +146,31 @@ impl ImportSite {
 }
 
 /// The import facts of one file ([`crate::FileSummary::imports`]).
+///
+/// What the module body does between its imports is told by the index of a site in
+/// [`Self::sites`]: "before site `k`" means before site `k` and every later one starts, which
+/// stays the same wherever the code moves as long as the order does.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModuleImports {
     /// In source order.
     pub sites: Vec<ImportSite>,
+    /// The module globals the module may bind before one of its sites, each with the first
+    /// site it may be bound before: a store of the module body (an assignment, a definition,
+    /// an import), or a store in a function or a class body under `global`, which may run at
+    /// any time (site 0). A name bound only after every site is not listed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bound_before: BTreeMap<String, u32>,
+    /// The first site before which any name of the module may be bound: by a star import of the
+    /// module body, or, from the start, by `exec`, a change through `globals()`, or `vars()` or
+    /// `locals()` in the module body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub any_bound_before: Option<u32>,
+    /// The first site before which the module body may run code other than its imports and its
+    /// stores of names ([`may_run_code`]): a call, a class statement, an operator, an attribute
+    /// or item access; `sites.len()` when it does only after every site, `None` when it never
+    /// does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_before: Option<u32>,
 }
 
 impl ModuleImports {
@@ -134,23 +179,69 @@ impl ModuleImports {
     pub fn same_facts(&self, other: &Self) -> bool {
         self.sites.len() == other.sites.len()
             && (self.sites.iter().zip(&other.sites)).all(|(a, b)| a.unplaced() == b.unplaced())
+            && self.bound_before == other.bound_before
+            && self.any_bound_before == other.any_bound_before
+            && self.code_before == other.code_before
+    }
+
+    /// Whether the module may have bound `name` before its site `k` runs: it binds the name
+    /// there, binds `__getattr__`, which `from` imports fall back to, or may bind any name.
+    pub fn may_bind_before(&self, name: &str, k: usize) -> bool {
+        let before = |first: Option<u32>| first.is_some_and(|first| first as usize <= k);
+        before(self.bound_before.get(name).copied())
+            || before(self.bound_before.get("__getattr__").copied())
+            || before(self.any_bound_before)
+    }
+
+    /// Whether the module body may run code before its site `k` ([`Self::code_before`]).
+    pub fn runs_code_before(&self, k: usize) -> bool {
+        self.code_before.is_some_and(|first| first as usize <= k)
     }
 }
 
-/// A class body a function runs, and whether an `ImportError` handler takes what its class
-/// statement raises (in the function, or around the statement of an enclosing class body).
+/// What the handlers around a statement do with an `ImportError` it raises.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+struct Handled {
+    /// A handler naming it takes it ([`environment::guarded_against_import_errors`]).
+    guarded: bool,
+    /// A handler may take it ([`environment::may_take_import_error`]).
+    caught: bool,
+}
+
+impl Handled {
+    /// What the handlers of block `bb` of `f` in module `ir` do.
+    fn at(ir: &ModuleIr, f: &IrFunction, bb: BlockId) -> Self {
+        Self {
+            guarded: environment::guarded_against_import_errors(f, bb),
+            caught: environment::may_take_import_error(f, bb, &ir.constants.shadowed),
+        }
+    }
+
+    /// Handled as by `self` or by `other`: by the handlers around it and those around what
+    /// runs it.
+    fn or(self, other: Self) -> Self {
+        Self {
+            guarded: self.guarded || other.guarded,
+            caught: self.caught || other.caught,
+        }
+    }
+}
+
+/// A class body a function runs, and what the handlers around its class statement do with an
+/// `ImportError` (in the function, or around the statement of an enclosing class body).
 struct ClassBody<'m> {
     body: &'m IrFunction,
-    guarded: bool,
+    handled: Handled,
 }
 
 /// The class bodies `f` runs, nested ones included, each once (a class statement in a `finally`
-/// body is made once per way out of its `try`; one guarded copy guards it).
+/// body is made once per way out of its `try`; one handled copy handles it).
 fn class_bodies<'m>(ir: &'m ModuleIr, f: &'m IrFunction) -> Vec<ClassBody<'m>> {
     let mut out: Vec<ClassBody<'m>> = Vec::new();
     let mut index: FxHashMap<u32, usize> = FxHashMap::default();
-    // Each node is a function and whether a handler guards the class statements leading to it.
-    let next = |(id, outer): (u32, bool), out: &mut Vec<(u32, bool)>| {
+    // Each node is a function and what the handlers do around the class statements leading to
+    // it.
+    let next = |(id, outer): (u32, Handled), out: &mut Vec<(u32, Handled)>| {
         let g = ir.function(FunctionId(id));
         for bb in &g.blocks {
             for inst in &bb.insts {
@@ -160,27 +251,27 @@ fn class_bodies<'m>(ir: &'m ModuleIr, f: &'m IrFunction) -> Vec<ClassBody<'m>> {
                 } = &inst.kind
                     && ir.function(*body).is_class_body
                 {
-                    let guarded = outer || environment::guarded_against_import_errors(g, bb.id);
-                    out.push((body.0, guarded));
+                    out.push((body.0, outer.or(Handled::at(ir, g, bb.id))));
                 }
             }
         }
     };
-    // Unmetered: a function's class statements are walked once, and the walk is never open.
+    // Unmetered: a function's class statements are walked once per way they are handled, and
+    // the walk is never open.
     reach(
         &Budget::unmetered("import_sites"),
-        [(f.id.0, false)],
+        [(f.id.0, Handled::default())],
         next,
-        |(id, guarded)| {
+        |(id, handled)| {
             if id != f.id.0 {
                 let at = *index.entry(id).or_insert_with(|| {
                     out.push(ClassBody {
                         body: ir.function(FunctionId(id)),
-                        guarded: false,
+                        handled: Handled::default(),
                     });
                     out.len() - 1
                 });
-                out[at].guarded |= guarded;
+                out[at].handled = out[at].handled.or(handled);
             }
             Visit::<()>::Expand
         },
@@ -194,7 +285,7 @@ struct Placed {
     /// The function running it (an index into [`Placements::runners`]).
     runner: usize,
     in_class: bool,
-    guarded: bool,
+    handled: Handled,
     unconditional: bool,
 }
 
@@ -210,8 +301,9 @@ struct Placements<'m> {
     /// By the span of the imported name, what the module body's reads load of a lazy import
     /// ([`lazy_loads`]).
     lazy_loads: FxHashMap<Span, LazyLoad>,
-    /// The class bodies an `ImportError` handler guards around their class statement.
-    guarded_classes: Vec<Span>,
+    /// The class bodies with an `ImportError` handler around their class statement that takes
+    /// or may take it.
+    handled_classes: Vec<(Span, Handled)>,
 }
 
 impl<'m> Placements<'m> {
@@ -223,7 +315,7 @@ impl<'m> Placements<'m> {
             placed: FxHashMap::default(),
             lazy_reads: Vec::new(),
             lazy_loads: FxHashMap::default(),
-            guarded_classes: Vec::new(),
+            handled_classes: Vec::new(),
         };
         for (runner, f) in runners.iter().enumerate() {
             out.place(ir, runner, f);
@@ -246,18 +338,21 @@ impl<'m> Placements<'m> {
                 .always_runs(shape, bb)
         };
         let bodies = class_bodies(ir, f);
-        (self.guarded_classes).extend(bodies.iter().filter(|c| c.guarded).map(|c| c.body.span));
-        let holders = std::iter::once((f, false, false))
-            .chain(bodies.iter().map(|c| (c.body, true, c.guarded)));
+        (self.handled_classes).extend(
+            (bodies.iter())
+                .filter(|c| c.handled != Handled::default())
+                .map(|c| (c.body.span, c.handled)),
+        );
+        let holders = std::iter::once((f, false, Handled::default()))
+            .chain(bodies.iter().map(|c| (c.body, true, c.handled)));
         for (g, in_class, outer) in holders {
             for bb in &g.blocks {
                 for (index, inst) in bb.insts.iter().enumerate() {
                     match &inst.kind {
                         InstKind::Import { .. } => {
-                            let guarded =
-                                outer || environment::guarded_against_import_errors(g, bb.id);
+                            let handled = outer.or(Handled::at(ir, g, bb.id));
                             let unconditional = !in_class && always(bb.id);
-                            self.add(inst.span, runner, in_class, guarded, unconditional);
+                            self.add(inst.span, runner, in_class, handled, unconditional);
                         }
                         InstKind::LoadGlobal {
                             name,
@@ -267,7 +362,7 @@ impl<'m> Placements<'m> {
                             name,
                             at: (!in_class).then_some((bb.id, index)),
                             unconditional: !in_class && always(bb.id),
-                            guarded: outer || environment::guarded_against_import_errors(g, bb.id),
+                            handled: outer.or(Handled::at(ir, g, bb.id)),
                         }),
                         _ => {}
                     }
@@ -276,20 +371,19 @@ impl<'m> Placements<'m> {
         }
         if f.is_module_body {
             for &(bb, span) in &ir.star_imports {
-                let guarded = environment::guarded_against_import_errors(f, bb);
-                self.add(span, runner, false, guarded, always(bb));
+                self.add(span, runner, false, Handled::at(ir, f, bb), always(bb));
             }
         }
     }
 
-    fn add(&mut self, span: Span, runner: usize, in_class: bool, guarded: bool, always: bool) {
+    fn add(&mut self, span: Span, runner: usize, in_class: bool, handled: Handled, always: bool) {
         let at = self.placed.entry(span).or_insert(Placed {
             runner,
             in_class,
-            guarded: false,
+            handled: Handled::default(),
             unconditional: false,
         });
-        at.guarded |= guarded;
+        at.handled = at.handled.or(handled);
         at.unconditional |= always;
     }
 }
@@ -300,7 +394,7 @@ struct LazyRead<'m> {
     /// The block of the module body and the instruction; `None` in a class body.
     at: Option<(BlockId, usize)>,
     unconditional: bool,
-    guarded: bool,
+    handled: Handled,
 }
 
 /// What the module body's reads load of one lazy import. An entry without `read` comes from a
@@ -313,6 +407,8 @@ struct LazyLoad {
     unconditional: bool,
     /// A read that may load it is outside every `ImportError` handler.
     unguarded: bool,
+    /// A read that may load it is outside every handler that may take an `ImportError`.
+    uncaught: bool,
 }
 
 /// What the module body's `reads` of lazily imported names load (PEP 810): a read loads the
@@ -337,12 +433,15 @@ fn lazy_loads(ir: &ModuleIr, reads: &[LazyRead<'_>]) -> FxHashMap<Span, LazyLoad
                     let load = out.entry(import).or_default();
                     load.read = true;
                     load.unconditional |= only && read.unconditional;
-                    load.unguarded |= !read.guarded;
+                    load.unguarded |= !read.handled.guarded;
+                    load.uncaught |= !read.handled.caught;
                 }
             }
             Answer::Open => {
                 for import in (0..name.all.len()).filter_map(|b| name.import(b)) {
-                    out.entry(import).or_default().unguarded |= !read.guarded;
+                    let load = out.entry(import).or_default();
+                    load.unguarded |= !read.handled.guarded;
+                    load.uncaught |= !read.handled.caught;
                 }
             }
         }
@@ -553,12 +652,131 @@ pub(crate) fn module_imports(
         })
         .collect();
     for site in &mut by_name {
-        site.guarded |= (placements.guarded_classes.iter())
-            .any(|c| c.start <= site.span.start && site.span.end <= c.end);
+        for (class, handled) in &placements.handled_classes {
+            if class.start <= site.span.start && site.span.end <= class.end {
+                site.guarded |= handled.guarded;
+                site.caught |= handled.caught;
+            }
+        }
     }
     sites.extend(by_name);
     sites.sort_by_key(|s| s.span.start);
-    Some(ModuleImports { sites })
+    let order = BodyOrder::of(input.ir, &sites);
+    Some(ModuleImports {
+        bound_before: order.bound_before,
+        any_bound_before: order.any_bound_before,
+        code_before: order.code_before,
+        sites,
+    })
+}
+
+/// When the module body binds its names and runs code, by the first site each happens before
+/// ([`ModuleImports::bound_before`], [`ModuleImports::any_bound_before`],
+/// [`ModuleImports::code_before`]).
+struct BodyOrder {
+    bound_before: BTreeMap<String, u32>,
+    any_bound_before: Option<u32>,
+    code_before: Option<u32>,
+}
+
+impl BodyOrder {
+    fn of(ir: &ModuleIr, sites: &[ImportSite]) -> Self {
+        // The first site starting after `offset`: what happens at `offset` happens before it.
+        let first_after = |offset: u32| sites.partition_point(|s| s.span.start <= offset) as u32;
+        let body = ir.function(ir.module_fn);
+        let mut bound_before: BTreeMap<String, u32> = BTreeMap::new();
+        for f in &ir.functions {
+            for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+                let InstKind::StoreGlobal { name, .. } = &inst.kind else {
+                    continue;
+                };
+                // A function or a class body binding the name under `global` may run at any
+                // time: called from code that runs before any site.
+                let first = if f.id == body.id {
+                    first_after(inst.span.start)
+                } else {
+                    0
+                };
+                if (first as usize) < sites.len() {
+                    let at = bound_before.entry(name.clone()).or_insert(first);
+                    *at = (*at).min(first);
+                }
+            }
+        }
+        let shape = FnShape::new(body);
+        let reads_namespace = |kind: &InstKind| {
+            matches!(kind, InstKind::Call { callee, args, kwargs, .. }
+                if args.is_empty() && kwargs.is_empty() && matches!(callee.as_str(), "vars" | "locals"))
+        };
+        let dynamic = ir.constants.dynamic
+            || (body.blocks.iter().flat_map(|b| &b.insts)).any(|i| reads_namespace(&i.kind));
+        let star = (ir.star_imports.iter()).map(|(_, span)| first_after(span.start));
+        let any_bound_before = (dynamic.then_some(0)).into_iter().chain(star).min();
+        let code = (body.blocks.iter()).flat_map(|b| {
+            let insts = (b.insts.iter())
+                .filter(|i| may_run_code(ir, &i.kind))
+                .map(|i| i.span.start);
+            insts.chain(tests_truth(&shape, b).then(|| b.term_span.map(|s| s.start)).flatten())
+        });
+        Self {
+            bound_before,
+            any_bound_before,
+            code_before: code.min().map(first_after),
+        }
+    }
+}
+
+/// Whether the module body's instruction `kind` may run code other than its imports and its
+/// stores of names: a call, a class statement (which runs the metaclass and
+/// `__init_subclass__`), an operator, an attribute or item access, iteration, formatting, a
+/// `with` statement, or a non-empty `dict` or `set` display (which hashes its items). Loads of
+/// names, constants, `list` and `tuple` displays, and making a function run none (R7).
+fn may_run_code(ir: &ModuleIr, kind: &InstKind) -> bool {
+    match kind {
+        InstKind::Const { .. }
+        | InstKind::Copy { .. }
+        | InstKind::LoadGlobal { .. }
+        | InstKind::LoadDeref { .. }
+        | InstKind::LoadName { .. }
+        | InstKind::StoreGlobal { .. }
+        | InstKind::StoreDeref { .. }
+        | InstKind::Delete { .. }
+        | InstKind::CatchException { .. }
+        | InstKind::Import { .. } => false,
+        InstKind::MakeClosure { func_id, .. } => {
+            func_id.is_some_and(|id| ir.function(id).is_class_body)
+        }
+        InstKind::AllocBuiltin { kind, elems, .. } => {
+            matches!(kind, BuiltinKind::Set | BuiltinKind::Dict) && !elems.is_empty()
+        }
+        InstKind::DictLiteral { entries, .. } => !entries.is_empty(),
+        InstKind::Compare { op, .. } => !matches!(op, CompareOpKind::Is | CompareOpKind::IsNot),
+        _ => true,
+    }
+}
+
+/// Whether block `b` ends by testing the truth of a value that may run code (its `__bool__` or
+/// `__len__`), or by raising a value (which may make an instance of the class raised): a
+/// constant, an identity test, and `TYPE_CHECKING` run none.
+fn tests_truth(shape: &FnShape<'_>, b: &BasicBlock) -> bool {
+    match &b.terminator {
+        Terminator::Branch { cond, .. } => !matches!(
+            shape.inst(shape.copy_root(*cond)).map(|i| &i.kind),
+            Some(
+                InstKind::Const { .. }
+                    | InstKind::Compare {
+                        op: CompareOpKind::Is | CompareOpKind::IsNot,
+                        ..
+                    }
+            )
+        ) && !matches!(
+            shape.inst(shape.copy_root(*cond)).map(|i| &i.kind),
+            Some(InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. })
+                if name == "TYPE_CHECKING"
+        ),
+        Terminator::Raise(Some(_)) => true,
+        _ => false,
+    }
 }
 
 /// The site of the import `statement` of `input`, placed `at`.
@@ -591,7 +809,8 @@ fn statement_site(
         ),
     };
     let mut unconditional = at.unconditional && !at.in_class;
-    let mut guarded = at.guarded;
+    let mut guarded = at.handled.guarded;
+    let mut caught = at.handled.caught;
     let is_lazy = matches!(statement, Statement::Import(imp) if imp.is_lazy);
     let timing = match statement {
         _ if in_type_checking => Answer::Known(Timing::TypeChecking),
@@ -602,6 +821,7 @@ fn statement_site(
             Some(load) if load.read => {
                 unconditional = load.unconditional;
                 guarded = !load.unguarded;
+                caught = !load.uncaught;
                 Answer::Known(Timing::Body)
             }
             Some(_) => Answer::Open,
@@ -628,7 +848,9 @@ fn statement_site(
         modules,
         timing,
         guarded,
+        caught,
         unconditional,
+        lazy: is_lazy,
     }
 }
 
@@ -707,6 +929,8 @@ pub struct ImportGraph<'i> {
     /// Per project module, its sites and what each loads; `None` for a module heki has no
     /// import facts of (a file it could not read).
     sites: Vec<Option<Vec<(&'i ImportSite, Target)>>>,
+    /// Per project module, its import facts, with its sites.
+    facts: Vec<Option<&'i ModuleImports>>,
     /// Per project module, what loading it loads in one step ([`Self::loads`]).
     loads: Vec<Vec<ModuleRef>>,
     /// The nodes and edges, the size the walks over the graph are budgeted by.
@@ -753,6 +977,7 @@ impl<'i> ImportGraph<'i> {
             external_ids: FxHashMap::default(),
             paths: Vec::new(),
             sites: Vec::new(),
+            facts: Vec::new(),
             loads: Vec::new(),
             size: 0,
         };
@@ -782,6 +1007,7 @@ impl<'i> ImportGraph<'i> {
             }
             graph.size += 1 + resolved.as_ref().map_or(0, Vec::len);
             graph.sites.push(resolved);
+            graph.facts.push(facts);
             graph.loads.push(loads.into_iter().collect());
         }
         graph.size += graph.externals.len();
@@ -829,8 +1055,12 @@ impl<'i> ImportGraph<'i> {
                     // files lack: Python finds it elsewhere (a compiled extension module) or
                     // not at all.
                     FromImport::Submodule => either(),
+                    // The package binds the name to an object of the submodule after importing
+                    // it (`from .parse import parse`): until its body has, the import loads the
+                    // submodule and takes it, as it does while the package is still loading.
                     FromImport::Open if held => either(),
-                    FromImport::Attribute | FromImport::Open => package,
+                    FromImport::Attribute => either(),
+                    FromImport::Open => package,
                 }
             }
             Target::Module(m @ ModuleRef::External(e)) => Target::PackageOrSubmodule {
@@ -1019,6 +1249,11 @@ impl<'i> ImportGraph<'i> {
     /// facts of it).
     pub fn sites(&self, m: u32) -> Option<&[(&'i ImportSite, Target)]> {
         self.sites[m as usize].as_deref()
+    }
+
+    /// The import facts of the project module `m`, whose sites [`Self::sites`] resolves.
+    pub fn facts(&self, m: u32) -> Option<&'i ModuleImports> {
+        self.facts[m as usize]
     }
 
     /// A budget for the walks over the graph: [`Budget::STEPS_PER_UNIT`] per module and site.

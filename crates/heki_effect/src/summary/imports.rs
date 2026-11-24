@@ -73,7 +73,13 @@ impl Extractor<'_> {
                 Timing::Function
             }),
             guarded: environment::guarded_against_import_errors(self.f, bb),
+            caught: environment::may_take_import_error(
+                self.f,
+                bb,
+                &self.cx.ir().constants.shadowed,
+            ),
             unconditional,
+            lazy: false,
         });
     }
 

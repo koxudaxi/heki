@@ -2466,6 +2466,20 @@ impl ProjectDecls {
         self.rebound_elsewhere.contains(&fqn)
     }
 
+    /// Whether another project module may bind the global `name` of the project module
+    /// `module`: it stores into it or deletes it, by name (`cfg.name = v`, `setattr(cfg,
+    /// "name", v)`) or under a name heki cannot read (`setattr(cfg, key, v)`).
+    pub fn global_bound_elsewhere(&self, module: &str, name: &str) -> bool {
+        let fqn = format!("{module}.{name}");
+        // The stores are kept by the object a name gives (`ProjectDecls::canonical`); a name
+        // the module binds to another module's object is looked up both ways.
+        let stored = |fqn: &str| {
+            (self.split_module(fqn)).is_some_and(|(m, _)| self.global_stored_elsewhere(m, fqn))
+        };
+        let canonical = self.canonical(&fqn);
+        self.rebound_elsewhere(&fqn) || stored(&fqn) || (canonical != fqn && stored(&canonical))
+    }
+
     /// [`Self::rebound_elsewhere`] of `fqn`, canonical as it is (an attribute of a class along
     /// an MRO, of a module's function).
     fn rebound_elsewhere_canonical(&self, fqn: &str) -> bool {
