@@ -4030,6 +4030,17 @@ mod tests {
         ),
     ];
 
+    /// The calls giving at most as many items as the integer an argument passes
+    /// (`EcosystemEntry::items_up_to`): `(arg, param, symbols)`.
+    const ITEMS_UP_TO: &[(u8, &str, &[&str])] = &[(
+        0,
+        "size",
+        &[
+            "sqlite3.Cursor.fetchmany",
+            "sqlite3.connect(file).cursor().fetchmany",
+        ],
+    )];
+
     /// The calls handing back what a callable they are handed returns: `(arg, keywords,
     /// symbols)` of [`ResultOf`].
     const RESULTS_OF: &[(u8, bool, &[&str])] = &[
@@ -4118,6 +4129,13 @@ mod tests {
                     .iter()
                     .find(|(_, symbols)| symbols.contains(&symbol.as_str()))
                     .map(|(items, _)| *items);
+                let items_up_to = ITEMS_UP_TO
+                    .iter()
+                    .find(|(.., symbols)| symbols.contains(&symbol.as_str()))
+                    .map(|(arg, param, _)| ArgSlot {
+                        arg: Some(*arg),
+                        param: Some((*param).to_owned()),
+                    });
                 let result_of = RESULTS_OF
                     .iter()
                     .find(|(.., symbols)| symbols.contains(&symbol.as_str()))
@@ -4149,6 +4167,7 @@ mod tests {
                     emits,
                     exit_suppresses,
                     items,
+                    items_up_to,
                     api,
                     writes_in_order,
                     result_of,

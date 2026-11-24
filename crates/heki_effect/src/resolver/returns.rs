@@ -45,6 +45,9 @@ pub struct ReturnedItems {
     /// They are the pieces `str.splitlines` cuts the call's text into.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pieces: bool,
+    /// Some of the call's items may be left out (a filter, a condition of a comprehension).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dropped: bool,
     /// Only their count follows the call's: one item for each of its items (`[f(r) for r in
     /// rows]`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -70,7 +73,7 @@ pub enum NoItems {
     Unsized,
 }
 
-/// The most passes deciding a module's return facts ([`ReturnFacts::decide`]): a function
+/// The most passes deciding a module's return facts ([`ReturnFacts::in_passes`]): a function
 /// returning what another returns (`a` returning `b()` returning `c()`) is decided a pass after
 /// it, so a function more than this many functions down such a chain gets no fact.
 const MAX_RETURN_PASSES: usize = 8;
@@ -321,17 +324,22 @@ impl ReturnedItems {
         Self {
             kind,
             pieces: false,
+            dropped: false,
             counted: false,
             api,
         }
     }
 
     /// What a value made from these items gives: the pieces `str.splitlines` cuts their text
-    /// into (`text`), and only their count (`counted`). Pieces of pieces are none heki names.
-    pub fn read_through(self, text: bool, counted: bool) -> Option<Self> {
-        (!(self.pieces && text)).then_some(Self {
+    /// into (`text`), some of them (`dropped`), and only their count (`counted`). Pieces of
+    /// pieces, and a count of items some of which may be left out, are none heki names.
+    pub fn read_through(self, text: bool, dropped: bool, counted: bool) -> Option<Self> {
+        let dropped = self.dropped || dropped;
+        let counted = self.counted || counted;
+        (!(self.pieces && text) && !(dropped && counted)).then_some(Self {
             pieces: self.pieces || text,
-            counted: self.counted || counted,
+            dropped,
+            counted,
             ..self
         })
     }
@@ -402,7 +410,7 @@ pub(super) fn record_return_facts(
         candidates: &candidates,
         types: RefCell::default(),
     };
-    for (qualname, items) in facts.decide() {
+    for (qualname, items) in facts.in_passes() {
         if let Some(d) = decls.functions.get_mut(qualname) {
             d.returns = Some(Box::new(ReturnFact { items: Some(items) }));
         }
@@ -421,6 +429,7 @@ struct ReturnedCall {
     block: heki_ir::BlockId,
     index: u32,
     text: bool,
+    dropped: bool,
     counted: bool,
 }
 
@@ -456,6 +465,7 @@ fn returned_origins(
                 block,
                 index,
                 text: o.text,
+                dropped: o.dropped,
                 counted: o.carries == heki_ir::Carries::Count,
             });
         }
@@ -477,7 +487,7 @@ impl<'f> ReturnFacts<'_, 'f> {
     /// its fact one pass after it), until no fact changes or [`MAX_RETURN_PASSES`] passes. A
     /// fact, once decided, stays: a pass only adds facts, so the facts do not depend on the
     /// order of the candidates. Past the bound, a function down a longer chain gets none.
-    fn decide(&self) -> FxHashMap<&'f str, ReturnedItems> {
+    fn in_passes(&self) -> FxHashMap<&'f str, ReturnedItems> {
         let mut facts: FxHashMap<&'f str, ReturnedItems> = FxHashMap::default();
         for _ in 0..MAX_RETURN_PASSES {
             let next: FxHashMap<&'f str, ReturnedItems> = self
@@ -540,6 +550,8 @@ impl<'f> ReturnFacts<'_, 'f> {
             .is_none()
             .then_some(())?;
         let called = self.cx.call_items(&types, &def, inst, returned).ok()?;
-        called.items.read_through(call.text, call.counted)
+        called
+            .items
+            .read_through(call.text, call.dropped, call.counted)
     }
 }

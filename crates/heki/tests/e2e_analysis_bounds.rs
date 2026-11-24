@@ -1075,10 +1075,12 @@ fn phi_inputs_after_many_is_tests_find_their_sides_once_per_edge() {
 /// (`x1000 = identity(x999) if flag else x999`): each phi is walked once and referred to by the
 /// walks that meet it, instead of every argument walking all the phis before it. The calls each
 /// argument may be the result of are those of every link before it, so the iterations' facts
-/// grow with the square of the chain: they pass their budget instead.
+/// grow with the square of the chain: they pass their budget instead, and so do the origins of
+/// the returned value's items that the function's return fact follows (each link adds a call).
 #[test]
 fn returned_phis_of_calls_on_the_previous_value_are_walked_once() {
-    let found = check_past_budgets(1_000, &["consumption::IterFlow"], |links| {
+    let owners = ["consumption::IterFlow", "heki_effect::resolver::returns"];
+    let found = check_past_budgets(1_000, &owners, |links| {
         let mut lines = vec![
             "def identity(x):".to_owned(),
             "    return x".to_owned(),
