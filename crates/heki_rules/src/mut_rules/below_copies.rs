@@ -7,7 +7,7 @@
 //! [`Mut202Fn`] holds the function's values and calls. A report is exact when every premise of
 //! the rule page holds ([`Mut202Fn::exact_below_copy`]), heuristic otherwise.
 
-use super::{CallParts, MUTABLE_BUILTINS, Mut202Fn, attr_writes, site_call};
+use super::{CallParts, Mut202Fn, attr_writes, mutable_builtin, site_call};
 use crate::CallHop;
 use heki_diagnostics::Diagnostic;
 use heki_effect::readonly::{self, ContainerKind, Derivation, ReturnStep};
@@ -761,7 +761,7 @@ impl<'a> Mut202Fn<'a> {
         let loaded = shape.inst(*lhs).and_then(|i| self.load_of(&i.kind));
         let builtin = self
             .class_of(*lhs)
-            .is_some_and(|t| MUTABLE_BUILTINS.contains(&t));
+            .is_some_and(|t| mutable_builtin(self.cx.decls, t));
         builtin
             && *level != Level::Key(None)
             && loaded.is_some_and(|(obj, loaded)| shape.copy_root(obj) == root && loaded == *level)
@@ -816,7 +816,7 @@ impl<'a> Mut202Fn<'a> {
                 ..
             } => Some(*lhs).filter(|lhs| {
                 self.class_of(*lhs)
-                    .is_some_and(|t| MUTABLE_BUILTINS.contains(&t))
+                    .is_some_and(|t| mutable_builtin(self.cx.decls, t))
             }),
             _ => None,
         };

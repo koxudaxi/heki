@@ -1564,3 +1564,35 @@ fn mut112_takes_an_element_of_a_shallow_copy_as_the_copied_values() {
         "{diags:#?}"
     );
 }
+
+/// An in-place operator on an instance of a project subclass of a builtin container changes it
+/// as on the builtin; one on a number binds a new object.
+#[test]
+fn mut112_an_in_place_operator_changes_a_subclass_of_a_builtin() {
+    let p = Project::new("mut112_builtin_subclass");
+    p.write(
+        "m.py",
+        r#"import typing
+
+
+class Items(list):
+    pass
+
+
+def subclass_cast_back(shared, fresh):
+    x = Items() if fresh else typing.cast(Items, shared)
+    x += [1]
+
+
+def int_or_shared(shared, fresh):
+    n = 0 if fresh else typing.cast(int, shared)
+    n += 1
+    return n
+"#,
+    );
+    let diags = diagnostics(&p, &["--extend-select", "MUT112"]);
+    assert_eq!(
+        found(&diags),
+        vec![d("m.py", 10, "subclass_cast_back", "x")]
+    );
+}

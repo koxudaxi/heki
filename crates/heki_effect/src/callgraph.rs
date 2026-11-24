@@ -526,20 +526,25 @@ fn must_through_calls(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut 
                 continue;
             };
             let must = s.must_exec.get_or_insert_with(Box::default);
+            // The claim names every call the implementations end in, not only the kept
+            // chain's.
+            let witnesses = if found.witnesses.len() > 1 {
+                found.witnesses
+            } else {
+                Vec::new()
+            };
             if !found.needs.is_empty() {
-                must.given.insert(e, found.needs, found.chain);
+                must.given.insert(e, found.needs, found.chain, witnesses);
                 continue;
             }
             match must.effects.get(&e) {
                 Some(kept) if kept.len() <= found.chain.len() => {}
                 _ => {
                     must.effects.insert(e, found.chain);
-                    // The claim names every call the implementations end in, not only the
-                    // kept chain's.
-                    if found.witnesses.len() > 1 {
-                        must.alternatives.insert(e, found.witnesses);
-                    } else {
+                    if witnesses.is_empty() {
                         must.alternatives.remove(&e);
+                    } else {
+                        must.alternatives.insert(e, witnesses);
                     }
                 }
             }
@@ -576,7 +581,7 @@ fn given_chain<'m>(
     e: ExecEffectKind,
     bc: &BoundCallee,
     caller_binds: bool,
-) -> Option<(crate::ParamTests, &'m [Arc<CallHop>])> {
+) -> Option<(crate::ParamTests, &'m crate::GivenChain)> {
     must.given
         .of(e)
         .filter_map(|g| {
@@ -589,9 +594,9 @@ fn given_chain<'m>(
                     guards::Given::Caller(_) | guards::Given::Fails => return None,
                 }
             }
-            Some((needs, g.chain.as_slice()))
+            Some((needs, g))
         })
-        .min_by_key(|(needs, chain)| (needs.len(), chain.len()))
+        .min_by_key(|(needs, g)| (needs.len(), g.chain.len()))
 }
 
 /// A step of a must-fact that does not hold: why a call has not been established to have run
@@ -720,14 +725,19 @@ fn site_steps(
                 }
                 // A summary without facts has none.
                 let must = callee.and_then(|c| c.must_exec.as_deref());
-                let whatever_passed = must.and_then(|m| m.chain(e));
-                let found = whatever_passed
-                    .map(|chain| (Vec::new(), chain))
-                    .or_else(|| {
-                        must.filter(|m| !m.bound_twice)
-                            .and_then(|m| given_chain(m, e, bc, caller_binds))
-                    });
-                let Some((needs, chain)) = found else {
+                // The chain, and the calls the callee's own implementations end in when they
+                // differ.
+                let found = match must.and_then(|m| Some((m.chain(e)?, m))) {
+                    Some((chain, m)) => {
+                        let ends = m.alternatives.get(&e).map_or(&[][..], Vec::as_slice);
+                        Some((Vec::new(), chain, ends))
+                    }
+                    None => must
+                        .filter(|m| !m.bound_twice)
+                        .and_then(|m| given_chain(m, e, bc, caller_binds))
+                        .map(|(needs, g)| (needs, g.chain.as_slice(), g.witnesses.as_slice())),
+                };
+                let Some((needs, chain, alternatives)) = found else {
                     let gap = if must.is_some_and(|m| m.bound_twice) {
                         MustGap::DefinedTwice(key())
                     } else {
@@ -743,10 +753,11 @@ fn site_steps(
                     continue;
                 };
                 // A callee whose own implementations end in different calls has each of them.
-                let ends = must
-                    .filter(|_| whatever_passed.is_some())
-                    .and_then(|m| m.alternatives.get(&e))
-                    .map_or(std::slice::from_ref(sink), Vec::as_slice);
+                let ends = if alternatives.is_empty() {
+                    std::slice::from_ref(sink)
+                } else {
+                    alternatives
+                };
                 for end in ends {
                     if !out.witnesses.contains(end) {
                         out.witnesses.push(Arc::clone(end));

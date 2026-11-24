@@ -1937,6 +1937,12 @@ def rename(o):
 def only_with(x):
     if hasattr(x, "url"):
         requests.get(x.url)
+
+
+def nap(seconds):
+    import time
+
+    time.sleep(seconds)
 "#;
 
 #[test]
@@ -1955,6 +1961,11 @@ fn more_facts_guards_slots_hand_offs_and_copies() {
     assert_eq!(
         (&has["test"], &has["has"]),
         (&Value::from("hasattr"), &Value::from("url"))
+    );
+    // `time.sleep(seconds)` waits unless the catalog's zero-sleep case holds.
+    assert_eq!(
+        effect(&report(&p, "nap"), "sleep")["guards"][0]["test"],
+        "catalog"
     );
     let entry = report(&p, "entry");
     assert_eq!(
