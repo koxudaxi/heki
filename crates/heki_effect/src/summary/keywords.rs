@@ -300,7 +300,11 @@ impl<'a> Extractor<'a> {
         }
         for (p, c) in bindings.defaults(call, decl, offset) {
             if let Some(name) = name_of(p) {
-                out.extend(ArgValue::decided(c).map(|value| (name.clone(), value)));
+                out.extend(
+                    crate::ConstArg::of_fact(c)
+                        .and_then(|c| ArgValue::decided(&c))
+                        .map(|value| (name.clone(), value)),
+                );
             }
         }
         Some(out)

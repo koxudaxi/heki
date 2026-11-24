@@ -552,3 +552,43 @@ class Store:
         json!({"known": [{"source": "call conn.query() of Store.load", "carries": "items"}]})
     );
 }
+
+/// A comprehension only iterates its outermost iterable, as a `for` loop does, also before 3.12,
+/// where it is a function of its own called with that iterable: a list the function fills by
+/// appends keeps the origins of its items.
+#[test]
+fn a_comprehension_over_a_list_the_function_fills_keeps_its_items_origins() {
+    let p = Project::new("paths_origins_comprehension");
+    p.write(
+        "m.py",
+        r#"def fetch(url: str) -> str:
+    return url
+
+
+def gather(urls: list[str]) -> None:
+    found = []
+    for url in urls:
+        found.append(fetch(url))
+    sizes = [len(x) for x in found]
+    total = sum(len(x) for x in found)
+    for page in found:
+        print(page, sizes, total)
+"#,
+    );
+    for version in ["py311", "py312"] {
+        let (code, stdout, stderr) = p.heki(&["dump-facts", "--target-version", version, "m.py"]);
+        assert_eq!(code, 0, "{stderr}");
+        let facts: Value = serde_json::from_str(&stdout).unwrap();
+        let last = function(&facts, "gather")["loops"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["origin"]
+            .clone();
+        assert_eq!(
+            last,
+            json!({"known": [{"source": "param 0", "carries": "count"}]}),
+            "{version}"
+        );
+    }
+}

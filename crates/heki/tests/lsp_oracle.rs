@@ -179,6 +179,9 @@ const GUARD_NET_GUARDED: &str = "from urllib.request import urlopen\n\n\ndef fet
 const GUARD_USE: &str = "from pkg.guard_net import fetch\n\n\ndef sync(urls):\n    for u in urls:\n        fetch(u, cache=False)\n";
 const GUARD_DEFAULT_USE: &str =
     "from pkg.guard_net import fetch\n\n\ndef sync(urls):\n    for u in urls:\n        fetch(u)\n";
+const CATALOG_NAP: &str = "import time\n\n\ndef nap(n: float) -> None:\n    time.sleep(1)\n";
+const CATALOG_USE: &str =
+    "from pkg.catalog_nap import nap\n\n\nasync def wait() -> None:\n    nap(0)\n";
 const GUARD_CONN: &str = "from urllib.request import urlopen\n\n\nclass Conn:\n    def __init__(self):\n        self._sock = None\n\n    def send(self):\n        self._sock = urlopen(\"https://example.com\")\n";
 const GUARD_CONN_USE: &str = "from pkg.guard_conn import Conn\n\n\ndef run(c: Conn, xs):\n    for x in xs:\n        c.send()\n";
 const GUARD_GLOBAL: &str = "from urllib.request import urlopen\n\n_conn = None\n\n\ndef conn():\n    global _conn\n    _conn = urlopen(\"https://example.com\")\n    return _conn\n";
@@ -958,6 +961,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/guard_use.py", GUARD_USE),
         ("pkg/guard_default_use.py", GUARD_DEFAULT_USE),
         ("pkg/guard_conn.py", GUARD_CONN),
+        ("pkg/catalog_nap.py", CATALOG_NAP),
+        ("pkg/catalog_use.py", CATALOG_USE),
         ("pkg/guard_conn_use.py", GUARD_CONN_USE),
         ("pkg/buf_read.py", BUF_READ),
         ("pkg/buf_use.py", BUF_USE),
@@ -3109,6 +3114,31 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
         )
         .absent(&[("pkg/key_writer.py", "MUT201")]),
         Step::new(
+            "the hook caches under its own name what a generator expression over the globals makes",
+            vec![Action::Save(
+                "pkg/key_consts.py",
+                format!(
+                    "{KEY_CONSTS}{}",
+                    KEY_HOOK.replace("object()", "tuple(n for n in globals())")
+                ),
+            )],
+        )
+        .present(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
+            "the generator expression's body changes the globals, which may rebind the constant",
+            vec![Action::Save(
+                "pkg/key_consts.py",
+                format!(
+                    "{KEY_CONSTS}{}",
+                    KEY_HOOK.replace(
+                        "object()",
+                        "tuple(globals().pop(n) for n in list(globals()))"
+                    )
+                ),
+            )],
+        )
+        .absent(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
             "a tuple of the constant, which a loop in another module takes the key from",
             vec![
                 Action::Save(
@@ -4951,6 +4981,33 @@ fn steps_guarded_effects() -> Vec<Step> {
         .present(&[
             ("pkg/guard_use.py", "EFF102"),
             ("pkg/guard_default_use.py", "EFF102"),
+        ]),
+        Step::new(
+            "a helper in another file comes to sleep for its parameter, which the caller passes as zero",
+            vec![save(
+                "pkg/catalog_nap.py",
+                &CATALOG_NAP.replace("sleep(1)", "sleep(n)"),
+            )],
+        )
+        .absent(&[
+            ("pkg/catalog_use.py", "EFF101"),
+            ("pkg/catalog_use.py", "EFF101 [heuristic]"),
+        ]),
+        Step::new(
+            "the caller passes a sleep the catalog has no case for",
+            vec![save(
+                "pkg/catalog_use.py",
+                &CATALOG_USE.replace("nap(0)", "nap(5)"),
+            )],
+        )
+        .present(&[("pkg/catalog_use.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "the caller passes zero again",
+            vec![save("pkg/catalog_use.py", CATALOG_USE)],
+        )
+        .absent(&[
+            ("pkg/catalog_use.py", "EFF101"),
+            ("pkg/catalog_use.py", "EFF101 [heuristic]"),
         ]),
         Step::new(
             "a connection class in another file connects lazily",

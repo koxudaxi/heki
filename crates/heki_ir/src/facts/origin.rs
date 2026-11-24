@@ -475,6 +475,9 @@ impl<'m> ItemOrigins<'m> {
                         ),
                         Use::Inst(b, i) => match &ix.f.block(b).insts[i as usize].kind {
                             InstKind::Copy { .. } | InstKind::MakeIter { .. } => true,
+                            kind if kind.comprehension_operands().is_some() => {
+                                kind.only_iterates(a)
+                            }
                             InstKind::MethodCall {
                                 recv,
                                 method,

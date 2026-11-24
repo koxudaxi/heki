@@ -532,7 +532,7 @@ pub(crate) fn bound_capacity(site: &CallSite, bc: &BoundCallee, p: usize) -> Cap
     {
         return c.clone();
     }
-    match b.constant.map(|c| (c.class, c.positive)) {
+    match b.constant().map(|c| (c.class, c.positive)) {
         Some((ConstClass::None, _)) => CapacityOf::default(),
         Some((ConstClass::Int, Some(p))) => CapacityOf::fixed(Answer::Known(Bound::of_positive(p))),
         _ => CapacityOf::unknown(),

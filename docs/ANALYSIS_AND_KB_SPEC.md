@@ -257,7 +257,10 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     the module writes, which aliases and items share), whose length gives its display. It is
     the one view of a module name bound once (a star import that runs, not one under
     `if TYPE_CHECKING:`, rebinds every name not bound after it for good, also one with an
-    underscore, which the imported module's `__all__` may list; `LastBindings`). A change
+    underscore, which the imported module's `__all__` may list; `LastBindings`). Reading the
+    dict `globals()` returns binds nothing, iterating it included, also as the outermost
+    iterable of a comprehension (`InstKind::comprehension_operands`: the enclosing scope calls
+    `iter()` on it and hands the comprehension the iterator). A change
     through `globals()` leaves no name fixed unless it binds only a name the namespace lacks
     (`globals().setdefault(k, v)`, or `globals()[name] = v` in the module's `__getattr__`, keyed
     by the parameter Python passes the missing name in, which only Python calls: an undecorated
@@ -1123,7 +1126,18 @@ caller): a constant argument, a value whose exact class the caller knows (`Const
 or comprehension, an `io.StringIO` / `io.BytesIO` it constructs, or a phi of values of one such
 class), the literal default of an omitted parameter, or a test the caller has made on the same
 value that decides a guard against the effect prunes it there; an undecided test of a caller
-input becomes the caller's guard. A known class decides `is None`; `isinstance`, true when a
+input becomes the caller's guard. The binding keeps what the caller knows of the argument as the
+catalog's `ArgFact` (`ArgBinding::fact`: its literal or string constant, whether it names a
+file, a class or flag a catalog case or method tells apart, and the exact class and truthiness
+`ConstArg` is read from), only where that decides something. A catalogued call that selects no
+case sets a test of the function's parameter on each effect a case lacks when the parameter is
+the argument every case of the entry tests (`time.sleep(seconds)`), and on each effect a state
+of the library class lacks when the call is made on the parameter, or on what catalog methods
+return of it (`db.execute(sql).fetchone()` on `db: sqlite3.Connection`, whose states are
+`sqlite3.connect(":memory:")` and `sqlite3.connect(file)`): `GuardTest::Value`, the cases with
+their outcomes or the states with theirs, so that a binding's fact decides it as the inline call
+decides its own argument. Two occurrences testing the same parameter's states join into the
+states either keeps the effect in. A known class decides `is None`; `isinstance`, true when a
 tested class is in its MRO and false when every tested class is a builtin type, one of the `io`
 classes, or `os.PathLike` outside it; and `hasattr` for the attributes of the file protocol
 (`read`, `write`, `close`, ...), which the buffers have and the builtin values lack (a buffer may

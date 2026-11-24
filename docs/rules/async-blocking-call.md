@@ -68,6 +68,15 @@ PathLike)` is false does not reach the callee's branch for `isinstance(self._inp
 A generator's branches are decided at the call that creates it. Lazy initialization does not
 relax this rule: a connection opened once still blocks the event loop that once.
 
+The library calls a helper makes with its own parameter are decided at each call the same way
+where the catalog decides them by the argument: `nap(0)` over `time.sleep(seconds)`,
+`fetch("data:text/plain,hi")` over `urllib.request.urlopen(url)`, and a connection to a database
+in memory passed to a helper that queries its `sqlite3.Connection` parameter (`execute`, the
+cursor it gives, its fetches) do not wait, as the same calls written inline do not; also through
+more helpers passing the parameter on, and for an omitted parameter's literal default. Where the
+argument keeps the wait (`nap(5)`, a connection opened on a file), the report through the helper
+is heuristic.
+
 The rule reports the boundary: the call (or property read, or iteration) inside the `async def`
 that leads to the blocking operation, with the call chain as related information. Several
 boundaries reaching the same blocking call are shown as one report with a count once more than

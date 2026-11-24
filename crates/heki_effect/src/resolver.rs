@@ -761,7 +761,7 @@ pub struct FunctionDecl {
     /// otherwise raise `TypeError`.
     pub has_kwargs: bool,
     /// The literal defaults, by parameter position (`guards`: an omitted argument).
-    pub defaults: Vec<(u8, crate::ConstArg)>,
+    pub defaults: Vec<(u8, ArgFact)>,
     /// Calling it returns a fresh (async) generator: a generator function without decorators
     /// other than `staticmethod` / `classmethod` / `abstractmethod` / `override` (a
     /// `@contextmanager` generator returns a context manager). `MUT106` single-pass sources.
@@ -6054,8 +6054,8 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
                 .iter()
                 .enumerate()
                 .filter_map(|(i, p)| {
-                    let c = crate::ConstArg::of_literal(p.default.as_ref()?)?;
-                    Some((u8::try_from(i).ok()?, c))
+                    let fact = crate::guards::literal_fact(p.default.as_ref()?)?;
+                    Some((u8::try_from(i).ok()?, fact))
                 })
                 .collect(),
             is_generator: is_generator_function(f),
@@ -8237,7 +8237,7 @@ fn copy_root<'i>(def: impl Fn(VarId) -> Option<&'i Inst>, var: VarId) -> Option<
 }
 
 /// A literal's value, as a catalog case compares it.
-fn literal_value(literal: &ConstLiteral) -> Option<LiteralValue> {
+pub(crate) fn literal_value(literal: &ConstLiteral) -> Option<LiteralValue> {
     match literal {
         ConstLiteral::Bool(b) => Some(LiteralValue::Bool(*b)),
         ConstLiteral::Int(n) => Some(LiteralValue::Int(*n)),
@@ -8265,6 +8265,7 @@ pub(crate) fn arg_fact<'i>(
         names_file: names_a_file(&def, &name_of, globals, files, var),
         class: class_of(var).or_else(|| bytes_literal_class(&def, var)),
         flags: set_flags(&def, &name_of, var),
+        ..ArgFact::default()
     }
 }
 
@@ -8282,7 +8283,7 @@ fn bytes_literal_class<'i>(def: &impl Fn(VarId) -> Option<&'i Inst>, var: VarId)
 
 /// Whether a database name opens a database in memory (`sqlite3.connect`), or opens none that
 /// heki can name: the empty name is a temporary database.
-fn in_memory_name(text: &str) -> bool {
+pub(crate) fn in_memory_name(text: &str) -> bool {
     text.is_empty()
         || text == ":memory:"
         || text.starts_with("file::memory:")
