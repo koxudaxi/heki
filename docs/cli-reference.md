@@ -90,6 +90,9 @@ Options:
       --diff
           Preview fixes as a unified diff without writing files
 
+      --touched <FILE>...
+          Show, fix, and fail on only the diagnostics in one of these files or with a hop of their call chain (`related`) in one, such as the files a commit or a pull request changed; the analysis still covers PATHS (put PATHS before the option). A path that is not an analyzed file is named in a warning
+
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
 
@@ -170,6 +173,8 @@ Examples:
       check two directories
   heki check --select EFF,MUT101 --ignore OPT110
       choose the rules for one run
+  heki check --touched app/users.py app/api.py
+      analyze the project, report only what touches the two files (pre-commit, a pull request)
   heki check --diff
       show the fixes heki proves safe; `--fix` applies them
   heki check --baseline heki-baseline.toml --update-baseline

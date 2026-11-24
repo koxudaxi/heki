@@ -110,6 +110,10 @@
           "description": "The Ratchet baseline the run compares with, or null.",
           "type": ["string", "null"]
         },
+        "touched": {
+          "description": "The analyzed files --touched names: the diagnostics are only those in one of them or with a hop of their call chain (related) in one; absent without --touched.",
+          "$ref": "#/$defs/string_list"
+        },
         "contracts": {
           "description": "The contracts, by key.",
           "type": "object",

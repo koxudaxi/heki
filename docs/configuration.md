@@ -1078,7 +1078,8 @@ a.py:6:12: unused-suppression No `EFF101` report on this line to suppress
 - A run judges what it reported, under its configuration: with `relax-async-in-tests`, a
   suppression of `EFF101` in a test suppresses nothing. A run over some files of a project misses
   the reports that come from the others (`heki check a.py` when the blocking call is in `b.py`),
-  so judge, and fix, on the whole project, as a pre-commit hook with `pass_filenames: false` does.
+  so judge, and fix, on the whole project: to look at some files, pass them to `--touched`, which
+  keeps the analysis whole, as the pre-commit hook does.
 - `heki check --fix` (and `--diff`) removes the unused codes, and the language server offers the
   same edit as a quick fix. The other codes stay; a suppression left without codes goes, with
   the blanks before it, and so does its line when the comment is alone on it. Other text of the

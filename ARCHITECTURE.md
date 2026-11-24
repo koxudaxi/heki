@@ -739,6 +739,7 @@ heki check --output-format full|concise|json|github|sarif   # default: HEKI_OUTP
 heki check --color auto|always|never          # colored full / concise / --diff output (NO_COLOR, FORCE_COLOR, as in Ruff)
 heki check --baseline heki-baseline.toml      # Ratchet: more findings fail, fewer ask to shrink the file
 heki check --update-baseline                  # record a new baseline or shrink an existing one (growth is refused)
+heki check [PATHS...] --touched FILE...       # analyze PATHS, show and fail on the reports in FILEs or whose call chain reaches one
 heki check --profile dump.collapsed [PATHS]   # optional: rank fixes with a recorded profile dump
 heki check --watch [PATHS...]                 # re-check on file changes
 

@@ -142,6 +142,42 @@ fn diff_previews_without_writing() {
     assert_eq!((code, stdout.as_str()), (0, ""));
 }
 
+/// `--touched` fixes, previews, and fails on only the reports it shows.
+#[test]
+fn touched_runs_fix_only_the_reports_they_show() {
+    let p = Project::new("fix_touched");
+    let src = "def f(items):\n    x = []\n    for i in items:\n        x = x + [i]\n    return x\n";
+    p.write("a.py", src).write("b.py", src);
+    let (code, stdout, stderr) = p.check(&["--diff", "--touched", "b.py"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stdout.starts_with("--- a/b.py\n+++ b/b.py\n"), "{stdout}");
+    assert!(!stdout.contains("a.py"), "{stdout}");
+    assert!(
+        stderr.contains("Would fix 1 issue(s) in 1 file(s)."),
+        "{stderr}"
+    );
+    let (code, stdout, stderr) = p.check(&["--diff", "--touched", "c.py"]);
+    assert_eq!((code, stdout.as_str()), (0, ""), "{stderr}");
+    assert_eq!(
+        stderr
+            .matches("warning: `--touched` names 1 path(s)")
+            .count(),
+        1,
+        "{stderr}"
+    );
+    let (code, _, stderr) = p.check(&["--fix", "--touched", "b.py"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("Fixed 1 issue(s) in 1 file(s)."),
+        "{stderr}"
+    );
+    assert_eq!(p.read("a.py"), src);
+    assert!(p.read("b.py").contains("x.append(i)"));
+    // The fix left nothing in `b.py`; `a.py` still fails the whole run.
+    assert_eq!(p.check(&["--touched", "b.py"]).0, 0);
+    assert_eq!(p.check(&[]).0, 1);
+}
+
 #[test]
 fn profile_hot_functions_promote_size_dependent_fixes() {
     let p = Project::new("fix_profile");

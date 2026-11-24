@@ -54,7 +54,7 @@ line, an array of them from one analysis, in the order of the names):
 ## `heki check --generate-prompt --output-format json` (experimental)
 
 One versioned object: `question`, `configuration` (root, configuration file, target version,
-source roots, rule selection, baseline, contracts), `rules` (code, name, certainty, activation,
+source roots, rule selection, baseline, `touched` with `--touched`, contracts), `rules` (code, name, certainty, activation,
 and what a report states), `heuristic_rules_off`, `diagnostics` (the concise fields of the
 diagnostics that fit, with `omitted` counting the rest), and `guidance`.
 `heki check --output-format-json-schema generate-prompt` prints its JSON Schema. A word after

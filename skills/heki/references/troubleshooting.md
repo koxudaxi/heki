@@ -20,9 +20,9 @@ interpreter to run.
 ## A diagnostic disappears when one file is checked
 
 `heki check path/to/file.py` analyzes that file alone and misses what its callees in other files
-do. Check the project (`heki check`, the default `.`). A diagnostic sits where the problem shows,
-which is often a caller's file: keep the ones whose `path` or a `related[].path` is a file you
-edited, not only those whose `path` is.
+do. Check the project (`heki check`, the default `.`), and pass the edited files to `--touched`:
+a diagnostic sits where the problem shows, which is often a caller's file, and `--touched` keeps
+the ones whose `path` or a `related[].path` is an edited file.
 
 ## `heki inspect` exits with 2
 

@@ -68,7 +68,7 @@ fn the_skill_follows_the_agent_skills_format() {
         "{description}"
     );
     assert!(
-        description.contains("heki check --output-format json"),
+        description.contains("heki check --touched <edited files> --output-format json"),
         "{description}"
     );
     // Every top-level key is one the format defines.
