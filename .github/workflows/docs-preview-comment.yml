@@ -6,6 +6,8 @@ name: Docs preview comment
 # every release run fail to start. This workflow runs no code of the pull request.
 
 on:
+  # zizmor: ignore[dangerous-triggers] checks out nothing and runs no code of the pull request; it reads
+  # the run's branch and sha as data and only from this repository (see the job condition)
   workflow_run:
     workflows: [Docs]
     types: [completed]

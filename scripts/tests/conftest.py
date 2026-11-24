@@ -2,7 +2,7 @@
 
 Run them from the repository root with:
 
-    uvx --python 3.12 --from "pytest==8.4.2" --with "pyyaml==6.0.3" --with "jsonschema==4.25.1" pytest scripts/tests
+    uv run --only-group scripts-tests --isolated --python 3.12 pytest scripts/tests
 """
 
 from __future__ import annotations

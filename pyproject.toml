@@ -57,3 +57,30 @@ include = [
     { path = "skills/**/*", format = "sdist" },
     { path = ".claude-plugin/*", format = "sdist" },
 ]
+
+# The tools CI and the documentation run, locked in uv.lock. A workflow runs one group with
+# `uv run --only-group <group> --isolated <tool>`, which installs no heki build.
+[dependency-groups]
+scripts-tests = ["pytest==8.4.2", "pyyaml==6.0.3", "jsonschema==4.25.1"]
+sentinel = ["packaging==25.0"]
+docs = ["zensical==0.1.2"]
+release = ["twine", "packaging==25.0"]
+hooks = ["pre-commit==4.7.0"]
+lint-workflows = ["zizmor"]
+
+[tool.uv]
+# A release younger than three days is not locked: a compromised upload is usually pulled
+# within hours.
+exclude-newer = "3d"
+# Every locked tool installs from a wheel; heki's own sdist is built only by the release workflow.
+no-build = true
+# Nothing is installed from the project itself.
+package = false
+
+[tool.uv.dependency-groups]
+scripts-tests = { requires-python = ">=3.12" }
+sentinel = { requires-python = ">=3.12" }
+docs = { requires-python = ">=3.12" }
+release = { requires-python = ">=3.12" }
+hooks = { requires-python = ">=3.12" }
+lint-workflows = { requires-python = ">=3.12" }
