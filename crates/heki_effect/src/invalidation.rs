@@ -844,6 +844,15 @@ pub fn is_initializer(func: &FuncKey) -> bool {
     INITIALIZERS.contains(&func.qualname.rsplit('.').next().unwrap_or(&func.qualname))
 }
 
+/// A class's own initialization: `func` (summary `s`) is an initializer method, and an object
+/// that may be its parameters `obj_params` may be its own `self` (bit 0). An object that may also
+/// be another one gets the benefit of the doubt. A helper's access reaches the initializer as one
+/// of the object it bound to the helper's parameter, so the helpers it passes `self` to
+/// initialize it too.
+pub fn initializes_own_self(func: &FuncKey, s: &EffectSummary, obj_params: u64) -> bool {
+    obj_params & 1 != 0 && is_initializer(func) && s.owner_class_qualname.is_some()
+}
+
 fn bits(mask: u64) -> impl Iterator<Item = u8> {
     (0..64u8).filter(move |k| mask & (1u64 << k) != 0)
 }

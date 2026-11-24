@@ -4,7 +4,6 @@
 # The list only shrinks: the test fails on an entry that no longer finds anything.
 
 heki_effect::ProjectIndex::callers_closure  W2  worklist: reach, Closure, or fixpoint
-heki_effect::cache_flow::attr_write_ops  W3  passes until nothing changes: fixpoint
 heki_effect::callgraph::propagate_with_budget  W2  worklist: reach, Closure, or fixpoint
 heki_effect::callgraph::scc_closure  W2  worklist: reach, Closure, or fixpoint
 heki_effect::capacity::ParamCapacities::of  W2  worklist: fixpoint; stage-2 migration debt

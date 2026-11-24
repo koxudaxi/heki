@@ -140,7 +140,7 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
          no: slower code, not a bug\n\
          \x20 EFF111        1      -  slowdown     not measured                      -          \
          no: slower code, not a bug\n\
-         \x20 No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF112, EFF113, EFF114, EFF115, \
+         \x20 No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF112, EFF113, EFF114, EFF115, EFF116, \
          MUT101, MUT106, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, OPT112\n\
          \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then \
          select it.\n\
@@ -657,7 +657,7 @@ fn rules_worth_enabling_follow_the_policy() {
         \x20 MUT107        1      -  bug          78% (65-87%), n=50, 2026-11-21    4%         no: real harm below 10%\n\
         \x20 Optional (experimental, never in the block)\n\
         \x20 EFF109        1      -  bug          not measured                      -          no: experimental\n\
-        \x20 No reports here: EFF102, EFF105, EFF106, EFF110, EFF112, EFF113, EFF114, EFF115, MUT101, MUT108, MUT111, MUT112, MUT113, \
+        \x20 No reports here: EFF102, EFF105, EFF106, EFF110, EFF112, EFF113, EFF114, EFF115, EFF116, MUT101, MUT108, MUT111, MUT112, MUT113, \
         MUT115, MUT118, OPT112\n\
         \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it."
     );
@@ -2053,4 +2053,42 @@ fn names_the_catalog_lacks_come_by_what_heki_would_report_through_them() {
         json!({"EFF103": 0, "EFF113": 1})
     );
     assert_follows_the_schema(&report);
+}
+
+/// The report lists the entries of the configured contracts that match nothing in the analyzed
+/// files, as `heki check` warns about them, whatever `lint.unmatched-contract-entries` says.
+#[test]
+fn the_report_lists_the_contract_entries_that_match_nothing() {
+    let p = Project::new("recommend_unmatched_entries");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nunmatched-contract-entries = \"ignore\"\n\n\
+         [[tool.heki.write-owners]]\nname = \"fields\"\n\
+         targets = [\"pkg.model.Field.kind\", \"pkg.model.Field.knd\"]\n\
+         allowed-writers = [\"pkg.model:*\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/model.py",
+        "class Field:\n    def __init__(self) -> None:\n        self.kind = \"str\"\n",
+    );
+    let (code, report, err) = recommend_json(&p, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        report["unmatched_entries"],
+        json!([{
+            "kind": "write-owners",
+            "key": "targets",
+            "entry": "pkg.model.Field.knd",
+            "contracts": ["fields"],
+            "names_no": "attribute, method, or `__dict__` key of `pkg.model.Field`",
+            "nearest": ["pkg.model.Field.kind"],
+        }])
+    );
+    assert_follows_the_schema(&report);
+    let (_, text, _) = p.heki(&["recommend"]);
+    assert!(
+        text.contains("\nContract entries that match nothing\n  - `targets` entry `pkg.model.Field.knd` of write-owners `fields` names no attribute, method, or `__dict__` key of `pkg.model.Field` in the analyzed files; `pkg.model.Field.kind` exists\n"),
+        "{text}"
+    );
 }

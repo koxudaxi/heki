@@ -8,11 +8,15 @@
 
 use super::{
     AccessGroups, Allowance, AllowanceKeys, DelegatedReport, FunctionMatcher, InsideAllowed,
-    MergedReports, Named, References, allows_own_receiver, attribution, binds_receiver,
-    counts_references, delegated_reports, named_protocols, project_classes, reports_unresolved,
+    MemberPattern, MergedReports, Named, References, allows_own_receiver, attribution,
+    binds_receiver, counts_references, delegated_reports, escaping_for, named_protocols,
+    place_functions, project_classes, reports_unresolved,
 };
 use crate::patterns::{ModuleIndex, PartIndex};
-use crate::{CheckContext, DottedPattern, RuleConfigError, SitesByCaller, last_name, module_of};
+use crate::{
+    CheckContext, DottedPattern, RuleConfigError, SitesByCaller, def_spellings, last_name,
+    module_of, split_last_dot,
+};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{ArgValue, CallHop, CallSite, ContractClass, FuncKey, SiteRole};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -31,7 +35,7 @@ pub(crate) struct CallTargetPattern {
     family: FxHashSet<String>,
     /// The last name of the text (`replace_reference` of `DataType.replace_reference`): what a
     /// call on an object of unknown class names (`MUT207`).
-    pub name: DottedPattern,
+    pub name: MemberPattern,
     /// The argument list of the text (`(is_dict=True)`, empty without one), as configured.
     list: String,
     /// The constants the list names: a call matches only when it passes each.
@@ -88,7 +92,7 @@ impl CallTargets {
 
     /// What `site` calls of target `i`: the method the protocol typing the receiver declares
     /// ([`CallSite::declared`]), the class it constructs, or every candidate the target names.
-    fn called_at(&self, i: usize, site: &CallSite) -> Vec<String> {
+    pub(crate) fn called_at(&self, i: usize, site: &CallSite) -> Vec<String> {
         if let Some(declared) = site.declared() {
             return vec![declared.fqn()];
         }
@@ -342,9 +346,12 @@ impl FunctionMatchers {
     /// The matchers `key` satisfies ([`FunctionMatcher::matches`]), ascending.
     pub(crate) fn matching(&self, key: &FuncKey) -> Vec<usize> {
         let mut found = Vec::new();
-        self.naming(&key.fqn(), &mut found);
-        self.naming(&key.qualname, &mut found);
-        self.modules.find(&key.module, &key.qualname, &mut found);
+        let fqn = key.fqn();
+        for (fqn, qualname) in def_spellings(&fqn, &key.qualname) {
+            self.naming(&fqn, &mut found);
+            self.naming(&qualname, &mut found);
+            self.modules.find(&key.module, &qualname, &mut found);
+        }
         if let Some((owner, _)) = key.qualname.rsplit_once('.') {
             let class = format!("{}.{owner}", key.module);
             found.extend(self.methods.get(&class).into_iter().flatten());
@@ -381,9 +388,11 @@ impl FunctionMatchers {
     fn naming_class(&self, class: &ContractClass) -> Vec<usize> {
         let qualname = class.qualname.as_deref().unwrap_or(&class.fqn);
         let mut found = Vec::new();
-        self.naming(&class.fqn, &mut found);
-        if let Some(module) = module_of(&class.fqn, qualname) {
-            self.modules.find(module, qualname, &mut found);
+        for (fqn, qualname) in def_spellings(&class.fqn, qualname) {
+            self.naming(&fqn, &mut found);
+            if let Some(module) = module_of(&fqn, &qualname) {
+                self.modules.find(module, &qualname, &mut found);
+            }
         }
         found.sort_unstable();
         found.dedup();
@@ -527,6 +536,19 @@ fn literal_prefix(text: &str) -> Option<(ArgValue, &str)> {
     Some((value, rest))
 }
 
+/// The last name of the call target `text` as a member of the classes the rest names.
+fn member_name(
+    text: &str,
+    all_classes: &[ContractClass],
+    context: &'static str,
+) -> Result<MemberPattern, RuleConfigError> {
+    let holder = match split_last_dot(text) {
+        Some((holder, _)) => Some(DottedPattern::new(holder, context)?),
+        None => None,
+    };
+    MemberPattern::new(last_name(text), holder.as_ref(), all_classes, context)
+}
+
 /// Parse call targets (`call-owners.targets`, `effect-boundaries.call-targets`).
 pub(crate) fn parse_call_targets(
     cx: &CheckContext<'_>,
@@ -546,7 +568,7 @@ pub(crate) fn parse_call_targets(
         patterns.push(CallTargetPattern {
             text: text.clone(),
             family: functions.method_family().cloned().unwrap_or_default(),
-            name: DottedPattern::new(last_name(name), context)?,
+            name: member_name(name, all_classes, context)?,
             list: text[name.len()..].to_owned(),
             arguments: arguments.unwrap_or_default(),
         });
@@ -678,7 +700,10 @@ pub(crate) fn mut204<'c>(
     }
     let all_classes = project_classes(cx);
     let mut rules = Vec::new();
+    let escaping = std::cell::OnceCell::new();
     for (index, rule) in cx.config.call_owners.iter().enumerate() {
+        let report_unresolved =
+            reports_unresolved(rule.unresolved.as_deref(), "call-owners", &rule.name)?;
         let context = "call-owners.targets";
         let subclasses = Subclasses::of(rule.subclasses);
         let targets = parse_call_targets(cx, &all_classes, &rule.targets, context, subclasses)?;
@@ -709,13 +734,10 @@ pub(crate) fn mut204<'c>(
                 &all_classes,
                 (&rule.allowed_protocols, rule.protocol_subclasses),
                 "call-owners.allowed-protocols",
-            )?),
+            )?)
+            .with_escaping(escaping_for(cx, report_unresolved, &escaping)),
             note: rule.message.as_deref(),
-            report_unresolved: reports_unresolved(
-                rule.unresolved.as_deref(),
-                "call-owners",
-                &rule.name,
-            )?,
+            report_unresolved,
             references: counts_references(rule.references.as_deref(), "call-owners", &rule.name)?,
         });
     }
@@ -822,7 +844,29 @@ pub(crate) fn mut204<'c>(
             }
         }
     }
-    reports.emit(cx, "MUT204", out);
+    reports.emit(cx, ("MUT204", "allowed callers"), out, |examples| {
+        let owners = |k: &FuncKey| rules.iter().any(|r| r.allowance.names_place(k));
+        for (key, path, _) in place_functions(cx, owners) {
+            for &(_, site) in sites.get(key).into_iter().flatten() {
+                for (c, groups) in contracts.called(site) {
+                    let rule = &rules[c];
+                    if !rule.allowance.names_place(key) {
+                        continue;
+                    }
+                    for group in groups {
+                        let (target, called) = group_texts(&rule.targets, &group, Some(site));
+                        let name = Named {
+                            target: &target,
+                            named: &called,
+                            rank: group[0],
+                            contract: c,
+                        };
+                        examples.add((&c, name), key, path);
+                    }
+                }
+            }
+        }
+    });
     Ok(())
 }
 

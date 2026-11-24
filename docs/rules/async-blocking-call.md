@@ -31,7 +31,14 @@ Each step of the chain is established, not assumed:
   `__getattribute__`, or a metaclass heki does not know leaves the read not followed); a
   decorator other than `staticmethod`, `classmethod`, `property`, `abstractmethod`, or
   `override` may not run the body, and is not followed; a function defined twice is not
-  followed;
+  followed, and neither is a function, class, or method whose name the project binds to another
+  object (assumption R1; a name its module body or class body binds last to one named object on
+  every path is that object): another store or a `del` of the name in its module (also on a
+  branch, after `global`, or by `globals()` or `exec`), in its class body, or on its class
+  object; a store or `del` from another module, also through `setattr` with a string literal,
+  and any name of a module that `setattr` stores into under a name heki cannot read; a store of
+  the function's `__code__`; and, for a method, a store of the name on a class the lookup
+  passes, of `__bases__` on a class along the MRO, or of `self.__class__` in a method;
 - the waiting call is in the ecosystem catalog, waits on every call (a database call that may be
   answered by a session's identity map, a cache, an open connection, or that sends only pending
   changes does not), and no argument that may come from the caller can make it return at once
@@ -72,8 +79,8 @@ Its premises:
   returns normally, exception edges into handlers included; the last call counts as made also
   when it raised.
 - **Every implementation**: each call on the chain has as its targets every implementation it
-  can run (assumptions R2 and R5), each a synchronous function run as written, and each has the
-  fact.
+  can run (assumptions R1, R2, and R5), each a synchronous function run as written, and each
+  has the fact.
 - **Waits**: the last call waits for the network, a database, a child process, or a sleep on
   every call, as the ecosystem catalog describes it (R3), for every argument heki cannot evaluate,
   the arguments that opened its connection included (R6; a SQLite connection only when it was
@@ -107,6 +114,13 @@ import asyncio
 async def handler() -> bytes:
     return await asyncio.to_thread(load)
 ```
+
+## Known limitations
+These rebind a name without heki seeing it, so a call through the name still counts as running
+its definition: a `mock.patch` or `mock.patch.object` target patched outside tests, a store
+through `sys.modules` (`sys.modules[__name__] = shim`, `setattr(sys.modules[__name__], "f", g)`),
+a `setattr` on a class object under a name heki cannot read, and an instance's `__class__` stored
+other than through `self` in a method of its class (`obj.__class__ = Other` in a helper).
 
 ## Fix safety
 No automatic fix.

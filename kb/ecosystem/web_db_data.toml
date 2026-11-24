@@ -112,9 +112,12 @@ opaque_to_layer3 = true
 
 # --- Copy sanitizers (MUT202) ---
 
+# `model_copy(*, update=None, deep=False)` builds an instance of the receiver's class with the
+# receiver's fields, the entries of `update` set over them without validation.
 [[entries]]
 symbol = "pydantic.BaseModel.model_copy"
 copy_sanitizer = "shallow"
+builds_receiver = { param = "update" }
 opaque_to_layer3 = true
 
 # `copy.deepcopy` of a model runs `BaseModel.__deepcopy__`, which deep-copies the instance's
@@ -150,6 +153,20 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pydantic.BaseModel"
 keeps_hashable_defaults = true
+opaque_to_layer3 = true
+
+# Pydantic 2's class methods building an instance without its `__init__`:
+# `model_construct(_fields_set=None, **values)` sets the fields from the keywords without
+# validation; `model_validate(obj, ...)` validates `obj` into a new instance when it is a dict,
+# and returns an instance of the class as it is (`revalidate_instances = "never"`).
+[[entries]]
+symbol = "pydantic.BaseModel.model_construct"
+builds_receiver = { keywords = true }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pydantic.BaseModel.model_validate"
+builds_receiver = { arg = 0, param = "obj", only_from_dict = true }
 opaque_to_layer3 = true
 
 # --- HTTP: requests ---

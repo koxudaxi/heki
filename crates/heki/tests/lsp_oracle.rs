@@ -28,7 +28,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "EFF115", "MUT115", "MUT118", "MUT119"]
+extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "EFF115", "EFF116", "MUT115", "MUT118", "MUT119"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -126,6 +126,12 @@ scopes = ["pkg.rack_view"]
 forbid = ["writes-targets"]
 write-targets = ["Rack.items"]
 allowed-callees = ["pkg.rack_ops.empty"]
+
+[[tool.heki.effect-boundaries]]
+name = "extras-pass"
+scopes = ["pkg.extras_pass"]
+write-universe = ['Extras.values["init"]']
+allowed-callees = ["pkg.extras.trusted_value"]
 
 [[tool.heki.write-owners]]
 name = "rack"
@@ -244,6 +250,13 @@ const ASYNC_USER: &str = "from pkg.async_client import AsyncClient\n\n\nasync de
 // Constant keys, objects under construction, and the strict mode: a `__dict__` key names the
 // guarded attribute through a `Final` constant of another module; a private helper fills a new
 // object its caller hands it; a helper writes a target on a parameter its caller types.
+// A store operation in another module writes the entry its caller passes (`set_value(e, "init", v)`).
+const EXTRAS: &str = "class Extras:\n    def __init__(self) -> None:\n        self.values: dict[str, object] = {}\n\n\ndef set_value(e: Extras, key: str, value: object) -> None:\n    e.values[key] = value\n";
+const EXTRAS_PASS: &str = "from pkg.extras import Extras, set_value\n\n\ndef prepare(e: Extras) -> None:\n    set_value(e, \"init\", 1)\n";
+// Two routes to the store operation passing the same key: one through an allowed callee, one
+// through a relay that is not allowed.
+const EXTRAS_ROUTES: &str = "\n\ndef trusted_value(e: Extras, key: str) -> None:\n    set_value(e, key, 1)\n\n\ndef relay_value(e: Extras, key: str) -> None:\n    _forward_value(e, key)\n\n\ndef _forward_value(e: Extras, key: str) -> None:\n    set_value(e, key, 1)\n";
+const EXTRAS_TRUSTED_PASS: &str = "from pkg.extras import Extras, relay_value, trusted_value\n\n\ndef prepare(e: Extras) -> None:\n    trusted_value(e, \"init\")\n";
 const KEY_CONSTS: &str = "from typing import Final\n\nKEY: Final = \"entries\"\n";
 const KEY_WRITER: &str = "from pkg.key_consts import KEY\nfrom pkg.model import Registry\n\n\ndef mark(r: Registry):\n    r.__dict__[KEY] = []\n";
 // A class constant names the guarded attribute for the class's own methods.
@@ -680,6 +693,21 @@ const EXACT_SUB_OVERRIDING: &str = "from pkg.exact_base import Base\n\n\nclass Q
 const EXACT_SUB_BLOCKING: &str = "import requests\n\nfrom pkg.exact_base import Base\n\n\nclass Quiet(Base):\n    def fetch(self, url):\n        return requests.post(url)\n";
 const EXACT_USE: &str =
     "from pkg.exact_base import Base\n\n\nasync def serve(b: Base):\n    b.fetch(\"u\")\n";
+// The third module binds the base's method to another function: the call may run that
+// function instead. The base's class body binds it to another function on every path: the call
+// runs that function.
+const EXACT_SUB_REBINDING: &str = "from pkg import exact_base\n\n\ndef quiet(self, url):\n    return url\n\n\nsetattr(exact_base.Base, \"fetch\", quiet)\n";
+const EXACT_BASE_REBOUND: &str = "import requests\n\n\ndef _quiet(self, url):\n    return url\n\n\nclass Base:\n    def fetch(self, url):\n        return requests.get(url)\n\n    fetch = _quiet\n";
+// The base's class body binds the method to another function on some paths: the call may run
+// either, so the report is not exact.
+const EXACT_BASE_QUIET_ON_A_PATH: &str = "import os\n\nimport requests\n\n\ndef _quiet(self, url):\n    return url\n\n\nclass Base:\n    def fetch(self, url):\n        return requests.get(url)\n\n    if os.environ.get(\"QUIET\"):\n        fetch = _quiet\n";
+// A module binds a blocking function's name to another function on some paths, then on every
+// path, read from another module.
+const EXACT_FETCH: &str = "import requests\n\n\ndef fetch(url):\n    return requests.get(url)\n";
+const EXACT_FETCH_ON_A_PATH: &str = "import os\n\nimport requests\n\n\ndef _quiet(url):\n    return url\n\n\ndef fetch(url):\n    return requests.get(url)\n\n\nif os.environ.get(\"QUIET\"):\n    fetch = _quiet\n";
+const EXACT_FETCH_REBOUND: &str = "import requests\n\n\ndef _quiet(url):\n    return url\n\n\ndef fetch(url):\n    return requests.get(url)\n\n\nfetch = _quiet\n";
+const EXACT_FETCH_USE: &str =
+    "from pkg import exact_fetch\n\n\nasync def serve():\n    exact_fetch.fetch(\"u\")\n";
 
 // Store types (`ModuleDecls::global_types`, `ClassDecl::attr_stores`): an `async def` calls a
 // method on a module global, in its module and through an import, and on an instance attribute;
@@ -833,6 +861,15 @@ const REC_WALK_BACK: &str = "from pkg import rec_handler\n\n\ndef descend(node):
 const CORO_JOBS: &str = "def flush(n):\n    return n\n";
 const CORO_JOBS_ASYNC: &str = "async def flush(n):\n    return n\n";
 const CORO_USE: &str = "import threading\n\nfrom pkg.coro_jobs import flush\n\n\ndef start(items):\n    threading.Thread(target=flush, args=(1,)).start()\n    return list(filter(flush, items))\n";
+// Generators nothing iterates (`EFF116`): a function of another module changes between a plain
+// function and a generator function, and so do a method and its override in a third module.
+const GEN_JOBS: &str = "def rows(n):\n    return [n]\n";
+const GEN_JOBS_GENERATOR: &str = "def rows(n):\n    yield n\n";
+const GEN_BASE: &str = "class Source:\n    def rows(self):\n        yield 1\n";
+const GEN_BASE_PLAIN: &str = "class Source:\n    def rows(self):\n        return [1]\n";
+const GEN_SUB: &str = "from pkg.gen_base import Source\n\n\nclass Cached(Source):\n    def rows(self):\n        yield 2\n";
+const GEN_SUB_PLAIN: &str = "from pkg.gen_base import Source\n\n\nclass Cached(Source):\n    def rows(self):\n        return [2]\n";
+const GEN_USE: &str = "import threading\n\nfrom pkg.gen_base import Source\nfrom pkg.gen_jobs import rows\n\n\ndef start(n, source: Source):\n    rows(n)\n    threading.Thread(target=rows, args=(n,)).start()\n    source.rows()\n    if not rows(n):\n        return 0\n    return 1\n";
 
 // `MUT115`: the declarations of a copied class and of the builtin containers' subclasses in
 // other modules, and a helper in another module, decide whether a change below a copy states
@@ -938,6 +975,10 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/rec_walk.py", REC_WALK),
         ("pkg/coro_jobs.py", CORO_JOBS),
         ("pkg/coro_use.py", CORO_USE),
+        ("pkg/gen_jobs.py", GEN_JOBS),
+        ("pkg/gen_base.py", GEN_BASE),
+        ("pkg/gen_sub.py", GEN_SUB),
+        ("pkg/gen_use.py", GEN_USE),
         ("pkg/plot.py", RO_PLOT),
         ("pkg/loops.py", LOOPS),
         ("pkg/compat.py", COMPAT),
@@ -1024,6 +1065,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/stamp.py", STAMP),
         ("pkg/stamp_middle.py", STAMP_MIDDLE),
         ("pkg/stamped.py", STAMPED),
+        ("pkg/extras.py", EXTRAS),
+        ("pkg/extras_pass.py", EXTRAS_PASS),
         ("pkg/conn_mixin.py", CONN_MIXIN),
         ("pkg/conn_client.py", CONN_CLIENT),
         ("pkg/conn_pooled.py", CONN_POOLED),
@@ -1288,7 +1331,8 @@ fn steps_kept_values() -> Vec<Step> {
 
 /// Exact effect reports follow every implementation of a call across modules (the targets of
 /// `CallSite::complete` read the subclasses of another file) and the must-facts of the callees
-/// (`EffectSummary::must_exec`, compared by Early Cutoff).
+/// (`EffectSummary::must_exec`, compared by Early Cutoff), and every binding of the name called
+/// that may be its last in the module or class body of another file.
 fn steps_exact_effects() -> Vec<Step> {
     vec![
         Step::new(
@@ -1318,6 +1362,67 @@ fn steps_exact_effects() -> Vec<Step> {
         )
         .present(&[("pkg/exact_use.py", "EFF101")])
         .absent(&[("pkg/exact_use.py", "EFF111")]),
+        // `ModuleDecls::rebound_globals` of another module: a name bound again leaves the call's
+        // targets incomplete (`ProjectDecls::lookup_rebound`). Bound again on every path of the
+        // base's class body, the name holds the other function (`NamedAttr::body`).
+        Step::new(
+            "the third module binds the base's method to another function",
+            vec![save("pkg/exact_sub.py", EXACT_SUB_REBINDING)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF111")])
+        .absent(&[("pkg/exact_use.py", "EFF101")]),
+        Step::new(
+            "it stops binding the method",
+            vec![save("pkg/exact_sub.py", EXACT_SUB)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF101")])
+        .absent(&[("pkg/exact_use.py", "EFF111")]),
+        Step::new(
+            "the base's class body binds the method to another function",
+            vec![save("pkg/exact_base.py", EXACT_BASE_REBOUND)],
+        )
+        .absent(&[
+            ("pkg/exact_use.py", "EFF101"),
+            ("pkg/exact_use.py", "EFF111"),
+        ]),
+        Step::new(
+            "the base binds it once again",
+            vec![save("pkg/exact_base.py", EXACT_BASE)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF101")])
+        .absent(&[("pkg/exact_use.py", "EFF111")]),
+        Step::new(
+            "the base's class body binds the method to another function on some paths",
+            vec![save("pkg/exact_base.py", EXACT_BASE_QUIET_ON_A_PATH)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF111")])
+        .absent(&[("pkg/exact_use.py", "EFF101")]),
+        Step::new(
+            "the base defines the method once again, and a module calls a blocking function",
+            vec![
+                save("pkg/exact_base.py", EXACT_BASE),
+                Action::Create("pkg/exact_fetch.py", EXACT_FETCH.to_owned()),
+                Action::Create("pkg/exact_fetch_use.py", EXACT_FETCH_USE.to_owned()),
+            ],
+        )
+        .present(&[
+            ("pkg/exact_use.py", "EFF101"),
+            ("pkg/exact_fetch_use.py", "EFF101"),
+        ]),
+        Step::new(
+            "the function's module binds its name to another function on some paths",
+            vec![save("pkg/exact_fetch.py", EXACT_FETCH_ON_A_PATH)],
+        )
+        .present(&[("pkg/exact_fetch_use.py", "EFF111")])
+        .absent(&[("pkg/exact_fetch_use.py", "EFF101")]),
+        Step::new(
+            "the module binds the name to the other function on every path",
+            vec![save("pkg/exact_fetch.py", EXACT_FETCH_REBOUND)],
+        )
+        .absent(&[
+            ("pkg/exact_fetch_use.py", "EFF101"),
+            ("pkg/exact_fetch_use.py", "EFF111"),
+        ]),
     ]
 }
 
@@ -1604,6 +1709,87 @@ fn steps_method_lookups() -> Vec<Step> {
     ]
 }
 
+const PV: &str = "class Pv:\n    def __run(self) -> int:\n        return 1\n\n    def go(self) -> int:\n        return self.__run()\n";
+const PV_USE: &str = "from pkg.pv import Pv\n\n\ndef use(p: Pv) -> int:\n    return p._Pv__run()\n";
+const PV_SUB: &str = "from pkg.pv import Pv\n\n\nclass Sub(Pv):\n    def __run(self) -> int:\n        return 2\n\n    def own(self) -> int:\n        return self.__run()\n\n    def peek(self) -> int:\n        return self._Pv__run()\n";
+const PV_DOC: &str = "from functools import cached_property\n\n\nclass PvDoc:\n    def __init__(self) -> None:\n        self.size = 0\n\n    @cached_property\n    def total(self) -> int:\n        return self.size + 1\n\n    def __grow(self) -> None:\n        self.size = 1\n";
+const PV_SHOW: &str =
+    "from pkg.pv_doc import PvDoc\n\n\ndef show(doc: PvDoc) -> int:\n    return doc.total\n";
+
+/// A private method (`def __run`, the member `_Pv__run`) called by its mangled name from other
+/// modules: the call follows the class's declarations when the method is renamed and back, and a
+/// subclass's own `__run` is another method, which `self.__run` in the subclass calls. A private
+/// method (`_PvDoc__grow`) that leaves a cached property stale makes its reads in another module
+/// stale reads until it invalidates the property.
+fn steps_private_names() -> Vec<Step> {
+    let contract = format!(
+        "{CONFIG}\n[[tool.heki.call-owners]]\nname = \"private-run\"\ntargets = [\"pkg.pv.Pv.__run\"]\nallowed-callers = [\"pkg.pv:Pv.*\"]\n"
+    );
+    vec![
+        Step::new(
+            "a module calls a private method of a class in another module by its mangled name",
+            vec![
+                Action::Configure(contract),
+                Action::Create("pkg/pv.py", PV.to_owned()),
+                Action::Create("pkg/pv_use.py", PV_USE.to_owned()),
+            ],
+        )
+        .present(&[("pkg/pv_use.py", "MUT204")])
+        .absent(&[("pkg/pv.py", "MUT204")]),
+        Step::new(
+            "the private method is renamed",
+            vec![save("pkg/pv.py", &PV.replace("__run", "__walk"))],
+        )
+        .absent(&[("pkg/pv_use.py", "MUT204")]),
+        Step::new(
+            "it is named back, and a subclass in another module defines its own `__run`",
+            vec![
+                save("pkg/pv.py", PV),
+                Action::Create("pkg/pv_sub.py", PV_SUB.to_owned()),
+            ],
+        )
+        .present(&[("pkg/pv_use.py", "MUT204"), ("pkg/pv_sub.py", "MUT204")]),
+        Step::new(
+            "the subclass calls only its own `__run`",
+            vec![save(
+                "pkg/pv_sub.py",
+                &PV_SUB.replace("self._Pv__run()", "self.__run()"),
+            )],
+        )
+        .absent(&[("pkg/pv_sub.py", "MUT204")]),
+        Step::new(
+            "a private method leaves a cached property stale that another module reads",
+            vec![
+                Action::Create("pkg/pv_doc.py", PV_DOC.to_owned()),
+                Action::Create("pkg/pv_show.py", PV_SHOW.to_owned()),
+            ],
+        )
+        .present(&[("pkg/pv_show.py", "MUT111"), ("pkg/pv_doc.py", "MUT101")]),
+        Step::new(
+            "the private method invalidates the cached property",
+            vec![save(
+                "pkg/pv_doc.py",
+                &PV_DOC.replace(
+                    "self.size = 1\n",
+                    "self.size = 1\n        self.__dict__.pop(\"total\", None)\n",
+                ),
+            )],
+        )
+        .absent(&[("pkg/pv_show.py", "MUT111"), ("pkg/pv_doc.py", "MUT101")]),
+        Step::new(
+            "the files and the contract are removed",
+            vec![
+                Action::Delete("pkg/pv_show.py"),
+                Action::Delete("pkg/pv_doc.py"),
+                Action::Delete("pkg/pv_sub.py"),
+                Action::Delete("pkg/pv_use.py"),
+                Action::Delete("pkg/pv.py"),
+                Action::Configure(CONFIG.to_owned()),
+            ],
+        ),
+    ]
+}
+
 /// A helper over a dispatch keeps every implementation's wait (`MustExec::alternatives`, compared
 /// by Early Cutoff): the report through it names and relates each, and follows an edit of the
 /// wait that is not on the helper's shortest chain.
@@ -1711,6 +1897,38 @@ fn steps_references() -> Vec<Step> {
             ],
         )
         .absent(&[("pkg/accounts.py", "MUT204")]),
+    ]
+}
+
+const RECEIPT_HOLDER: &str =
+    "from pkg.ledger import Receipt\n\n\nclass Holder:\n    kept = Receipt(1)\n";
+
+/// A class body at module level constructs the guarded dataclass of another module: the module
+/// body makes the call, which follows the dataclass's module when it renames the class and back.
+fn steps_class_bodies() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a class attribute's value constructs the guarded dataclass",
+            vec![Action::Create(
+                "pkg/receipt_holder.py",
+                RECEIPT_HOLDER.to_owned(),
+            )],
+        )
+        .present(&[("pkg/receipt_holder.py", "MUT204")]),
+        Step::new(
+            "the dataclass's module renames it",
+            vec![save(
+                "pkg/ledger.py",
+                &LEDGER.replace("class Receipt", "class Slip"),
+            )],
+        )
+        .absent(&[("pkg/receipt_holder.py", "MUT204")]),
+        Step::new("the name comes back", vec![save("pkg/ledger.py", LEDGER)])
+            .present(&[("pkg/receipt_holder.py", "MUT204")]),
+        Step::new(
+            "the class body is removed",
+            vec![Action::Delete("pkg/receipt_holder.py")],
+        ),
     ]
 }
 
@@ -2068,6 +2286,17 @@ fn steps_contract_extensions() -> Vec<Step> {
     let constructing = ACCT_OPS.replace("    return None\n", "    return Receipt(1)\n");
     let helper = |body: &str| PURE_OPS.replace("    return None\n", body);
     let two_reads = LAYER_OPS.replace("    return 0\n", "    return l.balance + l.balance\n");
+    // A pass helper constructs a ledger whose initializer hands a private helper its own `self`,
+    // then the ledger the pass was handed.
+    let opening = |handed: &str| {
+        format!(
+            "{}\n\nclass Opened(Ledger):\n    def __init__(self, other: Ledger):\n        super().__init__()\n        _open({handed})\n\n\ndef _open(l: Ledger):\n    l.balance = 0\n",
+            PURE_OPS.replace(
+                "    l.rows.append(1)\n",
+                "    l.rows.append(1)\n    Opened(l)\n"
+            )
+        )
+    };
     // The function exists before: only its calls change, not the declarations.
     let outside = CHAIN_TOP.replace(
         "def outside(r, v, l):\n    return None\n",
@@ -2121,6 +2350,21 @@ fn steps_contract_extensions() -> Vec<Step> {
         .present(&[("pkg/pure.py", "EFF201")]),
         Step::new(
             "the helpers are pure again",
+            vec![save("pkg/pure_ops.py", PURE_OPS)],
+        )
+        .absent(&[("pkg/pure.py", "EFF201")]),
+        Step::new(
+            "a pass helper constructs a ledger whose initializer hands its `self` to a helper writing it",
+            vec![Action::Save("pkg/pure_ops.py", opening("self"))],
+        )
+        .absent(&[("pkg/pure.py", "EFF201")]),
+        Step::new(
+            "the initializer hands the helper the pass's ledger instead",
+            vec![Action::Save("pkg/pure_ops.py", opening("other"))],
+        )
+        .present(&[("pkg/pure.py", "EFF201")]),
+        Step::new(
+            "the helpers are pure once more",
             vec![save("pkg/pure_ops.py", PURE_OPS)],
         )
         .absent(&[("pkg/pure.py", "EFF201")]),
@@ -2460,7 +2704,42 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
         "    r.entries.append(1)\n",
         "    KEPT.append(r)\n    r.entries.append(1)\n",
     );
+    let fixed_key = EXTRAS.replace("e.values[key]", "e.values[\"other\"]");
     vec![
+        Step::new(
+            "a store operation in another module stops writing the entry its caller passes",
+            vec![Action::Save("pkg/extras.py", fixed_key)],
+        )
+        .absent(&[("pkg/extras_pass.py", "EFF201")]),
+        Step::new(
+            "the store operation writes the entry its caller passes again",
+            vec![save("pkg/extras.py", EXTRAS)],
+        )
+        .present(&[("pkg/extras_pass.py", "EFF201")]),
+        Step::new(
+            "the scope function passes the key only through an allowed callee of another module",
+            vec![
+                save("pkg/extras.py", &format!("{EXTRAS}{EXTRAS_ROUTES}")),
+                save("pkg/extras_pass.py", EXTRAS_TRUSTED_PASS),
+            ],
+        )
+        .absent(&[("pkg/extras_pass.py", "EFF201")]),
+        Step::new(
+            "it passes the same key through a relay that is not allowed too",
+            vec![save(
+                "pkg/extras_pass.py",
+                &format!("{EXTRAS_TRUSTED_PASS}    relay_value(e, \"init\")\n"),
+            )],
+        )
+        .present(&[("pkg/extras_pass.py", "EFF201")]),
+        Step::new(
+            "the store module and the scope function are as before",
+            vec![
+                save("pkg/extras.py", EXTRAS),
+                save("pkg/extras_pass.py", EXTRAS_PASS),
+            ],
+        )
+        .present(&[("pkg/extras_pass.py", "EFF201")]),
         Step::new(
             "the `Final` key constant of another module names another attribute",
             vec![Action::Save(
@@ -3937,6 +4216,42 @@ fn steps_eff115() -> Vec<Step> {
     ]
 }
 
+/// `EFF116`: whether a call's callees are generator functions comes from their declarations in
+/// other modules, a function's and a method's and its override's, which change between a
+/// generator function and a plain one; a call that may run a plain override is no report.
+fn steps_eff116() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the dropped function becomes a generator function",
+            vec![save("pkg/gen_jobs.py", GEN_JOBS_GENERATOR)],
+        )
+        .present(&[("pkg/gen_use.py", "EFF116")]),
+        Step::new(
+            "the function becomes a plain function again",
+            vec![save("pkg/gen_jobs.py", GEN_JOBS)],
+        )
+        .present(&[("pkg/gen_use.py", "EFF116")]),
+        Step::new(
+            "an override in a third module becomes a plain function",
+            vec![save("pkg/gen_sub.py", GEN_SUB_PLAIN)],
+        )
+        .absent(&[("pkg/gen_use.py", "EFF116")]),
+        Step::new(
+            "the base method becomes a plain function too",
+            vec![save("pkg/gen_base.py", GEN_BASE_PLAIN)],
+        )
+        .absent(&[("pkg/gen_use.py", "EFF116")]),
+        Step::new(
+            "both become generator functions again",
+            vec![
+                save("pkg/gen_base.py", GEN_BASE),
+                save("pkg/gen_sub.py", GEN_SUB),
+            ],
+        )
+        .present(&[("pkg/gen_use.py", "EFF116")]),
+    ]
+}
+
 const LLM_CLIENT: &str = "from openai import OpenAI\n\nclient = OpenAI()\n";
 
 const LLM_VIEW: &str = "from pkg.llm_client import client\n\n\nasync def answer():\n    return client.chat.completions.create(model=\"m\")\n";
@@ -4334,6 +4649,133 @@ fn steps_contracts() -> Vec<Step> {
     ]
 }
 
+// The allowed functions the help of a contract report names, in other files.
+const STORE_WRITING: &str = "from pkg.model import Registry, Vault\n\n\nclass Store:\n    def put(self, r: Registry, x):\n        r.entries.append(x)\n";
+const STORE_WRITING_MOVED: &str = "from pkg.model import Registry, Vault\n\n\n# The store.\nclass Store:\n    def put(self, r: Registry, x):\n        r.entries.append(x)\n";
+const STORE_MORE: &str = "from pkg.ledger import Ledger\nfrom pkg.model import Registry, Vault\n\n\nclass Store:\n    def add(self, r: Registry):\n        r.entries.append(1)\n\n    def look(self, v: Vault):\n        return v.secret\n\n    def pay(self, l: Ledger):\n        return l.post(1)\n";
+// A subclass of the call target `Receipt`, constructed outside the allowed callers, and the
+// allowed `Store` starting to construct it.
+const SLIPS: &str = "from pkg.ledger import Receipt\n\n\nclass Slip(Receipt):\n    pass\n\n\ndef issue():\n    return Slip(1)\n";
+const STORE_ISSUING: &str = "from pkg.model import Registry, Vault\nfrom pkg.slips import Slip\n\n\nclass Store:\n    def put(self, r: Registry, x):\n        return x\n\n    def issue(self):\n        return Slip(2)\n";
+const STORE_NOT_ISSUING: &str = "from pkg.model import Registry, Vault\nfrom pkg.slips import Slip\n\n\nclass Store:\n    def put(self, r: Registry, x):\n        return x\n\n    def issue(self):\n        return 2 if Slip else 3\n";
+// A write no path announces, whose help names `pkg.grow.grow`: its announcement comes from
+// `pkg.announce`.
+const CARELESS: &str =
+    "from pkg.nodes import Node\n\n\ndef careless(node: Node, kid):\n    node.kids.append(kid)\n";
+// Owner targets named by private members (`Purse.__count`), which the class's own methods write
+// and read under the mangled names (`_Purse__count`).
+const PURSE_CONTRACTS: &str = "\n[[tool.heki.write-owners]]\nname = \"purse\"\ntargets = [\"Purse.__count\"]\nallowed-writers = [\"Purse.*\"]\n\n[[tool.heki.read-owners]]\nname = \"purse-seal\"\ntargets = [\"Purse.__seal\"]\nallowed-readers = [\"Purse.*\"]\n";
+const PURSE: &str = "class Purse:\n    def __init__(self):\n        self.__count = []\n        self.__seal = 0\n\n    def add(self, x):\n        return x\n\n    def seal(self):\n        return 0\n";
+const PURSE_WRITING: &str = "class Purse:\n    def __init__(self):\n        self.__count = []\n        self.__seal = 0\n\n    def add(self, x):\n        self.__count.append(x)\n\n    def seal(self):\n        return 0\n";
+const PURSE_READING: &str = "class Purse:\n    def __init__(self):\n        self.__count = []\n        self.__seal = 0\n\n    def add(self, x):\n        return x\n\n    def seal(self):\n        print(self.__seal)\n        return 0\n";
+const PURSE_USE: &str = "from pkg.purse import Purse\n\n\ndef poke(t: Purse):\n    t._Purse__count.append(1)\n\n\ndef peek(t: Purse):\n    return t._Purse__seal\n";
+
+/// The help of a contract report names the allowed functions of other files that do what it
+/// shows: a function starts and stops writing the target, a module with another one comes and
+/// goes, and a line added above one changes nothing the help names.
+fn steps_allowed_examples() -> Vec<Step> {
+    vec![
+        Step::new(
+            "an allowed writer starts writing the target itself",
+            vec![save("pkg/store.py", STORE_WRITING)],
+        )
+        .present(&[("pkg/ops.py", "MUT201")]),
+        Step::new(
+            "a comment above the allowed writer",
+            vec![save("pkg/store.py", STORE_WRITING_MOVED)],
+        )
+        .present(&[("pkg/ops.py", "MUT201")])
+        .cutoff(),
+        Step::new(
+            "a new module defines another allowed writer, reader, and caller",
+            vec![Action::Create("pkg/store_more.py", STORE_MORE.to_owned())],
+        )
+        .present(&[("pkg/ops.py", "MUT201")]),
+        Step::new(
+            "the new module is deleted",
+            vec![Action::Delete("pkg/store_more.py")],
+        )
+        .present(&[("pkg/ops.py", "MUT201")]),
+        Step::new(
+            "the allowed writer stops writing the target",
+            vec![save("pkg/store.py", STORE)],
+        )
+        .present(&[("pkg/ops.py", "MUT201")]),
+        Step::new(
+            "a module constructs a subclass of a call target outside the allowed callers",
+            vec![Action::Create("pkg/slips.py", SLIPS.to_owned())],
+        )
+        .present(&[("pkg/slips.py", "MUT204")]),
+        Step::new(
+            "an allowed caller that reads the subclass",
+            vec![save("pkg/store.py", STORE_NOT_ISSUING)],
+        )
+        .present(&[("pkg/slips.py", "MUT204")]),
+        Step::new(
+            "the allowed caller starts constructing the subclass",
+            vec![save("pkg/store.py", STORE_ISSUING)],
+        )
+        .present(&[("pkg/slips.py", "MUT204")]),
+        Step::new(
+            "the allowed caller stops constructing it",
+            vec![save("pkg/store.py", STORE_NOT_ISSUING)],
+        )
+        .present(&[("pkg/slips.py", "MUT204")]),
+        Step::new(
+            "a module writes an invalidation target no path announces",
+            vec![Action::Create("pkg/careless.py", CARELESS.to_owned())],
+        )
+        .present(&[("pkg/careless.py", "MUT109")]),
+        Step::new(
+            "the helper announcing an allowed writer's change in another module stops",
+            vec![save("pkg/announce.py", ANNOUNCE_SILENT)],
+        )
+        .present(&[("pkg/careless.py", "MUT109"), ("pkg/grow.py", "MUT109")]),
+        Step::new(
+            "the helper announces the change again",
+            vec![save("pkg/announce.py", ANNOUNCE)],
+        )
+        .present(&[("pkg/careless.py", "MUT109")])
+        .absent(&[("pkg/grow.py", "MUT109")]),
+        Step::new(
+            "a module writes and reads private owner targets of a class in another module",
+            vec![
+                Action::Configure(format!("{CONFIG}{PURSE_CONTRACTS}")),
+                Action::Create("pkg/purse.py", PURSE.to_owned()),
+                Action::Create("pkg/purse_use.py", PURSE_USE.to_owned()),
+            ],
+        )
+        .present(&[
+            ("pkg/purse_use.py", "MUT201"),
+            ("pkg/purse_use.py", "MUT203"),
+        ]),
+        Step::new(
+            "a method of the class starts writing its private target",
+            vec![save("pkg/purse.py", PURSE_WRITING)],
+        )
+        .present(&[
+            ("pkg/purse_use.py", "MUT201"),
+            ("pkg/purse_use.py", "MUT203"),
+        ]),
+        Step::new(
+            "it stops, and another starts reading the other private target",
+            vec![save("pkg/purse.py", PURSE_READING)],
+        )
+        .present(&[
+            ("pkg/purse_use.py", "MUT201"),
+            ("pkg/purse_use.py", "MUT203"),
+        ]),
+        Step::new(
+            "the methods neither write nor read them",
+            vec![save("pkg/purse.py", PURSE)],
+        )
+        .present(&[
+            ("pkg/purse_use.py", "MUT201"),
+            ("pkg/purse_use.py", "MUT203"),
+        ]),
+    ]
+}
+
 /// Files: a module created and deleted, a stub next to a module, and a package over the
 /// module of the same name.
 fn steps_files() -> Vec<Step> {
@@ -4412,8 +4854,8 @@ fn steps_configuration() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"EFF115\", \"MUT115\", \"MUT118\", \"MUT119\"]",
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"EFF115\", \"MUT115\", \"MUT118\", \"MUT119\"]\nselect = [\"NOPE1\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"EFF115\", \"EFF116\", \"MUT115\", \"MUT118\", \"MUT119\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"EFF115\", \"EFF116\", \"MUT115\", \"MUT118\", \"MUT119\"]\nselect = [\"NOPE1\"]",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),
@@ -4747,6 +5189,69 @@ fn steps_import_owners() -> Vec<Step> {
             )],
         )
         .absent(&[("pkg/imp_cli.py", "IMP201")]),
+    ]
+}
+
+const STAR_IMPL: &str = "import time\n\n__all__ = [\"fetch\"]\n\n\ndef fetch(url):\n    time.sleep(1)\n    return url\n";
+const STAR_USER: &str =
+    "from pkg.star import fetch\n\n\nasync def handle(url):\n    return fetch(url)\n";
+
+/// `from pkg.star import fetch` where `pkg/star/__init__.py` re-exports with a star import: the
+/// function while the module the import names, or one it star-imports in turn, exports it.
+fn steps_star_imports() -> Vec<Step> {
+    let unlisted = STAR_IMPL.replace("__all__ = [\"fetch\"]\n", "");
+    vec![
+        Step::new(
+            "a package re-exports a module's `__all__` with a star import",
+            vec![
+                Action::Create("pkg/star/__init__.py", "from ._impl import *\n".to_owned()),
+                Action::Create("pkg/star/_impl.py", STAR_IMPL.to_owned()),
+                Action::Create("pkg/star_user.py", STAR_USER.to_owned()),
+            ],
+        )
+        .present(&[("pkg/star_user.py", "EFF101")]),
+        Step::new(
+            "the module's `__all__` no longer lists the function",
+            vec![save(
+                "pkg/star/_impl.py",
+                &STAR_IMPL.replace("[\"fetch\"]", "[]"),
+            )],
+        )
+        .absent(&[("pkg/star_user.py", "EFF101")]),
+        Step::new(
+            "without `__all__`, the module's public names are re-exported",
+            vec![save("pkg/star/_impl.py", &unlisted)],
+        )
+        .present(&[("pkg/star_user.py", "EFF101")]),
+        Step::new(
+            "the package star-imports another module, which star-imports the first",
+            vec![
+                Action::Create("pkg/star/_api.py", "from ._impl import *\n".to_owned()),
+                save("pkg/star/__init__.py", "from ._api import *\n"),
+            ],
+        )
+        .present(&[("pkg/star_user.py", "EFF101")]),
+        Step::new(
+            "the first module makes the function private",
+            vec![save(
+                "pkg/star/_impl.py",
+                &unlisted.replace("def fetch", "def _fetch"),
+            )],
+        )
+        .absent(&[("pkg/star_user.py", "EFF101")]),
+        Step::new(
+            "the module the package star-imports defines the function itself",
+            vec![save(
+                "pkg/star/_api.py",
+                "import time\n\nfrom ._impl import *\n\n\ndef fetch(url):\n    time.sleep(1)\n    return url\n",
+            )],
+        )
+        .present(&[("pkg/star_user.py", "EFF101")]),
+        Step::new(
+            "the package no longer star-imports",
+            vec![save("pkg/star/__init__.py", "")],
+        )
+        .absent(&[("pkg/star_user.py", "EFF101")]),
     ]
 }
 
@@ -5181,6 +5686,7 @@ sessions!(editing, Session::start, {
     eff112: steps_eff112,
     eff114: steps_eff114,
     eff115: steps_eff115,
+    eff116: steps_eff116,
     attribute_types: steps_attribute_types,
     receiver_typing: steps_receiver_typing,
     effect_index: steps_effect_index,
@@ -5190,9 +5696,12 @@ sessions!(editing, Session::start, {
     helper_witnesses: steps_helper_witnesses,
     imported_constants: steps_imported_constants,
     method_lookups: steps_method_lookups,
+    private_names: steps_private_names,
     contracts: steps_contracts,
+    allowed_examples: steps_allowed_examples,
     contract_extensions: steps_contract_extensions,
     references: steps_references,
+    class_bodies: steps_class_bodies,
     bases_and_attribution: steps_bases_and_attribution,
     argument_lists: steps_argument_lists,
     environment: steps_environment,
@@ -5204,6 +5713,7 @@ sessions!(editing, Session::start, {
     declarations: steps_declarations,
     re_exports: steps_re_exports,
     package_names: steps_package_names,
+    star_imports: steps_star_imports,
     import_owners: steps_import_owners,
 });
 
@@ -5726,6 +6236,232 @@ fn lsp_diagnostics_equal_a_full_check_below_a_git_working_tree() {
     run_steps(s, &steps);
 }
 
+// ------------------------------------------------ calls through bound values across modules
+
+// What a call through a value one module binds runs, decided from that module's declarations:
+// a table of functions (`ModuleDecls::tables`, what other modules change in place in
+// `ModuleDecls::stores_elsewhere`), a class attribute bound to a `staticmethod`
+// (`ClassDecl::named_attrs`, a subclass binding the name to a method), a function returning a
+// module it imports (`FunctionDecl::returned_import`), and a `TypeVar`'s bound
+// (`ModuleDecls::type_vars`).
+const BOUND_CONFIG: &str = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"uses\"\nscopes = [\"pkg.use_*.*\"]\nwrite-universe = [\"Field.required\"]\nallow-writes = []\n";
+const BOUND_MODEL: &str = "class Field:\n    def __init__(self):\n        self.required = False\n";
+const BOUND_HELPERS: &str = "from pkg.model import Field\n\n\ndef require(field: Field):\n    field.required = True\n\n\ndef skip(field: Field):\n    pass\n";
+const BOUND_DEFS: &str = "from typing import Protocol, TypeVar\n\nfrom pkg.helpers import require, skip\nfrom pkg.model import Field\n\nTABLE = {\"run\": require, \"skip\": skip}\n\n\nclass Holder:\n    RUN = staticmethod(require)\n\n\ndef ops():\n    from pkg import helpers\n\n    return helpers\n\n\nclass View(Protocol):\n    @property\n    def fields(self) -> list[Field]: ...\n\n\nclass Other:\n    pass\n\n\nV = TypeVar(\"V\", bound=View)\n";
+const BOUND_TABLE_USE: &str =
+    "from pkg.defs import TABLE\n\n\ndef use(field):\n    TABLE[\"run\"](field)\n";
+const BOUND_ALIAS_USE: &str =
+    "from pkg.defs import Holder\n\n\ndef use(holder: Holder, field):\n    holder.RUN(field)\n";
+const BOUND_ALIAS_READ_USE: &str = "from pkg.defs import Holder\n\n\ndef use(holder: Holder, field):\n    run = holder.RUN\n    run(field)\n";
+const BOUND_DEFS_PATCHING: &str =
+    "\n\ndef patch(run):\n    from pkg import defs\n\n    defs.TABLE[\"run\"] = run\n";
+const BOUND_MODULE_USE: &str =
+    "from pkg.defs import ops\n\n\ndef use(field):\n    ops().require(field)\n";
+const BOUND_TYPE_VAR_USE: &str = "from pkg.defs import V\n\n\ndef use(view: V):\n    for field in view.fields:\n        field.required = True\n";
+
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_bound_values_across_modules() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/model.py", BOUND_MODEL.to_owned()),
+        ("pkg/helpers.py", BOUND_HELPERS.to_owned()),
+        ("pkg/defs.py", BOUND_DEFS.to_owned()),
+        ("pkg/use_table.py", BOUND_TABLE_USE.to_owned()),
+        ("pkg/use_alias.py", BOUND_ALIAS_USE.to_owned()),
+        ("pkg/use_module.py", BOUND_MODULE_USE.to_owned()),
+        ("pkg/use_type_var.py", BOUND_TYPE_VAR_USE.to_owned()),
+    ];
+    let s = Session::start_with("lsp_oracle_bound_values", BOUND_CONFIG, files, false);
+    let all: &[(&str, &str)] = &[
+        ("pkg/use_table.py", "EFF201"),
+        ("pkg/use_alias.py", "EFF201"),
+        ("pkg/use_module.py", "EFF201"),
+        ("pkg/use_type_var.py", "EFF201"),
+    ];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(all),
+        Step::new(
+            "the table binds the key to the function that writes nothing",
+            vec![save(
+                "pkg/defs.py",
+                &BOUND_DEFS.replace("{\"run\": require, \"skip\": skip}", "{\"run\": skip}"),
+            )],
+        )
+        .absent(&[("pkg/use_table.py", "EFF201")]),
+        Step::new("the table binds it to the writer again", vec![save("pkg/defs.py", BOUND_DEFS)])
+            .present(&[("pkg/use_table.py", "EFF201")]),
+        Step::new(
+            "another module changes the table in place",
+            vec![Action::Create(
+                "pkg/register.py",
+                "from pkg.defs import TABLE\n\n\ndef register(name, run):\n    TABLE[name] = run\n"
+                    .to_owned(),
+            )],
+        )
+        .absent(&[("pkg/use_table.py", "EFF201")]),
+        Step::new(
+            "the module changing it is deleted",
+            vec![Action::Delete("pkg/register.py")],
+        )
+        .present(&[("pkg/use_table.py", "EFF201")]),
+        Step::new(
+            "a subclass binds the attribute to a method of its own",
+            vec![Action::Create(
+                "pkg/sub.py",
+                "from pkg.defs import Holder\n\n\nclass Sub(Holder):\n    def RUN(self, field):\n        pass\n"
+                    .to_owned(),
+            )],
+        )
+        .absent(&[("pkg/use_alias.py", "EFF201")]),
+        Step::new("the subclass is deleted", vec![Action::Delete("pkg/sub.py")])
+            .present(&[("pkg/use_alias.py", "EFF201")]),
+        Step::new(
+            "the function returns another module",
+            vec![save(
+                "pkg/defs.py",
+                &BOUND_DEFS.replace("    from pkg import helpers\n\n    return helpers", "    from pkg import model\n\n    return model"),
+            )],
+        )
+        .absent(&[("pkg/use_module.py", "EFF201")]),
+        Step::new(
+            "the type variable's bound is a class without the fields",
+            vec![save("pkg/defs.py", &BOUND_DEFS.replace("bound=View", "bound=Other"))],
+        )
+        .present(&[("pkg/use_module.py", "EFF201")])
+        .absent(&[("pkg/use_type_var.py", "EFF201")]),
+        Step::new("the bound is the view again", vec![save("pkg/defs.py", BOUND_DEFS)])
+            .present(all),
+        Step::new(
+            "the table's module changes it through its own module object",
+            vec![save("pkg/defs.py", &format!("{BOUND_DEFS}{BOUND_DEFS_PATCHING}"))],
+        )
+        .absent(&[("pkg/use_table.py", "EFF201")]),
+        Step::new("it no longer changes the table", vec![save("pkg/defs.py", BOUND_DEFS)])
+            .present(all),
+        Step::new(
+            "a module calls the attribute it reads, which binds the function that writes nothing",
+            vec![
+                Action::Create("pkg/use_alias_read.py", BOUND_ALIAS_READ_USE.to_owned()),
+                save(
+                    "pkg/defs.py",
+                    &BOUND_DEFS.replace("RUN = staticmethod(require)", "RUN = staticmethod(skip)"),
+                ),
+            ],
+        )
+        .absent(&[
+            ("pkg/use_alias.py", "EFF201"),
+            ("pkg/use_alias_read.py", "EFF201"),
+        ]),
+        Step::new(
+            "a subclass binds the attribute to the writer",
+            vec![Action::Create(
+                "pkg/sub.py",
+                "from pkg.defs import Holder\nfrom pkg.helpers import require\n\n\nclass Sub(Holder):\n    RUN = staticmethod(require)\n"
+                    .to_owned(),
+            )],
+        )
+        .present(&[
+            ("pkg/use_alias.py", "EFF201"),
+            ("pkg/use_alias_read.py", "EFF201"),
+        ]),
+        Step::new("the subclass is deleted", vec![Action::Delete("pkg/sub.py")]).absent(&[
+            ("pkg/use_alias.py", "EFF201"),
+            ("pkg/use_alias_read.py", "EFF201"),
+        ]),
+        Step::new("the class binds the writer again", vec![save("pkg/defs.py", BOUND_DEFS)])
+            .present(&[
+                ("pkg/use_alias.py", "EFF201"),
+                ("pkg/use_alias_read.py", "EFF201"),
+            ]),
+    ];
+    run_steps(s, &steps);
+}
+
+// ---------------------------------------------- what contracts cannot attribute across modules
+
+// What a strict contract reports from another module's facts: an effect boundary the call
+// heki cannot resolve in a helper of another file (`OptInTables::blind_spots`), and a call
+// owner a helper another file hands on as a value (`FileSummary::reference_sites`).
+const STRICT_CONFIG: &str = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\", \"MUT204\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"checks\"\nscopes = [\"pkg.checks.*\"]\nwrite-universe = [\"Field.required\"]\nallow-writes = []\nunresolved = \"report\"\n\n[[tool.heki.call-owners]]\nname = \"settles\"\ntargets = [\"Store.require\"]\nallowed-callers = [\"pkg.passes.settle\"]\nunresolved = \"report\"\n";
+const STRICT_MODEL: &str = "class Field:\n    def __init__(self):\n        self.required = False\n\n\nclass Store:\n    def require(self, field: Field):\n        field.required = True\n";
+const STRICT_HELPER: &str =
+    "from pkg.model import Field\n\n\ndef call(run, field: Field):\n    pass\n";
+const STRICT_CHECKS: &str = "from pkg import helper\nfrom pkg.model import Field\n\n\ndef check(run, field: Field):\n    helper.call(run, field)\n";
+const STRICT_PASSES: &str = "from pkg.model import Field, Store\n\n\ndef _require(store: Store, field: Field):\n    store.require(field)\n\n\ndef settle(store: Store, field: Field):\n    _require(store, field)\n";
+
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_what_contracts_cannot_attribute() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/model.py", STRICT_MODEL.to_owned()),
+        ("pkg/helper.py", STRICT_HELPER.to_owned()),
+        ("pkg/checks.py", STRICT_CHECKS.to_owned()),
+        ("pkg/passes.py", STRICT_PASSES.to_owned()),
+    ];
+    let s = Session::start_with("lsp_oracle_strict", STRICT_CONFIG, files, false);
+    let steps = [
+        Step::new("initial index", Vec::new())
+            .absent(&[("pkg/checks.py", "EFF201"), ("pkg/passes.py", "MUT204")]),
+        Step::new(
+            "the helper calls what it is handed",
+            vec![save(
+                "pkg/helper.py",
+                &STRICT_HELPER.replace("    pass", "    run(field)"),
+            )],
+        )
+        .present(&[("pkg/checks.py", "EFF201")]),
+        Step::new(
+            "the helper calls nothing again",
+            vec![save("pkg/helper.py", STRICT_HELPER)],
+        )
+        .absent(&[("pkg/checks.py", "EFF201")]),
+        Step::new(
+            "another module keeps the private helper in a list",
+            vec![Action::Create(
+                "pkg/registry.py",
+                "from pkg.passes import _require\n\nHANDLERS = [_require]\n".to_owned(),
+            )],
+        )
+        .present(&[("pkg/passes.py", "MUT204")]),
+        Step::new(
+            "that module is deleted",
+            vec![Action::Delete("pkg/registry.py")],
+        )
+        .absent(&[("pkg/passes.py", "MUT204")]),
+        Step::new(
+            "a check constructs a field that names its attribute at run time",
+            vec![
+                save("pkg/model.py", &strict_model("self")),
+                save("pkg/checks.py", &format!("{STRICT_CHECKS}{STRICT_BUILD}")),
+            ],
+        )
+        .absent(&[("pkg/checks.py", "EFF201")]),
+        Step::new(
+            "the initializer writes an object it is handed",
+            vec![save("pkg/model.py", &strict_model("source"))],
+        )
+        .present(&[("pkg/checks.py", "EFF201")]),
+        Step::new(
+            "the initializer writes its own instance again",
+            vec![save("pkg/model.py", &strict_model("self"))],
+        )
+        .absent(&[("pkg/checks.py", "EFF201")]),
+    ];
+    run_steps(s, &steps);
+}
+
+const STRICT_BUILD: &str = "\n\ndef build():\n    return Field()\n";
+
+/// [`STRICT_MODEL`] with an initializer writing an attribute named at run time on `written`.
+fn strict_model(written: &str) -> String {
+    STRICT_MODEL.replace(
+        "    def __init__(self):\n        self.required = False\n",
+        &format!(
+            "    def __init__(self, name=\"required\", source=None):\n        setattr({written}, name, False)\n"
+        ),
+    )
+}
+
 // ------------------------------------------------- argument lists across modules (session 4)
 
 // A call target with an argument list, passed a number constant of another module by keyword:
@@ -5777,6 +6513,64 @@ fn lsp_diagnostics_equal_a_full_check_through_argument_lists_across_modules() {
         Step::new(
             "a keyword binds it again",
             vec![save("pkg/sig.py", MARKED_LEVELS)],
+        )
+        .present(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
+// ------------------------------------------------ builders of a library base class (session)
+
+// A call target with an argument list, met by `model_construct` / `model_validate` calls on a
+// model of another module: whether the call builds the class, and from which values, comes from
+// the class's bases there (the catalog's `builds_receiver` of `pydantic.BaseModel`'s methods)
+// and from a method a project base may define over them.
+const BUILDERS_CONFIG: &str = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"maps\"\ntargets = [\"pkg.models.DataType(is_dict=True)\"]\n";
+const BUILDERS_MODEL: &str =
+    "from pydantic import BaseModel\n\n\nclass DataType(BaseModel):\n    is_dict: bool = False\n";
+const BUILDERS_PLAIN: &str = "class DataType:\n    is_dict: bool = False\n";
+const BUILDERS_BASE: &str =
+    "from pydantic import BaseModel\n\n\nclass Base(BaseModel):\n    pass\n";
+const BUILDERS_OWN: &str = "from pydantic import BaseModel\n\n\nclass Base(BaseModel):\n    @classmethod\n    def model_construct(cls, **values):\n        return None\n\n    @classmethod\n    def model_validate(cls, obj):\n        return None\n";
+const BUILDERS_ON_BASE: &str =
+    "from pkg.base import Base\n\n\nclass DataType(Base):\n    is_dict: bool = False\n";
+const BUILDERS_USE: &str = "from pkg.models import DataType\n\n\ndef construct():\n    return DataType.model_construct(is_dict=True)\n\n\ndef validate():\n    return DataType.model_validate({\"is_dict\": True})\n";
+
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_builders_of_a_library_base() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/models.py", BUILDERS_MODEL.to_owned()),
+        ("pkg/base.py", BUILDERS_BASE.to_owned()),
+        ("pkg/use.py", BUILDERS_USE.to_owned()),
+    ];
+    let mut s = Session::start_with("lsp_oracle_builders", BUILDERS_CONFIG, files, false);
+    let reported: &[(&str, &str)] = &[("pkg/use.py", "MUT204")];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(reported),
+        Step::new(
+            "the class no longer derives from the model base: its builders are unknown",
+            vec![save("pkg/models.py", BUILDERS_PLAIN)],
+        )
+        .absent(reported),
+        Step::new(
+            "it derives from a project base deriving from the model base",
+            vec![save("pkg/models.py", BUILDERS_ON_BASE)],
+        )
+        .present(reported),
+        Step::new(
+            "the project base defines the builders over the library's",
+            vec![save("pkg/base.py", BUILDERS_OWN)],
+        )
+        .absent(reported),
+        Step::new(
+            "it inherits the library's again",
+            vec![save("pkg/base.py", BUILDERS_BASE)],
         )
         .present(reported),
     ];
@@ -5907,6 +6701,134 @@ fn lsp_diagnostics_equal_a_full_check_for_keys_another_contract_names() {
             vec![save("pkg/model.py", LISTED_KEYS_MODEL)],
         )
         .absent(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
+// ------------------------- `__dict__` keys no target names, on an object of unknown class
+
+const UNKNOWN_CLASS_KEYS_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201", "MUT205"]
+
+[[tool.heki.write-owners]]
+name = "caches"
+targets = ["pkg.model.Field._type_cache"]
+allowed-writers = ["pkg.store:*"]
+unlisted-dict-keys = "report"
+unresolved = "report"
+"#;
+
+const UNKNOWN_CLASS_KEYS_MODEL: &str = "class Field:\n    pass\n\n\nclass Other:\n    pass\n";
+const UNKNOWN_CLASS_KEYS_PASSES: &str =
+    "def fill(obj) -> None:\n    obj.__dict__[\"_new_cache\"] = 1\n";
+const UNKNOWN_CLASS_KEYS_USE: &str = "from pkg.model import Field, Other\nfrom pkg.passes import fill\n\n\ndef run(obj: Other) -> None:\n    fill(obj)\n";
+
+/// `unlisted-dict-keys` with `unresolved`: a helper writing a key no target names on its
+/// untyped parameter is reported when a caller in another module hands it an instance of a
+/// target's class, and not when the only caller hands it another class, as the caller's
+/// annotation changes and changes back.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_new_keys_on_objects_of_unknown_class() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/model.py", UNKNOWN_CLASS_KEYS_MODEL.to_owned()),
+        ("pkg/passes.py", UNKNOWN_CLASS_KEYS_PASSES.to_owned()),
+        ("pkg/use.py", UNKNOWN_CLASS_KEYS_USE.to_owned()),
+    ];
+    let mut s = Session::start_with(
+        "lsp_oracle_unknown_class_keys",
+        UNKNOWN_CLASS_KEYS_CONFIG,
+        files,
+        false,
+    );
+    let reported: &[(&str, &str)] = &[("pkg/passes.py", "MUT205")];
+    let steps = [
+        Step::new("initial index", Vec::new()).absent(reported),
+        Step::new(
+            "the caller hands the helper an instance of the target's class",
+            vec![save(
+                "pkg/use.py",
+                &UNKNOWN_CLASS_KEYS_USE.replace("obj: Other", "obj: Field"),
+            )],
+        )
+        .present(reported),
+        Step::new(
+            "the caller hands it another class again",
+            vec![save("pkg/use.py", UNKNOWN_CLASS_KEYS_USE)],
+        )
+        .absent(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
+// ------------------------------------------- a target whose attribute is renamed and back
+
+const RENAMED_TARGET_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201"]
+
+[[tool.heki.write-owners]]
+name = "caches"
+targets = ["pkg.model.Field._cache"]
+allowed-writers = ["pkg.store:*"]
+"#;
+
+const RENAMED_TARGET_MODEL: &str =
+    "class Field:\n    def __init__(self) -> None:\n        self._cache: dict = {}\n";
+const RENAMED_TARGET_USE: &str =
+    "from pkg.model import Field\n\n\ndef reset(field: Field) -> None:\n    field._cache = {}\n";
+
+/// A rename of the attribute a target names (the entry then matches nothing, which `heki check`
+/// warns about apart from its reports) and back: the write in another module stops and starts
+/// being a report, in the server as in a full check.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_as_a_target_attribute_is_renamed() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/model.py", RENAMED_TARGET_MODEL.to_owned()),
+        ("pkg/use.py", RENAMED_TARGET_USE.to_owned()),
+    ];
+    let mut s = Session::start_with(
+        "lsp_oracle_renamed_target",
+        RENAMED_TARGET_CONFIG,
+        files,
+        false,
+    );
+    let reported: &[(&str, &str)] = &[("pkg/use.py", "MUT201")];
+    let renamed = |text: &str| text.replace("_cache", "_memo");
+    let steps = [
+        Step::new("initial index", Vec::new()).present(reported),
+        Step::new(
+            "the attribute is renamed where it is defined and written",
+            vec![
+                save("pkg/model.py", &renamed(RENAMED_TARGET_MODEL)),
+                save("pkg/use.py", &renamed(RENAMED_TARGET_USE)),
+            ],
+        )
+        .absent(reported),
+        Step::new(
+            "the old name comes back",
+            vec![
+                save("pkg/model.py", RENAMED_TARGET_MODEL),
+                save("pkg/use.py", RENAMED_TARGET_USE),
+            ],
+        )
+        .present(reported),
     ];
     let mut failures = Vec::new();
     for step in &steps {

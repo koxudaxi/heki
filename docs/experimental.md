@@ -12,12 +12,13 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `cli-option.profile` | cli-option | `heki check --profile` | 0.1.1 | - |
 | `command.inspect` | command | `heki inspect` | 0.2.1 | - |
 | `command.recommend` | command | `heki recommend` | 0.2.2 | - |
-| `command.skill` | command | `heki skill` | 0.2.6 | - |
+| `command.skill` | command | `heki skill` | 0.2.5 | - |
 | `rule.EFF109` | rule | [`EFF109`](rules/lock-reacquired-while-held.md) | 0.2.1 | - |
 | `rule.EFF110` | rule | [`EFF110`](rules/exclusive-object-fanout.md) | 0.2.1 | - |
 | `rule.EFF112` | rule | [`EFF112`](rules/set-order-output.md) | 0.2.4 | - |
 | `rule.EFF114` | rule | [`EFF114`](rules/recursion-error-as-value.md) | 0.2.4 | - |
 | `rule.EFF115` | rule | [`EFF115`](rules/async-def-as-sync-callback.md) | 0.2.5 | - |
+| `rule.EFF116` | rule | [`EFF116`](rules/generator-never-iterated.md) | 0.2.6 | - |
 | `rule.IMP201` | rule | [`IMP201`](rules/import-owner-violation.md) | 0.2.7 | - |
 | `rule.IMP202` | rule | [`IMP202`](rules/unresolved-guarded-import.md) | 0.2.7 | - |
 | `rule.MUT101` | rule | [`MUT101`](rules/cached-property-stale-mutation.md) | 0.1.0 | - |
@@ -61,7 +62,7 @@ The sections, their policies, the candidates it infers, and its JSON object can 
 
 - **Kind:** command
 - **Target:** `heki skill`
-- **Since:** 0.2.6
+- **Since:** 0.2.5
 
 Where coding agents read skills, and so where `heki skill install` writes, can change as the agents evolve; the skill's wording changes with heki's commands.
 
@@ -104,6 +105,14 @@ Its precision is measured on a sample of reports of one corpus only, and its pre
 - **Since:** 0.2.5
 
 The development corpus has no report of it, so its precision is not measured, and its premises are not yet certified.
+
+## `rule.EFF116`
+
+- **Kind:** rule
+- **Target:** [`EFF116`](rules/generator-never-iterated.md)
+- **Since:** 0.2.6
+
+The development corpus has few reports of it, and its premises are not yet certified.
 
 ## `rule.IMP201`
 

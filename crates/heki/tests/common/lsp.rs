@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
@@ -130,6 +130,12 @@ impl Lsp {
         }
         let status = wait_or_hang(&mut self.child, "the server after `exit`");
         assert!(status.success(), "{status:?}");
+    }
+
+    /// Close stdin without `exit`, like a client that went away, and wait for the server to end.
+    pub fn hang_up(mut self) -> ExitStatus {
+        self.stdin = None;
+        wait_or_hang(&mut self.child, "the server after its input ended")
     }
 
     pub fn message(method: &str, params: Value) -> Value {
@@ -270,6 +276,14 @@ impl Lsp {
         .as_array()
         .unwrap()
         .clone()
+    }
+}
+
+impl Drop for Lsp {
+    /// A test that fails before the server has ended leaves no server behind.
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 

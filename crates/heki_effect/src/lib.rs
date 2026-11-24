@@ -60,7 +60,8 @@ pub use contracts::{ContractClass, Contracts};
 pub use environment::{AccessKind, ExternalAccess};
 pub use invalidation::{
     CoveredAfter, FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
-    builds_written_object, delegates_to_callers, is_initializer, reach_across,
+    builds_written_object, delegates_to_callers, initializes_own_self, is_initializer,
+    reach_across,
 };
 pub use iterations::{
     BetweenSteps, ContainerChange, ContainerIteration, IteratedContainer, IteratedResult,
@@ -116,16 +117,59 @@ pub struct AttrKeyPath {
 }
 
 /// A project-class attribute write a function reaches through any number of calls: the facts
-/// of a typed write site without its position, chain, and object (`EffectSummary::
-/// typed_field_writes`). A caller asks it whether a callee already sees the type of what it
-/// writes.
+/// of a typed write site without its position and chain (`EffectSummary::typed_field_writes`).
+/// A caller asks it whether a callee already sees the type of what it writes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TypedFieldWrite {
     pub class_qualname: String,
     pub attr: String,
     pub kind: WriteKind,
-    /// `TypedFieldWriteSite::fresh`.
+    /// The written object is under construction: `TypedFieldWriteSite::fresh`, or the object
+    /// a class's own initialization builds ([`initializes_own_self`]), written by the
+    /// initializer or by a helper it passes `self` to.
     pub fresh: bool,
+    /// `TypedFieldWriteSite::obj_params`, mapped through every call as for the sites: a
+    /// helper's write reaches the initializer handing it `self` as a write of its own `self`.
+    pub obj_params: u64,
+}
+
+/// The objects (`obj_params`) [`EffectSummary::typed_field_writes`] keeps apart for one write
+/// (field, kind, and freshness). A call can hand a helper a choice of its parameters (`h(p0 if
+/// flag else p1)`), so each level of a chain of helpers calling the one below twice could double
+/// them; past the bound they are one fact on an object that may be any of them, as a write site
+/// on several parameters is.
+const WRITTEN_OBJECTS_KEPT_APART: usize = 8;
+
+/// Join the objects of each write of `writes` that has more than
+/// [`WRITTEN_OBJECTS_KEPT_APART`]. It depends only on the set, not on the order the facts came
+/// in, so a summary stays the same however its callees' facts reach it.
+fn join_written_objects(writes: &mut BTreeSet<TypedFieldWrite>) {
+    // The facts order by field, kind, freshness, and then object: one write's facts are a run.
+    let same = |a: &TypedFieldWrite, b: &TypedFieldWrite| {
+        (&a.class_qualname, &a.attr, a.kind, a.fresh)
+            == (&b.class_qualname, &b.attr, b.kind, b.fresh)
+    };
+    let mut runs: Vec<(TypedFieldWrite, usize)> = Vec::new();
+    for w in writes.iter() {
+        match runs.last_mut() {
+            Some((first, n)) if same(first, w) => *n += 1,
+            _ => runs.push((w.clone(), 1)),
+        }
+    }
+    for (first, n) in runs
+        .into_iter()
+        .filter(|(_, n)| *n > WRITTEN_OBJECTS_KEPT_APART)
+    {
+        let joined: Vec<TypedFieldWrite> = writes.range(first.clone()..).take(n).cloned().collect();
+        let obj_params = joined.iter().fold(0, |mask, w| mask | w.obj_params);
+        for w in &joined {
+            writes.remove(w);
+        }
+        writes.insert(TypedFieldWrite {
+            obj_params,
+            ..first
+        });
+    }
 }
 
 /// One hop in an interprocedural call chain (for Boundary-Only & LSP RelatedLocation).
@@ -365,6 +409,33 @@ pub struct TypedFieldWriteSite {
     /// through protocols ([`Contracts::write_protocols`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub through_protocol: bool,
+    /// Where the key of an item write comes from when `key` holds no constant (computed only
+    /// when an ownership contract is declared).
+    #[serde(default)]
+    pub key_from: EntryKey,
+    /// A copy, in a caller, of a callee's item write keyed by one of the callee's parameters,
+    /// with the key the call passes in `key` or `key_from` (`set_extra(field, "init", v)` writing
+    /// `field.extras[key]`): it stands for the entry targets (`Class.attr["key"]`) the write may
+    /// hit, which the callee's own site leaves to its callers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub passed: bool,
+}
+
+/// Where the key of an item write comes from when [`TypedFieldWriteSite::key`] holds no
+/// constant.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryKey {
+    /// `key` is the write's constant key, or the write changes no single entry.
+    #[default]
+    Written,
+    /// Parameter `p` of the summary owner: each call decides the entry it writes.
+    Param(u8),
+    /// A key heki cannot tell: one the function computes, or an argument that is neither a
+    /// constant nor a parameter of the caller.
+    Unknown,
 }
 
 /// How a function's new object was made: a shallow copy shares the containers of the original
@@ -1130,7 +1201,7 @@ pub struct ConstArg {
 
 /// A constant a call passes for a parameter ([`CallSite::arguments`]), in the kinds a call
 /// target's argument list names.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ArgValue {
     None,
     Bool(bool),
@@ -1165,7 +1236,7 @@ impl ArgValue {
 
 /// [`CallSite::arguments`]: each parameter a call target's argument list names
 /// ([`Contracts::marked_params`]) that the call binds to a constant it establishes, with it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ArgumentValues(pub Vec<(String, ArgValue)>);
 
 /// What a caller knows about the value of a callee parameter at one call, when the argument
@@ -1184,6 +1255,11 @@ pub struct ArgBinding {
     /// The loops around the call (bit `d - 1`: the one at depth `d`) across whose iterations
     /// the argument stays one object: those that do not construct it.
     pub stays_in_loops: u64,
+    /// The string constant the argument is (a literal or a `Final` constant), for the item
+    /// writes a callee keys by the parameter ([`EntryKey::Param`]); kept only when an ownership
+    /// contract is declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<Box<str>>,
 }
 
 impl EffectSummary {
@@ -1535,21 +1611,33 @@ impl EffectSummary {
             .unwrap_or(&ownership::NO_RETURN_ORIGINS)
     }
 
-    /// Add the facts of the typed write sites to `typed_field_writes` (propagation adds those
-    /// of the callees).
-    pub(crate) fn refresh_typed_field_writes(&mut self) {
+    /// Add the facts of the typed write sites of `func` (this summary's function) to
+    /// `typed_field_writes`, also for what iterating its result runs (propagation adds those of
+    /// the callees).
+    pub(crate) fn refresh_typed_field_writes(&mut self, func: &FuncKey) {
+        // `initializes_own_self` of an object that may be `self`.
+        let initializes = initializes_own_self(func, self, 1);
+        self.add_site_facts(initializes);
+        if let Some(i) = &mut self.iterated {
+            i.add_site_facts(initializes);
+        }
+    }
+
+    /// Add the facts of this summary's typed write sites to `typed_field_writes`; `initializes`:
+    /// the function is an initializer, whose writes of what may be its `self` are fresh. Then
+    /// join the objects of each write past [`WRITTEN_OBJECTS_KEPT_APART`].
+    fn add_site_facts(&mut self, initializes: bool) {
         for s in &self.typed_field_write_sites {
             let fact = TypedFieldWrite {
                 class_qualname: s.class_qualname.clone(),
                 attr: s.attr.clone(),
                 kind: s.kind,
-                fresh: s.fresh,
+                fresh: s.fresh || initializes && s.obj_params & 1 != 0,
+                obj_params: s.obj_params,
             };
             self.typed_field_writes.insert(fact);
         }
-        if let Some(i) = &mut self.iterated {
-            i.refresh_typed_field_writes();
-        }
+        join_written_objects(&mut self.typed_field_writes);
     }
 
     /// Record that the function changes parameter `p` at `path` (`mutated_param_paths`);
@@ -1788,6 +1876,19 @@ impl BoundCallee {
     /// mapping of `obj_params` across this call).
     pub fn caller_params_of(&self, mask: u64) -> u64 {
         callgraph::bound_params(mask, self)
+    }
+
+    /// The key the call passes for parameter `p` of the callee: a string constant, the
+    /// caller's own parameter, or a value heki cannot tell.
+    pub fn passed_key(&self, p: u8) -> (Option<String>, EntryKey) {
+        let arg = self.params.get(usize::from(p));
+        if let Some(text) = arg.and_then(|a| a.binding.as_ref()?.text.as_deref()) {
+            return (Some(text.to_owned()), EntryKey::Written);
+        }
+        match arg.and_then(|a| a.param.as_ref()) {
+            Some((q, None)) => (None, EntryKey::Param(*q)),
+            _ => (None, EntryKey::Unknown),
+        }
     }
 }
 
@@ -2196,6 +2297,12 @@ pub struct UnawaitedHandoff {
     pub callees: Vec<FuncKey>,
     /// The API tests what the callable returns for truth (`heki_kb::UnawaitedCall::tests_result`).
     pub tests_result: bool,
+    /// The API gives what the callable returns back to its caller
+    /// (`heki_kb::UnawaitedCall::hands_back`).
+    pub hands_back: bool,
+    /// `callees` are every implementation calling the handed value can run, as
+    /// [`CallSite::complete`] says of a call.
+    pub complete: bool,
 }
 
 impl FileSummary {
@@ -2205,6 +2312,14 @@ impl FileSummary {
             .iter()
             .flat_map(|t| &t.blind_spots)
             .map(|(f, calls)| (f, calls.as_slice()))
+    }
+
+    /// [`OptInTables::blind_spots`] of `func`: none when the table was not built.
+    pub fn blind_calls_of(&self, func: &FuncKey) -> &[BlindCall] {
+        self.opt_in_tables
+            .as_ref()
+            .and_then(|t| t.blind_spots.get(func))
+            .map_or(&[], Vec::as_slice)
     }
 
     /// [`OptInTables::unawaited_handoffs`], by function.
@@ -2461,7 +2576,7 @@ pub struct OptInFacts {
     pub blind_spots: bool,
     pub set_order: bool,
     pub call_cycles: bool,
-    /// [`OptInTables::unawaited_handoffs`] (`EFF115`).
+    /// [`OptInTables::unawaited_handoffs`] (`EFF115`, `EFF116`).
     pub unawaited_handoffs: bool,
     /// [`OptInTables::fresh_returns`].
     pub fresh_returns: bool,

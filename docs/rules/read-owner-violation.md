@@ -24,7 +24,10 @@ the allowed readers:
 - through `ref.__dict__["children"]` or `ref.__dict__.get("children")` (also on `vars(ref)`),
   also with a string constant for the key.
 
-A target names a class and an attribute; it covers the class's subclasses too. A container
+A target names a class and an attribute; it covers the class's subclasses too. A private
+attribute (`self.__secret` in class `Vault`) is the member `_Vault__secret`, which a target names
+`Vault.__secret` or `Vault._Vault__secret`, read inside the class as `self.__secret` and outside
+as `vault._Vault__secret`. A container
 entry (`Class.attr["key"]`) is a write target only: reading an entry reads the attribute, so a
 read target names `Class.attr` (an entry is a configuration error).
 
@@ -85,6 +88,13 @@ With `allowed-protocols`, a read through a value typed with a project protocol t
 declares the attribute, itself or through its protocol bases, is allowed wherever it is judged; a
 read through another protocol or the implementation's class stays reported. A pattern names the
 subprotocols of the protocols it matches too, unless `protocol-subclasses = false`.
+
+The help starts with the contract's `message` and then names up to three allowed readers that
+read the member the report names themselves: public functions and methods an `allowed-readers`
+pattern names (with `forbidden-readers`, every function outside them), by fully qualified name
+(``allowed readers of `Reference.children`: `pkg.index.GenerationIndex.children_of` ``). Private
+functions (`_name`), special methods, and the exempt methods do not count. JSON output gives them
+with their files as `allowed_examples` (`fqn`, `path`).
 
 ## What a report states
 
@@ -162,7 +172,10 @@ No automatic fix.
     like `allowed-readers`.
   - `message`: the help of every report of the contract.
   - `unresolved`: `"ignore"` (default) or `"report"`: also report the reads the contract cannot
-    tie to a class, under `MUT206`.
+    tie to a class, under `MUT206`. A function some code hands
+    on as a value (a display, a class attribute, an argument, a return: `HANDLERS = [helper]`,
+    `REQUIRE = staticmethod(helper)`) has callers heki does not see: with `"report"`, it judges
+    its reads itself, as if it had no callers.
   - `attribution`: `"call-graph"` (default) or `"lexical"`: whether a private helper hands its
     reads to its callers and a function that only runs inside allowed readers is allowed, or
     each read is judged in the function holding it.

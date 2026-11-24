@@ -142,25 +142,17 @@ fn changed(
     };
     // What a call or a property read resolves to, and whether that is every implementation it
     // can run.
-    let (callee, complete) = match made {
-        InstKind::AttrLoad { obj, attr, .. } => {
-            let callee = tcx.resolve_attr_load(types.get(obj), attr);
-            let complete = matches!(&callee, Some(Callee::Project(keys, _)) if tcx.getter_targets_complete(types.get(obj), attr, keys));
-            (callee, complete)
-        }
+    let callee = match made {
+        InstKind::AttrLoad { obj, attr, .. } => tcx.resolve_attr_load(types.get(obj), attr),
         InstKind::MethodCall { recv, method, .. } => {
-            let callee = tcx.resolve_method(types.get(recv), method);
-            let complete = tcx.method_targets_complete(types.get(recv), method, &callee);
-            (Some(callee), complete)
+            Some(tcx.resolve_method(types.get(recv), method))
         }
         InstKind::Call { callee_var, .. } => {
-            let value = callee_var.and_then(|v| types.get(&v));
-            let callee = tcx.resolve_call(value);
-            let complete = tcx.call_targets_complete(value, &callee);
-            (Some(callee), complete)
+            Some(tcx.resolve_call(callee_var.and_then(|v| types.get(&v))))
         }
-        _ => (None, false),
+        _ => None,
     };
+    let complete = tcx.inst_targets_complete(made, |v| types.get(&v));
     let (by_name, method) = match change.method {
         Some(m) => (true, m),
         None if matches!(change.inst.kind, InstKind::SubscriptStore { .. }) => {

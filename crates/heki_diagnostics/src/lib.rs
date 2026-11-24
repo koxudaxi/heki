@@ -36,6 +36,16 @@ pub struct RelatedLocation {
     pub message: String,
 }
 
+/// A public project function that does what a contract report shows from a place its contract
+/// allows, and the file defining it (the report's help names it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllowedExample {
+    /// Dotted fully qualified name (`pkg.store.Store.add`).
+    pub fqn: String,
+    #[serde(serialize_with = "report_path")]
+    pub path: PathBuf,
+}
+
 /// Minimal byte-span text edit (preserves formatting and comments).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextEdit {
@@ -145,6 +155,11 @@ pub struct Diagnostic {
     /// producers the summaries keep without their contract; written by no output format.
     #[serde(skip)]
     pub contracts: Vec<u32>,
+    /// The public project functions that do what a contract report shows from a place its
+    /// contract allows, at most three, by fully qualified name: its help names them. Empty for the other
+    /// reports and when there is none; written to JSON only when not empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_examples: Vec<AllowedExample>,
 }
 
 /// Why a heuristic report of an exact rule is not exact.
@@ -1000,6 +1015,7 @@ mod tests {
             fold_key: None,
             open_records: Vec::new(),
             contracts: Vec::new(),
+            allowed_examples: Vec::new(),
         }
     }
 

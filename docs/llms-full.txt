@@ -593,6 +593,13 @@ Missed findings close as heki learns more:
   nothing: what the instance keeps can be replaced.
 - A `write-owners` contract with `unresolved = "report"` reports the writes heki cannot tie to a
   class ([`MUT205`](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/)).
+- A private helper hands its accesses to the callers heki sees. A helper some code also hands on
+  as a value (a table, a class attribute, an argument) has callers heki does not see: an owner
+  contract with `unresolved = "report"` judges it as if it had no callers, and one without lets
+  its callers decide.
+- An effect boundary is silent where heki cannot see: a call it cannot resolve, or a write on an
+  object of unknown class, in a scope's reach. With `unresolved = "report"` it reports them
+  (`EFF201`).
 
 ### Objects without a known class
 
@@ -603,8 +610,13 @@ Missed findings close as heki learns more:
   [`MUT207`](https://heki.koxudaxi.dev/rules/unresolved-guarded-call/).
 - A write in an unannotated helper is still found where a caller passes it an object of a known
   class. A read is not.
-- Not typed: values declared `Any`, generics substituted through `TypeVar`s, and calls of
-  `type[C]` attributes.
+- Not typed: values declared `Any` or `types.ModuleType`, generics substituted through
+  unbounded `TypeVar`s (a bounded or constrained one gives its bound or constraints), and calls
+  of `type[C]` attributes.
+- A module-level table of functions (`HANDLERS = {"create": create}`) gives the value of a key
+  a string constant gives, and one of its values for any other key, only while no code changes
+  it in place; a change through a call it is handed to (`register(HANDLERS)`) is not seen.
+  Changing a dict or list a global or an attribute holds in place leaves its items untyped.
 - The type of a module global or an instance attribute joins every store of it through a
   receiver whose type heki knows: `self`, an instance of the class (a parameter `obj: Helper`,
   `cls()` in a class method, one the storing module keeps in its own attribute or global, as
@@ -678,6 +690,8 @@ A generator's body runs where it is iterated:
 | a project function iterating it | |
 
 - A generator a function returns runs where its caller iterates it.
+- A generator nothing iterates (a call as a statement, a value only tested for truth) never runs
+  its body; `EFF116` reports such calls.
 - A generator expression counts where it is written.
 - A coroutine runs where it is awaited; one only scheduled (`asyncio.create_task`) is checked on
   its own.
@@ -763,6 +777,36 @@ Contracts reason about the callers heki sees: a private helper hands its reports
 and a function called only from allowed writers is not reported. Code outside the run, such as
 tests left out of it, is not known.
 
+## Measured and not taken
+
+These shapes were measured on the Stage 0-A corpus (378 packages, 30.75 million lines) and not built.
+Each failed the bar for a default rule: at least 10 % of the judged sample harmful, and no false exact
+claim.
+
+- Late binding of loop variables: 132 closures in 38 packages beyond the 3,865 names Ruff B023
+  reports; every harmful one is already a B023 report, and heki found none that B023 misses.
+- Resource use after close: 289 sites in 80 packages, 8 % harmful, with false exact claims. Left to
+  runtime and review.
+- Resource leaks across calls: 1,848 sites in 162 packages, 4 % harmful; about half are direct
+  constructors that Ruff `SIM115` and Pylint `R1732` flag.
+- Command-query separation (a `get_*`, `is_*`, or property that changes state): 11,558 sites in 254
+  packages, 4 % harmful; most are caches heki does not see as caches.
+- Dropped results of pure calls: 59,083 sites in 327 packages, no harm in the sample; the real bugs
+  are `str` methods on `str` values, which pyright `reportUnusedCallResult` covers.
+- Stale caches: 199 sites in 54 packages, 5 % harmful; Ruff B019 and Pylint W1518 flag the cache on
+  a method.
+- `asyncio.run` under a running loop: 71 sites in 12 packages, 1 of 25 judged right; nearly all are
+  guarded by a test heki does not model.
+- Writes lost in a child process: 62 sites in 27 packages, 4 % harmful.
+- `Popen` pipes left unread: 22 sites in 13 packages, 5 % harmful.
+- `CancelledError` swallowed: 466 sites in 62 packages, none harmful as judged; flake8-async
+  `ASYNC103` and `ASYNC104` cover the shape.
+- `BytesIO` read without a seek: 69 sites in 7 packages, 57 of them one test suite; too rare.
+- Opposite lock orders: 106 ordered pairs of named locks in 31 packages, no pair in opposite order.
+- An `except` clause that nothing in its `try` body raises, through its calls: 2,730 clauses in 157 packages
+  for project exceptions and 3,597 in 153 for library ones; of 60 judged, one was harmful, and that one is a
+  one-statement shape. Which exceptions a function can raise is planned as a `heki inspect` fact instead.
+
 ## How a rule gets into heki
 
 heki only takes checks that need what it can prove. A proposed rule goes through four questions,
@@ -785,7 +829,7 @@ The proofs heki can make, on five axes:
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
 | Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT109`, `MUT113`, `EFF102`, `EFF103`, `EFF106`, `EFF109`, `EFF110`, `EFF114`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT112`, `MUT113`, `MUT119`, `MUT201`–`MUT204` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT112`, `MUT113`, `MUT119`, `MUT201`–`MUT204` |
 | Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `MUT112`, `MUT119`, `EFF107`, `EFF109`, `EFF110`, `EFF112`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
 | State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT201`–`MUT204` |
@@ -1208,6 +1252,7 @@ the same file is `services.api.app` and the import is not resolved. Put a `pypro
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `target-version` | the oldest version `project.requires-python` admits, else `py312` | Python version of the code: `py311` … `py315` (or `3.11` … `3.15`). `--target-version` overrides it. See [below](https://heki.koxudaxi.dev/configuration/#the-default-target-version) for the inference and [Scope](https://heki.koxudaxi.dev/scope/#the-target-python-version) for what the version changes. |
+| `required-version` | none | A [PEP 440](https://peps.python.org/pep-0440/) version specifier made of operators and plain releases (`">=0.2.6"`; no pre-, post-, or dev-release suffix) the running heki must satisfy; an older or newer one stops with an error. See [Requiring a heki version](https://heki.koxudaxi.dev/configuration/#requiring-a-heki-version). |
 | `exclude` | the Ruff defaults (`.git`, `.venv`, `build`, `dist`, `node_modules`, …) | Replaces the excluded paths: globs, matched against the project-relative path and each of its components, and covering everything below a matched directory. |
 | `extend-exclude` | `[]` | Adds excluded paths. |
 | `src` | the detected source roots | Source roots, relative to the project root: the module names of the files below each are relative to it (`src = ["lib"]` names `lib/pkg/net.py` `pkg.net`). See [Module names follow the source roots](https://heki.koxudaxi.dev/configuration/#module-names-follow-the-source-roots). |
@@ -1227,6 +1272,29 @@ supported version that every clause admits:
 | `>=3.16` (only newer versions) | `py315` |
 | `<4` (no lower bound, admits 3.12) | `py312` |
 | missing, or not a version specifier | `py312` |
+
+### Requiring a heki version
+
+`required-version` makes a heki that does not satisfy the specifier refuse to run, as Ruff's
+`required-version` does. heki checks it before any other key, so a configuration that uses keys
+a newer release adds fails with this message on an older heki:
+
+```toml
+[tool.heki]
+required-version = ">=0.2.6"
+```
+
+```text
+error: pyproject.toml:2:20: this is heki 0.2.4, but the configuration requires `>=0.2.6`
+```
+
+An older heki cannot know which release adds a key it has never heard of. Without
+`required-version` (and any heki before the release that added it rejects the key as unknown, like any
+other), an unknown key is an error that says only what the table accepts. When the key is not close to a
+key of its table (a close one is a typo, and the error offers it), the error also says that the
+key may belong to a newer heki, names the running version, and points to `required-version` and
+the changelog. It cannot say which release adds the key. `heki version --changelog` prints what
+the installed release changed, and the changelog on GitHub lists every release.
 
 ### Which files are checked
 
@@ -1249,6 +1317,7 @@ supported version that every clause admits:
 | `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. Warnings are reported either way, and the language server shows them. `--fail-on` overrides it. |
 | `report-unused-suppressions` | `false` | Report the codes of suppression comments that suppressed no report, and the baseline entries that matched none. See [Unused suppressions](https://heki.koxudaxi.dev/configuration/#unused-suppressions). |
 | `require-suppression-codes` | `false` | Report the `# heki: ignore` comments that name no rule. See [Suppressions that name no rule](https://heki.koxudaxi.dev/configuration/#suppressions-that-name-no-rule). |
+| `unmatched-contract-entries` | a warning, in a run over the whole project | `"warning"`, `"error"`, or `"ignore"`: what `heki check` does with a contract entry that matches nothing in the analyzed files. An error fails the run. See [Entries that match nothing](https://heki.koxudaxi.dev/configuration/#entries-that-match-nothing). |
 
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
   (`EFF`, `MUT2`), or `ALL`. An unknown rule is a configuration error.
@@ -1262,8 +1331,8 @@ supported version that every clause admits:
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   says how many.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
-  `EFF110`, `EFF112`, `EFF114`, `EFF115`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`,
-  `MUT112`, `MUT113`, `MUT115`): they need their exact code or name. In `ignore`, a prefix covers every
+  `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `MUT101`, `MUT103`, `MUT106`, `MUT107`,
+  `MUT108`, `MUT111`, `MUT112`, `MUT113`, `MUT115`): they need their exact code or name. In `ignore`, a prefix covers every
   rule it matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
@@ -1309,7 +1378,8 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   (`pkg.model:DataModel.fields`), and a call target with one is matched whole (`pkg:*` names
   every function, method, and class of `pkg`). Such a name never matches an external symbol, and
   `unresolved = "report"` counts its last name (`decide` of `pkg:decide`). A module part that
-  names no project module is no error: the name matches nothing.
+  names no project module is no error: the name matches nothing, which `heki check` warns
+  about ([Entries that match nothing](https://heki.koxudaxi.dev/configuration/#entries-that-match-nothing)).
 - A report of a glob target names the member it matched (`reads
   `pkg.types.DataType._flag``); one report standing for several members lists the others.
 - An access matching several targets of one contract (a target on a class and one on its
@@ -1317,6 +1387,17 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   contract: it names the target configured first among them, and lists the others (`(also
   `A.items`)`).
 - A `Class.attr` target covers the subclasses of the class too.
+- A private name of a class (`__cache`, `__run`: two leading underscores and not two trailing)
+  is the member Python's name mangling makes of it (`_Parser__cache` in class `Parser`), and a
+  name may spell it either way: `pkg.Parser.__run` and `pkg.Parser._Parser__run` (or
+  `pkg.Parser._Parser__*`) name the same method. An access is matched as Python runs it: inside
+  `Parser`, `self.__run` reaches `_Parser__run`; outside, a receiver typed `Parser`, a
+  subclass's `self`, or `type[Parser]` reaches it as `_Parser__run`. A subclass's own private
+  name (`self.__run` in `JsonParser`, the member `_JsonParser__run`) is another member, and
+  overrides nothing of its base. With `unresolved = "report"`, the last name of such a target
+  counts in both spellings (`__run`, and `_Parser__run` for a class the target names); a
+  target without a class (`__run`) names the member of any class (`other.__run()` in class
+  `Driver` calls `_Driver__run`).
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, a name with more than one colon or an empty module or qualified name, call
   targets whose globs are too many to match together (tens of thousands of complex ones), an
@@ -1328,7 +1409,11 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
   method named like a target, accessed on an object of unknown class (an unannotated parameter,
   a loop variable, an untyped call result, `Any`, a protocol whose implementations heki cannot
-  list). A baseline counts them apart from the violations the typed rules prove.
+  list). A baseline counts them apart from the violations the typed rules prove. An owner
+  contract with it also judges a function some code hands on as a value (a display, a class
+  attribute, an argument, a return: `HANDLERS = [helper]`, `REQUIRE = staticmethod(helper)`)
+  in that function, as if it had no callers: such a function has callers heki does not see, so
+  its allowed callers do not allow what it does.
 - An attribute named through a string (`setattr`, `getattr`, `__dict__`, `vars`) is followed
   when the string is a constant: see [Dynamic names](https://heki.koxudaxi.dev/scope/#dynamic-names).
 
@@ -1361,13 +1446,16 @@ unresolved = "report"
 | `own-receiver` | `"report"` | `"report"` or `"allow"`: whether a write through the receiver of the method it is judged in (`self`, `cls`, `super()`) is allowed. See [How contracts report](https://heki.koxudaxi.dev/configuration/#how-contracts-report). |
 | `allowed-protocols` | `[]` | Project protocols (class patterns, their subclasses included): a write through a value typed with one that declares the attribute, itself or through its protocol bases, is allowed. See [How contracts report](https://heki.koxudaxi.dev/configuration/#how-contracts-report). |
 | `protocol-subclasses` | `true` | `false`: an `allowed-protocols` pattern names the protocols it matches, not their subprotocols (a protocol deriving from an allowed one stays judged). |
-| `unlisted-dict-keys` | `"ignore"` | `"ignore"` or `"report"`: whether a `__dict__` key of a target's class that no `write-owners` target names is reported when it is written. |
+| `unlisted-dict-keys` | `"ignore"` | `"ignore"` or `"report"`: whether a `__dict__` key of a target's class that no `write-owners` target names is reported when it is written; with `unresolved = "report"`, also on an object of unknown class (`MUT205`). |
 
 A container entry (`Class.attr["key"]`):
 
-- matches the writes of that constant key (a literal or a string constant), not a write of the
-  whole container or with a computed key;
-- is reported once, under the entry, when its container is a target too.
+- matches the writes of that constant key (a literal or a string constant), also by a store
+  operation a call passes the key to (`set_extra(field, "init", v)` writing `field.extras[key]`,
+  reported at the call), not a write of the whole container or with a computed key;
+- is reported once, under the entry, when its container is a target too;
+- in an effect boundary, makes a write of the container under a key heki cannot tell a report of
+  its own ("under a key heki cannot tell"), unless the boundary allows the whole container.
 
 A write into the entries of a target's container (`model.meta["kw"][name] = v`) is a write of
 the target. So is a write through a local alias of the container (`kw = model.meta["kw"]`), also
@@ -1392,9 +1480,10 @@ needs a target first. A target names the keys its attribute pattern matches (`Fi
 `_cache`), and an entry target names its container. A key another contract names is that
 contract's to guard: its writes are judged by that contract's allowance alone. The contract's
 allowance applies to an unlisted key as to a target write. A key computed at run time has no name
-to check (`MUT205`, with `unresolved = "report"`), and neither has a write in a helper that does
-not type the object. A key every function may write is listed by a contract that allows every
-writer:
+to check (`MUT205`, with `unresolved = "report"`), and neither has a write on an object heki
+cannot type, a helper's parameter that no annotation types included: with `unresolved = "report"`
+too, `MUT205` reports such a key (below). A key every function may write is listed by a contract
+that allows every writer:
 
 ```toml
 [[tool.heki.write-owners]]
@@ -1408,7 +1497,12 @@ With `unresolved = "report"`, `MUT205` reports:
 - an attribute named like a target, written on an object of unknown class;
 - a computed attribute name (`setattr(obj, name, v)`, `obj.__dict__[name] = v`,
   `obj.__dict__.update(...)`, `vars(obj) |= other`) written on a target class, or on an object
-  of unknown class, where it may be any target.
+  of unknown class, where it may be any target;
+- with `unlisted-dict-keys = "report"`, a constant `__dict__` key that no target names for some
+  class the contract's targets cover, written on an object of unknown class, where it may be a
+  new key of that class. A helper whose callers hand it only objects of classes no target covers
+  is not reported, and neither is a class's own initialization through a helper it passes `self`
+  to.
 
 ### `read-owners`
 
@@ -1470,7 +1564,7 @@ The call side of `write-owners`.
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `name` | `""` | The contract's name in reports. |
-| `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass. A target may end in an argument list (`DataType(is_dict=True)`, below). |
+| `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass, also through a `functools.partial` object holding it and through a library method building an instance of its receiver's class (a pydantic model's `model_construct`, `model_validate` of a dict, `model_copy`). A target may end in an argument list (`DataType(is_dict=True)`, below). |
 | `subclasses` | `true` | `false`: a class target means constructing exactly the class, not a subclass (an exception class whose subclasses anyone may raise). `Class.method` targets keep covering overrides. |
 | `allowed-callers` | `[]` | Functions allowed to call the targets. |
 | `forbidden-callers` | `[]` | When set, only calls by these functions are reported. |
@@ -1517,17 +1611,27 @@ The call side of `write-owners`.
   Python binds it: never a positional-only parameter (with `def f(kind=False, /, **kwargs)`,
   `f(kind=True)` leaves `kind` false), and a keyword naming no parameter passes its value under its
   name into `**kwargs`; the receiver of a method call is its first position. A `**` operand that is
-  a dict display with string constant keys (literals, or string constants as above), which nothing
-  changes (a name holding it is only unpacked with `**`, bound to another name, tested, or
-  returned), passes its entries as keywords: `DataType(**{"is_dict": True})`,
-  `flags = {"is_dict": True}; DataType(**flags)`. A call that raises `TypeError` instead of running
-  the function passes nothing: two keywords of one name (written and in such a display, or in two
-  displays), a keyword binding a parameter a position or the receiver binds too, a keyword naming no
-  parameter of a function without `**kwargs`, a position (the receiver included) past the parameters
-  of a function without `*args`, or a parameter without a default left unbound where no `*`
-  unpacking or `**` unpacking of another mapping may bind it. Any other argument (a variable, a
-  call, `*` unpacking, `**` unpacking of another mapping) is not established, and the call is not
-  reported. A reference passes no arguments, so it never matches. A target with an argument list
+  a mapping the function builds, which nothing changes (a name holding it is only unpacked with
+  `**`, merged into another mapping, bound to another name, tested, or returned), passes its
+  entries as keywords: a dict display with string constant keys (literals, or string constants as
+  above), `DataType(**{"is_dict": True})`, `flags = {"is_dict": True}; DataType(**flags)`; a merge
+  of mappings (`{**a, **b}`, `dict(a, is_dict=True)`, `a | b` of two mappings the function builds),
+  which passes the last entry of each key, a mapping heki does not build (a parameter) replacing
+  every key before it; and a mapping built on several paths (`flags = a if c else b`), which passes
+  a key where every path passes the same constant for it. Calling a `functools.partial` object the
+  function makes (through copies) calls what it holds, with the positions it holds first and its
+  keywords, which a keyword the call writes replaces: after `make = partial(DataType,
+  is_dict=True)`, `make()` constructs `DataType(is_dict=True)`, reported at `make()`, where the
+  class is constructed (a call unpacking a mapping with `**` over keywords the object holds is not
+  followed). A pydantic model's `model_construct` passes its keywords to the fields,
+  `model_validate` the entries of the dict it is passed, and `model_copy` those of `update`. A
+  call that raises `TypeError` instead of running the function passes nothing: two keywords of one
+  name (written and in such a display, or in two displays), a keyword binding a parameter a
+  position or the receiver binds too, a keyword naming no parameter of a function without
+  `**kwargs`, a position (the receiver included) past the parameters of a function without
+  `*args`, or a parameter without a default left unbound where no `*` unpacking or `**` unpacking
+  of another mapping may bind it. Any other argument (a variable, a call, `*` unpacking, `**`
+  unpacking of another mapping) is not established, and the call is not reported. A reference passes no arguments, so it never matches. A target with an argument list
   names no symbol outside the project; `unresolved = "report"` matches its last name before the
   list, whatever the arguments of a call on an object of unknown class.
 - With `references = "calls-and-bases"`, a class statement passing a class target as a base is
@@ -1629,6 +1733,7 @@ import-probes = "report"
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes (as in `write-owners`) counts as a write of the boundary. |
 | `references` | `"ignore"` | `"ignore"`, `"calls"`, `"calls-and-bases"`, or `"reads"`, as for `call-owners`: whether a reference handing a `call-targets` entry on (and a class statement naming one among its bases, and any other use of its value) counts for `calls`. |
 | `import-probes` | `"allow"` | `"allow"` or `"report"`: whether `reads-environment` also forbids an import probe, an `import` inside a `try` with an `except` clause naming `ImportError` or `ModuleNotFoundError`. `"report"` without `reads-environment` is a configuration error. |
+| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the boundary also reports, under `EFF201`, what it cannot judge in its scopes' reach: a call heki resolves to no function, a function it does not model (`eval`, a body too large) or whose body only a stub declares, and a write of an attribute `write-targets` or `write-universe` names on an object of unknown class or under a name computed at run time. Each kind is one report per scope function, at the first one with its chain. |
 | `message` | none | The help of every report of the boundary. |
 
 | `forbid` token | Forbids |
@@ -1882,8 +1987,9 @@ holds for `invalidation` too:
 - **`attribution = "lexical"` judges the code where it is written.** The two rules above do not
   apply: an access is judged in the function whose code holds it, whoever calls that function.
   A lambda, comprehension, or generator expression is part of the function it is written in, a
-  class body's code part of the function running the class statement, and a nested `def` a
-  function of its own; the parameters of the function a lambda, comprehension, or generator
+  class body's code (a class attribute's value, a decorator, a default argument) part of the
+  function running the class statement (`<module>` for a class at module level), and a nested
+  `def` a function of its own; the parameters of the function a lambda, comprehension, or generator
   expression reads are the function's, wherever it runs. For `write-owners`, a call handing a
   typed object to a helper that changes it without knowing its class is the caller's write.
   With `unresolved = "report"`, the callers binding a parameter only tell its object's class,
@@ -1922,10 +2028,58 @@ holds for `invalidation` too:
   list), and a protocol-typed value handed to a helper that changes it without typing its
   parameter stay reported. By the call graph, a private method of an implementation that a call
   through the protocol runs still hands its writes of its own `self` to the caller.
-- **One report stands for every site behind it.** A report at a call stands for every access
-  behind the call, and an effect boundary's report for every site its scope function reaches.
-  JSON output gives their number as `sites`, and a
-  [Ratchet baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) counts each of them.
+- **The help names the allowed code that does it today.** After the contract's `message`, the
+  help of a report names up to three public functions and methods whose own body does what the
+  report shows from a place the contract allows (an `allowed-*` pattern names them, or the
+  `forbidden-*` patterns leave them out; for `invalidation`, the functions announcing every
+  write of the target on every path and the `exempt-writers`), by fully qualified name:
+  ``add entries through `Store`; allowed writers of `Registry.entries`: `pkg.store.Store.add` ``.
+  Private functions (`_name`), special methods (`__init__`), and the exempt methods are not named.
+  JSON output gives them with their files as `allowed_examples` (`fqn`, `path`).
+
+### Entries that match nothing
+
+A contract entry that names nothing guards nothing: renaming or removing what it named leaves the
+contract silent. `heki check` warns about each such entry, once per kind, key, and text, naming
+the contracts that hold it and the existing names one part away (the same holder and a like
+last part, or the same last part and a like holder), and
+[`heki recommend`](https://heki.koxudaxi.dev/recommend/) lists them:
+
+```console
+$ heki check
+warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-caches` names no attribute, method, or `__dict__` key of `pkg.model.Field` in the analyzed files; `pkg.model.Field._type_cache` exists
+```
+
+- Judged, in the contracts whose rules run: the targets, `allowed-*`, `forbidden-*`,
+  `exempt-methods`, `allowed-protocols`, and `forbid-cached-property-on` of `write-owners`,
+  `read-owners`, and `call-owners`; the `scopes`, `write-targets`, `write-universe`, and
+  `allow-writes` of `effect-boundaries`; and the `targets`, `invalidators`, and
+  `exempt-writers` of `invalidation`. The `read-targets`, `call-targets`, and
+  `allowed-callees` of an effect boundary and the `producers` of `readonly-returns` may name
+  symbols outside the project, and are not judged.
+- Each entry is matched as its rule matches it, against the definitions of the analyzed files:
+  a function pattern names a function, method, class, or module body; a call target a function,
+  method, or class; an exempt method a method's name; a scope a module, class, or function; a
+  class pattern a class.
+- A `Class.attr` entry needs a project class, and an attribute the class family has: a name its
+  class body binds (a method, an annotation, an assignment), one its methods or its module set
+  on its instances, one of a project base, an attribute or a constant `__dict__` key the code
+  writes or reads on an object typed with the class or a subclass, or one written on an object
+  heki cannot type. A class whose module stores attributes heki cannot name
+  (`setattr(self, name, v)`), or that the code gives a name computed at run time, may have any
+  attribute. An attribute that only a base outside the project defines matches when the code
+  uses it on the class. An entry target (`Class.attr["key"]`) is judged by its attribute.
+- An entry whose last part is a glob is a rule about every name it may match, later ones
+  included: it needs only what holds that part (`pkg.store` of `pkg.store:*`, the class of
+  `Field._*`, the function of `run.*`). A glob without a literal holder (`*_helper`, `__*__`) is
+  not judged.
+- The warnings do not fail the run; with `unmatched-contract-entries = "error"` they are errors,
+  which fail it, and `"ignore"` turns them off. A suppression comment or a baseline does not
+  hide them.
+- Without the key, only a run over the whole project judges: one whose paths leave out Python
+  files below the project root (`heki check pkg/store.py`) would find unmatched the entries
+  naming code in the others. With the key set, every run judges the files it analyzes.
+- `--watch` and the language server do not report them.
 
 ## Ecosystem knowledge: `[[tool.heki.ecosystem]]`
 
@@ -2509,6 +2663,12 @@ It takes the options of `heki check` that decide what is analyzed: `--select`,
 - **Contract candidates**: the `write-owners`, `read-owners`, and `effect-boundaries`
   contracts the code already keeps, each with its confidence and evidence, and the trial run of
   its rules that verified it; then the candidates a trial rejected, with the report it made.
+- **Contract entries that match nothing**: the entries of the contracts configured now that name
+  no definition, attribute, method, or `__dict__` key in the analyzed files, with the existing
+  names like each, as `heki check` warns about them
+  ([Entries that match nothing](https://heki.koxudaxi.dev/configuration/#entries-that-match-nothing)). They are listed
+  whatever `lint.unmatched-contract-entries` says, and the section is left out when there is
+  none.
 - **Notes**: what to know to weigh the advice. When the paths given leave out Python files
   below the project root, the note names them: heki takes the files it analyzed as the whole
   project, so what it says about callers, readers, and writers holds for those files only. It
@@ -2756,7 +2916,7 @@ Rules worth enabling here
   rule    reports  exact  consequence  right about the code (published)  real harm  block
   MUT106        1      -  bug          not measured                      -          yes
   OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
-  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF112, EFF113, EFF114, EFF115, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, OPT112
+  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF112, EFF113, EFF114, EFF115, EFF116, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, OPT112
   MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it.
 
 Contract candidates
@@ -2800,6 +2960,7 @@ changes meaning.
 | `contracts` | each contract candidate the block declares: its kind, what it is about, its entry, confidence, evidence, what the trial reported, and caveats |
 | `rejected_contracts` | the candidates a run reported for, with the run and its reports |
 | `contracts_not_tried` | per kind, the candidates past the trial's places (32 of each kind, the configuration's own `write-owners` contracts taking `write-owners` places), which no trial declared |
+| `unmatched_entries` | each entry of "Contract entries that match nothing": the contracts' kind, the key, the entry, the contracts holding it (a name, or `#` and its position), what it names none of, and the existing names like it |
 | `notes` | the notes |
 | `config`, `config_toml` | the keys to add or change, as keys and values and as TOML |
 | `content` | the report as the text output prints it |
@@ -2835,6 +2996,7 @@ Commands:
   inspect      Experimental: what heki knows about one function (its effects, what it changes, keeps, and returns, whether it is pure, its callers, reports, and contracts)
   recommend    Experimental: advice on the configuration of a project, with counts from its analysis, and the keys to add (it writes no file)
   skill        Experimental: install heki's Agent Skill where a coding agent reads skills
+  version      Print the version of this heki, and with `--changelog` what this release changed
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -3388,6 +3550,40 @@ Examples:
       replace an installed skill with this heki's
 ```
 
+## `heki version`
+
+```text
+Print the version of this heki, and with `--changelog` what this release changed
+
+Usage: heki version [OPTIONS]
+
+Options:
+      --changelog
+          Also print this release's section of the changelog, the one the binary was built with, without a network
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Documentation:
+  This command     https://heki.koxudaxi.dev/cli-reference/#heki-version
+  Documentation    https://heki.koxudaxi.dev/
+  Getting started  https://heki.koxudaxi.dev/getting-started/
+  Configuration    https://heki.koxudaxi.dev/configuration/
+  Rules            https://heki.koxudaxi.dev/rules/
+  Coding agents    https://heki.koxudaxi.dev/coding-agents/
+  llms.txt         https://heki.koxudaxi.dev/llms.txt
+  Agent Skill      https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental
+
+Exit codes:
+  0  the version is printed
+
+Examples:
+  heki version
+      the version of this heki
+  heki version --changelog
+      the version, then the changelog section of this release: the rules, keys, and options it adds or changes
+```
+
 
 ---
 
@@ -3395,7 +3591,7 @@ Source: https://heki.koxudaxi.dev/rules/
 
 # Rules
 
-heki has 48 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
+heki has 49 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
 
 - The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report of an exact rule that did not establish every premise (an `OPT` report whose rewrite is not proven) is shown where a heuristic rule would run.
 - A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
@@ -3458,6 +3654,7 @@ Work that runs where it should not: blocking calls on the event loop, clients an
 | EFF112 | [set-order-output](https://heki.koxudaxi.dev/rules/set-order-output/) | Opt-in: the iteration order of a set of strings, which changes between runs, reaches a file, a stream, a serializer, or a raised exception's message across a call. | ≈ 🔌 🧪 |
 | EFF114 | [recursion-error-as-value](https://heki.koxudaxi.dev/rules/recursion-error-as-value/) | Opt-in: an `except` clause around a recursion (a call cycle reached from its `try` body) takes the `RecursionError` and goes on without raising, so the result depends on the stack depth. | ≈ 🔌 🧪 |
 | EFF115 | [async-def-as-sync-callback](https://heki.koxudaxi.dev/rules/async-def-as-sync-callback/) | Opt-in: an `async def` handed to a library call that calls it without awaiting what it returns (a thread's target, an executor's function, an `atexit` or signal handler, a `filter` predicate), so the call only creates a coroutine and the body does not run. | ≈ 🔌 🧪 |
+| EFF116 | [generator-never-iterated](https://heki.koxudaxi.dev/rules/generator-never-iterated/) | Opt-in: a call of a generator function whose generator nothing iterates (a statement, a value only tested for truth, a function handed to a thread, an `atexit` handler, or a `filter` predicate), so its body does not run. | ≈ 🔌 🧪 |
 | EFF201 | [effect-boundary-violation](https://heki.koxudaxi.dev/rules/effect-boundary-violation/) | Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope. | ≈ 📜 |
 
 ## Data Pipelines (DATA)
@@ -3729,12 +3926,13 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `cli-option.profile` | cli-option | `heki check --profile` | 0.1.1 | - |
 | `command.inspect` | command | `heki inspect` | 0.2.1 | - |
 | `command.recommend` | command | `heki recommend` | 0.2.2 | - |
-| `command.skill` | command | `heki skill` | 0.2.6 | - |
+| `command.skill` | command | `heki skill` | 0.2.5 | - |
 | `rule.EFF109` | rule | [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) | 0.2.1 | - |
 | `rule.EFF110` | rule | [`EFF110`](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/) | 0.2.1 | - |
 | `rule.EFF112` | rule | [`EFF112`](https://heki.koxudaxi.dev/rules/set-order-output/) | 0.2.4 | - |
 | `rule.EFF114` | rule | [`EFF114`](https://heki.koxudaxi.dev/rules/recursion-error-as-value/) | 0.2.4 | - |
 | `rule.EFF115` | rule | [`EFF115`](https://heki.koxudaxi.dev/rules/async-def-as-sync-callback/) | 0.2.5 | - |
+| `rule.EFF116` | rule | [`EFF116`](https://heki.koxudaxi.dev/rules/generator-never-iterated/) | 0.2.6 | - |
 | `rule.IMP201` | rule | [`IMP201`](https://heki.koxudaxi.dev/rules/import-owner-violation/) | 0.2.7 | - |
 | `rule.IMP202` | rule | [`IMP202`](https://heki.koxudaxi.dev/rules/unresolved-guarded-import/) | 0.2.7 | - |
 | `rule.MUT101` | rule | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | 0.1.0 | - |
@@ -3778,7 +3976,7 @@ The sections, their policies, the candidates it infers, and its JSON object can 
 
 - **Kind:** command
 - **Target:** `heki skill`
-- **Since:** 0.2.6
+- **Since:** 0.2.5
 
 Where coding agents read skills, and so where `heki skill install` writes, can change as the agents evolve; the skill's wording changes with heki's commands.
 
@@ -3821,6 +4019,14 @@ Its precision is measured on a sample of reports of one corpus only, and its pre
 - **Since:** 0.2.5
 
 The development corpus has no report of it, so its precision is not measured, and its premises are not yet certified.
+
+## `rule.EFF116`
+
+- **Kind:** rule
+- **Target:** [`EFF116`](https://heki.koxudaxi.dev/rules/generator-never-iterated/)
+- **Since:** 0.2.6
+
+The development corpus has few reports of it, and its premises are not yet certified.
 
 ## `rule.IMP201`
 
@@ -3984,7 +4190,9 @@ The server indexes the workspace in the background, then keeps only the per-func
 summaries in memory. It runs the analyses one at a time, in the order of the editor's messages
 (an edit's analysis takes its place when its debounce ends), so the diagnostics do not depend on
 which analysis happens to start first: of documents opened together, each is analyzed with the
-ones opened before it already indexed.
+ones opened before it already indexed. When the editor closes the server's input or goes away
+without ending the session, the server exits at once (exit code 1), also with an analysis still
+running.
 
 | Event | Re-analyzed |
 | ----- | ----------- |
@@ -4000,7 +4208,7 @@ On a save, the edit reaches other files only through what it changes:
 | The edit changes | Also re-analyzed |
 | ---------------- | ---------------- |
 | a function's effects, the locks it takes (`EFF109`), the objects it uses one operation at a time (`EFF110`), what it returns in a set's order or writes of its parameters (`EFF112`), whether it reaches a call cycle (`EFF114`), or what the object it returns may be (a new one, its argument, or state it keeps; for `MUT119`, a new container on every return) | its callers, and the functions of a call cycle through it (their effects change with it) |
-| a declaration that names resolve through: a re-exported class, a new method or base class, a property getter, a subclass, an offloading decorator, a function becoming an `async def` or a plain `def` (`EFF115`) | every file that resolved names through it |
+| a declaration that names resolve through: a re-exported class, a new method or base class, a property getter, a subclass, an offloading decorator, a function becoming an `async def` or a plain `def` (`EFF115`), or a generator function or a plain one (`EFF116`) | every file that resolved names through it |
 | a method of a class family | the classes of that family; with `MUT112` selected, every changed method counts: a value stored in `self.<attr>` is reported when a method of the family changes that attribute in place |
 | what a function changes of its own containers, or what it does with the generators it calls (`MUT113`, when selected) | the classes of its family with generators suspending inside an iteration of their containers, and those of the generators it calls |
 | the writes that leave a `@cached_property` stale (`MUT111`, when selected) | the files reading such a property: whether a read is reported depends on every writer of the class family, wherever it is |
@@ -4129,6 +4337,7 @@ Each diagnostic has:
 | `blocker` | the obligation that blocks an automatic fix, if any |
 | `fix` | byte-span edits for proven-safe rewrites |
 | `sites` | the violation sites a contract report stands for, when more than one |
+| `allowed_examples` | for a contract report, up to three public functions (`fqn`, `path`) that do the same from a place the contract allows, which `help` names |
 
 A text run ends with one line per reported rule: `heki rule <CODE>` and the rule's page.
 
@@ -4163,6 +4372,67 @@ instead, which makes a good prompt for the fix. `heki rule --all --output-format
 every rule's metadata and documentation, the premises of its exact claim, and its published
 precision: its certification and its latest measurement ([Rule Precision](https://heki.koxudaxi.dev/precision/)).
 
+## Architecture rules with agents
+
+Do not describe the architecture in the project's `AGENTS.md` or `CLAUDE.md`. Declare it as
+[contracts](https://heki.koxudaxi.dev/configuration/#contracts) and let `heki check` enforce it. Three lines are enough:
+
+> After editing Python, run `heki check`.
+> A report that names a contract means the code crossed a wall the maintainers declared: change the
+> code as the report's help says.
+> Do not edit the contracts or the baseline, and do not add a suppression, unless the maintainer
+> asks.
+
+The `message` of a contract is what the agent reads as the fix, so write it as an instruction:
+
+```toml
+# heki.toml
+[[write-owners]]
+name = "generation-store"
+targets = ["pkg.model.DataModel.fields"]
+allowed-writers = ["Store.*"]
+message = "use GenerationStore.set_fields() instead"
+```
+
+Put the contracts and the baseline path in `heki.toml`, and give that file an owner (`CODEOWNERS`,
+or the host's rule for protected files). A change to a wall is then a reviewed change, and an agent
+cannot move a wall to make a report go away.
+
+### A Stop hook for Claude Code
+
+A [Stop hook](https://code.claude.com/docs/en/hooks) runs when Claude Code is about to end its turn.
+The script below runs `heki check` and, when it exits with 1 (findings), sends the text to the agent
+and keeps it working. Exit code 2 of the hook means "block, and read stderr". heki's own failure (exit
+code 2, or no `heki` on the path) lets the turn end, so a configuration error does not loop. The hook
+input has `stop_hook_active`, which is `true` while Claude Code is already continuing because of a
+stop hook; the script stops blocking then.
+
+```sh
+#!/bin/sh
+input=$(cat)
+case $input in
+  *'"stop_hook_active":true'* | *'"stop_hook_active": true'*) exit 0 ;;
+esac
+report=$(heki check 2>&1)
+status=$?
+[ "$status" -eq 1 ] || exit 0
+printf '%s\n' "$report" >&2
+exit 2
+```
+
+Register it in `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [{ "hooks": [{ "type": "command", "command": ".claude/hooks/heki-stop.sh" }] }]
+  }
+}
+```
+
+Run on a project with findings that are already known, it would block every turn: use
+`heki check --baseline heki-baseline.toml` in the script so that only new findings count.
+
 ## What a function does: `heki inspect` (experimental)
 
 When a diagnostic or a question is about one function, `heki inspect` says what it reaches,
@@ -4194,6 +4464,10 @@ $ heki inspect app/users.py::load_user --callers --depth 3
 - `pure` means heki found no effect and no change of an input or of shared state, and resolved
   every call below. Libraries the [catalog](https://heki.koxudaxi.dev/configuration/#ecosystem-knowledge-toolhekiecosystem)
   does not list count as having no effects.
+- Constructing an object changes no existing one: `changes.class_attrs` marks the writes of an
+  object under construction `fresh`, and the text form leaves them out. Such an object is one the
+  function allocates and fills, or the `self` of a class's own initialization, written by the
+  initializer or by a helper it passes `self` to (`Node(...)` running `_link(self)`).
 - `purity.unknown_reach.entries` lists the functions heki cannot follow among the function and
   its callees (a call it cannot resolve, or a body only a stub declares), nearest first, at most
   100; `truncated` says there are more. `purity.unknown_at` is the first of them. Both are given
@@ -4971,7 +5245,14 @@ Each step of the chain is established, not assumed:
   `__getattribute__`, or a metaclass heki does not know leaves the read not followed); a
   decorator other than `staticmethod`, `classmethod`, `property`, `abstractmethod`, or
   `override` may not run the body, and is not followed; a function defined twice is not
-  followed;
+  followed, and neither is a function, class, or method whose name the project binds to another
+  object (assumption R1; a name its module body or class body binds last to one named object on
+  every path is that object): another store or a `del` of the name in its module (also on a
+  branch, after `global`, or by `globals()` or `exec`), in its class body, or on its class
+  object; a store or `del` from another module, also through `setattr` with a string literal,
+  and any name of a module that `setattr` stores into under a name heki cannot read; a store of
+  the function's `__code__`; and, for a method, a store of the name on a class the lookup
+  passes, of `__bases__` on a class along the MRO, or of `self.__class__` in a method;
 - the waiting call is in the ecosystem catalog, waits on every call (a database call that may be
   answered by a session's identity map, a cache, an open connection, or that sends only pending
   changes does not), and no argument that may come from the caller can make it return at once
@@ -5012,8 +5293,8 @@ Its premises:
   returns normally, exception edges into handlers included; the last call counts as made also
   when it raised.
 - **Every implementation**: each call on the chain has as its targets every implementation it
-  can run (assumptions R2 and R5), each a synchronous function run as written, and each has the
-  fact.
+  can run (assumptions R1, R2, and R5), each a synchronous function run as written, and each
+  has the fact.
 - **Waits**: the last call waits for the network, a database, a child process, or a sleep on
   every call, as the ecosystem catalog describes it (R3), for every argument heki cannot evaluate,
   the arguments that opened its connection included (R6; a SQLite connection only when it was
@@ -5047,6 +5328,13 @@ import asyncio
 async def handler() -> bytes:
     return await asyncio.to_thread(load)
 ```
+
+## Known limitations
+These rebind a name without heki seeing it, so a call through the name still counts as running
+its definition: a `mock.patch` or `mock.patch.object` target patched outside tests, a store
+through `sys.modules` (`sys.modules[__name__] = shim`, `setattr(sys.modules[__name__], "f", g)`),
+a `setattr` on a class object under a name heki cannot read, and an instance's `__class__` stored
+other than through `self` in a method of its class (`obj.__class__ = Other` in a helper).
 
 ## Fix safety
 No automatic fix.
@@ -5573,7 +5861,9 @@ It does not report:
   `if clear:`, leaves the other path stale and is reported;
 - private helpers whose every caller invalidates the property;
 - lazy initialization: a write where a `None` / falsy test of the attribute found it unset
-  (`if self._conn is None: self._conn = connect()`, also in a `@property` getter), when the
+  (`if self._conn is None: self._conn = connect()`, also in a `@property` getter; the test may
+  be of `getattr(self, "_conn", None)` or `hasattr(self, "_conn")`, or the write in the
+  `except AttributeError:` clause of a `try` that reads it), when the
   cached property reads the attribute only through such initializations
   (`return self._connect().db`): computing the cached value set the attribute, so the test
   cannot find it unset again. A cached property that reads it directly
@@ -5798,8 +6088,9 @@ Its premises:
 - **Keyed**: the cached function takes a parameter besides `self` / `cls`. Established.
 - **Container kind**: every return a run can reach hands out a builtin container of the named
   kind, by its return annotation (R2) or by construction. Established.
-- **Same object**: the changed object is that call's result on every path, with no copy.
-  Established.
+- **Same object**: the changed object is that call's result on every path, with no copy, and
+  the call runs that function: the project binds no name the call goes through to another object
+  (assumption R1, as for `EFF101`). Established.
 - **Changed in place**: the line is an in-place change of a container of that kind. When only
   the return annotation names the kind, no project subclass of that container overrides the
   method or operator, has a metaclass that may install it, or, for a method called by name,
@@ -5874,11 +6165,24 @@ the allowed callers and resolves to a target:
 - a module-level function (`pkg.util.reset_cache()`);
 - a class: constructing it or a subclass (`FinalFacts(...)`, `pkg.facts.FinalFacts(...)`,
   `cls(...)` in a class method, a value typed `type[FinalFacts]` or `typing.Type[FinalFacts]`,
-  `type(facts)(...)`), also for a dataclass or another class without an `__init__` of its own;
-  with `subclasses = false`, constructing exactly the class;
+  `type(facts)(...)`), also for a dataclass or another class without an `__init__` of its own,
+  through a `functools.partial` object holding the class (`make = partial(FinalFacts)`, then
+  `make()`, reported at `make()`), and through a library method building an instance of its
+  receiver's class without its `__init__` (a pydantic model's `FinalFacts.model_construct(...)`,
+  `FinalFacts.model_validate({...})` of a dict, `facts.model_copy(...)`); with
+  `subclasses = false`, constructing exactly the class;
 - what a property returns, called (`self.data_type(is_dict=True)` with a property `data_type`
   returning `type[DataType]` constructs `DataType`): the value the getter's return annotation
-  names is called, and the getter runs as reading the property does.
+  names is called, and the getter runs as reading the property does;
+- what a name bound to the target holds, called: a class attribute bound once to it
+  (`factory = FinalFacts` or `run = staticmethod(reset_cache)`, then `self.factory()`,
+  `cls.factory()`, or `Parser.factory()`), an entry of a module-level table of functions
+  (`HANDLERS["reset"]()`), and a module a function returns (`_ops().reset_cache()` of a function
+  returning the module it imports);
+- a private method by the name Python's name mangling gives it (`parser._Parser__run()` with
+  `parser: Parser`, `Parser._Parser__run(p)`, `self._Parser__run()` in a subclass): a target
+  names it `Parser.__run` or `Parser._Parser__run`. A subclass's own `__run` is another method
+  (`_JsonParser__run`), no override of the target.
 
 A target ending in an argument list names only the calls passing those constants:
 `DataType(is_dict=True)` is `DataType(is_dict=True)`, not `DataType(is_list=True)`, and
@@ -5892,9 +6196,18 @@ where every function the call may run binds that position to the parameter, or l
 every such function's default is `True`, `False`, `None`, `0`, or `""` and the value. A keyword
 binds as Python binds it: never a positional-only parameter, and one naming no parameter passes its
 value under its name into `**kwargs`; the receiver is the first position. A `**` operand that is a
-dict display with string constant keys, which nothing changes (a name holding it is only unpacked
-with `**`, bound to another name, tested, or returned), passes its entries as keywords
-(`DataType(**{"is_dict": True})`, `flags = {"is_dict": True}` then `DataType(**flags)`). A call that
+mapping the function builds, which nothing changes (a name holding it is only unpacked with `**`,
+merged into another mapping, bound to another name, tested, or returned), passes its entries as
+keywords: a dict display with string constant keys (`DataType(**{"is_dict": True})`,
+`flags = {"is_dict": True}` then `DataType(**flags)`); a merge (`{**a, **b}`, `dict(a, k=v)`,
+`a | b` of two mappings the function builds), which passes the last entry of each key, a mapping
+heki does not build (a parameter) replacing every key before it; and one built on several paths
+(`flags = a if c else b`), which passes a key where every path passes the same constant for it.
+Calling a `functools.partial` object the function makes passes what the object holds first (its
+positions, and its keywords, which a keyword of the call replaces), then the call's arguments; a
+call unpacking a mapping over keywords the object holds is not followed. A pydantic model's
+`model_construct` passes its keywords to the fields, `model_validate` the entries of the dict it
+is passed, and `model_copy` those of `update`. A call that
 raises `TypeError` instead of running the function (two keywords of one name, a parameter bound by a
 position, or the receiver, and a keyword, a keyword without `**kwargs` to land in, a position past
 the parameters without `*args`, a parameter without a default left unbound where no `*` unpacking or
@@ -5917,8 +6230,10 @@ only inspects its arguments (`print`, `getattr`, `type`), `super`, `typing.cast`
 function's defaults and annotations; a subscript (`Optional[Rule]`), a comparison (`f is decide`), a
 receiver (`Rule.of(...)`), and a module binding another name to it. A callable a builtin calls once
 per item (`sorted(xs, key=decide)`, `map(decide, xs)`) is a call already, and so is the
-`functools.partial` object handed to one. A reference in a class body counts for the function
-running the class statement (`<module>` for a class at module level). A class body, a function, a
+`functools.partial` object handed to one. A call or a reference in a class body (a class
+attribute's value, a method's decorator or default argument) counts for the function running the
+class statement (`<module>` for a class at module level, a nested class's included); a method's own
+body is the method's. A class body, a function, a
 lambda, or a comprehension nested in a function names what the function binds to a name it reads
 (a local import), at the name.
 
@@ -5971,7 +6286,8 @@ parameter, `Any`) is not seen; with `unresolved = "report"`,
 `MUT207` reports it.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with project
-callers hands its calls to its callers: the call is reported at the call sites of the first
+callers hands its calls to its callers (with `unresolved = "report"`, not one that some code also
+hands on as a value, which has callers heki does not see): the call is reported at the call sites of the first
 non-private callers, with the chain of calls down to the call as related information. A call runs
 where the body holding it runs, as for `MUT201`: a generator's calls where it is iterated (a
 generator an allowed caller creates and returns calls outside it when its caller iterates it), a
@@ -6010,6 +6326,14 @@ is a reference handing the method on through such a value (`return h._helper` wi
 a call through another protocol or the implementation's class stays reported. A pattern names the
 subprotocols of the protocols it matches too, unless `protocol-subclasses = false`.
 
+The help starts with the contract's `message` and then names up to three allowed callers that
+make the call the report names themselves: public functions and methods an `allowed-callers`
+pattern names (with `forbidden-callers`, every function outside them), by fully qualified name
+(``allowed callers of `DataType.replace_reference`: `pkg.store.GenerationStore.replace_ref` ``).
+A reference handing a target on, the targets calling each other, private functions (`_name`),
+special methods, and the exempt methods do not count. JSON output gives them with their files as
+`allowed_examples` (`fqn`, `path`).
+
 ## What a report states
 
 A report states that the function calls a function or method, or constructs a class, that a
@@ -6044,7 +6368,12 @@ Its premises:
   target (whether a test of a display holding it looks at it) is not part of the claim.
 - **Arguments** (a target with an argument list): the call binds each parameter the list names to
   its constant, as Python binds the call. Established: an argument heki cannot tell is no match,
-  and a call that raises `TypeError` instead of running the function binds nothing.
+  a mapping built on several paths passes a key only where every path passes the same constant
+  (as every function the call may run must agree), and a call that raises `TypeError` instead of
+  running the function binds nothing. Not followed: a mapping or a `functools.partial` object
+  the function does not build itself through copies (a parameter, an attribute, a call's result,
+  one chosen on several paths), a mapping something changes in place, a key computed at run time,
+  and a pydantic model's `model_validate` of a value not established to be a dict.
 
 ## Why is this bad?
 Some operations keep invariants only when one component runs them: a store that updates its
@@ -6111,7 +6440,10 @@ No automatic fix.
     `allowed-callers`.
   - `message`: the help of every report of the contract.
   - `unresolved`: `"ignore"` (default) or `"report"`: also report the calls the contract cannot
-    tie to a class, under `MUT207`.
+    tie to a class, under `MUT207`. A function some code hands
+    on as a value (a display, a class attribute, an argument, a return: `HANDLERS = [helper]`,
+    `REQUIRE = staticmethod(helper)`) has callers heki does not see: with `"report"`, it judges
+    its calls itself, as if it had no callers.
   - `references`: `"ignore"` (default), `"calls"`, `"calls-and-bases"`, or `"reads"`: a
     reference handing a target on to be called later counts as a call of it, with
     `"calls-and-bases"` a class statement naming a class target among its bases too, and with
@@ -6445,15 +6777,18 @@ count for a read.
     subclasses), or to one entry of the container an attribute holds (`Class.attr["key"]`), in
     every form `MUT201` follows, through the receivers whose class `MUT201` sees (the items of
     annotated containers included); a class's own initialization is no write (constructing a
-    fresh object runs its `__init__`), and neither is a write that constructs the object it
-    writes (`fresh-objects = "allow"`, the default; a write the reached function makes to an
+    fresh object runs its `__init__`): what an initializer writes on its own `self`, itself or
+    through the helpers it passes `self` to (`_link(self)`, `self._init_fields()`,
+    `super().__init__()`), while the same helper writing another object, or called after
+    `__init__` returned, writes an existing one; neither is a write that constructs the object
+    it writes (`fresh-objects = "allow"`, the default; a write the reached function makes to an
     object it allocated), as for `MUT201`;
   - `reads-targets`: reads of the `Class.attr` entries of `read-targets` (and their
     subclasses), in every form `MUT203` follows (`obj.attr`, `getattr(obj, "attr")`,
-    `obj.__dict__["attr"]` or `vars(obj)["attr"]`, a property getter that reads it); an
-    initializer reading its own instance is no read. An entry also names an attribute of a module
-    outside the project by its full dotted name (`sys.platform`), read as `sys.platform` or
-    through `from sys import platform`;
+    `obj.__dict__["attr"]` or `vars(obj)["attr"]`, a property getter that reads it); a class's
+    own initialization reading its instance, itself or through such a helper, is no read. An
+    entry also names an attribute of a module outside the project by its full dotted name
+    (`sys.platform`), read as `sys.platform` or through `from sys import platform`;
   - `calls`: calls of the `call-targets` entries, matched as the targets of `MUT204`: a function,
     a method (with its overrides in subclasses, through bound-method aliases and `getattr` with a
     constant name), or a class (constructing it); a call is one only when every function it may
@@ -6488,6 +6823,14 @@ count for a read.
   write of a `write-universe` entry that no `allow-writes` entry names is reported, in every form
   `writes-targets` follows. `allow-writes` also exempts writes from `write-targets` in the same
   boundary. Without `allow-writes`, the boundary allows no write of the universe.
+- An entry target (`Class.attr["key"]`, in `write-targets`, `write-universe`, or `allow-writes`)
+  also matches the writes a store operation makes with the key a call passes it: `set_extra(field,
+  "init", v)`, where `set_extra` writes `field.extras[key]`, writes `Field.extras["init"]`,
+  through any number of functions passing the key on, also as a `Final` constant. An item write
+  whose key heki cannot tell (a key the function computes, a parameter of the scope function, or
+  an argument that is neither) is reported where the boundary names an entry of the attribute and
+  allows no write of the whole container (`allow-writes = ["Field.extras"]`): "writes an entry of
+  `Field.extras` under a key heki cannot tell".
 
 Each scope function is searched breadth first over the project call graph, so the reported
 chain is a shortest one. The search does not enter:
@@ -6523,6 +6866,18 @@ definition. The report counts every distinct site of that kind the scope functio
 a Ratchet baseline sees a second blocking call, write, or parameter change below a recorded
 report.
 
+With `unresolved = "report"`, the boundary also reports what it cannot judge in the reach: a call
+heki resolves to no function (`HANDLERS[kind](https://heki.koxudaxi.dev/rules/...)` on a table something changes, a parameter
+called), a function it does not model (`eval`, a body too large) or whose body only a stub
+declares, and a write of an attribute `write-targets` or `write-universe` names on an object of
+unknown class or under a name computed at run time (`thing.required = True` of an unannotated
+`thing`, `setattr(thing, name, v)`); a class's own initialization is none, so constructing an
+object whose initializer runs `setattr(self, name, v)`, itself or in a helper it hands `self` to,
+is not reported. Each kind is reported once per scope function, at the call
+in the scope function starting the shortest chain to the first one, with the chain; calls and
+writes inside `allowed-callees` are not followed. Without it, the boundary is silent where heki
+cannot see, so no report does not mean the scope stays inside the boundary.
+
 `allow-writes` is only as precise as heki's view of which object each write changes. A write
 heki cannot tell apart from a write of the pass's input is reported: state that a property
 getter writes while rendering, or a store operation whose writes depend on its arguments. A
@@ -6552,7 +6907,9 @@ Its premises:
   part of the claim. With `"calls-and-bases"`, so is a class statement passing a class target
   as a base, typed where the statement runs; whether the subclass is constructed is not part of
   the claim. With `"reads"`, so is any other use of the target's value, as for `MUT204`; what the
-  use does with it is not part of the claim.
+  use does with it is not part of the claim. For an item write, the entry is the one the key
+  names: a constant in the function, or the constant a call on the chain passes for the key.
+  Established. A write under a key heki cannot tell may change another entry. Open.
 
 ## Why is this bad?
 Some parts of a code base promise to be pure: rendering a model must not mutate it, domain code
@@ -6618,6 +6975,9 @@ No automatic fix.
   - `allow-writes`: `Class.attr` writes the boundary allows (needs `write-universe`).
   - `fresh-objects`: `"allow"` (default) or `"report"`: whether writes that construct the object
     they write count, as for `[[tool.heki.write-owners]]`.
+  - `unresolved`: `"ignore"` (default) or `"report"`: whether what the boundary cannot judge in
+    the reach is reported (diagnostic targets `checks:unresolved-calls`,
+    `checks:unresolved-writes:required`).
   - `references`: `"ignore"` (default), `"calls"`, `"calls-and-bases"`, or `"reads"`: whether a
     reference handing a `call-targets` entry on, with `"calls-and-bases"` a class statement
     naming one among its bases, and with `"reads"` any other use of its value, counts for
@@ -6769,6 +7129,153 @@ No automatic fix.
 
 ---
 
+Source: https://heki.koxudaxi.dev/rules/generator-never-iterated/
+
+# generator-never-iterated (EFF116)
+
+Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+
+Opt-in: a call of a generator function whose generator nothing iterates (a statement, a value only tested for truth, a function handed to a thread, an `atexit` handler, or a `filter` predicate), so its body does not run.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+
+!!! warning "Experimental"
+
+    The development corpus has few reports of it, and its premises are not yet certified. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
+
+## What it does
+Checks for a call of a generator function whose generator nothing iterates. Calling a function
+with `yield` in its body (a `def` or an `async def`) only creates a generator: the body runs
+where the generator is iterated, step by step. A generator that is never iterated never runs
+its body, and nothing warns about it at run time.
+
+It reports a call of a project generator function:
+
+- as a statement: `self.load_rows()`, `cleanup(path)`;
+- whose value only a truth test reads: `if gen():`, `while gen():`, `assert gen()`,
+  `not gen()`, `bool(gen())`. A generator is always true, so the test always passes (or never,
+  under `not`), whatever the body would yield;
+- handed to a library call that calls it and drops what it returns, or tests it for truth: the
+  calls of the ecosystem catalog's `calls_unawaited` table that `EFF115` reads, such as
+  `threading.Thread(target=gen)`, `threading.Timer(t, gen)`, `multiprocessing.Process(target=gen)`,
+  `loop.call_soon(gen)`, `atexit.register(gen)`, `signal.signal(sig, gen)`,
+  `stack.callback(gen)` of an exit stack, and the predicates of `filter(gen, xs)`,
+  `itertools.filterfalse`, `itertools.takewhile`, and `itertools.dropwhile`. The function is
+  handed itself, as a bound method (`self.drain`), or through `functools.partial`.
+
+Every function the call may run is a generator function without decorators other than
+`staticmethod`, `classmethod`, `abstractmethod`, or `override`: a call of a method that a
+subclass overrides with a plain function is no report. When the name is bound to more than one
+definition (`def` under `if` and `else`), the report says that the last one is a generator
+function.
+
+It does not report:
+
+- a generator that is iterated, stepped, returned, yielded, stored, bound to a name, passed to
+  any call, or delegated to (`yield from gen()`);
+- a call that may run a plain function or a decorated one, such as another implementation of
+  the method;
+- a generator function under any other decorator: `contextlib.contextmanager`, a test fixture, or
+  a decorator heki does not know may call the function or wrap the generator;
+- a call heki does not resolve to a project function, and a library function that returns a
+  generator;
+- a function handed to a library call that gives what it returns back to the caller: an
+  executor's `submit` and `map`, the offloading APIs (`asyncio.to_thread`,
+  `loop.run_in_executor`, ...), and `weakref.finalize`, whose object returns the result when it
+  is called by hand;
+- an awaited call (`await gen()`), which raises `TypeError`, and which the type checkers report;
+- a generator expression: its scope is never called.
+
+## What a report states
+
+A report states that the named function is a generator function, so the call only creates a
+generator, and that nothing iterates that generator: the body of the function does not run
+there.
+
+Its premises:
+
+- **Generator function**: every function the call runs is a generator function that no
+  decorator replaces, and the name of each is bound to one definition. Open when the name is
+  bound to more than one definition (`def` under `if` and `else`).
+- **Every implementation**: the call's targets are every implementation it can run (R1, R2, R5).
+  Open for a receiver typed by a protocol, a base class heki knows nothing of that may define the
+  method, more than 64 classes to dispatch over, a member of a union that does not resolve, or a
+  name the project binds to another object.
+- **Never iterated**: the generator is only the value of the call, with no name, and nothing
+  reads it but a truth test; or the library call that runs the function drops what it returns or
+  tests it for truth, as the catalog describes it (R3).
+
+Not part of the claim: whether the body would have had an effect, and whether the caller meant
+the generator to run.
+
+## Why is this bad?
+The work the function does never happens, and nothing fails: rows are never loaded into a cache
+the next line reads, a fallback behind `if not gen():` never runs, a test helper with `yield`
+verifies nothing, a thread starts and ends at once. Adding a `yield` to a function (for a debug
+print, or to stream its results) silently breaks every caller that called it as a statement.
+
+## Example
+```python
+import threading
+
+
+class Code:
+    def __init__(self, raw: list[bytes]) -> None:
+        self.raw = raw
+        self.cache: list[str] = []
+
+    def load(self):
+        for item in self.raw:
+            self.cache.append(item.decode())
+            yield self.cache[-1]
+
+    def instruction(self, i: int) -> str:
+        self.load()  # EFF116
+        return self.cache[i]
+
+
+def parse_extra(text: str):
+    for line in text.splitlines():
+        yield line.strip()
+
+
+def check(text: str) -> None:
+    if not parse_extra(text):  # EFF116
+        print("nothing to parse")
+    threading.Thread(target=parse_extra, args=(text,)).start()  # EFF116
+```
+
+Use instead:
+```python
+class Code:
+    def instruction(self, i: int) -> str:
+        for _ in self.load():
+            pass
+        return self.cache[i]
+
+
+def check(text: str) -> None:
+    if not list(parse_extra(text)):
+        print("nothing to parse")
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `lint.extend-select = ["EFF116"]` (or `--extend-select EFF116`) enables the rule. It is
+  opt-in: selecting the `EFF` prefix does not enable it.
+
+## Known limitations
+- A generator bound to a name that nothing reads (`rows = gen()`) is not reported.
+- A truth test through a short-circuit expression whose value is used (`gen() or default`) is
+  not reported: the expression's value is the generator.
+
+
+---
+
 Source: https://heki.koxudaxi.dev/rules/hash-attr-mutation/
 
 # hash-attr-mutation (MUT107)
@@ -6815,7 +7322,9 @@ The rule reports the write itself, once per method and attribute. It does not re
   instead, or which raises without one, and any write on a class whose MRO defines
   `__setattr__` or `__delattr__`;
 - lazy initialization: a write under a `None` / falsy check of the same attribute
-  (`if self._key is None: self._key = ...`, `if not self._parts: ...`);
+  (`if self._key is None: self._key = ...`, `if not self._parts: ...`, also of
+  `getattr(self, "_key", None)` and `hasattr(self, "_key")`), or in the `except
+  AttributeError:` clause of a `try` that reads it;
 - memo / cache dictionaries (`self._cache[key] = value`, `setdefault`, the
   `if key not in self._memo:` pattern): in-place changes of an attribute with a `cache` or
   `memo` word in its name; rebinding it (`self.cache_size = n`) and names such as
@@ -7992,7 +8501,7 @@ Its premises:
 - **Every return**: each function on the chain has made the next call on every path on which it
   returns normally.
 - **Every implementation**: each call on the chain has as its targets every implementation it
-  can run (assumptions R2 and R5), each with the fact.
+  can run (assumptions R1, R2, and R5), each with the fact.
 - **Sends**: the last call sends a statement on every call, as the ecosystem catalog describes it
   (R3).
 
@@ -8033,6 +8542,11 @@ def names(cursor: sqlite3.Cursor, ids: list[int]) -> list[str]:
 The query returns each matching row once and in no particular order, so the result is rebuilt
 from the IDs: in their order, with repeated IDs repeated. A database caps the number of
 parameters in one statement; split a long list of IDs into chunks.
+
+## Known limitations
+A call through a name the project binds to another object in a way `EFF101` lists among its
+known limitations (`mock.patch` outside tests, `sys.modules`) still counts as running its
+definition here too.
 
 ## Fix safety
 No automatic fix.
@@ -8568,8 +9082,10 @@ stop_event.is_set():`), or is a `while True:` loop that waits on every iteration
 reading its target steps through items, also when it sleeps per item.
 
 A client that is only created while an attribute is unset, which the code then sets (lazy
-initialization: `if not self._sock: self._sock = connect()`, or `if self._sock: return`
-before connecting), is created once per object, not on every iteration: the call is not
+initialization: `if not self._sock: self._sock = connect()`, `if self._sock: return` before
+connecting, `if not hasattr(self, "_sock"):`, a `None` test of `getattr(self, "_sock", None)`,
+or the `except AttributeError:` clause of a `try` reading `self._sock`; the store may be
+`setattr` or `object.__setattr__`), is created once per object, not on every iteration: the call is not
 reported unless a data-sized loop around it constructs the object in each iteration
 (`Connection().send(cmd)`); `conn.send(cmd)` on a connection made before the loop, taken from
 a pool, or held by the receiver is not reported. The receiver of a bound method, the arguments a
@@ -8823,7 +9339,10 @@ the allowed readers:
 - through `ref.__dict__["children"]` or `ref.__dict__.get("children")` (also on `vars(ref)`),
   also with a string constant for the key.
 
-A target names a class and an attribute; it covers the class's subclasses too. A container
+A target names a class and an attribute; it covers the class's subclasses too. A private
+attribute (`self.__secret` in class `Vault`) is the member `_Vault__secret`, which a target names
+`Vault.__secret` or `Vault._Vault__secret`, read inside the class as `self.__secret` and outside
+as `vault._Vault__secret`. A container
 entry (`Class.attr["key"]`) is a write target only: reading an entry reads the attribute, so a
 read target names `Class.attr` (an entry is a configuration error).
 
@@ -8884,6 +9403,13 @@ With `allowed-protocols`, a read through a value typed with a project protocol t
 declares the attribute, itself or through its protocol bases, is allowed wherever it is judged; a
 read through another protocol or the implementation's class stays reported. A pattern names the
 subprotocols of the protocols it matches too, unless `protocol-subclasses = false`.
+
+The help starts with the contract's `message` and then names up to three allowed readers that
+read the member the report names themselves: public functions and methods an `allowed-readers`
+pattern names (with `forbidden-readers`, every function outside them), by fully qualified name
+(``allowed readers of `Reference.children`: `pkg.index.GenerationIndex.children_of` ``). Private
+functions (`_name`), special methods, and the exempt methods do not count. JSON output gives them
+with their files as `allowed_examples` (`fqn`, `path`).
 
 ## What a report states
 
@@ -8961,7 +9487,10 @@ No automatic fix.
     like `allowed-readers`.
   - `message`: the help of every report of the contract.
   - `unresolved`: `"ignore"` (default) or `"report"`: also report the reads the contract cannot
-    tie to a class, under `MUT206`.
+    tie to a class, under `MUT206`. A function some code hands
+    on as a value (a display, a class attribute, an argument, a return: `HANDLERS = [helper]`,
+    `REQUIRE = staticmethod(helper)`) has callers heki does not see: with `"report"`, it judges
+    its reads itself, as if it had no callers.
   - `attribution`: `"call-graph"` (default) or `"lexical"`: whether a private helper hands its
     reads to its callers and a function that only runs inside allowed readers is allowed, or
     each read is judged in the function holding it.
@@ -9130,10 +9659,14 @@ value.
 
 Filling a memo of the shared object, directly or in a method or helper it is handed to, is no
 mutation: an in-place change of an attribute named as a cache or memo (`self._style_cache[k] =
-v`, also through the methods of a cache object held there), a store under
-`if k not in self._decoders:` or through `setdefault`, and a lazy
-initialization (`if self._runtime is None: self._runtime = load()`) leave what the object
-computes as it was.
+v`, also through the methods of a cache object held there), a store under a test finding the
+key missing (`if k not in self._decoders:`, the `else` of `if k in ...:`, a `None` or falsy
+`self._index.get(k)`, the key computed again by the same expression, `id(raw)`) or through
+`setdefault`, a fill of a container a helper has as its default (`def fill(key, _seen={})`), and
+a lazy initialization leave what the object computes as it was. A lazy initialization stores
+an attribute (`self._x = v`, `setattr`, `object.__setattr__`) where a test found it unset: `if
+self._runtime is None:`, `if not hasattr(self, "_runtime"):`, a `None` test of `getattr(self,
+"_runtime", None)`, or the `except AttributeError:` clause of a `try` that reads it.
 
 ## What a report states
 
@@ -10050,6 +10583,10 @@ name is no target: a class outside the target's family (`DataType` and its subcl
 caller path through an allowed caller counts like any other: the call is the function's own, and
 its callers only tell the receiver's class.
 
+The help names up to three allowed callers that call a target of the method's name
+themselves, as for `MUT204`, after the contract's `message`:
+``allowed callers of `replace_reference`: ...``.
+
 ## What a report states
 
 A report states that, outside the call owners, the function calls a method named like a target of
@@ -10215,6 +10752,10 @@ With `attribution = "lexical"`, a function that only runs inside allowed readers
 and a caller path through an allowed reader counts like any other: the read is the function's
 own, and its callers only tell the object's class.
 
+The help names up to three allowed readers that read a target of the attribute's name
+themselves, as for `MUT203`, after the contract's `message`:
+``allowed readers of `children`: ...``.
+
 ## What a report states
 
 A report states that, outside the read owners, the function reads an attribute named like a target
@@ -10287,7 +10828,7 @@ Strict mode of a `write-owners` contract (`unresolved = "report"`): writing an a
 ## What it does
 The strict mode of a `[[tool.heki.write-owners]]` contract that sets `unresolved = "report"`:
 reports the writes outside the write owners that `MUT201` cannot tie to a target class, so a clean
-`MUT201` run says how much it did not check. Three kinds of writes are reported, each once, at the
+`MUT201` run says how much it did not check. Four kinds of writes are reported, each once, at the
 write:
 
 - an attribute named like a target attribute (`fields` for `Model.fields`, any name for
@@ -10310,7 +10851,12 @@ write:
   `slots=True` along the way), and one stored on its class, a subclass, or an instance outside
   the class body (`Model.KEY = "x"`);
 - an attribute name computed at run time written on an object of unknown class (an unannotated
-  `target` in `setattr(target, name, v)` or `target.__dict__[key] = v`), which may be any target.
+  `target` in `setattr(target, name, v)` or `target.__dict__[key] = v`), which may be any target;
+- with `unlisted-dict-keys = "report"`, a constant `__dict__` key written on an object of unknown
+  class (`field.__dict__["_name_cache"] = v`, `field.__dict__.setdefault(KEY, v)`, `del
+  vars(field)["k"]`) that no target of any `write-owners` contract names for some class this
+  contract's targets cover: it may be a new key of that class, which `MUT201` reports on a typed
+  object.
 
 The rules of `MUT201` for what is allowed apply: allowed writers, exempt methods, a class's own
 initialization (`setattr(self, name, v)` in `__init__`), functions that only run inside allowed
@@ -10319,23 +10865,33 @@ they write. A parameter that every caller path binds to an object of a project c
 reported: `MUT201` reports the write at those callers. For a computed name on a parameter, a
 caller binding an object of a target class leaves the write to `MUT205` (`MUT201` has no name to
 report at that caller), unless it is that class's own initialization handing over its `self`,
-and one binding an object of another class ties it there. With
+and one binding an object of another class ties it there. The same holds for a `__dict__` key no
+target names: a caller binding an object of a class the key would be new to leaves the write to
+`MUT205` (`MUT201` sees no `__dict__` write at a caller handing the object to a helper that does
+not type it). With
 `attribution = "lexical"`, a function that only runs inside allowed writers is not allowed, and a
 caller path through an allowed writer counts like any other, while a helper that only a class's
 own initialization runs on its own `self` (`self._assign(name)` in `__init__`) stays allowed.
 With `own-receiver = "allow"`, a computed name written on the receiver of the method judging it
 (`setattr(self, name, v)`) is allowed.
 
+The help names up to three allowed writers that write a target of the attribute's name
+themselves, as for `MUT201`, after the contract's `message`:
+``allowed writers of `fields`: ...``.
+
 ## What a report states
 
 A report states that, outside the write owners, the function writes an attribute named like a target
-of the `write-owners` contract on an object whose class heki does not know, or a computed attribute
-name on a guarded class or on an object whose class heki does not know.
+of the `write-owners` contract on an object whose class heki does not know, a computed attribute
+name on a guarded class or on an object whose class heki does not know, or, with
+`unlisted-dict-keys = "report"`, a `__dict__` key no target names on an object whose class heki
+does not know.
 
 Its premises:
 
-- **Named like a target**: the attribute's name matches a target's, or is computed at run time.
-  Established.
+- **Named like a target**: the attribute's name matches a target's, or is computed at run time
+  (with `unlisted-dict-keys = "report"`, or is a `__dict__` key no target names for a class the
+  targets cover). Established.
 - **Unknown class**: heki did not resolve the class of the object. Established: the claim is about
   heki's own resolution.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
@@ -10375,6 +10931,13 @@ def read_only(model: Model) -> int:
     return len(model.fields)  # not reported: a read
 ```
 
+With `unlisted-dict-keys = "report"` as well:
+
+```python
+def remember(model) -> None:
+    model.__dict__["_seen"] = True  # MUT205: a key no target names, on an object of unknown class
+```
+
 Use instead:
 ```python
 def touch(model: Model) -> None:
@@ -10387,6 +10950,8 @@ No automatic fix.
 ## Options
 - `[[tool.heki.write-owners]]`:
   - `unresolved`: `"ignore"` (default) or `"report"`.
+  - `unlisted-dict-keys`: `"ignore"` (default) or `"report"`: also report a constant `__dict__`
+    key no `write-owners` target names, written on an object of unknown class.
   - `targets`, `allowed-writers`, `forbidden-writers`, `exempt-methods`, `fresh-objects`,
     `attribution`, `message`: as for `MUT201`.
 
@@ -10557,8 +11122,9 @@ lists keys any function may write. A computed key, a plain attribute store (`fie
 `setattr`), and a write in a helper that does not see the object's class are not such writes. A
 target can also name one entry of the container an attribute holds, `Class.attr["key"]`: it matches
 the writes of that key (`field.extras["init"] = v`, `field.extras[INIT]` with a string constant,
-`field.extras.pop("init")`, `del field.extras["init"]`, `field.extras["init"].append(v)`), not a
-write of the whole container (`field.extras = {}`, `field.extras.update(...)`) or with a computed
+`field.extras.pop("init")`, `del field.extras["init"]`, `field.extras["init"].append(v)`, and a
+store operation called with the key, `set_extra(field, "init", v)` writing `field.extras[key]`,
+reported at the call), not a write of the whole container (`field.extras = {}`, `field.extras.update(...)`) or with a computed
 key, which are writes of `Class.attr`. When a contract names both a container and one of its
 entries, a write of the entry is reported once, under the entry.
 
@@ -10661,6 +11227,15 @@ containers with the original, so only rebinding its attributes constructs it
 (`copied.data_types = [...]`); `copied.data_types.append(x)` changes the original's list and is
 reported. `fresh-objects = "report"` reports these writes like any other.
 
+The help starts with the contract's `message` and then names up to three allowed writers that
+write the member the report names themselves: public functions and methods an `allowed-writers`
+pattern names (with `forbidden-writers`, every function outside them), by fully qualified name
+(``allowed writers of `Model.fields`: `pkg.store.Store.add_field` ``). A write through a helper,
+a write that constructs the object it writes (with `fresh-objects = "allow"`), private functions
+(`_name`), special methods (`__init__`), and the exempt methods do not count. JSON output gives
+them with their files as `allowed_examples` (`fqn`, `path`); a report without one has no such
+field.
+
 ## What a report states
 
 A report states that the function writes a target of a `write-owners` contract (an attribute, or the
@@ -10751,7 +11326,10 @@ No automatic fix.
   - `fresh-objects`: `"allow"` (default) or `"report"`: whether writes that construct the object
     they write are reported.
   - `unresolved`: `"ignore"` (default) or `"report"`: also report the writes the contract
-    cannot tie to a class, under `MUT205`.
+    cannot tie to a class, under `MUT205`. A function some code hands
+    on as a value (a display, a class attribute, an argument, a return: `HANDLERS = [helper]`,
+    `REQUIRE = staticmethod(helper)`) has callers heki does not see: with `"report"`, it judges
+    its writes itself, as if it had no callers.
   - `attribution`: `"call-graph"` (default) or `"lexical"`: whether a private helper hands its
     writes to its callers and a function that only runs inside allowed writers is allowed, or
     each write is judged in the function holding it.
@@ -10819,6 +11397,14 @@ It does not report:
   a caller, at any distance);
 - paths that leave the function by raising: exception edges are not followed and only normal
   returns count.
+
+The help starts with the contract's `message` and then names up to three announcing writers of
+the target the report names: public functions and methods that write it themselves and announce
+every write of it, their own and their helpers', on every path, and `exempt-writers` that write it
+themselves, by fully qualified name
+(``announcing writers of `DataModel.fields`: `pkg.passes.narrow` ``). Private functions (`_name`)
+and special methods do not count. JSON output gives them with their files as `allowed_examples`
+(`fqn`, `path`).
 
 ## What a report states
 

@@ -634,6 +634,40 @@ def copies_only(flag: bool) -> None:
     );
 }
 
+/// A written keyword binds its parameter whatever way the `**` mapping beside it is built: a
+/// helper changing the argument it passes changes the shared value, beside a display and beside
+/// a mapping built on two paths.
+#[test]
+fn a_keyword_beside_a_mapping_of_several_ways_binds_its_parameter() {
+    let p = project("shared_keyword_beside_mapping", DEEP_SHARED);
+    p.write(
+        "app.py",
+        r#"CACHE = [[1], [2]]
+
+
+def shared() -> list[list[int]]:
+    return CACHE
+
+
+def fill(rows, kind=False):
+    rows.append([int(kind)])
+
+
+def one_way() -> None:
+    fill(rows=shared(), **{"kind": True})
+
+
+def two_ways(flag: bool) -> None:
+    flags = {"kind": True} if flag else {"kind": False}
+    fill(rows=shared(), **flags)
+"#,
+    );
+    assert_eq!(
+        reports(&p, "MUT202"),
+        vec![at("app.py", 13, "one_way"), at("app.py", 18, "two_ways")]
+    );
+}
+
 #[test]
 fn container_constructors_and_unpacking_displays_copy_only_the_top_level() {
     let p = project("shared_constructors", "");
@@ -1024,6 +1058,161 @@ def render_logged(width):
             at("pkg/render.py", 33, "render_logged"),
             at("pkg/render.py", 34, "render_logged"),
             at("pkg/render.py", 35, "render_logged"),
+        ]
+    );
+}
+
+/// The memo fills and lazy initializations written without a `None` test of the attribute or a
+/// `not in` test of the memo: `hasattr`, `getattr(..., None)`, `try` / `except AttributeError`,
+/// a store through `object.__setattr__`, `setattr`, or `__setattr__`, a fill under a `None` or
+/// falsy `.get(k)`, the `else` of a `k in` test, a key computed twice by the same expression
+/// (a call, a method, a tuple, an attribute), and a container a helper has as its default.
+#[test]
+fn memo_fills_written_by_hand_leave_a_shared_object_alone() {
+    let p = project("shared_memo_shapes", "");
+    p.write(
+        "node.py",
+        r#"from functools import lru_cache
+
+
+class Node:
+    def __init__(self, name):
+        self.name = name
+        self._h = None
+        self._u = None
+        self._index = {}
+
+    def by_hasattr(self):
+        if not hasattr(self, "_size"):
+            self._size = len(self.name)
+        return self._size
+
+    def by_getattr(self):
+        found = getattr(self, "_upper", None)
+        if found is None:
+            found = self._upper = self.name.upper()
+        return found
+
+    def by_try(self):
+        try:
+            return self._lower
+        except KeyError:
+            raise
+        except AttributeError:
+            self._lower = self.name.lower()
+            return self._lower
+
+    def __hash__(self):
+        if self._h is None:
+            object.__setattr__(self, "_h", hash(self.name))
+        return self._h
+
+    def by_setattr(self):
+        if self._u is None:
+            setattr(self, "_u", self.name)
+            self.__setattr__("_u", self.name)
+        return self._u
+
+    def by_get(self, key):
+        found = self._index.get(key.lower())
+        if not found:
+            found = self._index[key.lower()] = len(key)
+        return found
+
+    def by_in(self, a, b):
+        if (a, b) in self._index:
+            return self._index[(a, b)]
+        self._index[(a, b)] = 0
+        return 0
+
+    def by_identity(self, raw):
+        if self._index.get(id(raw)) is None:
+            self._index[id(raw)] = raw.name
+        return self._index[id(raw)]
+
+    def by_attribute(self, raw):
+        if raw.name not in self._index:
+            self._index[raw.name] = 1
+
+    def other_error(self):
+        try:
+            return self._title
+        except KeyError:
+            self._title = self.name.title()
+            return self._title
+
+    def bare_except(self):
+        try:
+            return self._label
+        except:
+            self._label = self.name
+            return self._label
+
+    def other_key(self):
+        if "probe" not in self._index:
+            self._index[KEY] = 0
+
+    def closes(self):
+        try:
+            self._closed = True
+        finally:
+            if self.name:
+                self._closed = False
+
+
+KEY = "probe"
+
+
+def fill(key, _seen={}):
+    if key not in _seen:
+        _seen[key] = 1
+
+
+def drain(key, _seen={}):
+    _seen.clear()
+
+
+@lru_cache(maxsize=None)
+def node(name) -> Node:
+    return Node(name)
+
+
+@lru_cache(maxsize=None)
+def table(name) -> dict:
+    return {}
+
+
+def kept(name, raw):
+    n = node(name)
+    n.by_hasattr()
+    n.by_getattr()
+    n.by_try()
+    n.__hash__()
+    n.by_setattr()
+    n.by_get("k")
+    n.by_in(1, 2)
+    n.by_identity(raw)
+    n.by_attribute(raw)
+    fill("k", table(name))
+
+
+def changed(name):
+    n = node(name)
+    n.other_error()
+    n.bare_except()
+    n.other_key()
+    n.closes()
+    drain("k", table(name))
+"#,
+    );
+    assert_eq!(
+        reports(&p, "MUT114"),
+        vec![
+            at("node.py", 127, "changed"),
+            at("node.py", 128, "changed"),
+            at("node.py", 129, "changed"),
+            at("node.py", 130, "changed"),
+            at("node.py", 131, "changed"),
         ]
     );
 }

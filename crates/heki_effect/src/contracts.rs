@@ -21,20 +21,28 @@ use std::fmt::Debug;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ContractClass {
     pub fqn: String,
-    /// The qualname of the project class inside its module (`Outer.Inner`), looked up only when
-    /// a class pattern has a module part ([`Contracts::names_class_modules`]); `None` otherwise,
-    /// and for a class the project does not define.
+    /// The qualname of the project class inside its module (`Outer.Inner`), looked up when a
+    /// class pattern has a module part ([`Contracts::names_class_modules`]) and for the
+    /// [`Self::member`] of a class; `None` otherwise, and for a class the project does not define.
     pub qualname: Option<String>,
 }
 
 impl ContractClass {
     /// The class `fqn` as `contracts` match it.
     pub fn new(contracts: &dyn Contracts, project: &ProjectDecls, fqn: String) -> Self {
-        let qualname = if contracts.names_class_modules() {
-            project.class_qualname(&fqn).map(str::to_owned)
+        if contracts.names_class_modules() {
+            Self::with_qualname(project, fqn)
         } else {
-            None
-        };
+            Self {
+                fqn,
+                qualname: None,
+            }
+        }
+    }
+
+    /// The class `fqn` with its qualname when the project defines it.
+    pub fn with_qualname(project: &ProjectDecls, fqn: String) -> Self {
+        let qualname = project.class_qualname(&fqn).map(str::to_owned);
         Self { fqn, qualname }
     }
 
@@ -47,7 +55,10 @@ impl ContractClass {
     }
 
     /// The fqn and the qualname of attribute `attr` of the class, as
-    /// [`Contracts::readonly_producer`] takes them (the fqn twice without the qualname).
+    /// [`Contracts::readonly_producer`] takes them: the fqn twice without the qualname, which
+    /// then names the attribute of an external class. A project class is built
+    /// [`Self::with_qualname`], so a producer may name its private attribute as written in it
+    /// (`C.__items` of `_C__items`).
     pub fn member(&self, attr: &str) -> (String, String) {
         let fqn = format!("{}.{attr}", self.fqn);
         let qualname = self
@@ -146,11 +157,6 @@ pub trait Contracts: Debug + Send + Sync {
     /// Whether an effect boundary reports the imports that probe whether a module is installed
     /// (`import-probes = "report"`).
     fn import_probes(&self) -> bool;
-
-    /// Whether an effect boundary checks a module body (a scope naming `<module>`): what the
-    /// bodies of its classes take from outside the project is then the module body's
-    /// (`FileSummary::external_accesses`).
-    fn checks_module_bodies(&self) -> bool;
 
     /// Whether a `call-owners` contract allows the calls through the receiver of the method
     /// making them (`own-receiver = "allow"`): the call sites then keep the parameters their

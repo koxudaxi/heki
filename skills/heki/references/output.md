@@ -16,6 +16,7 @@ A list of diagnostics. Each one has:
 | `blocker` | the obligation that blocks an automatic fix, if any |
 | `fix` | byte-span edits for proven-safe rewrites |
 | `sites` | the violation sites a contract report stands for, when more than one |
+| `allowed_examples` | for a contract report, up to three public functions (`fqn`, `path`) that do the same from a place the contract allows, which `help` names |
 
 `severity` is `error` for a bug (a wrong result, an exception, a lost update, a deadlock, a
 broken contract) and `warning` for slower code or a bug that is rarely harmful.
@@ -37,6 +38,9 @@ One versioned object about one function:
 
 - `pure` means heki found no effect and no change of an input or of shared state, and resolved
   every call below. Libraries heki's catalog does not list count as having no effects.
+- Constructing an object changes no existing one: `changes.class_attrs` marks the writes of an
+  object under construction `fresh` (one the function allocates and fills, or the `self` of a
+  class's own initialization, written by the initializer or by a helper it passes `self` to).
 - `purity.unknown_reach.entries` lists the functions heki cannot follow among the function and
   its callees (a call it cannot resolve, or a body only a stub declares), nearest first, at most
   100; `truncated` says there are more. `purity.unknown_at` is the first of them. Both are given

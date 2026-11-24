@@ -17,6 +17,7 @@ mod open_premises;
 mod prompt;
 mod recommend;
 mod skill;
+mod version;
 mod watch;
 
 use anyhow::Result;
@@ -112,6 +113,9 @@ enum Commands {
     Recommend(RecommendArgs),
     /// Experimental: install heki's Agent Skill where a coding agent reads skills.
     Skill(SkillArgs),
+    /// Print the version of this heki, and with `--changelog` what this release changed.
+    #[command(after_long_help = help::VERSION.render())]
+    Version(VersionArgs),
     /// Internal/testing: dump `heki_semantic` scope tree as JSON for CPython `symtable` verification.
     #[command(hide = true)]
     DumpSemantic(DumpSemanticArgs),
@@ -421,6 +425,14 @@ struct DumpSemanticArgs {
 }
 
 #[derive(Debug, Args)]
+struct VersionArgs {
+    /// Also print this release's section of the changelog, the one the binary was built with,
+    /// without a network.
+    #[arg(long)]
+    changelog: bool,
+}
+
+#[derive(Debug, Args)]
 struct SkillArgs {
     #[command(subcommand)]
     command: SkillCommand,
@@ -538,6 +550,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Skill(SkillArgs {
             command: SkillCommand::Install(args),
         }) => skill::install(&args),
+        Commands::Version(args) => version::run(args.changelog),
         Commands::DumpSemantic(args) => {
             let (src, parsed) = parse_file(&args.file)?;
             let ver = heki_env::PythonVersion::parse_tag(&args.target_version)

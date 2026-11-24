@@ -23,11 +23,24 @@ the allowed callers and resolves to a target:
 - a module-level function (`pkg.util.reset_cache()`);
 - a class: constructing it or a subclass (`FinalFacts(...)`, `pkg.facts.FinalFacts(...)`,
   `cls(...)` in a class method, a value typed `type[FinalFacts]` or `typing.Type[FinalFacts]`,
-  `type(facts)(...)`), also for a dataclass or another class without an `__init__` of its own;
-  with `subclasses = false`, constructing exactly the class;
+  `type(facts)(...)`), also for a dataclass or another class without an `__init__` of its own,
+  through a `functools.partial` object holding the class (`make = partial(FinalFacts)`, then
+  `make()`, reported at `make()`), and through a library method building an instance of its
+  receiver's class without its `__init__` (a pydantic model's `FinalFacts.model_construct(...)`,
+  `FinalFacts.model_validate({...})` of a dict, `facts.model_copy(...)`); with
+  `subclasses = false`, constructing exactly the class;
 - what a property returns, called (`self.data_type(is_dict=True)` with a property `data_type`
   returning `type[DataType]` constructs `DataType`): the value the getter's return annotation
-  names is called, and the getter runs as reading the property does.
+  names is called, and the getter runs as reading the property does;
+- what a name bound to the target holds, called: a class attribute bound once to it
+  (`factory = FinalFacts` or `run = staticmethod(reset_cache)`, then `self.factory()`,
+  `cls.factory()`, or `Parser.factory()`), an entry of a module-level table of functions
+  (`HANDLERS["reset"]()`), and a module a function returns (`_ops().reset_cache()` of a function
+  returning the module it imports);
+- a private method by the name Python's name mangling gives it (`parser._Parser__run()` with
+  `parser: Parser`, `Parser._Parser__run(p)`, `self._Parser__run()` in a subclass): a target
+  names it `Parser.__run` or `Parser._Parser__run`. A subclass's own `__run` is another method
+  (`_JsonParser__run`), no override of the target.
 
 A target ending in an argument list names only the calls passing those constants:
 `DataType(is_dict=True)` is `DataType(is_dict=True)`, not `DataType(is_list=True)`, and
@@ -41,9 +54,18 @@ where every function the call may run binds that position to the parameter, or l
 every such function's default is `True`, `False`, `None`, `0`, or `""` and the value. A keyword
 binds as Python binds it: never a positional-only parameter, and one naming no parameter passes its
 value under its name into `**kwargs`; the receiver is the first position. A `**` operand that is a
-dict display with string constant keys, which nothing changes (a name holding it is only unpacked
-with `**`, bound to another name, tested, or returned), passes its entries as keywords
-(`DataType(**{"is_dict": True})`, `flags = {"is_dict": True}` then `DataType(**flags)`). A call that
+mapping the function builds, which nothing changes (a name holding it is only unpacked with `**`,
+merged into another mapping, bound to another name, tested, or returned), passes its entries as
+keywords: a dict display with string constant keys (`DataType(**{"is_dict": True})`,
+`flags = {"is_dict": True}` then `DataType(**flags)`); a merge (`{**a, **b}`, `dict(a, k=v)`,
+`a | b` of two mappings the function builds), which passes the last entry of each key, a mapping
+heki does not build (a parameter) replacing every key before it; and one built on several paths
+(`flags = a if c else b`), which passes a key where every path passes the same constant for it.
+Calling a `functools.partial` object the function makes passes what the object holds first (its
+positions, and its keywords, which a keyword of the call replaces), then the call's arguments; a
+call unpacking a mapping over keywords the object holds is not followed. A pydantic model's
+`model_construct` passes its keywords to the fields, `model_validate` the entries of the dict it
+is passed, and `model_copy` those of `update`. A call that
 raises `TypeError` instead of running the function (two keywords of one name, a parameter bound by a
 position, or the receiver, and a keyword, a keyword without `**kwargs` to land in, a position past
 the parameters without `*args`, a parameter without a default left unbound where no `*` unpacking or
@@ -66,8 +88,10 @@ only inspects its arguments (`print`, `getattr`, `type`), `super`, `typing.cast`
 function's defaults and annotations; a subscript (`Optional[Rule]`), a comparison (`f is decide`), a
 receiver (`Rule.of(...)`), and a module binding another name to it. A callable a builtin calls once
 per item (`sorted(xs, key=decide)`, `map(decide, xs)`) is a call already, and so is the
-`functools.partial` object handed to one. A reference in a class body counts for the function
-running the class statement (`<module>` for a class at module level). A class body, a function, a
+`functools.partial` object handed to one. A call or a reference in a class body (a class
+attribute's value, a method's decorator or default argument) counts for the function running the
+class statement (`<module>` for a class at module level, a nested class's included); a method's own
+body is the method's. A class body, a function, a
 lambda, or a comprehension nested in a function names what the function binds to a name it reads
 (a local import), at the name.
 
@@ -120,7 +144,8 @@ parameter, `Any`) is not seen; with `unresolved = "report"`,
 `MUT207` reports it.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with project
-callers hands its calls to its callers: the call is reported at the call sites of the first
+callers hands its calls to its callers (with `unresolved = "report"`, not one that some code also
+hands on as a value, which has callers heki does not see): the call is reported at the call sites of the first
 non-private callers, with the chain of calls down to the call as related information. A call runs
 where the body holding it runs, as for `MUT201`: a generator's calls where it is iterated (a
 generator an allowed caller creates and returns calls outside it when its caller iterates it), a
@@ -159,6 +184,14 @@ is a reference handing the method on through such a value (`return h._helper` wi
 a call through another protocol or the implementation's class stays reported. A pattern names the
 subprotocols of the protocols it matches too, unless `protocol-subclasses = false`.
 
+The help starts with the contract's `message` and then names up to three allowed callers that
+make the call the report names themselves: public functions and methods an `allowed-callers`
+pattern names (with `forbidden-callers`, every function outside them), by fully qualified name
+(``allowed callers of `DataType.replace_reference`: `pkg.store.GenerationStore.replace_ref` ``).
+A reference handing a target on, the targets calling each other, private functions (`_name`),
+special methods, and the exempt methods do not count. JSON output gives them with their files as
+`allowed_examples` (`fqn`, `path`).
+
 ## What a report states
 
 A report states that the function calls a function or method, or constructs a class, that a
@@ -193,7 +226,12 @@ Its premises:
   target (whether a test of a display holding it looks at it) is not part of the claim.
 - **Arguments** (a target with an argument list): the call binds each parameter the list names to
   its constant, as Python binds the call. Established: an argument heki cannot tell is no match,
-  and a call that raises `TypeError` instead of running the function binds nothing.
+  a mapping built on several paths passes a key only where every path passes the same constant
+  (as every function the call may run must agree), and a call that raises `TypeError` instead of
+  running the function binds nothing. Not followed: a mapping or a `functools.partial` object
+  the function does not build itself through copies (a parameter, an attribute, a call's result,
+  one chosen on several paths), a mapping something changes in place, a key computed at run time,
+  and a pydantic model's `model_validate` of a value not established to be a dict.
 
 ## Why is this bad?
 Some operations keep invariants only when one component runs them: a store that updates its
@@ -260,7 +298,10 @@ No automatic fix.
     `allowed-callers`.
   - `message`: the help of every report of the contract.
   - `unresolved`: `"ignore"` (default) or `"report"`: also report the calls the contract cannot
-    tie to a class, under `MUT207`.
+    tie to a class, under `MUT207`. A function some code hands
+    on as a value (a display, a class attribute, an argument, a return: `HANDLERS = [helper]`,
+    `REQUIRE = staticmethod(helper)`) has callers heki does not see: with `"report"`, it judges
+    its calls itself, as if it had no callers.
   - `references`: `"ignore"` (default), `"calls"`, `"calls-and-bases"`, or `"reads"`: a
     reference handing a target on to be called later counts as a call of it, with
     `"calls-and-bases"` a class statement naming a class target among its bases too, and with

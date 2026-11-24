@@ -9,7 +9,7 @@
 - [Scope and Limitations](https://heki.koxudaxi.dev/scope/): This page says what heki checks, what it leaves to other tools, where its knowledge comes from, and what it does when it cannot tell
 - [Installation](https://heki.koxudaxi.dev/installation/): heki is a single executable: its Python package ships only that executable and installs no Python dependencies into your environment
 - [Getting Started](https://heki.koxudaxi.dev/getting-started/): This page runs heki on a project, reads a diagnostic, applies a fix, and picks the rules
-- [Rules](https://heki.koxudaxi.dev/rules/): heki has 48 rules in four families
+- [Rules](https://heki.koxudaxi.dev/rules/): heki has 49 rules in four families
 - [Rule Precision](https://heki.koxudaxi.dev/precision/): A rule is exact once it is certified (below), and heuristic until then
 - [Experimental Features](https://heki.koxudaxi.dev/experimental/): Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes
 - [Development](https://heki.koxudaxi.dev/development/): This page covers building and testing heki, its checks against CPython, the memory budget, the documentation, releases, and the crates
@@ -41,6 +41,7 @@
 - [conditional-ownership-mutation (MUT112)](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
 - [effect-boundary-violation (EFF201)](https://heki.koxudaxi.dev/rules/effect-boundary-violation/): Family: Execution Effects (EFF) · Heuristic · Runs when its contract is declared · Severity error (a bug) · No automatic fix
 - [exclusive-object-fanout (EFF110)](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/): Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
+- [generator-never-iterated (EFF116)](https://heki.koxudaxi.dev/rules/generator-never-iterated/): Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
 - [hash-attr-mutation (MUT107)](https://heki.koxudaxi.dev/rules/hash-attr-mutation/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity error (a bug) · No automatic fix
 - [immutable-quadratic-concat (OPT103)](https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/): Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity warning (slower code) · No automatic fix
 - [import-owner-violation (IMP201)](https://heki.koxudaxi.dev/rules/import-owner-violation/): Family: Imports (IMP) · Heuristic · Runs when its contract is declared · Experimental · Severity error (a bug) · No automatic fix

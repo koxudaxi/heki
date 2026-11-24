@@ -273,6 +273,13 @@ fn kept_to_the_return_stripped_code_heki_does_not_follow_runs_after_the_write() 
         let p = project("mut101_strip_kept", &holder(READ, WRITE, after, ""));
         assert_eq!(tiers(&p), vec![report("MUT101", 15, false)], "{after}");
     }
+    // A library call handed a function the module binds again on some paths runs either.
+    let extra = "\n\ndef order(item: str) -> str:\n    return item\n\n\ndef reverse(item: str) -> str:\n    return item[::-1]\n\n\nif __debug__:\n    order = reverse\n";
+    let p = project(
+        "mut101_strip_kept_rebound",
+        &holder(READ, WRITE, r#"sorted(["a"], key=order)"#, extra),
+    );
+    assert_eq!(tiers(&p), vec![report("MUT101", 15, false)]);
     // A removal on one branch of a project call made after the write.
     let extra = "\n\ndef forget(obj: Holder, flag: bool) -> None:\n    if flag:\n        obj.__dict__.pop(\"features\", None)\n";
     let p = project(

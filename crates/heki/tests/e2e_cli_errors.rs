@@ -82,7 +82,7 @@ fn configuration_errors_name_the_fix_and_the_section() {
             "[tool.heki]\nnope = 1\n",
             &[
                 "error: pyproject.toml:5:1: unknown key `nope` in [tool.heki]",
-                "  = help: expected one of `baseline`, `call-owners`, `ecosystem`, `effect-boundaries`, `exclude`, `extend-exclude`, `import-owners`, `invalidation`, `lint`, `read-owners`, `readonly-returns`, `src`, `target-version`, `write-owners`",
+                "  = help: expected one of `baseline`, `call-owners`, `ecosystem`, `effect-boundaries`, `exclude`, `extend-exclude`, `import-owners`, `invalidation`, `lint`, `read-owners`, `readonly-returns`, `required-version`, `src`, `target-version`, `write-owners`",
                 &docs("configuration/#top-level-settings"),
             ],
         ),
@@ -558,4 +558,116 @@ fn inspect_offers_the_nearest_functions() {
         stderr.contains("  = help: name a Python file `heki check` checks, relative to the working directory, or pass its directory as a path\n"),
         "{stderr}"
     );
+}
+
+/// `required-version` stops a heki that does not satisfy it before any other key is read, a bad
+/// specifier is a value error, and an unknown key that is not near a known one points to it.
+#[test]
+fn required_version_and_keys_of_a_newer_heki() {
+    let running = env!("CARGO_PKG_VERSION");
+    let p = project(
+        "required_version",
+        "[tool.heki]\nrequired-version = \">=99\"\nfuture-key = 1\n",
+    );
+    fails_with(
+        &p,
+        &["check"],
+        &[
+            &format!(
+                "error: pyproject.toml:5:20: this is heki {running}, but the configuration requires `>=99`"
+            ),
+            "5 | required-version = \">=99\"",
+            "  = help: install a heki that satisfies `>=99`",
+            &docs("configuration/#requiring-a-heki-version"),
+        ],
+    );
+    let p = project(
+        "required_version_ok",
+        "[tool.heki]\nrequired-version = \">=0.1, <99\"\n",
+    );
+    let (code, stdout, stderr) = p.heki(&["check", "--no-heuristic"]);
+    assert_ne!(code, 2, "{stdout}{stderr}");
+    let p = project(
+        "required_version_bad",
+        "[tool.heki]\nrequired-version = \"newer\"\n",
+    );
+    fails_with(
+        &p,
+        &["check"],
+        &[
+            "error: pyproject.toml:5:20: invalid `required-version` in [tool.heki]: `newer` is not accepted: each comma-separated clause is an operator (`==`, `!=`, `>=`, `>`, `<=`, `<`, `~=`, `===`) and a release of digits and dots, such as `>=0.2.4, <0.3`; pre-, post-, and development-release suffixes are not accepted",
+            "  = help: `required-version` takes a string, for example: `required-version = \">=0.2\"`",
+        ],
+    );
+    for (name, spec) in [
+        ("garbage", ">=0.2garbage"),
+        ("post", ">=0.2.4.post1"),
+        ("rc", "==0.2.4rc1"),
+        ("dev", "<0.3.dev0"),
+        ("empty_part", ">=0..2"),
+    ] {
+        let p = project(
+            &format!("required_version_{name}"),
+            &format!("[tool.heki]\nrequired-version = \"{spec}\"\n"),
+        );
+        fails_with(
+            &p,
+            &["check"],
+            &[&format!(
+                "error: pyproject.toml:5:20: invalid `required-version` in [tool.heki]: `{spec}` is not accepted: each comma-separated clause is an operator (`==`, `!=`, `>=`, `>`, `<=`, `<`, `~=`, `===`) and a release of digits and dots, such as `>=0.2.4, <0.3`; pre-, post-, and development-release suffixes are not accepted"
+            )],
+        );
+    }
+    let p = project(
+        "required_version_wildcard",
+        "[tool.heki]\nrequired-version = \"==0.*, !=0.1.*, ~=0.1\"\n",
+    );
+    let (code, stdout, stderr) = p.heki(&["check", "--no-heuristic"]);
+    assert_ne!(code, 2, "{stdout}{stderr}");
+    let p = project(
+        "required_version_not_string",
+        "[tool.heki]\nrequired-version = 3\n",
+    );
+    fails_with(
+        &p,
+        &["check"],
+        &["error: pyproject.toml:5:20: invalid `required-version`"],
+    );
+    let p = project("newer_key", "[tool.heki]\nunmatched-targets = \"report\"\n");
+    fails_with(
+        &p,
+        &["check"],
+        &[
+            "error: pyproject.toml:5:1: unknown key `unmatched-targets` in [tool.heki]",
+            &format!(
+                "  = help: `unmatched-targets` may be a key of a newer heki than {running}: `required-version`"
+            ),
+        ],
+    );
+    let p = project("typo_key", "[tool.heki]\nbaselin = \"b.toml\"\n");
+    let (_, _, stderr) = p.heki(&["check"]);
+    assert!(stderr.contains("did you mean `baseline`?"), "{stderr}");
+    assert!(!stderr.contains("newer heki"), "{stderr}");
+}
+
+/// `heki version` prints the version, and with `--changelog` the section of CHANGELOG.md for this version.
+#[test]
+fn version_prints_the_changelog_of_the_release() {
+    let p = project("version_cmd", "");
+    let (code, out, _) = p.heki(&["version"]);
+    assert_eq!(code, 0);
+    assert_eq!(out, format!("heki {}\n", env!("CARGO_PKG_VERSION")));
+    let (code, out, _) = p.heki(&["version", "--changelog"]);
+    assert_eq!(code, 0);
+    let changelog =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../CHANGELOG.md"))
+            .unwrap();
+    let heading = format!("\n## [{}]", env!("CARGO_PKG_VERSION"));
+    let rest = &changelog[changelog.find(&heading).unwrap() + 1..];
+    let section = rest[..rest[3..].find("\n## [").map_or(rest.len(), |n| n + 3)].trim_end();
+    assert!(
+        out.starts_with(&format!("heki {}\n\n## [", env!("CARGO_PKG_VERSION"))),
+        "{out}"
+    );
+    assert!(out.ends_with(&format!("{section}\n")), "{out}");
 }

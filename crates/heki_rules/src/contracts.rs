@@ -10,9 +10,9 @@
 use crate::eff_rules::{forbidden_effects, names_function};
 use crate::inspect::ContractRole;
 use crate::mut_rules::{
-    Allowance, AllowanceKeys, ContractTarget, FunctionMatcher, FunctionMatchers, ReadOnlyProducers,
-    References, parse_read_targets, parse_targets, patterns, project_classes, split_arguments,
-    split_item,
+    Allowance, AllowanceKeys, ContractTarget, FunctionMatcher, FunctionMatchers, MemberPattern,
+    ReadOnlyProducers, References, parse_read_targets, parse_targets, patterns, project_classes,
+    split_arguments, split_item,
 };
 use crate::{
     CheckContext, DottedPattern, RuleConfigError, RuleSelection, last_name, split_last_dot,
@@ -20,6 +20,7 @@ use crate::{
 use heki_effect::{BLOCKING_EFFECTS, ContractClass, Contracts, FuncKey, OptInFacts, TypedWrites};
 use heki_env::HekiConfig;
 use heki_kb::{EffectiveEcosystemKb, EnvironmentAccess};
+use heki_semantic::mangling;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -50,12 +51,28 @@ impl InvalidationNames {
 
     /// The first target naming attribute `attr` of an object of class `classes[0]` (`classes`:
     /// the class and its project bases), as configured.
+    ///
+    /// A private name of the class a target names is held mangled with it: `C.__cache` names
+    /// `_C__cache`.
     pub(crate) fn target(&self, classes: &[ContractClass], attr: &str) -> Option<&str> {
         self.targets
             .iter()
-            .find(|(_, class, a)| a.matches(attr) && classes.iter().any(|c| class.matches_class(c)))
+            .find(|(_, class, a)| {
+                classes.iter().any(|c| {
+                    class.matches_class(c)
+                        && (a.matches(attr)
+                            || mangling::unmangle(written_name(c), attr)
+                                .is_some_and(|written| a.matches(written)))
+                })
+            })
             .map(|(text, _, _)| text.as_str())
     }
+}
+
+/// The name class `c` is written with in its class statement.
+fn written_name(c: &ContractClass) -> &str {
+    let qualname = c.qualname.as_deref().unwrap_or(&c.fqn);
+    qualname.rsplit('.').next().unwrap_or(qualname)
 }
 
 /// [`Contracts`] over a configuration's `readonly-returns` and `invalidation` entries.
@@ -74,9 +91,9 @@ pub(crate) struct ConfigContracts {
     /// The masks of [`Contracts::writer_contexts`] by name.
     writer_contexts: NameMasks,
     /// The attribute patterns of the `read-owners` targets with `unresolved = "report"`.
-    unresolved_reads: Vec<DottedPattern>,
+    unresolved_reads: Vec<MemberPattern>,
     /// The last names of the `call-owners` targets with `unresolved = "report"`.
-    unresolved_calls: Vec<DottedPattern>,
+    unresolved_calls: Vec<MemberPattern>,
     /// [`Contracts::references`] and [`Contracts::reference_bases`].
     references: References,
     /// [`Contracts::marked_params`].
@@ -99,8 +116,6 @@ struct ExternalNames {
     /// The catalog's environment calls and reads, when a boundary forbids `reads-environment`.
     environment: FxHashMap<String, EnvironmentAccess>,
     probes: bool,
-    /// [`Contracts::checks_module_bodies`].
-    module_bodies: bool,
 }
 
 impl ExternalNames {
@@ -144,12 +159,6 @@ impl ExternalNames {
             environment,
             probes: forbidding("reads-environment")
                 .any(|b| b.import_probes.as_deref() == Some("report")),
-            module_bodies: config.effect_boundaries.iter().any(|b| {
-                b.scopes.iter().any(|s| {
-                    DottedPattern::new(s, "effect-boundaries.scopes")
-                        .is_ok_and(|p| p.names_module_bodies())
-                })
-            }),
         }
     }
 
@@ -272,11 +281,12 @@ impl ConfigContracts {
 /// [`last_names`] of call targets, whose argument lists name no function.
 fn call_last_names<'t>(
     targets: impl Iterator<Item = &'t String>,
-) -> Result<Vec<DottedPattern>, RuleConfigError> {
+) -> Result<Vec<MemberPattern>, RuleConfigError> {
     let context = "call-owners.targets";
-    targets
-        .map(|t| DottedPattern::new(last_name(split_arguments(t, context)?.0), context))
-        .collect()
+    let names: Vec<&str> = targets
+        .map(|t| Ok(split_arguments(t, context)?.0))
+        .collect::<Result<_, RuleConfigError>>()?;
+    last_names(names.into_iter(), context)
 }
 
 /// [`Contracts::marked_params`] of `config`. A bad argument list is left out: it is a
@@ -296,13 +306,14 @@ fn marked_params(config: &HekiConfig) -> FxHashSet<String> {
         .collect()
 }
 
-/// The patterns of the last dotted names of `targets` (`children` of `pkg.Reference.children`).
-fn last_names<'t>(
-    targets: impl Iterator<Item = &'t String>,
+/// The patterns of the last dotted names of `targets` (`children` of `pkg.Reference.children`),
+/// as members of any class: an object of unknown class may be of any.
+fn last_names(
+    targets: impl Iterator<Item = impl AsRef<str>>,
     context: &'static str,
-) -> Result<Vec<DottedPattern>, RuleConfigError> {
+) -> Result<Vec<MemberPattern>, RuleConfigError> {
     targets
-        .map(|t| DottedPattern::new(last_name(t), context))
+        .map(|t| MemberPattern::new(last_name(t.as_ref()), None, &[], context))
         .collect()
 }
 
@@ -398,10 +409,6 @@ impl Contracts for ConfigContracts {
         self.external.probes
     }
 
-    fn checks_module_bodies(&self) -> bool {
-        self.external.module_bodies
-    }
-
     fn references(&self) -> bool {
         self.references != References::Ignored
     }
@@ -442,7 +449,18 @@ fn counts_references(config: &HekiConfig) -> References {
         .iter()
         .filter(|b| b.forbid.iter().any(|t| t == "calls"))
         .map(|b| counted(&b.references));
-    calls.chain(boundaries).max().unwrap_or(References::Ignored)
+    // A strict owner contract judges a function handed on as a value in that function
+    // (`CheckContext::escaping_functions`), which the references handing it on tell.
+    let strict = |unresolved: &Option<String>| unresolved.as_deref() == Some("report");
+    let handed = config.write_owners.iter().any(|r| strict(&r.unresolved))
+        || config.read_owners.iter().any(|r| strict(&r.unresolved))
+        || config.call_owners.iter().any(|r| strict(&r.unresolved));
+    let handed = handed.then_some(References::Calls);
+    calls
+        .chain(boundaries)
+        .chain(handed)
+        .max()
+        .unwrap_or(References::Ignored)
 }
 
 /// Bit `i` set for every contract `i` that `has` holds for.
@@ -501,7 +519,7 @@ pub fn typed_writes(config: &HekiConfig, selection: &RuleSelection) -> TypedWrit
 /// The opt-in facts the rules `selection` runs read: `MUT112`'s return origins, `MUT113`'s
 /// iteration facts, `EFF109`'s lock facts, `EFF110`'s one-at-a-time uses, the must-facts of
 /// the effect rules whose reports are split by them, the kept-value facts of `MUT101` and
-/// `MUT111`, `MUT119`'s new returned containers, and the callables `EFF115` reads, each only with its rules. The readers assert it
+/// `MUT111`, `MUT119`'s new returned containers, and the callables `EFF115` and `EFF116` read, each only with their rules. The readers assert it
 /// ([`heki_effect::ProjectIndex::opt_in_facts`]).
 pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
     OptInFacts {
@@ -520,7 +538,9 @@ pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
             .iter()
             .any(|code| selection.is_enabled(code)),
         call_cycles: selection.is_enabled("EFF114"),
-        unawaited_handoffs: selection.is_enabled("EFF115"),
+        unawaited_handoffs: ["EFF115", "EFF116"]
+            .iter()
+            .any(|code| selection.is_enabled(code)),
         fresh_returns: selection.is_enabled("MUT119"),
         shared_state: false,
         blind_spots: false,

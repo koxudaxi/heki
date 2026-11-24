@@ -3,7 +3,8 @@
 //! subclass's) and calling a method through it, class methods called through their class,
 //! calling an instance (`__call__`), constructions through a module, the targets of `with`
 //! statements, module-level names bound twice, a package's name over a submodule of the same
-//! name (`from pkg import parse`), the parameters `*` arguments bind, project
+//! name (`from pkg import parse`), the names a star import binds, the parameters `*` arguments
+//! bind, project
 //! methods named like container mutators, augmented assignments, the bases of class statements
 //! in functions, what calling and awaiting an `async def` give, and the types of globals and
 //! instance attributes, which every store of each must agree on.
@@ -598,6 +599,262 @@ fn a_package_import_bound_again_is_open() {
         let (code, stdout, stderr) = p.check(&["--output-format", "concise"]);
         assert_eq!(code, 0, "{init}\n{stdout}{stderr}");
         assert!(!stdout.contains("EFF101"), "{init}\n{stdout}");
+    }
+}
+
+/// A module of public functions that block, and a private one.
+const STAR_IMPL: &str = r#"import time
+
+
+def fetch(url):
+    time.sleep(1)
+    return url
+
+
+def _hidden(url):
+    time.sleep(1)
+    return url
+"#;
+
+/// A module whose `__all__` lists one of its two blocking functions.
+const LISTED_IMPL: &str = r#"import time
+
+__all__ = ["fetch"]
+
+
+def fetch(url):
+    time.sleep(1)
+    return url
+
+
+def unlisted(url):
+    time.sleep(1)
+    return url
+"#;
+
+/// A package re-exporting with `from ._impl import *`, which reads the names it binds too.
+const LISTED_INIT: &str = r#"from ._impl import *  # noqa: F403
+
+
+async def inside(url):
+    return fetch(url)  # EFF101
+"#;
+
+/// The names a star import binds read through the package: those of the module's `__all__`,
+/// without one its public names, also down a chain of star imports, as the package's name over a
+/// submodule, and a submodule an `__all__` lists. A name the module's `__all__` does not list, a
+/// private name, a name read through an `__all__` heki cannot read (also through a module
+/// star-importing that package), one two star imports bind to different objects, and one a
+/// star import of a module outside the project may bind are not the module's function, nor is a
+/// star-imported name over a submodule it is not read through.
+const STAR_USERS: &str = r#"from pkg import listed
+from pkg import public
+from pkg.chain import deep
+from pkg.coreparse import core
+from pkg.coreparse import parse as core_parse
+from pkg.dynamic import fetch as dynamic_fetch
+from pkg.fallback import fetch as fallback_fetch
+from pkg.listed import fetch, unlisted
+from pkg.parsepkg import parse
+from pkg.public import fetch as public_fetch
+from pkg.rewrap import fetch as rewrapped_fetch
+from pkg.shadowed import fetch as shadowed_fetch
+from pkg.tools import tool
+
+
+async def through_the_package(url):
+    return fetch(url)  # EFF101
+
+
+async def attribute_of_the_package(url):
+    return listed.fetch(url)  # EFF101
+
+
+async def not_in_all(url):
+    return unlisted(url)
+
+
+async def public_name(url):
+    return public_fetch(url)  # EFF101
+
+
+async def private_name(url):
+    return public._hidden(url)
+
+
+async def down_a_chain(url):
+    return deep(url)  # EFF101
+
+
+async def through_an_unreadable_all(url):
+    return dynamic_fetch(url)
+
+
+async def through_a_package_with_an_unreadable_all(url):
+    return rewrapped_fetch(url)
+
+
+async def bound_by_two_star_imports(url):
+    return fallback_fetch(url)
+
+
+async def after_a_star_import_from_outside(url):
+    return shadowed_fetch(url)
+
+
+async def submodule_function(x):
+    return parse(x)  # EFF101
+
+
+async def over_a_submodule(x):
+    return core_parse(x)
+
+
+async def a_submodule_of_the_package(x):
+    return core.parse(x)  # EFF101
+
+
+async def a_submodule_all_lists(x):
+    return tool.parse(x)  # EFF101
+"#;
+
+/// Constants a star import binds, read in the importing module: a sleep of no time and a
+/// `data:` URL end at once, as the literals would. Two star imports binding a name to two
+/// constants leave its value open.
+const STAR_CONSTANTS: &str = r#"import time
+from urllib.request import urlopen
+
+from pkg.settings import *  # noqa: F403
+from pkg.more_settings import *  # noqa: F403
+
+
+async def no_pause():
+    time.sleep(PAUSE)
+
+
+async def a_wait():
+    time.sleep(WAIT)  # EFF101
+
+
+async def local_page():
+    urlopen(PAGE).read()
+
+
+async def remote_page():
+    urlopen(REMOTE).read()  # EFF101
+
+
+async def bound_twice():
+    time.sleep(TWICE)  # EFF101
+"#;
+
+#[test]
+fn a_star_import_binds_the_names_of_the_module_it_imports() {
+    let dynamic_impl = format!(
+        "{STAR_IMPL}\n\n__all__ = [name for name in dir() if not name.startswith(\"_\")]\n"
+    );
+    check_marks(
+        "star_imports",
+        &[
+            ("pkg/listed/__init__.py", LISTED_INIT),
+            ("pkg/listed/_impl.py", LISTED_IMPL),
+            ("pkg/public/__init__.py", "from ._impl import *\n"),
+            ("pkg/public/_impl.py", STAR_IMPL),
+            ("pkg/chain/__init__.py", "from .first import *\n"),
+            ("pkg/chain/first.py", "from .second import *\n"),
+            (
+                "pkg/chain/second.py",
+                "from .third import *\n\n__all__ = [\"deep\"]\n",
+            ),
+            ("pkg/chain/third.py", &STAR_IMPL.replace("fetch", "deep")),
+            (
+                "pkg/dynamic/__init__.py",
+                "from ._impl import *\n\n\ndef size(url):\n    return len(url)\n",
+            ),
+            ("pkg/dynamic/_impl.py", &dynamic_impl),
+            ("pkg/rewrap.py", "from pkg.dynamic import *\n"),
+            (
+                "pkg/fallback/__init__.py",
+                "try:\n    from ._fast import *\nexcept ImportError:\n    from ._slow import *\n",
+            ),
+            ("pkg/fallback/_fast.py", "def fetch(url):\n    return url\n"),
+            ("pkg/fallback/_slow.py", STAR_IMPL),
+            ("pkg/fallback/fetch.py", ""),
+            (
+                "pkg/shadowed/__init__.py",
+                "from ._impl import *\nfrom os.path import *\n",
+            ),
+            ("pkg/shadowed/_impl.py", STAR_IMPL),
+            ("pkg/parsepkg/__init__.py", "from .parse import *\n"),
+            ("pkg/parsepkg/parse.py", PARSE_MODULE),
+            ("pkg/coreparse/__init__.py", "from .core import *\n"),
+            ("pkg/coreparse/core.py", PARSE_MODULE),
+            ("pkg/coreparse/parse.py", PARSE_MODULE),
+            ("pkg/toolbox/__init__.py", "__all__ = [\"tool\"]\n"),
+            ("pkg/toolbox/tool.py", PARSE_MODULE),
+            ("pkg/tools.py", "from pkg.toolbox import *\n"),
+            ("pkg/star_users.py", STAR_USERS),
+            (
+                "pkg/settings.py",
+                "PAUSE = 0\nWAIT = 1\nPAGE = \"data:,x\"\nREMOTE = \"https://example.com\"\nTWICE = 0\n",
+            ),
+            ("pkg/more_settings.py", "TWICE = 0\n"),
+            ("pkg/paced.py", STAR_CONSTANTS),
+        ],
+        &["EFF101"],
+    );
+}
+
+/// A star import of a module heki could not read binds names it cannot name: the call is taken
+/// for no function.
+#[test]
+fn a_star_import_of_an_unread_module_binds_open_names() {
+    let p = Project::new("star_import_unread");
+    p.write("pyproject.toml", CONFIG);
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/star/__init__.py", "from ._impl import *\n");
+    p.write("pkg/star/_impl.py", STAR_IMPL);
+    p.write(
+        "pkg/users.py",
+        "from pkg.star import fetch\n\n\nasync def go(url):\n    return fetch(url)\n",
+    );
+    let (code, stdout, stderr) = p.check(&["--output-format", "concise"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stdout.contains("pkg/users.py:5:12: EFF101 "), "{stdout}");
+    p.write("pkg/star/_impl.py", "print \"done\"\n");
+    let (code, stdout, stderr) = p.check(&["--output-format", "concise"]);
+    assert_eq!(code, 2, "{stdout}");
+    assert!(
+        stderr.contains("pkg/star/_impl.py:1:7: syntax error: "),
+        "{stderr}"
+    );
+    assert!(!stdout.contains("EFF101"), "{stdout}");
+}
+
+/// The issue's shape: `heki inspect` follows a call of a name re-exported by a star import into
+/// the project's function, read as an imported name and as an attribute of the package.
+#[test]
+fn inspect_follows_a_star_re_export() {
+    let p = Project::new("star_reexport_inspect");
+    p.write("pyproject.toml", CONFIG);
+    p.write("pkg/__init__.py", "");
+    p.write(
+        "pkg/utils/_utils.py",
+        "import requests\n\n__all__ = [\"fetch\"]\n\n\ndef fetch(url):\n    return requests.get(url)\n",
+    );
+    p.write("pkg/utils/__init__.py", "from ._utils import *\n");
+    p.write(
+        "pkg/m.py",
+        "from .utils import fetch\nfrom . import utils\n\n\ndef a(url):\n    return fetch(url)\n\n\ndef b(url):\n    return utils.fetch(url)\n",
+    );
+    for function in ["pkg.m.a", "pkg.m.b"] {
+        let (code, stdout, stderr) = p.heki(&["inspect", function]);
+        assert_eq!(code, 0, "{stderr}");
+        assert!(stdout.contains("impure: effects"), "{function}: {stdout}");
+        assert!(
+            stdout.contains("blocking_net (called), 2 calls down"),
+            "{function}: {stdout}"
+        );
     }
 }
 
@@ -2890,10 +3147,11 @@ fn stores_through_families_and_re_exports_keep_what_they_bind() {
 }
 
 /// More spellings of stores and deletions, recognized by the value of the callee: `setattr`
-/// through `builtins`, a local alias, an import in the function, a closure cell, or names bound
-/// on both branches; deletions and namespace reads store nothing; a namespace handed on,
-/// merged, updated from keywords or another dict, or written under another method stores any
-/// attribute; stores through a union of classes, the module itself, and in place.
+/// through `builtins`, a local alias, an import in the function (also the function's only sign
+/// of a store), a closure cell, or names bound on both branches; deletions and namespace reads
+/// store nothing; a namespace handed on, merged, updated from keywords or another dict, or
+/// written under another method stores any attribute; stores through a union of classes, the
+/// module itself, and in place.
 const FORMS: &str = r#"import builtins
 import collections
 from typing import Protocol
@@ -2964,6 +3222,19 @@ class Spelled:
         self.client.get("https://example.com")  # EFF101
         for c in self.items:
             c.get("https://example.com")  # EFF101
+
+
+class ImportedSetattr:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def swap(self, client: httpx.AsyncClient) -> None:
+        from builtins import setattr as put
+
+        put(self, "client", client)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
 
 
 def fill(namespace) -> None:
