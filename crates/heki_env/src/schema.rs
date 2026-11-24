@@ -160,6 +160,7 @@ const EXAMPLES: &[(&str, &str)] = &[
         r#"["<stdlib>", "pkg.model.*"]"#,
     ),
     ("import-owners.forbidden-imports", r#"["pkg.backends.*"]"#),
+    ("import-owners.relative-imports", r#"["pkg._runtime.*"]"#),
     (
         "import-owners.ignored-imports",
         r#"["pkg.model.legacy -> pkg.backends.sql"]"#,

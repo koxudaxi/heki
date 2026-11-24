@@ -16,10 +16,11 @@ An import that an `import-owners` contract does not allow: a forbidden module, o
 
 ## What it does
 Checks the imports of the modules a `[[tool.heki.import-owners]]` contract judges against the
-modules it allows or forbids. An import counts wherever it runs: in the module body, in a class
-body, inside a function, or lazily (`lazy import`, PEP 810), with or without an `ImportError`
-handler around it. An import under `if TYPE_CHECKING:` never runs, and counts only with
-`type-checking = "report"`.
+modules it allows or forbids, and against how they must name the modules it allows only through
+a relative import (`relative-imports`). An import counts wherever it runs: in the module body,
+in a class body, inside a function, or lazily (`lazy import`, PEP 810), with or without an
+`ImportError` handler around it. An import under `if TYPE_CHECKING:` never runs, and counts
+only with `type-checking = "report"`.
 
 What an import loads is decided as Python decides it:
 
@@ -30,12 +31,18 @@ What an import loads is decided as Python decides it:
 - Relative imports are made absolute from the importing module.
 - `importlib.import_module("pkg.db")` and `__import__("pkg.db")` with a constant name, or a name
   heki establishes, import that module. With several possible names, the call is reported only
-  when every one of them breaks the contract.
+  when every one of them breaks the contract, and the report gives each name's reason.
 - An import of a module the project lacks below one of its packages fails, and is no import.
 
 A module pattern is a whole module name or a glob whose `*` spans dots (`pkg.backend.*` names
 every module below `pkg.backend`, not `pkg.backend` itself), or a group: `<stdlib>`,
 `<project>`, `<third-party>`.
+
+A module of `relative-imports` is allowed when the import names it relative to the importer
+(`from . import b`, `from .b import f`, `importlib.import_module(".b", __package__)`), and
+reported when it names it by its full name (`from pkg._runtime import b`, or a relative name
+anchored at a package the code spells), whatever the other lists say: a package copied into
+other packages under another name keeps working only with the relative imports.
 
 With `reach = "import-time"`, the contract judges every module that loading the importer loads
 while it loads, through the module bodies of the project's modules and the parent `__init__`
@@ -59,10 +66,11 @@ Its premises:
   classes the contract counts leads to it, each step loading the next module or, first, its
   parent package. An import whose module heki cannot name gives no report (`IMP202` reports it
   with `unresolved = "report"`).
-- **Breaks the contract**: the module matches `forbidden-imports` and not `allowed-imports`, or
-  misses `allowed-imports` when only it is set, and no `ignored-imports` pair accepts the import;
-  a by-name import gives names heki knows whole, and every one of them does. Established from the
-  contract.
+- **Breaks the contract**: the module matches `forbidden-imports` and neither `allowed-imports`
+  nor `relative-imports`, or misses both when `forbidden-imports` is not set; or it matches
+  `relative-imports` and the importer's own import names it by its full name. No
+  `ignored-imports` pair accepts the import; a by-name import gives names heki knows whole, and
+  every one of them does. Established from the contract.
 
 A report says where an import is written, never that a branch around it is taken.
 
@@ -121,5 +129,6 @@ No automatic fix.
 
 ## Options
 - `[[tool.heki.import-owners]]`: `importers`, `exempt-importers`, `allowed-imports`,
-  `forbidden-imports`, `ignored-imports`, `type-checking`, `reach`, `unresolved`, `message`
+  `forbidden-imports`, `relative-imports`, `ignored-imports`, `type-checking`, `reach`,
+  `unresolved`, `message`
   ([configuration](../configuration.md#import-owners)).

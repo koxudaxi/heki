@@ -110,6 +110,12 @@ importers = ["pkg.imp_cli"]
 forbidden-imports = ["pkg.imp_heavy"]
 reach = "import-time"
 
+[[tool.heki.import-owners]]
+name = "copied"
+importers = ["pkg.imp_rt.*"]
+allowed-imports = ["<stdlib>"]
+relative-imports = ["pkg.imp_rt.*"]
+
 [[tool.heki.invalidation]]
 name = "dial"
 targets = ["pkg.dials:*.level"]
@@ -5383,8 +5389,9 @@ fn steps_package_names() -> Vec<Step> {
 }
 
 /// `import-owners`: an import added to the importer, a module created that turns a `from`
-/// import of a name into an import of the submodule, and with `reach`, an import added to,
-/// moved in, and removed from a module the importer imports.
+/// import of a name into an import of the submodule, with `reach`, an import added to, moved
+/// in, and removed from a module the importer imports, and a relative import rewritten with the
+/// package's full name and back.
 fn steps_import_owners() -> Vec<Step> {
     vec![
         Step::new(
@@ -5441,6 +5448,25 @@ fn steps_import_owners() -> Vec<Step> {
             )],
         )
         .absent(&[("pkg/imp_cli.py", "IMP201")]),
+        Step::new(
+            "a copied package's module imports another relatively",
+            vec![
+                Action::Create("pkg/imp_rt/__init__.py", String::new()),
+                Action::Create("pkg/imp_rt/b.py", String::new()),
+                Action::Create("pkg/imp_rt/a.py", "from . import b\n".to_owned()),
+            ],
+        )
+        .absent(&[("pkg/imp_rt/a.py", "IMP201")]),
+        Step::new(
+            "the import names the package by its full name",
+            vec![save("pkg/imp_rt/a.py", "from pkg.imp_rt import b\n")],
+        )
+        .present(&[("pkg/imp_rt/a.py", "IMP201")]),
+        Step::new(
+            "the import is relative again",
+            vec![save("pkg/imp_rt/a.py", "from . import b\n")],
+        )
+        .absent(&[("pkg/imp_rt/a.py", "IMP201")]),
     ]
 }
 
