@@ -563,11 +563,11 @@ impl<'i> Change<'i> {
 /// The types of the operands of a [`Change`], as the code typing it knows them.
 pub(crate) trait Operands {
     /// The type of the value `v` holds, as an item.
-    fn elem(&self, v: VarId) -> Elem;
+    fn operand_item(&self, v: VarId) -> Elem;
 
     /// The items iterating the value `v` holds yields.
-    fn items(&self, v: VarId) -> Elem {
-        match self.elem(v) {
+    fn operand_items(&self, v: VarId) -> Elem {
+        match self.operand_item(v) {
             Elem::Of(Ty::Inst(o)) if o.args != Args::None => o.args.item(),
             Elem::Empty => Elem::Empty,
             _ => Elem::Unknown,
@@ -575,8 +575,8 @@ pub(crate) trait Operands {
     }
 
     /// The keys and values of the mapping `v` holds.
-    fn entries(&self, v: VarId) -> (Elem, Elem) {
-        match self.elem(v) {
+    fn operand_entries(&self, v: VarId) -> (Elem, Elem) {
+        match self.operand_item(v) {
             Elem::Of(Ty::Inst(Obj {
                 args: Args::Map(k, v),
                 ..
@@ -640,37 +640,37 @@ impl Container {
                     (Map, "update", [] | [_]) => {
                         let (mut keys, mut values) = args
                             .first()
-                            .map_or((Elem::Empty, Elem::Empty), |m| of.entries(*m));
+                            .map_or((Elem::Empty, Elem::Empty), |m| of.operand_entries(*m));
                         for (_, v) in kwargs {
                             keys = keys.join(&Elem::Of(Ty::inst("builtins.str")));
-                            values = values.join(&of.elem(*v));
+                            values = values.join(&of.operand_item(*v));
                         }
                         Some((keys, values))
                     }
                     _ if !kwargs.is_empty() => None,
                     (Sequence, "append" | "appendleft", [v])
                     | (Sequence, "insert", [_, v])
-                    | (Set, "add", [v]) => items(of.elem(*v)),
+                    | (Set, "add", [v]) => items(of.operand_item(*v)),
                     (Sequence, "extend" | "extendleft", [xs])
-                    | (Set, "symmetric_difference_update", [xs]) => items(of.items(*xs)),
+                    | (Set, "symmetric_difference_update", [xs]) => items(of.operand_items(*xs)),
                     (Set, "update", xss) => items(
                         xss.iter()
-                            .fold(Elem::Empty, |acc, xs| acc.join(&of.items(*xs))),
+                            .fold(Elem::Empty, |acc, xs| acc.join(&of.operand_items(*xs))),
                     ),
-                    (Map, "setdefault", [k, v]) => Some((of.elem(*k), of.elem(*v))),
+                    (Map, "setdefault", [k, v]) => Some((of.operand_item(*k), of.operand_item(*v))),
                     // The value is `None`, which types nothing.
-                    (Map, "setdefault", [k]) => Some((of.elem(*k), Elem::Empty)),
+                    (Map, "setdefault", [k]) => Some((of.operand_item(*k), Elem::Empty)),
                     _ => None,
                 }
             }
             Change::Operator(op, rhs) => match (self, op) {
                 (Sequence, BinOpKind::Add) | (Set, BinOpKind::BitOr | BinOpKind::BitXor) => {
-                    items(of.items(rhs))
+                    items(of.operand_items(rhs))
                 }
                 (Sequence, BinOpKind::Mult) | (Set, BinOpKind::BitAnd | BinOpKind::Sub) => {
                     Some((Elem::Empty, Elem::Empty))
                 }
-                (Map, BinOpKind::BitOr) => Some(of.entries(rhs)),
+                (Map, BinOpKind::BitOr) => Some(of.operand_entries(rhs)),
                 _ => None,
             },
             Change::ItemStore { index, value } => match self {
@@ -678,16 +678,16 @@ impl Container {
                 // which stores the items of the value.
                 Sequence => {
                     let sliced = matches!(
-                        of.elem(index),
+                        of.operand_item(index),
                         Elem::Of(Ty::Inst(o)) if matches!(o.class.as_str(), "builtins.tuple" | "builtins.slice")
                     );
                     items(if sliced {
-                        of.items(value)
+                        of.operand_items(value)
                     } else {
-                        of.elem(value)
+                        of.operand_item(value)
                     })
                 }
-                Map => Some((of.elem(index), of.elem(value))),
+                Map => Some((of.operand_item(index), of.operand_item(value))),
                 Set => None,
             },
         }
