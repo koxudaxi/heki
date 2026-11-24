@@ -24,7 +24,7 @@ fn found(diags: &[Value]) -> Vec<(String, u64, String, String)> {
             (
                 d["path"].as_str().unwrap().to_owned(),
                 d["line"].as_u64().unwrap(),
-                d["rule_code"].as_str().unwrap().to_owned(),
+                common::tiered_code(d).to_owned(),
                 d["related"]
                     .get(0)
                     .and_then(|r| r["message"].as_str())
@@ -242,15 +242,15 @@ fn eff101_resolves_receivers_through_imports_globals_annotations_and_classes() {
             // A function-local import.
             d(h, 63, "EFF101", "time.sleep"),
             // A class method calling a static method through `cls`.
-            d(h, 67, "EFF111", "app.models.K.make"),
+            d(h, 67, "EFF101 [heuristic]", "app.models.K.make"),
             // A generator expression runs where it is consumed.
-            d(h, 71, "EFF102", "requests.get"),
             d(
                 h,
                 71,
-                "EFF111",
+                "EFF101 [heuristic]",
                 "app.handlers.via_genexpr.<locals>.<genexpr>"
             ),
+            d(h, 71, "EFF102", "requests.get"),
         ],
         "{diags:#?}"
     );
@@ -371,7 +371,7 @@ fn eff101_resolves_pipe_and_optional_annotations_super_returns_and_overrides() {
             // A method's return annotation types its result.
             d(a, 52, "EFF101", "httpx.Client.get"),
             // CHA over a subclass overriding the method.
-            d(a, 56, "EFF111", "pkg.api.SlowJob.run"),
+            d(a, 56, "EFF101 [heuristic]", "pkg.api.SlowJob.run"),
             // A Layer 2 constructor with a lowercase name (`boto3.client`) returns a client
             // whose methods the configuration catalogues.
             d(a, 61, "EFF101", "boto3.client.get_object"),
@@ -383,7 +383,12 @@ fn eff101_resolves_pipe_and_optional_annotations_super_returns_and_overrides() {
     p.write("pkg/many.py", &overrides(7));
     assert_eq!(
         found(&diagnostics(&p, &["pkg/many.py"])),
-        vec![d("pkg/many.py", 45, "EFF111", "pkg.many.Sub0.go")]
+        vec![d(
+            "pkg/many.py",
+            45,
+            "EFF101 [heuristic]",
+            "pkg.many.Sub0.go"
+        )]
     );
 }
 
@@ -402,7 +407,7 @@ fn eff101_merges_conditional_definitions_and_follows_python_311_comprehensions()
     let diags = diagnostics(&p, &["pkg/dup.py"]);
     assert_eq!(
         found(&diags),
-        vec![d("pkg/dup.py", 15, "EFF111", "pkg.dup.pause")]
+        vec![d("pkg/dup.py", 15, "EFF101 [heuristic]", "pkg.dup.pause")]
     );
     let (_, stdout, _) = p.heki(&["snapshot", "pkg/dup.py"]);
     let snap: Value = serde_json::from_str(&stdout).unwrap();
@@ -450,7 +455,7 @@ fn eff101_merges_conditional_definitions_and_follows_python_311_comprehensions()
     let diags = diagnostics(&p, &["pkg/comps.py", "--target-version", "py311"]);
     // Through the comprehension's frame the call runs once per item: not on every path.
     let eff101 = &diags[0];
-    assert_eq!(eff101["rule_code"], "EFF111");
+    assert_eq!(common::tiered_code(eff101), "EFF101 [heuristic]");
     assert_eq!(eff101["column"], 12, "at the comprehension call");
     assert_eq!(
         eff101["related"][0]["message"],
@@ -565,15 +570,10 @@ def ddl(cur: sqlite3.Cursor, names):
         cur.execute("  create table € (a int)")
 "#,
     );
-    let diags = diagnostics(&p, &["--select", "EFF103,EFF113"]);
+    let diags = diagnostics(&p, &["--select", "EFF103"]);
     let got: Vec<(&str, &str)> = diags
         .iter()
-        .map(|d| {
-            (
-                d["rule_code"].as_str().unwrap(),
-                d["qualname"].as_str().unwrap(),
-            )
-        })
+        .map(|d| (common::tiered_code(d), d["qualname"].as_str().unwrap()))
         .collect();
     assert_eq!(got, vec![("EFF103", "query")], "{diags:#?}");
 }
@@ -803,7 +803,7 @@ def via_psycopg_and_sa(ids):
         sa_conn.execute("SELECT 3")
 "#,
     );
-    let diags = diagnostics(&p, &["--select", "EFF103,EFF113"]);
+    let diags = diagnostics(&p, &["--select", "EFF103"]);
     assert_eq!(
         found(&diags),
         vec![
@@ -1195,13 +1195,13 @@ fn exact_claims_establish_each_premise() {
     let p = Project::new("exact_premises");
     p.write("pkg/__init__.py", "")
         .write("pkg/premises.py", PREMISES);
-    let diags = diagnostics(&p, &["--select", "EFF101,EFF111,EFF103,EFF113"]);
+    let diags = diagnostics(&p, &["--select", "EFF101,EFF103"]);
     let got: Vec<(u64, &str, &str)> = diags
         .iter()
         .map(|d| {
             (
                 d["line"].as_u64().unwrap(),
-                d["rule_code"].as_str().unwrap(),
+                common::tiered_code(d),
                 d["message"].as_str().unwrap(),
             )
         })
@@ -1246,7 +1246,7 @@ fn exact_claims_establish_each_premise() {
             ),
             (
                 91,
-                "EFF111",
+                "EFF101 [heuristic]",
                 "`tp_managers` reaches the blocking call `time.sleep` on the event loop"
             ),
             (
@@ -1256,7 +1256,7 @@ fn exact_claims_establish_each_premise() {
             ),
             (
                 102,
-                "EFF113",
+                "EFF103 [heuristic]",
                 "`sqlite3.Connection.execute` runs a database query on every loop iteration"
             ),
             (
@@ -1286,7 +1286,7 @@ fn exact_claims_establish_each_premise() {
             ),
             (
                 154,
-                "EFF111",
+                "EFF101 [heuristic]",
                 "`tn_subclass_constructed` reaches the blocking call `time.sleep` on the event loop"
             ),
             (
@@ -1296,17 +1296,17 @@ fn exact_claims_establish_each_premise() {
             ),
             (
                 177,
+                "EFF101 [heuristic]",
+                "`tp_method_manager` reaches the blocking call `sqlalchemy.engine.Engine.connect` on the event loop"
+            ),
+            (
+                177,
                 "EFF101",
                 "`pkg.premises.with_connection` always runs the waiting call `time.sleep` on the event loop (1 call down, on every path)"
             ),
             (
-                177,
-                "EFF111",
-                "`tp_method_manager` reaches the blocking call `sqlalchemy.engine.Engine.connect` on the event loop"
-            ),
-            (
                 183,
-                "EFF113",
+                "EFF103 [heuristic]",
                 "`sqlite3.Connection.execute` runs a database query on every loop iteration"
             ),
             (
@@ -1321,7 +1321,7 @@ fn exact_claims_establish_each_premise() {
             ),
             (
                 198,
-                "EFF113",
+                "EFF103 [heuristic]",
                 "`sqlite3.Connection.execute` runs a database query on every loop iteration"
             ),
             (
@@ -1339,17 +1339,19 @@ fn exact_claims_establish_each_premise() {
     // The advice is in the help of every query report, exact or heuristic.
     let query_helps: Vec<(&str, &str)> = diags
         .iter()
-        .filter(|d| d["rule_code"] == "EFF103" || d["rule_code"] == "EFF113")
+        .filter(|d| d["rule_code"] == "EFF103")
         .map(|d| {
             (
-                d["rule_code"].as_str().unwrap(),
+                common::tiered_code(d),
                 d["help"].as_str().unwrap_or_default(),
             )
         })
         .collect();
     assert!(
         query_helps.iter().any(|(code, _)| *code == "EFF103")
-            && query_helps.iter().any(|(code, _)| *code == "EFF113")
+            && query_helps
+                .iter()
+                .any(|(code, _)| *code == "EFF103 [heuristic]")
             && query_helps.iter().all(
                 |(_, help)| *help == "batch the queries, or load the data once before the loop"
             ),
@@ -1428,17 +1430,16 @@ fn a_property_read_may_raise_before_the_wait() {
     let p = Project::new("exact_property_reads");
     p.write("pkg/__init__.py", "")
         .write("pkg/reads.py", PROPERTY_READS);
-    let diags = diagnostics(&p, &["--select", "EFF101,EFF111"]);
+    let diags = diagnostics(&p, &["--select", "EFF101"]);
     let got: Vec<(u64, &str)> = diags
         .iter()
-        .map(|d| {
-            (
-                d["line"].as_u64().unwrap(),
-                d["rule_code"].as_str().unwrap(),
-            )
-        })
+        .map(|d| (d["line"].as_u64().unwrap(), common::tiered_code(d)))
         .collect();
-    assert_eq!(got, vec![(32, "EFF111"), (36, "EFF101")], "{diags:#?}");
+    assert_eq!(
+        got,
+        vec![(32, "EFF101 [heuristic]"), (36, "EFF101")],
+        "{diags:#?}"
+    );
 }
 
 const HOOKED_READS: &str = r#"import time
@@ -1567,23 +1568,18 @@ fn a_method_lookup_runs_the_hooks_of_every_class_the_value_may_be() {
     let p = Project::new("exact_hooked_reads");
     p.write("pkg/__init__.py", "")
         .write("pkg/reads.py", HOOKED_READS);
-    let diags = diagnostics(&p, &["--select", "EFF101,EFF111"]);
+    let diags = diagnostics(&p, &["--select", "EFF101"]);
     let got: Vec<(u64, &str)> = diags
         .iter()
-        .map(|d| {
-            (
-                d["line"].as_u64().unwrap(),
-                d["rule_code"].as_str().unwrap(),
-            )
-        })
+        .map(|d| (d["line"].as_u64().unwrap(), common::tiered_code(d)))
         .collect();
     assert_eq!(
         got,
         vec![
-            (98, "EFF111"),
-            (102, "EFF111"),
-            (106, "EFF111"),
-            (110, "EFF111"),
+            (98, "EFF101 [heuristic]"),
+            (102, "EFF101 [heuristic]"),
+            (106, "EFF101 [heuristic]"),
+            (110, "EFF101 [heuristic]"),
             (114, "EFF101")
         ],
         "{diags:#?}"
@@ -1623,14 +1619,11 @@ fn a_helper_summary_keeps_every_witness() {
     let p = Project::new("exact_helper_witnesses");
     p.write("pkg/__init__.py", "")
         .write("pkg/serve.py", HELPER_OVER_DISPATCH);
-    let diags = diagnostics(&p, &["--select", "EFF101,EFF111"]);
+    let diags = diagnostics(&p, &["--select", "EFF101"]);
     assert_eq!(diags.len(), 1, "{diags:#?}");
     let d = &diags[0];
     assert_eq!(
-        (
-            d["line"].as_u64().unwrap(),
-            d["rule_code"].as_str().unwrap()
-        ),
+        (d["line"].as_u64().unwrap(), common::tiered_code(d)),
         (24, "EFF101")
     );
     assert_eq!(
@@ -1714,22 +1707,17 @@ fn a_call_of_a_property_value_is_as_complete_as_calling_the_value() {
     let p = Project::new("exact_property_values");
     p.write("pkg/__init__.py", "")
         .write("pkg/m.py", PROPERTY_VALUES);
-    let diags = diagnostics(&p, &["--select", "EFF101,EFF111"]);
+    let diags = diagnostics(&p, &["--select", "EFF101"]);
     let got: Vec<(u64, &str)> = diags
         .iter()
-        .map(|d| {
-            (
-                d["line"].as_u64().unwrap(),
-                d["rule_code"].as_str().unwrap(),
-            )
-        })
+        .map(|d| (d["line"].as_u64().unwrap(), common::tiered_code(d)))
         .collect();
     assert_eq!(
         got,
         vec![
             // A protocol value, through `super()` and through `self`: heuristic.
-            (31, "EFF111"),
-            (34, "EFF111"),
+            (31, "EFF101 [heuristic]"),
+            (34, "EFF101 [heuristic]"),
             // A project class value: exact.
             (37, "EFF101"),
             (40, "EFF101"),
@@ -1898,13 +1886,13 @@ async def imported() -> object:
 fn an_offloaded_call_hands_back_what_its_callable_returns() {
     let p = Project::new("offloaded_results");
     p.write("pkg/__init__.py", "").write("pkg/m.py", OFFLOADED);
-    let diags = diagnostics(&p, &["--select", "EFF101,EFF111"]);
+    let diags = diagnostics(&p, &["--select", "EFF101"]);
     let got: Vec<(u64, &str, &str)> = diags
         .iter()
         .map(|d| {
             (
                 d["line"].as_u64().unwrap(),
-                d["rule_code"].as_str().unwrap(),
+                common::tiered_code(d),
                 d["target"].as_str().unwrap(),
             )
         })
@@ -1924,13 +1912,13 @@ fn an_offloaded_call_hands_back_what_its_callable_returns() {
             (44, "EFF101", "sqlite3.Cursor.fetchone"),
             (49, "EFF101", "sqlite3.Cursor.fetchone"),
             // An executor's future hands the cursor back through `result()`.
+            (53, "EFF101 [heuristic]", "concurrent.futures.Future.result"),
             (53, "EFF101", "sqlite3.Cursor.fetchone"),
-            (53, "EFF111", "concurrent.futures.Future.result"),
             // A project function typed by its annotation, as written out; one without an
             // annotation returns nothing known.
             (57, "EFF101", "sqlite3.Connection.execute"),
-            (57, "EFF111", "sqlite3.Cursor.fetchone"),
-            (62, "EFF111", "sqlite3.Cursor.fetchone"),
+            (57, "EFF101 [heuristic]", "sqlite3.Cursor.fetchone"),
+            (62, "EFF101 [heuristic]", "sqlite3.Cursor.fetchone"),
             // A local annotated with the cursor's library class keeps the cursor of a file
             // connection it holds.
             (72, "EFF101", "sqlite3.Connection.execute"),

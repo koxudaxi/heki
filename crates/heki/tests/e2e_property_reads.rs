@@ -33,7 +33,7 @@ fn found(diags: &[Value]) -> Vec<(String, u64, String, String, String)> {
             (
                 d["path"].as_str().unwrap().to_owned(),
                 d["line"].as_u64().unwrap(),
-                d["rule_code"].as_str().unwrap().to_owned(),
+                common::tiered_code(d).to_owned(),
                 d["qualname"].as_str().unwrap().to_owned(),
                 d["target"].as_str().unwrap().to_owned(),
             )
@@ -350,17 +350,23 @@ fn execution_effects_run_property_getters() {
             d(a, 77, "EFF101", "Lazy.value", "requests.get"),
             // `super().remote` in `Child` finds `Middle`'s class attribute after `Child`, not
             // `Base`'s getter.
-            d(a, 141, "EFF111", "Child.via_super", "requests.get"),
+            d(
+                a,
+                141,
+                "EFF101 [heuristic]",
+                "Child.via_super",
+                "requests.get"
+            ),
             d(h, 7, "EFF101", "direct", "requests.get"),
             // One helper deeper.
             d(h, 11, "EFF101", "one_deeper", "requests.get"),
             // A `functools.cached_property` getter: a read may hand out the value an earlier
             // read computed.
-            d(h, 15, "EFF111", "cached", "time.sleep"),
+            d(h, 15, "EFF101 [heuristic]", "cached", "time.sleep"),
             // A base-class property read on a subclass instance.
             d(h, 19, "EFF101", "inherited", "requests.get"),
             // An overriding property of a subclass (CHA over `Base`): `Base.data` does not wait.
-            d(h, 23, "EFF111", "overridden", "time.sleep"),
+            d(h, 23, "EFF101 [heuristic]", "overridden", "time.sleep"),
             // An overriding property reading `super().remote`.
             d(h, 27, "EFF101", "through_super", "requests.get"),
             // Property reads in unbounded loops: a query and a fresh client per iteration.
@@ -372,13 +378,13 @@ fn execution_effects_run_property_getters() {
             // (only its subclass `Square` defines the property), a base heki does not know
             // comes before the getter (`Traced`), `__getattribute__` runs on every read
             // (`Audited`), and a subclass's class attribute shadows the property (`StaticFeed`).
-            d(h, 69, "EFF111", "no_getter", "requests.get"),
-            d(h, 73, "EFF111", "traced", "requests.get"),
-            d(h, 77, "EFF111", "audited", "requests.get"),
-            d(h, 81, "EFF111", "feed_entries", "requests.get"),
+            d(h, 69, "EFF101 [heuristic]", "no_getter", "requests.get"),
+            d(h, 73, "EFF101 [heuristic]", "traced", "requests.get"),
+            d(h, 77, "EFF101 [heuristic]", "audited", "requests.get"),
+            d(h, 81, "EFF101 [heuristic]", "feed_entries", "requests.get"),
             // A value stored on the class object outside its body (`Rebound.remote = ...`) is
             // what the read finds.
-            d(h, 85, "EFF111", "rebound", "requests.get"),
+            d(h, 85, "EFF101 [heuristic]", "rebound", "requests.get"),
         ],
         "{diags:#?}"
     );
@@ -475,7 +481,13 @@ fn property_reads_follow_overrides_up_to_the_cha_limit() {
     p.write("pkg/kinds.py", &overriding_properties(7));
     assert_eq!(
         found(&diagnostics(&p, &[])),
-        vec![d("pkg/kinds.py", 53, "EFF111", "fan_out", "time.sleep")]
+        vec![d(
+            "pkg/kinds.py",
+            53,
+            "EFF101 [heuristic]",
+            "fan_out",
+            "time.sleep"
+        )]
     );
 }
 

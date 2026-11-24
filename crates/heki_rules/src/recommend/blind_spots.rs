@@ -13,7 +13,7 @@ use crate::blind_spots::{BlindSite, BlindSpots, CallCounts};
 use crate::contracts::{ConfiguredName, configured_names};
 use crate::project::{ParsedFile, Project, display_path, module_of, parse_source, rel_posix};
 use heki_ast::LineIndex;
-use heki_diagnostics::RatchetBaseline;
+use heki_diagnostics::{Certainty, RatchetBaseline};
 use heki_effect::{
     ModuleLayout, ProjectIndex, is_source_dir, is_stub, module_name_for_path, module_precedence,
     module_prefix, resolve_relative_module,
@@ -32,12 +32,13 @@ use std::path::{Path, PathBuf};
 /// reach.
 pub const MAX_TRIED_SYMBOLS: usize = 64;
 
-/// The effects the hypothetical-catalog run gives each name: a wait on the network (`EFF101`,
-/// `EFF111`) and a database query (`EFF103`, `EFF113`).
+/// The effects the hypothetical-catalog run gives each name: a wait on the network (`EFF101`)
+/// and a database query (`EFF103`).
 pub const HYPOTHETICAL_EFFECTS: [&str; 2] = ["blocking_net", "db_query"];
 
-/// The rules the hypothetical-catalog run selects.
-const HYPOTHETICAL_RULES: [&str; 4] = ["EFF101", "EFF111", "EFF103", "EFF113"];
+/// The rules the hypothetical-catalog run selects, by name, so that it prints their heuristic
+/// reports too.
+const HYPOTHETICAL_RULES: [&str; 2] = ["EFF101", "EFF103"];
 
 /// The most directories the source-root trial tries, those resolving the most imports first.
 pub const MAX_SOURCE_ROOT_TRIALS: usize = 8;
@@ -124,31 +125,28 @@ pub struct SymbolCalls {
     pub symbol: String,
     #[serde(flatten)]
     pub counts: Counts,
-    /// What `heki check` would report if the call waited on the network, from the
-    /// hypothetical-catalog run (`null`: the name was not tried).
-    pub if_waits: Option<IfWaits>,
-    /// What `heki check` would report if the call sent a database query (`null`: not tried).
-    pub if_queries: Option<IfQueries>,
+    /// The `EFF101` reports `heki check` would print if the call waited on the network, from
+    /// the hypothetical-catalog run (`null`: the name was not tried).
+    pub if_waits: Option<TrialReports>,
+    /// The `EFF103` reports `heki check` would print if the call sent a database query (`null`:
+    /// not tried).
+    pub if_queries: Option<TrialReports>,
     /// The first 50 calls.
     pub examples: Vec<Site>,
 }
 
+/// The reports of one rule the hypothetical-catalog run printed, by certainty.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, JsonSchema)]
 #[schemars(deny_unknown_fields)]
-pub struct IfWaits {
-    #[serde(rename = "EFF101")]
-    pub eff101: usize,
-    #[serde(rename = "EFF111")]
-    pub eff111: usize,
+pub struct TrialReports {
+    pub exact: usize,
+    pub heuristic: usize,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, JsonSchema)]
-#[schemars(deny_unknown_fields)]
-pub struct IfQueries {
-    #[serde(rename = "EFF103")]
-    pub eff103: usize,
-    #[serde(rename = "EFF113")]
-    pub eff113: usize,
+impl TrialReports {
+    fn total(self) -> usize {
+        self.exact + self.heuristic
+    }
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -362,7 +360,8 @@ impl Discovered {
 #[derive(Debug, Default)]
 pub(super) struct Trial {
     tried: BTreeSet<String>,
-    found: BTreeMap<String, (IfWaits, IfQueries)>,
+    /// The `EFF101` and the `EFF103` reports of each name.
+    found: BTreeMap<String, (TrialReports, TrialReports)>,
     /// A report named several of the names tried: it counts for the first.
     several: bool,
 }
@@ -397,14 +396,16 @@ pub(super) fn hypothetical_catalog(
         };
         trial.several |= named.next().is_some();
         let (waits, queries) = trial.found.entry(first.to_owned()).or_default();
-        let count = match d.rule_code.as_str() {
-            "EFF101" => &mut waits.eff101,
-            "EFF111" => &mut waits.eff111,
-            "EFF103" => &mut queries.eff103,
-            // The run selects these four rules only.
-            _ => &mut queries.eff113,
+        // The run selects these two rules only.
+        let rule = if d.rule_code == "EFF101" {
+            waits
+        } else {
+            queries
         };
-        *count += 1;
+        match d.certainty {
+            Certainty::Exact => rule.exact += 1,
+            Certainty::Heuristic => rule.heuristic += 1,
+        }
     }
     Ok((project, trial))
 }
@@ -519,9 +520,7 @@ impl Discovered {
 
 /// The reports `heki check` would print through the name if it waited or sent a query.
 fn hypothetical_reports(s: &SymbolCalls) -> usize {
-    let waits = s.if_waits.unwrap_or_default();
-    let queries = s.if_queries.unwrap_or_default();
-    waits.eff101 + waits.eff111 + queries.eff103 + queries.eff113
+    s.if_waits.unwrap_or_default().total() + s.if_queries.unwrap_or_default().total()
 }
 
 /// The notes the section adds to the report's.
@@ -1231,20 +1230,21 @@ fn why(u: &UnresolvedCalls) -> String {
     }
 }
 
-/// What a trial counted for a name, as the text says it.
-fn hypothetical(counts: &[(&str, usize)], tried: bool) -> String {
-    if !tried {
+/// What a trial counted for a name under the rule `code` (`None`: not tried), as the text says
+/// it.
+fn hypothetical(code: &str, counts: Option<TrialReports>) -> String {
+    let Some(counts) = counts else {
         return "not tried".to_owned();
-    }
-    let found: Vec<String> = counts
-        .iter()
+    };
+    let found: Vec<String> = [("exact", counts.exact), ("heuristic", counts.heuristic)]
+        .into_iter()
         .filter(|(_, n)| *n > 0)
-        .map(|(code, n)| format!("{code} {n}"))
+        .map(|(tier, n)| format!("{n} {tier}"))
         .collect();
     if found.is_empty() {
         "-".to_owned()
     } else {
-        found.join(", ")
+        format!("{code} {}", found.join(", "))
     }
 }
 
@@ -1259,17 +1259,9 @@ fn names_table(out: &mut String, symbols: &[&SymbolCalls], total: usize) {
     let rows: Vec<(String, String)> = symbols
         .iter()
         .map(|s| {
-            let w = s.if_waits.unwrap_or_default();
-            let q = s.if_queries.unwrap_or_default();
             (
-                hypothetical(
-                    &[("EFF101", w.eff101), ("EFF111", w.eff111)],
-                    s.if_waits.is_some(),
-                ),
-                hypothetical(
-                    &[("EFF103", q.eff103), ("EFF113", q.eff113)],
-                    s.if_queries.is_some(),
-                ),
+                hypothetical("EFF101", s.if_waits),
+                hypothetical("EFF103", s.if_queries),
             )
         })
         .collect();
@@ -1504,17 +1496,14 @@ mod tests {
 
     #[test]
     fn a_name_not_tried_is_told_apart_from_one_that_reports_nothing() {
-        for (counts, tried, said) in [
-            (
-                &[("EFF101", 2), ("EFF111", 1)][..],
-                true,
-                "EFF101 2, EFF111 1",
-            ),
-            (&[("EFF101", 0), ("EFF111", 3)], true, "EFF111 3"),
-            (&[("EFF103", 0), ("EFF113", 0)], true, "-"),
-            (&[("EFF103", 0), ("EFF113", 0)], false, "not tried"),
+        let counts = |exact, heuristic| Some(TrialReports { exact, heuristic });
+        for (code, counts, said) in [
+            ("EFF101", counts(2, 1), "EFF101 2 exact, 1 heuristic"),
+            ("EFF101", counts(0, 3), "EFF101 3 heuristic"),
+            ("EFF103", counts(0, 0), "-"),
+            ("EFF103", None, "not tried"),
         ] {
-            assert_eq!(hypothetical(counts, tried), said);
+            assert_eq!(hypothetical(code, counts), said);
         }
     }
 }

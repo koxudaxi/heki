@@ -11,12 +11,11 @@ use serde_json::Value;
 
 /// `(file:line, rule)` of every diagnostic `heki check --select <select>` reports, sorted.
 fn reported(p: &Project, select: &str, version: &str) -> Vec<(String, String)> {
-    let select = common::select_with_siblings(select);
     let (code, stdout, stderr) = p.check(&[
         "--output-format",
         "json",
         "--select",
-        &select,
+        select,
         "--target-version",
         version,
     ]);
@@ -28,7 +27,7 @@ fn reported(p: &Project, select: &str, version: &str) -> Vec<(String, String)> {
         .map(|d| {
             (
                 format!("{}:{}", d["path"].as_str().unwrap(), d["line"]),
-                d["rule_code"].as_str().unwrap().to_owned(),
+                common::tiered_code(d).to_owned(),
             )
         })
         .collect();
@@ -383,9 +382,9 @@ fn a_length_test_on_every_path_to_a_loop_caps_it() {
         (g(60), "EFF103"),
         (g(67), "EFF103"),
         (g(75), "EFF103"),
-        (g(83), "EFF113"),
-        (g(90), "EFF113"),
-        (g(126), "EFF113"),
+        (g(83), "EFF103 [heuristic]"),
+        (g(90), "EFF103 [heuristic]"),
+        (g(126), "EFF103 [heuristic]"),
         (g(142), "EFF103"),
     ];
     let expected: Vec<(&str, &str)> = expected.iter().map(|(a, r)| (a.as_str(), *r)).collect();
@@ -520,18 +519,18 @@ fn a_new_list_grows_only_by_the_items_a_fixed_loop_adds() {
     let f = |line: u32| format!("filled.py:{line}");
     let expected: Vec<(String, &str)> = vec![
         (f(14), "EFF103"),
-        (f(22), "EFF113"),
-        (f(32), "EFF113"),
-        (f(39), "EFF113"),
-        (f(50), "EFF113"),
-        (f(52), "EFF113"),
-        (f(57), "EFF113"),
-        (f(92), "EFF113"),
-        (f(112), "EFF113"),
+        (f(22), "EFF103 [heuristic]"),
+        (f(32), "EFF103 [heuristic]"),
+        (f(39), "EFF103 [heuristic]"),
+        (f(50), "EFF103 [heuristic]"),
+        (f(52), "EFF103 [heuristic]"),
+        (f(57), "EFF103 [heuristic]"),
+        (f(92), "EFF103 [heuristic]"),
+        (f(112), "EFF103 [heuristic]"),
     ];
     // The items of a comprehension with a data clause are the parameter's when Python 3.12
     // inlines it; Python 3.11 builds it in a frame of its own, whose items have no origin.
-    for (version, comprehension) in [("py311", "EFF113"), ("py312", "EFF103")] {
+    for (version, comprehension) in [("py311", "EFF103 [heuristic]"), ("py312", "EFF103")] {
         let mut expected = expected.clone();
         expected.push((f(69), comprehension));
         let expected: Vec<(&str, &str)> = expected.iter().map(|(a, r)| (a.as_str(), *r)).collect();
@@ -638,11 +637,11 @@ fn module_constants_through_imports_module_bodies_and_tuples() {
         );
     assert_both_versions(
         &p,
-        "EFF103,EFF113,OPT113",
+        "EFF103,OPT113",
         &[
             ("pkg/gen_docs.py:5", "OPT113"),
-            ("pkg/migrate.py:25", "EFF113"),
-            ("pkg/migrate.py:31", "EFF113"),
+            ("pkg/migrate.py:25", "EFF103 [heuristic]"),
+            ("pkg/migrate.py:31", "EFF103 [heuristic]"),
         ],
     );
 }
@@ -798,7 +797,11 @@ fn slices_constructors_and_additions_by_fixed_counts() {
     let expected: Vec<(String, &str)> = [24, 26, 28, 30, 70]
         .into_iter()
         .map(|line| (s(line), "EFF103"))
-        .chain([32, 55, 68, 74].into_iter().map(|line| (s(line), "EFF113")))
+        .chain(
+            [32, 55, 68, 74]
+                .into_iter()
+                .map(|line| (s(line), "EFF103 [heuristic]")),
+        )
         .collect();
     let expected: Vec<(&str, &str)> = expected.iter().map(|(a, r)| (a.as_str(), *r)).collect();
     assert_both_versions(&p, "EFF103", &expected);
@@ -827,7 +830,7 @@ fn a_star_import_may_bind_the_builtins_a_size_rests_on() {
     // `range(3)` three items only with the real builtins. Without a star import the first loop
     // is an exact `EFF103` and the second is not reported. After the star import of a module
     // that binds `range` (`shadow`), or of one that binds no builtin (`helpers`), neither size
-    // is known: no exact report, and both loops count as data-sized (`EFF113`).
+    // is known: no exact report, and both loops count as data-sized (heuristic `EFF103`).
     let p = Project::new("sizes_star_import");
     p.write("pkg/__init__.py", "")
         .write("pkg/shadow.py", "def range(n):\n    return [0] * 1000\n")
@@ -847,10 +850,10 @@ fn a_star_import_may_bind_the_builtins_a_size_rests_on() {
         "EFF103",
         &[
             ("pkg/plain.py:7", "EFF103"),
-            ("pkg/starred.py:7", "EFF113"),
-            ("pkg/starred.py:12", "EFF113"),
-            ("pkg/helpers_star.py:7", "EFF113"),
-            ("pkg/helpers_star.py:12", "EFF113"),
+            ("pkg/starred.py:7", "EFF103 [heuristic]"),
+            ("pkg/starred.py:12", "EFF103 [heuristic]"),
+            ("pkg/helpers_star.py:7", "EFF103 [heuristic]"),
+            ("pkg/helpers_star.py:12", "EFF103 [heuristic]"),
         ],
     );
 }

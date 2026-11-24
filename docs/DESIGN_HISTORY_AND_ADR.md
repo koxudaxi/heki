@@ -447,6 +447,18 @@ that need no configuration, the import contracts of other tools, and heki's own 
      effect rules (their claims differ, and a rule is its claim); a selection that reads a
      per-report certainty (the selection stays per rule, and a filter withholds the heuristic
      reports of an exact rule).
+     *Amended in 0.4.0*: the effect rules keep one code too, with a certainty per report:
+     `EFF111` is now the heuristic tier of `EFF101`, and `EFF113` that of `EFF103`. Every gain in
+     precision moved a report from the heuristic code to the exact one, so it changed the
+     report's code: an inline suppression stopped matching it, a baseline counted it as new, and
+     the entry of the old code was left unused. 13 rules already carried both tiers under one
+     code (the eight `OPT` rewrite rules, `OPT113`, `DATA101`, `MUT110`, `MUT114`, and
+     `MUT119`), `DATA101` split by the same must-facts as the effect rules, and within one code a
+     baseline entry already holds across a change of tier. The heuristic tier states the
+     weaker claim of the same premises, each open premise recorded as for the other rules. The
+     old codes are no aliases, as `MUT109` was not in 0.3.0: in a selector, a suppression, or a
+     baseline entry they are read like any unknown code. Decision 10 is unchanged: naming
+     `EFF101` or `EFF103` shows its heuristic reports.
   10. **Selecting the heuristic rules and reports** (D6): `[tool.heki.lint] heuristic = true` and
       `--heuristic` / `--no-heuristic` (on `check` and `server`), modelled on Ruff's `preview`:
       prefixes and `ALL` then also select the heuristic `Default` rules, and an exact code or name

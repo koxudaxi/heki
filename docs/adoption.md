@@ -246,6 +246,20 @@ exact ones that are not opt-in do ([Getting Started](getting-started.md#run-it) 
   `"MUT208"` in those entries, or record the baseline anew.
 - `heki check --fix` applies the proven fixes of `OPT101` and `OPT102` by default, as in 0.1.
 
+### From heki 0.2 and 0.3
+
+`EFF111` and `EFF113` are no longer codes of their own: their reports are the heuristic reports
+of `EFF101` and `EFF103`, labelled `heuristic` and shown, as before, with `lint.heuristic = true`
+or where the code is named. The old codes and names are not kept.
+
+- Write `EFF101` for `EFF111` (`async-possibly-blocking-call`) and `EFF103` for `EFF113`
+  (`loop-possible-db-query`) in `select`, `extend-select`, `ignore`, `per-file-ignores`,
+  `severity`, and suppression comments. In the configuration the old codes are unknown rules
+  (exit code 2); a comment naming one suppresses nothing.
+- A baseline entry with `rule_code = "EFF111"` or `"EFF113"` no longer matches: its reports count
+  as regressions. Change the code to `"EFF101"` or `"EFF103"` (adding up the counts of two entries
+  that then have the same file, function, and target), or record the baseline anew.
+
 ## Effect snapshots (`MUT103`)
 
 For a library, a change in what a public function *does* is worth reviewing even when no rule

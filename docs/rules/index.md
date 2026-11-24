@@ -2,7 +2,7 @@
 
 # Rules
 
-heki has 55 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](../precision.md) says how a rule is certified and what each one measured. Each rule's page says what a report states.
+heki has 53 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](../precision.md) says how a rule is certified and what each one measured. Each rule's page says what a report states.
 
 - The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report of an exact rule that did not establish every premise (an `OPT` report whose rewrite is not proven) is shown where a heuristic rule would run.
 - A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
@@ -53,11 +53,9 @@ Work that runs where it should not: blocking calls on the event loop, clients an
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| EFF101 | [async-blocking-call](async-blocking-call.md) | A call in `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop. |  |
-| EFF111 | [async-possibly-blocking-call](async-possibly-blocking-call.md) | Heuristic sibling of `EFF101`: a call in `async def` that can reach a blocking call on the event loop. | ≈ |
+| EFF101 | [async-blocking-call](async-blocking-call.md) | A call in `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop; its heuristic reports, a call that can reach a blocking call. |  |
 | EFF102 | [loop-unpooled-client](loop-unpooled-client.md) | Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop. | ≈ |
-| EFF103 | [loop-db-query](loop-db-query.md) | A loop over data whose every iteration sends a database statement. |  |
-| EFF113 | [loop-possible-db-query](loop-possible-db-query.md) | Heuristic sibling of `EFF103`: a loop that can run a database query on every iteration. | ≈ |
+| EFF103 | [loop-db-query](loop-db-query.md) | A loop over data whose every iteration sends a database statement; its heuristic reports, a loop that can run a database query on every iteration. |  |
 | EFF105 | [async-blocking-fs](async-blocking-fs.md) | Opt-in: blocking local filesystem I/O reachable from `async def`. | ≈ 🔌 |
 | EFF106 | [lock-or-tx-held-across-io](lock-or-tx-held-across-io.md) | Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction. | ≈ 🔌 |
 | EFF107 | [unretained-async-task](unretained-async-task.md) | Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored. | ≈ 🔌 |

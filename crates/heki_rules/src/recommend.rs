@@ -33,10 +33,10 @@ use thiserror::Error;
 
 /// The `version` of the JSON object: it changes when a field is removed or changes meaning;
 /// fields are only added within a version.
-pub const RECOMMEND_VERSION: u32 = 1;
+pub const RECOMMEND_VERSION: u32 = 2;
 
-/// Where the JSON Schema of the object is published (`docs/schemas/recommend-1.json`).
-pub const SCHEMA_URL: &str = "https://heki.koxudaxi.dev/schemas/recommend-1.json";
+/// Where the JSON Schema of the object is published (`docs/schemas/recommend-2.json`).
+pub const SCHEMA_URL: &str = "https://heki.koxudaxi.dev/schemas/recommend-2.json";
 
 /// The most entries a list of the JSON object holds; the list says when it holds fewer than
 /// there are.
@@ -105,7 +105,7 @@ pub struct RecommendReport {
     pub kind: ReportKind,
     /// The version of the object's fields: it changes when a field is removed or changes
     /// meaning; fields are only added within a version.
-    #[schemars(range(min = 1, max = 1))]
+    #[schemars(range(min = RECOMMEND_VERSION, max = RECOMMEND_VERSION))]
     pub version: u32,
     /// The version of heki that wrote the report.
     pub heki: String,
@@ -230,7 +230,7 @@ pub struct BaselineSplit {
     pub regressions: usize,
 }
 
-/// The JSON Schema of [`RecommendReport`], as `docs/schemas/recommend-1.json` publishes it.
+/// The JSON Schema of [`RecommendReport`], as `docs/schemas/recommend-2.json` publishes it.
 pub fn json_schema() -> serde_json::Value {
     let mut schema = schemars::schema_for!(RecommendReport);
     schema.insert("$id".to_owned(), SCHEMA_URL.into());
