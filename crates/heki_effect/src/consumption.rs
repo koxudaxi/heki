@@ -709,7 +709,7 @@ impl IterFlow {
                     } => args.first().copied().into_iter().collect(),
                     InstKind::MethodCall {
                         recv, method, args, ..
-                    } if method == "join" && args.len() == 1 && is_text(shape, types, *recv) => {
+                    } if method == "join" && args.len() == 1 && is_text(types, *recv) => {
                         args.clone()
                     }
                     InstKind::Call { args, .. } | InstKind::MethodCall { args, .. } => {
@@ -829,16 +829,9 @@ fn is_iterator_annotation(tcx: &TypeCtx<'_>, annotation: &str) -> bool {
         .is_some_and(|t| ITERATOR_TYPES.contains(&t.as_str()))
 }
 
-/// `var` holds a `str` or `bytes`: a constant (through copies) or a value typed so.
-fn is_text(shape: &FnShape<'_>, types: &FxHashMap<VarId, Val>, var: VarId) -> bool {
-    let copied = shape.inst(shape.copy_root(var)).map(|i| &i.kind);
-    matches!(
-        copied,
-        Some(InstKind::Const {
-            literal: ConstLiteral::Str(_) | ConstLiteral::Bytes,
-            ..
-        })
-    ) || matches!(types.get(&var), Some(Val::Inst(t)) if t == "builtins.str" || t == "builtins.bytes")
+/// `var` holds a `str` or `bytes`.
+fn is_text(types: &FxHashMap<VarId, Val>, var: VarId) -> bool {
+    matches!(types.get(&var), Some(Val::Inst(t)) if t == "builtins.str" || t == "builtins.bytes")
 }
 
 /// For the iterator `iter` a `MakeIter` defines: the block entered when its loop is exhausted,

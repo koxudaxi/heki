@@ -561,10 +561,10 @@ def f(unknown) -> None:
     assert_eq!(of(&t, "g"), one("m.Model"));
     assert_eq!(of(&t, "h"), one("m.Sub"));
     // A bare `Final` takes the value's type; `TypeAlias` and `Literal` declare no instance (the
-    // alias holds the class object).
+    // alias holds the class object, the literal has its constant's class).
     assert_eq!(of(&t, "i"), one("builtins.list"));
     assert_eq!(of(&t, "j"), one("ref m.Model"));
-    assert!(of(&t, "k").is_empty());
+    assert_eq!(of(&t, "k"), one("builtins.str"));
     assert_eq!(of(&t, "c"), one("m.Model"));
     assert_eq!(of(&t, "d"), one("m.Model"));
     assert_eq!(of(&t, "e"), one("m.Model"));

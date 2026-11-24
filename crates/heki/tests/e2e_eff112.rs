@@ -1016,6 +1016,7 @@ fn expected() -> Vec<(String, u64, String, String)> {
             "literal_set:77->json.dumps",
         ),
         d("pkg/more.py", 81, "modes", "modes:81->json.dumps"),
+        d("pkg/more.py", 85, "other", "other:85->json.dumps"),
         d(
             "pkg/more.py",
             117,
