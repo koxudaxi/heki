@@ -36,7 +36,9 @@ allowed writers:
   `vars(model)["fields"]`, `model.__dict__.setdefault("fields", v)`, and a local alias of the
   namespace),
   also with a string constant for the name (`model.__dict__[FIELDS_KEY]`, imported or not):
-  a module-level name declared `Final` or bound once in its module and rebound by no other, or
+  a module-level name declared `Final` or bound once in its module and rebound by no other (a
+  module `__getattr__` caching what it serves, `globals()[name] = value`, leaves the names the
+  module body binds on every path, since Python calls it only for a missing name), or
   a class-body name declared `ClassVar` or `Final` and bound once (`self.KEY`, `cls.KEY`,
   `Model.KEY`), which every subclass of the object's class finds along its MRO in the same
   class (none defines it again or lists another base defining it first,
@@ -47,8 +49,11 @@ allowed writers:
   each instance holds itself (`Keys("x").KEY`): it names an attribute only when read on the
   class object of a dataclass whose default no class along the way replaces (one with
   `slots=True` or built by a transform); a name a loop takes from a tuple, list, or set of such
-  constants (`for key in ("fields", FIELDS_KEY): setattr(model, key, [])`) writes each of them,
-  when no code changes the list or set (`keys.append(name)` makes the name unknown);
+  constants (`for key in ("fields", FIELDS_KEY): setattr(model, key, [])`), or from a module's
+  tuple of them (`for key in RECORDS`, imported or not), writes each of them, when no code
+  changes the list or set (`keys.append(name)` makes the name unknown), and so does the key of
+  each pair a generator gives `__dict__.update`
+  (`copy.__dict__.update((key, src.__dict__[key]) for key in RECORDS)`);
 - into the entries of the container the attribute holds (`model.meta["kw"][name] = v`,
   `model.meta["kw"].append(v)`, through a local alias of the entry): an `item_mut` write;
 - through a helper that mutates the container or object it receives (`helper(model.fields)`),

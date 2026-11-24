@@ -1066,7 +1066,9 @@ pub struct ModuleDecls {
     /// `KEY: Final = "_key"`), and class-body names declared `ClassVar` or `Final` and bound
     /// once (`KEY: ClassVar[str] = "_key"`), under `Class.KEY`. A constant names an attribute in
     /// `obj.__dict__[KEY]`, `getattr(obj, KEY)`, and `setattr(obj, KEY, v)`, and a key in
-    /// `obj.attr[KEY]`, as its literal would.
+    /// `obj.attr[KEY]`, as its literal would. A module-level name bound once to a tuple display
+    /// of string constants (`RECORDS = (ORIGIN_KEY, "_number")`) is one too: a loop over it
+    /// takes the names of its items, as a loop over the display would.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub str_constants: BTreeMap<String, StrConstant>,
     /// Module-level names bound once to a number or boolean literal (`PAUSE = 0`, `DELAY = 0.5`,
@@ -1152,6 +1154,11 @@ pub enum StrValue {
     /// `KEY = OTHER` / `KEY = keys.OTHER`: the fully qualified name of the constant it is
     /// bound to, resolved within the module (chased by [`ProjectDecls::str_constant`]).
     Alias(String),
+    /// `RECORDS = (ORIGIN_KEY, "_number")`, a module-level tuple display: its items in order,
+    /// each a literal or an alias ([`ProjectDecls::str_tuple`]). A module-level tuple of
+    /// literals shares its texts with the module's constants
+    /// (`heki_ir::ModuleConstants::str_tuples`).
+    Tuple(Box<[StrValue]>),
 }
 
 impl ModuleDecls {
@@ -3176,9 +3183,36 @@ impl ProjectDecls {
     }
 
     /// The value of the string constant `fqn` (`pkg.keys.KEY`, `pkg.model.Model.KEY`), through
-    /// re-exports ([`Self::canonical_value`]) and constants bound to other constants (at most
-    /// `MAX_ALIAS_CHASE` steps).
+    /// re-exports and aliases ([`Self::constant_value`]).
     pub fn str_constant(&self, fqn: &str) -> Option<&str> {
+        match self.constant_value(fqn)? {
+            StrValue::Literal(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// The texts of the items of the tuple constant `fqn` (`pkg.keys.RECORDS`), through
+    /// re-exports and aliases ([`Self::constant_value`]), when each item is a string constant.
+    pub fn str_tuple(&self, fqn: &str) -> Option<Vec<&str>> {
+        match self.constant_value(fqn)? {
+            StrValue::Tuple(items) => items.iter().map(|i| self.item_text(i)).collect(),
+            _ => None,
+        }
+    }
+
+    /// The text of the item `item` of a tuple constant.
+    fn item_text<'s>(&'s self, item: &'s StrValue) -> Option<&'s str> {
+        match item {
+            StrValue::Literal(v) => Some(v),
+            StrValue::Alias(fqn) => self.str_constant(fqn),
+            StrValue::Tuple(_) => None,
+        }
+    }
+
+    /// What the constant `fqn` is bound to, a text or a tuple, through re-exports
+    /// ([`Self::canonical_value`]) and constants bound to other constants (at most
+    /// `MAX_ALIAS_CHASE` steps).
+    fn constant_value(&self, fqn: &str) -> Option<&StrValue> {
         let mut cur = self.canonical_value(fqn)?;
         for _ in 0..MAX_ALIAS_CHASE {
             let (m, rest) = self.split_module(&cur)?;
@@ -3187,8 +3221,8 @@ impl ProjectDecls {
                 return None;
             }
             match &constant.value {
-                StrValue::Literal(v) => return Some(v),
                 StrValue::Alias(next) => cur = self.canonical_value(next)?,
+                value => return Some(value),
             }
         }
         None
@@ -6349,9 +6383,12 @@ fn count_u8<T>(items: impl Iterator<Item = T>) -> u8 {
 /// [`ModuleDecls::str_constants`]: the module-level names bound exactly once in the module and
 /// the class-body names declared `ClassVar` or `Final` (`typing` / `typing_extensions`, also
 /// subscripted) bound exactly once in the class body, each to a string literal or to another
-/// name (`constant_source`). A module-level literal is the text of one of the module's
-/// constants (`heki_ir::ModuleConstants::strs`), shared with it, and a name those leave out is
-/// no constant. A name stored twice (`global KEY` in a function, two branches) or deleted is no
+/// name (`constant_source`), and the module-level names bound to a tuple display of those
+/// (`tuple_source`). A module-level literal is the text of one of the module's constants
+/// (`heki_ir::ModuleConstants::strs`), shared with it, and a name those leave out is no
+/// constant; a module-level name bound to another module's constant is one only where the
+/// module's IR fixes it too (`heki_ir::ModuleConstants::imported`: not in a loop, before a star
+/// import, or where `exec` or `globals()` may rebind it). A name stored twice (`global KEY` in a function, two branches) or deleted is no
 /// constant, and neither is a name an import statement binds: it resolves through the imports.
 /// A class attribute the module also stores or deletes outside the class body
 /// (`ClassDecl::rebound_attrs`) is none either.
@@ -6365,6 +6402,7 @@ fn str_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Strin
         .filter_map(|imp| Some((imp.span, import_target(imp, input)?)))
         .collect();
     let module_stores = GlobalStores::of(&input.ir.functions);
+    let fixed_import = |name: &str| input.ir.constants.imported.contains(name);
     let mut out = BTreeMap::new();
     for f in input
         .ir
@@ -6427,7 +6465,16 @@ fn str_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Strin
                     None => continue,
                 },
                 Some(Ok(s)) => StrValue::Literal(Arc::from(s)),
+                // As for a literal, the module's IR decides whether the name is fixed.
+                Some(Err(_)) if f.is_module_body && !fixed_import(name) => continue,
                 Some(Err(fqn)) => StrValue::Alias(fqn),
+                None if f.is_module_body => {
+                    let fixed = input.ir.constants.str_tuples.get(name);
+                    match tuple_source(f, &defs, &imports, value, fixed, fixed_import(name)) {
+                        Some(items) => StrValue::Tuple(items),
+                        None => continue,
+                    }
+                }
                 None => continue,
             };
             let constant = StrConstant {
@@ -7372,6 +7419,55 @@ fn constant_source<'a>(
             _ => return None,
         }
     }
+}
+
+/// The items of the tuple display of string constants behind `var` (through copies), bound to a
+/// name by the module body `f` ([`StrValue::Tuple`]): each a literal or another constant
+/// ([`constant_source`]). A tuple of literals is one of the module's constants (`fixed`,
+/// `heki_ir::ModuleConstants::str_tuples`), shared with it, and one naming another module's
+/// constants is one only where the module's IR fixes the name (`fixed_import`,
+/// `heki_ir::ModuleConstants::imported`), as for a string.
+fn tuple_source(
+    f: &IrFunction,
+    defs: &FxHashMap<VarId, &Inst>,
+    imports: &FxHashMap<Span, String>,
+    var: VarId,
+    fixed: Option<&Arc<[Arc<str>]>>,
+    fixed_import: bool,
+) -> Option<Box<[StrValue]>> {
+    let mut cur = var;
+    let mut display = None;
+    for _ in 0..MAX_ALIAS_CHASE {
+        match &defs.get(&cur)?.kind {
+            InstKind::Copy { src, .. } => cur = *src,
+            InstKind::AllocBuiltin {
+                dst,
+                kind: heki_ir::BuiltinKind::Tuple,
+                elems,
+            } => {
+                display = Some((*dst, elems));
+                break;
+            }
+            _ => return None,
+        }
+    }
+    let (dst, elems) = display?;
+    let sources: Vec<Result<&str, String>> = (elems.iter().enumerate())
+        .map(|(i, e)| (!f.is_starred(dst, i)).then(|| constant_source(defs, imports, *e))?)
+        .collect::<Option<_>>()?;
+    if sources.iter().all(Result::is_ok) {
+        return Some(
+            fixed?
+                .iter()
+                .map(|t| StrValue::Literal(Arc::clone(t)))
+                .collect(),
+        );
+    }
+    let item = |source: Result<&str, String>| match source {
+        Ok(text) => StrValue::Literal(Arc::from(text)),
+        Err(fqn) => StrValue::Alias(fqn),
+    };
+    fixed_import.then(|| sources.into_iter().map(item).collect())
 }
 
 /// `FunctionDecl::readonly_params` and `FunctionDecl::mutable_params` of `f`.
@@ -8751,13 +8847,31 @@ impl<'a> TypeCtx<'a> {
     /// its own constants, or one it imports (`from pkg.keys import KEY`, also through a star
     /// import).
     pub fn global_str(&self, name: &str) -> Option<&'a str> {
+        match self.global_constant(name)? {
+            StrValue::Literal(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// The texts of the items of the module-level tuple constant `name` read inside this
+    /// module, of its own or one it imports, as [`Self::global_str`] reads a string.
+    pub fn global_str_tuple(&self, name: &str) -> Option<Vec<&'a str>> {
+        match self.global_constant(name)? {
+            StrValue::Tuple(items) => items.iter().map(|i| self.project.item_text(i)).collect(),
+            _ => None,
+        }
+    }
+
+    /// What the module-level constant `name` read inside this module is bound to
+    /// ([`Self::global_str`]).
+    fn global_constant(&self, name: &str) -> Option<&'a StrValue> {
         let Some(constant) = self.module.str_constants.get(name) else {
             return match self.project.star_binding(self.module, name) {
-                StarBinding::Bound { target, .. } => self.project.str_constant(&target),
+                StarBinding::Bound { target, .. } => self.project.constant_value(&target),
                 _ => self
                     .module
                     .fixed_import(name)
-                    .and_then(|fqn| self.project.str_constant(fqn)),
+                    .and_then(|fqn| self.project.constant_value(fqn)),
             };
         };
         let fqn = || format!("{}.{name}", self.module.module_name);
@@ -8765,8 +8879,8 @@ impl<'a> TypeCtx<'a> {
             return None;
         }
         match &constant.value {
-            StrValue::Literal(v) => Some(v),
-            StrValue::Alias(next) => self.project.str_constant(next),
+            StrValue::Alias(next) => self.project.constant_value(next),
+            value => Some(value),
         }
     }
 
@@ -9356,6 +9470,15 @@ impl<'a> TypeCtx<'a> {
         match read {
             GlobalRead::Own(name) => self.global_str(name),
             GlobalRead::Other(fqn) => self.project.str_constant(&fqn),
+        }
+    }
+
+    /// The texts of the tuple constant the global read `read` gives
+    /// ([`Self::global_str_tuple`], [`ProjectDecls::str_tuple`]).
+    pub(crate) fn global_read_str_tuple(&self, read: GlobalRead<'_>) -> Option<Vec<&'a str>> {
+        match read {
+            GlobalRead::Own(name) => self.global_str_tuple(name),
+            GlobalRead::Other(fqn) => self.project.str_tuple(&fqn),
         }
     }
 

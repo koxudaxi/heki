@@ -21,8 +21,8 @@ use heki_ir::walk::{
     Answer, Budget, Closure, Def, Facts, FnShape, Join, Sparse, Use, Visit, fixpoint, reach,
 };
 use heki_ir::{
-    BlockId, BuiltinKind, InPlaceChanges, Inst, InstKind, IrFunction, LastBindings, Terminator,
-    VarId,
+    BlockId, BuiltinKind, FunctionId, InPlaceChanges, Inst, InstKind, IrFunction, LastBindings,
+    Terminator, VarId,
 };
 use heki_kb::{EffectiveEcosystemKb, FieldItems};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1543,7 +1543,9 @@ pub(crate) enum AttrName<'f> {
     /// The one a string constant gives.
     Named(Cow<'f, str>),
     /// One of the string constants of the tuple, list, or set display a loop takes the name
-    /// from (`for key in ("a", "b")`).
+    /// from (`for key in ("a", "b")`, also through a module's tuple constant, `for key in
+    /// RECORDS`), or that the keys of the pairs `ns.update(...)` stores are
+    /// (`ns.update((key, v) for key in RECORDS)`).
     OneOf(Vec<String>),
     /// An attribute one of these project classes (canonical) gives its instances: a key of
     /// the namespace of an instance (`for key, value in src.__dict__.items()`), which that
@@ -1562,8 +1564,10 @@ enum Items {
     /// The keys of a mapping from attributes of instances of these project classes
     /// ([`AttrName::KeyOf`]): the namespace of an instance, or the fields the class declares.
     Keys(Vec<String>),
-    /// The `(key, value)` pairs of such a mapping.
-    Pairs(Vec<String>),
+    /// `(key, value)` pairs whose keys are the boxed items: the pairs of such a mapping
+    /// (`Keys`), or pairs a generator makes of string constants
+    /// (`Constants`: `((key, src.__dict__[key]) for key in RECORDS)`).
+    Pairs(Box<Items>),
     /// Objects whose `name` is a field one of these project classes declares
     /// (`dataclasses.fields(obj)`).
     Fields(Vec<String>),
@@ -1571,13 +1575,15 @@ enum Items {
 
 /// The values a loop iterates, followed through the function of `f`: `def` gives each
 /// variable's defining instruction, `types` the inferred values, `constant` the string constant
-/// a variable holds.
+/// a variable holds. In the body of a generator expression, `passed` gives what a loop over its
+/// `.0` takes: the outermost iterable, which the creating function evaluates and passes.
 struct Iterated<'a, 'i> {
     cx: &'a TypeCtx<'a>,
     f: &'a IrFunction,
     def: &'a dyn Fn(VarId) -> Option<&'i Inst>,
     types: &'a FxHashMap<VarId, crate::resolver::Val>,
     constant: &'a dyn Fn(VarId) -> Option<String>,
+    passed: Option<&'a dyn Fn() -> Option<Items>>,
 }
 
 impl<'i> Iterated<'_, 'i> {
@@ -1630,12 +1636,14 @@ impl<'i> Iterated<'_, 'i> {
             })
     }
 
-    /// What a loop over `iterable` takes: the items of a display of string constants, the keys
-    /// or the pairs of a namespace (`vars(src)`, `src.__dict__`), the fields a class declares
-    /// ([`Self::declared_fields`]), a copy of a mapping (`.copy()`, `dict(...)`), its `keys()`
-    /// or `items()`, or a `list`, `tuple`, or `sorted` of one of these. Each wrapper holds one
-    /// value, so the walk follows one chain to the display, the namespace, or the fields, then
-    /// applies the wrappers from the inside out.
+    /// What a loop over `iterable` takes: the items of a display of string constants or of a
+    /// module's tuple constant ([`TypeCtx::global_read_str_tuple`]), the keys or the pairs of a
+    /// namespace (`vars(src)`, `src.__dict__`), the fields a class declares
+    /// ([`Self::declared_fields`]), what a generator expression yields ([`Self::generated`]), a
+    /// copy of a mapping (`.copy()`, `dict(...)`), its `keys()` or `items()`, or a `list`,
+    /// `tuple`, or `sorted` of one of these. Each wrapper holds one value, so the walk follows one
+    /// chain to the display, the namespace, or the fields, then applies the wrappers from the
+    /// inside out.
     fn items(&self, iterable: VarId) -> Option<Items> {
         const WRAPPERS: &[&str] = &[
             "builtins.list",
@@ -1643,17 +1651,25 @@ impl<'i> Iterated<'_, 'i> {
             "builtins.sorted",
             "builtins.dict",
         ];
+        let wrapped = |wrappers: &[Wrapper], inner: Items| {
+            (wrappers.iter().rev()).try_fold(inner, |items, w| w.apply(items))
+        };
         let mut wrappers: Vec<Wrapper> = Vec::new();
         let mut cur = iterable;
         for _ in 0..=Self::MAX_WRAPPERS {
+            if let Some(passed) = self.passed.filter(|_| self.f.var_name(cur) == Some(".0")) {
+                return wrapped(&wrappers, passed()?);
+            }
             let inst = self.def(cur)?;
             let namespace = super::namespace_load(&inst.kind, |v| self.types.get(&v));
             let inner = match namespace {
                 Some((_, obj)) => Some(Items::Keys(self.instances(obj)?)),
-                None => self.declared_fields(&inst.kind),
+                None => self
+                    .declared_fields(&inst.kind)
+                    .or_else(|| self.tuple_constant(inst)),
             };
             if let Some(inner) = inner {
-                return (wrappers.iter().rev()).try_fold(inner, |items, w| w.apply(items));
+                return wrapped(&wrappers, inner);
             }
             match &inst.kind {
                 InstKind::AllocBuiltin {
@@ -1670,8 +1686,13 @@ impl<'i> Iterated<'_, 'i> {
                             .flatten()
                     });
                     let inner = Items::Constants(names.collect::<Option<_>>()?);
-                    return (wrappers.iter().rev()).try_fold(inner, |items, w| w.apply(items));
+                    return wrapped(&wrappers, inner);
                 }
+                InstKind::MakeGenExpr {
+                    func_id: Some(body),
+                    outer_iter,
+                    ..
+                } => return wrapped(&wrappers, self.generated(*body, *outer_iter)?),
                 InstKind::MethodCall {
                     recv,
                     method,
@@ -1701,6 +1722,97 @@ impl<'i> Iterated<'_, 'i> {
             }
         }
         None
+    }
+
+    /// The items of the module-level tuple constant `inst` reads, of this module or another
+    /// (`RECORDS`, `keys.RECORDS`, `from pkg.keys import RECORDS`).
+    fn tuple_constant(&self, inst: &Inst) -> Option<Items> {
+        let module_of = |v: VarId| match self.types.get(&v)? {
+            crate::resolver::Val::Ref(module) => Some(module.clone()),
+            _ => None,
+        };
+        let read = self.cx.global_read(inst, &module_of)?;
+        let texts = self.cx.global_read_str_tuple(read)?;
+        Some(Items::Constants(
+            texts.into_iter().map(str::to_owned).collect(),
+        ))
+    }
+
+    /// What the generator expression whose body is the function `body` yields, when heki can
+    /// name it: the items of a loop of the body (`(key for key in RECORDS if ...)`), or
+    /// `(key, value)` pairs whose keys it names (`((key, src.__dict__[key]) for key in
+    /// RECORDS)`), each key as [`key_name`] decides it. The body receives `outer_iter`, the
+    /// outermost iterable, from this function, as `.0`.
+    fn generated(&self, body: FunctionId, outer_iter: VarId) -> Option<Items> {
+        let f = self.cx.ir().function(body);
+        let mut yielded = insts(f).filter_map(|inst| match &inst.kind {
+            InstKind::Yield { value, .. } => Some(*value),
+            InstKind::YieldFrom { .. } => Some(None),
+            _ => None,
+        });
+        let (Some(Some(value)), None) = (yielded.next(), yielded.next()) else {
+            return None;
+        };
+        let defs: FxHashMap<VarId, &Inst> = insts(f)
+            .filter_map(|inst| Some((inst.kind.dst()?, inst)))
+            .collect();
+        let def = |v: VarId| defs.get(&v).copied();
+        // The body's own values are not inferred: a key it takes from a namespace of its own
+        // (`for k in vars(src)` past the first `for`) names no attribute here.
+        let types = FxHashMap::default();
+        let constant = |v: VarId| self.cx.str_constant_with(v, &def, &types);
+        let passed = || self.items(outer_iter);
+        let inner = Iterated {
+            cx: self.cx,
+            f,
+            def: &def,
+            types: &types,
+            constant: &constant,
+            passed: Some(&passed),
+        };
+        match &inner.def(value)?.kind {
+            InstKind::AllocBuiltin {
+                dst,
+                kind: BuiltinKind::Tuple,
+                elems,
+            } if elems.len() == 2 && !(0..2).any(|i| f.is_starred(*dst, i)) => {
+                let key = elems[0];
+                let keys = match constant(key) {
+                    Some(name) => Items::Constants(vec![name]),
+                    None => inner.key_items(key)?,
+                };
+                Some(Items::Pairs(Box::new(keys)))
+            }
+            _ => inner.loop_items(value),
+        }
+    }
+
+    /// What the key `key` names when it is no string constant: one of the items of the display,
+    /// the namespace, or the fields a loop takes it from ([`key_name`]).
+    fn key_items(&self, key: VarId) -> Option<Items> {
+        let items = match &self.def(key)?.kind {
+            InstKind::IterNext { .. } => self.loop_items(key),
+            // The first of the pair a loop unpacks (`for key, value in ...`).
+            InstKind::SubscriptLoad {
+                obj,
+                index,
+                key_const: None,
+                is_slice: false,
+                ..
+            } if is_int(self.def(*index), 0) => match self.loop_items(*obj)? {
+                Items::Pairs(keys) => Some(*keys),
+                _ => None,
+            },
+            // The name of the field a loop takes (`for field in dataclasses.fields(obj)`).
+            InstKind::AttrLoad { obj, attr, .. } if attr == "name" => {
+                match self.loop_items(*obj)? {
+                    Items::Fields(classes) => Some(Items::Keys(classes)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        items.filter(|i| matches!(i, Items::Constants(_) | Items::Keys(_)))
     }
 
     /// The fields of a class that the instruction `kind` reads (`type(obj).model_fields`,
@@ -1786,11 +1898,11 @@ enum Wrapper {
 impl Wrapper {
     fn apply(self, inner: Items) -> Option<Items> {
         match (self, inner) {
-            (Self::Keys, Items::Keys(classes)) => Some(Items::Keys(classes)),
-            (Self::Pairs, Items::Keys(classes)) => Some(Items::Pairs(classes)),
-            (Self::Dict, Items::Keys(classes) | Items::Pairs(classes)) => {
-                Some(Items::Keys(classes))
+            (Self::Keys | Self::Dict, Items::Keys(classes)) => Some(Items::Keys(classes)),
+            (Self::Pairs, Items::Keys(classes)) => {
+                Some(Items::Pairs(Box::new(Items::Keys(classes))))
             }
+            (Self::Dict, Items::Pairs(keys)) => Some(*keys),
             (Self::Same, items) => Some(items),
             _ => None,
         }
@@ -1826,40 +1938,20 @@ pub(crate) fn key_name<'i>(
         def,
         types,
         constant: &constant,
+        passed: None,
     };
-    let items = match loops.def(key).map(|i| &i.kind) {
-        Some(InstKind::IterNext { .. }) => loops.loop_items(key),
-        // The first of the pair a loop unpacks (`for key, value in ...`).
-        Some(InstKind::SubscriptLoad {
-            obj,
-            index,
-            key_const: None,
-            is_slice: false,
-            ..
-        }) if is_int(loops.def(*index), 0) => match loops.loop_items(*obj) {
-            Some(Items::Pairs(classes)) => Some(Items::Keys(classes)),
-            _ => None,
-        },
-        // The name of the field a loop takes (`for field in dataclasses.fields(obj)`).
-        Some(InstKind::AttrLoad { obj, attr, .. }) if attr == "name" => {
-            match loops.loop_items(*obj) {
-                Some(Items::Fields(classes)) => Some(Items::Keys(classes)),
-                _ => None,
-            }
-        }
-        _ => None,
-    };
-    match items {
+    match loops.key_items(key) {
         Some(Items::Constants(names)) => AttrName::OneOf(names),
         Some(Items::Keys(classes)) => AttrName::KeyOf(classes),
-        Some(Items::Pairs(_) | Items::Fields(_)) | None => AttrName::Unknown,
+        _ => AttrName::Unknown,
     }
 }
 
 /// What the keys of `other` name, stored by `ns.update(other)` (as for [`key_name`]): those of
 /// the namespace of an object, of its copy, or of its `items()`, name attributes that object
 /// has, and those of the fields a class declares attributes the class declares
-/// ([`AttrName::KeyOf`]); any others may be any names.
+/// ([`AttrName::KeyOf`]); those of the pairs a generator makes of string constants name these
+/// ([`AttrName::OneOf`]); any others may be any names.
 pub(crate) fn update_keys<'i>(
     cx: &TypeCtx<'_>,
     f: &IrFunction,
@@ -1874,9 +1966,16 @@ pub(crate) fn update_keys<'i>(
         def,
         types,
         constant: &constant,
+        passed: None,
     };
     match loops.items(other) {
-        Some(Items::Keys(classes) | Items::Pairs(classes)) => AttrName::KeyOf(classes),
+        Some(Items::Keys(classes)) => AttrName::KeyOf(classes),
+        Some(Items::Pairs(keys)) => match *keys {
+            Items::Keys(classes) => AttrName::KeyOf(classes),
+            Items::Constants(names) => AttrName::OneOf(names),
+            _ => AttrName::Unknown,
+        },
+        // Strings are no pairs (`ns.update(["ab"])` stores `a`).
         Some(Items::Constants(_) | Items::Fields(_)) | None => AttrName::Unknown,
     }
 }
@@ -2522,8 +2621,9 @@ impl<'c, 'f> Classifier<'c, 'f> {
         }
     }
 
-    /// A store of an attribute heki cannot name (`name`: [`AttrName::KeyOf`] or
-    /// [`AttrName::Unknown`]) of what `obj` holds, binding `value` when one value is known
+    /// A store of an attribute heki cannot name or pair with its value (`name`:
+    /// [`AttrName::KeyOf`], or any other: the keys of the pairs `ns.update(pairs)` stores, whose
+    /// values heki does not follow) of what `obj` holds, binding `value` when one value is known
     /// (`__setstate__` restores from its state). One under a key of the namespace of an
     /// instance of the class or a subclass (a copy) adds no attribute the class's instances do
     /// not have ([`ProjectDecls::keys_exist_in`]).

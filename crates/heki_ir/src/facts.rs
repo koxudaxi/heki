@@ -395,7 +395,9 @@ fn is_immutable_kind(kind: BuiltinKind) -> bool {
 
 /// Module-level names the code fixes: bound once, by the module body, outside loops, and
 /// never rebound (no other store, `del`, `global` assignment, later star import, or dynamic
-/// globals).
+/// globals). A change through `globals()` that binds only names the namespace lacks (a module
+/// `__getattr__` caching `globals()[name] = value`) leaves the names the body binds on every
+/// path.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModuleConstants {
     /// Integer constants (`ATTEMPTS = 5`, `LIMIT = BASE * 2`).
@@ -426,12 +428,20 @@ pub struct ModuleConstants {
     /// Float constants (`DELAY = 0.5`), the text of their literal.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub floats: BTreeMap<String, String>,
+    /// Names fixed as those of the tables above are, bound to what another module binds, which
+    /// only the declarations resolve: an import or an attribute of one (`KEY = OTHER` after
+    /// `from pkg.keys import OTHER`, `KEY = keys.OTHER`), or a tuple display holding one
+    /// (`RECORDS = (OTHER, "_number")`).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub imported: BTreeSet<String>,
     /// Names of the builtins the module may rebind: those it stores or deletes as globals, and
     /// all of them when it has a star import.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub shadowed: BTreeSet<String>,
     /// Module globals may be bound behind the IR (`exec`, or a change through the dict
-    /// `globals()` returns: [`writes_globals`]): no name is fixed and no builtin is trusted.
+    /// `globals()` returns: [`globals_writes`]): no builtin is trusted, and the tables above are
+    /// empty, except where every such change binds only names the namespace lacks, which leaves
+    /// the names the body binds on every path.
     /// (A `from m import *` only rebinds the public names bound before it, and the builtins.)
     #[serde(default)]
     pub dynamic: bool,
@@ -874,7 +884,7 @@ impl<'a> FnIndex<'a> {
                 name,
                 is_lazy_import: false,
                 ..
-            } if !self.module.dynamic => match self.module.displays.get(name) {
+            } => match self.module.displays.get(name) {
                 Some(d) => {
                     out.add_display(v, d);
                     out.shared = true;
@@ -1582,7 +1592,6 @@ impl<'a> FnIndex<'a> {
                 is_lazy_import: false,
                 ..
             } if past_small
-                && !self.module.dynamic
                 && (self.module.strs.contains_key(name)
                     || self.module.str_tuples.contains_key(name)) =>
             {
@@ -1700,7 +1709,7 @@ impl<'a> FnIndex<'a> {
                 name,
                 is_lazy_import: false,
                 ..
-            } if !self.module.dynamic => self.module.ints.get(name).copied(),
+            } => self.module.ints.get(name).copied(),
             InstKind::UnaryOp {
                 op: UnaryOpKind::USub,
                 operand,
@@ -2706,17 +2715,32 @@ const READING_BUILTINS: &[&str] = &[
     "bool",
 ];
 
-/// Whether `f` may bind a module global behind the IR through the dict `globals()` returns
-/// (`vars()` and `locals()` are A1 hazards of their own), when the builtins `module` trusts are
-/// the real ones. Storing or deleting an item, calling a method that changes the dict, or
-/// handing it on where other code may change it (a stored, returned, or merged value, an
-/// argument of a call other than the object a real reading builtin reads, or an operand whose
-/// operation runs another object's method) may bind any name, also one declared `Final`, which
-/// the runtime does not enforce. Reading the dict (`globals().get(name)`, `globals()[name]`,
-/// `name in globals()`, iterating it) binds nothing. The builtin `globals` itself handed on (`g
-/// = globals`) may be called anywhere, and a call of whatever the code binds to that name may
-/// return the dict.
-fn writes_globals(f: &IrFunction, module: &ModuleConstants) -> bool {
+/// Which module globals the code may bind behind the IR through the dict `globals()` returns
+/// ([`globals_writes`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum GlobalsWrites {
+    None,
+    /// Only names missing from the namespace when the change runs ([`binds_only_missing`]).
+    Missing,
+    Any,
+}
+
+/// How `f` may bind module globals behind the IR through the dict `globals()` returns (`vars()`
+/// and `locals()` are A1 hazards of their own), when the builtins `module` trusts are the real
+/// ones. Storing or deleting an item, calling a method that changes the dict, or handing it on
+/// where other code may change it (a stored, returned, or merged value, an argument of a call
+/// other than the object a real reading builtin reads, or an operand whose operation runs
+/// another object's method) may bind any name, also one declared `Final`, which the runtime does
+/// not enforce, unless the change binds only a missing name ([`binds_only_missing`]). Reading
+/// the dict (`globals().get(name)`, `globals()[name]`, `name in globals()`, iterating it) binds
+/// nothing. The builtin `globals` itself handed on (`g = globals`) may be called anywhere, and a
+/// call of whatever the code binds to that name may return the dict. `missing_name`: the
+/// parameter of the module's `__getattr__` when `f` is that hook ([`missing_name_param`]).
+fn globals_writes(
+    f: &IrFunction,
+    module: &ModuleConstants,
+    missing_name: Option<VarId>,
+) -> GlobalsWrites {
     let dict_call = |kind: &InstKind| match kind {
         InstKind::Call {
             dst,
@@ -2735,7 +2759,7 @@ fn writes_globals(f: &IrFunction, module: &ModuleConstants) -> bool {
         _ => false,
     };
     if dicts.is_empty() && !insts().any(|i| names_globals(&i.kind)) {
-        return false;
+        return GlobalsWrites::None;
     }
     let ix = FnIndex::new(f, module);
     let is_dict = |v: VarId| dicts.contains(&ix.shape.copy_root(v));
@@ -2790,22 +2814,96 @@ fn writes_globals(f: &IrFunction, module: &ModuleConstants) -> bool {
         }
         _ => false,
     };
-    f.blocks.iter().any(|bb| {
+    let handed_on = |bb: &crate::BasicBlock| {
         bb.phis
             .iter()
             .any(|phi| phi.incoming.iter().any(|(_, v)| is_dict(*v)))
-            || bb.insts.iter().any(|inst| {
-                let handed_on = names_globals(&inst.kind)
-                    && inst.kind.dst().is_some_and(|d| !callees.contains(&d));
-                let changed =
-                    inst.kind.operands().into_iter().any(is_dict) && !reads_only(&inst.kind);
-                handed_on || changed
-            })
             || match bb.terminator {
                 Terminator::Return(Some(v)) | Terminator::Raise(Some(v)) => is_dict(v),
                 _ => false,
             }
-    })
+    };
+    let write = |inst: &Inst| {
+        if names_globals(&inst.kind) && inst.kind.dst().is_some_and(|d| !callees.contains(&d)) {
+            GlobalsWrites::Any
+        } else if !inst.kind.operands().into_iter().any(is_dict) || reads_only(&inst.kind) {
+            GlobalsWrites::None
+        } else if binds_only_missing(&inst.kind, &is_dict, |v| {
+            missing_name.is_some_and(|p| ix.shape.copy_root(v) == p)
+        }) {
+            GlobalsWrites::Missing
+        } else {
+            GlobalsWrites::Any
+        }
+    };
+    let mut out = GlobalsWrites::None;
+    for bb in &f.blocks {
+        if handed_on(bb) {
+            return GlobalsWrites::Any;
+        }
+        for inst in &bb.insts {
+            out = out.max(write(inst));
+            if out == GlobalsWrites::Any {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+/// Whether the change `kind` makes to the dict of module globals (`is_dict`) binds only a name
+/// missing from it when the change runs, so it never rebinds one the module body has bound:
+/// `globals().setdefault(key, value)`, or `globals()[name] = value` in the module's
+/// `__getattr__`, which Python calls only for a name the namespace lacks, the key being the
+/// parameter that name arrives in (`is_missing_name`). Any other change, through a helper of
+/// the hook too, may bind any name, and so does a value that hands the dict on.
+fn binds_only_missing(
+    kind: &InstKind,
+    is_dict: &dyn Fn(VarId) -> bool,
+    is_missing_name: impl Fn(VarId) -> bool,
+) -> bool {
+    match kind {
+        InstKind::SubscriptStore {
+            obj, index, value, ..
+        } => is_dict(*obj) && !is_dict(*value) && is_missing_name(*index),
+        InstKind::MethodCall {
+            recv,
+            method,
+            args,
+            kwargs,
+            star_from: None,
+            ..
+        } => {
+            is_dict(*recv)
+                && method == "setdefault"
+                && kwargs.is_empty()
+                && matches!(args.as_slice(), [key, value] if !is_dict(*key) && !is_dict(*value))
+        }
+        _ => false,
+    }
+}
+
+/// The parameter Python passes the missing name in when `f` is the module's `__getattr__` (PEP
+/// 562): a plain function the module body defines under that name, which no function of the
+/// module (`functions`) loads, so only Python calls it, and only for a name the module's
+/// namespace lacks. A coroutine or generator body runs later, when the name may be bound.
+fn missing_name_param(
+    f: &IrFunction,
+    module_fn: FunctionId,
+    functions: &[IrFunction],
+) -> Option<VarId> {
+    let hook = f.qualname == "__getattr__"
+        && f.enclosing == Some(module_fn)
+        && f.kind == FunctionKind::Sync;
+    let first = f.params.first().filter(|_| hook)?;
+    let loads_hook = |kind: &InstKind| {
+        matches!(kind, InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. }
+            if name == "__getattr__")
+    };
+    let hook_loaded = (functions.iter())
+        .flat_map(|g| g.blocks.iter().flat_map(|b| &b.insts))
+        .any(|i| loads_hook(&i.kind));
+    (!first.is_vararg && !first.is_kwarg && !first.kw_only && !hook_loaded).then_some(first.var)
 }
 
 /// How a module's code binds each module global: the stores in the module body or in a
@@ -2962,23 +3060,32 @@ fn module_constants(
     // A builtin the module does not rebind is the real one unless some function changes the
     // globals behind the IR, which is what this decides: when no function does so with the
     // builtins taken as real, none does.
-    out.dynamic =
-        !module.a1_hazards.is_empty() || functions.iter().any(|f| writes_globals(f, &out));
-    if out.dynamic {
+    let writes = (functions.iter())
+        .map(|f| globals_writes(f, &out, missing_name_param(f, module_fn, functions)))
+        .max()
+        .unwrap_or(GlobalsWrites::None);
+    out.dynamic = !module.a1_hazards.is_empty() || writes != GlobalsWrites::None;
+    if !module.a1_hazards.is_empty() || writes == GlobalsWrites::Any {
         return out;
     }
     // Ints first: displays and later ints may use them (`range(N)` only through loads).
     let ix = FnIndex::new(module, &out);
-    // Whether a store binds its name after every star import depends on the last one only.
-    let last = star_imports
-        .iter()
+    // Whether a store binds its name after every star import depends on the last one only. A
+    // change through `globals()` that binds only missing names acts as one at the start of the
+    // body: it may bind a name the body does not bind on every path, but none the body binds on
+    // every path once the module has loaded. A module still loading (`from m import NAME` in an
+    // import cycle) may run its `__getattr__` for a name the body binds later; the body's store
+    // then replaces what the hook bound, so the name holds the body's value after the load.
+    let missing = (writes == GlobalsWrites::Missing).then_some(0);
+    let last = (star_imports.iter().copied().chain(missing))
         .max()
-        .map(|&end| (LastBindings::of(&ix.shape), end));
+        .map(|end| (LastBindings::of(&ix.shape), end));
     let mut ints = BTreeMap::new();
     let mut strs = BTreeMap::new();
     let mut str_tuples = BTreeMap::new();
     let mut bools = BTreeMap::new();
     let mut floats = BTreeMap::new();
+    let mut imported = BTreeSet::new();
     let mut shared = SharedTexts::default();
     let mut candidates: Vec<(String, SmallDisplay)> = Vec::new();
     for bb in &module.blocks {
@@ -2995,6 +3102,9 @@ fn module_constants(
                 last.is_some_and(|(last, end)| !last.overrides(&ix.shape, bb.id, inst, end));
             if !stores.once(name) || star_rebinds {
                 continue;
+            }
+            if holds_imported(&ix, *value) {
+                imported.insert(name.clone());
             }
             // A string constant, or a tuple of them, is one entry: its text, whose length is its
             // size (both are immutable, whatever their uses).
@@ -3029,6 +3139,7 @@ fn module_constants(
     out.str_tuples = str_tuples;
     out.bools = bools;
     out.floats = floats;
+    out.imported = imported;
     if candidates.is_empty() {
         return out;
     }
@@ -3072,6 +3183,32 @@ fn module_constants(
         .filter(|(n, _)| !changed.contains(n))
         .collect();
     out
+}
+
+/// Whether `value` holds what another module binds ([`ModuleConstants::imported`]): an import
+/// or an attribute of one, or a tuple display holding one.
+fn holds_imported(ix: &FnIndex<'_>, value: VarId) -> bool {
+    // At least as many attributes as the declarations follow from an import (`a.b.c.KEY`).
+    const MAX_ATTRS: usize = 16;
+    let imported = |v: VarId| {
+        let mut cur = v;
+        for _ in 0..=MAX_ATTRS {
+            match ix.source(cur).map(|i| &i.kind) {
+                Some(InstKind::Import { .. }) => return true,
+                Some(InstKind::AttrLoad { obj, .. }) => cur = *obj,
+                _ => return false,
+            }
+        }
+        false
+    };
+    match ix.source(value).map(|i| &i.kind) {
+        Some(InstKind::AllocBuiltin {
+            kind: BuiltinKind::Tuple,
+            elems,
+            ..
+        }) => elems.iter().any(|e| imported(*e)),
+        _ => imported(value),
+    }
 }
 
 /// The entry of [`ModuleConstants::bools`] the module global `name` bound to `value` makes: a

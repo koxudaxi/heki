@@ -259,6 +259,8 @@ const EXTRAS_ROUTES: &str = "\n\ndef trusted_value(e: Extras, key: str) -> None:
 const EXTRAS_TRUSTED_PASS: &str = "from pkg.extras import Extras, relay_value, trusted_value\n\n\ndef prepare(e: Extras) -> None:\n    trusted_value(e, \"init\")\n";
 const KEY_CONSTS: &str = "from typing import Final\n\nKEY: Final = \"entries\"\n";
 const KEY_WRITER: &str = "from pkg.key_consts import KEY\nfrom pkg.model import Registry\n\n\ndef mark(r: Registry):\n    r.__dict__[KEY] = []\n";
+const KEY_HOOK: &str = "\n\ndef __getattr__(name):\n    value = object()\n    globals()[name] = value\n    return value\n";
+const KEY_LOOP: &str = "from pkg.key_consts import KEYS\nfrom pkg.model import Registry\n\n\ndef mark_all(r: Registry):\n    for key in KEYS:\n        r.__dict__[key] = []\n";
 // A class constant names the guarded attribute for the class's own methods.
 const KEY_CLASS: &str = "from typing import ClassVar\n\nfrom pkg.model import Registry\n\n\nclass Keys:\n    KEY: ClassVar[str] = \"entries\"\n\n    def mark(self, r: Registry):\n        r.__dict__[self.KEY] = []\n";
 // Module aliases and getters: a module alias of `object.__setattr__`, imported by another
@@ -2970,6 +2972,52 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
         Step::new(
             "the key constant is `Final` again",
             vec![save("pkg/key_consts.py", KEY_CONSTS)],
+        )
+        .present(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
+            "the key module caches missing names in its `__getattr__`: the constant stays",
+            vec![Action::Save(
+                "pkg/key_consts.py",
+                format!("{KEY_CONSTS}{KEY_HOOK}"),
+            )],
+        )
+        .present(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
+            "the hook caches under another key, which may rebind the constant",
+            vec![Action::Save(
+                "pkg/key_consts.py",
+                format!(
+                    "{KEY_CONSTS}{}",
+                    KEY_HOOK.replace("[name]", "[name.upper()]")
+                ),
+            )],
+        )
+        .absent(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
+            "a tuple of the constant, which a loop in another module takes the key from",
+            vec![
+                Action::Save(
+                    "pkg/key_consts.py",
+                    format!("{KEY_CONSTS}KEYS: Final = (KEY,)\n"),
+                ),
+                Action::Create("pkg/key_loop.py", KEY_LOOP.to_owned()),
+            ],
+        )
+        .present(&[("pkg/key_loop.py", "MUT201")]),
+        Step::new(
+            "the tuple holds a value that is no constant",
+            vec![Action::Save(
+                "pkg/key_consts.py",
+                format!("{KEY_CONSTS}KEYS: Final = (KEY, str(1))\n"),
+            )],
+        )
+        .absent(&[("pkg/key_loop.py", "MUT201")]),
+        Step::new(
+            "the key module is as before, and the loop is deleted",
+            vec![
+                save("pkg/key_consts.py", KEY_CONSTS),
+                Action::Delete("pkg/key_loop.py"),
+            ],
         )
         .present(&[("pkg/key_writer.py", "MUT201")]),
         Step::new(

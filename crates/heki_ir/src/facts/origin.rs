@@ -346,12 +346,11 @@ impl<'m> ItemOrigins<'m> {
                 let m = &self.ir.constants;
                 // The items of a string, or of a tuple of strings, are fixed too; those of another
                 // display are values the walk does not follow.
-                let constant = !m.dynamic
-                    && (m.ints.contains_key(name)
-                        || m.strs.contains_key(name)
-                        || m.str_tuples.contains_key(name)
-                        || (m.displays.contains_key(name) && steps.parts == 0)
-                        || m.bools.contains_key(name));
+                let constant = m.ints.contains_key(name)
+                    || m.strs.contains_key(name)
+                    || m.str_tuples.contains_key(name)
+                    || (m.displays.contains_key(name) && steps.parts == 0)
+                    || m.bools.contains_key(name);
                 if constant {
                     walk.add_source(Some(ItemSource::Fixed));
                 } else {
