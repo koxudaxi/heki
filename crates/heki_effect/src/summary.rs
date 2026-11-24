@@ -7909,7 +7909,7 @@ impl<'a> Extractor<'a> {
             for (e, param, test) in given {
                 facts
                     .given
-                    .insert(e, vec![(param, test)], vec![Arc::clone(&hop)]);
+                    .insert(e, vec![(param, test)], vec![Arc::clone(&hop)], Vec::new());
             }
         }
         let queues = while_full.map(|w| {
