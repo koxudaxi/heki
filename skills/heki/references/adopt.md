@@ -11,7 +11,9 @@ user what each one found, and stop where a step says to ask.
    error fails the run; warnings and heuristic reports do not.
 3. Run `heki recommend` (experimental). It writes no file. It says which rules would report on
    the project, what heki could not see, and the contracts the code already keeps, with the keys
-   to add.
+   to add. When it lists no contract candidates (for example because the
+   `[tool.heki]` block sets `src` and heki sees nothing under it), write that block first, then run
+   `heki recommend` again.
 
 ## 2. Propose one or two contracts
 
@@ -27,11 +29,14 @@ before writing it.
    `pyproject.toml` that exists, without merging them. If the repository already configures heki in
    `.heki.toml` or `pyproject.toml`, add to that file, or move all of its settings into the new
    `heki.toml` in the same change.
-2. Add a `CODEOWNERS` line for `heki.toml` (or the host's rule for protected files), so that a
+2. Add a `CODEOWNERS` line for `heki.toml` and for the baseline file (a hand edit to a count hides a
+   new finding), or the host's rule for protected files, so that a
    change to a contract is a reviewed change and a report cannot be removed by moving the wall.
 3. When `heki check` reports old findings, record them once:
    `heki check --baseline heki-baseline.toml --update-baseline`. Commit the file and set
-   `baseline = "heki-baseline.toml"` in `heki.toml`. The job then fails only on new findings.
+   `baseline = "heki-baseline.toml"` in `heki.toml`. The job then fails only on new findings. When `heki-baseline.toml`
+   already exists and a finding has no entry, `--update-baseline` refuses: fix the finding, or
+   decide with the user before recording it.
 4. Add the pre-commit hook and the CI job from
    [Adopting heki](https://heki.koxudaxi.dev/adoption/#pre-commit). The hook passes the staged
    files to `--touched`; CI runs the whole project.

@@ -329,8 +329,9 @@ it stays quiet where it cannot tell. See [Scope and limitations](https://heki.ko
 
 ## 🪜 pre-commit and CI
 
-The hook passes the staged files to `heki check --touched`, so old findings elsewhere do not
-block a commit:
+The hook passes the staged files to `heki check --touched`, so old findings in other files do not
+block a commit. A report in an unstaged file whose call chain passes through a staged file is
+shown and fails it too:
 
 ```yaml
 # .pre-commit-config.yaml
@@ -341,9 +342,12 @@ repos:
       - id: heki
 ```
 
-Exact errors fail the hook and the CI job; warnings and heuristic reports do not. See
-[Adopting heki](https://heki.koxudaxi.dev/adoption/) for a local hook, a GitHub Actions workflow
-with SARIF, and a Ratchet baseline that records today's errors, so that only new ones fail.
+Exact errors fail the hook. Warnings and heuristic reports do not, unless you pass
+`--fail-on warning` or set `fail-on = "warning"` in `[tool.heki.lint]`. In CI, a plain
+`heki check --output-format github` step fails on exact errors, while the SARIF example keeps
+findings as alerts and fails only on a configuration, read, or syntax error. See
+[Adopting heki](https://heki.koxudaxi.dev/adoption/) for a local hook, the workflow, and a Ratchet
+baseline that records today's errors, so that only new ones fail.
 
 ## 📚 Documentation
 
