@@ -40,10 +40,10 @@ $ cargo llvm-cov --workspace --show-missing-lines --fail-uncovered-lines 3
 ### In CI
 
 ```console
-$ cargo nextest run --workspace --cargo-profile ci-test
+$ cargo nextest run --workspace --cargo-profile ci
 ```
 
-- CI builds the tests once per platform in the `ci-test` profile of `Cargo.toml` (the workspace
+- CI builds the tests once per platform in the `ci` profile of `Cargo.toml` (the workspace
   crates at `opt-level = 1`, the dependencies at 3: the real binary the tests spawn runs 3.7 times
   as fast as in `dev`) and runs them in parallel shards with
   [cargo-nextest](https://nexte.st), each test in a process of its own. A test that holds a long
@@ -51,8 +51,8 @@ $ cargo nextest run --workspace --cargo-profile ci-test
   tests, so the shards stay short.
 - On Linux the tests are built and run from the unpacked source distribution, which must
   therefore carry every file they embed or read (`include` in `pyproject.toml`).
-- Coverage runs the same way, in the `ci` profile (the workspace crates as in `dev`, so the report
-  has the lines of `dev`), in 8 shards: each shard merges its profiles, and one job reports and enforces the limit.
+- Coverage runs the same way, in the same profile (its report leaves the same lines uncovered as `dev`'s), in 8
+  shards: each shard merges its profiles, and one job reports and enforces the limit.
 
 ## Checks against CPython
 

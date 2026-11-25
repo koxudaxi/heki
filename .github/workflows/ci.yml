@@ -109,10 +109,11 @@ jobs:
             fi
           done
 
-  # The test binaries, built once per platform in the `ci-test` profile (optimized dependencies and workspace
-  # crates, see Cargo.toml) and archived for that platform's `test` shards, which wait for their
-  # own build only. Linux builds them from the unpacked source distribution, so its shards run every test
-  # from it: platforms without a wheel build from the source distribution, and packagers run its
+  # The test binaries, built once per platform in the `ci` profile (optimized dependencies and
+  # workspace crates, see Cargo.toml) and archived for that platform's `test` shards, which wait
+  # for their own build only. Linux builds them from the unpacked source distribution, so its
+  # shards run every test from it:
+  # platforms without a wheel build from the source distribution, and packagers run its
   # tests, so it must carry every file the build and the tests embed or read (`pyproject.toml`).
   # The other platforms build the checkout.
   test-build-linux:
@@ -146,7 +147,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # The cache key of the three jobs; rust-cache adds the platform to it.
-          shared-key: test-build
+          shared-key: test-build-o1
           workspaces: ${{ runner.os == 'Linux' && 'sdist-tree -> target' || '. -> target' }}
       - &install-nextest
         uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
@@ -159,7 +160,7 @@ jobs:
           TREE: ${{ runner.os == 'Linux' && 'sdist-tree' || '.' }}
           CARGO_NET_GIT_FETCH_WITH_CLI: ${{ runner.os == 'Windows' && 'true' || 'false' }}
         run: >-
-          cargo nextest archive --workspace --locked --cargo-profile ci-test
+          cargo nextest archive --workspace --locked --cargo-profile ci
           --manifest-path "$TREE/Cargo.toml" --archive-file tests.tar.zst
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -263,7 +264,7 @@ jobs:
     steps: *test-steps
 
   coverage-build:
-    # The instrumented test binaries, in the `ci` profile like the tests. cargo-llvm-cov builds
+    # The instrumented test binaries, in the `ci` profile. cargo-llvm-cov builds
     # into `coverage/target`, a directory named `target`, so the shards can extract the archive
     # back to the path the binaries were built at.
     name: build coverage tests
@@ -281,6 +282,7 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          shared-key: coverage-o1
           workspaces: ". -> coverage/target"
       - &install-llvm-cov
         uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
