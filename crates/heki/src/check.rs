@@ -832,8 +832,8 @@ fn report(
             let run = analyzed.rules_run();
             let checked = project.files.iter().map(|f| f.rel.as_str()).collect();
             let withheld = baseline_counts(&analyzed.withheld, &key_path, unit);
-            let judged = (cmp.stale_entries.iter())
-                .filter(|e| covered(&e.key) && shown(&e.key, &e.within));
+            let judged =
+                (cmp.stale_entries.iter()).filter(|e| covered(&e.key) && shown(&e.key, &e.within));
             for StaleEntry {
                 key,
                 allowed,

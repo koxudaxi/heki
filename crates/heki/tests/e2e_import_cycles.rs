@@ -856,7 +856,10 @@ fn a_run_covering_a_group_drops_or_replaces_its_entry() {
 #[test]
 fn a_group_with_a_file_the_run_does_not_cover_is_kept() {
     let p = two_groups("import_cycles_baseline_part_kept");
-    p.write("b.toml", &group_entries(&["other.c, other.d, pkg.a, pkg.b"]));
+    p.write(
+        "b.toml",
+        &group_entries(&["other.c, other.d, pkg.a, pkg.b"]),
+    );
     modules(&p, &[("a", &[]), ("b", &[])]);
     let (code, err) = ratchet(&p, &["pkg", "--update-baseline"]);
     assert_eq!(code, 0, "{err}");
@@ -875,7 +878,10 @@ fn a_group_is_unused_only_where_the_rule_runs_on_all_its_files() {
         "heki.toml",
         "[lint]\nreport-unused-suppressions = true\nper-file-ignores = { \"pkg/**\" = [\"IMP101\"] }\n",
     );
-    p.write("b.toml", &group_entries(&["other.c, other.d", "pkg.a, pkg.b"]));
+    p.write(
+        "b.toml",
+        &group_entries(&["other.c, other.d", "pkg.a, pkg.b"]),
+    );
     let (code, err) = ratchet(&p, &[]);
     assert_eq!(code, 0, "{err}");
     assert!(!err.contains("matched no report"), "{err}");
