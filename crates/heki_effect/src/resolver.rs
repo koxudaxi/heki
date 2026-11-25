@@ -2107,6 +2107,9 @@ pub struct ProjectDecls {
     /// The answers of [`Self::catalog_attribute`] so far, by class and name; cleared with the
     /// indexes.
     catalog_attributes: SharedMemo<(String, String), Option<String>, DeclKeys>,
+    /// The answers of [`Self::object_attr_read_runs_no_code`] so far, by class and name;
+    /// cleared with the indexes.
+    object_attr_reads: SharedMemo<(String, String), bool, DeclKeys>,
 }
 
 /// Why an attribute (or `TypedDict` key) of a project class is read-only (`MUT108`, `MUT120`).
@@ -2401,6 +2404,7 @@ impl ProjectDecls {
         self.capacities.clear();
         self.star_bindings.clear();
         self.catalog_attributes.clear();
+        self.object_attr_reads.clear();
         // Maintenance, not a lookup of an analysis.
         let recording = std::mem::replace(self.recorder.on.get_mut(), false);
         self.build_indexes();
@@ -3978,6 +3982,29 @@ impl ProjectDecls {
             }
         }
         read
+    }
+
+    /// Whether reading `attr`, an attribute every object has (`__class__`, `__dict__`), on a
+    /// value of the project class `class` runs no code but finding it, on every class the value
+    /// may be under R2: none binds the name, defines `__getattribute__`, or has a metaclass heki
+    /// does not know, and every base outside the project is a plain base or one
+    /// `catalog_stores` accepts (a base whose `__setattr__` the catalog says stores on the
+    /// instance, R3). Kept per class and name for the life of the indexes, so the reads of one
+    /// class's namespace walk its subclasses once; the catalog is fixed while the indexes are.
+    pub(crate) fn object_attr_read_runs_no_code(
+        &self,
+        class: &str,
+        attr: &str,
+        catalog_stores: impl Fn(&str) -> bool,
+    ) -> bool {
+        let class = self.canonical(class);
+        self.object_attr_reads
+            .ask(self, (class.clone(), attr.to_owned()), || {
+                let read = self.attr_read(&class, attr);
+                read.binders.is_empty()
+                    && !read.runs_hook(false)
+                    && (read.bases_known || self.binds_none_of(&class, &[], catalog_stores))
+            })
     }
 
     /// Whether reading `attr` on an instance of the project class `class` (or, under assumption

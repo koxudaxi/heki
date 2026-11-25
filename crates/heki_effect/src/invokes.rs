@@ -365,10 +365,7 @@ pub(crate) fn attribute_access_runs_project_code(
     };
     let reads_plainly = |class: &str| {
         if OBJECT_ATTRS.contains(&attr) {
-            let read = project.attr_read(class, attr);
-            read.binders.is_empty()
-                && !read.runs_hook(false)
-                && (read.bases_known || project.binds_none_of(class, &[], catalog_stores))
+            project.object_attr_read_runs_no_code(class, attr, catalog_stores)
         } else {
             project.plain_attr(class, attr) || project.method_read_runs_no_code(class, attr)
         }
