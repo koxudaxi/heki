@@ -377,6 +377,19 @@ A module global the module body binds to a value of known type, and an instance 
 the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores`,
 `resolver::stores`).
 
+Some receivers have the class the language or the standard library gives them. An instance's
+own namespace (`obj.__dict__`, or `vars(obj)` of the builtin: `resolver::namespace_load`) is a
+builtin `dict`, of keys and values of any class, where reading it runs no code of the classes the
+instance may be (`invokes::reads_own_namespace`: no class defines `__getattribute__` or binds
+`__dict__`, and every base outside the project is a plain one or one whose `__setattr__` the
+catalog says stores on the instance, `pydantic.BaseModel`); a class object's namespace is a
+read-only proxy, which stays untyped. Its methods are then those of `dict`, and the entries it
+reads, stores, or removes stay reads and writes of the instance's attributes. The members a
+`NamedTuple` class takes from its base, and what the methods of a holder give of the value its
+type argument names (`ContextVar[T]`, kept as `types::Generic::Held` since annotations are read
+without the catalog), are catalog rows (4.2: `_replace`, `_make`, `_asdict`, `_fields`,
+`returns_held`).
+
 - **What a store stores into.** A store stores into what its receiver holds: `self` in a method
   (a copy of it, the closure cell of a function nested in the method, `super()`), or a value whose
   type the inference knows: an instance of a project class (`inst = cls()` in a class method, a
@@ -540,6 +553,36 @@ of its body (inferred as a child scope reading the function's cells), and a `fun
 object as a call of its callable with the arguments the object holds first (`partial.rs`, shared
 with the call targets).
 
+An instance of a `typing.NamedTuple` class, or of a `@dataclass(frozen=True)` that leaves `init`
+on, holds in each field what the call constructing it bound there, for as long as it lives: a
+store raises (`AttributeError` on a named tuple, `FrozenInstanceError` on a frozen dataclass).
+The class's generated constructor takes its fields in order (`ClassDecl::init_fields`,
+`ProjectDecls::constructor_fields`: a dataclass's dataclass bases first, a field it declares again
+keeping the base's place, the keyword-only ones after the others), unless the class defines
+`__init__`, `__new__`, `__post_init__`, `__setattr__`, `__getattr__`, or `__getattribute__`, an
+`InitVar`, or a field specifier heki does not read, has a metaclass heki does not know, or a base
+that is no such class or plain base. Calling exactly such a class (a name, not `cls`, which may be
+a subclass) binds each argument to the field of its position or keyword and an omitted field to
+its default; a call that unpacks `*` or `**`, passes too many positions, names no field, or
+leaves a field without a default unbound binds none. The instance's type keeps the fields that
+hold a named object (a function, a class, a lambda) or `None` (`types::Args::Fields`), and every
+reader of types sees them: a local, a closure cell, a global or an attribute every store of
+which binds such instances (also under an annotation of the class, `ProjectDecls::narrower`), the
+items of a container (`TABLE: tuple[Spec, ...] = (Spec(run=a), Spec(run=b))` gives one of `a` and
+`b`, `None` adding nothing), and a copy of the instance alone (`copy.copy`, `dataclasses.replace`
+given no other value). A copy given other values, `typing.Self` of a method's result, and a call
+of a class object that may be a subclass give an instance whose fields hold their declared types.
+Reading a field gives what it holds (`TypeCtx::field_held`, for typing and for the call targets
+of `obj.field(...)`, which binds no receiver) when the instance holds what the construction gave
+(`ProjectDecls::field_holds_given`): along the MRO, every class binding the name binds it as a
+field of its own to a default that is no descriptor (none, `None`, a literal, a display, a
+default factory, a project function or class; any default of a named tuple's field, which is one
+of its items), no code of the project stores the attribute on an instance of a class along the MRO
+(`object.__setattr__(self, "run", f)` in a method) or attributes heki cannot name there, no module
+binds it on the class, and reading it runs no hook. A dataclass that is not frozen holds what any
+code holding an instance stores, through receivers heki may not type, and so does not keep its
+fields.
+
 A scope nested in a function (a comprehension or generator expression with a scope of its own, a
 lambda, a nested function or class) reads the function's variables through their closure cells.
 A cell holds every value the function binds to the variable, its parameter's and each
@@ -640,6 +683,18 @@ be (the class and its project subclasses, at most `DISPATCH_CLASS_LIMIT`); a cla
 finding the name as anything else leaves the call unresolved, and so do objects that bind a
 receiver differently. A call of a class bound so constructs it (`self.factory(...)`).
 
+A class-body name bound last, on every path, to a `functools.partial` object of such a name that
+holds keywords only (`copy = staticmethod(partial(copy_field, deep=False))`,
+`NamedAttr::body_partial`), under the same conditions, is that object, which calls the name with
+the call's arguments first and gives what it returns. Read through the class object, or wrapped
+in `staticmethod`, a call through it calls the name (constructs a class it names); a plain
+`partial` read on an instance is a method descriptor from Python 3.14 on, which binds the
+instance as its first argument, and older versions bind nothing, so such a call is unresolved.
+The keywords it holds are values the call does not show: its binding of the callable's
+parameters may pass any of them, so no parameter takes its default there
+(`Call::unseen_keywords`), and a library callable, whose catalog cases the arguments a call shows
+select, leaves the call unresolved. A partial holding a positional argument is not followed.
+
 A module-level function or class that the module body binds again, to named objects only, holds
 in the same way what binds it last (`ModuleDecls::aliases`), or one of the objects the bindings
 that may be last bind (`ModuleDecls::alias_paths`): a call through the name, in the module, from
@@ -698,16 +753,39 @@ decided in at most eight passes, each from the facts of the pass before. Its typ
 when they agree on one narrower than the annotation (`ProjectDecls::narrower`: a catalog class of
 the annotated library class, `sqlite3.connect(file)` of `-> sqlite3.Connection`, or a subclass
 of the annotated class): `FunctionDecl::declared_return` gives it in the annotation's place, for
-typing, `result_of`, and the globals and attributes of pass 2. A module constant the module
+typing, `result_of`, and the globals and attributes of pass 2. A function whose annotation names
+no class (none, `Any`, `object`, `Callable`) returns the named object every returned value is,
+or one of them (`Ty::OneOf`): a `def` or `lambda` it makes (`make_requirer()` returning the
+`requirer` it defines, whose cells a call away from it binds to nothing), or a function or class
+a name binds; a `return` of anything else, `None` included, gives no fact. Only the functions
+every value of which a definition, a module-level name, or a cell gives are inferred for it. A module constant the module
 body binds once, outside a loop, to a value that names a file (`ModuleDecls::file_constants`,
 `names_a_file`) names it where a function or another module reads it
 (`TypeCtx::names_file_constant`), unless another module rebinds it.
 
-A module-level `TypeVar` bound once with a `bound=` (a name, an attribute of one, or the string of
-an annotation) or constraints is that bound, or the union of the constraints, wherever an
-annotation names it, in its module or imported (`ModuleDecls::type_vars`,
-`ProjectDecls::declared_ty`): `for c in run.contexts` of `contexts: list[C]` with `C =
-TypeVar("C", bound=View)` gives a `View`. An unbounded one gives no class.
+A module-level name the module body binds once to a type expression reads as the type it names
+wherever an annotation names it, in its module or imported, also as a member of a union
+(`ModuleDecls::type_names`, `ProjectDecls::declared_ty`). A type alias names its value:
+`Operation: TypeAlias = Added | Removed` (the string of an annotation too), `type Operation =
+Added | Removed` without type parameters, and an assignment of a subscript or a union without an
+annotation (`Operations = list[Added]`); its value may name an alias bound before it, and a type
+variable in it stands for any type, so it gives no class. A `TypeVar` with a `bound=` or
+constraints names that bound, or the union of the constraints: `for c in run.contexts` of
+`contexts: list[C]` with `C = TypeVar("C", bound=View)` gives a `View`. An unbounded one gives no
+class, and neither does a name bound twice or a variable annotated otherwise
+(`Declared: object = A | B`).
+
+The text of the type expression a value spells (`resolver::type_expression_text`: names of
+module-level objects, attributes of them, subscripts, unions, `None`, and strings) reads as the
+same text in an annotation does: the value of an alias, the bound of a type variable, and the
+type `typing.cast` names (`cast(list[Windows], hosts)` as `cast("list[Windows]", hosts)`). A
+subscript naming anything else (`list[kind]` of a parameter `kind`) names no type. A builtin or
+`collections` container class subscripted with types is an alias of the class
+(`types::runtime_generic`: `frozenset[str]` is a `types.GenericAlias`): calling it constructs the
+class (`frozenset[str]()`), also through a module-level name bound to it (`Names =
+frozenset[str]`, a module alias of the class). A subscript of any other class (a project generic
+class, whose alias may construct a subclass, or a `typing` alias, which may raise) calls nothing
+heki knows.
 
 A method that no project class of the receiver's MRO defines comes from the first base outside
 the project, when heki takes it to define the method (a base it knows nothing of coming first, an
@@ -2642,7 +2720,10 @@ field validates it: pydantic 2's `BaseModel`), `return_type` (factories such as
 argument a call writes or serializes in the order of its elements, with the keyword that sorts
 mapping keys first and whether it sorts by default: `json.dumps`, `yaml.safe_dump`,
 `pprint.pprint`, `pathlib.Path.write_text`, `print`: `EFF112`),
-`waits_until_done` / `done_when_awaited` (futures), `result_of` (the call hands back, awaited or
+`waits_until_done` / `done_when_awaited` (futures), `returns_held` (the method returns the
+value its receiver holds, which the holder's type argument names (`ContextVar[T].get()`) or a
+future was given (`result()`); with `default`, the argument at that position where the receiver
+holds none: `ContextVar.get(default)`), `result_of` (the call hands back, awaited or
 by the future's `result()`, what calling the callable at position `arg` returns, with the
 positional arguments after it and, with `keywords`, the call's keywords: `asyncio.to_thread`,
 `loop.run_in_executor`, `anyio.to_thread.run_sync`, `executor.submit`; section 2.1),
@@ -2741,7 +2822,11 @@ attribute on an instance of a library class gives (`symbol = "openai.OpenAI.chat
 release its distribution's verified range admits, the value read has the catalogued members of
 that class; it says nothing of its identity or of what the read runs, so a plain attribute, a
 property, and a cached property are alike to it. It is a table of its own because an attribute is
-no method a class takes from its base (`external_defines`). The synchronous and asynchronous
+no method a class takes from its base (`external_defines`). A row of the standard library
+(`typing.NamedTuple._fields`, `contextvars.Token.var`) holds on every interpreter heki supports,
+which `tests/sentinel/verify_stdlib_kb.py` checks on CPython 3.11 to 3.15, with the other rows of
+the standard library that type a value (a method's `return_type`, a copy of its receiver,
+`returns_held`) on instances of each class it builds. The synchronous and asynchronous
 clients of a library have rows of their own at every step, and a row whose meaning changes
 across the verified releases under one name is left out. `[[distributions]]`
 (`heki_kb::Distribution`) names, per distribution (its PyPI name), the import packages its rows

@@ -369,7 +369,7 @@ impl<'a> Extractor<'a> {
     pub(super) fn keyword_ways<'c>(&self, call: &Call<'c>) -> Vec<Keywords<'c>> {
         let mut ways = vec![Keywords {
             named: Vec::new(),
-            open: false,
+            open: call.unseen_keywords,
             repeated: false,
         }];
         let mut unpacked = false;
@@ -636,7 +636,7 @@ impl<'a> Extractor<'a> {
         else {
             return None;
         };
-        let Callee::External(symbol) = self.cx.resolve_method(self.types.get(recv), method) else {
+        let Callee::External(symbol) = self.method_callee(*recv, method) else {
             return None;
         };
         let fields = self.cx.catalog(&symbol)?.builds_receiver.as_ref()?;

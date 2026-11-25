@@ -1959,10 +1959,7 @@ impl<'a> Extractor<'a> {
         else {
             return None;
         };
-        if matches!(
-            self.cx.resolve_method(self.val(*recv), method),
-            Callee::Project(..)
-        ) {
+        if matches!(self.method_callee(*recv, method), Callee::Project(..)) {
             return None;
         }
         let views = (self.derivations(kind).into_iter())
@@ -2078,7 +2075,7 @@ impl<'a> Extractor<'a> {
                 star_from,
                 ..
             } if project.may_return_param_attr(method) => {
-                let callee = self.cx.resolve_method(self.val(*recv), method);
+                let callee = self.method_callee(*recv, method);
                 let dispatch = (*recv, method.as_str());
                 (
                     *dst,
@@ -2726,11 +2723,23 @@ impl<'a> Extractor<'a> {
             InstKind::Call { callee_var, .. } => {
                 self.cx.resolve_call(callee_var.and_then(|v| self.val(v)))
             }
-            InstKind::MethodCall { recv, method, .. } => {
-                self.cx.resolve_method(self.val(*recv), method)
-            }
+            InstKind::MethodCall { recv, method, .. } => self.method_callee(*recv, method),
             _ => Callee::Unresolved,
         }
+    }
+
+    /// Whether calling `var`, a bound method (`m = obj.method`), passes keywords the call does
+    /// not show: those of a `functools.partial` class attribute ([`Call::unseen_keywords`]).
+    fn calls_unseen_keywords(&self, var: VarId) -> bool {
+        self.bound_method(var).is_some_and(|(recv, method)| {
+            self.cx.calls_partial_with_keywords(self.val(recv), &method)
+        })
+    }
+
+    /// What `recv.method(...)` calls ([`TypeCtx::resolve_method_of`]).
+    fn method_callee(&self, recv: VarId, method: &str) -> Callee {
+        self.cx
+            .resolve_method_of(self.val(recv), self.inferred.ty(recv), method)
     }
 
     /// `MUT202` derivations of a call's result from its receiver and from its first argument
@@ -2760,7 +2769,7 @@ impl<'a> Extractor<'a> {
                 Some(method.as_str()),
                 args,
                 kwargs,
-                self.cx.resolve_method(self.val(*recv), method),
+                self.method_callee(*recv, method),
             ),
             _ => return Vec::new(),
         };
@@ -3366,22 +3375,9 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// Whether `obj.__dict__` reads the instance's own namespace, running no code: `obj` is an
-    /// instance whose every class may be reads the attribute plainly
-    /// ([`invokes::attribute_access_runs_project_code`]).
+    /// [`invokes::reads_own_namespace`] of `obj`.
     fn reads_own_namespace(&self, obj: VarId) -> bool {
-        let val = self.types.get(&obj);
-        matches!(val, Some(Val::Inst(_) | Val::Union(_)))
-            && !invokes::attribute_access_runs_project_code(
-                self.cx.project,
-                self.cx.kb,
-                &invokes::Handed {
-                    val,
-                    ..invokes::Handed::default()
-                },
-                "__dict__",
-                invokes::AttrAccess::Read,
-            )
+        invokes::reads_own_namespace(self.cx.project, self.cx.kb, self.types.get(&obj))
     }
 
     /// What the function establishes of the class of the value `v` holds ([`Built`]).
@@ -3459,9 +3455,12 @@ impl<'a> Extractor<'a> {
                     InstKind::AllocBuiltin { .. } | InstKind::DictLiteral { .. } => {
                         set(dst, BuiltRule::Is(Built::Exact), none);
                     }
-                    // An instance's own namespace, read without running code, is a builtin dict.
-                    InstKind::AttrLoad { obj, attr, .. }
-                        if attr == "__dict__" && self.reads_own_namespace(*obj) =>
+                    // An instance's own namespace (`obj.__dict__`, `vars(obj)`), read without
+                    // running code, is a builtin dict.
+                    kind @ (InstKind::AttrLoad { .. } | InstKind::Call { .. })
+                        if self
+                            .namespace_load(kind)
+                            .is_some_and(|(_, obj)| self.reads_own_namespace(obj)) =>
                     {
                         set(dst, BuiltRule::Is(Built::Exact), none);
                     }
@@ -4178,10 +4177,7 @@ impl<'a> Extractor<'a> {
                 InstKind::MethodCall { recv, method, .. }
                     if is_self(recv) || matches!(self.val(*recv), Some(Val::Super(_))) =>
                 {
-                    if !matches!(
-                        self.cx.resolve_method(self.val(*recv), method),
-                        Callee::Project(..)
-                    ) {
+                    if !matches!(self.method_callee(*recv, method), Callee::Project(..)) {
                         return None;
                     }
                     Some(*recv)
@@ -4941,7 +4937,7 @@ impl<'a> Extractor<'a> {
                 if crate::callgraph::is_private_name(method) {
                     self.summary.private_calls.insert(method.clone());
                 }
-                let callee = self.cx.resolve_method(self.val(*recv), method);
+                let callee = self.method_callee(*recv, method);
                 self.unresolved_access(method, Access::Call, *recv, span);
                 self.deep_copy(&callee, args, kwargs, *star_from, span);
                 // `obj.prop(...)` reads the property and calls the value read, which binds no
@@ -4994,6 +4990,8 @@ impl<'a> Extractor<'a> {
                     recv_is_self,
                     constructs,
                     per_item: None,
+                    unseen_keywords: matches!(callee, Callee::Project(..))
+                        && self.cx.calls_partial_with_keywords(self.val(*recv), method),
                     span,
                 };
                 self.call_inst((bb, index), method, callee, &call);
@@ -5056,6 +5054,7 @@ impl<'a> Extractor<'a> {
                         recv_is_self,
                         constructs: self.class_called(partial.callable),
                         per_item: None,
+                        unseen_keywords: self.calls_unseen_keywords(partial.callable),
                         span,
                     };
                     self.call_inst((bb, index), callee, target, &call);
@@ -5068,7 +5067,7 @@ impl<'a> Extractor<'a> {
                     && let Some(held) = *callee_var
                     && let Some((recv, method)) = self.bound_method(held)
                 {
-                    let target = self.cx.resolve_method(self.val(recv), &method);
+                    let target = self.method_callee(recv, &method);
                     let complete = self.callable_targets_complete(held, &target);
                     self.held_calls_complete.insert((bb, index), complete);
                     self.unresolved_access(&method, Access::Call, recv, span);
@@ -5086,6 +5085,7 @@ impl<'a> Extractor<'a> {
                         recv_is_self,
                         constructs: None,
                         per_item: None,
+                        unseen_keywords: self.calls_unseen_keywords(held),
                         span,
                     };
                     self.call_inst((bb, index), &method, target, &call);
@@ -5115,6 +5115,7 @@ impl<'a> Extractor<'a> {
                     recv_is_self: false,
                     constructs,
                     per_item: None,
+                    unseen_keywords: false,
                     span,
                 };
                 self.call_inst((bb, index), callee, target, &call);
@@ -5143,6 +5144,7 @@ impl<'a> Extractor<'a> {
                     recv_is_self: false,
                     constructs: None,
                     per_item: None,
+                    unseen_keywords: false,
                     span,
                 };
                 self.call(bb, &target, &call);
@@ -5206,10 +5208,7 @@ impl<'a> Extractor<'a> {
         self.state_tests.get_or_init(|| {
             let dom = heki_ir::DominatorTree::over(self.shape, |p, b| self.live.edge(p, b));
             let def = |v: VarId| self.defs.get(&v).copied();
-            let resolve = |recv: VarId, method: &str| match self
-                .cx
-                .resolve_method(self.types.get(&recv), method)
-            {
+            let resolve = |recv: VarId, method: &str| match self.method_callee(recv, method) {
                 Callee::Project(keys, _) => keys,
                 _ => Vec::new(),
             };
@@ -5374,6 +5373,7 @@ impl<'a> Extractor<'a> {
             recv_is_self,
             constructs: None,
             per_item: None,
+            unseen_keywords: false,
             span,
         };
         match dst {
@@ -5403,7 +5403,7 @@ impl<'a> Extractor<'a> {
     /// method alias, `getattr(obj, "method")`).
     fn callable_callee(&self, var: VarId) -> (Callee, Option<VarId>) {
         match self.bound_method(var) {
-            Some((recv, method)) => (self.cx.resolve_method(self.val(recv), &method), Some(recv)),
+            Some((recv, method)) => (self.method_callee(recv, &method), Some(recv)),
             None => (self.cx.resolve_call(self.val(var)), None),
         }
     }
@@ -7180,6 +7180,7 @@ impl<'a> Extractor<'a> {
             recv_is_self,
             constructs: None,
             per_item: items.as_ref(),
+            unseen_keywords: self.calls_unseen_keywords(target),
             span: call.span,
         };
         let per_item = per_item.map(|p| {
@@ -8404,6 +8405,10 @@ struct Call<'c> {
     /// A builtin calls the callees once per item (`Runner::PerItem`), passing them these
     /// items: `dst` holds what the builtin returns, never what they return.
     per_item: Option<&'c PassedItems>,
+    /// The call passes keywords the code does not show, which may bind any parameter: those a
+    /// `functools.partial` object of a class attribute holds
+    /// ([`TypeCtx::calls_partial_with_keywords`]).
+    unseen_keywords: bool,
     span: Span,
 }
 

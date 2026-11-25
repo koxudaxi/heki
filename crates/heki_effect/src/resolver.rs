@@ -41,13 +41,17 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
+mod fields;
 mod package_paths;
 mod returns;
 mod sentinels;
 pub(crate) mod stores;
+mod type_names;
 mod workspace;
 
+pub use fields::{FieldDefault, InitField, InitFields};
 pub use returns::{CallItems, NoItems, ReturnFact, ReturnedItems};
+pub(crate) use type_names::type_expression_text;
 
 /// The derived indexes of a [`ProjectDecls`] version (`ProjectDecls::index_changes`).
 struct Indexes {
@@ -588,6 +592,11 @@ pub struct ClassDecl {
     /// instance fields ([`ProjectDecls::field_defaults`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataclass: Option<Dataclass>,
+    /// The fields the constructor a `NamedTuple` or a `@dataclass(frozen=True)` generates for
+    /// the class binds, its own in order ([`ProjectDecls::constructor_fields`]): what an
+    /// instance it makes holds in them. Boxed: few classes have one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_fields: Option<Box<InitFields>>,
     /// What the class's own body and methods store in its attributes (`attr = [...]` in the
     /// body, `self.attr = ...` in a method): `Some` when every store is a small display that
     /// none of them grows (`heki_ir::FnIndex::stored_display`), `None` when an attribute is
@@ -665,6 +674,11 @@ pub struct NamedAttr {
     /// paths.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub body_defined: bool,
+    /// The class body binds the attribute last, on every path, to a `functools.partial` object
+    /// of a name that holds keywords only (`copy = partial(copy_field, deep=False)`, also
+    /// wrapped in `staticmethod`): `body` is then `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_partial: Option<Box<PartialAttr>>,
     /// The class body annotates the attribute outside `ClassVar` and `InitVar`: a field, where
     /// a base the project does not define may build an `__init__` that stores the default.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -680,6 +694,21 @@ pub struct NamedAttr {
     pub held: BTreeSet<String>,
 }
 
+/// A `functools.partial` object a class body binds an attribute to ([`NamedAttr::body_partial`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartialAttr {
+    /// The name of the callable it holds, by the fqn its module gives it.
+    pub callable: String,
+    /// It holds keywords, whose values the calls through it do not see.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keywords: bool,
+    /// `staticmethod` wraps it: reading it on an instance gives the object itself. A plain
+    /// `functools.partial` read on an instance binds the instance from Python 3.14 on (a method
+    /// descriptor), and gives the object itself before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_static: bool,
+}
+
 /// What reading a class attribute finds when its class body binds it to module-level names
 /// ([`ProjectDecls::class_aliases`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -689,6 +718,8 @@ pub(crate) struct ClassAlias<'d> {
     /// On the other paths it holds what the class's own `def` of it makes: that function, by
     /// fqn.
     pub defined: Option<String>,
+    /// It holds this `functools.partial` object of a name instead (`names` is empty).
+    pub partial: Option<&'d PartialAttr>,
 }
 
 /// An `object()` sentinel an instance of a class may hold in an attribute
@@ -995,12 +1026,15 @@ pub struct ModuleDecls {
     /// is an alias ([`Self::aliases`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub alias_paths: BTreeMap<String, Vec<String>>,
-    /// Module-level `TypeVar`s with a bound or constraints (`C = TypeVar("C", bound=View)`), by
-    /// name, with the type an annotation naming them gives: the bound, or the union of the
-    /// constraints ([`type_vars`]). A value of the variable's type is one of those classes, in
-    /// the module or where an import names it ([`ProjectDecls::declared_ty`]).
+    /// Module-level names an annotation reads as a type they name, though they are no class, by
+    /// name, with that type ([`type_names`]): a type alias (`Operation: TypeAlias = Added |
+    /// Removed`, `type Operation = Added | Removed`, or an assignment of a subscript or a union
+    /// the body makes once, `Operation = Added | Removed`), the type it names; a `TypeVar` with
+    /// a bound or constraints (`C = TypeVar("C", bound=View)`), the bound or the union of the
+    /// constraints, which a value of the variable's type is one of. They are so in the module
+    /// and where an import names them ([`ProjectDecls::declared_ty`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub type_vars: BTreeMap<String, Ty>,
+    pub type_names: BTreeMap<String, Ty>,
     /// The module globals the module stores or deletes (in its body, or in a function after
     /// `global name`) that are no runtime import, class, or function of it: its own objects,
     /// of a value heki may not know ([`Symbol::Unknown`]), never a builtin of the same name.
@@ -1337,55 +1371,6 @@ impl ModuleDecls {
         None
     }
 
-    /// Priority 2 annotation normalization: `Optional[T]` / `T | None` / `Annotated[T, ...]`
-    /// / quoted `"T"` -> `T`; `list[...]` -> `builtins.list`; resolved to a fqn.
-    pub fn resolve_annotation(&self, text: &str) -> Option<String> {
-        let mut t = text.trim();
-        loop {
-            let unquoted = t
-                .strip_prefix('"')
-                .and_then(|s| s.strip_suffix('"'))
-                .or_else(|| t.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')));
-            if let Some(u) = unquoted {
-                t = u.trim();
-                continue;
-            }
-            let parts = split_top_level(t, '|');
-            if parts.len() > 1 {
-                let non_none: Vec<&str> = parts.into_iter().filter(|p| *p != "None").collect();
-                if non_none.len() != 1 {
-                    return None;
-                }
-                t = non_none[0];
-                continue;
-            }
-            if let Some((head, inner)) = subscript(t) {
-                let last = head.rsplit('.').next().unwrap_or(head);
-                match last {
-                    "Optional" | "Annotated" | "Final" | "ClassVar" | "Required"
-                    | "NotRequired" | "ReadOnly" => {
-                        t = split_top_level(inner, ',').first().copied()?;
-                        continue;
-                    }
-                    "Union" => {
-                        let non_none: Vec<&str> = split_top_level(inner, ',')
-                            .into_iter()
-                            .filter(|p| *p != "None")
-                            .collect();
-                        if non_none.len() != 1 {
-                            return None;
-                        }
-                        t = non_none[0];
-                        continue;
-                    }
-                    _ => {}
-                }
-                return self.resolve_type_head(head);
-            }
-            return self.resolve_type_head(t);
-        }
-    }
-
     /// The type an annotation names (receiver typing): a class with the arguments of a known
     /// generic container (`list[Model]`, `Mapping[str, Model]`, `tuple[Model, int]`,
     /// `Iterator[Model]`), or the class object `type[Model]` / `typing.Type[Model]` names, after
@@ -1408,8 +1393,8 @@ impl ModuleDecls {
             {
                 return Some(Ty::SelfType);
             }
-            if let Some(bound) = self.type_vars.get(t) {
-                return Some(bound.clone());
+            if let Some(named) = self.type_names.get(t) {
+                return Some(named.clone());
             }
             return self
                 .resolve_type_head(t)
@@ -1458,6 +1443,7 @@ impl ModuleDecls {
                 [_, "..."] => Args::items(elem(0)),
                 _ => Args::Tuple((0..args.len()).map(elem).collect()),
             },
+            Some(Generic::Held) => Args::result(elem(0)),
         };
         Some(Ty::container(&class, args))
     }
@@ -2106,6 +2092,9 @@ pub struct ProjectDecls {
     /// The answers of [`Self::catalog_attribute`] so far, by class and name; cleared with the
     /// indexes.
     catalog_attributes: SharedMemo<(String, String), Option<String>, DeclKeys>,
+    /// The answers of [`Self::object_attr_read_runs_no_code`] so far, by class and name;
+    /// cleared with the indexes.
+    object_attr_reads: SharedMemo<(String, String), bool, DeclKeys>,
 }
 
 /// Why an attribute (or `TypedDict` key) of a project class is read-only (`MUT108`, `MUT120`).
@@ -2400,6 +2389,7 @@ impl ProjectDecls {
         self.capacities.clear();
         self.star_bindings.clear();
         self.catalog_attributes.clear();
+        self.object_attr_reads.clear();
         // Maintenance, not a lookup of an analysis.
         let recording = std::mem::replace(self.recorder.on.get_mut(), false);
         self.build_indexes();
@@ -2416,7 +2406,10 @@ impl ProjectDecls {
             for (qualname, class) in &m.classes {
                 let fqn = format!("{}.{qualname}", m.module_name);
                 for (attr, named) in &class.named_attrs {
-                    if (named.body.is_some() || !named.body_paths.is_empty()) && !named.annotated {
+                    let binds = named.body.is_some()
+                        || !named.body_paths.is_empty()
+                        || named.body_partial.is_some();
+                    if binds && !named.annotated {
                         alias_names.insert(attr.clone());
                     }
                 }
@@ -3979,6 +3972,29 @@ impl ProjectDecls {
         read
     }
 
+    /// Whether reading `attr`, an attribute every object has (`__class__`, `__dict__`), on a
+    /// value of the project class `class` runs no code but finding it, on every class the value
+    /// may be under R2: none binds the name, defines `__getattribute__`, or has a metaclass heki
+    /// does not know, and every base outside the project is a plain base or one
+    /// `catalog_stores` accepts (a base whose `__setattr__` the catalog says stores on the
+    /// instance, R3). Kept per class and name for the life of the indexes, so the reads of one
+    /// class's namespace walk its subclasses once; the catalog is fixed while the indexes are.
+    pub(crate) fn object_attr_read_runs_no_code(
+        &self,
+        class: &str,
+        attr: &str,
+        catalog_stores: impl Fn(&str) -> bool,
+    ) -> bool {
+        let class = self.canonical(class);
+        self.object_attr_reads
+            .ask(self, (class.clone(), attr.to_owned()), || {
+                let read = self.attr_read(&class, attr);
+                read.binders.is_empty()
+                    && !read.runs_hook(false)
+                    && (read.bases_known || self.binds_none_of(&class, &[], catalog_stores))
+            })
+    }
+
     /// Whether reading `attr` on an instance of the project class `class` (or, under assumption
     /// R2, of a project subclass) reads a plain attribute and runs no code of the project: a
     /// class along its MRO declares it (a field, a slot, or what its body or methods store), no
@@ -4735,26 +4751,23 @@ impl ProjectDecls {
 
     /// The type a declaration names (an annotation, or a type stored in the declarations), with
     /// every class named canonically (re-exports chased): `None` when it names a module, or a name
-    /// of a project module that is no class (a type alias, a `TypeVar`, a constant); an item of
-    /// such a type is unknown. A name below a module heki does not see (a compiled submodule of a
-    /// project package) stays as it is. A class object (`type[C]`) is [`Self::class_object`].
+    /// of a project module that is no class and names no type (a constant, an unbounded
+    /// `TypeVar`); an item of such a type is unknown. A project name that names a type (a type
+    /// alias, a bound `TypeVar`: [`ModuleDecls::type_names`]) is that type, also as a member of a
+    /// union. A name below a module heki does not see (a compiled submodule of a project package)
+    /// stays as it is. A class object (`type[C]`) is [`Self::class_object`].
     pub(crate) fn declared_ty(&self, ty: &Ty) -> Option<Ty> {
         self.declared_ty_with(ty, true)
     }
 
-    /// [`Self::declared_ty`]; with `type_vars`, a project `TypeVar` an import names is its bound
-    /// ([`ModuleDecls::type_vars`]), whose own names are taken as they are.
-    fn declared_ty_with(&self, ty: &Ty, type_vars: bool) -> Option<Ty> {
+    /// [`Self::declared_ty`]; with `names`, a project name an import names is the type it names
+    /// ([`ModuleDecls::type_names`]), whose own names are taken as they are.
+    fn declared_ty_with(&self, ty: &Ty, names: bool) -> Option<Ty> {
         if let Ty::Class(class) = ty {
             return self.class_object(&self.object_named(class));
         }
-        if type_vars
-            && let Some(o) = ty.obj()
-            && let Some(bound) = self.type_var_bound(&o.class)
-        {
-            return self.declared_ty_with(bound, false);
-        }
-        ty.map_members(|o| {
+        let named = |o: &crate::types::Obj| self.type_name(&o.class).filter(|_| names);
+        let canonical = |o: &crate::types::Obj| {
             let class = self.object_named(&o.class);
             if let Some((m, rest)) = self.split_module(&class)
                 && !rest.contains('.')
@@ -4762,16 +4775,45 @@ impl ProjectDecls {
             {
                 return None;
             }
-            let args = o.args.map_elems(|t| self.declared_ty_with(t, type_vars));
+            let args = o.args.map_elems(|t| self.declared_ty_with(t, names));
             Some(crate::types::Obj { class, args })
-        })
+        };
+        let members = ty.members();
+        if let [o] = members
+            && let Some(t) = named(o)
+        {
+            return self.declared_ty_with(t, false);
+        }
+        if !members.iter().any(|o| named(o).is_some()) {
+            return ty.map_members(canonical);
+        }
+        // A union naming a type among its members (`Operation | Extra`): the instances each member
+        // is.
+        let mut objs = Vec::new();
+        for o in members {
+            match named(o) {
+                Some(t) => {
+                    let t = self.declared_ty_with(t, false)?;
+                    if t.members().is_empty() {
+                        return None;
+                    }
+                    objs.extend(t.members().iter().cloned());
+                }
+                None => objs.push(canonical(o)?),
+            }
+        }
+        Ty::of_members(objs)
     }
 
-    /// The type a value of the project `TypeVar` named `fqn` has ([`ModuleDecls::type_vars`]).
-    fn type_var_bound(&self, fqn: &str) -> Option<&Ty> {
-        let named = self.object_named(fqn);
-        let (m, rest) = self.split_module(&named)?;
-        m.type_vars.get(rest)
+    /// The type the project name `fqn` names ([`ModuleDecls::type_names`]), as written or past
+    /// re-exports: an alias that is also a module alias of a class (`Names = frozenset[str]`)
+    /// names the type with its arguments.
+    fn type_name(&self, fqn: &str) -> Option<&Ty> {
+        let named = |fqn: &str| {
+            let (m, rest) = self.split_module(fqn)?;
+            m.type_names.get(rest)
+        };
+        named(fqn).or_else(|| named(&self.object_named(fqn)))
     }
 
     /// The type of a class object that is the canonical class `class` or one of its subclasses
@@ -4796,9 +4838,10 @@ impl ProjectDecls {
     /// Whether the inferred type `t` is narrower than the declared `declared`, so that a value
     /// keeps it: anything for a declaration of `Any` / `object`, an instance of a class that
     /// specializes the declared one ([`Self::specializes`]: `x: Base = Sub()`, `cur:
-    /// sqlite3.Cursor = conn.execute(...)` on a file), and for a declared class object, a class
-    /// named exactly or the class object of a subclass (`kind: type[Base] = Base`, `= Sub`, `=
-    /// type(sub)`).
+    /// sqlite3.Cursor = conn.execute(...)` on a file) or of the declared class with known
+    /// fields ([`Args::Fields`]: `spec: Spec = Spec(run=f)`), and for a declared class object, a
+    /// class named exactly or the class object of a subclass (`kind: type[Base] = Base`, `=
+    /// Sub`, `= type(sub)`).
     pub(crate) fn narrower(&self, t: &Ty, declared: &Ty, kb: &EffectiveEcosystemKb) -> bool {
         if let Ty::Class(d) = declared {
             return match t {
@@ -4810,8 +4853,13 @@ impl ProjectDecls {
         declared.obj().is_some_and(|d| {
             of_any_class(&d.class)
                 || (is_any_callable(&d.class) && t.obj().is_none())
-                || t.obj()
-                    .is_some_and(|i| self.specializes(&i.class, &d.class, kb))
+                || t.obj().is_some_and(|i| {
+                    self.specializes(&i.class, &d.class, kb)
+                        // An instance of the class whose fields hold known objects.
+                        || i.class == d.class
+                            && matches!(i.args, Args::Fields(_))
+                            && matches!(d.args, Args::None)
+                })
         })
     }
 
@@ -4845,6 +4893,8 @@ impl ProjectDecls {
         };
         let args = match (&i.args, &d.args) {
             (Args::Items(a), Args::Items(b)) => Args::Items(Box::new(slot(a, b))),
+            // A display of known length declared as a tuple of any length.
+            (Args::Tuple(_), Args::Items(b)) => Args::Items(Box::new(slot(&i.args.item(), b))),
             (Args::Map(ka, va), Args::Map(kb, vb)) => {
                 Args::Map(Box::new(slot(ka, kb)), Box::new(slot(va, vb)))
             }
@@ -5132,6 +5182,7 @@ impl ProjectDecls {
             ClassAlias {
                 names,
                 defined: None,
+                partial: None,
             } if names.len() == 1 => names.first().copied(),
             _ => None,
         }
@@ -5175,9 +5226,11 @@ impl ProjectDecls {
                     .map(|(name, is_static)| (name.as_str(), *is_static))
                     .collect(),
             };
-            let alias = (!names.is_empty()).then(|| ClassAlias {
+            let partial = named.body_partial.as_deref();
+            let alias = (!names.is_empty() || partial.is_some()).then(|| ClassAlias {
                 names,
                 defined: named.body_defined.then(|| format!("{c}.{attr}")),
+                partial,
             })?;
             let stored =
                 self.attr_store(&c, decl, attr).is_some() || self.stores_any_attr(&c, decl);
@@ -5787,7 +5840,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
     decls.made_in = (!made_in.is_empty()).then(|| Box::new(made_in));
     let bindings = BodyBindings::of(input, &decls);
     (decls.aliases, decls.alias_paths) = module_aliases(input, &decls, &bindings);
-    decls.type_vars = type_vars(input, &decls);
+    type_names::type_names(input, &mut decls);
     let stores = GlobalStores::of(&input.ir.functions);
     decls.unknown_globals = unknown_globals(&stores, &decls);
     let rebound = rebound_imports(input, &stores, &decls);
@@ -6122,6 +6175,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
     decls.file_constants = file_constants(input, &decls);
     decls.object_sentinels = sentinels::object_sentinels(input, &decls);
     sentinels::named_attrs(input, &mut decls);
+    fields::init_fields(input, &mut decls);
     decls.copy_registrations = sentinels::copy_registrations(input, &decls);
     returns::record_return_facts(input, &mut decls, kb);
     decls
@@ -6340,7 +6394,8 @@ fn ty_classes(ty: &Ty, out: &mut Vec<String>) {
     for obj in ty.members() {
         out.push(obj.class.clone());
         let items: Vec<&Elem> = match &obj.args {
-            Args::None => Vec::new(),
+            // The named objects a field holds are no classes of instances.
+            Args::None | Args::Fields(_) => Vec::new(),
             Args::Items(e) | Args::Result(e) => vec![e.as_ref()],
             Args::Map(k, v) => vec![k.as_ref(), v.as_ref()],
             Args::Tuple(es) => es.iter().collect(),
@@ -6842,103 +6897,6 @@ fn file_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeSet<Stri
     out
 }
 
-/// [`ModuleDecls::type_vars`]: the module-level names bound once, by the module body, to a
-/// `TypeVar(...)` call (`typing` or `typing_extensions`) whose `bound=` or constraints the
-/// module's names resolve to classes. A bound or a constraint is a name, an attribute of one, or
-/// the string of an annotation (`bound="ContextView"`); anything else leaves the variable
-/// unbounded, and so does a variable a star import, `exec`, or `globals()` may rebind.
-fn type_vars(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<String, Ty> {
-    let mut out = BTreeMap::new();
-    if input.ir.constants.dynamic || input.ir.has_star_import {
-        return out;
-    }
-    let body = input.ir.function(input.ir.module_fn);
-    let stores = GlobalStores::of(&input.ir.functions);
-    let shape = FnShape::new(body);
-    let text = |var: VarId| annotation_text(&shape, var);
-    for inst in body.blocks.iter().flat_map(|b| &b.insts) {
-        let InstKind::StoreGlobal { name, value } = &inst.kind else {
-            continue;
-        };
-        if !stores.once(name) {
-            continue;
-        }
-        let (callee, args, kwargs) = match shape.inst(shape.copy_root(*value)).map(|i| &i.kind) {
-            Some(InstKind::Call {
-                callee_var: Some(c),
-                args,
-                kwargs,
-                star_from: None,
-                ..
-            }) => (text(*c), args, kwargs),
-            Some(InstKind::MethodCall {
-                recv,
-                method,
-                args,
-                kwargs,
-                star_from: None,
-                ..
-            }) => (text(*recv).map(|r| format!("{r}.{method}")), args, kwargs),
-            _ => continue,
-        };
-        let is_type_var = callee
-            .and_then(|c| decls.resolve_dotted(&c, false))
-            .is_some_and(|c| matches!(c.as_str(), "typing.TypeVar" | "typing_extensions.TypeVar"));
-        if !is_type_var {
-            continue;
-        }
-        let bound = kwargs
-            .iter()
-            .find(|(k, _)| k.as_deref() == Some("bound"))
-            .map(|(_, v)| *v);
-        let ty = match (bound, args.get(1..).unwrap_or_default()) {
-            (Some(bound), []) => text(bound).and_then(|t| decls.resolve_annotation_ty(&t)),
-            (None, constraints) if !constraints.is_empty() => {
-                let texts: Option<Vec<String>> = constraints.iter().map(|c| text(*c)).collect();
-                texts.and_then(|ts| {
-                    let parts: Vec<&str> = ts.iter().map(String::as_str).collect();
-                    decls.union_annotation(&parts)
-                })
-            }
-            _ => None,
-        };
-        if let Some(ty) = ty {
-            out.insert(name.clone(), ty);
-        }
-    }
-    out
-}
-
-/// The annotation text the module-body variable `var` holds or names: a string literal, a name
-/// the body binds or reads (an import, a class, a global), or an attribute of one
-/// (`views.ContextView`), at most [`MAX_ALIAS_SEGMENTS`] segments. Every load and every
-/// assignment of a name binds a variable the IR names after it.
-fn annotation_text(shape: &FnShape<'_>, var: VarId) -> Option<String> {
-    let mut attrs: Vec<&str> = Vec::new();
-    let mut cur = var;
-    loop {
-        if let Some(name) = shape.f.var_name(cur).filter(|n| !n.starts_with('.')) {
-            let mut text = name.to_owned();
-            for attr in attrs.iter().rev() {
-                text.push('.');
-                text.push_str(attr);
-            }
-            return Some(text);
-        }
-        match &shape.inst(cur)?.kind {
-            InstKind::Const {
-                literal: heki_ir::ConstLiteral::Str(s),
-                ..
-            } if attrs.is_empty() => return Some(s.to_string()),
-            InstKind::AttrLoad { obj, attr, .. } if attrs.len() < MAX_ALIAS_SEGMENTS => {
-                attrs.push(attr);
-                cur = *obj;
-            }
-            _ => return None,
-        }
-    }
-}
-
 /// [`ModuleDecls::rebound_imports`]: the import's own store is one of the module's stores of
 /// the name (`stores`).
 fn rebound_imports(
@@ -7291,11 +7249,18 @@ struct Named<'n> {
 
 impl Named<'_> {
     /// The fqn of the object the module-body variable `var` holds when it is a name or an
-    /// attribute of one. Each variable is resolved once (`known`): a chain of aliases bound to
-    /// one another (`a1 = a0`, `a2 = a1`, ...) shares the walk.
+    /// attribute of one, or a builtin container class subscripted with types, an alias of the
+    /// class (`Names = frozenset[str]`, [`crate::types::runtime_generic`]). Each variable is
+    /// resolved once (`known`): a chain of aliases bound to one another (`a1 = a0`, `a2 = a1`,
+    /// ...) shares the walk.
     fn object(&self, var: VarId, known: &mut FxHashMap<VarId, Option<String>>) -> Option<String> {
-        // The variables walked through, each with the attribute it loads (`None`: a copy).
-        let mut walked: Vec<(VarId, Option<&str>)> = Vec::new();
+        /// How a variable walked through holds what its operand does.
+        enum Through<'a> {
+            Copy,
+            Attr(&'a str),
+            Subscript,
+        }
+        let mut walked: Vec<(VarId, Through<'_>)> = Vec::new();
         let mut cur = var;
         // SSA definitions form no cycle without a phi, which ends the walk.
         let mut object = loop {
@@ -7307,12 +7272,21 @@ impl Named<'_> {
             };
             let base = match &inst.kind {
                 InstKind::Copy { src, .. } => {
-                    walked.push((cur, None));
+                    walked.push((cur, Through::Copy));
                     cur = *src;
                     continue;
                 }
                 InstKind::AttrLoad { obj, attr, .. } => {
-                    walked.push((cur, Some(attr.as_str())));
+                    walked.push((cur, Through::Attr(attr.as_str())));
+                    cur = *obj;
+                    continue;
+                }
+                InstKind::SubscriptLoad {
+                    obj,
+                    is_slice: false,
+                    ..
+                } => {
+                    walked.push((cur, Through::Subscript));
                     cur = *obj;
                     continue;
                 }
@@ -7334,13 +7308,16 @@ impl Named<'_> {
             known.insert(cur, base.clone());
             break base;
         };
-        for (v, attr) in walked.into_iter().rev() {
-            if let (Some(base), Some(attr)) = (&object, attr) {
+        for (v, through) in walked.into_iter().rev() {
+            object = match through {
+                Through::Copy => object,
                 // A name of more than a few dotted segments is no alias anyone writes; the cap
                 // keeps a chain of attribute loads (`a2 = a1.x`) linear.
-                object = (base.matches('.').count() < MAX_ALIAS_SEGMENTS)
-                    .then(|| format!("{base}.{attr}"));
-            }
+                Through::Attr(attr) => object
+                    .filter(|base| base.matches('.').count() < MAX_ALIAS_SEGMENTS)
+                    .map(|base| format!("{base}.{attr}")),
+                Through::Subscript => object.filter(|class| crate::types::runtime_generic(class)),
+            };
             known.insert(v, object.clone());
         }
         object
@@ -8773,7 +8750,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     declared_items: BTreeMap::new(),
     aliases: BTreeMap::new(),
     alias_paths: BTreeMap::new(),
-    type_vars: BTreeMap::new(),
+    type_names: BTreeMap::new(),
     unknown_globals: BTreeSet::new(),
     rebound_imports: None,
     small_globals: BTreeMap::new(),
@@ -9259,6 +9236,36 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
+    /// Resolve `recv.method(...)` where `ty` is the type of `recv` with its arguments: an
+    /// instance holding a named object in its field `method` ([`crate::types::Args::Fields`],
+    /// [`ProjectDecls::field_holds_given`]) calls that object, binding no receiver; anything
+    /// else is resolved by its value ([`Self::resolve_method`]).
+    pub(crate) fn resolve_method_of(
+        &self,
+        recv: Option<&Val>,
+        ty: Option<&Ty>,
+        method: &str,
+    ) -> Callee {
+        if let Some(held) = ty.and_then(|t| self.field_held(t, method)) {
+            return match held {
+                Elem::Of(t) => self.resolve_call(t.val().as_ref()),
+                Elem::Empty | Elem::Unknown => Callee::Unresolved,
+            };
+        }
+        self.resolve_method(recv, method)
+    }
+
+    /// What the instance of type `ty` holds in its field `attr`, when it holds what the call
+    /// constructing it bound: the one reading of [`crate::types::Args::Fields`], for typing and
+    /// for call targets.
+    pub(crate) fn field_held<'t>(&self, ty: &'t Ty, attr: &str) -> Option<&'t Elem> {
+        let o = ty.obj()?;
+        let held = o.args.field(attr)?;
+        self.project
+            .field_holds_given(&o.class, attr)
+            .then_some(held)
+    }
+
     /// Resolve `recv.method(...)`.
     pub fn resolve_method(&self, recv: Option<&Val>, method: &str) -> Callee {
         if let Some(Val::OneOf(fqns)) = recv {
@@ -9329,21 +9336,7 @@ impl<'a> TypeCtx<'a> {
     /// unresolved when the targets bind differently; too many past [`DISPATCH_CLASS_LIMIT`]
     /// classes.
     fn alias_call_targets(&self, recv: Recv<'_>, method: &str) -> Option<Callee> {
-        let (class, on_instance, family) = match recv {
-            Recv::Ref(class) if self.project.is_project_class(class) => (class, false, false),
-            Recv::Class(class) => (class, false, true),
-            Recv::Inst(class) => (class, true, true),
-            Recv::Ref(_) | Recv::Super(_) => return None,
-        };
-        // Every method call asks, and the receiver's class may have thousands of subclasses:
-        // they are listed only for a name some class body binds.
-        if !self.project.binds_alias(method) {
-            return None;
-        }
-        let mut classes = vec![self.project.canonical(class)];
-        if family {
-            classes.extend(self.project.subclasses_of(class));
-        }
+        let (classes, on_instance) = self.alias_classes(recv, method)?;
         // As for the implementations of a method (`instance_targets_complete`). Past the limit,
         // the first class binding the name to a name decides, not what each one binds.
         if classes.len() > DISPATCH_CLASS_LIMIT {
@@ -9362,6 +9355,8 @@ impl<'a> TypeCtx<'a> {
             .iter()
             .any(|alias| alias.as_ref().is_none_or(|a| a.defined.is_some()))
             .then(|| self.defined_method_targets(Some(recv), method));
+        let partials: Vec<&PartialAttr> =
+            found.iter().flatten().filter_map(|a| a.partial).collect();
         let names = found.into_iter().flatten().flat_map(|alias| alias.names);
         for (named, is_static) in names {
             let named = self.project.object_named(named);
@@ -9379,7 +9374,77 @@ impl<'a> TypeCtx<'a> {
                 Err(targets) => return Some(targets),
             }
         }
+        for partial in partials {
+            let callee = match self.partial_attr_callable(partial, on_instance) {
+                Some(callable) => match self.call_targets(Some(Recv::Ref(&callable))) {
+                    // The keywords it holds may decide what a library call does, which the
+                    // catalog reads from the arguments the call shows.
+                    Callee::External(_) if partial.keywords => Callee::Unresolved,
+                    callee => callee,
+                },
+                None => Callee::Unresolved,
+            };
+            match join_either(out, callee) {
+                Ok(joined) => out = Some(joined),
+                Err(targets) => return Some(targets),
+            }
+        }
         out
+    }
+
+    /// The classes whose bodies may bind `method` for a call on `recv`, and whether the call is
+    /// on an instance: a class object is exactly its class, an instance or `cls` also a project
+    /// subclass. `None` when no class body binds the name to a name, or `recv` is no class or
+    /// instance of one.
+    fn alias_classes(&self, recv: Recv<'_>, method: &str) -> Option<(Vec<String>, bool)> {
+        let (class, on_instance, family) = match recv {
+            Recv::Ref(class) if self.project.is_project_class(class) => (class, false, false),
+            Recv::Class(class) => (class, false, true),
+            Recv::Inst(class) => (class, true, true),
+            Recv::Ref(_) | Recv::Super(_) => return None,
+        };
+        // Every method call asks, and the receiver's class may have thousands of subclasses:
+        // they are listed only for a name some class body binds.
+        if !self.project.binds_alias(method) {
+            return None;
+        }
+        let mut classes = vec![self.project.canonical(class)];
+        if family {
+            classes.extend(self.project.subclasses_of(class));
+        }
+        Some((classes, on_instance))
+    }
+
+    /// The callable a call through the `functools.partial` object `partial` of a class
+    /// attribute calls, read on the class object or on an instance (`on_instance`), by its fqn:
+    /// the object calls it with the call's arguments and then the keywords it holds. `None` for
+    /// a plain partial read on an instance, which Python 3.14 binds to the instance as its first
+    /// argument and older versions do not.
+    fn partial_attr_callable(&self, partial: &PartialAttr, on_instance: bool) -> Option<String> {
+        (partial.is_static || !on_instance).then(|| self.project.object_named(&partial.callable))
+    }
+
+    /// Whether `recv.method(...)` calls a `functools.partial` object of a class attribute that
+    /// holds keywords ([`PartialAttr::keywords`]) on some class `recv` may be: the call passes
+    /// the callable keywords it does not show, which may bind any parameter.
+    pub(crate) fn calls_partial_with_keywords(&self, recv: Option<&Val>, method: &str) -> bool {
+        let holds_keywords = |recv: Recv<'_>| {
+            // Past the limit the call has too many targets to bind (`alias_call_targets`).
+            self.alias_classes(recv, method)
+                .filter(|(classes, _)| classes.len() <= DISPATCH_CLASS_LIMIT)
+                .is_some_and(|(classes, _)| {
+                    classes.iter().any(|c| {
+                        self.project
+                            .class_aliases(c, method)
+                            .and_then(|a| a.partial)
+                            .is_some_and(|p| p.keywords)
+                    })
+                })
+        };
+        match self.dispatch_classes(recv) {
+            Some(classes) => classes.iter().any(|c| holds_keywords(Recv::Inst(c))),
+            None => recv.and_then(Val::recv).is_some_and(holds_keywords),
+        }
     }
 
     /// What reading `attr` on an instance of `class` gives when the class body defining it binds
@@ -9409,6 +9474,14 @@ impl<'a> TypeCtx<'a> {
     /// function outside `staticmethod`, which the read binds to the instance (`Some(None)`, a
     /// bound method); `None` for no such attribute.
     fn exact_instance_alias(&self, class: &str, attr: &str) -> Option<Option<Ty>> {
+        if let Some(partial) = self
+            .project
+            .class_aliases(class, attr)
+            .and_then(|a| a.partial)
+        {
+            let callable = self.partial_attr_callable(partial, true);
+            return Some(callable.map(|c| Ty::Partial(Box::new(self.named(&c)))));
+        }
         let (named, is_static) = self.project.class_alias(class, attr)?;
         let named = self.project.object_named(named);
         let binds = !is_static

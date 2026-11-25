@@ -734,6 +734,16 @@ const FACTORY_DB: &str = "import sqlite3\nfrom pathlib import Path\n\nDB_PATH = 
 const FACTORY_DB_MEMORY: &str = "import sqlite3\nfrom pathlib import Path\n\nDB_PATH = Path(__file__).parent / \"app.db\"\n\n\ndef connect() -> sqlite3.Connection:\n    return sqlite3.connect(\":memory:\")\n";
 const FACTORY_DB_UNKNOWN_PATH: &str = "import os\nimport sqlite3\n\nDB_PATH = os.environ[\"DB\"]\n\n\ndef connect() -> sqlite3.Connection:\n    return sqlite3.connect(DB_PATH)\n";
 const FACTORY_USE: &str = "from pkg.factory_db import connect\n\n\nasync def serve():\n    return connect().execute(\"SELECT 1\")\n";
+// Functions values hold, defined in one module and called in others: the closure a factory
+// returns (`ReturnFact::ty`), a named tuple's field (`ClassDecl::init_fields`), and a
+// `staticmethod(partial(...))` class attribute (`NamedAttr::body_partial`).
+const HELD_DEFS: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n";
+const HELD_DEFS_QUIET_FACTORY: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    return rest\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n";
+const HELD_DEFS_PLAIN_VIEW: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View:\n    def __init__(self, run: Callable[[], None]) -> None:\n        self.run = run\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n";
+const HELD_DEFS_QUIET_PARTIAL: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(rest))\n";
+const HELD_FACTORY: &str = "from pkg.held_defs import make_waiter\n\n\nasync def through_factory() -> None:\n    make_waiter()()\n";
+const HELD_FIELD: &str = "from pkg.held_defs import View, nap\n\n\nasync def through_field() -> None:\n    View(nap).run()\n";
+const HELD_PARTIAL: &str = "from pkg.held_defs import Holder\n\n\nasync def through_partial() -> None:\n    Holder().run()\n";
 const ROWS_USE: &str = "from pkg.rows_db import authors, book\n\n\ndef each():\n    for r in authors():\n        book(r[0])\n";
 // The third module binds the base's method to another function: the call may run that
 // function instead. The base's class body binds it to another function on every path: the call
@@ -1218,6 +1228,10 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/rows_use.py", ROWS_USE),
         ("pkg/factory_db.py", FACTORY_DB),
         ("pkg/factory_use.py", FACTORY_USE),
+        ("pkg/held_defs.py", HELD_DEFS),
+        ("pkg/held_factory.py", HELD_FACTORY),
+        ("pkg/held_field.py", HELD_FIELD),
+        ("pkg/held_partial.py", HELD_PARTIAL),
         ("pkg/st_client.py", ST_CLIENT),
         ("pkg/st_use.py", ST_USE),
         ("pkg/st_rebind.py", ST_REBIND),
@@ -1553,6 +1567,55 @@ fn steps_returned_types() -> Vec<Step> {
         )
         .present(EXACT)
         .absent(HEURISTIC),
+    ]
+}
+
+/// The function a value holds, decided in the module defining it: a factory returning a function
+/// that does not wait, a class that is no named tuple (whose attribute holds what a parameter
+/// declares), and a partial class attribute of a function that does not wait each take the wait
+/// away from their callers in other modules, and the definitions written back bring it back.
+fn steps_held_functions() -> Vec<Step> {
+    const FACTORY: &[(&str, &str)] = &[("pkg/held_factory.py", "EFF101")];
+    const FIELD: &[(&str, &str)] = &[("pkg/held_field.py", "EFF101 [heuristic]")];
+    const PARTIAL: &[(&str, &str)] = &[("pkg/held_partial.py", "EFF101")];
+    const ALL: &[(&str, &str)] = &[
+        ("pkg/held_factory.py", "EFF101"),
+        ("pkg/held_field.py", "EFF101 [heuristic]"),
+        ("pkg/held_partial.py", "EFF101"),
+    ];
+    vec![
+        Step::new(
+            "the factory returns a function that does not wait",
+            vec![save("pkg/held_defs.py", HELD_DEFS_QUIET_FACTORY)],
+        )
+        .absent(FACTORY)
+        .present(&[
+            ("pkg/held_field.py", "EFF101 [heuristic]"),
+            ("pkg/held_partial.py", "EFF101"),
+        ]),
+        Step::new(
+            "the view is a plain class",
+            vec![save("pkg/held_defs.py", HELD_DEFS_PLAIN_VIEW)],
+        )
+        .absent(FIELD)
+        .present(&[
+            ("pkg/held_factory.py", "EFF101"),
+            ("pkg/held_partial.py", "EFF101"),
+        ]),
+        Step::new(
+            "the partial holds a function that does not wait",
+            vec![save("pkg/held_defs.py", HELD_DEFS_QUIET_PARTIAL)],
+        )
+        .absent(PARTIAL)
+        .present(&[
+            ("pkg/held_factory.py", "EFF101"),
+            ("pkg/held_field.py", "EFF101 [heuristic]"),
+        ]),
+        Step::new(
+            "every definition waits again",
+            vec![save("pkg/held_defs.py", HELD_DEFS)],
+        )
+        .present(ALL),
     ]
 }
 
@@ -4798,6 +4861,83 @@ fn steps_attribute_types() -> Vec<Step> {
     ]
 }
 
+/// The receivers whose class the language or the standard library fixes: an instance's
+/// namespace is a dict while reading it runs no code of its class, a `NamedTuple` instance has
+/// `_replace`, and a `ContextVar[T]` gives a `T`, each decided by declarations in another module.
+fn steps_builtin_receivers() -> Vec<Step> {
+    const MODEL: &str = "from contextvars import ContextVar\nfrom typing import NamedTuple\n\n\nclass Holder:\n    def __init__(self) -> None:\n        self.required = False\n\n\nclass Memo:\n    def bump(self, h: Holder) -> None:\n        pass\n\n\nclass Spot(NamedTuple):\n    module: str\n\n\nMEMO: ContextVar[Memo] = ContextVar(\"memo\")\n";
+    const PEEK: &str = "from pkg.rcv_model import Holder\n\n\ndef peek(h: Holder) -> object:\n    return h.__dict__.get(\"x\")\n";
+    const MOVED: &str = "from pkg.rcv_model import Spot\n\n\ndef moved(s: Spot) -> Spot:\n    return s._replace(module=\"m\")\n";
+    const BUMPED: &str = "from pkg.rcv_model import MEMO, Holder\n\n\ndef bumped(h: Holder) -> None:\n    MEMO.get().bump(h)\n";
+    const ALL: &[(&str, &str)] = &[
+        ("pkg/rcv_peek.py", "EFF201"),
+        ("pkg/rcv_moved.py", "EFF201"),
+        ("pkg/rcv_bumped.py", "EFF201"),
+    ];
+    let boundary = format!(
+        "{CONFIG}\n[[tool.heki.effect-boundaries]]\nname = \"receivers\"\nscopes = [\"pkg.rcv_peek\", \"pkg.rcv_moved\", \"pkg.rcv_bumped\"]\nwrite-universe = [\"Holder.required\"]\nallow-writes = []\nunresolved = \"report\"\n"
+    );
+    vec![
+        Step::new(
+            "modules read an instance's namespace, copy a named tuple, and call what a context \
+             variable holds",
+            vec![
+                Action::Configure(boundary),
+                Action::Create("pkg/rcv_model.py", MODEL.to_owned()),
+                Action::Create("pkg/rcv_peek.py", PEEK.to_owned()),
+                Action::Create("pkg/rcv_moved.py", MOVED.to_owned()),
+                Action::Create("pkg/rcv_bumped.py", BUMPED.to_owned()),
+            ],
+        )
+        .absent(ALL),
+        Step::new(
+            "the class defines `__getattribute__`: reading its namespace may run code",
+            vec![save(
+                "pkg/rcv_model.py",
+                &MODEL.replace(
+                    "        self.required = False\n",
+                    "        self.required = False\n\n    def __getattribute__(self, name: str) -> object:\n        return object.__getattribute__(self, name)\n",
+                ),
+            )],
+        )
+        .present(&[("pkg/rcv_peek.py", "EFF201")])
+        .absent(&[("pkg/rcv_moved.py", "EFF201"), ("pkg/rcv_bumped.py", "EFF201")]),
+        Step::new(
+            "the named tuple becomes a plain class",
+            vec![save(
+                "pkg/rcv_model.py",
+                &MODEL.replace("class Spot(NamedTuple):", "class Spot:"),
+            )],
+        )
+        .present(&[("pkg/rcv_moved.py", "EFF201")])
+        .absent(&[("pkg/rcv_peek.py", "EFF201"), ("pkg/rcv_bumped.py", "EFF201")]),
+        Step::new(
+            "the context variable loses its type argument",
+            vec![save(
+                "pkg/rcv_model.py",
+                &MODEL.replace("MEMO: ContextVar[Memo] =", "MEMO ="),
+            )],
+        )
+        .present(&[("pkg/rcv_bumped.py", "EFF201")])
+        .absent(&[("pkg/rcv_peek.py", "EFF201"), ("pkg/rcv_moved.py", "EFF201")]),
+        Step::new(
+            "the declarations are as before",
+            vec![save("pkg/rcv_model.py", MODEL)],
+        )
+        .absent(ALL),
+        Step::new(
+            "the files and the boundary are removed",
+            vec![
+                Action::Delete("pkg/rcv_peek.py"),
+                Action::Delete("pkg/rcv_moved.py"),
+                Action::Delete("pkg/rcv_bumped.py"),
+                Action::Delete("pkg/rcv_model.py"),
+                Action::Configure(CONFIG.to_owned()),
+            ],
+        ),
+    ]
+}
+
 /// The initial index.
 fn steps_initial_index() -> Vec<Step> {
     vec![Step::new("initial index", Vec::new()).present(&[
@@ -6275,11 +6415,13 @@ sessions!(editing, Session::start, {
     eff115: steps_eff115,
     eff116: steps_eff116,
     attribute_types: steps_attribute_types,
+    builtin_receivers: steps_builtin_receivers,
     receiver_typing: steps_receiver_typing,
     effect_index: steps_effect_index,
     exact_effects: steps_exact_effects,
     returned_rows: steps_returned_rows,
     returned_types: steps_returned_types,
+    held_functions: steps_held_functions,
     store_types: steps_store_types,
     unused_suppressions: steps_unused_suppressions,
     helper_witnesses: steps_helper_witnesses,
@@ -6833,12 +6975,12 @@ fn lsp_diagnostics_equal_a_full_check_below_a_git_working_tree() {
 // a table of functions (`ModuleDecls::tables`, what other modules change in place in
 // `ModuleDecls::stores_elsewhere`), a class attribute bound to a `staticmethod`
 // (`ClassDecl::named_attrs`, a subclass binding the name to a method), a function returning a
-// module it imports (`FunctionDecl::returned_import`), and a `TypeVar`'s bound
-// (`ModuleDecls::type_vars`).
+// module it imports (`FunctionDecl::returned_import`), and the type a `TypeVar`'s bound or a
+// type alias names (`ModuleDecls::type_names`).
 const BOUND_CONFIG: &str = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"uses\"\nscopes = [\"pkg.use_*.*\"]\nwrite-universe = [\"Field.required\"]\nallow-writes = []\n";
 const BOUND_MODEL: &str = "class Field:\n    def __init__(self):\n        self.required = False\n";
 const BOUND_HELPERS: &str = "from pkg.model import Field\n\n\ndef require(field: Field):\n    field.required = True\n\n\ndef skip(field: Field):\n    pass\n";
-const BOUND_DEFS: &str = "from typing import Protocol, TypeVar\n\nfrom pkg.helpers import require, skip\nfrom pkg.model import Field\n\nTABLE = {\"run\": require, \"skip\": skip}\n\n\nclass Holder:\n    RUN = staticmethod(require)\n\n\ndef ops():\n    from pkg import helpers\n\n    return helpers\n\n\nclass View(Protocol):\n    @property\n    def fields(self) -> list[Field]: ...\n\n\nclass Other:\n    pass\n\n\nV = TypeVar(\"V\", bound=View)\n";
+const BOUND_DEFS: &str = "from typing import Protocol, TypeAlias, TypeVar\n\nfrom pkg.helpers import require, skip\nfrom pkg.model import Field\n\nTABLE = {\"run\": require, \"skip\": skip}\n\n\nclass Holder:\n    RUN = staticmethod(require)\n\n\ndef ops():\n    from pkg import helpers\n\n    return helpers\n\n\nclass View(Protocol):\n    @property\n    def fields(self) -> list[Field]: ...\n\n\nclass Other:\n    pass\n\n\nV = TypeVar(\"V\", bound=View)\n\n\nclass Writer:\n    def touch(self, field: Field):\n        field.required = True\n\n\nclass Reader:\n    def touch(self, field: Field):\n        pass\n\n\nTouching: TypeAlias = Writer | Reader\n";
 const BOUND_TABLE_USE: &str =
     "from pkg.defs import TABLE\n\n\ndef use(field):\n    TABLE[\"run\"](field)\n";
 const BOUND_ALIAS_USE: &str =
@@ -6849,6 +6991,8 @@ const BOUND_DEFS_PATCHING: &str =
 const BOUND_MODULE_USE: &str =
     "from pkg.defs import ops\n\n\ndef use(field):\n    ops().require(field)\n";
 const BOUND_TYPE_VAR_USE: &str = "from pkg.defs import V\n\n\ndef use(view: V):\n    for field in view.fields:\n        field.required = True\n";
+const BOUND_TYPE_ALIAS_USE: &str =
+    "from pkg.defs import Touching\n\n\ndef use(value: Touching, field):\n    value.touch(field)\n";
 // The items of a list attribute another module appends to (`StoredElsewhere::changed`).
 const BOUND_LISTED: &str = "from pkg.model import Field\n\n\nclass Model:\n    def __init__(self, fields: list[Field]):\n        self.fields = self.validate(fields) if fields else []\n\n    def validate(self, fields: list[Field]) -> list[Field]:\n        return fields\n";
 const BOUND_LIST_USE: &str = "from pkg.listed import Model\n\n\ndef use(model: Model):\n    for field in model.fields:\n        field.required = True\n";
@@ -6866,6 +7010,7 @@ fn lsp_diagnostics_equal_a_full_check_through_bound_values_across_modules() {
         ("pkg/use_alias.py", BOUND_ALIAS_USE.to_owned()),
         ("pkg/use_module.py", BOUND_MODULE_USE.to_owned()),
         ("pkg/use_type_var.py", BOUND_TYPE_VAR_USE.to_owned()),
+        ("pkg/use_type_alias.py", BOUND_TYPE_ALIAS_USE.to_owned()),
     ];
     let s = Session::start_with("lsp_oracle_bound_values", BOUND_CONFIG, files, false);
     let all: &[(&str, &str)] = &[
@@ -6873,6 +7018,7 @@ fn lsp_diagnostics_equal_a_full_check_through_bound_values_across_modules() {
         ("pkg/use_alias.py", "EFF201"),
         ("pkg/use_module.py", "EFF201"),
         ("pkg/use_type_var.py", "EFF201"),
+        ("pkg/use_type_alias.py", "EFF201"),
     ];
     let steps = [
         Step::new("initial index", Vec::new()).present(all),
@@ -6926,6 +7072,16 @@ fn lsp_diagnostics_equal_a_full_check_through_bound_values_across_modules() {
         .present(&[("pkg/use_module.py", "EFF201")])
         .absent(&[("pkg/use_type_var.py", "EFF201")]),
         Step::new("the bound is the view again", vec![save("pkg/defs.py", BOUND_DEFS)])
+            .present(all),
+        Step::new(
+            "the type alias names only the class that writes nothing",
+            vec![save(
+                "pkg/defs.py",
+                &BOUND_DEFS.replace("Touching: TypeAlias = Writer | Reader", "Touching: TypeAlias = Reader"),
+            )],
+        )
+        .absent(&[("pkg/use_type_alias.py", "EFF201")]),
+        Step::new("the alias names the writer again", vec![save("pkg/defs.py", BOUND_DEFS)])
             .present(all),
         Step::new(
             "the table's module changes it through its own module object",

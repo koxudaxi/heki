@@ -609,6 +609,18 @@ def sentinel_subclasses(n: int) -> str:
     return "\n".join(lines)
 
 
+def namespace_reads_on_subclasses(n: int) -> str:
+    """Many subclasses of a class, and as many functions reading an entry of the namespace of an
+    instance of it (`obj.__dict__`), which is a dict when reading it runs no code of any of
+    them: that is decided once per class."""
+    lines = []
+    for i in range(n):
+        lines += [f"class C{i}(Base):", "    pass", ""]
+    for i in range(n):
+        lines += [f"def read{i}(obj: Base):", "    return obj.__dict__.get('cache')", ""]
+    return "\n".join(lines)
+
+
 def sentinels_per_class(n: int) -> str:
     """Many `object()` sentinels, each the default of a field of its own dataclass, tested
     against it and deep-copied in functions of its own."""
@@ -1016,6 +1028,12 @@ FAMILIES = [
         size=2000,
     ),
     Family("sentinel_subclasses", project=sentinel_subclasses, placements=("project",), size=2000),
+    Family(
+        "namespace_reads_on_subclasses",
+        project=namespace_reads_on_subclasses,
+        placements=("project",),
+        size=1200,
+    ),
     Family("sentinels_per_class", project=sentinels_per_class, placements=("project",), size=2000),
     Family(
         "sentinel_attribute_chain", project=sentinel_attribute_chain, placements=("project",), size=2000

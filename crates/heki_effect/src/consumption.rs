@@ -825,8 +825,12 @@ fn source_wraps(tcx: &TypeCtx<'_>, callee: &Callee, args: &[VarId]) -> Option<Wr
 
 fn is_iterator_annotation(tcx: &TypeCtx<'_>, annotation: &str) -> bool {
     tcx.module
-        .resolve_annotation(annotation)
-        .is_some_and(|t| ITERATOR_TYPES.contains(&t.as_str()))
+        .resolve_annotation_ty(annotation)
+        .and_then(|t| tcx.project.declared_ty(&t))
+        .is_some_and(|t| {
+            t.obj()
+                .is_some_and(|o| ITERATOR_TYPES.contains(&o.class.as_str()))
+        })
 }
 
 /// `var` holds a `str` or `bytes`.

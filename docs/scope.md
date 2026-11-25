@@ -269,7 +269,10 @@ Missed findings close as heki learns more:
   what it returns changes the attribute's object.
 - `vars(obj)` (the builtin, not a name shadowing it) is `obj.__dict__`: an entry stored, deleted,
   set by a container method, or updated in place (`vars(obj) |= other`, also on
-  `obj.__dict__`) through either is a write of the attribute it names.
+  `obj.__dict__`) through either is a write of the attribute it names. Where reading it runs no
+  code of the instance's classes, the namespace is a builtin `dict`, so its methods resolve
+  (`obj.__dict__.get(KEY)` is no call heki cannot resolve); a class object's namespace is a
+  read-only proxy and has no class.
 - A write-owners contract sees a container change through what a method or a property returns
   when it returns the attribute itself on every `return` (`node.members().append(x)` with
   `return self.items`) and every class the object may be runs it. A `cached_property` hands out
@@ -294,8 +297,10 @@ Missed findings close as heki learns more:
 - A write in an unannotated helper is still found where a caller passes it an object of a known
   class. A read is not.
 - Not typed: values declared `Any` or `types.ModuleType`, generics substituted through
-  unbounded `TypeVar`s (a bounded or constrained one gives its bound or constraints), and calls
-  of `type[C]` attributes.
+  unbounded `TypeVar`s (a bounded or constrained one gives its bound or constraints), names a
+  module binds to a type expression more than once or with type parameters (a type alias bound
+  once names its value), calls of a subscripted class other than a builtin or `collections`
+  container (`Box[int]()`), and calls of `type[C]` attributes.
 - A module-level table of functions (`HANDLERS = {"create": create}`) gives the value of a key
   a string constant gives, and one of its values for any other key, only while no code changes
   it in place; a change through a call it is handed to (`register(HANDLERS)`) is not seen.

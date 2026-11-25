@@ -284,7 +284,7 @@ impl Extractor<'_> {
                     self.statement_texts(*recv, walk)
                 }
                 _ => {
-                    let callee = self.cx.resolve_method(self.val(*recv), method);
+                    let callee = self.method_callee(*recv, method);
                     self.wrapped_statement(&callee, args, walk)
                 }
             },

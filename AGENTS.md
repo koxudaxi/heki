@@ -72,6 +72,8 @@ python3.15 tests/symtable_verify/verify_symtable.py --heki target/debug/heki tes
 python3.15 tests/import_verify/verify_imports.py --heki target/debug/heki tests/import_verify/fixtures/
 # Layer 1 knowledge base sentinels
 python3.15 tests/sentinel/verify_soundness_kb.py
+# Layer 2 rows of the standard library that type a value, on the running interpreter
+python3.15 tests/sentinel/verify_stdlib_kb.py
 # Layer 2 rows against releases of their distributions (needs uv and PyPI; its own workflow)
 uv run --no-project --python 3.12 --with "packaging==25.0" python tests/sentinel/verify_ecosystem_kb.py
 # Adversarial Soundness counterexamples (every one Blocked or Disproved)
