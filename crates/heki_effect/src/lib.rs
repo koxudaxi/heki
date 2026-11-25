@@ -570,12 +570,8 @@ pub struct NewFrom {
     /// The callee's parameters the call binds to a value that has no elements
     /// ([`ConstArg::has_no_elements`]), so the returns giving an element of one of them return
     /// nothing there ([`ReturnsNew::kind_at`]).
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default)]
     pub empty_params: u64,
-}
-
-fn is_zero(n: &u64) -> bool {
-    *n == 0
 }
 
 impl NewCond {
@@ -667,7 +663,7 @@ pub enum ReturnsNew {
         /// Parameters some returns give an element of instead (an item, `get`, `pop`,
         /// `setdefault`, an iteration step): the result is new only at a call binding each of
         /// them to a value that has no elements, where those returns return nothing.
-        #[serde(default, skip_serializing_if = "is_zero")]
+        #[serde(default)]
         elements_of: u64,
     },
 }
