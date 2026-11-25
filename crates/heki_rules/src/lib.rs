@@ -1696,6 +1696,7 @@ impl<'a> CheckContext<'a> {
             contracts: Vec::new(),
             allowed_examples: Vec::new(),
             group: reports_groups(meta.code),
+            key_target: None,
         });
         out.last_mut()
     }

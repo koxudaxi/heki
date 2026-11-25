@@ -728,7 +728,7 @@ fn update_baseline_only_shrinks_an_existing_baseline() {
         recorded
     );
     // A version this heki does not know is not overwritten either.
-    p.write("b.toml", &recorded.replace("version = 2", "version = 9"));
+    p.write("b.toml", &recorded.replace("version = 3", "version = 9"));
     let (code, _, stderr) = p.heki(&update);
     assert_eq!(code, 2);
     assert!(stderr.contains("has version 9"), "{stderr}");
@@ -737,6 +737,146 @@ fn update_baseline_only_shrinks_an_existing_baseline() {
             .unwrap()
             .contains("version = 9")
     );
+}
+
+/// A blocking call a helper makes when it is asked to: a heuristic `EFF101` report at the call
+/// in `handler`, exact once the `if` goes.
+const GUARDED_TOOL: &str = "import subprocess\n\n\ndef run_tool(flag: bool) -> None:\n    if flag:\n        subprocess.run([\"true\"])\n\n\nasync def handler() -> None:\n    run_tool(True)\n";
+
+/// [`GUARDED_TOOL`] without the `if`.
+fn unguarded(src: &str) -> String {
+    src.replace("    if flag:\n        subprocess.run", "    subprocess.run")
+}
+
+#[test]
+fn a_baseline_entry_of_a_heuristic_report_does_not_allow_an_exact_one() {
+    let p = Project::new("baseline_tiers");
+    p.write("a.py", GUARDED_TOOL);
+    let update = ["--baseline", "b.toml", "--update-baseline"];
+    let (code, _, stderr) = p.heki(&update);
+    assert_eq!(code, 0, "{stderr}");
+    let recorded = std::fs::read_to_string(p.dir.join("b.toml")).unwrap();
+    assert!(recorded.contains("\nversion = 3\n"), "{recorded}");
+    assert!(
+        recorded.contains("target = \"subprocess.run\"\ncount = 1\nheuristic = 1\n"),
+        "{recorded}"
+    );
+    // The entry allowed the weaker claim: the exact report is a regression, with or without
+    // `--heuristic`.
+    p.write("a.py", &unguarded(GUARDED_TOOL));
+    let note = "note: baseline entry a.py::handler EFF101 `subprocess.run` allows 1 site(s) (0 exact), found 1 (1 exact)";
+    for (code, stdout, stderr) in [
+        p.heki(&["--baseline", "b.toml"]),
+        p.plain(&["--baseline", "b.toml"]),
+    ] {
+        assert_eq!(code, 1, "{stdout}{stderr}");
+        assert!(stdout.contains("always runs the waiting call"), "{stdout}");
+        assert!(stderr.contains(note), "{stderr}");
+        assert!(stderr.contains("Found 1 Ratchet regression(s)"), "{stderr}");
+    }
+    // Nor does `--update-baseline` take it in.
+    let (code, _, stderr) = p.heki(&update);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("not updated: 1 entry(ies) grew"),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(p.dir.join("b.toml")).unwrap(),
+        recorded
+    );
+}
+
+#[test]
+fn an_exact_report_that_turns_heuristic_passes_and_its_entry_can_shrink() {
+    // The call `handler` makes always runs `subprocess.run`, two calls down, and `tool` can run
+    // `subprocess.check_call` before it: the exact report claims the first, and the heuristic
+    // report, once `step()` is guarded too, names the second, which is shorter. One key holds
+    // both.
+    let src = "import subprocess\n\n\ndef tool(flag: bool) -> None:\n    if flag:\n        subprocess.check_call([\"true\"])\n    step()\n\n\ndef step() -> None:\n    subprocess.run([\"true\"])\n\n\nasync def handler(flag: bool) -> None:\n    tool(flag)\n";
+    let p = Project::new("baseline_exact_to_heuristic");
+    p.write("a.py", src);
+    let (code, stdout, _) = p.heki(&["--output-format", "concise"]);
+    assert_eq!(code, 1);
+    assert!(
+        stdout.contains("`a.tool` always runs the waiting call `subprocess.run`"),
+        "{stdout}"
+    );
+    let update = ["--baseline", "b.toml", "--update-baseline"];
+    assert_eq!(p.heki(&update).0, 0);
+    let recorded = std::fs::read_to_string(p.dir.join("b.toml")).unwrap();
+    assert!(
+        recorded.contains("target = \"subprocess.check_call\"\ncount = 1\n")
+            && !recorded.contains("heuristic ="),
+        "{recorded}"
+    );
+    p.write(
+        "a.py",
+        &src.replace("    step()\n", "    if flag:\n        step()\n"),
+    );
+    let (code, stdout, stderr) = p.heki(&["--baseline", "b.toml"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(
+        stderr.contains("note: baseline entry a.py::handler EFF101 `subprocess.check_call` can shrink 1 (1 exact) -> 1 (0 exact) (`--update-baseline`)"),
+        "{stderr}"
+    );
+    // The entry shrinks to the heuristic report: the exact one is a regression again.
+    assert_eq!(p.heki(&update).0, 0);
+    let shrunk = std::fs::read_to_string(p.dir.join("b.toml")).unwrap();
+    assert!(
+        shrunk.contains("target = \"subprocess.check_call\"\ncount = 1\nheuristic = 1\n"),
+        "{shrunk}"
+    );
+    let (code, _, stderr) = p.heki(&["--baseline", "b.toml"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("can shrink"), "{stderr}");
+    p.write("a.py", src);
+    assert_eq!(p.heki(&["--baseline", "b.toml"]).0, 1);
+}
+
+#[test]
+fn version_2_baselines_are_compared_as_before_until_they_are_rewritten() {
+    let p = Project::new("baseline_v2");
+    p.write("a.py", GUARDED_TOOL);
+    let check = ["--baseline", "b.toml"];
+    let update = ["--baseline", "b.toml", "--update-baseline"];
+    assert_eq!(p.heki(&update).0, 0);
+    // As heki wrote it before entries recorded their heuristic sites.
+    let v2 = std::fs::read_to_string(p.dir.join("b.toml"))
+        .unwrap()
+        .replace("version = 3", "version = 2")
+        .replace("heuristic = 1\n", "");
+    p.write("b.toml", &v2);
+    p.write("a.py", &unguarded(GUARDED_TOOL));
+    let note = "note: baseline b.toml does not record which sites were heuristic (written before version 3), so a recorded heuristic report that is exact now is no regression; `--update-baseline` rewrites it to record them";
+    let (code, stdout, stderr) = p.heki(&check);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(stderr.contains(note), "{stderr}");
+    // A site more is still a regression.
+    p.write(
+        "a.py",
+        &format!("{}    run_tool(False)\n", unguarded(GUARDED_TOOL)),
+    );
+    let (code, _, stderr) = p.heki(&check);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("allows 1 site(s), found 2") && stderr.contains(note),
+        "{stderr}"
+    );
+    // `--update-baseline` compares like a check, says nothing of the version, and rewrites the
+    // file once nothing grew.
+    let (code, _, stderr) = p.heki(&update);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(!stderr.contains(note), "{stderr}");
+    assert_eq!(std::fs::read_to_string(p.dir.join("b.toml")).unwrap(), v2);
+    p.write("a.py", &unguarded(GUARDED_TOOL));
+    assert_eq!(p.heki(&update).0, 0);
+    let rewritten = std::fs::read_to_string(p.dir.join("b.toml")).unwrap();
+    assert!(rewritten.contains("\nversion = 3\n"), "{rewritten}");
+    let (code, _, stderr) = p.heki(&check);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("note: baseline"), "{stderr}");
 }
 
 #[test]

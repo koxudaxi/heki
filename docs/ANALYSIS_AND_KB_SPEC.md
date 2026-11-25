@@ -2983,12 +2983,18 @@ Lookups are exact, without inheritance or aliases (an entry names the class that
 an annotation, or a constructor call produces), and the `heki_kb` unit tests pin every entry.
 
 ### 4.3 Line-number-independent Ratchet baseline (`heki_diagnostics`)
-- **Key**: `BaselineKey = (relative_posix_path, qualname, rule_id, normalized_target)` → `count`.
-  Without line numbers, unrelated edits and reformatting do not break the baseline.
+- **Key**: `BaselineKey = (relative_posix_path, qualname, rule_id, normalized_target)` → `count`
+  sites, `heuristic` of them heuristic (`Tally`). Without line numbers, unrelated edits and
+  reformatting do not break the baseline. Both tiers of a rule key a report alike.
 - **Rules (shrink only)**:
-  - a key whose current count **exceeds** the baseline **fails** (a new violation);
-  - a key whose current count is **below** the baseline (or has disappeared) prints a note asking
-    to shrink the file with `heki check --update-baseline`.
+  - a key whose current count **exceeds** the baseline, or whose exact sites exceed `count` less
+    `heuristic` (a recorded heuristic report that is exact now), **fails** (a new violation);
+  - a key whose current count is **below** the baseline (or has disappeared), or that has fewer
+    exact sites (an exact report that turned heuristic), prints a note asking to shrink the file
+    with `heki check --update-baseline`.
+- **Versions**: 3 records `heuristic`; 2 does not, and any of its sites may be exact; 1 (or no
+  `version`) counts diagnostics instead of sites. An older file keeps its meaning until
+  `--update-baseline` rewrites it as version 3.
 
 ---
 

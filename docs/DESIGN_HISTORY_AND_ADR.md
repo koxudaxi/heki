@@ -469,6 +469,20 @@ first, then a convention the code follows, then a contract.
      old codes are no aliases, as `MUT109` was not in 0.3.0: in a selector, a suppression, or a
      baseline entry they are read like any unknown code. Decision 10 is unchanged: naming
      `EFF101` or `EFF103` shows its heuristic reports.
+     *Amended by baseline version 3*: a baseline entry no longer holds across every change of
+     tier. An entry allows the claims it recorded and no stronger one: it records how many of its
+     sites were heuristic (`heuristic`), and a run regresses when it finds more sites than the
+     entry's `count`, or more exact sites than `count` less `heuristic`. An exact report that
+     turns heuristic passes, and `--update-baseline` shrinks the entry to it; a recorded
+     heuristic report that is exact now fails once, also after an upgrade in which heki proves
+     it, until it is fixed or the baseline is recorded anew. Both tiers of a rule key a report
+     alike, so that a change of tier stays within its entry: `EFF101` and `EFF103` key by the
+     last call of the shortest call chain, also where the exact message names the call every
+     implementation runs. A baseline of version 2 is compared as before, with a note, until
+     `--update-baseline` rewrites it; an older heki refuses version 3 instead of ignoring the
+     count. *Rejected*: an exception for the reports an upgrade proves (it would reopen the hole
+     at every upgrade); keying the exact report by the call it claims (adding a branch on the way
+     would turn its entry into a new one).
   10. **Selecting the heuristic rules and reports** (D6): `[tool.heki.lint] heuristic = true` and
       `--heuristic` / `--no-heuristic` (on `check` and `server`), modelled on Ruff's `preview`:
       prefixes and `ALL` then also select the heuristic `Default` rules, and an exact code or name

@@ -166,6 +166,12 @@ pub struct Diagnostic {
     /// them covers it, wherever the report sits. Written by no output format.
     #[serde(skip)]
     pub group: bool,
+    /// The target a Ratchet baseline keys the report by, when it is not `target`: an exact report
+    /// naming the call every implementation runs (`EFF101`, `EFF103`) keys by the call of the
+    /// shortest chain, as its heuristic tier names it, so that a change of tier stays within one
+    /// entry. Written by no output format.
+    #[serde(skip)]
+    pub key_target: Option<String>,
 }
 
 /// Why a heuristic report of an exact rule is not exact.
@@ -745,7 +751,7 @@ impl BaselineKey {
     /// The group keys of `counts` of this group key's rule that share a module with it.
     fn meeting<'c>(
         &self,
-        counts: &'c BTreeMap<BaselineKey, u32>,
+        counts: &'c BTreeMap<BaselineKey, Tally>,
     ) -> impl Iterator<Item = &'c BaselineKey> {
         let members = self.members();
         (counts.keys())
@@ -755,11 +761,11 @@ impl BaselineKey {
 
     /// The reports of `counts` that this entry matched: those of its key, or for a group entry,
     /// the groups that share a module with it.
-    pub fn found_in(&self, counts: &BTreeMap<BaselineKey, u32>) -> u32 {
+    pub fn found_in(&self, counts: &BTreeMap<BaselineKey, Tally>) -> Tally {
         if self.is_group() {
-            u32::try_from(self.meeting(counts).count()).unwrap_or(u32::MAX)
+            self.meeting(counts).map(|k| counts[k]).sum()
         } else {
-            counts.get(self).copied().unwrap_or(0)
+            counts.get(self).copied().unwrap_or_default()
         }
     }
 }
@@ -776,23 +782,14 @@ impl std::fmt::Display for BaselineKey {
 /// What the counts of a Ratchet baseline count.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CountUnit {
-    /// Violation sites ([`Diagnostic::sites`]): the files this version writes (`version = 2`).
+    /// Violation sites ([`Diagnostic::sites`]).
     #[default]
     Sites,
-    /// Diagnostics: files written before baselines counted sites (no `version`, or 1). They
-    /// keep their meaning until `--update-baseline` rewrites them.
+    /// Diagnostics: files written before baselines counted sites.
     Diagnostics,
 }
 
 impl CountUnit {
-    /// The on-disk `version` of a baseline with this unit.
-    fn version(self) -> u32 {
-        match self {
-            Self::Diagnostics => 1,
-            Self::Sites => BASELINE_VERSION,
-        }
-    }
-
     /// What a count counts, for messages (`2 site(s)`).
     pub fn noun(self) -> &'static str {
         match self {
@@ -802,13 +799,108 @@ impl CountUnit {
     }
 }
 
-/// The baseline format this version writes: counts are violation sites.
-pub const BASELINE_VERSION: u32 = 2;
+/// The format of a Ratchet baseline, by its `version`. A file keeps the meaning of its format
+/// until `--update-baseline` rewrites it in the one this heki writes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum BaselineVersion {
+    /// No `version`, or 1: counts diagnostics.
+    V1,
+    /// Counts violation sites, without telling the heuristic ones apart: any of them may be
+    /// exact.
+    V2,
+    /// Counts violation sites, and how many of them were heuristic ([`BASELINE_VERSION`]).
+    #[default]
+    V3,
+}
+
+impl BaselineVersion {
+    /// The format of a file whose `version` is `number`, if this heki reads it.
+    fn of(number: Option<u32>) -> Option<Self> {
+        match number {
+            None | Some(1) => Some(Self::V1),
+            Some(2) => Some(Self::V2),
+            Some(BASELINE_VERSION) => Some(Self::V3),
+            Some(_) => None,
+        }
+    }
+
+    /// The on-disk `version`.
+    pub fn number(self) -> u32 {
+        match self {
+            Self::V1 => 1,
+            Self::V2 => 2,
+            Self::V3 => BASELINE_VERSION,
+        }
+    }
+
+    /// What the counts of this format count.
+    pub fn unit(self) -> CountUnit {
+        match self {
+            Self::V1 => CountUnit::Diagnostics,
+            Self::V2 | Self::V3 => CountUnit::Sites,
+        }
+    }
+
+    /// Whether an entry records how many of its sites were heuristic.
+    pub fn records_heuristic(self) -> bool {
+        self == Self::V3
+    }
+}
+
+/// The baseline format this version writes: counts are violation sites, with the heuristic ones
+/// among them.
+pub const BASELINE_VERSION: u32 = 3;
+
+/// The sites (or diagnostics) of a baseline key: an entry's allowance, or what a run found.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Tally {
+    pub count: u32,
+    /// How many of `count` were heuristic reports.
+    pub heuristic: u32,
+}
+
+impl Tally {
+    /// The sites of `count` that were exact. The heuristic tier states the weaker claim of the
+    /// same premises, so an allowance for a heuristic site never covers an exact one.
+    pub fn exact(self) -> u32 {
+        self.count.saturating_sub(self.heuristic)
+    }
+
+    /// Whether `found` needs more than this allowance: more sites, or more exact ones.
+    pub fn exceeded_by(self, found: Self) -> bool {
+        found.count > self.count || found.exact() > self.exact()
+    }
+
+    /// Whether this allowance holds more than `found` needs: `found` does not exceed it and has
+    /// fewer sites, or, when the baseline records heuristic sites, fewer exact ones (an exact
+    /// report that became heuristic).
+    fn shrinks_to(self, found: Self, version: BaselineVersion) -> bool {
+        let fewer_exact = version.records_heuristic() && found.exact() < self.exact();
+        !self.exceeded_by(found) && (found.count < self.count || fewer_exact)
+    }
+}
+
+impl std::ops::Add for Tally {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Self {
+            count: self.count + other.count,
+            heuristic: self.heuristic + other.heuristic,
+        }
+    }
+}
+
+impl std::iter::Sum for Tally {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::default(), |a, b| a + b)
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RatchetBaseline {
-    pub counts: BTreeMap<BaselineKey, u32>,
-    pub unit: CountUnit,
+    pub counts: BTreeMap<BaselineKey, Tally>,
+    pub version: BaselineVersion,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -817,12 +909,13 @@ pub struct RatchetComparison {
     pub stale_entries: Vec<StaleEntry>,
 }
 
-/// A report key with more reports than its entry allows, or a group no entry holds.
+/// A report key with more reports than its entry allows (or more exact ones), or a group no
+/// entry holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Regression {
     pub key: BaselineKey,
-    pub allowed: u32,
-    pub found: u32,
+    pub allowed: Tally,
+    pub found: Tally,
     /// The recorded groups a group no entry holds shares a module with: the groups it joins.
     pub joins: Vec<BaselineKey>,
 }
@@ -831,9 +924,9 @@ pub struct Regression {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaleEntry {
     pub key: BaselineKey,
-    pub allowed: u32,
+    pub allowed: Tally,
     /// [`BaselineKey::found_in`] the current reports.
-    pub found: u32,
+    pub found: Tally,
     /// The groups made of a group entry's modules only, which the entry can shrink to.
     pub within: Vec<BaselineKey>,
 }
@@ -856,7 +949,7 @@ pub enum BaselineError {
         cause: toml::de::Error,
     },
     #[error(
-        "baseline {path} has version {version}; this heki reads versions 1 and {BASELINE_VERSION}"
+        "baseline {path} has version {version}; this heki reads versions 1 to {BASELINE_VERSION}"
     )]
     Version { path: PathBuf, version: u32 },
     #[error("baseline {path} lists {key} more than once; keep one entry")]
@@ -889,7 +982,7 @@ impl heki_env::Explain for BaselineError {
             Self::Version { path, version } => (
                 path,
                 format!(
-                    "the baseline has version {version}; this heki reads versions 1 and {BASELINE_VERSION}"
+                    "the baseline has version {version}; this heki reads versions 1 to {BASELINE_VERSION}"
                 ),
                 rewrite,
             ),
@@ -910,7 +1003,7 @@ impl heki_env::Explain for BaselineError {
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BaselineFile {
-    /// Absent (or 1) in files written before baselines counted sites.
+    /// Absent (or 1) in files written before baselines counted sites ([`BaselineVersion`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     version: Option<u32>,
     #[serde(default)]
@@ -929,14 +1022,24 @@ struct BaselineEntry {
     rule_code: String,
     target: String,
     count: u32,
+    /// How many of `count` were heuristic: left out when none were, and in files written before
+    /// version 3.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    heuristic: u32,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // `skip_serializing_if` passes a reference.
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 impl RatchetBaseline {
-    /// A baseline of site counts ([`baseline_counts`] with [`CountUnit::Sites`]).
-    pub fn from_counts(counts: BTreeMap<BaselineKey, u32>) -> Self {
+    /// A baseline of site counts ([`baseline_counts`] with [`CountUnit::Sites`]), in the format
+    /// this heki writes.
+    pub fn from_counts(counts: BTreeMap<BaselineKey, Tally>) -> Self {
         Self {
-            counts: counts.into_iter().filter(|(_, c)| *c > 0).collect(),
-            unit: CountUnit::Sites,
+            counts: counts.into_iter().filter(|(_, c)| c.count > 0).collect(),
+            version: BaselineVersion::V3,
         }
     }
 
@@ -945,24 +1048,27 @@ impl RatchetBaseline {
     /// sits at. An entry of a group is stale when it holds groups other than the one of exactly
     /// its modules (it can shrink to them), or when no group shares a module with it; a group
     /// that shares modules with it and that it does not hold is a regression that names it.
-    pub fn compare(&self, current: &BTreeMap<BaselineKey, u32>) -> RatchetComparison {
+    /// Another key regresses when it has more sites than its entry allows, or more exact ones.
+    pub fn compare(&self, current: &BTreeMap<BaselineKey, Tally>) -> RatchetComparison {
         let mut out = RatchetComparison::default();
         for (key, &cur) in current {
+            // A group is held by its modules: its rule has one tier (`IMP101` is heuristic), so
+            // its heuristic sites are recorded and never compared.
             if key.is_group() {
                 let members = key.members();
                 let joins: Vec<&BaselineKey> = key.meeting(&self.counts).collect();
                 if !joins.iter().any(|e| members.is_subset(&e.members())) {
                     out.regressions.push(Regression {
                         key: key.clone(),
-                        allowed: 0,
+                        allowed: Tally::default(),
                         found: cur,
                         joins: joins.into_iter().cloned().collect(),
                     });
                 }
                 continue;
             }
-            let allowed = self.counts.get(key).copied().unwrap_or(0);
-            if cur > allowed {
+            let allowed = self.counts.get(key).copied().unwrap_or_default();
+            if allowed.exceeded_by(cur) {
                 out.regressions.push(Regression {
                     key: key.clone(),
                     allowed,
@@ -980,9 +1086,9 @@ impl RatchetBaseline {
                     .cloned()
                     .collect();
                 let exact = matches!(&within[..], [g] if g.members() == members);
-                (!exact && (found == 0 || !within.is_empty()), within)
+                (!exact && (found.count == 0 || !within.is_empty()), within)
             } else {
-                (found < allowed, Vec::new())
+                (allowed.shrinks_to(found, self.version), Vec::new())
             };
             if stale {
                 out.stale_entries.push(StaleEntry {
@@ -1004,7 +1110,7 @@ impl RatchetBaseline {
         diags: &mut Vec<Diagnostic>,
         key_path: &dyn Fn(&Path) -> String,
     ) -> RatchetComparison {
-        let cmp = self.compare(&baseline_counts(diags, key_path, self.unit));
+        let cmp = self.compare(&baseline_counts(diags, key_path, self.version.unit()));
         let regressed: BTreeSet<&BaselineKey> = cmp.regressions.iter().map(|r| &r.key).collect();
         diags.retain(|d| regressed.contains(&baseline_key(d, key_path(&d.path))));
         cmp
@@ -1021,16 +1127,10 @@ impl RatchetBaseline {
             path: path.to_path_buf(),
             cause,
         })?;
-        let unit = match file.version {
-            None | Some(1) => CountUnit::Diagnostics,
-            Some(BASELINE_VERSION) => CountUnit::Sites,
-            Some(version) => {
-                return Err(BaselineError::Version {
-                    path: path.to_path_buf(),
-                    version,
-                });
-            }
-        };
+        let version = BaselineVersion::of(file.version).ok_or_else(|| BaselineError::Version {
+            path: path.to_path_buf(),
+            version: file.version.unwrap_or_default(),
+        })?;
         // heki writes one entry per key; two (a hand merge of two baselines) would add their
         // allowances up, while each recorded the same findings.
         let mut counts = BTreeMap::new();
@@ -1053,23 +1153,28 @@ impl RatchetBaseline {
                     key,
                 });
             }
-            counts.insert(key, e.count);
+            let tally = Tally {
+                count: e.count,
+                heuristic: e.heuristic,
+            };
+            counts.insert(key, tally);
         }
-        Ok(Self { counts, unit })
+        Ok(Self { counts, version })
     }
 
     pub fn to_toml_string(&self) -> String {
         let file = BaselineFile {
-            version: Some(self.unit.version()),
+            version: Some(self.version.number()),
             entries: self
                 .counts
                 .iter()
-                .map(|(k, &count)| BaselineEntry {
+                .map(|(k, &Tally { count, heuristic })| BaselineEntry {
                     path: k.path.clone(),
                     qualname: k.qualname.clone(),
                     rule_code: k.rule_code.clone(),
                     target: k.target.clone(),
                     count,
+                    heuristic,
                 })
                 .collect(),
         };
@@ -1108,23 +1213,29 @@ pub fn baseline_key(d: &Diagnostic, path: String) -> BaselineKey {
         path,
         qualname,
         rule_code: d.rule_code.clone(),
-        target: d.target.clone(),
+        target: d.key_target.as_ref().unwrap_or(&d.target).clone(),
     }
 }
 
-/// Count violation sites (or diagnostics) per baseline key.
+/// Count violation sites (or diagnostics) per baseline key, and the heuristic ones among them.
 pub fn baseline_counts(
     diags: &[Diagnostic],
     key_path: &dyn Fn(&Path) -> String,
     unit: CountUnit,
-) -> BTreeMap<BaselineKey, u32> {
-    let mut out = BTreeMap::new();
+) -> BTreeMap<BaselineKey, Tally> {
+    let mut out: BTreeMap<BaselineKey, Tally> = BTreeMap::new();
     for d in diags {
-        let n = match unit {
+        let count = match unit {
             CountUnit::Sites => d.sites.max(1),
             CountUnit::Diagnostics => 1,
         };
-        *out.entry(baseline_key(d, key_path(&d.path))).or_insert(0) += n;
+        let heuristic = if d.certainty == Certainty::Heuristic {
+            count
+        } else {
+            0
+        };
+        let tally = out.entry(baseline_key(d, key_path(&d.path))).or_default();
+        *tally = *tally + Tally { count, heuristic };
     }
     out
 }
@@ -1172,7 +1283,13 @@ mod tests {
             contracts: Vec::new(),
             allowed_examples: Vec::new(),
             group: false,
+            key_target: None,
         }
+    }
+
+    /// `count` sites, `heuristic` of them heuristic.
+    fn sites(count: u32, heuristic: u32) -> Tally {
+        Tally { count, heuristic }
     }
 
     #[test]
@@ -1180,17 +1297,17 @@ mod tests {
         let k1 = key("src/a.py", "Parser.run", "DataModel.fields");
         let k2 = key("src/b.py", "Parser.old", "DataType.data_types");
         let baseline = RatchetBaseline {
-            counts: BTreeMap::from([(k1.clone(), 1), (k2.clone(), 2)]),
-            unit: CountUnit::Sites,
+            counts: BTreeMap::from([(k1.clone(), sites(1, 0)), (k2.clone(), sites(2, 0))]),
+            version: BaselineVersion::V3,
         };
-        let current = BTreeMap::from([(k1.clone(), 2), (k2.clone(), 1)]);
+        let current = BTreeMap::from([(k1.clone(), sites(2, 0)), (k2.clone(), sites(1, 0))]);
         let cmp = baseline.compare(&current);
         assert_eq!(
             cmp.regressions,
             vec![Regression {
                 key: k1,
-                allowed: 1,
-                found: 2,
+                allowed: sites(1, 0),
+                found: sites(2, 0),
                 joins: Vec::new()
             }]
         );
@@ -1198,24 +1315,74 @@ mod tests {
             cmp.stale_entries,
             vec![StaleEntry {
                 key: k2,
-                allowed: 2,
-                found: 1,
+                allowed: sites(2, 0),
+                found: sites(1, 0),
                 within: Vec::new()
             }]
         );
     }
 
     #[test]
+    fn an_entry_allows_the_tiers_it_recorded() {
+        let k = key("src/a.py", "Parser.run", "DataModel.fields");
+        let compare = |version, allowed: Tally, found: Tally| {
+            let baseline = RatchetBaseline {
+                counts: BTreeMap::from([(k.clone(), allowed)]),
+                version,
+            };
+            let cmp = baseline.compare(&BTreeMap::from([(k.clone(), found)]));
+            (!cmp.regressions.is_empty(), !cmp.stale_entries.is_empty())
+        };
+        // (regressed, can shrink)
+        let cases = [
+            // A recorded heuristic site does not allow an exact one.
+            (sites(1, 1), sites(1, 0), (true, false)),
+            (sites(2, 1), sites(2, 0), (true, false)),
+            (sites(2, 1), sites(2, 1), (false, false)),
+            // An exact site that became heuristic is covered, and the entry can shrink to it.
+            (sites(1, 0), sites(1, 1), (false, true)),
+            (sites(2, 1), sites(1, 0), (false, true)),
+            (sites(2, 1), sites(3, 3), (true, false)),
+        ];
+        for (allowed, found, expected) in cases {
+            assert_eq!(
+                compare(BaselineVersion::V3, allowed, found),
+                expected,
+                "{allowed:?} {found:?}"
+            );
+        }
+        // An entry written before version 3 lets any of its sites be exact, and it holds no more
+        // than it matched when they are heuristic now.
+        assert_eq!(
+            compare(BaselineVersion::V2, sites(1, 0), sites(1, 0)),
+            (false, false)
+        );
+        assert_eq!(
+            compare(BaselineVersion::V2, sites(1, 0), sites(1, 1)),
+            (false, false)
+        );
+        assert_eq!(
+            compare(BaselineVersion::V2, sites(1, 0), sites(2, 1)),
+            (true, false)
+        );
+        // A hand-edited entry with more heuristic sites than sites allows no exact one.
+        assert_eq!(sites(1, 2).exact(), 0);
+    }
+
+    #[test]
     fn ratchet_toml_round_trip_is_sorted() {
         let no_group: fn(&str) -> bool = |_| false;
         let baseline = RatchetBaseline::from_counts(BTreeMap::from([
-            (key("src/z.py", "Z.run", "M.f"), 1),
-            (key("src/a.py", "A.run", "M.f"), 3),
-            (key("src/zero.py", "Z.none", "M.f"), 0),
+            (key("src/z.py", "Z.run", "M.f"), sites(1, 1)),
+            (key("src/a.py", "A.run", "M.f"), sites(3, 0)),
+            (key("src/zero.py", "Z.none", "M.f"), sites(0, 0)),
         ]));
         let text = baseline.to_toml_string();
         assert!(text.find("src/a.py").unwrap() < text.find("src/z.py").unwrap());
         assert!(!text.contains("src/zero.py"));
+        // The count of heuristic sites is left out when there are none.
+        assert_eq!(text.matches("heuristic = ").count(), 1, "{text}");
+        assert!(text.contains("count = 1\nheuristic = 1\n"), "{text}");
         let back = RatchetBaseline::from_toml_str(&text, Path::new("b.toml"), no_group).unwrap();
         assert_eq!(back, baseline);
         assert!(
@@ -1236,7 +1403,9 @@ mod tests {
         let d = diag(1, "MUT201", "m");
         let mut two_sites = d.clone();
         two_sites.sites = 2;
-        let diags = [d.clone(), d, two_sites];
+        let mut heuristic = d.clone();
+        heuristic.certainty = Certainty::Heuristic;
+        let diags = [d.clone(), d, two_sites, heuristic];
         let counts = |unit| {
             baseline_counts(&diags, &|p| path_text(p), unit)
                 .values()
@@ -1244,8 +1413,8 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         // Sites: a report standing for two sites counts twice; diagnostics: once.
-        assert_eq!(counts(CountUnit::Sites), vec![4]);
-        assert_eq!(counts(CountUnit::Diagnostics), vec![3]);
+        assert_eq!(counts(CountUnit::Sites), vec![sites(5, 1)]);
+        assert_eq!(counts(CountUnit::Diagnostics), vec![sites(4, 1)]);
     }
 
     #[test]
@@ -1255,17 +1424,28 @@ mod tests {
         // Files written before baselines counted sites keep counting diagnostics.
         for old in [entry.to_owned(), format!("version = 1\n{entry}")] {
             let b = RatchetBaseline::from_toml_str(&old, path, |_| false).unwrap();
-            assert_eq!(b.unit, CountUnit::Diagnostics);
-            assert_eq!(b.unit.noun(), "diagnostic(s)");
+            assert_eq!(b.version, BaselineVersion::V1);
+            assert_eq!(b.version.unit().noun(), "diagnostic(s)");
+            assert!(!b.version.records_heuristic());
             assert!(b.to_toml_string().contains("version = 1\n"));
         }
-        let new = RatchetBaseline::from_toml_str(&format!("version = 2\n{entry}"), path, |_| false)
+        for (number, version) in [(2, BaselineVersion::V2), (3, BaselineVersion::V3)] {
+            let b = RatchetBaseline::from_toml_str(
+                &format!("version = {number}\n{entry}"),
+                path,
+                |_| false,
+            )
             .unwrap();
-        assert_eq!(new.unit, CountUnit::Sites);
-        assert_eq!(new.unit.noun(), "site(s)");
-        assert!(new.to_toml_string().contains("version = 2\n"));
+            assert_eq!(b.version, version);
+            assert_eq!(b.version.unit().noun(), "site(s)");
+            assert_eq!(b.version.records_heuristic(), number == 3);
+            assert!(
+                b.to_toml_string()
+                    .contains(&format!("version = {number}\n"))
+            );
+        }
         let twice = format!(
-            "version = 2\n{entry}{}",
+            "version = 3\n{entry}{}",
             entry.replace("count = 1", "count = 4294967295")
         );
         assert_eq!(
@@ -1279,7 +1459,7 @@ mod tests {
             .to_string();
         assert_eq!(
             err,
-            "baseline b.toml has version 7; this heki reads versions 1 and 2"
+            "baseline b.toml has version 7; this heki reads versions 1 to 3"
         );
     }
 

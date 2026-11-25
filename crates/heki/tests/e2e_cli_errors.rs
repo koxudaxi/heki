@@ -455,7 +455,7 @@ fn file_errors_say_what_to_do_with_the_file() {
         &p,
         &["check", "--baseline", "b.toml"],
         &[
-            "error: b.toml: the baseline has version 9; this heki reads versions 1 and 2",
+            "error: b.toml: the baseline has version 9; this heki reads versions 1 to 3",
             rewrite,
             &baselines,
         ],

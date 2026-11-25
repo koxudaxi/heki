@@ -9,9 +9,9 @@ use crate::{AnalysisArgs, CheckArgs, ColorChoice, OutputFormat, SnapshotArgs};
 use anyhow::Result;
 use heki_ast::LineIndex;
 use heki_diagnostics::{
-    BASELINE_VERSION, BaselineKey, CountUnit, Diagnostic, FileFailure, RatchetBaseline, Regression,
-    StaleEntry, Stylesheet, TextEdit, baseline_counts, fix_python_source, github_escape, path_text,
-    render, unified_diff,
+    BASELINE_VERSION, BaselineKey, BaselineVersion, CountUnit, Diagnostic, FileFailure,
+    RatchetBaseline, Regression, StaleEntry, Stylesheet, Tally, TextEdit, baseline_counts,
+    fix_python_source, github_escape, path_text, render, unified_diff,
 };
 use heki_effect::ProjectIndex;
 use heki_env::{Docs, LintConfig, Problem, Severity, UnmatchedEntries};
@@ -743,6 +743,23 @@ fn targets(keys: &[BaselineKey]) -> String {
     }
 }
 
+/// An entry's allowance, with `noun` after its count, and what a run found, as notes write them:
+/// with the exact sites (`1 site(s) (0 exact)`) when they differ and the counts alone do not
+/// tell them.
+fn tallies(allowed: Tally, found: Tally, noun: &str) -> (String, String) {
+    let tiers = allowed.exact() != found.exact() && (allowed.heuristic > 0 || found.heuristic > 0);
+    let shown = |t: Tally, noun: &str| {
+        let count = [t.count.to_string(), noun.to_owned()].join(" ");
+        let count = count.trim_end();
+        if tiers {
+            format!("{count} ({} exact)", t.exact())
+        } else {
+            count.to_owned()
+        }
+    };
+    (shown(allowed, noun), shown(found, ""))
+}
+
 /// The note on a regression: the counts of its key, or what a new group joins.
 fn regression_note(regression: &Regression, unit: CountUnit) -> String {
     let Regression {
@@ -752,10 +769,8 @@ fn regression_note(regression: &Regression, unit: CountUnit) -> String {
         joins,
     } = regression;
     if !key.is_group() {
-        return format!(
-            "note: baseline entry {key} allows {allowed} {}, found {found}",
-            unit.noun()
-        );
+        let (allowed, found) = tallies(*allowed, *found, unit.noun());
+        return format!("note: baseline entry {key} allows {allowed}, found {found}");
     }
     let outside = key.members_outside(joins).join(", ");
     let how = match &joins[..] {
@@ -768,6 +783,24 @@ fn regression_note(regression: &Regression, unit: CountUnit) -> String {
         ),
     };
     format!("note: {key} is a new group: {how}")
+}
+
+/// The note of a run compared with a baseline written before [`BASELINE_VERSION`]: what its
+/// entries allow that the current format does not, until `--update-baseline` rewrites it.
+fn outdated_baseline_note(path: &Path, version: BaselineVersion, fmt: OutputFormat) {
+    let path = path.display();
+    match version {
+        BaselineVersion::V1 => log!(
+            fmt,
+            "note: baseline {path} counts diagnostics, not violation sites (written before version {}); `--update-baseline` rewrites it to count sites",
+            BaselineVersion::V2.number()
+        ),
+        BaselineVersion::V2 => log!(
+            fmt,
+            "note: baseline {path} does not record which sites were heuristic (written before version {BASELINE_VERSION}), so a recorded heuristic report that is exact now is no regression; `--update-baseline` rewrites it to record them"
+        ),
+        BaselineVersion::V3 => {}
+    }
 }
 
 /// Baseline handling, rendering, summary, and exit code of the reports `diags` of `analyzed`.
@@ -818,13 +851,9 @@ fn report(
         let shown = |key: &BaselineKey, within: &[BaselineKey]| {
             in_view.as_ref().is_none_or(|v| v.shows(key, within))
         };
-        let unit = baseline.unit;
-        if unit == CountUnit::Diagnostics && !args.update_baseline {
-            log!(
-                fmt,
-                "note: baseline {} counts diagnostics, not violation sites (written before version {BASELINE_VERSION}); `--update-baseline` rewrites it to count sites",
-                bp.display()
-            );
+        let unit = baseline.version.unit();
+        if !args.update_baseline {
+            outdated_baseline_note(bp, baseline.version, fmt);
         }
         // Legacy entries compare in their own unit, before `--update-baseline` rewrites them.
         let cmp = baseline.keep_regressions(&mut diags, &key_path);
@@ -832,6 +861,7 @@ fn report(
             let run = analyzed.rules_run();
             let checked = project.files.iter().map(|f| f.rel.as_str()).collect();
             let withheld = baseline_counts(&analyzed.withheld, &key_path, unit);
+            // A report withheld because `lint.heuristic` is off still matches its entry.
             let judged =
                 (cmp.stale_entries.iter()).filter(|e| covered(&e.key) && shown(&e.key, &e.within));
             for StaleEntry {
@@ -842,7 +872,8 @@ fn report(
             } in judged
             {
                 let (files, _) = project.entry_files(key);
-                if run.unused_entry(key, found + key.found_in(&withheld), &files, &checked) {
+                let matched = (*found + key.found_in(&withheld)).count;
+                if run.unused_entry(key, matched, &files, &checked) {
                     log!(
                         fmt,
                         "error: baseline entry {key} matched no report (`--update-baseline` removes it)"
@@ -851,6 +882,7 @@ fn report(
                     continue;
                 }
                 if within.is_empty() {
+                    let (allowed, found) = tallies(*allowed, *found, "");
                     log!(
                         fmt,
                         "note: baseline entry {key} can shrink {allowed} -> {found} (`--update-baseline`)"
@@ -877,15 +909,17 @@ fn report(
         // A run decides the entries whose files it covers and keeps the others. A group it
         // reports that a kept entry holds is that entry's: the entry may hold modules the run
         // does not see, so it stays and the group is not counted beside it.
-        let kept: Vec<(&BaselineKey, &u32)> = recorded
+        let kept: Vec<(&BaselineKey, &Tally)> = recorded
             .iter()
             .flat_map(|b| &b.counts)
             .filter(|(key, _)| !covered(key))
             .collect();
+        // Kept entries of version 2 stay as they are: an entry that records no heuristic site
+        // allows as many exact ones as it had sites, as their version did.
         let legacy_kept = !kept.is_empty()
             && recorded
                 .as_ref()
-                .is_some_and(|b| b.unit == CountUnit::Diagnostics);
+                .is_some_and(|b| b.version.unit() == CountUnit::Diagnostics);
         if regressions > 0 {
             let refused = Problem::new(format!(
                 "baseline `{}` not updated: {regressions} entry(ies) grew",
@@ -898,8 +932,9 @@ fn report(
         } else if legacy_kept {
             // Its other entries count diagnostics, and site counts beside them would mix units.
             let refused = Problem::new(format!(
-                "baseline `{}` not updated: it counts diagnostics (written before version {BASELINE_VERSION}), and this run covers part of the project",
-                bp.display()
+                "baseline `{}` not updated: it counts diagnostics (written before version {}), and this run covers part of the project",
+                bp.display(),
+                BaselineVersion::V2.number()
             ))
             .help("update it once from the project root with `heki check --update-baseline`, which rewrites it to count sites")
             .docs(Docs::Baselines);
@@ -1318,6 +1353,7 @@ mod tests {
             contracts: Vec::new(),
             allowed_examples: Vec::new(),
             group: false,
+            key_target: None,
         }
     }
 
