@@ -1200,6 +1200,7 @@ mod tests {
 
     #[test]
     fn ratchet_toml_round_trip_is_sorted() {
+        let no_group: fn(&str) -> bool = |_| false;
         let baseline = RatchetBaseline::from_counts(BTreeMap::from([
             (key("src/z.py", "Z.run", "M.f"), 1),
             (key("src/a.py", "A.run", "M.f"), 3),
@@ -1208,16 +1209,18 @@ mod tests {
         let text = baseline.to_toml_string();
         assert!(text.find("src/a.py").unwrap() < text.find("src/z.py").unwrap());
         assert!(!text.contains("src/zero.py"));
-        let back = RatchetBaseline::from_toml_str(&text, Path::new("b.toml"), |_| false).unwrap();
+        let back = RatchetBaseline::from_toml_str(&text, Path::new("b.toml"), no_group).unwrap();
         assert_eq!(back, baseline);
         assert!(
-            RatchetBaseline::from_toml_str("[[entries]]\npath = 1\n", Path::new("b.toml"), |_| {
-                false
-            })
+            RatchetBaseline::from_toml_str(
+                "[[entries]]\npath = 1\n",
+                Path::new("b.toml"),
+                no_group
+            )
             .is_err()
         );
         assert!(
-            RatchetBaseline::from_toml_str("bogus = 1\n", Path::new("b.toml"), |_| false).is_err()
+            RatchetBaseline::from_toml_str("bogus = 1\n", Path::new("b.toml"), no_group).is_err()
         );
     }
 
