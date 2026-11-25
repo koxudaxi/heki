@@ -729,8 +729,9 @@ class, and neither does a name bound twice or a variable annotated otherwise
 (`Declared: object = A | B`).
 
 The text of the type expression a value spells (`resolver::type_expression_text`: names of
-module-level objects, attributes of them, subscripts, unions, `None`, and strings) reads as the
-same text in an annotation does: the value of an alias, the bound of a type variable, and the
+module-level objects, attributes of them, subscripts, unions, `None`, and strings, up to 64 parts
+counted as the text writes them: `kind | kind` writes `kind` twice) reads as the same text in an
+annotation does: the value of an alias, the bound of a type variable, and the
 type `typing.cast` names (`cast(list[Windows], hosts)` as `cast("list[Windows]", hosts)`). A
 subscript naming anything else (`list[kind]` of a parameter `kind`) names no type. A builtin or
 `collections` container class subscripted with types is an alias of the class

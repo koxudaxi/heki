@@ -326,6 +326,11 @@ def casts_to_a_class_parameter(field: Field, host: Base, kind: type[Windows]) ->
     cast(kind, host).run(field)
 
 
+def casts_to_an_item_of_classes(field: Field, host: Base) -> None:
+    classes = (Windows,)
+    cast(classes[0], host).run(field)
+
+
 def keeps_the_declared_items(field: Field, hosts: list[Base]) -> None:
     for host in hosts:
         host.run(field)  # writes

@@ -7313,10 +7313,15 @@ fn a_fact_needing_more_tests_than_the_bound_is_not_kept() {
     assert_eq!(certainty(5), waits("heuristic"));
 }
 
-/// `aliases` type aliases of a subscript and a union each, one alias of a union of `aliases`
-/// members, and a function casting a value to a subscript `aliases` times: each type expression
-/// is spelled once, the wide union only up to its bound of parts.
+/// `aliases` type aliases of a subscript and a union each, one alias of a union wider than the
+/// bound of parts, and a function casting a value to a subscript `aliases` times and once to a
+/// union doubling its text in each of `DOUBLINGS` links: each type expression is spelled once,
+/// the wide and the doubling union only up to their bound of parts. The wide union has a fixed
+/// width: a chain of operators as long as `aliases` overflows the 1 MiB main thread stack of a
+/// debug build on Windows.
 fn type_expressions(aliases: usize) -> String {
+    const WIDE: usize = 70;
+    const DOUBLINGS: usize = 40;
     let mut out = vec![
         "from typing import TypeAlias, cast".to_owned(),
         String::new(),
@@ -7331,7 +7336,7 @@ fn type_expressions(aliases: usize) -> String {
             "A{i}: TypeAlias = dict[str, list[tuple[C, int]]] | None"
         ));
     }
-    out.push(format!("Wide = {}", vec!["C"; aliases].join(" | ")));
+    out.push(format!("Wide = {}", vec!["C"; WIDE].join(" | ")));
     out.extend([
         String::new(),
         String::new(),
@@ -7340,6 +7345,9 @@ fn type_expressions(aliases: usize) -> String {
     for i in 0..aliases {
         out.push(format!("    c{i} = cast(dict[str, list[C]], value)"));
     }
+    out.push("    kind = C".to_owned());
+    out.extend((0..DOUBLINGS).map(|_| "    kind = kind | kind".to_owned()));
+    out.push("    cast(kind, value)".to_owned());
     out.join("\n") + "\n"
 }
 
