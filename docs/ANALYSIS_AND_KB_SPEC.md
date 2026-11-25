@@ -817,7 +817,10 @@ EffectSummary(f) = {
                                                            // helpers, some normal path leaves unannounced
     retains_params:           Bitset,                      // parameters the function keeps (stores, returns)
     returns_new:              bool,                        // returns an object it constructs, nothing else
-                                                           // holding it (fresh-objects)
+                                                           // holding it (fresh-objects); with the
+                                                           // parameters some returns give an element of
+                                                           // instead, new at a call binding each to a value
+                                                           // without elements (None, a number, "")
     return_origins:           Option<Box<ReturnOrigins>>,  // MUT112, absent for most functions: what the
                                                            // returned object may be, path by path (new, held
                                                            // state, parameter i, or an element of parameter i;

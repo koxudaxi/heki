@@ -35,10 +35,10 @@ use crate::{
     Access, ArgBinding, ArgOrigin, ArgTargets, ArgValue, AttrKeyPath, BoundCallee, CallHop,
     CallSite, CallTarget, CellChange, Construction, ContractClass, Contracts, Dispatch,
     EffectSummary, EntryKey, FileSummary, FuncKey, GuardSubject, HandedState, Implementers, Items,
-    KeptFacts, ListedCache, ModuleInput, MustExec, NewArg, NewCond, NewKind, OnEveryReturn,
-    OptInFacts, PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SharedState,
-    SharedStateFacts, SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, UnawaitedHandoff,
-    Unresolved, UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
+    KeptFacts, ListedCache, ModuleInput, MustExec, NewArg, NewCond, NewFrom, NewKind,
+    OnEveryReturn, OptInFacts, PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine,
+    SharedState, SharedStateFacts, SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite,
+    UnawaitedHandoff, Unresolved, UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, KeySet, Use};
@@ -547,12 +547,22 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary, func: &FuncKe
     into.retains_params |= other.retains_params;
     // A must-fact: a new object only when both definitions return one.
     into.returns_new = match (std::mem::take(&mut into.returns_new), other.returns_new) {
-        (ReturnsNew::New { kind: a, cond: c }, ReturnsNew::New { kind: b, cond: d }) => {
+        (
             ReturnsNew::New {
-                kind: a.min(b),
-                cond: c.and(&d),
-            }
-        }
+                kind: a,
+                cond: c,
+                elements_of: x,
+            },
+            ReturnsNew::New {
+                kind: b,
+                cond: d,
+                elements_of: y,
+            },
+        ) => ReturnsNew::New {
+            kind: a.min(b),
+            cond: c.and(&d),
+            elements_of: x | y,
+        },
         _ => ReturnsNew::No,
     };
     if let Some(other) = other.return_origins {
@@ -883,7 +893,9 @@ struct Extractor<'a> {
     pending_unresolved: Vec<(UnresolvedWriteSite, usize)>,
     /// Whether the construction queries can be answered with anything but "no": the function
     /// allocates (a call returning a project-class instance, a copy), or it is a private helper
-    /// (its writes to its parameters are reported at callers that may hand it new objects).
+    /// (its writes to its parameters are reported at callers that may hand it new objects), or
+    /// has parameters an effect boundary judges by what the calls reaching it hand them
+    /// ([`Contracts::judges_handed_objects`]).
     track: bool,
     /// Variables that may hold what a call returns that may be a new object (a superset of the
     /// allocations `Recorder` learns while visiting), through copies and phis: only they and the
@@ -1291,7 +1303,8 @@ impl<'a> Extractor<'a> {
             unawaited: Vec::new(),
         };
         ex.ownership = contracts.is_some_and(|c| c.ownership());
-        ex.track = ex.ownership && ex.may_construct();
+        let handed = contracts.is_some_and(|c| c.judges_handed_objects()) && !f.params.is_empty();
+        ex.track = ex.ownership && (ex.may_construct() || handed);
         ex.build_may_params();
         ex.build_fresh();
         if ex.events.is_some() {
@@ -4554,19 +4567,22 @@ impl<'a> Extractor<'a> {
                 .callee
                 .clone()
         };
-        let (answers, returned) =
-            rec.resolve(self.shape, &self.may_params, &param_of, &callee_of, returns);
+        let element_of = |v: VarId| self.element_of_params(v);
+        let (answers, returned) = rec.resolve(
+            self.shape,
+            &self.may_params,
+            &param_of,
+            &element_of,
+            &callee_of,
+            returns,
+        );
         for p in std::mem::take(&mut self.pending_sites) {
             let mut site = p.site;
             site.construction = construction_of(&answers[p.query], p.rebinds);
             self.summary.typed_field_write_sites.insert(site);
         }
         for (mut site, q) in std::mem::take(&mut self.pending_unresolved) {
-            // A parameter is left to the callers (`MUT205` walks them).
-            site.construction = match construction_of(&answers[q], site.kind.rebinds()) {
-                Construction::Param { .. } => Construction::No,
-                other => other,
-            };
+            site.construction = construction_of(&answers[q], site.kind.rebinds());
             self.summary.unresolved_write_sites.insert(site);
         }
         for (si, ci, pi, q) in std::mem::take(&mut self.pending_args) {
@@ -4581,8 +4597,35 @@ impl<'a> Extractor<'a> {
                 params[pi].new_object = answers[q].clone();
             }
         }
-        if let Some(NewArg::New { kind, cond }) = returned {
-            self.summary.returns_new = ReturnsNew::New { kind, cond };
+        if returned != ReturnsNew::No {
+            self.summary.returns_new = returned;
+        }
+    }
+
+    /// The parameters the object `var` holds is an element of by its definition (`0`: none): an
+    /// item, `get`, `pop`, `setdefault`, or an iteration step ([`Source::Element`]) of a
+    /// parameter itself, or of an iterator over one.
+    fn element_of_params(&self, var: VarId) -> u64 {
+        let shape = self.shape;
+        let (Def::Inst(b, i), Some(inst)) = (shape.def(var), shape.inst(var)) else {
+            return 0;
+        };
+        let callee = self.callees.get(&(b, i as usize));
+        let constructs = self.construction(&inst.kind).is_some();
+        let made_here = |_: VarId| false;
+        let source = ownership::source(
+            self.f, &inst.kind, callee, constructs, self.cx.kb, &made_here,
+        );
+        let Source::Element(of) = source else {
+            return 0;
+        };
+        let holder = match shape.inst(of).map(|i| &i.kind) {
+            Some(InstKind::MakeIter { iterable, .. }) => *iterable,
+            _ => of,
+        };
+        match self.param_alias.get(&holder) {
+            Some((p, None)) if *p < 64 => 1u64 << p,
+            _ => 0,
         }
     }
 
@@ -6632,6 +6675,8 @@ impl<'a> Extractor<'a> {
                 let loops = self.loops_around(bb);
                 // `(callee, its index, what it is handed)` for `Self::hand_over`.
                 let mut handovers = Vec::new();
+                // What each callee returns at the call, for `Self::project_alloc`.
+                let mut returns = Vec::with_capacity(keys.len());
                 // What each callee running here is passed for the marked parameters, for
                 // `agreed_marks`, on each way the mappings the call unpacks may be built when
                 // there are several.
@@ -6801,6 +6846,12 @@ impl<'a> Extractor<'a> {
                             &bound,
                         ));
                     }
+                    if self.ownership {
+                        returns.push(NewFrom {
+                            callee: key.clone(),
+                            empty_params: params_without_elements(&params),
+                        });
+                    }
                     // A copy of the exact length; the buffer keeps its room for the next call.
                     let mut exact = Vec::with_capacity(params.len());
                     exact.append(&mut params);
@@ -6817,6 +6868,7 @@ impl<'a> Extractor<'a> {
                     }
                 }
                 self.param_origins = buffer;
+                self.project_alloc(call, returns);
                 if !handed_state.is_empty() {
                     self.summary.shared_state_mut().handed.extend(handed_state);
                 }
@@ -7571,9 +7623,10 @@ impl<'a> Extractor<'a> {
             .contains(&at)
     }
 
-    /// The allocation a call makes and the escapes of what it is handed, before its callees
-    /// are bound: a constructor call allocates its object, a project function may return a new
-    /// one, and a call heki cannot resolve may keep everything it is handed.
+    /// The allocation a call outside the project makes and the escapes of what a call is
+    /// handed, before its callees are bound: a copy or a constructor call allocates its object,
+    /// and a call heki cannot resolve may keep everything it is handed. A project call's are
+    /// [`Self::project_alloc`] and [`Self::hand_over`].
     fn call_escapes(&mut self, callee: &Callee, call: &Call<'_>) {
         if !self.ownership {
             return;
@@ -7593,20 +7646,7 @@ impl<'a> Extractor<'a> {
                     new_instance,
                 );
             }
-            Callee::Project(keys, _) => {
-                let Some(dst) = call.dst.filter(|_| self.track && call.per_item.is_none()) else {
-                    return;
-                };
-                if let Some(class) = &call.constructs {
-                    if !self.cx.project.may_reuse_instances(class) {
-                        self.rec.alloc(self.at(), dst, NewKind::Own, Vec::new());
-                    }
-                } else if self.may_be_new(dst) {
-                    // A project function returning an instance of a project class: a new object
-                    // when every candidate returns one.
-                    self.rec.alloc(self.at(), dst, NewKind::Own, keys.clone());
-                }
-            }
+            Callee::Project(..) => {}
             Callee::TooMany | Callee::Unresolved => {
                 for v in call
                     .recv_var
@@ -7617,6 +7657,26 @@ impl<'a> Extractor<'a> {
                     self.escape(*v, Escape::Definite);
                 }
             }
+        }
+    }
+
+    /// The allocation of a project call, its callees bound (`returns`: each with the parameters
+    /// the call binds to values without elements): a constructor call allocates its object, and
+    /// a project function returning an instance of a project class a new object when every
+    /// candidate returns one.
+    fn project_alloc(&mut self, call: &Call<'_>, returns: Vec<NewFrom>) {
+        if !self.ownership {
+            return;
+        }
+        let Some(dst) = call.dst.filter(|_| self.track && call.per_item.is_none()) else {
+            return;
+        };
+        if let Some(class) = &call.constructs {
+            if !self.cx.project.may_reuse_instances(class) {
+                self.rec.alloc(self.at(), dst, NewKind::Own, Vec::new());
+            }
+        } else if self.may_be_new(dst) {
+            self.rec.alloc(self.at(), dst, NewKind::Own, returns);
         }
     }
 
@@ -8434,6 +8494,16 @@ impl Bindings<'_> {
             .map(|(p, c)| (usize::from(*p), c))
             .filter(move |(p, _)| !by_position(*p) && !by_keyword.contains(p))
     }
+}
+
+/// The parameters a call binds to a value without elements ([`crate::ConstArg::has_no_elements`]),
+/// by what it knows of each bound argument: a literal default, or a constant the call passes.
+fn params_without_elements(params: &[ArgOrigin]) -> u64 {
+    (params.iter().enumerate().take(64))
+        .filter(|(_, o)| {
+            (o.binding.as_ref().and_then(ArgBinding::constant)).is_some_and(|c| c.has_no_elements())
+        })
+        .fold(0, |mask, (k, _)| mask | 1u64 << k)
 }
 
 /// What a builtin calling a callable once per item passes it ([`Extractor::passed_items`]).

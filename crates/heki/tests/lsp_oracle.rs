@@ -143,6 +143,11 @@ allowed-callees = ["pkg.extras.trusted_value"]
 name = "rack"
 targets = ["Rack.items"]
 allowed-writers = ["pkg.rack_ops.empty"]
+
+[[tool.heki.effect-boundaries]]
+name = "copy-pass"
+scopes = ["pkg.copy_pass"]
+write-universe = ["Ticket.flag"]
 "#;
 
 // An `async def` two modules above a sync helper (`EFF101` with its chain).
@@ -322,6 +327,10 @@ const FIELD_READER: &str = "from pkg.field_keys import FieldKeys\nfrom pkg.model
 const KEY_OTHER_FIRST: &str = "from typing import ClassVar\n\nfrom pkg.key_class import Keys\n\n\nclass OtherKey:\n    KEY: ClassVar[str] = \"other\"\n\n\nclass OtherFirstKeys(OtherKey, Keys):\n    pass\n";
 const FRESH_OPS: &str = "from pkg.model import Registry\n\nKEPT = []\n\n\ndef _fill(r: Registry):\n    r.entries.append(1)\n";
 const FRESH_BUILD: &str = "from pkg.fresh_ops import _fill\nfrom pkg.model import Registry\n\n\ndef build():\n    r = Registry()\n    _fill(r)\n    return r\n";
+// A copy helper returning an element of an optional table or a copy, and a public helper
+// marking its parameter, in another module than the boundary's scope using both on copies.
+const COPY_OPS: &str = "import copy\n\nKEPT = []\n\n\nclass Ticket:\n    def __init__(self):\n        self.flag = False\n\n\ndef copy_or_reuse(t: Ticket, reuse: dict[int, Ticket] | None = None) -> Ticket:\n    if reuse and (hit := reuse.get(id(t))) is not None:\n        return hit\n    return copy.copy(t)\n\n\ndef mark(t: Ticket) -> None:\n    t.flag = True\n";
+const COPY_PASS: &str = "from pkg.copy_ops import Ticket, copy_or_reuse, mark\n\n\ndef run(t: Ticket) -> Ticket:\n    copied = copy_or_reuse(t)\n    copied.flag = True\n    mark(copied)\n    return copied\n";
 const STRICT_OPS: &str = "def _reset(r):\n    r.entries = []\n";
 // The strict reads and calls: helpers that type nothing read and call a guarded attribute and
 // method; a caller in another module binds their object to another class, then to the guarded
@@ -1182,6 +1191,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/lost_loop_rebuild.py", LOST_LOOP_REBUILD),
         ("pkg/fresh_ops.py", FRESH_OPS),
         ("pkg/fresh_build.py", FRESH_BUILD),
+        ("pkg/copy_ops.py", COPY_OPS),
+        ("pkg/copy_pass.py", COPY_PASS),
         ("pkg/strict_ops.py", STRICT_OPS),
         ("pkg/strict_use.py", STRICT_USE),
         ("pkg/q_telemetry.py", Q_TELEMETRY),
@@ -2992,7 +3003,8 @@ fn steps_small_displays() -> Vec<Step> {
 /// module defines the name again or lists a base defining it first, or code rebinds it on the
 /// class or a subclass, and a `Final` one when a decorator in another module building its class
 /// becomes a `dataclass_transform` (a project-wide fact); whether a helper keeps the object its caller hands it is a summary fact
-/// of the helper; whether a parameter is typed, and with which class, is a fact of
+/// of the helper, and so is whether a copy helper returns an element of an optional table only
+/// where the table defaults to a value without elements; whether a parameter is typed, and with which class, is a fact of
 /// the callers the strict modes walk (`MUT205` writes, `MUT206` reads, `MUT207` calls), and
 /// whether that class defines a method a call target naming no class names is a declaration of
 /// the class's module.
@@ -3342,6 +3354,35 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
             vec![save("pkg/sealer.py", SEALER)],
         )
         .present(&[("pkg/reseal_helper.py", "MUT207")]),
+        Step::new(
+            "the copy helper of another module defaults its table to a shared dict",
+            vec![Action::Save(
+                "pkg/copy_ops.py",
+                COPY_OPS.replace("| None = None", "= {}"),
+            )],
+        )
+        .present(&[("pkg/copy_pass.py", "EFF201")]),
+        Step::new(
+            "the copy helper's table defaults to `None` again",
+            vec![save("pkg/copy_ops.py", COPY_OPS)],
+        )
+        .absent(&[("pkg/copy_pass.py", "EFF201")]),
+        Step::new(
+            "the marking helper of another module keeps the ticket before marking it",
+            vec![Action::Save(
+                "pkg/copy_ops.py",
+                COPY_OPS.replace(
+                    "    t.flag = True\n",
+                    "    KEPT.append(t)\n    t.flag = True\n",
+                ),
+            )],
+        )
+        .present(&[("pkg/copy_pass.py", "EFF201")]),
+        Step::new(
+            "the marking helper only marks the ticket again",
+            vec![save("pkg/copy_ops.py", COPY_OPS)],
+        )
+        .absent(&[("pkg/copy_pass.py", "EFF201")]),
     ]
 }
 

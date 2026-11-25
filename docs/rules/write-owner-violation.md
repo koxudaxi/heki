@@ -175,7 +175,9 @@ A write that constructs the object it writes is allowed too (`fresh-objects = "a
 default): the object was allocated in the same call chain, by calling its class, by
 `object.__new__(Model)` (also `Model.__new__(Model)` when no class defines `__new__`), by copying
 (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`, `.copy()`, `.model_copy()`), or by a
-project function that returns such an object, and nothing else can hold it yet: no store into
+project function that returns such an object (at a call leaving an optional parameter at a
+default without elements, such as `None`, the paths returning an element of it return
+nothing), and nothing else can hold it yet: no store into
 another object, a container, a global, or a closure, no `yield`, and no call that may keep it
 ran before the write. A project function keeps an object it stores, yields, or hands to code
 heki does not follow or to a function that keeps it; reading or writing it keeps nothing. Writes

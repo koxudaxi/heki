@@ -2736,6 +2736,81 @@ fn initializers_handing_self_down_a_helper_chain_reach_each_helper_at_most_twice
     assert_eq!(found, [(&json!("build"), &json!("build:Node.optional"))]);
 }
 
+/// A boundary's scopes handing a new object down a chain of a thousand public helpers, the last
+/// writing its parameter, one of them handing the input down the chain too; and taking a copy
+/// from a helper with a thousand returns of elements of its optional table, called without the
+/// table. What the calls hand each helper is walked once along the chain, and the elements once
+/// per return. The write of the input stays reported, at the call handing it over.
+#[test]
+fn new_objects_handed_down_a_helper_chain_are_judged_in_one_walk() {
+    let module = |size: usize| {
+        let mut lines = vec![
+            "import copy".to_owned(),
+            String::new(),
+            String::new(),
+            "class Node:".to_owned(),
+            "    def __init__(self) -> None:".to_owned(),
+            "        self.flag = False".to_owned(),
+        ];
+        for h in 0..size {
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("def h{h}(a: Node) -> None:"),
+                format!("    h{}(a)", h + 1),
+            ]);
+        }
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def h{size}(a: Node) -> None:"),
+            "    a.flag = True".to_owned(),
+            String::new(),
+            String::new(),
+            "def pick(node: Node, table: dict[int, Node] | None = None, k: int = 0) -> Node:"
+                .to_owned(),
+        ]);
+        for r in 0..size {
+            lines.extend([
+                format!("    if table and k == {r}:"),
+                format!("        return table[{r}]"),
+            ]);
+        }
+        lines.extend([
+            "    return copy.copy(node)".to_owned(),
+            String::new(),
+            String::new(),
+            "def build(node: Node) -> Node:".to_owned(),
+            "    copied = copy.copy(node)".to_owned(),
+            "    h0(copied)".to_owned(),
+            "    picked = pick(node)".to_owned(),
+            "    picked.flag = True".to_owned(),
+            "    return copied".to_owned(),
+            String::new(),
+            String::new(),
+            "def mixed(node: Node) -> None:".to_owned(),
+            "    h0(copy.copy(node))".to_owned(),
+            "    h0(node)".to_owned(),
+        ]);
+        lines.join("\n") + "\n"
+    };
+    let found = check_linear(1_000, |size| {
+        let p = Project::new(&format!("bounds_handed_new_{size}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"build\"\nscopes = [\"m.build\", \"m.mixed\"]\nwrite-universe = [\"Node.*\"]\n",
+        )
+        .write("m.py", &module(size));
+        p
+    });
+    let found: Vec<(&Value, &Value)> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF201")
+        .map(|d| (&d["qualname"], &d["target"]))
+        .collect();
+    assert_eq!(found, [(&json!("mixed"), &json!("build:Node.flag"))]);
+}
+
 /// A chain of forty helpers, each calling the one below twice: once with its own parameters and
 /// once with a choice of its first and its last one (`h(p0 if flag else pk, ...)`), the last
 /// helper writing its first parameter. The objects the write may be double at each level (two to
