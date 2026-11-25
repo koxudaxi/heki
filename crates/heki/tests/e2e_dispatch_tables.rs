@@ -93,7 +93,7 @@ fn verdict(p: &Project, symbol: &str) -> String {
 
 const TABLES: &str = r#"from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, TypeAlias, TypeVar
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -117,21 +117,23 @@ LAMBDAS = {"other": lambda field: None, "require": _require}
 LAST = {"require": _noop, "require": _require}
 EXTRA = {"noop": _noop}
 ALIASED: dict[str, Handler] = {"require": _require}
+Opaque = TypeVar("Opaque")
+OPAQUE: dict[str, Opaque] = {"require": _require}
 MAPPED: Mapping[str, Callable[[Field], None]] = {"require": _require}
 UNPACKING = {"require": _require, **EXTRA}
 "#;
 
 /// A constant key gives its own value; any other key, iterating the values, or a key a constant
 /// names one of them; an entry bound again by a later one of the same key is the later one. An
-/// annotation whose item type heki does not resolve (an alias of it) keeps the stored functions,
-/// and so does one of another mapping class; a dict with a `**` entry may give any of its
-/// values.
+/// annotation keeps the stored functions when its item type is a callable type, an alias of one,
+/// or a `TypeVar` with no bound, and so does one of another mapping class; a dict with a `**`
+/// entry may give any of its values.
 const TABLE_CALLS: &str = r#"from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 from pkg import tables
-from pkg.tables import ALIASED, KEY, LAMBDAS, LAST, MAPPED, TABLE, UNPACKING
+from pkg.tables import ALIASED, KEY, LAMBDAS, LAST, MAPPED, OPAQUE, TABLE, UNPACKING
 
 if TYPE_CHECKING:
     from pkg.model import Field
@@ -176,6 +178,10 @@ def later_entry(field: Field) -> None:
 
 def through_an_aliased_item_type(field: Field) -> None:
     ALIASED["require"](field)  # EFF201
+
+
+def through_an_opaque_item_type(field: Field) -> None:
+    OPAQUE["require"](field)  # EFF201
 
 
 def through_a_mapping(field: Field) -> None:
