@@ -987,7 +987,7 @@ EffectSummary(f) = {
                                                            // time on the function's task (EFF110;
                                                            // propagated, never through a call made
                                                            // while a lock is held,
-                                                           // CallSite::under_lock; only with EFF110
+                                                           // CallSite::locks; only with EFF110
                                                            // selected, OptInFacts::exclusive)
 
     // Set orders (EFF112; only with EFF112 selected, OptInFacts::set_order)
@@ -2247,7 +2247,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      in its body, in its own names (`ObjRef`, mapped through the arguments as for
      `acquires_locks`); a use while the function certainly holds a lock (`locks::lock_steps`,
      `held::at_entry`), and the uses of a call made while it holds one
-     (`CallSite::under_lock`), are left out.
+     (`CallSite::locks`), are left out.
    - The rule (`eff_rules::fanout_exclusive`) finds the fan-outs of a function: the arguments of
      `asyncio.gather` (also a generator expression or a comprehension unpacked into it, whose
      element is started once per item), the display `asyncio.wait` waits on, and the
@@ -2389,7 +2389,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      with a bit per lock released, at most 63). A variable a closure reads is a lock when its
      type facts say so: the enclosing function binds it to one and no nested scope rebinds it.
      `EffectSummary::guarded` keeps the named locks a function returns holding and its own writes
-     of shared state made holding one; `CallSite::under_thread_lock` says whether the caller holds
+     of shared state made holding one; `CallSite::locks` says whether the caller holds
      one at the call. A write of shared state is an attribute of the method's instance (also
      through a nested scope's captured `self`), a global, or an attribute of a class or module,
      assigned or deleted, or a builtin container such state holds changed in place; the

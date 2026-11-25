@@ -427,3 +427,120 @@ fn runs_only_when_selected_or_heuristic() {
     assert!(stdout.contains("## What a report states"), "{stdout}");
     assert!(stdout.contains("This rule is heuristic"), "{stdout}");
 }
+
+/// A class lock taken through `cls`, a declared global deleted, a lock released later that is not
+/// the one held, a branch that never ends, and a helper taking a lock of another object.
+const SHAPES: &str = r#"import threading
+
+
+_reg_lock = threading.Lock()
+
+
+class Registry:
+    count = 0
+
+    @classmethod
+    def bump(cls) -> None:
+        with _reg_lock:
+            cls.count += 1
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.count = 0
+
+
+_slot_lock = threading.Lock()
+_slot = 0
+
+
+def _fill() -> None:
+    global _slot
+    with _slot_lock:
+        _slot = 1
+
+
+def drop() -> None:
+    global _slot
+    del _slot
+
+
+class Pair:
+    def __init__(self) -> None:
+        self._a = threading.Lock()
+        self._b = threading.Lock()
+        self.n = 0
+        self.m = 0
+
+    def start(self) -> None:
+        threading.Thread(target=self._loop).start()
+        threading.Thread(target=self._spin).start()
+
+    def _loop(self) -> None:
+        with self._a:
+            self.n += 1
+        self._b.release()
+
+    def clear(self) -> None:
+        self.n = 0
+
+    def _spin(self) -> None:
+        if self.m:
+            while True:
+                pass
+        self._a.acquire()
+        self.m += 1
+        self._a.release()
+
+    def zero(self) -> None:
+        self.m = 0
+
+    def _take(self) -> None:
+        self._a.acquire()
+
+    def _give(self) -> None:
+        self._a.release()
+
+    def merge(self, other: "Pair") -> None:
+        other._take()
+        self.m = 3
+        other._give()
+
+
+def borrow(one: Pair, other: Pair) -> None:
+    other._take()
+    other.n = 2
+    other._give()
+
+
+def run() -> None:
+    threading.Thread(target=_fill).start()
+    threading.Thread(target=Registry.bump).start()
+"#;
+
+#[test]
+fn reports_writes_in_the_remaining_lock_shapes() {
+    let p = Project::new("eff117_shapes");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/shapes.py", SHAPES);
+    let diags = diagnostics(&p, SELECT);
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(
+                "pkg/shapes.py",
+                17,
+                "Registry.reset",
+                "pkg.shapes.Registry.count->pkg.shapes._reg_lock"
+            ),
+            d(
+                "pkg/shapes.py",
+                32,
+                "drop",
+                "pkg.shapes._slot->pkg.shapes._slot_lock"
+            ),
+            d("pkg/shapes.py", 52, "Pair.clear", "self.n->self._a"),
+            d("pkg/shapes.py", 63, "Pair.zero", "self.m->self._a"),
+        ],
+        "{diags:#?}"
+    );
+}

@@ -3967,8 +3967,7 @@ impl<'a> Extractor<'a> {
             arguments: None,
             queues: None,
             state_tests: None,
-            under_lock: false,
-            under_thread_lock: false,
+            locks: crate::LockHeld::None,
             // Handing a function on does not run it: no must-fact goes through the reference.
             complete: false,
             on_every_return: OnEveryReturn::default(),
@@ -6849,8 +6848,7 @@ impl<'a> Extractor<'a> {
                         is_read: false,
                         arguments,
                         state_tests: None,
-                        under_lock: false,
-                        under_thread_lock: false,
+                        locks: crate::LockHeld::None,
                         complete: false,
                         on_every_return: crate::OnEveryReturn::default(),
                         made_by: None,
@@ -7660,12 +7658,14 @@ impl<'a> Extractor<'a> {
             } else {
                 None
             },
-            under_lock: self.opt_in.exclusive && self.lock_held_at(self.pos),
-            under_thread_lock: self.opt_in.guarded
-                && !self
-                    .thread_lock_points()
-                    .held_at(self.pos.0, self.pos.1)
-                    .is_empty(),
+            locks: crate::LockHeld::of(
+                self.opt_in.exclusive && self.lock_held_at(self.pos),
+                self.opt_in.guarded
+                    && !self
+                        .thread_lock_points()
+                        .held_at(self.pos.0, self.pos.1)
+                        .is_empty(),
+            ),
             complete,
             on_every_return,
             made_by: None,
@@ -8876,8 +8876,7 @@ fn role_site(
         is_read: false,
         arguments: None,
         state_tests: site.state_tests.clone(),
-        under_lock: site.under_lock,
-        under_thread_lock: site.under_thread_lock,
+        locks: site.locks,
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
         made_by: Some(site.span),

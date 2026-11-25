@@ -52,11 +52,17 @@ pub struct GuardedView {
     /// The functions every call of which is made holding a thread lock, up to [`CALLER_DEPTH`]
     /// calls above; no thread entry is one.
     pub entry_held: BTreeSet<FuncKey>,
-    /// The constructors and after-fork handlers, and the functions only they call, up to
-    /// [`CALLER_DEPTH`] calls above.
-    pub setup_only: BTreeSet<FuncKey>,
+    /// The after-fork handlers, and the functions only they and the constructors call, up to
+    /// [`CALLER_DEPTH`] calls above; the constructors themselves are known by name
+    /// ([`Self::is_setup_only`]) and not kept, as most functions of a project with classes.
+    setup_only: BTreeSet<FuncKey>,
     /// The guarded attributes of instances by name, each with the classes writing it.
     by_attr: BTreeMap<String, Vec<String>>,
+}
+
+/// Whether the function is a constructor, by its name.
+fn is_constructor(f: &FuncKey) -> bool {
+    CONSTRUCTORS.contains(&f.qualname.rsplit('.').next().unwrap_or_default())
 }
 
 /// Whether the function `key` is test code, by its module's path.
@@ -69,6 +75,17 @@ fn in_tests(key: &FuncKey) -> bool {
 
 impl GuardedView {
     pub fn of(index: &ProjectIndex, decls: &ProjectDecls) -> Self {
+        // Without a write made holding a lock nothing is guarded, and nothing is reported.
+        let writes_locked = (index.files.values())
+            .flat_map(|file| file.functions.values())
+            .any(|s| {
+                s.guarded
+                    .as_ref()
+                    .is_some_and(|g| !g.locked_writes.is_empty())
+            });
+        if !writes_locked {
+            return Self::default();
+        }
         let mut callers: FxHashMap<&FuncKey, Vec<(&FuncKey, bool)>> = FxHashMap::default();
         let mut calls: FxHashMap<&FuncKey, Vec<&FuncKey>> = FxHashMap::default();
         let mut entries: FxHashSet<&FuncKey> = FxHashSet::default();
@@ -77,7 +94,7 @@ impl GuardedView {
             for site in &file.call_sites {
                 for bc in site.project_callees() {
                     (callers.entry(&bc.callee).or_default())
-                        .push((&site.caller, site.under_thread_lock));
+                        .push((&site.caller, site.locks.thread()));
                     calls.entry(&site.caller).or_default().push(&bc.callee);
                 }
             }
@@ -110,10 +127,7 @@ impl GuardedView {
                 Visit::<()>::Expand
             },
         );
-        let is_setup = |f: &FuncKey| {
-            forks.contains(f)
-                || CONSTRUCTORS.contains(&f.qualname.rsplit('.').next().unwrap_or_default())
-        };
+        let is_setup = |f: &FuncKey| forks.contains(f) || is_constructor(f);
         let (setup, held) = (Walk::Setup(&is_setup), Walk::Held(&entries));
         let (setup_callers, held_callers) = (
             setup.by_callers(&callers, &steps),
@@ -123,7 +137,7 @@ impl GuardedView {
         for file in index.files.values() {
             for f in file.functions.keys() {
                 steps.take(1);
-                if setup.answers(f, &setup_callers) {
+                if !is_constructor(f) && setup.answers(f, &setup_callers) {
                     setup_only.insert(f.clone());
                 }
                 if held.answers(f, &held_callers) {
@@ -135,7 +149,7 @@ impl GuardedView {
         for file in index.files.values() {
             for (key, s) in &file.functions {
                 let Some(facts) = &s.guarded else { continue };
-                if setup_only.contains(key) || in_tests(key) {
+                if is_constructor(key) || setup_only.contains(key) || in_tests(key) {
                     continue;
                 }
                 for w in &facts.locked_writes {
@@ -164,6 +178,11 @@ impl GuardedView {
             setup_only,
             by_attr,
         }
+    }
+
+    /// Whether the function runs only while objects are built or after a fork.
+    pub fn is_setup_only(&self, key: &FuncKey) -> bool {
+        is_constructor(key) || self.setup_only.contains(key)
     }
 
     /// The functions whose membership in a set of `self` and `other` differs.
@@ -287,7 +306,7 @@ pub(super) fn run(
             continue;
         }
         let key = CheckContext::key(unit, f);
-        if view.setup_only.contains(&key)
+        if view.is_setup_only(&key)
             || view.entry_held.contains(&key)
             || code_kind::is_test_code(&key.qualname, &unit.rel_path)
         {

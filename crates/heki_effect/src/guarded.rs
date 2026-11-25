@@ -534,15 +534,14 @@ fn released_later(
             Visit::<()>::Expand
         },
     );
-    let mut node = vec![usize::MAX; f.blocks.len()];
+    let mut node: Vec<Option<usize>> = vec![None; f.blocks.len()];
     for (i, b) in leaving.iter().enumerate() {
-        node[b.0 as usize] = i;
+        node[b.0 as usize] = Some(i);
     }
     // What a block gives back from its entry on: every lock while its fact is not known yet,
     // nothing for a block from which no path leaves.
-    let entry = |facts: &Facts<And>, b: BlockId| match node[b.0 as usize] {
-        usize::MAX => 0,
-        i => facts.get(i).map_or(full, |a| a.0),
+    let entry = |facts: &Facts<And>, b: BlockId| {
+        node[b.0 as usize].map_or(0, |i| facts.get(i).map_or(full, |a| a.0))
     };
     // The state before each instruction of block `b`, then after its last one.
     let before = |b: BlockId, facts: &Facts<And>| -> Vec<u64> {
@@ -560,11 +559,7 @@ fn released_later(
         out
     };
     let readers = |i: usize, out: &mut Vec<usize>| {
-        out.extend(
-            (shape.preds(leaving[i]).iter())
-                .map(|p| node[p.0 as usize])
-                .filter(|j| *j != usize::MAX),
-        );
+        out.extend((shape.preds(leaving[i]).iter()).filter_map(|p| node[p.0 as usize]));
     };
     let transfer = |i: usize, facts: &Facts<And>| {
         let b = leaving[i];
