@@ -33,6 +33,7 @@ line, an array of them from one analysis, in the order of the names):
 | `effects` | the network, database, file, subprocess, sleep, and lock waits it reaches, and the clients and queries it creates, each with the shortest call chain |
 | `changes` | the parameters, `self` attributes, other objects' attributes, module globals, and closure cells it changes, directly or through calls, with the call chain to the change |
 | `retains` | the parameters it stores where they outlive the call |
+| `only_reads` | its parameters annotated with a mutable container (`list`, `dict`, `set`), those it and every function it hands them to only read (no change, no store, every call resolved), those whose uses the read-only type (`Sequence`, `Mapping`, `AbstractSet`) allows, and those whose name it binds once |
 | `returns` | whether its result is a new object, a parameter, or state that outlives the call |
 | `purity` | `pure`, `impure` with the reasons, or `unknown` with the reasons; whatever the verdict, the functions below it whose calls heki cannot resolve, nearest first, each with the call chain to it; and what the verdict assumes |
 | `callers` | who calls it, whether in a loop; with `--callers`, transitively |
@@ -50,8 +51,9 @@ line, an array of them from one analysis, in the order of the names):
   for an `impure` function too: what it changes may then be incomplete.
 - A field the configuration does not compute is `null`, with the setting that computes it.
 - Fact keys carry no line numbers, so a diff of the objects before and after an edit shows only
-  what changed: a new entry in `effects`, `changes`, `retains`, or `returns` is new behavior.
-  Tell the user about it unless they asked for it.
+  what changed: a new entry in `effects`, `changes`, `retains`, `only_reads`, or `returns` is new
+  behavior, and so is a parameter leaving `only_reads.params`. Tell the user about it unless they
+  asked for it.
 
 ## `heki check --generate-prompt --output-format json` (experimental)
 
