@@ -2952,7 +2952,9 @@ $ heki recommend app --output-format json
 
 It takes the options of `heki check` that decide what is analyzed: `--select`,
 `--extend-select`, `--ignore`, `--heuristic` / `--no-heuristic`, `--config`,
-`--target-version`, and `--baseline`. The advice is relative to that configuration.
+`--target-version`, and `--baseline`. The advice is relative to that configuration. `--all`
+shows every block of contracts, where the report shows the first 3 of each kind, and lists up
+to 50 of the sites that keep blocks at `unresolved = "ignore"`, where it lists 5.
 
 ## What it prints
 
@@ -2979,8 +2981,13 @@ It takes the options of `heki check` that decide what is analyzed: `--select`,
   ([Rule Precision](https://heki.koxudaxi.dev/precision/)), or "not measured". Rules without reports here are named on
   one line.
 - **Contract candidates**: the `write-owners`, `read-owners`, and `effect-boundaries`
-  contracts the code already keeps, each with its confidence and evidence, and the trial run of
-  its rules that verified it; then the candidates a trial rejected, with the report it made.
+  contracts the code already keeps, as blocks: the candidates whose entries differ only in their
+  targets or scopes are one entry. Each block has its confidence, evidence, and the trial run of
+  its rules that verified it, and the class patterns tried for it ([below](https://heki.koxudaxi.dev/recommend/#blocks-and-class-patterns)).
+  The first 3 blocks of each kind are shown and declared, and the others counted. Then the
+  sites heki cannot tie to a class that keep blocks at `unresolved = "ignore"`, each once with
+  the candidates and blocks it holds back, and the candidates a trial rejected, with the report
+  it made.
 - **Contract entries that match nothing**: the entries of the contracts configured now that name
   no definition, attribute, method, or `__dict__` key in the analyzed files, with the existing
   names like each, as `heki check` warns about them
@@ -3076,6 +3083,14 @@ Candidates are drawn from what the code does, never from names:
   it constructs) gets an entry that allows no writer.
 - `read-owners`: a private attribute (`_name`) read only by functions of its class's module,
   whose class is used in at least two modules. The entry allows the readers as above.
+- An ownership candidate is judged by the accesses of its class's family, the class and its
+  project subclasses, since its target covers them: their writers and readers, and the modules
+  reading the attribute on objects of any of them. A method accessing the attribute only
+  through its own receiver (`self.items.append(x)` in a subclass) may be in any module: when one
+  is outside the owner's module, the entry sets `own-receiver = "allow"`.
+- Test code never defines an owner: an attribute a test function writes (or a private one it
+  reads) other than through its own receiver gets no candidate, since that access would be a
+  report of the contract.
 - `effect-boundaries`: a module whose functions reach no blocking call, with
   `forbid = ["blocking"]`; a package whose every module qualifies is one scope, which names the
   package's own module and the modules below it (`["pkg:*", "pkg.*:*"]`), also when it has no
@@ -3124,6 +3139,34 @@ configuration ignores that rule (`MUT205`, `MUT206`): it stays ignored, so the e
 `unresolved = "ignore"` and the block does not select the rule. A candidate on a subclass is
 left out when the one on its base class is kept: a target covers the subclasses of its class.
 Every candidate carries the caveat that accesses inside code heki cannot follow are not seen.
+
+### Blocks and class patterns
+
+The kept candidates of one kind whose entries set the same keys but `name` and `targets` (or
+`scopes`) are one block: its targets are theirs, and its trial their reports, each once. A
+contract reports every access of one of its targets that it does not allow, whichever target it
+is, so the block reports what its candidates do. A block's confidence is the lowest of its
+candidates', and it is named after its one target or scope, or else after what accesses its
+targets (`attributes written by app.store:Store.*`) or where its scopes are.
+
+Where the census sees no function writing an attribute of a class or its subclasses (for
+`read-owners`: reading one whose name starts with `_`) that the block does not allow, the block
+may name them all by one pattern, `module:Class.*` (`module:Class._*`), which also names the
+attributes the code adds later. The pattern trial declares each such pattern alone, with the
+block's other keys and `unresolved = "report"`, and runs the rules of its kind: the block names
+the pattern in place of the class's targets only when the trial reports nothing for it that they
+did not, under the contract's rule, under the rule of accesses on objects of unknown class when
+the block reports them (a pattern names any attribute a write of unknown class may add), and by
+hiding a report of the configuration's own contracts. A refused pattern is listed with its first
+report.
+
+Blocks are ranked within each kind: `write-owners` with an attribute changed in place first,
+then by the modules reading their targets times their candidates. The first 3 of each kind are
+shown and declared; `--all` shows and declares every one. The sites of `MUT205` and `MUT206`
+reports that keep blocks at `unresolved = "ignore"` are listed after the blocks, each once, with
+the candidates whose trial reported it and the blocks they are in (shown or not), the first 5 by
+the candidates they hold back (`--all`: up to 50). An annotation naming the object's class lets
+heki judge such an access by that class.
 
 The verification run then applies the whole block, the rules it enables and the contracts it
 declares, as `heki check` would; the counts of the block's rules come from it.
@@ -3246,7 +3289,7 @@ Contract candidates
   effect-boundaries  app.report  medium
     3 function(s) in 1 module(s) reach no blocking call heki sees
     trial: EFF201 0
-  For every candidate, accesses inside code heki cannot follow (unresolved calls, libraries without a catalog) are not seen.
+  For every block, accesses inside code heki cannot follow (unresolved calls, libraries without a catalog) are not seen.
 
 Notes
   - 1 Python file(s) below the project root were not analyzed (tests/test_users.py): heki takes the analyzed files as the whole project, so what it says about callers, readers, and writers holds for those files only.
@@ -3266,8 +3309,9 @@ pyproject.toml: keys to add or change
 ## JSON output
 
 `--output-format json` prints one object, described by the JSON Schema at
-[schemas/recommend-2.json](https://heki.koxudaxi.dev/schemas/recommend-2.json), the URL its `$schema` field names, which
-`heki recommend --output-format-json-schema` prints.
+[schemas/recommend-3.json](https://heki.koxudaxi.dev/schemas/recommend-3.json), the URL its `$schema` field names, which
+`heki recommend --output-format-json-schema` prints. Version 3 lists contracts as blocks, with
+`targets` in place of one `target`.
 Within a `version`, fields are only added; the `version` changes when a field is removed or
 changes meaning.
 
@@ -3276,13 +3320,15 @@ changes meaning.
 | `kind`, `version`, `heki` | `heki-recommend`, the version of the object, and the version of heki |
 | `root`, `config_file`, `table_prefix` | the project root, the configuration file (`null` without one), and the table its keys are under (`tool.heki`, or empty) |
 | `analyzed` | the files and functions analyzed, the files that could not be read or parsed, the paths given, and the Python files below the root they leave out |
-| `runs` | the analyses the report was computed from: `discovery`, then `source-roots` (the source-root trial) and `hypothetical-catalog` (the trial of library names) when they ran, `contract-trial` when it tried a contract candidate (none when the block sets `src`, or when every candidate is past the places of its kind), and `verification` when the block adds rules or contracts and does not set `src` |
+| `runs` | the analyses the report was computed from: `discovery`, then `source-roots` (the source-root trial) and `hypothetical-catalog` (the trial of library names) when they ran, `contract-trial` when it tried a contract candidate (none when the block sets `src`, or when every candidate is past the places of its kind), `pattern-trial` when a block shown has a class pattern to try, and `verification` when the block adds rules or contracts and does not set `src` |
 | `reports_now` | the counts of "Reports now", and `failing`: the reports shown (with a baseline, the regressions) that make `heki check` fail at the configuration's `fail-on` |
 | `open_premises` | the counts of "What keeps reports heuristic": by code; by premise or condition and cause, with what the cause states, what closes it, the reports, the reports it is the only open cause of, and the first 50 reports; the sets of causes that reports leave open together |
 | `blind_spots` | the counts of "What heki cannot see": the calls of library names without a catalog entry, by package and name, with what the trial run found; the names heki's catalog lacks in packages it covers; the calls heki does not resolve, by function and reason; the source-root candidates and their trials; the functions with an A1 hazard; the totals |
 | `rules` | each rule of "Rules worth enabling here": its metadata, the reports it would add, its published measurement, whether the block enables it, and why |
-| `contracts` | each contract candidate the block declares: its kind, what it is about, its entry, confidence, evidence, what the trial reported, and caveats |
-| `rejected_contracts` | the candidates a run reported for, with the run and its reports |
+| `contracts` | each block the configuration block declares, the first 3 of each kind (`--all`: every one): its kind, its targets (or the packages and modules of its scopes), the candidates it stands for, its entry, confidence, evidence, what the trial reported for its candidates, the class patterns tried with what the pattern trial reported and whether the block names them, and caveats |
+| `contracts_not_shown` | per kind, the blocks past the first 3 and the candidates they stand for |
+| `contract_blockers` | the sites of accesses heki cannot tie to a class that keep blocks at `unresolved = "ignore"`: how many, the first 5 (`--all`: 50) with the rule, path, line, function, the report as `heki check` writes it, and the candidates and blocks each holds back, and whether the list is cut |
+| `rejected_contracts` | the candidates a run reported for, each alone, with the run and its reports |
 | `contracts_not_tried` | per kind, the candidates past the trial's places (32 of each kind, the configuration's own `write-owners` contracts taking `write-owners` places), which no trial declared |
 | `unmatched_entries` | each entry of "Contract entries that match nothing": the contracts' kind, the key, the entry, the contracts holding it (a name, or `#` and its position), what it names none of, the existing names like it, and `named_at_run_time` when its class family gets attributes named at run time (only with `unmatched-contract-entries = "error"`) |
 | `notes` | the notes |
@@ -3781,6 +3827,9 @@ Options:
 
       --output-format-json-schema
           Print the JSON Schema of the object of `--output-format json` and exit
+
+      --all
+          Show every block of contracts (by default the first 3 of each kind) and up to 50 of the sites keeping them at `unresolved = "ignore"` (by default 5), in the report and in the keys to add
 
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable

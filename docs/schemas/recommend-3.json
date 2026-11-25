@@ -1,0 +1,1852 @@
+{
+  "$defs": {
+    "A1Hazards": {
+      "additionalProperties": false,
+      "description": "The functions where assumption A1 does not hold (`heki assumptions` lists them).",
+      "properties": {
+        "functions": {
+          "description": "The functions with an A1 hazard: the Soundness lane proves nothing in them.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unmodeled": {
+          "description": "Of those, the functions too large to model at all.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "functions",
+        "unmodeled"
+      ],
+      "type": "object"
+    },
+    "Activation": {
+      "description": "When a rule runs without being named by its code or name (ADR-018).",
+      "oneOf": [
+        {
+          "const": "default",
+          "description": "In the default selection, and matched by a prefix or `ALL`, while the rule is exact;\nwhatever its certainty with `lint.heuristic`.",
+          "type": "string"
+        },
+        {
+          "const": "opt-in",
+          "description": "Only by its exact code or name.",
+          "type": "string"
+        },
+        {
+          "const": "contract",
+          "description": "Selected as an exact `Default` rule is, whatever its certainty: it reports only what a\ndeclared contract asks for, so declaring the contract is what selects it.",
+          "type": "string"
+        }
+      ]
+    },
+    "Analyzed": {
+      "additionalProperties": false,
+      "description": "The files the report was computed from.",
+      "properties": {
+        "errors": {
+          "description": "The files that could not be read or parsed, as `heki check` reports them.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "files": {
+          "description": "The files analyzed.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "functions": {
+          "description": "The functions in them, module bodies included.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "left_out": {
+          "$ref": "#/$defs/LeftOut"
+        },
+        "paths": {
+          "description": "The paths given on the command line.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "files",
+        "functions",
+        "errors",
+        "paths",
+        "left_out"
+      ],
+      "type": "object"
+    },
+    "BaselineSplit": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "regressions": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "allowed",
+        "regressions"
+      ],
+      "type": "object"
+    },
+    "BlindSpotsSection": {
+      "additionalProperties": false,
+      "description": "What heki cannot see.",
+      "properties": {
+        "a1_hazards": {
+          "$ref": "#/$defs/A1Hazards"
+        },
+        "catalog_may_miss": {
+          "description": "Names of packages the catalog covers that it has no entry for, which `heki check` would\nreport if they waited or sent a query: at most 50.",
+          "items": {
+            "$ref": "#/$defs/SymbolCalls"
+          },
+          "type": "array"
+        },
+        "source_roots": {
+          "description": "Directories that resolve imports naming no project module once they are source roots,\nthe most imports first: at most 50.",
+          "items": {
+            "$ref": "#/$defs/SourceRoot"
+          },
+          "type": "array"
+        },
+        "totals": {
+          "$ref": "#/$defs/Totals"
+        },
+        "truncated": {
+          "description": "Whether a list holds fewer entries than there are.",
+          "type": "boolean"
+        },
+        "uncatalogued": {
+          "description": "The calls of names of packages the ecosystem catalog does not cover, by package, the\npackage with the most reach first: at most 50.",
+          "items": {
+            "$ref": "#/$defs/PackageCalls"
+          },
+          "type": "array"
+        },
+        "unresolved": {
+          "description": "The calls heki resolves to no function, by function and reason, the most reach first: at\nmost 50.",
+          "items": {
+            "$ref": "#/$defs/UnresolvedCalls"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "uncatalogued",
+        "catalog_may_miss",
+        "unresolved",
+        "source_roots",
+        "a1_hazards",
+        "totals",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "CauseRow": {
+      "additionalProperties": false,
+      "description": "The reports that leave one premise or condition open for one cause.",
+      "properties": {
+        "cause": {
+          "description": "The cause, unique within its premise or condition.",
+          "type": "string"
+        },
+        "closer": {
+          "$ref": "#/$defs/Closer",
+          "description": "What closes the cause: `annotation` (an annotation the user writes, which must be\ntrue), `code` (a change of the code's shape), `heki-catalog` (a fact only heki's\nshipped catalog can hold), or `none` (nothing the user can apply to every case)."
+        },
+        "examples": {
+          "description": "The first 50 reports, in report order.",
+          "items": {
+            "$ref": "#/$defs/ReportAt"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/OpenKind"
+        },
+        "name": {
+          "description": "The premise's name in the premise table (docs/precision.md), or the condition's.",
+          "type": "string"
+        },
+        "only_open": {
+          "description": "The reports it is the only open premise or condition of.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reports": {
+          "description": "The reports that leave it open.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rules": {
+          "description": "The reports by the exact rule whose claim they report.",
+          "items": {
+            "$ref": "#/$defs/CauseRule"
+          },
+          "type": "array"
+        },
+        "states": {
+          "description": "What the cause states.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "cause",
+        "states",
+        "closer",
+        "reports",
+        "only_open",
+        "rules",
+        "examples"
+      ],
+      "type": "object"
+    },
+    "CauseRule": {
+      "additionalProperties": false,
+      "description": "The reports of one rule's claim that leave a cause open.",
+      "properties": {
+        "only_open": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reports": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rule": {
+          "description": "The exact rule whose claim the reports state.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule",
+        "reports",
+        "only_open"
+      ],
+      "type": "object"
+    },
+    "Closer": {
+      "description": "What closes an open cause, for every case the cause stands for.",
+      "oneOf": [
+        {
+          "const": "annotation",
+          "description": "An annotation the user writes; heki trusts it under R2, so it must be true.",
+          "type": "string"
+        },
+        {
+          "const": "code",
+          "description": "A change of the code's shape.",
+          "type": "string"
+        },
+        {
+          "const": "heki-catalog",
+          "description": "A fact only heki's shipped catalog can hold (no `[[tool.heki.ecosystem]]` key sets it).",
+          "type": "string"
+        },
+        {
+          "const": "none",
+          "description": "Nothing the user can apply to every case: heki cannot establish the premise today, the\ncode states the opposite, or the cause stands for cases with different closers that the\nfacts do not tell apart yet.",
+          "type": "string"
+        }
+      ]
+    },
+    "Combination": {
+      "additionalProperties": false,
+      "description": "Causes that reports leave open together.",
+      "properties": {
+        "open": {
+          "items": {
+            "$ref": "#/$defs/OpenRef"
+          },
+          "type": "array"
+        },
+        "reports": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "open",
+        "reports"
+      ],
+      "type": "object"
+    },
+    "Confidence": {
+      "oneOf": [
+        {
+          "const": "high",
+          "description": "The trial found nothing the contract cannot see: no access it cannot tie to a class (an\neffect boundary: no scope function reaching code heki does not see), and every Python file\nbelow the project root was analyzed.",
+          "type": "string"
+        },
+        {
+          "const": "medium",
+          "description": "The trial reports no violation, but heki may not see all the contract is about: accesses\non objects of unknown class, Python files below the project root left out, or scope\nfunctions reaching code heki does not see. The caveats say which. An ownership entry then\nsets `unresolved = \"ignore\"`.",
+          "type": "string"
+        }
+      ]
+    },
+    "Consequence": {
+      "description": "What happens in the code a rule reports, which sets its default severity.",
+      "oneOf": [
+        {
+          "const": "bug",
+          "description": "A bug that can be critical: a wrong result, an exception, a lost update, a deadlock, an\nevent loop held up for every other task, or a broken contract.",
+          "type": "string"
+        },
+        {
+          "const": "minor-bug",
+          "description": "A bug that is rarely harmful: a promise the code makes is broken, such as a read-only\nannotation, where the callers seldom notice.",
+          "type": "string"
+        },
+        {
+          "const": "slowdown",
+          "description": "Slower code that computes the right result.",
+          "type": "string"
+        }
+      ]
+    },
+    "ContractAdvice": {
+      "additionalProperties": false,
+      "description": "A block the configuration declares: the candidates the contract trial kept whose entries\ndiffer only in their targets (or scopes), as one entry.",
+      "properties": {
+        "candidates": {
+          "description": "The candidates the block stands for.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "caveats": {
+          "description": "What the confidence does not cover.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "confidence": {
+          "$ref": "#/$defs/Confidence",
+          "description": "The lowest of its candidates'."
+        },
+        "entry": {
+          "additionalProperties": true,
+          "description": "The entry the block declares, as the keys it sets.",
+          "type": "object"
+        },
+        "evidence": {
+          "$ref": "#/$defs/Evidence",
+          "description": "Its candidates' together."
+        },
+        "kind": {
+          "$ref": "#/$defs/ContractKind"
+        },
+        "patterns": {
+          "description": "The class patterns the pattern trial tried in place of a class's targets.",
+          "items": {
+            "$ref": "#/$defs/PatternAdvice"
+          },
+          "type": "array"
+        },
+        "targets": {
+          "description": "What the block is about, sorted: the attributes (`module:Class.attr`) and class patterns\n(`module:Class.*`) its targets name, or the packages and modules its scopes cover.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "trial": {
+          "$ref": "#/$defs/Trial",
+          "description": "What the contract trial reported for its candidates, each report once."
+        }
+      },
+      "required": [
+        "kind",
+        "targets",
+        "candidates",
+        "entry",
+        "confidence",
+        "evidence",
+        "trial",
+        "patterns",
+        "caveats"
+      ],
+      "type": "object"
+    },
+    "ContractBlocker": {
+      "additionalProperties": false,
+      "description": "One site of [`ContractBlockers`].",
+      "properties": {
+        "blocks": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "candidates": {
+          "description": "The candidates whose trial reported it, and the blocks they are in, shown or not.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "function": {
+          "description": "The function the access is judged in.",
+          "type": "string"
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "description": "The report as `heki check` writes it for the first candidate it holds back.",
+          "type": "string"
+        },
+        "path": {
+          "description": "As `heki check` writes it.",
+          "type": "string"
+        },
+        "rule": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule",
+        "path",
+        "line",
+        "function",
+        "message",
+        "candidates",
+        "blocks"
+      ],
+      "type": "object"
+    },
+    "ContractBlockers": {
+      "additionalProperties": false,
+      "description": "The accesses heki cannot tie to a class (`MUT205`, `MUT206`) that keep blocks at\n`unresolved = \"ignore\"`: each site once, with what it holds back.",
+      "properties": {
+        "count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "items": {
+          "description": "The first by the candidates they hold back, then by path and line:\n[`MAX_BLOCKERS_SHOWN`], or with `heki recommend --all` up to [`MAX_LISTED`].",
+          "items": {
+            "$ref": "#/$defs/ContractBlocker"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "description": "Whether `items` holds fewer than `count`.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "count",
+        "items",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "ContractKind": {
+      "description": "The kinds of contract `heki recommend` proposes, by their key in the configuration.",
+      "enum": [
+        "write-owners",
+        "read-owners",
+        "effect-boundaries"
+      ],
+      "type": "string"
+    },
+    "Counts": {
+      "additionalProperties": false,
+      "description": "How many calls there are, and what they may hold up.",
+      "properties": {
+        "awaited": {
+          "description": "The calls that are awaited: whatever they run, they do not hold up the event loop.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "calls": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "in_loops": {
+          "description": "The calls inside a loop of their function, or in a function below a loop.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "on_event_loop": {
+          "description": "The calls, not awaited, in a function on an event loop (an `async def`, or a function\none runs on its thread): one that waits holds the loop up.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "calls",
+        "awaited",
+        "on_event_loop",
+        "in_loops"
+      ],
+      "type": "object"
+    },
+    "Evidence": {
+      "additionalProperties": false,
+      "description": "What a candidate rests on, from the discovery run.",
+      "properties": {
+        "audience": {
+          "$ref": "#/$defs/Listed",
+          "description": "The other modules reading the attribute (`write-owners`), using its class\n(`read-owners`), or calling into the scopes (`effect-boundaries`)."
+        },
+        "functions": {
+          "$ref": "#/$defs/Listed",
+          "description": "The functions the entry allows (`write-owners`: those writing the attribute after its\nobject is constructed; `read-owners`: those reading it) or holds (`effect-boundaries`:\nthe functions its scopes' modules define, without the comprehensions and lambdas inside\nthem), fully qualified."
+        },
+        "in_place": {
+          "description": "`write-owners`: a writer changes the attribute's object in place (a container).",
+          "type": "boolean"
+        },
+        "modules": {
+          "$ref": "#/$defs/Listed",
+          "description": "The modules of those functions; for an attribute written only while its objects are\nconstructed, the module of its class."
+        },
+        "unseen": {
+          "$ref": "#/$defs/Listed",
+          "description": "`effect-boundaries`: the functions of the scopes reaching code heki does not see (a call\nit does not resolve, a library name without a catalog entry, an A1 hazard, a body known\nonly from a stub)."
+        }
+      },
+      "required": [
+        "functions",
+        "modules",
+        "audience",
+        "in_place",
+        "unseen"
+      ],
+      "type": "object"
+    },
+    "ImportAt": {
+      "additionalProperties": false,
+      "properties": {
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "description": "The module or name the import names.",
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "name"
+      ],
+      "type": "object"
+    },
+    "LeftOut": {
+      "additionalProperties": false,
+      "description": "The Python files below the project root that the paths given leave out: heki takes the\nfiles it analyzed as the whole project.",
+      "properties": {
+        "files": {
+          "description": "The files found, in the order of a walk of the root sorted by name.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "python_files": {
+          "description": "How many were found (when `truncated`, a lower bound).",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "description": "Whether the count stopped before the end (after 50 files, or after the first 10,000\nentries below the root) or could not read an entry.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "python_files",
+        "files",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "Listed": {
+      "additionalProperties": false,
+      "description": "A list of names, the first [`MAX_LISTED`] of them.",
+      "properties": {
+        "count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "items": {
+          "description": "Sorted.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "description": "Whether `items` holds fewer than `count`.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "count",
+        "items",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "Location": {
+      "additionalProperties": false,
+      "properties": {
+        "column": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "column"
+      ],
+      "type": "object"
+    },
+    "NotShown": {
+      "additionalProperties": false,
+      "description": "The blocks of one kind past the first [`MAX_BLOCKS_SHOWN`], which the report leaves out\n(`heki recommend --all` shows them).",
+      "properties": {
+        "blocks": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "candidates": {
+          "description": "The candidates they stand for.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/ContractKind"
+        }
+      },
+      "required": [
+        "kind",
+        "blocks",
+        "candidates"
+      ],
+      "type": "object"
+    },
+    "NotTried": {
+      "additionalProperties": false,
+      "description": "The candidates of one kind past the first [`MAX_CANDIDATES`] (for `write-owners`, less the\nconfiguration's own), which no trial declared.",
+      "properties": {
+        "candidates": {
+          "description": "The candidates past them.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/ContractKind"
+        },
+        "tried": {
+          "description": "The candidates the trial declared.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "tried",
+        "candidates"
+      ],
+      "type": "object"
+    },
+    "OpenKind": {
+      "description": "What a report leaves open: a premise of its claim, which may then be false, or a condition\nof the exact tier that is no premise, under which the claim holds.",
+      "enum": [
+        "premise",
+        "condition"
+      ],
+      "type": "string"
+    },
+    "OpenPremises": {
+      "additionalProperties": false,
+      "description": "The heuristic reports of exact claims, by what keeps them heuristic.",
+      "properties": {
+        "by_cause": {
+          "description": "One row per premise or condition left open and cause, the row that is the only open one\nof the most reports first, then the row of the most reports.",
+          "items": {
+            "$ref": "#/$defs/CauseRow"
+          },
+          "type": "array"
+        },
+        "by_rule": {
+          "description": "Those reports by the code they are reported under, the most first.",
+          "items": {
+            "$ref": "#/$defs/RuleReports"
+          },
+          "type": "array"
+        },
+        "combinations": {
+          "description": "The sets of more than one cause that reports leave open together, the commonest first:\nat most 50.",
+          "items": {
+            "$ref": "#/$defs/Combination"
+          },
+          "type": "array"
+        },
+        "not_recorded": {
+          "description": "The reports that record no cause, by code: they are counted under no row of `by_cause`.",
+          "items": {
+            "$ref": "#/$defs/RuleReports"
+          },
+          "type": "array"
+        },
+        "reports": {
+          "description": "The heuristic reports of exact claims, as `heki check` prints them with every rule\nselected: the heuristic reports of the exact rules.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "description": "Whether `combinations` holds fewer sets than there are.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "reports",
+        "by_rule",
+        "not_recorded",
+        "by_cause",
+        "combinations",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "OpenRef": {
+      "additionalProperties": false,
+      "properties": {
+        "cause": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/OpenKind"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "cause"
+      ],
+      "type": "object"
+    },
+    "PackageCalls": {
+      "additionalProperties": false,
+      "description": "The calls of the names of one package.",
+      "properties": {
+        "awaited": {
+          "description": "The calls that are awaited: whatever they run, they do not hold up the event loop.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "calls": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "in_loops": {
+          "description": "The calls inside a loop of their function, or in a function below a loop.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "on_event_loop": {
+          "description": "The calls, not awaited, in a function on an event loop (an `async def`, or a function\none runs on its thread): one that waits holds the loop up.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "package": {
+          "type": "string"
+        },
+        "symbols": {
+          "description": "The names called, the one with the most reach first.",
+          "items": {
+            "$ref": "#/$defs/SymbolCalls"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "package",
+        "calls",
+        "awaited",
+        "on_event_loop",
+        "in_loops",
+        "symbols"
+      ],
+      "type": "object"
+    },
+    "PatternAdvice": {
+      "additionalProperties": false,
+      "description": "A pattern naming every attribute of a class and its subclasses (`module:Class.*`; for\n`read-owners`, the private ones, `module:Class._*`), tried in place of the targets of the\nclass a block lists: it also names the attributes the code adds later.",
+      "properties": {
+        "kept": {
+          "description": "Whether the block names it in place of them: the pattern trial reported nothing for it\nthat they did not.",
+          "type": "boolean"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "replaces": {
+          "description": "The targets of the block it stands for, sorted.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "trial": {
+          "$ref": "#/$defs/Trial",
+          "description": "What the pattern trial reported for it, declared alone with the block's other keys."
+        }
+      },
+      "required": [
+        "pattern",
+        "replaces",
+        "kept",
+        "trial"
+      ],
+      "type": "object"
+    },
+    "PublishedMeasurement": {
+      "additionalProperties": false,
+      "description": "A measurement as published: the classes of the sampled reports, and the shares derived\nfrom them.",
+      "properties": {
+        "benign": {
+          "description": "Reports that are right, of code that is deliberate or harmless at realistic sizes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "confirmed": {
+          "description": "Reports whose problem is real and observable from the code.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "date": {
+          "description": "The date of the build the round measured.",
+          "type": "string"
+        },
+        "false_claims": {
+          "description": "Reports that are wrong about the code.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "interval_percent": {
+          "description": "The 95% Wilson score interval of `right_percent`.",
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "plausible": {
+          "description": "Reports that are right, of code that does harm at realistic sizes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "real_harm_percent": {
+          "description": "The share of real harm (confirmed and plausible), in percent.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "right_percent": {
+          "description": "The share right about the code (confirmed, plausible, and benign), in percent.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "round": {
+          "description": "The round of the measurement protocol.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rule": {
+          "type": "string"
+        },
+        "sample": {
+          "description": "The reports sampled.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "rule",
+        "round",
+        "date",
+        "sample",
+        "confirmed",
+        "plausible",
+        "benign",
+        "false_claims",
+        "right_percent",
+        "interval_percent",
+        "real_harm_percent"
+      ],
+      "type": "object"
+    },
+    "RejectedContract": {
+      "additionalProperties": false,
+      "description": "A candidate a run with it declared reported for.",
+      "properties": {
+        "entry": {
+          "additionalProperties": true,
+          "description": "The entry the block would declare.",
+          "type": "object"
+        },
+        "kind": {
+          "$ref": "#/$defs/ContractKind"
+        },
+        "run": {
+          "$ref": "#/$defs/RunLabel",
+          "description": "The run that reported it: the contract trial, or the verification run with the whole\nblock."
+        },
+        "target": {
+          "description": "What the entry is about, as for a candidate kept.",
+          "type": "string"
+        },
+        "trial": {
+          "$ref": "#/$defs/Trial"
+        }
+      },
+      "required": [
+        "kind",
+        "target",
+        "entry",
+        "run",
+        "trial"
+      ],
+      "type": "object"
+    },
+    "ReportAt": {
+      "additionalProperties": false,
+      "description": "One report, with where it leaves the cause open.",
+      "properties": {
+        "at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Location"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where the premise or condition is open: the call of a chain's hop, or a loop."
+        },
+        "column": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "detail": {
+          "description": "What the cause's statement leaves out: the function, value, or class it is about.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "rule": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "column",
+        "rule"
+      ],
+      "type": "object"
+    },
+    "ReportKind": {
+      "enum": [
+        "heki-recommend"
+      ],
+      "type": "string"
+    },
+    "ReportsNow": {
+      "additionalProperties": false,
+      "description": "What the current configuration shows, as `heki check` prints it: reports that share a root\ncause are folded into one.",
+      "properties": {
+        "baseline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BaselineSplit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "With a baseline: the reports it allows, and the regressions `heki check` prints."
+        },
+        "exact": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failing": {
+          "description": "The reports `heki check` judges, those shown or with a baseline the regressions, that\nmake it fail (exit code 1) at the configuration's `fail-on`: the exact errors, or every\none at `fail-on = \"warning\"`.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "heuristic": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "heuristic_rules_off": {
+          "description": "The heuristic rules that are off only because `lint.heuristic` is false.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "shown": {
+          "description": "The reports `heki check` prints without a baseline.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "withheld_heuristic": {
+          "description": "The heuristic reports of exact rules that `lint.heuristic = false` leaves out.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "shown",
+        "exact",
+        "heuristic",
+        "withheld_heuristic",
+        "heuristic_rules_off",
+        "failing"
+      ],
+      "type": "object"
+    },
+    "RuleAdvice": {
+      "additionalProperties": false,
+      "description": "One rule the current selection does not run in full.",
+      "properties": {
+        "activation": {
+          "$ref": "#/$defs/Activation"
+        },
+        "baseline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BaselineSplit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "With a baseline: the added reports it allows, and the regressions."
+        },
+        "caveats": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "certainty": {
+          "enum": [
+            "exact",
+            "heuristic"
+          ],
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "consequence": {
+          "$ref": "#/$defs/Consequence"
+        },
+        "enabled_now": {
+          "description": "Whether the current selection runs the rule: then only its heuristic reports, which it\nwithholds, are counted.",
+          "type": "boolean"
+        },
+        "exact": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "experimental": {
+          "type": "boolean"
+        },
+        "heuristic": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "in_block": {
+          "description": "Whether the block enables the rule.",
+          "type": "boolean"
+        },
+        "measurement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PublishedMeasurement"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The latest published measurement of how often the rule's reports are right."
+        },
+        "reason": {
+          "description": "Why the rule is in the block or not.",
+          "type": "string"
+        },
+        "reports": {
+          "description": "The reports naming the rule in `extend-select` would add to what `heki check` prints\n(`null` for a rule that is not counted).",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "slug": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "slug",
+        "certainty",
+        "activation",
+        "experimental",
+        "consequence",
+        "enabled_now",
+        "exact",
+        "heuristic",
+        "in_block",
+        "reason",
+        "caveats"
+      ],
+      "type": "object"
+    },
+    "RuleReports": {
+      "additionalProperties": false,
+      "description": "The reports under one code.",
+      "properties": {
+        "reports": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rule": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule",
+        "reports"
+      ],
+      "type": "object"
+    },
+    "Run": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "$ref": "#/$defs/RunLabel"
+        }
+      },
+      "required": [
+        "label"
+      ],
+      "type": "object"
+    },
+    "RunLabel": {
+      "oneOf": [
+        {
+          "const": "discovery",
+          "description": "Every rule selected, on the configuration as it is.",
+          "type": "string"
+        },
+        {
+          "const": "source-roots",
+          "description": "The source-root trial: the module names of the files with directories added to `src`,\nand the imports they resolve (no analysis).",
+          "type": "string"
+        },
+        {
+          "const": "hypothetical-catalog",
+          "description": "The configuration with a catalog entry that waits and sends a query for each library\nname tried, and the rules those effects make report.",
+          "type": "string"
+        },
+        {
+          "const": "contract-trial",
+          "description": "The configuration with every contract candidate declared, the contract rules selected.",
+          "type": "string"
+        },
+        {
+          "const": "pattern-trial",
+          "description": "The configuration with each class pattern of the blocks shown declared alone, the rules\nof their kinds selected.",
+          "type": "string"
+        },
+        {
+          "const": "verification",
+          "description": "The configuration with the whole block applied, the block's rules and contracts selected.",
+          "type": "string"
+        }
+      ]
+    },
+    "Site": {
+      "additionalProperties": false,
+      "properties": {
+        "column": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "function": {
+          "description": "The function making the call.",
+          "type": "string"
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "column",
+        "function"
+      ],
+      "type": "object"
+    },
+    "SourceRoot": {
+      "additionalProperties": false,
+      "description": "A directory that, made a source root, resolves imports that name no project module now.",
+      "properties": {
+        "directory": {
+          "description": "Relative to the project root.",
+          "type": "string"
+        },
+        "examples": {
+          "description": "The first 50 of them.",
+          "items": {
+            "$ref": "#/$defs/ImportAt"
+          },
+          "type": "array"
+        },
+        "imports": {
+          "description": "The imports of its files that name no project module now.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "in_block": {
+          "description": "Whether the block adds it to `src`.",
+          "type": "boolean"
+        },
+        "reason": {
+          "description": "Why it is in the block or not.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "directory",
+        "imports",
+        "examples",
+        "in_block",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "SymbolCalls": {
+      "additionalProperties": false,
+      "description": "The calls of one library name.",
+      "properties": {
+        "awaited": {
+          "description": "The calls that are awaited: whatever they run, they do not hold up the event loop.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "calls": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "examples": {
+          "description": "The first 50 calls.",
+          "items": {
+            "$ref": "#/$defs/Site"
+          },
+          "type": "array"
+        },
+        "if_queries": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrialReports"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The `EFF103` reports `heki check` would print if the call sent a database query (`null`:\nnot tried)."
+        },
+        "if_waits": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrialReports"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The `EFF101` reports `heki check` would print if the call waited on the network, from\nthe hypothetical-catalog run (`null`: the name was not tried)."
+        },
+        "in_loops": {
+          "description": "The calls inside a loop of their function, or in a function below a loop.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "on_event_loop": {
+          "description": "The calls, not awaited, in a function on an event loop (an `async def`, or a function\none runs on its thread): one that waits holds the loop up.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "symbol": {
+          "description": "Spelled as an entry of `[[tool.heki.ecosystem]]` needs it: entries are looked up by this\nexact name, without inheritance or aliases.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol",
+        "calls",
+        "awaited",
+        "on_event_loop",
+        "in_loops",
+        "examples"
+      ],
+      "type": "object"
+    },
+    "Totals": {
+      "additionalProperties": false,
+      "properties": {
+        "below_source_roots": {
+          "description": "The calls of names below a directory of `source_roots`: calls of the project's files,\nwhich the library names leave out.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "not_tried": {
+          "description": "The library names it did not: past the first 64 by reach.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "registered_calls": {
+          "description": "The calls of names of packages the catalog covers, without an entry.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source_root_candidates": {
+          "description": "The directories of `source_roots`, those past the first 50 included.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tried": {
+          "description": "The library names the hypothetical-catalog run gave an entry.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "uncatalogued": {
+          "$ref": "#/$defs/Counts",
+          "description": "The calls of names of packages the catalog does not cover."
+        },
+        "uncatalogued_packages": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "uncatalogued_symbols": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unresolved": {
+          "$ref": "#/$defs/Counts"
+        },
+        "unresolved_by_reason": {
+          "additionalProperties": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "The unresolved calls by reason.",
+          "type": "object"
+        },
+        "unresolved_functions": {
+          "description": "The functions making a call heki resolves to no function.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unresolved_groups": {
+          "description": "The groups of those calls by function and reason.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "uncatalogued",
+        "uncatalogued_packages",
+        "uncatalogued_symbols",
+        "registered_calls",
+        "unresolved",
+        "unresolved_by_reason",
+        "unresolved_functions",
+        "unresolved_groups",
+        "source_root_candidates",
+        "below_source_roots",
+        "tried",
+        "not_tried"
+      ],
+      "type": "object"
+    },
+    "Trial": {
+      "additionalProperties": false,
+      "description": "What a run with the contract declared reported for it.",
+      "properties": {
+        "examples": {
+          "description": "The reports after inline suppressions, the first 50 in the order `heki check` prints\nthem.",
+          "items": {
+            "$ref": "#/$defs/TrialReport"
+          },
+          "type": "array"
+        },
+        "reports": {
+          "additionalProperties": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "The reports after inline suppressions, by rule: the contract's rule, and for an ownership\ncontract the rule of the accesses it cannot tie to a class.",
+          "type": "object"
+        },
+        "suppressed": {
+          "description": "The reports inline suppressions drop.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "reports",
+        "suppressed",
+        "examples"
+      ],
+      "type": "object"
+    },
+    "TrialReport": {
+      "additionalProperties": false,
+      "description": "One report of a trial.",
+      "properties": {
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "path": {
+          "description": "As `heki check` writes it.",
+          "type": "string"
+        },
+        "rule": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule",
+        "path",
+        "line",
+        "message"
+      ],
+      "type": "object"
+    },
+    "TrialReports": {
+      "additionalProperties": false,
+      "description": "The reports of one rule the hypothetical-catalog run printed, by certainty.",
+      "properties": {
+        "exact": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "heuristic": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "exact",
+        "heuristic"
+      ],
+      "type": "object"
+    },
+    "UnmatchedEntry": {
+      "additionalProperties": false,
+      "description": "A contract entry that matches nothing in the analyzed files, with every contract of its kind\nholding the same text under the same key.",
+      "properties": {
+        "contracts": {
+          "description": "The contracts holding it, in configuration order: a name, or `#<position>` (from 1) for\na contract without one.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "entry": {
+          "description": "The entry as configured.",
+          "type": "string"
+        },
+        "key": {
+          "description": "The key holding the entry (`targets`, `allowed-writers`).",
+          "type": "string"
+        },
+        "kind": {
+          "description": "The contracts' kind (`write-owners`).",
+          "type": "string"
+        },
+        "named_at_run_time": {
+          "description": "The class family gets attributes named at run time, which may include the entry's:\nheki cannot tell whether it names one (judged only with\n`unmatched-contract-entries = \"error\"`).",
+          "type": "boolean"
+        },
+        "names_no": {
+          "description": "What it names none of, in the words of the message (`function or method`).",
+          "type": "string"
+        },
+        "nearest": {
+          "description": "Existing names like the entry, written as the entry is, the closest first (at most\nthree).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "key",
+        "entry",
+        "contracts",
+        "names_no",
+        "nearest"
+      ],
+      "type": "object"
+    },
+    "UnresolvedCalls": {
+      "additionalProperties": false,
+      "description": "The calls one function makes that heki resolves to no function, for one reason.",
+      "properties": {
+        "awaited": {
+          "description": "The calls that are awaited: whatever they run, they do not hold up the event loop.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "calls": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "examples": {
+          "description": "The first 50 calls.",
+          "items": {
+            "$ref": "#/$defs/Site"
+          },
+          "type": "array"
+        },
+        "function": {
+          "type": "string"
+        },
+        "in_loops": {
+          "description": "The calls inside a loop of their function, or in a function below a loop.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "names": {
+          "description": "The methods and names called, each once, sorted.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on_event_loop": {
+          "description": "The calls, not awaited, in a function on an event loop (an `async def`, or a function\none runs on its thread): one that waits holds the loop up.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "parameter": {
+          "description": "The parameter, for a reason about one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why: `unannotated-parameter`, `unresolved-annotation`, `any-value`, `callable-value`,\n`unbound-name`, `unlisted-protocol`, `call-result`, `attribute`, `computed-name`,\n`too-many-implementations`, `unknown-member`, or `untyped-value`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "function",
+        "path",
+        "reason",
+        "names",
+        "calls",
+        "awaited",
+        "on_event_loop",
+        "in_loops",
+        "examples"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://heki.koxudaxi.dev/schemas/recommend-3.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The JSON object `heki recommend --output-format json` prints.",
+  "properties": {
+    "$schema": {
+      "description": "The URL of this schema.",
+      "type": "string"
+    },
+    "analyzed": {
+      "$ref": "#/$defs/Analyzed"
+    },
+    "blind_spots": {
+      "$ref": "#/$defs/BlindSpotsSection",
+      "description": "What heki cannot see: no count of reports applies there."
+    },
+    "config": {
+      "additionalProperties": true,
+      "description": "The keys `config_toml` adds or changes, as the configuration's keys and values.",
+      "type": "object"
+    },
+    "config_file": {
+      "description": "The configuration file the run read, or `null` when the project has none.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "config_toml": {
+      "description": "The keys to add or change, as TOML for `config_file` (empty when nothing is added).",
+      "type": "string"
+    },
+    "content": {
+      "description": "The report as the text output prints it.",
+      "type": "string"
+    },
+    "contract_blockers": {
+      "$ref": "#/$defs/ContractBlockers",
+      "description": "The accesses heki cannot tie to a class that keep blocks at `unresolved = \"ignore\"`, each\nsite once."
+    },
+    "contracts": {
+      "description": "The contracts the code keeps, as the blocks the configuration block declares: candidates\nthe contract trial kept, merged where their entries differ only in their targets or\nscopes, then applied with the whole block by the verification run. By kind, then by rank\nwithin it: the first 3 of each kind, or every one with `heki recommend --all`.",
+      "items": {
+        "$ref": "#/$defs/ContractAdvice"
+      },
+      "type": "array"
+    },
+    "contracts_not_shown": {
+      "description": "The blocks past the first 3 of their kind, which neither the report nor the configuration\nblock holds.",
+      "items": {
+        "$ref": "#/$defs/NotShown"
+      },
+      "type": "array"
+    },
+    "contracts_not_tried": {
+      "description": "The candidates past the cap of their kind, which no trial declared.",
+      "items": {
+        "$ref": "#/$defs/NotTried"
+      },
+      "type": "array"
+    },
+    "heki": {
+      "description": "The version of heki that wrote the report.",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/ReportKind"
+    },
+    "notes": {
+      "description": "What the reader should know to weigh the advice.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "open_premises": {
+      "$ref": "#/$defs/OpenPremises",
+      "description": "What keeps the heuristic reports of exact claims heuristic."
+    },
+    "rejected_contracts": {
+      "description": "The candidates a run with them declared reported for: not in the block.",
+      "items": {
+        "$ref": "#/$defs/RejectedContract"
+      },
+      "type": "array"
+    },
+    "reports_now": {
+      "$ref": "#/$defs/ReportsNow"
+    },
+    "root": {
+      "description": "The project root, as the output writes paths (`.` for the working directory).",
+      "type": "string"
+    },
+    "rules": {
+      "description": "Every rule the configuration does not run in full: the rules it leaves off, and the exact\nrules whose heuristic reports it withholds. The block's rules come first.",
+      "items": {
+        "$ref": "#/$defs/RuleAdvice"
+      },
+      "type": "array"
+    },
+    "runs": {
+      "description": "The analyses the report was computed from, in the order they ran.",
+      "items": {
+        "$ref": "#/$defs/Run"
+      },
+      "type": "array"
+    },
+    "table_prefix": {
+      "description": "The table the configuration's keys are under in that file: `tool.heki` in a\n`pyproject.toml`, empty for a file that holds them at its top level (`heki.toml`).",
+      "type": "string"
+    },
+    "unmatched_entries": {
+      "description": "The entries of the contracts configured now that match nothing in the analyzed files, one\nper kind, key, and text, in configuration order.",
+      "items": {
+        "$ref": "#/$defs/UnmatchedEntry"
+      },
+      "type": "array"
+    },
+    "version": {
+      "description": "The version of the object's fields: it changes when a field is removed or changes\nmeaning; fields are only added within a version.",
+      "format": "uint32",
+      "maximum": 3,
+      "minimum": 3,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "$schema",
+    "kind",
+    "version",
+    "heki",
+    "root",
+    "table_prefix",
+    "analyzed",
+    "runs",
+    "reports_now",
+    "open_premises",
+    "blind_spots",
+    "rules",
+    "contracts",
+    "contracts_not_shown",
+    "contract_blockers",
+    "rejected_contracts",
+    "contracts_not_tried",
+    "unmatched_entries",
+    "notes",
+    "config",
+    "config_toml",
+    "content"
+  ],
+  "title": "heki recommend",
+  "type": "object"
+}

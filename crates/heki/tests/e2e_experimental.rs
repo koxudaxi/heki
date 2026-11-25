@@ -424,10 +424,10 @@ fn docs_check_fails_on_a_stale_recommend_example_or_schema() {
         "{page}"
     );
     let schema: Value =
-        serde_json::from_str(&docs.0.read("docs/schemas/recommend-2.json")).unwrap();
+        serde_json::from_str(&docs.0.read("docs/schemas/recommend-3.json")).unwrap();
     assert_eq!(
         schema["$id"],
-        json!("https://heki.koxudaxi.dev/schemas/recommend-2.json")
+        json!("https://heki.koxudaxi.dev/schemas/recommend-3.json")
     );
     assert_eq!(docs.build_docs(&["--check"]).0, 0);
 
@@ -443,10 +443,10 @@ fn docs_check_fails_on_a_stale_recommend_example_or_schema() {
         "{out}"
     );
     let (code, out) = docs.check_with(
-        "docs/schemas/recommend-2.json",
+        "docs/schemas/recommend-3.json",
         "\"title\": \"heki recommend\"",
         "\"title\": \"x\"",
     );
     assert_eq!(code, 1);
-    assert!(out.contains("docs/schemas/recommend-2.json"), "{out}");
+    assert!(out.contains("docs/schemas/recommend-3.json"), "{out}");
 }

@@ -583,7 +583,10 @@ that need no configuration, the import contracts of other tools, and heki's own 
   2. A contract enters the block only when a trial run of its rules, with the strict sibling,
      reports no violation of it on the code as it is and hides no report of the configuration's
      own contracts; reports of the strict sibling make it medium, with `unresolved = "ignore"`.
-     A run with the whole block then applies it as `heki check` would.
+     Kept contracts whose entries differ only in their targets or scopes are one entry, and a
+     pattern naming every attribute of a class enters it only after a trial of its own reports
+     nothing the targets it stands for did not. A run with the whole block then applies it as
+     `heki check` would.
   3. A catalog entry enters the block only when heki can verify every key it sets. heki cannot
      verify a library's effects, so library entries never enter it; such calls are listed as
      questions, with what a trial entry would report. `src` enters only after its trial.
