@@ -526,19 +526,15 @@ symbol = "pathlib.Path.move_into"
 effects = ["blocking_fs"]
 opaque_to_layer3 = true
 
-# The listing methods of `Path`, `glob.iglob` and `os.walk` are generators: they read the
-# directories while the result is iterated, as `os.walk` does (the class of the result is named
-# after the call).
+# `Path.iterdir` lists the directory when it is called on 3.13 and later (earlier versions
+# list while the result is iterated), so the wait is on the call. `Path.glob`, `Path.rglob`,
+# `Path.walk`, `glob.iglob` and `os.walk` are generators: they read the directories while the
+# result is iterated (the class of the result is named after the call).
 
 [[entries]]
 symbol = "pathlib.Path.iterdir"
-return_type = "pathlib.Path.iterdir()"
-items = "entries"
-opaque_to_layer3 = true
-
-[[entries]]
-symbol = "pathlib.Path.iterdir().__iter__"
 effects = ["blocking_fs"]
+items = "entries"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -805,12 +801,17 @@ effects = ["blocking_sync"]
 opaque_to_layer3 = true
 
 # --- FTP ---
-# `ftplib.FTP(...)` opens no more than the client object here; each command waits for the
-# server. A new client per call in a loop is a new connection.
+# `ftplib.FTP()` opens no more than the client object here; each command waits for the
+# server. Given a host, the constructor connects (and `user` logs in), so a call with a host
+# waits too. A new client per call in a loop is a new connection. `FTP.mlsd` is a generator: it
+# talks to the server while its result is iterated.
 
 [[entries]]
 symbol = "ftplib.FTP"
 effects = ["unpooled_client_alloc"]
+cases = [
+    { arg = 0, param = "host", nonempty = true, effects = ["blocking_net", "unpooled_client_alloc"] },
+]
 exit_suppresses = false
 opaque_to_layer3 = true
 
@@ -856,6 +857,12 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "ftplib.FTP.mlsd"
+return_type = "ftplib.FTP.mlsd()"
+items = "entries"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.mlsd().__iter__"
 effects = ["blocking_net"]
 opaque_to_layer3 = true
 
@@ -917,6 +924,9 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "ftplib.FTP_TLS"
 effects = ["unpooled_client_alloc"]
+cases = [
+    { arg = 0, param = "host", nonempty = true, effects = ["blocking_net", "unpooled_client_alloc"] },
+]
 exit_suppresses = false
 opaque_to_layer3 = true
 
@@ -962,6 +972,12 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "ftplib.FTP_TLS.mlsd"
+return_type = "ftplib.FTP_TLS.mlsd()"
+items = "entries"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.mlsd().__iter__"
 effects = ["blocking_net"]
 opaque_to_layer3 = true
 

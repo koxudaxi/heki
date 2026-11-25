@@ -813,6 +813,56 @@ effects = ["blocking_net"]
 opaque_to_layer3 = true
 
 [[entries]]
+symbol = "urllib3.poolmanager.PoolManager.connection_from_host"
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.poolmanager.PoolManager.connection_from_url"
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.poolmanager.PoolManager.connection_from_context"
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.poolmanager.PoolManager.connection_from_pool_key"
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.poolmanager.PoolManager.connection_from_pool_kwargs"
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.poolmanager.ProxyManager.connection_from_host"
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.poolmanager.ProxyManager.connection_from_url"
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.poolmanager.ProxyManager.connection_from_context"
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.poolmanager.ProxyManager.connection_from_pool_key"
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.poolmanager.ProxyManager.connection_from_pool_kwargs"
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+[[entries]]
 symbol = "urllib3.poolmanager.proxy_from_url"
 effects = ["unpooled_client_alloc"]
 return_type = "urllib3.ProxyManager"
@@ -6147,10 +6197,23 @@ effects = ["blocking_sync"]
 opaque_to_layer3 = true
 
 # --- fsspec ---
-# A file system reads local disks or object stores; either waits on the call.
+# A file system reads local disks or object stores; either waits on the call. `fsspec.open`
+# returns an `OpenFile` that opens the file when it is entered (`with`) or `open()` is called.
+# `walk` is a generator: it lists while its result is iterated. A file system for `ftp`, `sftp`
+# or `ssh` connects in its constructor.
 
 [[entries]]
 symbol = "fsspec.open"
+return_type = "fsspec.core.OpenFile"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.core.OpenFile.__enter__"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.core.OpenFile.open"
 effects = ["blocking_fs"]
 opaque_to_layer3 = true
 
@@ -6167,6 +6230,9 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "fsspec.filesystem"
 return_type = "fsspec.AbstractFileSystem"
+cases = [
+    { arg = 0, param = "protocol", one_of = ["ftp", "sftp", "ssh"], effects = ["blocking_net"] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -6226,6 +6292,12 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fsspec.AbstractFileSystem.walk"
+return_type = "fsspec.AbstractFileSystem.walk()"
+items = "entries"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.walk().__iter__"
 effects = ["blocking_fs"]
 opaque_to_layer3 = true
 

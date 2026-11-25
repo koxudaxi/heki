@@ -4134,8 +4134,9 @@ def f_psutil_iter() -> list[object]:
     return [p for p in psutil.process_iter()]
 
 
-def f_fsspec_open(path: str) -> object:
-    return fsspec.open(path)
+def f_fsspec_open(path: str) -> bytes:
+    with fsspec.open(path) as f:
+        return f.read()
 
 
 def f_fsspec_cat(path: str) -> bytes:
@@ -4164,6 +4165,94 @@ fn signal_ftplib_psutil_and_fsspec_have_rows() {
             "f_psutil_children",
             "f_psutil_iter",
             "f_psutil_memory",
+        ]
+    );
+    assert!(found.iter().all(|(_, f)| !f.starts_with("g_")), "{found:?}");
+}
+
+const LAZY_AND_CONNECTING: &str = r#"import ftplib
+from pathlib import Path
+
+import fsspec
+import urllib3.poolmanager
+
+
+def f_iterdir_returned(p: Path) -> object:
+    return p.iterdir()
+
+
+def f_ftp_with_host() -> object:
+    return ftplib.FTP("ftp.example.com")
+
+
+def f_ftp_tls_with_host() -> object:
+    return ftplib.FTP_TLS("ftp.example.com")
+
+
+def g_ftp_without_host() -> object:
+    return ftplib.FTP()
+
+
+def g_mlsd_returned(ftp: ftplib.FTP) -> object:
+    return ftp.mlsd()
+
+
+def f_mlsd_consumed(ftp: ftplib.FTP) -> list[object]:
+    return list(ftp.mlsd())
+
+
+def g_fsspec_open_returned(path: str) -> object:
+    return fsspec.open(path)
+
+
+def f_fsspec_open_entered(path: str) -> bytes:
+    with fsspec.open(path) as f:
+        return f.read()
+
+
+def f_fsspec_open_method(path: str) -> object:
+    return fsspec.open(path).open()
+
+
+def f_fsspec_ftp() -> object:
+    return fsspec.filesystem("ftp")
+
+
+def g_fsspec_memory() -> object:
+    return fsspec.filesystem("memory")
+
+
+def g_fsspec_walk_returned(fs: fsspec.AbstractFileSystem, path: str) -> object:
+    return fs.walk(path)
+
+
+def f_fsspec_walk_consumed(fs: fsspec.AbstractFileSystem, path: str) -> list[object]:
+    return list(fs.walk(path))
+
+
+def g_pool_from_manager_does_no_io(pm: urllib3.poolmanager.PoolManager) -> object:
+    return pm.connection_from_host("example.com")
+"#;
+
+#[test]
+fn lazy_results_wait_where_they_are_used_and_constructors_that_connect_wait() {
+    let found = probe_reports("cat_lazy_and_connecting", LAZY_AND_CONNECTING);
+    assert_eq!(
+        reported(&found, "fs"),
+        [
+            "f_fsspec_open_entered",
+            "f_fsspec_open_method",
+            "f_fsspec_walk_consumed",
+            "f_iterdir_returned",
+        ]
+    );
+    assert_eq!(
+        reported(&found, "net"),
+        [
+            "f_fsspec_ftp",
+            "f_ftp_tls_with_host",
+            "f_ftp_with_host",
+            "f_mlsd_consumed",
         ]
     );
     assert!(found.iter().all(|(_, f)| !f.starts_with("g_")), "{found:?}");
@@ -4199,7 +4288,8 @@ async def tp_process():
 async def tp_waits(pid: int, ftp: ftplib.FTP):
     signal.sigwait({signal.SIGUSR1})
     psutil.Process(pid).children()
-    fsspec.open("s3://bucket/key")
+    with fsspec.open("s3://bucket/key"):
+        pass
     ftp.nlst()
 
 
@@ -4237,7 +4327,7 @@ fn the_new_rows_block_the_event_loop() {
         by_function("tp_fs"),
         [
             "pathlib.Path.mkdir",
-            "pathlib.Path.iterdir().__iter__",
+            "pathlib.Path.iterdir",
             "os.replace",
             "shutil.move",
             "tempfile.mkdtemp",
@@ -4254,7 +4344,7 @@ fn the_new_rows_block_the_event_loop() {
             "signal.sigwait",
             "psutil.Process",
             "psutil.Process.children",
-            "fsspec.open",
+            "fsspec.core.OpenFile.__enter__",
             "ftplib.FTP.nlst"
         ]
     );

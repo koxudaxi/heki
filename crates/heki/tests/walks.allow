@@ -61,12 +61,11 @@ heki_effect::summary::Extractor::external_call  W1  stage-2 debt (EFF110): recur
 heki_effect::summary::Extractor::external_read  W1  recursion (calls itself): Memo or Closure; stage-2 migration debt
 heki_effect::summary::Extractor::handed_callable  W1  recursion (through Extractor::call): Memo or Closure
 heki_effect::summary::Extractor::hashed_whole_self_attrs  W2  worklist: reach, Closure, or fixpoint
-heki_effect::summary::Extractor::iteration  W1  stage-2 debt (EFF110): recursion (through TypeCtx::infer_types): Memo or Closure
-heki_effect::summary::Extractor::iterations  W1  stage-2 debt (EFF110): recursion (through TypeCtx::infer_types): Memo or Closure
 heki_effect::summary::Extractor::lock_acquired  W1  stage-2 debt (EFF109): recursion (through TypeCtx::infer_types): Memo or Closure
 heki_effect::summary::Extractor::lock_held_at  W1  stage-2 debt (EFF110): recursion (through TypeCtx::infer_types): Memo or Closure
 heki_effect::summary::Extractor::name_rebound  W1  stage-2 debt (EFF109): recursion (through TypeCtx::infer_types): Memo or Closure
 heki_effect::summary::Extractor::property_read  W1  stage-2 debt (EFF110): recursion (through TypeCtx::infer_types): Memo or Closure
+heki_effect::summary::Extractor::protocol_call  W1  stage-2 debt (EFF110): recursion (through TypeCtx::infer_types): Memo or Closure
 heki_effect::summary::Extractor::reference_site  W4  block_loop_depth: FnShape; stage-2 migration debt
 heki_effect::summary::Extractor::returned_origins  W2  worklist: reach, Closure, or fixpoint
 heki_effect::summary::Extractor::returned_self_attrs  W2  worklist: reach, Closure, or fixpoint

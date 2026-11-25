@@ -2105,9 +2105,10 @@ mod tests {
                     "fsspec.AbstractFileSystem.tail",
                     "fsspec.AbstractFileSystem.touch",
                     "fsspec.AbstractFileSystem.upload",
-                    "fsspec.AbstractFileSystem.walk",
+                    "fsspec.AbstractFileSystem.walk().__iter__",
                     "fsspec.AbstractFileSystem.write_text",
-                    "fsspec.open",
+                    "fsspec.core.OpenFile.__enter__",
+                    "fsspec.core.OpenFile.open",
                     "fsspec.open_files",
                     "fsspec.open_local",
                     "glob.iglob().__iter__",
@@ -2162,7 +2163,7 @@ mod tests {
                     "pathlib.Path.is_mount",
                     "pathlib.Path.is_socket",
                     "pathlib.Path.is_symlink",
-                    "pathlib.Path.iterdir().__iter__",
+                    "pathlib.Path.iterdir",
                     "pathlib.Path.lchmod",
                     "pathlib.Path.lstat",
                     "pathlib.Path.mkdir",
@@ -2321,7 +2322,7 @@ mod tests {
                     "ftplib.FTP.dir",
                     "ftplib.FTP.login",
                     "ftplib.FTP.mkd",
-                    "ftplib.FTP.mlsd",
+                    "ftplib.FTP.mlsd().__iter__",
                     "ftplib.FTP.nlst",
                     "ftplib.FTP.pwd",
                     "ftplib.FTP.quit",
@@ -2341,7 +2342,7 @@ mod tests {
                     "ftplib.FTP_TLS.dir",
                     "ftplib.FTP_TLS.login",
                     "ftplib.FTP_TLS.mkd",
-                    "ftplib.FTP_TLS.mlsd",
+                    "ftplib.FTP_TLS.mlsd().__iter__",
                     "ftplib.FTP_TLS.nlst",
                     "ftplib.FTP_TLS.pwd",
                     "ftplib.FTP_TLS.quit",
@@ -2367,14 +2368,25 @@ mod tests {
             ),
             (
                 s(&[
-                    "ftplib.FTP",
-                    "ftplib.FTP_TLS",
                     "urllib3.connectionpool.HTTPConnectionPool",
                     "urllib3.connectionpool.HTTPSConnectionPool",
                     "urllib3.poolmanager.PoolManager",
                     "urllib3.poolmanager.ProxyManager",
                 ]),
                 entry(&[UnpooledClientAlloc]),
+            ),
+            (
+                s(&["ftplib.FTP", "ftplib.FTP_TLS"]),
+                with_cases(
+                    vec![ArgCase {
+                        arg: Some(0),
+                        param: Some("host".into()),
+                        nonempty: true,
+                        effects: Some(vec![BlockingNet, UnpooledClientAlloc]),
+                        ..ArgCase::default()
+                    }],
+                    entry(&[UnpooledClientAlloc]),
+                ),
             ),
             (
                 s(&[
@@ -2410,8 +2422,36 @@ mod tests {
                 returning("urllib3.HTTPConnectionPool", entry(&[])),
             ),
             (
+                with_prefix_all(
+                    &[
+                        "urllib3.poolmanager.PoolManager",
+                        "urllib3.poolmanager.ProxyManager",
+                    ],
+                    &[
+                        "connection_from_context",
+                        "connection_from_host",
+                        "connection_from_pool_key",
+                        "connection_from_pool_kwargs",
+                        "connection_from_url",
+                    ],
+                ),
+                returning("urllib3.HTTPConnectionPool", entry(&[])),
+            ),
+            (
                 s(&["fsspec.filesystem"]),
-                returning("fsspec.AbstractFileSystem", entry(&[])),
+                returning(
+                    "fsspec.AbstractFileSystem",
+                    with_cases(
+                        vec![ArgCase {
+                            arg: Some(0),
+                            param: Some("protocol".into()),
+                            one_of: s(&["ftp", "sftp", "ssh"]),
+                            effects: Some(vec![BlockingNet]),
+                            ..ArgCase::default()
+                        }],
+                        entry(&[]),
+                    ),
+                ),
             ),
             (
                 s(&[
@@ -2427,15 +2467,21 @@ mod tests {
         ];
         // A generator reads the directories while its result is iterated.
         for call in [
-            "pathlib.Path.iterdir",
             "pathlib.Path.glob",
             "pathlib.Path.rglob",
             "pathlib.Path.walk",
             "glob.iglob",
             "psutil.process_iter",
+            "ftplib.FTP.mlsd",
+            "ftplib.FTP_TLS.mlsd",
+            "fsspec.AbstractFileSystem.walk",
         ] {
             rows.push((s(&[call]), returning(&format!("{call}()"), entry(&[]))));
         }
+        rows.push((
+            s(&["fsspec.open"]),
+            returning("fsspec.core.OpenFile", entry(&[])),
+        ));
         rows
     }
 
@@ -4463,6 +4509,9 @@ mod tests {
                 "glob.iglob",
                 "psutil.process_iter",
                 "glob.glob",
+                "ftplib.FTP.mlsd",
+                "ftplib.FTP_TLS.mlsd",
+                "fsspec.AbstractFileSystem.walk",
             ],
         ),
     ];
