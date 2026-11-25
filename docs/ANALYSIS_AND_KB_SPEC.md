@@ -2403,8 +2403,9 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      depth). Each function of the checked file naming a guarded attribute or global is typed,
      its writes found, and a write where `LockPoints` (with its callees' `returns_holding`
      through the binding of `self`) finds nothing held is reported once per state. The language server keeps the view and re-checks every file when
-     the guarded states change, and the files of the functions whose membership changed
-     otherwise; the locked writes are places other files' reports show.
+     the guarded states, their locked writers, or whether a thread runs those writers change,
+     and the files of the functions whose membership changed otherwise; the locked writes are
+     places other files' reports show.
 
 14. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function (and each module body a scope names as `<module>`,

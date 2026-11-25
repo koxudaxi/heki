@@ -21,7 +21,7 @@ use crate::resolver::{TypeCtx, Val};
 use heki_ast::Span;
 use heki_ir::walk::{And, Budget, Facts, FnShape, Sparse, Visit, fixpoint, reach};
 use heki_ir::{BlockId, Inst, InstKind, IrFunction, Terminator, VarId};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -144,16 +144,15 @@ enum Receiver {
     Named(String),
 }
 
-/// Where `f` (or the method a scope nested in it reads `self` from) runs on an instance: the
-/// class, fully qualified, when `var` is that method's first parameter.
-fn receiver<'i>(
+/// Where the function of `shape` (or the method a scope nested in it reads `self` from) runs on
+/// an instance: the class, fully qualified, when `var` copies that method's first parameter.
+fn receiver(
     tcx: &TypeCtx<'_>,
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     types: &FxHashMap<VarId, Val>,
-    def: &dyn Fn(VarId) -> Option<&'i Inst>,
     var: VarId,
 ) -> Option<Receiver> {
-    let var = through_copies(def, var);
+    let (f, var) = (shape.f, shape.copy_root(var));
     let method = |g: &IrFunction, param: u8| {
         let class = g.owner_class_qualname.as_ref()?;
         let fqn = format!("{}.{class}", tcx.module_name());
@@ -172,7 +171,7 @@ fn receiver<'i>(
     if f.params.first().is_some_and(|p| p.var == var) {
         return method(f, 0);
     }
-    match def(var).map(|i| &i.kind) {
+    match shape.inst(var).map(|i| &i.kind) {
         Some(InstKind::LoadDeref { name, .. }) => {
             let (g, param) = tcx.captured_param(f, name)?;
             method(g, param)
@@ -192,30 +191,28 @@ fn thread_local_class(tcx: &TypeCtx<'_>, class: &str) -> bool {
 
 /// The object `var` reaches as shared state: an attribute of the method's instance, of a class,
 /// or of a module, or a module global (through copies).
-fn state_of<'i>(
+fn state_of(
     tcx: &TypeCtx<'_>,
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     types: &FxHashMap<VarId, Val>,
-    def: &dyn Fn(VarId) -> Option<&'i Inst>,
     var: VarId,
 ) -> Option<StateKey> {
-    match &def(through_copies(def, var))?.kind {
-        InstKind::AttrLoad { obj, attr, .. } => attr_state(tcx, f, types, def, *obj, attr),
+    match &shape.inst(shape.copy_root(var))?.kind {
+        InstKind::AttrLoad { obj, attr, .. } => attr_state(tcx, shape, types, *obj, attr),
         InstKind::LoadGlobal { name, .. } => Some(StateKey::Global(tcx.global_fqn(name))),
         _ => None,
     }
 }
 
 /// The attribute `attr` of `obj` as shared state.
-fn attr_state<'i>(
+fn attr_state(
     tcx: &TypeCtx<'_>,
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     types: &FxHashMap<VarId, Val>,
-    def: &dyn Fn(VarId) -> Option<&'i Inst>,
     obj: VarId,
     attr: &str,
 ) -> Option<StateKey> {
-    match receiver(tcx, f, types, def, obj)? {
+    match receiver(tcx, shape, types, obj)? {
         Receiver::Instance(class) if !thread_local_class(tcx, &class) => Some(StateKey::Attr {
             class,
             attr: attr.to_owned(),
@@ -235,42 +232,42 @@ fn container(types: &FxHashMap<VarId, Val>, var: VarId) -> Option<ContainerKind>
     }
 }
 
-/// The write of shared state `kind` makes in `f`: an assignment or deletion of an attribute of
-/// the instance, a class, or a module, or of a global the function declares `global`; an item
-/// store or delete, or a mutating method call, on a builtin container such state holds.
-pub fn state_written<'i>(
+/// The write of shared state `kind` makes in the function of `shape`: an assignment or deletion
+/// of an attribute of the instance, a class, or a module, or of a global the function declares
+/// `global`; an item store or delete, or a mutating method call, on a builtin container such
+/// state holds.
+pub fn state_written(
     tcx: &TypeCtx<'_>,
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     types: &FxHashMap<VarId, Val>,
-    def: &dyn Fn(VarId) -> Option<&'i Inst>,
     kind: &InstKind,
 ) -> Option<(StateKey, WriteKind)> {
     let changed = |obj: VarId| {
-        container(types, through_copies(def, obj))?;
-        Some((state_of(tcx, f, types, def, obj)?, WriteKind::Changes))
+        container(types, shape.copy_root(obj))?;
+        Some((state_of(tcx, shape, types, obj)?, WriteKind::Changes))
     };
     match kind {
         InstKind::AttrStore { obj, attr, .. } | InstKind::AttrDelete { obj, attr } => {
-            if matches!(types.get(&through_copies(def, *obj)), Some(Val::Inst(c)) if thread_local_class(tcx, c))
+            if matches!(types.get(&shape.copy_root(*obj)), Some(Val::Inst(c)) if thread_local_class(tcx, c))
             {
                 return None;
             }
             Some((
-                attr_state(tcx, f, types, def, *obj, attr)?,
+                attr_state(tcx, shape, types, *obj, attr)?,
                 WriteKind::Assigns,
             ))
         }
         InstKind::StoreGlobal { name, .. }
         | InstKind::Delete {
             name, global: true, ..
-        } if !f.is_module_body => {
+        } if !shape.f.is_module_body => {
             Some((StateKey::Global(tcx.global_fqn(name)), WriteKind::Assigns))
         }
         InstKind::SubscriptStore { obj, .. } | InstKind::SubscriptDelete { obj, .. } => {
             changed(*obj)
         }
         InstKind::MethodCall { recv, method, .. } => {
-            let kind = container(types, through_copies(def, *recv))?;
+            let kind = container(types, shape.copy_root(*recv))?;
             if !kind.mutators().contains(&method.as_str()) {
                 return None;
             }
@@ -280,21 +277,22 @@ pub fn state_written<'i>(
     }
 }
 
-/// The own writes of shared state of `f` in the blocks a run reaches (`live`).
-pub fn state_writes<'i>(
+/// The own writes of shared state of the function of `shape` in the blocks a run reaches
+/// (`live`).
+pub fn state_writes(
     tcx: &TypeCtx<'_>,
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     types: &FxHashMap<VarId, Val>,
-    def: &dyn Fn(VarId) -> Option<&'i Inst>,
     live: &crate::ownership::Live,
 ) -> Vec<StateWrite> {
+    let f = shape.f;
     if f.is_module_body || f.is_class_body {
         return Vec::new();
     }
     let mut out = Vec::new();
     for bb in f.blocks.iter().filter(|b| live.block(b.id)) {
         for (i, inst) in bb.insts.iter().enumerate() {
-            if let Some((state, kind)) = state_written(tcx, f, types, def, &inst.kind) {
+            if let Some((state, kind)) = state_written(tcx, shape, types, &inst.kind) {
                 out.push(StateWrite {
                     state,
                     kind,
@@ -317,15 +315,14 @@ fn is_thread_lock(tcx: &TypeCtx<'_>, types: &FxHashMap<VarId, Val>, var: VarId) 
     }
 }
 
-/// How `f` names the lock `var`.
-fn lock_key<'i>(
+/// How the function of `shape` names the lock `var`.
+fn lock_key(
     tcx: &TypeCtx<'_>,
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     types: &FxHashMap<VarId, Val>,
-    def: &dyn Fn(VarId) -> Option<&'i Inst>,
     var: VarId,
 ) -> LockKey {
-    let state = state_of(tcx, f, types, def, var);
+    let state = state_of(tcx, shape, types, var);
     match state {
         Some(StateKey::Attr { attr, .. }) => LockKey::SelfAttr(attr),
         Some(StateKey::Global(fqn)) => LockKey::Global(fqn),
@@ -340,11 +337,10 @@ enum Step {
     Exit(VarId),
 }
 
-fn step<'i>(
+fn step(
     tcx: &TypeCtx<'_>,
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     types: &FxHashMap<VarId, Val>,
-    def: &dyn Fn(VarId) -> Option<&'i Inst>,
     kind: &InstKind,
 ) -> Option<Step> {
     match kind {
@@ -361,7 +357,7 @@ fn step<'i>(
             ..
         } if is_thread_lock(tcx, types, *recv) => match method.as_str() {
             "acquire" => Some(Step::Take(*recv, false)),
-            "release" => Some(Step::Release(lock_key(tcx, f, types, def, *recv))),
+            "release" => Some(Step::Release(lock_key(tcx, shape, types, *recv))),
             _ => None,
         },
         _ => None,
@@ -381,11 +377,10 @@ impl LockPoints {
     /// (`taken_by_call`: the callees' [`GuardFacts::returns_holding`] in `f`'s names; nothing
     /// while the callees' facts are not known). One pass over the instructions after the
     /// dataflows, which keep a bit per acquisition and per lock released.
-    pub fn of<'i>(
+    pub fn of(
         tcx: &TypeCtx<'_>,
         shape: &FnShape<'_>,
         types: &FxHashMap<VarId, Val>,
-        def: &dyn Fn(VarId) -> Option<&'i Inst>,
         live: &crate::ownership::Live,
         taken_by_call: &dyn Fn(BlockId, usize, &Inst) -> Vec<LockKey>,
     ) -> Self {
@@ -396,7 +391,7 @@ impl LockPoints {
         let mut steps: Vec<((BlockId, usize), Step)> = Vec::new();
         for bb in f.blocks.iter().filter(|b| live.block(b.id)) {
             for (i, inst) in bb.insts.iter().enumerate() {
-                if let Some(s) = step(tcx, f, types, def, &inst.kind) {
+                if let Some(s) = step(tcx, shape, types, &inst.kind) {
                     steps.push(((bb.id, i), s));
                     continue;
                 }
@@ -409,7 +404,7 @@ impl LockPoints {
         }
         for (at, s) in &steps {
             if let Step::Take(lock, with) = s {
-                let key = lock_key(tcx, f, types, def, *lock);
+                let key = lock_key(tcx, shape, types, *lock);
                 let span = f.block(at.0).insts[at.1].span;
                 let k = taken.add(span, with.then_some(*lock), key);
                 changes.insert(*at, Change::Take(k));
@@ -592,16 +587,4 @@ fn released_later(
             out
         })
         .open_means(FxHashMap::default())
-}
-
-/// `var` before the copies that produced it.
-fn through_copies<'i>(def: &dyn Fn(VarId) -> Option<&'i Inst>, mut var: VarId) -> VarId {
-    let mut seen = FxHashSet::default();
-    while seen.insert(var) {
-        match def(var).map(|i| &i.kind) {
-            Some(InstKind::Copy { src, .. }) => var = *src,
-            _ => break,
-        }
-    }
-    var
 }

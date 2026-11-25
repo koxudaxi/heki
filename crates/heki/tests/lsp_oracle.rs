@@ -951,6 +951,13 @@ const GEN_USE: &str = "import threading\n\nfrom pkg.gen_base import Source\nfrom
 const LOCKED_BASE: &str = "import threading\n\n\nclass Counter:\n    def __init__(self):\n        self._lock = threading.Lock()\n        self.count = 0\n\n    def start(self):\n        threading.Thread(target=self._tick).start()\n\n    def _tick(self):\n        with self._lock:\n            self.count += 1\n\n    def _acquire(self):\n        self._lock.acquire()\n\n    def _give(self):\n        self._lock.release()\n";
 const LOCKED_USE: &str = "from pkg.locked_base import Counter\n\n\nclass Resettable(Counter):\n    def reset(self):\n        self.count = 0\n";
 const LOCKED_USE_HELD: &str = "from pkg.locked_base import Counter\n\n\nclass Resettable(Counter):\n    def reset(self):\n        self._acquire()\n        self.count = 0\n        self._give()\n";
+// A module list one module appends to holding a lock and another clears holding none; a third
+// module runs the appending function, directly or on a thread.
+const LOCKED_LIST: &str = "import threading\n\n_lock = threading.Lock()\nseen: list[str] = []\n\n\ndef add(line: str) -> None:\n    with _lock:\n        seen.append(line)\n";
+const LOCKED_LIST_CLEAR: &str =
+    "from pkg import locked_list\n\n\ndef clear() -> None:\n    locked_list.seen.clear()\n";
+const LOCKED_LIST_RUN: &str =
+    "from pkg.locked_list import add\n\n\ndef run(line: str) -> None:\n    add(line)\n";
 
 // `MUT115`: the declarations of a copied class and of the builtin containers' subclasses in
 // other modules, and a helper in another module, decide whether a change below a copy states
@@ -4888,7 +4895,9 @@ fn steps_eff115() -> Vec<Step> {
 
 /// `EFF117`: whether the subclass's write is reported comes from the base class's module, whose
 /// thread writes the state holding the lock, whose helper takes the lock, and which starts the
-/// thread; the locked write's line, which the report shows, moves there too.
+/// thread; the locked write's line, which the report shows, moves there too. Whether a module
+/// list cleared without the lock is reported comes from a third module, which starts or stops
+/// running the locked writer on a thread: neither the writer nor the guarded states change.
 fn steps_eff117() -> Vec<Step> {
     let unlocked = LOCKED_BASE.replace(
         "        with self._lock:\n            self.count += 1\n",
@@ -4897,6 +4906,13 @@ fn steps_eff117() -> Vec<Step> {
     let unstarted = LOCKED_BASE.replace(
         "        threading.Thread(target=self._tick).start()\n",
         "        self._tick()\n",
+    );
+    let on_thread = format!(
+        "import threading\n\n{}",
+        LOCKED_LIST_RUN.replace(
+            "    add(line)\n",
+            "    threading.Thread(target=add, args=(line,)).start()\n",
+        )
     );
     vec![
         Step::new(
@@ -4932,6 +4948,25 @@ fn steps_eff117() -> Vec<Step> {
             vec![save("pkg/locked_base.py", &unstarted)],
         )
         .absent(&[("pkg/locked_use.py", "EFF117")]),
+        Step::new(
+            "a module list is appended to holding a lock, cleared elsewhere, and run directly",
+            vec![
+                Action::Create("pkg/locked_list.py", LOCKED_LIST.to_owned()),
+                Action::Create("pkg/locked_list_clear.py", LOCKED_LIST_CLEAR.to_owned()),
+                Action::Create("pkg/locked_list_run.py", LOCKED_LIST_RUN.to_owned()),
+            ],
+        )
+        .absent(&[("pkg/locked_list_clear.py", "EFF117")]),
+        Step::new(
+            "a third module runs the locked writer on a thread",
+            vec![save("pkg/locked_list_run.py", &on_thread)],
+        )
+        .present(&[("pkg/locked_list_clear.py", "EFF117")]),
+        Step::new(
+            "it runs the writer directly again",
+            vec![save("pkg/locked_list_run.py", LOCKED_LIST_RUN)],
+        )
+        .absent(&[("pkg/locked_list_clear.py", "EFF117")]),
     ]
 }
 

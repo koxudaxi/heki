@@ -1001,9 +1001,10 @@ impl Workspace {
     }
 
     /// Record what `EFF117` reads of the whole project against the current index: when the
-    /// states some writer changes holding a lock, or those writers, changed, every file may
-    /// report differently; when the functions a thread runs, called only holding a lock, or
-    /// run only while objects are built changed, their files may. Returns those files.
+    /// states some writer changes holding a lock, those writers, or whether a thread runs them
+    /// changed, every file may report differently (a write in any file is reported against
+    /// them); when the functions a thread runs, called only holding a lock, or run only while
+    /// objects are built changed, their files may. Returns those files.
     fn note_guarded(&mut self) -> Vec<PathBuf> {
         let Some(before) = &self.guarded else {
             return Vec::new();

@@ -7801,15 +7801,9 @@ impl<'a> Extractor<'a> {
     /// its callees are not known yet ([`guarded::LockPoints::of`]).
     fn thread_lock_points(&self) -> &guarded::LockPoints {
         self.thread_locks.get_or_init(|| {
-            let def = |v: VarId| self.defs.get(&v).copied();
-            guarded::LockPoints::of(
-                self.cx,
-                self.shape,
-                &self.types,
-                &def,
-                &self.live,
-                &|_, _, _| Vec::new(),
-            )
+            guarded::LockPoints::of(self.cx, self.shape, &self.types, &self.live, &|_, _, _| {
+                Vec::new()
+            })
         })
     }
 
@@ -7820,9 +7814,8 @@ impl<'a> Extractor<'a> {
         if points.is_empty() {
             return;
         }
-        let def = |v: VarId| self.defs.get(&v).copied();
         let locked_writes: Vec<guarded::LockedWrite> =
-            guarded::state_writes(self.cx, self.f, &self.types, &def, &self.live)
+            guarded::state_writes(self.cx, self.shape, &self.types, &self.live)
                 .into_iter()
                 .filter_map(|w| {
                     let lock = (points.held_at(w.at.0, w.at.1).iter())

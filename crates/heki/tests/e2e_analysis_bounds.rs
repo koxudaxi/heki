@@ -4630,6 +4630,55 @@ fn guarded_writes_in_one_released_region_take_linear_steps() {
     assert_eq!(reported, vec!["C.reset"; n]);
 }
 
+/// `n` attributes a thread writes holding a lock, each through the next of a chain of `n` names
+/// bound to `self`, and a method writing them the same way holding none.
+fn guarded_alias_writes(n: usize) -> Project {
+    let mut lines = vec![
+        "import threading".to_owned(),
+        String::new(),
+        String::new(),
+        "class C:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self._lock = threading.Lock()".to_owned(),
+        String::new(),
+        "    def start(self):".to_owned(),
+        "        threading.Thread(target=self._tick).start()".to_owned(),
+    ];
+    // The method `def`, binding the chain `name`, then writing through it below `block`.
+    let method = |lines: &mut Vec<String>, def: &str, name: &str, block: &str, value: &str| {
+        lines.extend([String::new(), format!("    def {def}(self):")]);
+        lines.push(format!("        {name}0 = self"));
+        lines.extend((1..n).map(|i| format!("        {name}{i} = {name}{}", i - 1)));
+        let indent = if block.is_empty() {
+            "        "
+        } else {
+            lines.push(format!("        {block}"));
+            "            "
+        };
+        lines.extend((0..n).map(|i| format!("{indent}{name}{i}.a{i} = {value}")));
+    };
+    method(&mut lines, "_tick", "s", "with self._lock:", "1");
+    method(&mut lines, "reset", "r", "", "0");
+    let p = Project::new(&format!("bounds_guarded_alias_writes_{n}"));
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// Thousands of guarded attributes written through a chain of as many names bound to `self`,
+/// holding the lock and holding none: the instance each write's receiver copies is read from
+/// the function's copy-root table, not walked back along the chain per write.
+#[test]
+fn guarded_writes_through_a_long_alias_chain_read_each_copy_root_once() {
+    let n = 8_000;
+    let found = check_linear(n, guarded_alias_writes);
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF117")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["C.reset"; n]);
+}
+
 /// A project selecting `EFF110` with the module `m` of `lines` after a coroutine `load` using a
 /// session one operation at a time.
 fn fanout_module(name: &str, lines: Vec<String>) -> Project {

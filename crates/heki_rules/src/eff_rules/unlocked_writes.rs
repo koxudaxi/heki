@@ -42,6 +42,10 @@ pub struct Guard {
     pub span: heki_ast::Span,
 }
 
+/// A guard without its place, with whether a thread can run its writer
+/// ([`GuardedView::unplaced_guards`]).
+type UnplacedGuard<'v> = (&'v FuncKey, &'v LockKey, WriteKind, bool);
+
 /// What `EFF117` reads of the whole project ([`Self::of`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GuardedView {
@@ -193,17 +197,25 @@ impl GuardedView {
             .chain(diff(&self.setup_only, &other.setup_only))
     }
 
-    /// Whether the states guarded and their writers differ between `self` and `other`.
+    /// Whether what a write in any file is reported against differs between `self` and `other`
+    /// ([`Self::unplaced_guards`]).
     pub fn guards_differ(&self, other: &Self) -> bool {
-        let unplaced = |v: &Self| -> BTreeMap<StateKey, BTreeSet<(FuncKey, LockKey, WriteKind)>> {
-            (v.guards.iter())
-                .map(|(s, g)| {
-                    let writes = g.iter().map(|g| (g.writer.clone(), g.lock.clone(), g.kind));
-                    (s.clone(), writes.collect())
-                })
-                .collect()
-        };
-        unplaced(self) != unplaced(other)
+        self.unplaced_guards() != other.unplaced_guards()
+    }
+
+    /// The states guarded, each with its writers, their locks and kinds of write, and whether a
+    /// thread can run them (a write no thread reaches is reported only against a writer one
+    /// runs): what a write in any file is reported against, but where.
+    fn unplaced_guards(&self) -> BTreeMap<&StateKey, BTreeSet<UnplacedGuard<'_>>> {
+        (self.guards.iter())
+            .map(|(state, guards)| {
+                let on_thread = |g: &Guard| self.threaded.contains(&g.writer);
+                let writes = guards
+                    .iter()
+                    .map(|g| (&g.writer, &g.lock, g.kind, on_thread(g)));
+                (state, writes.collect())
+            })
+            .collect()
     }
 
     /// The last names of the states guarded: an attribute's, a global's.
@@ -315,11 +327,11 @@ pub(super) fn run(
         let defs: FxHashMap<VarId, &Inst> = (f.blocks.iter().flat_map(|b| &b.insts))
             .filter_map(|i| Some((i.kind.dst()?, i)))
             .collect();
-        let def = |v: VarId| defs.get(&v).copied();
         let types = tcx.infer(f);
         let live = ownership::Live::of(f, &defs);
+        let shape = FnShape::new(f);
         let writes: Vec<(StateWrite, Vec<&Guard>)> =
-            guarded::state_writes(&tcx, f, &types, &def, &live)
+            guarded::state_writes(&tcx, &shape, &types, &live)
                 .into_iter()
                 .map(|w| {
                     let guards = view.guards_of(cx.decls, &w.state);
@@ -343,9 +355,8 @@ pub(super) fn run(
             continue;
         }
         let sites: &SitesBySpan<'_> = sites.get_or_insert_with(|| cx.sites_by_span(unit));
-        let shape = FnShape::new(f);
         let taken = |_, _, inst: &Inst| taken_by_call(cx, sites, &key, f, inst);
-        let points = LockPoints::of(&tcx, &shape, &types, &def, &live, &taken);
+        let points = LockPoints::of(&tcx, &shape, &types, &live, &taken);
         let mut reported: FxHashSet<&StateKey> = FxHashSet::default();
         for (w, guard) in &writes {
             if points.held_at(w.at.0, w.at.1).is_empty() && reported.insert(&w.state) {
