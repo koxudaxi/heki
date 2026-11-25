@@ -695,6 +695,27 @@ impl ContainerFamily {
         ("typing.DefaultDict", "__missing__"),
     ];
 
+    /// Standard-library classes whose methods are Python code calling other methods by name
+    /// (`Counter.most_common` calls `self.items()`), so a subclass that defines any member can
+    /// change the object in a read heki lists as the builtin's own.
+    const PYTHON_METHOD_BASES: &[&str] = &[
+        "collections.Counter",
+        "collections.OrderedDict",
+        "collections.defaultdict",
+        "collections.ChainMap",
+        "collections.UserDict",
+        "collections.UserList",
+        "typing.Counter",
+        "typing.OrderedDict",
+        "typing.DefaultDict",
+        "typing.ChainMap",
+    ];
+
+    /// Whether `class` is one of [`Self::PYTHON_METHOD_BASES`].
+    pub fn runs_python_methods(class: &str) -> bool {
+        Self::PYTHON_METHOD_BASES.contains(&class)
+    }
+
     /// The method of `methods` that `class` binds and whose code changes the object
     /// ([`Self::CHANGING_READS`]).
     pub fn changing_read(class: &str, methods: &[&str]) -> Option<&'static str> {
