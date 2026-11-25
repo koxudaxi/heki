@@ -276,7 +276,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         consequence: Consequence::MinorBug,
         size_dependent_fix: false,
         auto_fix_default: false,
-        summary: "Handing a `Sequence` / `Mapping` / `ReadOnly` parameter, as itself, to a function whose body (or a helper's) changes it in place at a named line.",
+        summary: "Handing a `Sequence` / `Mapping` / `AbstractSet` / `ReadOnly` parameter, as itself, to a function whose body (or a helper's) changes it in place at a named line.",
         doc: include_str!("../rule-docs/MUT110.md"),
     },
     RuleMeta {

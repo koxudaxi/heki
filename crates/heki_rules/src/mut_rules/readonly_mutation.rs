@@ -3,10 +3,11 @@
 //! analysis. Type checkers stop the rebinding of a frozen dataclass or `NamedTuple` field, a
 //! `Final` / `ReadOnly` attribute, or a `ReadOnly` `TypedDict` key, but not an in-place change of
 //! the container it holds, directly, through an alias, or in a helper (`MUT108`); they trust a
-//! helper's signature, so a `Sequence` / `Mapping` parameter handed to an unannotated or `Any`
-//! helper that changes it goes unnoticed (`MUT110`); and they stop a write of a property without
-//! a setter, but not one in a helper that does not see the type, nor an in-place change of the
-//! container the property returns (`MUT120`, a read-only view: a class of such properties only).
+//! helper's signature, so a `Sequence` / `Mapping` / `AbstractSet` parameter handed to an
+//! unannotated or `Any` helper that changes it goes unnoticed (`MUT110`); and they stop a write
+//! of a property without a setter, but not one in a helper that does not see the type, nor an
+//! in-place change of the container the property returns (`MUT120`, a read-only view: a class of
+//! such properties only).
 //!
 //! A change is reported where heki sees that the object is read-only: an own change at the
 //! change, a helper's change at the call that hands the attribute (the object holding it, or the
@@ -356,7 +357,7 @@ impl Rule<'_, '_> {
                         ),
                     };
                     let help = format!(
-                        "pass a copy (`list({name})` / `dict({name})`), or annotate the helper's parameter with a mutable type"
+                        "pass a copy (`list({name})` / `dict({name})` / `set({name})`), or annotate the helper's parameter with a mutable type"
                     );
                     handed.push(HandedParam {
                         name: name.clone(),

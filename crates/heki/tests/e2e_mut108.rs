@@ -762,3 +762,45 @@ fn mut108_lsp_follows_helper_and_frozen_edits_in_other_files() {
     lsp.diagnostics(&app, <[Value]>::is_empty);
     lsp.stop(true);
 }
+
+/// A field or `Final` attribute annotated `AbstractSet` / `collections.abc.Set` holds a container,
+/// as one annotated `Sequence` or `Mapping` does.
+const SET_FIELDS: &str = r#"from collections.abc import Set
+from dataclasses import dataclass
+from typing import AbstractSet, Final
+
+
+@dataclass(frozen=True)
+class Config:
+    tags: AbstractSet[str]
+
+
+class Holder:
+    def __init__(self) -> None:
+        self.tags: Final[Set[str]] = set()
+
+
+def grow(items):
+    if isinstance(items, set):
+        items.add("x")
+
+
+def fill(config: Config, holder: Holder) -> None:
+    grow(config.tags)
+    grow(holder.tags)
+"#;
+
+#[test]
+fn mut108_set_abc_fields_hold_containers() {
+    let p = Project::new("mut108_set_fields");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/model.py", SET_FIELDS);
+    let m = "pkg/model.py";
+    assert_eq!(
+        found(&diagnostics(&p, &["--select", "MUT108"])),
+        vec![
+            d(m, 22, "fill", "Config.tags"),
+            d(m, 23, "fill", "Holder.tags"),
+        ]
+    );
+}

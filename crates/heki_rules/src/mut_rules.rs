@@ -4492,8 +4492,8 @@ pub use readonly_mutation::{CHAIN_RULES, ChainFacts, chain_facts};
 
 /// `MUT108` (in-place changes of frozen dataclass / `NamedTuple` / `dataclass_transform` fields,
 /// `Final` / `ReadOnly` attributes, and `ReadOnly` `TypedDict` keys), `MUT110` (`Sequence` /
-/// `Mapping` parameters handed to functions that change them), and `MUT120` (read-only views
-/// changed where a type checker does not see it), through one analysis.
+/// `Mapping` / `AbstractSet` parameters handed to functions that change them), and `MUT120`
+/// (read-only views changed where a type checker does not see it), through one analysis.
 pub(crate) fn readonly_rules(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     readonly_mutation::run(cx, out);
 }
