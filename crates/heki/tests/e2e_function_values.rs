@@ -807,6 +807,7 @@ const FIELD_SHAPE_DEFS: &str = r#"from __future__ import annotations
 
 import dataclasses
 import typing
+from abc import ABC
 from collections.abc import Callable
 from dataclasses import KW_ONLY, InitVar, dataclass, field
 from typing import ClassVar, NamedTuple
@@ -814,6 +815,10 @@ from typing import ClassVar, NamedTuple
 from pkg.model import Field, noop, require
 
 KW = True
+
+
+class Meta(type):
+    pass
 
 
 @dataclass(frozen=True)
@@ -879,6 +884,38 @@ class Tuple(NamedTuple):
 
 
 @dataclass(frozen=True)
+class Metaed(metaclass=Meta):
+    run: Callable[[Field], bool]
+
+
+@dataclass(frozen=True)
+class MetaedChild(Metaed):
+    pass
+
+
+@dataclass(frozen=True)
+class Abstract(ABC):
+    run: Callable[[Field], bool]
+    other: Callable[[Field], bool] = lambda f: True
+    handler: ClassVar[Callable[[Field], bool]] = noop
+
+
+@dataclass(frozen=True)
+class Open:
+    run: Callable[[Field], bool]
+
+
+class Hooked(Open):
+    def __getattribute__(self, name: str) -> object:
+        return super().__getattribute__(name)
+
+
+@dataclass(frozen=True)
+class Narrowed(Abstract):
+    run: Callable[[Field], bool] = noop
+
+
+@dataclass(frozen=True)
 class Required:
     name: str = "a"
     run: Callable[[Field], bool] = field(kw_only=True)
@@ -893,13 +930,19 @@ class Items(NamedTuple):
 const FIELD_SHAPE_CALLS: &str = r#"from __future__ import annotations
 
 from pkg.defs import (
+    Abstract,
     After,
     AllKeywords,
     Factory,
+    Hooked,
     Init,
+    Open,
     Items,
+    Metaed,
+    MetaedChild,
     MaybeKeyword,
     MaybeKeywords,
+    Narrowed,
     Positional,
     Rebound,
     Required,
@@ -984,6 +1027,38 @@ def a_field_left_at_none(field: Field) -> bool:
 
 def a_field_left_at_a_lambda(field: Field) -> bool:
     return Items(require).other(field)  # unresolved
+
+
+def a_class_with_a_metaclass(field: Field) -> bool:
+    return Metaed(require).run(field)  # unresolved
+
+
+def a_subclass_of_a_class_with_a_metaclass(field: Field) -> bool:
+    return MetaedChild(require).run(field)  # unresolved
+
+
+def a_class_with_an_abstract_base(field: Field) -> bool:
+    return Abstract(require).run(field)  # writes
+
+
+def a_dataclass_field_left_at_a_lambda(field: Field) -> bool:
+    return Abstract(require).other(field)  # unresolved
+
+
+def a_field_passed_where_a_default_may_be_a_descriptor(field: Field) -> bool:
+    return Abstract(require, other=require).other(field)  # unresolved
+
+
+def a_class_whose_subclass_runs_code_on_reads(field: Field) -> bool:
+    return Open(require).run(field)  # unresolved
+
+
+def an_attribute_that_is_no_field(field: Field) -> bool:
+    return Abstract(require).handler(field)
+
+
+def a_field_declared_again(field: Field) -> bool:
+    return Narrowed().run(field)
 "#;
 
 /// The shapes a field list is read from: an annotation of an attribute, a `ClassVar`, the
