@@ -16,6 +16,7 @@ pub mod block;
 pub mod contracts;
 pub mod premises;
 pub mod rules;
+pub mod types;
 
 use crate::project::{
     Facts, Indexed, ParsedFile, Project, ProjectError, paths_leave_out, regressed,
@@ -141,6 +142,9 @@ pub struct RecommendReport {
     /// The accesses heki cannot tie to a class that keep blocks at `unresolved = "ignore"`, each
     /// site once.
     pub contract_blockers: contracts::ContractBlockers,
+    /// The standard types the code already keeps: annotation edits, each group a claim with
+    /// premises (ADR-023).
+    pub suggestions: types::Section,
     /// The candidates a run with them declared reported for: not in the block.
     pub rejected_contracts: Vec<contracts::RejectedContract>,
     /// The candidates past the cap of their kind, which no trial declared.
@@ -210,6 +214,9 @@ pub enum RunLabel {
     /// The configuration with a catalog entry that waits and sends a query for each library
     /// name tried, and the rules those effects make report.
     HypotheticalCatalog,
+    /// The files of the suggestions analyzed again with their edits applied, every rule
+    /// selected (the annotation trial).
+    AnnotationTrial,
     /// The configuration with every contract candidate declared, the contract rules selected.
     ContractTrial,
     /// The configuration with each class pattern of the blocks shown declared alone, the rules
@@ -281,7 +288,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     let mut runs = vec![Run {
         label: RunLabel::Discovery,
     }];
-    let discovery = Indexed::build(project, selection, snapshot, Facts::Recommend)?;
+    let mut discovery = Indexed::build(project, selection, snapshot, Facts::Recommend)?;
     // The heuristic reports of exact claims record what they leave open, and why.
     let (diags, _) = discovery.diagnose_units(&discovery.project.units(), true)?;
     let files_analyzed = &discovery.project.files;
@@ -296,7 +303,6 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     let fail_on = discovery.project.env.cfg.lint.fail_on_severity();
     let reports_now = reports_now(&current, baseline.as_ref(), files_analyzed, &diags, fail_on);
     let configured_now = contracts::configured_reports(&discovery.project.env.cfg, &diags);
-    drop(diags);
     let env = &discovery.project.env;
     let declared = crate::declared_contracts(env, &discovery.index, &current)?;
     let unmatched_entries = crate::unmatched_entries(env, &discovery.index, &current)?;
@@ -313,6 +319,14 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         .collect();
     let generated = contracts::generate(&discovery.index, &env.cfg, &declared, &current, &tests);
     drop(tests);
+    // The annotation trial builds its index from the discovery index's files: the discovery
+    // index is gone afterwards.
+    let suggestions = types::suggest(&mut discovery, &current, diags, shown)?;
+    if suggestions.tried {
+        runs.push(Run {
+            label: RunLabel::AnnotationTrial,
+        });
+    }
     // One index at a time: the trials build their own. (A partial move would keep it until the
     // end of the function.)
     let Indexed { project, index, .. } = discovery;
@@ -451,6 +465,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         contracts: section.advice(),
         contracts_not_shown: section.not_shown,
         contract_blockers: section.blockers,
+        suggestions: suggestions.section(all),
         rejected_contracts: section.rejected,
         contracts_not_tried: section.not_tried,
         unmatched_entries,

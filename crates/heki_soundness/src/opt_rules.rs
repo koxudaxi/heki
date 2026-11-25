@@ -247,9 +247,9 @@ impl<'a> ModuleCtx<'a> {
             }
         }
         if deque.is_none() && !used_names.contains("collections") {
-            deque = crate::imports::collections_import(source, module_fn).map(|import| DequeRef {
+            deque = Some(DequeRef {
                 spelling: "collections.deque".into(),
-                import: Some(import),
+                import: Some(crate::imports::collections_import(source, module_fn)),
             });
         }
         let local_names = ir

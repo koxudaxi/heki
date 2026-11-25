@@ -30,6 +30,8 @@ mod construction;
 pub mod consumption;
 mod contracts;
 pub(crate) mod decorators;
+mod edited;
+pub use edited::{FactChange, OffsetMap, Restated};
 mod environment;
 pub mod fresh;
 pub mod guards;
@@ -42,7 +44,9 @@ pub mod iterations;
 pub mod locks;
 pub mod one_at_a_time;
 mod only_read;
-pub use only_read::ContainerParams;
+pub use only_read::{
+    AnnotationFacts, AnnotationReads, ContainerParams, LiteralAnnotation, ParamAnnotation,
+};
 pub mod order_flow;
 pub mod ownership;
 mod partial;
@@ -2516,6 +2520,10 @@ pub struct OptInTables {
     /// [`FileSummary::imports`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imports: Option<Box<imports::ModuleImports>>,
+    /// By qualified name, what a read-only annotation of the parameters of each function with
+    /// one needs besides its summary ([`OptInFacts::suggestions`]; [`AnnotationFacts`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub annotation_facts: BTreeMap<String, AnnotationFacts>,
 }
 
 /// A project function handed to a library call that calls it as a plain function and never
@@ -2706,7 +2714,7 @@ pub struct ProjectIndex {
     /// Propagation leaves typed writes where they are made: callers get neither the write sites
     /// of their callees, nor their write facts, nor `IndirectHelper` sites. Set when no
     /// enabled rule reads them; every function keeps its own.
-    pub(crate) skips_typed_writes: bool,
+    pub(crate) typed_writes: TypedWrites,
     /// What the project callers bind to the parameters queue waits ask about, from the local
     /// facts of every file (computed before propagation).
     pub(crate) param_capacities: capacity::ParamCapacities,
@@ -2783,10 +2791,55 @@ pub fn analyze_project_for(
     ProjectIndex::build_for(files, contracts, typed_writes, opt_in)
 }
 
+/// A project index taken apart ([`ProjectIndex::into_files`]): its files' local summaries, with
+/// their final facts reset to the local ones, and what they were summarized with; no call graph
+/// and nothing propagation derived. A summary replaced here drops the one it replaces, and
+/// [`Self::build`] propagates once.
+pub struct IndexFiles {
+    pub files: FxHashMap<PathBuf, FileSummary>,
+    contracts: Option<Arc<dyn Contracts>>,
+    typed_writes: TypedWrites,
+    opt_in: OptInFacts,
+}
+
+impl IndexFiles {
+    /// The local summary of `input`, a module of these files edited or as it is, against the
+    /// project declarations `decls`, with the facts these files are summarized with: what the
+    /// module's own functions do, before propagation ([`FileSummary::local_functions`]).
+    pub fn summarize(
+        &self,
+        input: &ModuleInput<'_>,
+        kb: &EffectiveEcosystemKb,
+        soundness: Option<&EffectiveSoundnessKb>,
+        decls: &DeclPasses,
+    ) -> FileSummary {
+        let own = resolver::own_module_decls(input, kb, decls);
+        summary::summarize_module(
+            input,
+            decls.completed(),
+            kb,
+            soundness,
+            own,
+            false,
+            self.contracts.as_deref(),
+            self.opt_in,
+        )
+    }
+
+    /// The index of these files, built as [`ProjectIndex::build_for`] builds one (one
+    /// propagation), in the order the project's files are summarized in.
+    pub fn build(self) -> ProjectIndex {
+        let mut files: Vec<FileSummary> = self.files.into_values().collect();
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        ProjectIndex::build_for(files, self.contracts, self.typed_writes, self.opt_in)
+    }
+}
+
 /// Whether propagation carries typed writes (`EffectSummary::typed_field_write_sites` and
 /// `typed_field_writes`) from callees to callers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TypedWrites {
+    #[default]
     Propagated,
     /// No enabled rule reads propagated typed writes: each function keeps its own only.
     Local,
@@ -2830,6 +2883,10 @@ pub struct OptInFacts {
     /// [`EffectSummary::only_read_params`] and [`EffectSummary::container_params`], which
     /// `heki inspect` shows and the language server keeps current.
     pub only_read: bool,
+    /// What `heki recommend`'s read-only annotations read besides [`Self::only_read`]:
+    /// [`OptInTables::annotation_facts`], and the references handing a project function on
+    /// ([`FileSummary::reference_sites`]), its uses as a value.
+    pub suggestions: bool,
 }
 
 impl OptInFacts {
@@ -2850,6 +2907,7 @@ impl OptInFacts {
         fresh_returns: true,
         imports: true,
         only_read: true,
+        suggestions: false,
     };
 
     /// Whether the call sites carry [`CallSite::complete`] and [`CallSite::on_every_return`].
@@ -2927,7 +2985,7 @@ impl ProjectIndex {
 
     /// Whether callers got the typed writes of their callees ([`TypedWrites`]).
     pub fn propagates_typed_writes(&self) -> bool {
-        !self.skips_typed_writes
+        self.typed_writes == TypedWrites::Propagated
     }
 
     /// The opt-in facts the summaries carry.
@@ -2952,7 +3010,7 @@ impl ProjectIndex {
         files.sort_by(|a, b| module_precedence(&a.path).cmp(&module_precedence(&b.path)));
         let mut index = Self {
             contracts,
-            skips_typed_writes: typed_writes == TypedWrites::Local,
+            typed_writes,
             opt_in,
             ..Self::default()
         };
@@ -2966,6 +3024,32 @@ impl ProjectIndex {
         callgraph::propagate(&mut index, &all);
         callgraph::recompute_sync_driven(&mut index);
         index
+    }
+
+    /// The index's file summaries with their final facts reset to the local ones, the call
+    /// graph and what propagation derived dropped, to build the index again with some of them
+    /// replaced ([`IndexFiles`]).
+    pub fn into_files(self) -> IndexFiles {
+        let Self {
+            mut files,
+            contracts,
+            typed_writes,
+            opt_in,
+            reverse_call_graph,
+            func_files,
+            param_capacities,
+        } = self;
+        // What propagation derived goes before a rebuild derives it again: never two at once.
+        drop((reverse_call_graph, func_files, param_capacities));
+        for file in files.values_mut() {
+            file.reset_final_facts();
+        }
+        IndexFiles {
+            files,
+            contracts,
+            typed_writes,
+            opt_in,
+        }
     }
 
     /// Whether every implementation the call at `site` (in `path`) can run has run `e`
@@ -3128,8 +3212,9 @@ impl ProjectIndex {
     }
 
     /// Every module's declarations in [`module_precedence`] order (a later file sharing a
-    /// module name replaces the earlier ones).
-    fn preferred_decls(&self) -> Vec<Arc<ModuleDecls>> {
+    /// module name replaces the earlier ones), from which [`DeclPasses::new`] and
+    /// [`ProjectDecls::new`] build the project's.
+    pub fn preferred_decls(&self) -> Vec<Arc<ModuleDecls>> {
         let mut files: Vec<&FileSummary> = self.files.values().collect();
         files.sort_by(|a, b| module_precedence(&a.path).cmp(&module_precedence(&b.path)));
         files.into_iter().map(|f| Arc::clone(&f.decls)).collect()

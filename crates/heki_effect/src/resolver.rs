@@ -15,6 +15,7 @@
 
 use crate::capacity::CapacityOf;
 use crate::decorators;
+use crate::only_read::{LiteralAnnotation, ParamAnnotation};
 use crate::ownership;
 use crate::readonly::ContainerKind;
 use crate::types::{Added, Args, Elem, Generic, Ty, generic, typing_generic};
@@ -1270,6 +1271,14 @@ impl ModuleDecls {
         })
     }
 
+    /// The fqn a function of the module reads as the global `name`: what its runtime import
+    /// binds ([`Self::fixed_import`]), or the module's own global (`ReturnFact::ty_globals`).
+    pub fn global_read(&self, name: &str) -> String {
+        self.fixed_import(name)
+            .cloned()
+            .unwrap_or_else(|| format!("{}.{name}", self.module_name))
+    }
+
     /// Whether a statement of the module itself binds the module global `name` at run time: an
     /// import, a `def` or `class` statement, a module alias, or any other store or deletion.
     pub fn binds(&self, name: &str) -> bool {
@@ -1802,7 +1811,24 @@ fn annotated_head<'t>(
     text: &'t str,
     resolve: &impl Fn(&str) -> Option<String>,
 ) -> Option<AnnotatedHead<'t>> {
+    Some(head_of(text, resolve)?.named)
+}
+
+/// The type an annotation names ([`head_of`]) and where it is written.
+struct Head<'t> {
+    named: AnnotatedHead<'t>,
+    /// The head as written, a slice of the annotation (`list` of `Optional["list[int]"]`).
+    head: &'t str,
+    /// The type arguments as written (`int`), `None` without a subscript.
+    args: Option<&'t str>,
+    /// The way to the head went through `Annotated[...]`.
+    annotated: bool,
+}
+
+/// [`annotated_head`], with where the head is written.
+fn head_of<'t>(text: &'t str, resolve: &impl Fn(&str) -> Option<String>) -> Option<Head<'t>> {
     let mut t = text;
+    let mut annotated = false;
     loop {
         let u = unquote(t);
         let mut parts = split_top_level(u, '|');
@@ -1812,23 +1838,105 @@ fn annotated_head<'t>(
             continue;
         }
         let (head, args) = head_and_args(u);
+        let found = |named| {
+            Some(Head {
+                named,
+                head,
+                args,
+                annotated,
+            })
+        };
         let Some(fqn) = resolve(head) else {
             let last = head.rsplit('.').next().unwrap_or(head);
-            return Some(AnnotatedHead::Unresolved(last));
+            return found(AnnotatedHead::Unresolved(last));
         };
         let wrapper = fqn
             .strip_prefix("typing.")
             .or_else(|| fqn.strip_prefix("typing_extensions."));
         match (wrapper, args) {
-            (Some("Optional" | "Annotated"), Some(inner)) => t = first_arg(inner),
+            (Some("Optional"), Some(inner)) => t = first_arg(inner),
+            (Some("Annotated"), Some(inner)) => {
+                annotated = true;
+                t = first_arg(inner);
+            }
             (Some("Union"), Some(inner)) => {
                 let mut members = split_top_level(inner, ',');
                 members.retain(|p| *p != "None");
                 t = single(&members)?;
             }
-            (Some("ReadOnly"), _) => return Some(AnnotatedHead::ReadOnly),
-            _ => return Some(AnnotatedHead::Resolved(fqn)),
+            (Some("ReadOnly"), _) => return found(AnnotatedHead::ReadOnly),
+            _ => return found(AnnotatedHead::Resolved(fqn)),
         }
+    }
+}
+
+/// What the parameter annotation `text` says to a read-only annotation of the parameter
+/// ([`ParamAnnotation`]); `span` is where `text` is in the source. A literal container is a
+/// resolved `list`, `dict`, or `set`, or its `typing` form, after `Optional`, `| None`, and
+/// quotes: not one written through `Annotated[...]` (its metadata is there for a reader), a
+/// `Mutable*` ABC (the author stated mutability), or an alias.
+pub(crate) fn param_annotation(
+    text: Option<&str>,
+    span: Option<Span>,
+    resolve: &impl Fn(&str) -> Option<String>,
+) -> ParamAnnotation {
+    let (Some(text), Some(span)) = (text, span) else {
+        return ParamAnnotation::Any;
+    };
+    let Some(found) = head_of(text, resolve) else {
+        return ParamAnnotation::Other;
+    };
+    let AnnotatedHead::Resolved(fqn) = found.named else {
+        return ParamAnnotation::Other;
+    };
+    if found.annotated {
+        return ParamAnnotation::Other;
+    }
+    let kind = match fqn.as_str() {
+        "builtins.list" | "typing.List" => ContainerKind::List,
+        "builtins.dict" | "typing.Dict" => ContainerKind::Dict,
+        "builtins.set" | "typing.Set" => ContainerKind::Set,
+        "typing.Any" | "typing_extensions.Any" | "builtins.object" => return ParamAnnotation::Any,
+        other => return abstract_annotation(other),
+    };
+    let offset = |part: &str| {
+        let at = part.as_ptr() as usize - text.as_ptr() as usize;
+        span.start + u32::try_from(at).expect("an annotation is shorter than 4 GiB")
+    };
+    let start = offset(found.head);
+    ParamAnnotation::Literal(Box::new(LiteralAnnotation {
+        kind,
+        text: text.into(),
+        span,
+        head: Span {
+            start,
+            end: start + u32::try_from(found.head.len()).expect("a short head"),
+        },
+        str_items: kind == ContainerKind::List && found.args.map(str::trim) == Some("str"),
+    }))
+}
+
+/// What a parameter annotation resolved to `fqn`, no literal container (`typing.Set` is one) and
+/// not `Any`, says to a read-only annotation ([`ParamAnnotation::Admits`] or
+/// [`ParamAnnotation::Other`]).
+fn abstract_annotation(fqn: &str) -> ParamAnnotation {
+    let (list, dict, set) = (
+        ContainerKind::List.bit(),
+        ContainerKind::Dict.bit(),
+        ContainerKind::Set.bit(),
+    );
+    let Some(name) = (fqn.strip_prefix("typing.")).or_else(|| fqn.strip_prefix("collections.abc."))
+    else {
+        return ParamAnnotation::Other;
+    };
+    match name {
+        "Iterable" | "Collection" | "Container" | "Sized" => {
+            ParamAnnotation::Admits(list | dict | set)
+        }
+        "Sequence" | "Reversible" => ParamAnnotation::Admits(list),
+        "Mapping" => ParamAnnotation::Admits(dict),
+        "AbstractSet" | "Set" => ParamAnnotation::Admits(set),
+        _ => ParamAnnotation::Other,
     }
 }
 
@@ -3043,6 +3151,18 @@ impl ProjectDecls {
         })
     }
 
+    /// Whether `from source import *`, a star import of the module `importer`, may bind `name`:
+    /// a module outside the project may bind any name; one of the project binds what
+    /// [`Self::star_binding`] reads through it.
+    pub fn star_import_may_bind(&self, importer: &str, source: &str, name: &str) -> bool {
+        let mut held = FxHashMap::default();
+        held.insert(importer.to_owned(), Holds::No);
+        !matches!(
+            self.star_import_binds(source, name, &mut held, 1),
+            StarSource::Nothing
+        )
+    }
+
     /// [`Self::star_binding`] for the star imports of `m`, which `depth` star imports nest;
     /// `held` keeps what [`Self::module_holds`] answered so far, and `No` for the modules it is
     /// still answering, so a star import back into one of them binds nothing more: each module
@@ -3725,6 +3845,17 @@ impl ProjectDecls {
             Symbol::Class(c) => Some(c),
             _ => None,
         }
+    }
+
+    /// The declaration of the project class `fqn`.
+    pub fn class_decl(&self, fqn: &str) -> Option<&ClassDecl> {
+        self.class(&self.canonical(fqn))
+    }
+
+    /// The method resolution order of `class` ([`Self::mro`]): `class` first, then its bases,
+    /// each external one standing for itself.
+    pub fn mro_of(&self, class: &str) -> Vec<String> {
+        self.mro(class)
     }
 
     pub fn is_project_class(&self, fqn: &str) -> bool {

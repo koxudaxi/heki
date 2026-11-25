@@ -25,6 +25,22 @@ pub(crate) struct Decorator {
     /// A `functools` cache beside it still keeps the function's own results (`MUT114`): it
     /// returns the object it is handed, or calls it as defined.
     pub beside_cache: bool,
+    /// What it reads of the annotations of the function or class it decorates and of a class's
+    /// methods (`heki recommend`'s read-only parameters, assumption T1).
+    pub annotations: ReadsAnnotations,
+    /// Called with arguments, it gives a decorator of the same row (`@dataclass(frozen=True)`).
+    pub takes_arguments: bool,
+}
+
+/// What a decorator of the table reads of annotations: a different annotation elsewhere changes
+/// nothing it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadsAnnotations {
+    Nothing,
+    /// For a class without a docstring, the signature of the constructor `inspect.signature`
+    /// finds: the class's own `__new__` or `__init__` (`dataclass` writes the docstring
+    /// `C(rows: list[int])` from it).
+    ConstructorWithoutDocstring,
 }
 
 /// `typing.override` and `typing.final` only set an attribute on the object they are handed
@@ -39,6 +55,8 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         keeps_return: true,
         getter: false,
         beside_cache: true,
+        annotations: ReadsAnnotations::Nothing,
+        takes_arguments: false,
     },
     Decorator {
         name: "classmethod",
@@ -47,6 +65,8 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         keeps_return: true,
         getter: false,
         beside_cache: true,
+        annotations: ReadsAnnotations::Nothing,
+        takes_arguments: false,
     },
     Decorator {
         name: "abstractmethod",
@@ -55,6 +75,8 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         keeps_return: true,
         getter: false,
         beside_cache: false,
+        annotations: ReadsAnnotations::Nothing,
+        takes_arguments: false,
     },
     Decorator {
         name: "override",
@@ -63,6 +85,8 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         keeps_return: true,
         getter: false,
         beside_cache: true,
+        annotations: ReadsAnnotations::Nothing,
+        takes_arguments: false,
     },
     Decorator {
         name: "final",
@@ -71,6 +95,8 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         keeps_return: true,
         getter: false,
         beside_cache: true,
+        annotations: ReadsAnnotations::Nothing,
+        takes_arguments: false,
     },
     Decorator {
         name: "property",
@@ -79,6 +105,8 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         keeps_return: true,
         getter: true,
         beside_cache: false,
+        annotations: ReadsAnnotations::Nothing,
+        takes_arguments: false,
     },
     Decorator {
         name: "cached_property",
@@ -87,6 +115,62 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         keeps_return: false,
         getter: true,
         beside_cache: false,
+        annotations: ReadsAnnotations::Nothing,
+        takes_arguments: false,
+    },
+    // Decorators that keep none of the premises above and read no annotation of what they
+    // decorate but `dataclass`: the class-body annotations (its fields), and the constructor's
+    // for the docstring it writes; a context manager decorator wraps the generator it is
+    // handed without looking at its signature.
+    Decorator {
+        name: "dataclass",
+        modules: Some(&["dataclasses"]),
+        keeps_call: false,
+        keeps_return: false,
+        getter: false,
+        beside_cache: false,
+        annotations: ReadsAnnotations::ConstructorWithoutDocstring,
+        takes_arguments: true,
+    },
+    Decorator {
+        name: "total_ordering",
+        modules: Some(&["functools"]),
+        keeps_call: false,
+        keeps_return: false,
+        getter: false,
+        beside_cache: false,
+        annotations: ReadsAnnotations::Nothing,
+        takes_arguments: false,
+    },
+    Decorator {
+        name: "unique",
+        modules: Some(&["enum"]),
+        keeps_call: false,
+        keeps_return: false,
+        getter: false,
+        beside_cache: false,
+        annotations: ReadsAnnotations::Nothing,
+        takes_arguments: false,
+    },
+    Decorator {
+        name: "contextmanager",
+        modules: Some(&["contextlib"]),
+        keeps_call: false,
+        keeps_return: false,
+        getter: false,
+        beside_cache: false,
+        annotations: ReadsAnnotations::Nothing,
+        takes_arguments: false,
+    },
+    Decorator {
+        name: "asynccontextmanager",
+        modules: Some(&["contextlib"]),
+        keeps_call: false,
+        keeps_return: false,
+        getter: false,
+        beside_cache: false,
+        annotations: ReadsAnnotations::Nothing,
+        takes_arguments: false,
     },
 ];
 
@@ -94,10 +178,12 @@ pub(crate) const DECORATORS: &[Decorator] = &[
 /// `decls` describes) is: the one its head is bound to there, written without a call
 /// (`@final()` decorates with what calling `final` returns).
 fn entry(decorator: &str, decls: &ModuleDecls) -> Option<&'static Decorator> {
-    if decorator.contains('(') {
-        return None;
-    }
-    let symbol = decls.decorator_symbol(decorator)?;
+    let found = of_symbol(&decls.decorator_symbol(decorator)?)?;
+    (!decorator.contains('(') || found.takes_arguments).then_some(found)
+}
+
+/// The decorator of the table the object `symbol` names (`dataclasses.dataclass`).
+pub(crate) fn of_symbol(symbol: &str) -> Option<&'static Decorator> {
     let (module, name) = symbol.rsplit_once('.')?;
     DECORATORS
         .iter()

@@ -1,5 +1,7 @@
-//! Where a rewrite adds `import collections`: in sorted position among the module's top-level
-//! standard-library imports, so that an isort-formatted file stays formatted (Ruff `I001`).
+//! Where an edit adds an import of a standard-library module (`import collections` for the
+//! `deque` rewrite, `from collections.abc import Sequence` for a read-only annotation that
+//! `heki recommend` suggests): in sorted position among the module's top-level standard-library
+//! imports, so that an isort-formatted file stays formatted (Ruff `I001`).
 //!
 //! The leading statements of the module (a docstring, then imports only) are read as text:
 //! blocks of import statements separated by blank lines, the `__future__` block first. The new
@@ -9,7 +11,7 @@
 //! Without such a block it starts one before the first block of other imports, and in a module
 //! without imports it follows the docstring and `__future__` imports, with the blank lines isort
 //! puts after an import block. Code that runs before the new import is never more than
-//! imports, so nothing can call the rewritten function before `collections` is bound.
+//! imports, so nothing can call the rewritten function before the new import binds its name.
 
 use crate::edits::{line_end, line_start, slice};
 use heki_ast::Span;
@@ -27,9 +29,41 @@ struct ImportStmt {
     is_from: bool,
 }
 
-/// The edit inserting `import collections` (an insertion, or the replacement of the blank lines
-/// that follow it), or `None` when the module's leading statements leave no safe place.
-pub(crate) fn collections_import(source: &str, module_fn: &IrFunction) -> Option<(Span, String)> {
+/// The edit inserting `import collections` ([`import_edit`]).
+pub(crate) fn collections_import(source: &str, module_fn: &IrFunction) -> (Span, String) {
+    let import = NewImport {
+        module: "collections",
+        is_from: false,
+        statement: "import collections",
+    };
+    import_edit(source, module_fn, &import)
+}
+
+/// An import statement of a standard-library module to add to a module.
+pub struct NewImport<'a> {
+    /// The module it imports from (`collections.abc`).
+    pub module: &'a str,
+    /// A `from` import.
+    pub is_from: bool,
+    /// The statement, without a line break (`from collections.abc import Sequence`).
+    pub statement: &'a str,
+}
+
+/// The edit inserting `import` (an insertion, or the replacement of the blank lines that follow
+/// it).
+pub fn import_edit(source: &str, module_fn: &IrFunction, import: &NewImport<'_>) -> (Span, String) {
+    let (span, text) = placed_import(source, module_fn, import);
+    // Every place is the start of a line but the end of a source whose last line has no line
+    // break: there the import starts a line of its own.
+    let at = span.start as usize;
+    if at == source.len() && !source.is_empty() && !source.ends_with(['\n', '\r']) {
+        return (span, format!("{}{text}", heki_ast::line_break(source)));
+    }
+    (span, text)
+}
+
+/// [`import_edit`]'s place and text, at the start of a line or at the end of the source.
+fn placed_import(source: &str, module_fn: &IrFunction, import: &NewImport<'_>) -> (Span, String) {
     let br = heki_ast::line_break(source);
     let (docstring_end, region_end) = import_region(source, module_fn);
     let floor = magic_comments_end(source);
@@ -59,8 +93,8 @@ pub(crate) fn collections_import(source: &str, module_fn: &IrFunction) -> Option
     let new_key = key(&ImportStmt {
         start: 0,
         end: 0,
-        module: "collections".into(),
-        is_from: false,
+        module: import.module.to_lowercase(),
+        is_from: import.is_from,
     });
     let others: Vec<&Vec<&ImportStmt>> = blocks
         .iter()
@@ -75,17 +109,17 @@ pub(crate) fn collections_import(source: &str, module_fn: &IrFunction) -> Option
             .iter()
             .find(|s| key(s) > new_key)
             .map_or_else(|| block.last().map_or(0, |s| s.end), |s| s.start);
-        return Some((
+        return (
             Span { start: at, end: at },
-            format!("import collections{br}"),
-        ));
+            format!("{}{br}", import.statement),
+        );
     }
     if let Some(first) = others.first().and_then(|b| b.first()) {
         let at = first.start;
-        return Some((
+        return (
             Span { start: at, end: at },
-            format!("import collections{br}{br}"),
-        ));
+            format!("{}{br}{br}", import.statement),
+        );
     }
     let after_statement = blocks
         .iter()
@@ -94,7 +128,7 @@ pub(crate) fn collections_import(source: &str, module_fn: &IrFunction) -> Option
         .chain(future_end)
         .max()
         .or(docstring_end);
-    first_import_edit(source, br, after_statement)
+    first_import_edit(source, br, after_statement, import.statement)
 }
 
 /// The edit for a module without other imports: after `after_statement`, the end of the
@@ -104,12 +138,12 @@ fn first_import_edit(
     source: &str,
     br: &str,
     after_statement: Option<u32>,
-) -> Option<(Span, String)> {
+    statement: &str,
+) -> (Span, String) {
     let anchor = after_statement.unwrap_or_else(|| after_leading_comments(source));
     // A blank line after the docstring or the `__future__` block, none below leading comments.
     let separated = after_statement.is_some();
-    // The rewritten function follows: there is a next statement.
-    let next = next_statement(source, anchor)?;
+    let next = next_statement(source, anchor);
     let line = slice(source, next, line_end(source, next)).unwrap_or_default();
     let opens_def = ["def ", "async def ", "class ", "@"]
         .iter()
@@ -121,15 +155,15 @@ fn first_import_edit(
     if separated {
         text.push_str(br);
     }
-    text.push_str("import collections");
+    text.push_str(statement);
     text.push_str(&br.repeat(blank_lines + 1));
-    Some((
+    (
         Span {
             start: anchor,
             end: replaced_end,
         },
         text,
-    ))
+    )
 }
 
 /// `(end of the docstring statement's line, start of the first statement that is not an
@@ -320,18 +354,19 @@ fn after_leading_comments(source: &str) -> u32 {
 }
 
 /// The start of the first line at or after `from` that holds a statement (not blank, not a
-/// comment).
-fn next_statement(source: &str, from: u32) -> Option<u32> {
+/// comment); the end of the source when none does (the rewritten function, which follows the
+/// import, always does).
+fn next_statement(source: &str, from: u32) -> u32 {
     let mut at = from;
     while (at as usize) < source.len() {
         let end = line_end(source, at);
         let text = slice(source, at, end).unwrap_or_default().trim();
         if !text.is_empty() && !text.starts_with('#') {
-            return Some(at);
+            break;
         }
         at = (end as usize + 1).min(source.len()) as u32;
     }
-    None
+    at
 }
 
 /// The end of the blank lines that start at `from` (before `limit`).

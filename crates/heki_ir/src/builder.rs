@@ -483,6 +483,7 @@ impl<'a> ModuleLowerer<'a> {
             span: spec.span,
             is_module_body: spec.is_module_body,
             is_class_body: spec.is_class_body,
+            stub_body: false,
             passed_from: None,
             enclosing: spec.enclosing,
         };
@@ -517,6 +518,10 @@ impl<'a> ModuleLowerer<'a> {
             builder.bind_parameters(params);
         }
 
+        let stub_body = match spec.body {
+            FunctionBody::Suite(stmts) => !spec.is_module_body && is_stub_suite(stmts),
+            _ => false,
+        };
         match spec.body {
             FunctionBody::Suite(stmts) => {
                 builder.lower_suite(stmts);
@@ -583,6 +588,7 @@ impl<'a> ModuleLowerer<'a> {
         let lowered = builder.finish();
         self.functions[fn_id.0 as usize] = IrFunction {
             enclosing: spec.enclosing,
+            stub_body,
             ..lowered.function
         };
         self.class_bases.extend(
@@ -607,6 +613,31 @@ impl<'a> ModuleLowerer<'a> {
         );
         fn_id
     }
+}
+
+/// Whether a `def` body states nothing of its own: a docstring, `pass`, `...`, and at most one
+/// `raise NotImplementedError` (an interface method a subclass fills in).
+fn is_stub_suite(stmts: &[Stmt]) -> bool {
+    let not_implemented = |e: &Expr| {
+        let callee = match e {
+            Expr::Call(c) => c.func.as_ref(),
+            other => other,
+        };
+        matches!(callee, Expr::Name(n) if n.id.as_str() == "NotImplementedError")
+    };
+    let mut raises = 0;
+    stmts.iter().all(|stmt| match stmt {
+        Stmt::Pass(_) => true,
+        Stmt::Expr(e) => matches!(
+            e.value.as_ref(),
+            Expr::StringLiteral(_) | Expr::EllipsisLiteral(_)
+        ),
+        Stmt::Raise(r) => {
+            raises += 1;
+            raises == 1 && r.cause.is_none() && r.exc.as_deref().is_some_and(not_implemented)
+        }
+        _ => false,
+    })
 }
 
 #[derive(Default)]
@@ -1348,11 +1379,12 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         {
             let name = p.parameter.name.to_string();
             let var = self.fresh_var(Some(name.clone()));
-            let annotation = p
+            let annotation_span = p
                 .parameter
                 .annotation
                 .as_ref()
-                .map(|a| self.module.slice_text(Span::from(a.range())));
+                .map(|a| Span::from(a.range()));
+            let annotation = annotation_span.map(|span| self.module.slice_text(span));
             self.write_local(&name, self.cur_bb, var);
             self.params.push(ParamInfo {
                 name,
@@ -1368,15 +1400,14 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 is_vararg: false,
                 is_kwarg: false,
                 annotation,
+                annotation_span,
             });
         }
         if let Some(v) = &params.vararg {
             let name = v.name.to_string();
             let var = self.fresh_var(Some(name.clone()));
-            let annotation = v
-                .annotation
-                .as_ref()
-                .map(|a| self.module.slice_text(Span::from(a.range())));
+            let annotation_span = v.annotation.as_ref().map(|a| Span::from(a.range()));
+            let annotation = annotation_span.map(|span| self.module.slice_text(span));
             self.write_local(&name, self.cur_bb, var);
             self.params.push(ParamInfo {
                 name,
@@ -1389,15 +1420,14 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 is_vararg: true,
                 is_kwarg: false,
                 annotation,
+                annotation_span,
             });
         }
         if let Some(k) = &params.kwarg {
             let name = k.name.to_string();
             let var = self.fresh_var(Some(name.clone()));
-            let annotation = k
-                .annotation
-                .as_ref()
-                .map(|a| self.module.slice_text(Span::from(a.range())));
+            let annotation_span = k.annotation.as_ref().map(|a| Span::from(a.range()));
+            let annotation = annotation_span.map(|span| self.module.slice_text(span));
             self.write_local(&name, self.cur_bb, var);
             self.params.push(ParamInfo {
                 name,
@@ -1410,6 +1440,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 is_vararg: false,
                 is_kwarg: true,
                 annotation,
+                annotation_span,
             });
         }
     }
@@ -4163,6 +4194,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             span: self.span,
             is_module_body: self.is_module_body,
             is_class_body: self.is_class_body,
+            stub_body: false,
             passed_from: None,
             enclosing: None,
         };

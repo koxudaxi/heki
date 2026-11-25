@@ -196,6 +196,20 @@ attributes = ["__fields__"]
 items = "keys"
 versions = "pydantic 2.12.3"
 
+# Validation, dependency injection, and command-line parsing read the annotations of what they
+# wrap: a different annotation changes what the code accepts or how it converts it. A model's
+# metaclass reads the class-body annotations (its fields), not those of its methods.
+[[annotation_readers]]
+decorators = ["pydantic.validate_call", "pydantic.validate_arguments"]
+reads = "functions"
+versions = "pydantic 2.14.1"
+
+[[annotation_readers]]
+bases = ["pydantic.BaseModel", "pydantic.RootModel"]
+decorators = ["pydantic.dataclasses.dataclass"]
+reads = "fields"
+versions = "pydantic 2.14.1"
+
 # --- Models: attrs ---
 # The fields of a class an attrs decorator builds: `__attrs_attrs__` and `fields(cls)` hold the
 # `Attribute` objects, each with its `name`; `fields_dict(cls)` is a dict from each name. Both
@@ -208,6 +222,14 @@ decorators = [
 attributes = ["__attrs_attrs__"]
 items = "names"
 versions = "attrs 22.2.0, 25.4.0"
+
+[[annotation_readers]]
+decorators = [
+    "attr.s", "attr.attrs", "attr.define", "attr.mutable", "attr.frozen", "attr.dataclass",
+    "attrs.define", "attrs.mutable", "attrs.frozen",
+]
+reads = "fields"
+versions = "attrs 25.4.0"
 
 [[declared_fields]]
 functions = ["attr.fields", "attrs.fields"]
@@ -6817,3 +6839,31 @@ symbol = "kombu.utils.objects.cached_property"
 versions = "kombu 5.0.0, 5.3.0, 5.7.0"
 keeps = "a data descriptor whose __get__ stores the getter's value in obj.__dict__[name] (from 5.3 through functools.cached_property.__get__) and returns it on later reads; __set__ stores into obj.__dict__"
 invalidation = "del obj.<name> runs __delete__, which pops the entry from obj.__dict__ (then a deleter hook if one is set); obj.__dict__.pop(<name>) removes it too"
+
+# --- Annotations read at run time: web frameworks and command-line parsers ---
+# FastAPI reads the annotations of each endpoint and dependency (`get_typed_signature`), Typer
+# those of each command (`get_params_from_function`), and Typeguard those of the functions it
+# checks. Click reads none.
+[[annotation_readers]]
+decorators = [
+    "fastapi.FastAPI.get", "fastapi.FastAPI.post", "fastapi.FastAPI.put", "fastapi.FastAPI.patch",
+    "fastapi.FastAPI.delete", "fastapi.FastAPI.head", "fastapi.FastAPI.options",
+    "fastapi.FastAPI.api_route", "fastapi.FastAPI.websocket", "fastapi.APIRouter.get",
+    "fastapi.APIRouter.post", "fastapi.APIRouter.put", "fastapi.APIRouter.patch",
+    "fastapi.APIRouter.delete", "fastapi.APIRouter.head", "fastapi.APIRouter.options",
+    "fastapi.APIRouter.api_route", "fastapi.APIRouter.websocket",
+]
+functions = ["fastapi.Depends", "fastapi.Security"]
+reads = "functions"
+versions = "fastapi 0.141.1"
+
+[[annotation_readers]]
+decorators = ["typer.Typer.command", "typer.Typer.callback"]
+functions = ["typer.run"]
+reads = "functions"
+versions = "typer 0.27.2"
+
+[[annotation_readers]]
+decorators = ["typeguard.typechecked"]
+reads = "functions"
+versions = "typeguard 4.4.4"

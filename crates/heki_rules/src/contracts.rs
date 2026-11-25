@@ -577,6 +577,7 @@ pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
             .iter()
             .any(|code| selection.is_enabled(code)),
         only_read: false,
+        suggestions: false,
     }
 }
 
@@ -602,11 +603,14 @@ pub fn import_facts(selection: &RuleSelection) -> OptInFacts {
 }
 
 /// [`opt_in_facts`] with the facts `heki recommend` reads besides the rules: the calls heki is
-/// blind to ([`crate::blind_spots`]). Neither `heki check` nor the language server computes
-/// them.
+/// blind to ([`crate::blind_spots`]), and the parameters functions only read with what their
+/// read-only annotation needs ([`crate::recommend::types`]). Neither `heki check` nor the
+/// language server computes the blind spots and the annotation facts.
 pub fn recommend_facts(selection: &RuleSelection) -> OptInFacts {
     OptInFacts {
         blind_spots: true,
+        only_read: true,
+        suggestions: true,
         ..opt_in_facts(selection)
     }
 }

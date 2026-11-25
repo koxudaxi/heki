@@ -451,12 +451,7 @@ fn globals_read(decls: &ModuleDecls, definitions: &[TypedReturns<'_>]) -> Vec<St
             InstKind::LoadGlobal { name, .. } => Some(name.as_str()),
             _ => None,
         })
-        .map(|name| {
-            decls
-                .fixed_import(name)
-                .cloned()
-                .unwrap_or_else(|| format!("{}.{name}", decls.module_name))
-        })
+        .map(|name| decls.global_read(name))
         .collect();
     out.sort();
     out.dedup();
