@@ -7347,7 +7347,7 @@ fn type_expressions(aliases: usize) -> String {
     }
     out.push("    kind = C".to_owned());
     out.extend((0..DOUBLINGS).map(|_| "    kind = kind | kind".to_owned()));
-    out.push("    cast(kind, value)".to_owned());
+    out.push("    cast(kind, value).run()".to_owned());
     out.join("\n") + "\n"
 }
 
