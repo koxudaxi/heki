@@ -3,7 +3,8 @@
 //! the other uses of its value (`references = "reads"`).
 
 use super::{Extractor, Position, names_only};
-use crate::CallSite;
+use crate::resolver::Callee;
+use crate::{CallSite, ownership};
 use heki_ast::Span;
 use heki_ir::walk::{Answer, Budget, Visit, reach};
 use heki_ir::{DictEntry, InstKind, IrFunction, ModuleIr, Terminator, VarId};
@@ -29,6 +30,10 @@ impl Extractor<'_> {
         let flow = HandedValues::of(
             (self.f, self.cx.ir()),
             |at| self.callees.get(&at).is_some_and(names_only),
+            |at, args| match self.callees.get(&at)? {
+                Callee::External(symbol) => ownership::handed_back(symbol, args),
+                _ => None,
+            },
             &self.handed,
             reads,
         );
@@ -169,13 +174,16 @@ struct HandedValues {
 type Onward = FxHashMap<VarId, Vec<(VarId, Option<Held>)>>;
 
 impl HandedValues {
-    /// The flow of `f`'s values; `names_only_at` tells the calls that hand nothing on, and
+    /// The flow of `f`'s values; `names_only_at` tells the calls that hand nothing on,
+    /// `handed_back_at` the argument a call hands back as itself (`typing.cast(T, value)`,
+    /// [`ownership::handed_back`]), which flows into its result and is not handed on there, and
     /// `handed` the callables library APIs run (`(call, argument)`), calls already. Given `f`'s
     /// module, the other uses are kept too, with the values its statements use without an
     /// instruction ([`ModuleIr::statement_uses`]).
     fn of(
         (f, ir): (&IrFunction, &ModuleIr),
         names_only_at: impl Fn(Position) -> bool,
+        handed_back_at: impl Fn(Position, &[VarId]) -> Option<VarId>,
         handed: &FxHashSet<(VarId, VarId)>,
         reads: bool,
     ) -> Self {
@@ -240,7 +248,11 @@ impl HandedValues {
                             flow.add(*recv, span, Usage::Reads);
                         }
                         let passed = args.iter().chain(kwargs.iter().map(|(_, v)| v));
-                        if names_only_at(at) {
+                        let handed_back = handed_back_at(at, args);
+                        if let Some(v) = handed_back {
+                            flow.from.entry(*dst).or_default().push(v);
+                        }
+                        if handed_back.is_some() || names_only_at(at) {
                             for v in passed {
                                 flow.add(*v, span, Usage::Reads);
                             }

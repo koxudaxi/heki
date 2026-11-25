@@ -3428,6 +3428,49 @@ fn steps_aliases_and_getters() -> Vec<Step> {
         )
         .present(&[("pkg/getter_use.py", "MUT201")]),
         Step::new(
+            "the getter returns the container of a cast of its parameter",
+            vec![save(
+                "pkg/getter_src.py",
+                &format!(
+                    "from typing import cast\n{}",
+                    GETTER_SRC.replace("return r.entries", "return cast(Registry, r).entries")
+                ),
+            )],
+        )
+        .present(&[("pkg/getter_use.py", "MUT201")]),
+        Step::new(
+            "the caller changes the container a pass-through function hands back",
+            vec![
+                save(
+                    "pkg/getter_src.py",
+                    &format!("{GETTER_SRC}\n\ndef same(x):\n    return x\n"),
+                ),
+                save(
+                    "pkg/getter_use.py",
+                    &GETTER_USE
+                        .replace("import entries_of", "import entries_of, same")
+                        .replace("entries_of(r).append(1)", "same(r.entries).append(1)"),
+                ),
+            ],
+        )
+        .present(&[("pkg/getter_use.py", "MUT201")]),
+        Step::new(
+            "the pass-through function returns a copy",
+            vec![save(
+                "pkg/getter_src.py",
+                &format!("{GETTER_SRC}\n\ndef same(x):\n    return list(x)\n"),
+            )],
+        )
+        .absent(&[("pkg/getter_use.py", "MUT201")]),
+        Step::new(
+            "the getter and its caller are back",
+            vec![
+                save("pkg/getter_src.py", GETTER_SRC),
+                save("pkg/getter_use.py", GETTER_USE),
+            ],
+        )
+        .present(&[("pkg/getter_use.py", "MUT201")]),
+        Step::new(
             "the subclass binds the getter's name as a class attribute",
             vec![save(
                 "pkg/listing_cls.py",

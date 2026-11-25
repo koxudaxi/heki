@@ -1813,10 +1813,17 @@ message = "write model state through GenerationStore instead"
        with a constant name loads
        `obj.a`, and so does a call or property read whose every project callee returns
        attribute `a` of the parameter the object binds on every `return`
-       (`FunctionDecl::returns_param_attr`: `node.members().append(1)` and
+       (`FunctionDecl::returns_param`: `node.members().append(1)` and
        `node.view.append(1)` with `return self.items`; never a `cached_property`), when every
        class the receiver may be takes the name from one of those callees: along its MRO, the
-       first class binding the name defines one (`ProjectDecls::function_taken`).
+       first class binding the name defines one (`ProjectDecls::function_taken`). A call
+       handing back what it is handed is that object itself (`Extractor::build_same_objects`,
+       one answer for every reader of the alias facts): `typing.cast(T, value)`
+       (`ownership::handed_back`, which `ownership::source` reads too), and a call whose every
+       project callee returns, on every `return`, the parameter the argument binds
+       (`FunctionDecl::returns_param` with no attribute: `return x`, `return cast(T, x)`); a
+       function returning another call's result is open. Such a value is `retyped`: a type
+       checker types it by the call, so `MUT110` does not leave its changes to one.
   2. `typed_field_write_sites` propagate bottom-up with their call chains, from private callees
      only: a public callee reports its own writes. A write is allowed
      when a function on its chain matches `allowed-writers` or `exempt-methods`, when an

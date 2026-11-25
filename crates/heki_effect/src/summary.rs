@@ -501,6 +501,10 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary, func: &FuncKe
     for (i, spans) in other.param_inplace_sites {
         into.param_inplace_sites.entry(i).or_default().extend(spans);
     }
+    for (i, spans) in other.retyped_param_changes.into_iter().flat_map(|c| *c) {
+        let into = into.retyped_param_changes.get_or_insert_with(Box::default);
+        into.entry(i).or_default().extend(spans);
+    }
     for (i, slots) in other.inplace_param_slots {
         into.inplace_param_slots.entry(i).or_default().extend(slots);
     }
@@ -802,6 +806,12 @@ struct Extractor<'a> {
     /// Parameters (bit `i`: parameter `i < 64`) each variable may be, through copies and phis
     /// (any input): the may-alias counterpart of `param_alias`'s `(i, None)` entries.
     may_params: FxHashMap<VarId, u64>,
+    /// The value each instruction's result is the object of, as itself ([`Self::same_object`]).
+    same_objects: FxHashMap<VarId, VarId>,
+    /// The values a call handed back as itself (`typing.cast`, a project function returning its
+    /// parameter), directly or through the same objects and phis (any input): a type checker
+    /// types them by that call, not by the annotation of what was handed in.
+    retyped: FxHashSet<VarId>,
     /// Instances the function constructs by calling a project class (`Model(...)`,
     /// `cls(...)`), through copies and phis whose every input is one (`a = A(x) if c else
     /// A(y)`): `TypedFieldWriteSite::fresh`.
@@ -1236,6 +1246,8 @@ impl<'a> Extractor<'a> {
             dict_of: FxHashMap::default(),
             item_alias: FxHashMap::default(),
             may_params: FxHashMap::default(),
+            same_objects: FxHashMap::default(),
+            retyped: FxHashSet::default(),
             fresh: FxHashSet::default(),
             stored_attrs,
             phis: OnceCell::new(),
@@ -1293,6 +1305,7 @@ impl<'a> Extractor<'a> {
         };
         ex.ownership = contracts.is_some_and(|c| c.ownership());
         ex.track = ex.ownership && ex.may_construct();
+        ex.build_same_objects();
         ex.build_may_params();
         ex.build_fresh();
         if ex.events.is_some() {
@@ -1506,22 +1519,83 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// `(dst, src)` of an instruction whose result is the object it is handed: a copy, or an
-    /// augmented assignment changing a built-in container in place (`items += more`,
-    /// `extras |= other`), which gives the container itself. On any other value
-    /// (`count += 1`) it binds a new object.
+    /// `(dst, src)` of an instruction whose result is the object it is handed
+    /// ([`Self::build_same_objects`]).
     fn same_object(&self, kind: &InstKind) -> Option<(VarId, VarId)> {
-        match kind {
-            InstKind::Copy { dst, src } => Some((*dst, *src)),
-            InstKind::BinOp {
-                dst,
-                op,
-                lhs,
-                in_place: true,
-                ..
-            } if self.has_in_place_operator(*lhs, *op) => Some((*dst, *lhs)),
-            _ => None,
+        let dst = kind.dst()?;
+        self.same_objects.get(&dst).map(|src| (dst, *src))
+    }
+
+    /// [`Self::same_objects`] and [`Self::retyped`]. An instruction's result is the object it is
+    /// handed on every path for a copy, an augmented assignment changing a built-in container in
+    /// place (`items += more`, `extras |= other`), which gives the container itself (on any
+    /// other value, `count += 1`, it binds a new object), and a call handing an argument back as
+    /// itself: `typing.cast(T, value)` ([`ownership::handed_back`]), or a call of project
+    /// functions that each return the parameter it binds there ([`Self::returned_param`]).
+    fn build_same_objects(&mut self) {
+        let mut handed_back = Vec::new();
+        for bb in &self.f.blocks {
+            for (index, inst) in bb.insts.iter().enumerate() {
+                self.pos = (bb.id, index);
+                let same = match &inst.kind {
+                    InstKind::Copy { dst, src } => Some((*dst, *src)),
+                    InstKind::BinOp {
+                        dst,
+                        op,
+                        lhs,
+                        in_place: true,
+                        ..
+                    } => self
+                        .has_in_place_operator(*lhs, *op)
+                        .then_some((*dst, *lhs)),
+                    kind @ (InstKind::Call { dst, args, .. }
+                    | InstKind::MethodCall { dst, args, .. }) => {
+                        let symbol = match self.callee_of(kind) {
+                            Callee::External(symbol) => symbol,
+                            _ => String::new(),
+                        };
+                        let returned = || match self.returned_param(kind) {
+                            Some((dst, holder, None)) => Some((dst, holder)),
+                            _ => None,
+                        };
+                        let call = ownership::handed_back(&symbol, args)
+                            .map(|v| (*dst, v))
+                            .or_else(returned);
+                        handed_back.extend(call.map(|(dst, _)| dst));
+                        call
+                    }
+                    _ => None,
+                };
+                if let Some((dst, src)) = same {
+                    self.same_objects.insert(dst, src);
+                }
+            }
         }
+        if handed_back.is_empty() {
+            return;
+        }
+        // Forward from the calls' results, each value once.
+        let mut onward: FxHashMap<VarId, Vec<VarId>> = FxHashMap::default();
+        for (dst, src) in &self.same_objects {
+            onward.entry(*src).or_default().push(*dst);
+        }
+        for phi in self.f.blocks.iter().flat_map(|b| &b.phis) {
+            for (_, v) in &phi.incoming {
+                onward.entry(*v).or_default().push(phi.dst);
+            }
+        }
+        while let Some(v) = handed_back.pop() {
+            if self.retyped.insert(v) {
+                handed_back.extend(onward.get(&v).into_iter().flatten());
+            }
+        }
+    }
+
+    /// Whether the function's parameter `i` is annotated read-only
+    /// ([`crate::FunctionDecl::readonly_params`]).
+    fn readonly_param(&self, i: u8) -> bool {
+        (self.cx.project.function_decl(self.key))
+            .is_some_and(|d| d.readonly_params & (1u64 << i) != 0)
     }
 
     /// The mask bit of the enclosing function's parameter that the variable `name` the function
@@ -1654,7 +1728,7 @@ impl<'a> Extractor<'a> {
         for bb in &self.f.blocks {
             self.pos = (bb.id, 0);
             for inst in &bb.insts {
-                if let Some((dst, holder, attr)) = self.returned_attr(&inst.kind) {
+                if let Some((dst, holder, Some(attr))) = self.returned_param(&inst.kind) {
                     returned_attrs.insert(dst, (holder, attr));
                 }
                 if let InstKind::LoadDeref { dst, name } = &inst.kind {
@@ -2033,16 +2107,16 @@ impl<'a> Extractor<'a> {
         resolver::namespace_load(kind, |v| self.val(v))
     }
 
-    /// `(dst, holder, attr)` of a call or property read that returns attribute `attr` of an
-    /// object it is handed (`node.members()`, `node.view`, `items_of(node)` returning
-    /// `node.items`): every project function it may run returns that attribute of the same
-    /// parameter ([`crate::FunctionDecl::returns_param_attr`]), bound here to `holder`, and
-    /// every class the value it dispatches on may be runs one of them
+    /// `(dst, holder, attr)` of a call or property read that returns an object it is handed
+    /// (`same(node)` returning `node`), or attribute `attr` of one (`node.members()`,
+    /// `node.view`, `items_of(node)` returning `node.items`): every project function it may run
+    /// returns that object of the same parameter ([`crate::FunctionDecl::returns_param`]), bound
+    /// here to `holder`, and every class the value it dispatches on may be runs one of them
     /// ([`resolver::TypeCtx::runs_on_every_class`]).
-    fn returned_attr(&self, kind: &InstKind) -> Option<(VarId, VarId, String)> {
+    fn returned_param(&self, kind: &InstKind) -> Option<(VarId, VarId, Option<String>)> {
         let project = &self.cx.project;
         let (dst, callee, recv, args, star_from, dispatch) = match kind {
-            InstKind::AttrLoad { dst, obj, attr } if project.may_return_param_attr(attr) => {
+            InstKind::AttrLoad { dst, obj, attr } if project.may_return_param(attr) => {
                 let getters = self.cx.resolve_attr_load(self.val(*obj), attr)?;
                 (
                     *dst,
@@ -2060,7 +2134,7 @@ impl<'a> Extractor<'a> {
                 args,
                 star_from,
                 ..
-            } if project.may_return_param_attr(method) => {
+            } if project.may_return_param(method) => {
                 let callee = self.cx.resolve_method(self.val(*recv), method);
                 let dispatch = (*recv, method.as_str());
                 (
@@ -2083,9 +2157,9 @@ impl<'a> Extractor<'a> {
                 let returns_attr = match self.val(*c)? {
                     Val::Ref(fqn) => matches!(
                         project.symbol(fqn),
-                        resolver::Symbol::Function(_, decl) if decl.returns_param_attr.is_some()
+                        resolver::Symbol::Function(_, decl) if decl.returns_param.is_some()
                     ),
-                    Val::Inst(_) | Val::Union(_) => project.may_return_param_attr("__call__"),
+                    Val::Inst(_) | Val::Union(_) => project.may_return_param("__call__"),
                     Val::Class(_) | Val::Super(_) | Val::OneOf(_) => false,
                 };
                 if !returns_attr {
@@ -2108,14 +2182,14 @@ impl<'a> Extractor<'a> {
         };
         // The argument each callee returns the attribute of: `None` for the receiver, else
         // the position among the call's arguments (a static method binds no receiver).
-        let mut returned: Option<(Option<usize>, &str)> = None;
+        let mut returned: Option<(Option<usize>, Option<&str>)> = None;
         for key in &keys {
             let decl = self.cx.project.function_decl(key)?;
-            let (param, attr) = decl.returns_param_attr.as_ref()?;
+            let (param, attr) = decl.returns_param.as_ref()?;
             let binds = binds_recv && !decl.is_staticmethod;
             let this = (
                 usize::from(*param).checked_sub(usize::from(binds)),
-                attr.as_str(),
+                attr.as_deref(),
             );
             if *returned.get_or_insert(this) != this {
                 return None;
@@ -2131,7 +2205,7 @@ impl<'a> Extractor<'a> {
             Some(i) if star_from.is_none_or(|s| i < usize::from(s)) => *args.get(i)?,
             Some(_) => return None,
         };
-        Some((dst, holder, attr.to_owned()))
+        Some((dst, holder, attr.map(str::to_owned)))
     }
 
     /// The alias maps of `dst = obj.<attr>` ([`Self::build_aliases`]).
@@ -2583,6 +2657,7 @@ impl<'a> Extractor<'a> {
             typed_instance,
             implementers,
             may_params: self.may_params.get(&var).copied().unwrap_or(0),
+            retyped: self.retyped.contains(&var),
             fresh: self.is_fresh(var) || field.is_some_and(|a| a.fresh),
             reach: self.reach_of(var),
             binding: None,
@@ -6149,6 +6224,10 @@ impl<'a> Extractor<'a> {
                         .entry(i)
                         .or_default()
                         .insert(span);
+                    if self.retyped.contains(&var) && self.readonly_param(i) {
+                        let changes = self.summary.retyped_param_changes.get_or_insert_default();
+                        changes.entry(i).or_default().insert(span);
+                    }
                 }
                 self.mutate_param(i, String::new(), span);
             }
@@ -8575,16 +8654,14 @@ fn inspecting_builtin(symbol: &str, detached: bool) -> bool {
 }
 
 /// Calls that only name what they are handed: typing forms, `super`, and the call form of an
-/// `except` clause.
+/// `except` clause. (`typing.cast` hands its value back: [`ownership::handed_back`].)
 const NAMING_CALLS: &[&str] = &[
     "builtins.super",
     "contextlib.suppress",
     "typing.NewType",
     "typing.TypeVar",
-    "typing.cast",
     "typing_extensions.NewType",
     "typing_extensions.TypeVar",
-    "typing_extensions.cast",
 ];
 
 /// Whether calling `callee` hands none of its arguments on: a builtin that only inspects them

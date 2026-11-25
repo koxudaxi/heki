@@ -227,6 +227,16 @@ const NEW_OBJECT_CALLS: &[&str] = &[
 /// `typing.cast(T, value)` returns `value`.
 pub(crate) const CASTS: &[&str] = &["typing.cast", "typing_extensions.cast"];
 
+/// The argument a call of the library function `symbol` hands back as itself: the value of
+/// `typing.cast(T, value)`, a type annotation in call form that returns its value unchanged at
+/// run time. Every reader of "which object is this value" (the alias facts of changes and
+/// retention, [`source`], the references a function hands on) takes it from here; a project
+/// function returning its parameter on every path is the declarations' answer
+/// ([`crate::FunctionDecl::returns_param`]).
+pub(crate) fn handed_back(symbol: &str, args: &[VarId]) -> Option<VarId> {
+    CASTS.contains(&symbol).then(|| args.get(1).copied())?
+}
+
 /// What the instruction `kind` of `f` makes of the object its result holds. A call's resolution
 /// is `callee` (`None` for any other instruction); `constructs` says the call constructs a
 /// project class. `made_here` tells the values holding an object the function makes itself
@@ -297,8 +307,8 @@ pub fn source<'i>(
             {
                 return Source::New;
             }
-            if CASTS.contains(&symbol) {
-                return args.get(1).map_or(Source::Unknown, |v| Source::Same(*v));
+            if let Some(value) = handed_back(symbol, args) {
+                return Source::Same(value);
             }
             // `getattr(*spec)` names neither its object nor its default: unknown.
             if symbol == "builtins.getattr"
