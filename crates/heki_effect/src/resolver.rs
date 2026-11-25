@@ -1000,7 +1000,8 @@ pub struct ModuleDecls {
     /// join of every store of the module (`stores::record`).
     pub global_types: BTreeMap<String, Ty>,
     /// Module globals bound once, by the module body, to a dict display whose keys are string
-    /// literals and some of whose values are functions or classes, that nothing changes in
+    /// literals and some of whose values are functions, classes, or instances whose fields hold
+    /// them, that nothing changes in
     /// place (`HANDLERS = {"create": create, "drop": drop}`): each key with its value's type
     /// (`None`: unknown), in order (`stores::record`). `HANDLERS["create"]` is that value
     /// ([`ProjectDecls::table`]).

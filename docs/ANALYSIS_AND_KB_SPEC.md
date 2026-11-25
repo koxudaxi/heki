@@ -719,7 +719,8 @@ A value bound to one of several named objects (a branch `f = a if c else b`, the
 table) is one of them (`Ty::OneOf`, at most `MAX_NAMED`, eight): a call runs every one, which must
 bind a receiver alike. A module global bound once, by the module body outside a loop, to a dict
 display with string-literal keys and no `**` entry, some value of which is a function, a class,
-or a partial object, and that no code changes in place (through its name or a module object,
+a partial object, or an instance whose fields hold such objects (`types::Args::Fields`), and
+that no code changes in place (through its name or a module object,
 the module's own included) or rebinds, is a table (`ModuleDecls::tables`, at most 256
 entries): reading it with a key a string constant gives (`HANDLERS["create"]`,
 `HANDLERS[KEY]`, in its module, imported, or through the module) gives that entry's value, a

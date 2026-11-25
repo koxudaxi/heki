@@ -133,6 +133,7 @@ class Child(Spec):
 
 SPECS: tuple[Spec, ...] = (Spec("a", when=require), Spec("b", when=noop), Spec("c"))
 QUIET: tuple[Spec, ...] = (Spec("b", when=noop), Spec("c"))
+BY_NAME = {"a": Spec("a", when=require), "b": Spec("b", when=noop)}
 VIEW = View(require)
 
 
@@ -147,11 +148,12 @@ class Holder:
 /// The fields a constructor binds: by position, by keyword, by a default the class body binds
 /// to a function (also a base dataclass's), a keyword-only field, one a generator expression
 /// reads through its closure cell, one of the items of a tuple of instances bound once (each
-/// value a construction passed, `None` adding nothing: no item of `QUIET` writes), and an
-/// instance held in a module global and in an attribute.
+/// value a construction passed, `None` adding nothing: no item of `QUIET` writes), the entry a
+/// key of a dict of instances gives, and an instance held in a module global and in an
+/// attribute.
 const FIELD_CALLS: &str = r#"from __future__ import annotations
 
-from pkg.defs import QUIET, SPECS, VIEW, Child, Holder, Spec, View
+from pkg.defs import BY_NAME, QUIET, SPECS, VIEW, Child, Holder, Spec, View
 from pkg.model import Field, noop, require
 
 
@@ -196,6 +198,16 @@ def over_a_table(field: Field) -> bool:
 
 def over_a_table_that_writes_nothing(field: Field) -> bool:
     return any(spec.when is not None and spec.when(field) for spec in QUIET)
+
+
+def by_a_key(field: Field) -> bool:
+    spec = BY_NAME["a"]
+    return spec.when is not None and spec.when(field)  # writes
+
+
+def by_a_key_that_writes_nothing(field: Field) -> bool:
+    spec = BY_NAME["b"]
+    return spec.when is not None and spec.when(field)
 
 
 def through_a_global(field: Field) -> bool:
