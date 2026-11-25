@@ -49,6 +49,7 @@ pub use mut_rules::{
 };
 pub use selection::{
     EffectiveSelectors, RECOMMEND_HINT, RuleSelection, SelectionError, Selectors, heuristic_hint,
+    not_failing_note,
 };
 pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};
 

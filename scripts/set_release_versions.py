@@ -17,6 +17,8 @@ CHANGELOG a binary embeds (`heki version --changelog`) has the section `main` ge
   with ``--locked`` accepts the lock file;
 - `uv.lock`: the version of the project itself, so that ``uv run`` under ``UV_LOCKED=1`` accepts
   the lock file;
+- `README.md` and `docs/adoption.md`: the ``rev:`` of the pre-commit example becomes the release
+  tag (`build_docs.py --check` fails when it differs from the workspace version's tag);
 - with ``--changelog DATE``, `CHANGELOG.md`: the first ``## [VERSION] - Unreleased`` heading
   becomes ``## [VERSION] - DATE``, and the ``[VERSION]`` link, a compare that ends at ``HEAD``,
   ends at the release tag instead (a missing one compares the previous release with the tag, or
@@ -58,6 +60,10 @@ RELEASED_HEADING = re.compile(
 )
 UNRELEASED_SECTION = re.compile(r"^## \[Unreleased\]", re.MULTILINE | re.IGNORECASE)
 LINK_DEFINITION = re.compile(r"^\[(?P<label>[^\]]+)\]: (?P<url>\S+)$", re.MULTILINE)
+
+PRECOMMIT_DOCS = ("README.md", "docs/adoption.md")
+"""The pages whose pre-commit example pins the hook repository's release tag."""
+PRECOMMIT_REV = re.compile(r"^ +rev: v(?P<value>[^\s]+)$", re.MULTILINE)
 
 WORKSPACE_VERSION = "Cargo.toml `workspace.package.version`"
 
@@ -267,6 +273,12 @@ def dated_changelog(text: str, version: str, date: str, repository: str) -> str:
     return text
 
 
+def precommit_revs(root: Path = ROOT) -> dict[str, list[str]]:
+    """The versions the pre-commit examples pin (the ``rev: v...`` lines), by page."""
+    pages = {name: (root / name).read_text(encoding="utf-8") for name in PRECOMMIT_DOCS}
+    return {name: [m["value"] for m in PRECOMMIT_REV.finditer(text)] for name, text in pages.items()}
+
+
 def release_files(root: Path, version: str, changelog_date: str | None) -> dict[Path, str]:
     """The new text of every file the release changes, checked before anything is written."""
     texts = {
@@ -296,6 +308,9 @@ def release_files(root: Path, version: str, changelog_date: str | None) -> dict[
         version,
         members,
     )
+    for name in PRECOMMIT_DOCS:
+        page = (root / name).read_text(encoding="utf-8")
+        written[name] = replace_value(page, PRECOMMIT_REV, version, f"{name} pre-commit example")
     if changelog_date is not None:
         repository = cargo["workspace"]["package"]["repository"].rstrip("/")
         changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")

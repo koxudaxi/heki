@@ -124,7 +124,7 @@ of a shown report in another file is left, and the run says how many were.
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.2.7
+    rev: v0.4.0
     hooks:
       - id: heki
 ```
