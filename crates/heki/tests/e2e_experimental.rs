@@ -63,6 +63,9 @@ impl DocsTree {
         for rel in [
             "scripts/build_docs.py",
             "scripts/ansi_svg.py",
+            "scripts/set_release_versions.py",
+            "Cargo.toml",
+            "pyproject.toml",
             "zensical.toml",
             "README.md",
             "ARCHITECTURE.md",

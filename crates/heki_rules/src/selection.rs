@@ -422,6 +422,17 @@ pub fn heuristic_hint(rules_off: usize, reports_withheld: usize) -> Option<Strin
     ))
 }
 
+/// The note for the `count` reports a run shows (`which` names them) that `heki check` does not
+/// fail on at `fail-on = "error"`: warnings, and heuristic reports, which count as warnings.
+/// `heki check` ends a text run with it, and `heki recommend` lists it among its notes.
+pub fn not_failing_note(count: usize, which: &str) -> String {
+    format!(
+        "heki check does not fail on {count} {which}: warnings, and heuristic reports, which can \
+         be wrong about the code and count as warnings; `fail-on = \"warning\"` in the lint \
+         settings makes them fail it."
+    )
+}
+
 /// The line a text run ends with when it shows nothing on a whole project without contracts: what
 /// to do next is `heki recommend`'s question (ADR-020).
 pub const RECOMMEND_HINT: &str = "hint: `heki recommend` (experimental) lists the rules and \

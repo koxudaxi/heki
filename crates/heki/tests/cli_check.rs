@@ -515,6 +515,36 @@ fn warnings_do_not_fail_the_check_unless_fail_on_says_so() {
 }
 
 #[test]
+fn a_text_run_says_which_reports_it_shows_do_not_fail_it() {
+    let note = "heki check does not fail on 1 report(s) shown now: warnings, and heuristic reports";
+    let p = Project::new("not_failing_note");
+    p.write("models.py", CONTRACT_BREACH)
+        .write("heki.toml", WRITE_OWNERS);
+    // A broken contract is shown as an error, and passes the run.
+    for format in ["full", "concise"] {
+        let (code, _, stderr) = p.heki(&["--output-format", format]);
+        assert_eq!(code, 0, "{format}: {stderr}");
+        assert!(stderr.contains(note), "{format}: {stderr}");
+    }
+    // Other formats keep their output.
+    let (_, stdout, stderr) = p.heki(&["--output-format", "json"]);
+    assert!(
+        !stdout.contains(note) && !stderr.contains(note),
+        "{stdout}{stderr}"
+    );
+    // At `fail-on = "warning"` the report fails the run, and nothing is left to say.
+    let (code, _, stderr) = p.heki(&["--fail-on", "warning"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(!stderr.contains("does not fail on"), "{stderr}");
+    // A clean run has no note.
+    let clean = Project::new("not_failing_note_clean");
+    clean.write("app.py", "x = 1\n");
+    let (code, _, stderr) = clean.heki(&[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("does not fail on"), "{stderr}");
+}
+
+#[test]
 fn ratchet_regressions_fail_at_the_fail_on_severity() {
     let p = Project::new("ratchet_fail_on");
     p.write("a.py", BLOCKING)

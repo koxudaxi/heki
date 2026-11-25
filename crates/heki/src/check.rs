@@ -971,6 +971,11 @@ fn report(
             baseline_path.is_some(),
             touched.map(Touched::file_count),
         );
+        not_failing_hint(
+            &diags,
+            fail_on(args, &project.env.cfg.lint),
+            baseline_path.is_some(),
+        );
         heuristic_hint(
             analyzed.heuristic_off,
             Touched::shown(touched, &analyzed.withheld),
@@ -1186,6 +1191,20 @@ pub(crate) fn rule_pages(diags: &[Diagnostic]) {
     for (code, slug) in rules {
         let page = heki_env::problem::rule_page(slug);
         eprintln!("{code} ({slug}): `heki rule {code}`, {page}");
+    }
+}
+
+/// After the summary of a text format: the reports it shows that do not fail the run at `fail_on`
+/// ([`heki_rules::not_failing_note`]); `baseline` when the reports shown are Ratchet regressions.
+fn not_failing_hint(diags: &[Diagnostic], fail_on: Severity, baseline: bool) {
+    let passing = diags.iter().filter(|d| !d.fails_run(fail_on)).count();
+    if fail_on == Severity::Error && passing > 0 {
+        let which = if baseline {
+            "regression(s)"
+        } else {
+            "report(s) shown now"
+        };
+        eprintln!("{}", heki_rules::not_failing_note(passing, which));
     }
 }
 
