@@ -234,10 +234,24 @@ impl Changes {
             std::mem::take(&mut now.functions),
             std::mem::take(&mut then.functions),
         );
+        // The added imports' own entries: the binding, and what the module's tables of its
+        // globals say of it.
         for name in &restated.imports {
             if !now.imports.contains_key(name) {
                 then.imports.remove(name);
+                then.global_types.remove(name);
+                then.global_capacities.remove(name);
+                if let Some(rebound) = &mut then.rebound_imports {
+                    rebound.remove(name);
+                }
             }
+        }
+        if then
+            .rebound_imports
+            .as_deref()
+            .is_some_and(BTreeSet::is_empty)
+        {
+            then.rebound_imports = None;
         }
         for class in now.classes.values_mut().chain(then.classes.values_mut()) {
             (class.code_attrs).retain(|name| !restated.head_names.contains(name));
