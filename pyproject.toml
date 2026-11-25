@@ -51,6 +51,7 @@ include = [
     { path = "docs/llms.txt", format = "sdist" },
     { path = "scripts/build_docs.py", format = "sdist" },
     { path = "scripts/ansi_svg.py", format = "sdist" },
+    { path = "scripts/set_release_versions.py", format = "sdist" },
     { path = "zensical.toml", format = "sdist" },
     { path = "ARCHITECTURE.md", format = "sdist" },
     { path = "CHANGELOG.md", format = "sdist" },
