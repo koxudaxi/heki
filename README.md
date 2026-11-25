@@ -102,6 +102,31 @@ EFF103 (loop-db-query): `heki rule EFF103`, https://heki.koxudaxi.dev/rules/loop
 
 Ruff, ty, Pyrefly, pyright, and mypy report nothing for either example with their default settings.
 
+### Installation
+
+```console
+$ uv tool install heki      # or: pipx install heki / pip install heki
+$ uvx heki check            # run without installing
+```
+
+### Usage
+
+```console
+$ heki check                                    # check the project
+$ heki check --heuristic                        # also run the heuristic rules
+$ heki check --diff                             # preview proven-safe fixes
+$ heki check --fix                              # apply them
+$ heki check --baseline heki-baseline.toml      # fail only on new findings
+$ heki rule EFF101                              # explain a rule
+$ heki server                                   # LSP server for editors
+$ heki inspect app.users.load_user              # what one function does (experimental)
+$ heki recommend                                # configuration advice (experimental)
+```
+
+See [Coding agents](https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental)
+for `heki inspect` and [Configuration advice](https://heki.koxudaxi.dev/recommend/) for
+`heki recommend`.
+
 ### How heki differs
 
 The difference is the model, not reaching across files: type checkers already follow types
@@ -299,48 +324,13 @@ report names the missing obligation instead of offering a fix.
 
 ## 🎯 Scope
 
-- Its knowledge comes from its own analysis, a catalog of library behavior, contracts you
-  declare in `pyproject.toml`, and type annotations, which only help it resolve calls: rewrites
-  never trust them.
-- When it cannot tell, it stays quiet. Annotations, catalog entries, and contracts close the
-  findings it misses.
-- It does not model `__getattr__` proxies, metaclasses, or framework machinery, and it never
-  runs your code.
-
-See [Scope and limitations](https://heki.koxudaxi.dev/scope/) for the details.
-
-## 📦 Installation
-
-```console
-$ uv tool install heki      # or: pipx install heki / pip install heki
-$ uvx heki check            # run without installing
-```
-
-## 🏃 Usage
-
-```console
-$ heki check                                    # check the project
-$ heki check --heuristic                        # also run the heuristic rules
-$ heki check --diff                             # preview proven-safe fixes
-$ heki check --fix                              # apply them
-$ heki check --baseline heki-baseline.toml      # fail only on new findings
-$ heki rule EFF101                              # explain a rule
-$ heki server                                   # LSP server for editors
-$ heki inspect app.users.load_user              # what one function does (experimental)
-$ heki recommend                                # configuration advice (experimental)
-```
-
-See [Coding agents](https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental)
-for `heki inspect` and [Configuration advice](https://heki.koxudaxi.dev/recommend/) for
-`heki recommend`.
+heki follows its own analysis, a catalog of library behavior, and the contracts you declare, and
+it stays quiet where it cannot tell. See [Scope and limitations](https://heki.koxudaxi.dev/scope/).
 
 ## 🪜 pre-commit and CI
 
-A pre-commit hook. heki follows calls across files, so the hook analyzes the whole project and
-passes the staged files to `--touched`: it shows and fails on the reports in those files and the
-reports whose call chain reaches them, so old findings elsewhere do not block a commit. The
-[heki-pre-commit](https://github.com/koxudaxi/heki-pre-commit) repository installs heki from its PyPI
-wheel, so there is no compile and no Rust toolchain:
+The hook passes the staged files to `heki check --touched`, so old findings elsewhere do not
+block a commit:
 
 ```yaml
 # .pre-commit-config.yaml
@@ -351,56 +341,9 @@ repos:
       - id: heki
 ```
 
-Its tags follow heki releases, so `pre-commit autoupdate` works. To build heki from source instead,
-use `repo: https://github.com/koxudaxi/heki` with a release `rev`; pre-commit then builds that
-release with cargo on the first run, which takes a few minutes, and installs Rust for the build when
-cargo is missing.
-
-A local hook can run any version of the PyPI wheel, also without a compile:
-
-```yaml
-# .pre-commit-config.yaml
-repos:
-  - repo: local
-    hooks:
-      - id: heki
-        name: heki
-        entry: uvx heki check --touched
-        language: system   # needs uv on PATH
-        types: [python]
-        pass_filenames: true
-        require_serial: true
-        verbose: true      # show warnings: they do not fail the hook
-```
-
-A GitHub Actions workflow with code-scanning alerts (SARIF) and annotations:
-
-```yaml
-# .github/workflows/heki.yml
-name: heki
-on: [push, pull_request]
-permissions:
-  contents: read
-  security-events: write   # for the SARIF upload
-jobs:
-  heki:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
-      - run: uvx heki check --output-format sarif > heki.sarif || test "$?" -eq 1
-      - uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: heki.sarif
-      - run: uvx heki check --output-format github
-```
-
-Exact errors, such as `EFF101` reports, fail the hook and the last step. Warnings, such as
-`EFF103` reports, and heuristic reports do not, unless you add `--fail-on warning` or set
-`fail-on = "warning"` in `[tool.heki.lint]`. The SARIF step keeps findings as alerts and fails
-only on a configuration, read, or syntax error. See
-[Adopting heki](https://heki.koxudaxi.dev/adoption/) for a hook without uv and a Ratchet baseline
-that records today's errors, so that only new ones fail.
+Exact errors fail the hook and the CI job; warnings and heuristic reports do not. See
+[Adopting heki](https://heki.koxudaxi.dev/adoption/) for a local hook, a GitHub Actions workflow
+with SARIF, and a Ratchet baseline that records today's errors, so that only new ones fail.
 
 ## 📚 Documentation
 

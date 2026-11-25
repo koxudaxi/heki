@@ -49,3 +49,5 @@ Run `heki`, or `uv run heki` when the project lists it as a development dependen
 [references/output.md](references/output.md) lists the JSON fields, and
 [references/troubleshooting.md](references/troubleshooting.md) says what to do when a command
 fails or a report seems wrong.
+
+To adopt heki in a repository, follow [references/adopt.md](references/adopt.md).
