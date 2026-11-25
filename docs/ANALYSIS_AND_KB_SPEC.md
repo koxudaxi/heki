@@ -907,8 +907,9 @@ EffectSummary(f) = {
                                                            // server): no value that may be parameter i's object,
                                                            // or a view of it, is stored, captured, yielded,
                                                            // returned, or handed to a call other than a project
-                                                           // call binding it to a parameter that only reads it
-                                                           // or a Layer 1 argument read_only / retained_in_return;
+                                                           // call binding it to a parameter that only reads it,
+                                                           // a Layer 1 argument read_only / retained_in_return,
+                                                           // or a cast handing it back (ownership::handed_back);
                                                            // greatest fixpoint in a call cycle, 0 past its pass
                                                            // limit; changes of the object itself are
                                                            // mutated_param_paths' (only_read_mask joins them)
