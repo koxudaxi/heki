@@ -121,7 +121,7 @@ fn a_file_is_checked_in_its_project() {
     assert_eq!((code, sites), (0, vec![]), "{stderr}");
     assert!(stderr.contains("PATHS name 2 file(s)"), "{stderr}");
     assert!(
-        stderr.contains("All checks passed for 0 touched file(s) (5 file(s) analyzed)."),
+        stderr.contains("No reports in or through 0 touched file(s) (5 file(s) analyzed)."),
         "{stderr}"
     );
 }

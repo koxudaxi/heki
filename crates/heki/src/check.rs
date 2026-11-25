@@ -169,7 +169,8 @@ fn analyze(
         selection,
         snapshot,
     } = indexed;
-    let touched = Touched::of(&args.touched, &paths.files, &project);
+    let wide = project_wide_files(&args.analysis, &project.env);
+    let touched = Touched::of(&args.touched, &paths.files, &project, &wide);
     Ok(Analyzed {
         project,
         index,
@@ -264,10 +265,17 @@ pub(crate) fn shown_failures<'a>(
 /// the files the run analyzed. A run with them shows and fails on only the reports that touch
 /// one of them (in the file, or with a hop of the call chain, `related`, in it), and rewrites
 /// only them. The analysis still covers the whole of what it analyzes, since a report in a file
-/// the change left alone can come from a callee it changed.
+/// the change left alone can come from a callee it changed. That is all such a run can promise:
+/// whether a change added a report elsewhere (through a re-export, or an annotation another
+/// module relied on) cannot be told from one state of the code. So with a baseline, which
+/// compares every report, it shows every regression, and without one it counts the failing
+/// reports it does not show ([`Touched::failing_not_shown`]).
 pub(crate) struct Touched {
     /// Keyed like [`ParsedFile::path`], as reports name files.
     files: FxHashSet<PathBuf>,
+    /// A named path is a file whose change can move any report ([`project_wide_files`]): the
+    /// run shows every report, and still rewrites only `files`.
+    every_report: bool,
     /// The baseline paths of `files`.
     baseline_paths: FxHashSet<String>,
     /// The paths `--touched` gives that name no analyzed file.
@@ -278,9 +286,15 @@ pub(crate) struct Touched {
 
 impl Touched {
     /// The files `touched` (`--touched`) and `files` (of PATHS) name in `project`, or `None`
-    /// when both are empty. Paths are compared as the file system resolves them, so `./a.py`, an
-    /// absolute path, and a link name the same file.
-    pub(crate) fn of(touched: &[PathBuf], files: &[PathBuf], project: &Project) -> Option<Self> {
+    /// when both are empty; `wide` are the files whose change can move any report. Paths are
+    /// compared as the file system resolves them, so `./a.py`, an absolute path, and a link name
+    /// the same file.
+    pub(crate) fn of(
+        touched: &[PathBuf],
+        files: &[PathBuf],
+        project: &Project,
+        wide: &[PathBuf],
+    ) -> Option<Self> {
         if touched.is_empty() && files.is_empty() {
             return None;
         }
@@ -301,7 +315,11 @@ impl Touched {
                     .iter()
                     .map(|e| (&e.path, rel_posix(&e.path, root))),
             );
-        let mut found = FxHashSet::default();
+        let mut found: FxHashSet<PathBuf> = (wide.iter())
+            .filter_map(|p| canonical(p).ok())
+            .filter(|p| wanted.contains(p))
+            .collect();
+        let every_report = !found.is_empty();
         let (mut analyzed_files, mut baseline_paths) = (FxHashSet::default(), FxHashSet::default());
         for (path, rel) in analyzed {
             let Some(resolved) = canonical(path).ok().filter(|p| wanted.contains(p)) else {
@@ -322,8 +340,14 @@ impl Touched {
             unknown: not_found(touched),
             unknown_files: not_found(files),
             files: analyzed_files,
+            every_report,
             baseline_paths,
         })
+    }
+
+    /// These files as the run reports on them: `None` when a named file selects every report.
+    pub(crate) fn selecting(touched: Option<&Self>) -> Option<&Self> {
+        touched.filter(|t| !t.every_report)
     }
 
     /// How many analyzed files are touched.
@@ -338,7 +362,15 @@ impl Touched {
 
     /// Whether a run with `touched` shows `d`.
     pub(crate) fn shows(touched: Option<&Self>, d: &Diagnostic) -> bool {
-        touched.is_none_or(|t| t.touches(d))
+        touched.is_none_or(|t| t.every_report || t.touches(d))
+    }
+
+    /// How many of `diags` fail the run at `fail_on` and are not shown: a run without a baseline
+    /// ends with a note counting them, since its pass is no pass of the whole project.
+    pub(crate) fn failing_not_shown(&self, diags: &[Diagnostic], fail_on: Severity) -> usize {
+        (diags.iter())
+            .filter(|d| d.fails_run(fail_on) && !Self::shows(Some(self), d))
+            .count()
     }
 
     /// The file errors of `errors` a run with `touched` reports and fails on, as it does its
@@ -350,8 +382,8 @@ impl Touched {
         errors: &'e [FileError],
         format: OutputFormat,
     ) -> Vec<&'e FileError> {
-        let (shown, others): (Vec<&FileError>, Vec<&FileError>) =
-            (errors.iter()).partition(|e| touched.is_none_or(|t| t.files.contains(&e.path)));
+        let (shown, others): (Vec<&FileError>, Vec<&FileError>) = (errors.iter())
+            .partition(|e| touched.is_none_or(|t| t.every_report || t.files.contains(&e.path)));
         if !others.is_empty() {
             let mut paths: Vec<String> = (others.iter().take(recommend::MAX_EXAMPLES))
                 .map(|e| format!("`{}`", shown_text(&e.path)))
@@ -380,9 +412,13 @@ impl Touched {
         diags.iter().filter(|d| Self::shows(touched, d)).count()
     }
 
-    /// Drop the reports of `diags` that touch no touched file.
-    pub(crate) fn keep(&self, diags: &mut Vec<Diagnostic>) {
-        diags.retain(|d| self.touches(d));
+    /// Drop the reports of `diags`, the reports left after a baseline when `compared`, that a run
+    /// with these files does not show: those that touch no touched file, and none after a
+    /// baseline. An entry counts every report of its key, so a regression fails wherever it is.
+    pub(crate) fn keep(&self, diags: &mut Vec<Diagnostic>, compared: bool) {
+        if !compared {
+            diags.retain(|d| Self::shows(Some(self), d));
+        }
     }
 
     /// The touched files as reports print them, in order.
@@ -392,8 +428,8 @@ impl Touched {
         shown
     }
 
-    /// The baseline entries a run with these files judges, of the reports `diags` before the
-    /// comparison.
+    /// The stale baseline entries a run with these files judges, of the reports `diags` before
+    /// the comparison.
     fn baseline_view(
         &self,
         diags: &[Diagnostic],
@@ -446,14 +482,15 @@ pub(crate) fn warn_files_not_analyzed(
     project: &Project,
     format: OutputFormat,
 ) {
-    if let Some(named) = Touched::of(&[], &paths.files, project) {
+    if let Some(named) = Touched::of(&[], &paths.files, project, &[]) {
         named.warn(format);
     }
 }
 
-/// The baseline entries a `--touched` run judges: an entry of a touched file, and an entry with a
-/// report that touches one. The reports of the other entries are not shown, so a grown or
-/// stale count there is not this run's to report.
+/// The stale baseline entries a `--touched` run judges: an entry of a touched file, and an entry
+/// with a report that touches one. A grown entry is a regression wherever it is, but the
+/// reports of a stale one elsewhere are not shown, so its count is left to a run over the whole
+/// project.
 struct BaselineView<'t> {
     touched: &'t Touched,
     keys: FxHashSet<BaselineKey>,
@@ -722,6 +759,20 @@ pub(crate) fn baseline_path(analysis: &AnalysisArgs, env: &ProjectEnv) -> Option
         .or_else(|| env.cfg.baseline.as_ref().map(|b| env.root.join(b)))
 }
 
+/// The files whose change can move any report: the configuration files at the project root
+/// (`heki_lsp::CONFIG_FILES`, with the summary snapshot), `--config`, and the Ratchet baseline.
+/// `--watch` reloads the whole workspace when one changes, and naming one in `--touched` or
+/// PATHS selects every report.
+pub(crate) fn project_wide_files(analysis: &AnalysisArgs, env: &ProjectEnv) -> Vec<PathBuf> {
+    let root = &env.root;
+    let mut files: Vec<PathBuf> = (heki_lsp::CONFIG_FILES.iter())
+        .map(|n| root.join(n))
+        .collect();
+    files.extend(analysis.config.clone());
+    files.extend(baseline_path(analysis, env));
+    files
+}
+
 /// Every path of `diags` as the output formats print it ([`shown_path`]).
 pub(crate) fn show_paths(diags: &mut [Diagnostic]) {
     for d in diags {
@@ -814,10 +865,10 @@ fn report(
     let key_path = baseline_key(&project.files);
     let baseline_path = baseline_path(&args.analysis, &project.env);
     let fmt = args.output_format;
-    let touched = analyzed.touched.as_ref();
-    if let Some(touched) = touched {
+    if let Some(touched) = &analyzed.touched {
         touched.warn(fmt);
     }
+    let touched = Touched::selecting(analyzed.touched.as_ref());
     if args.update_baseline && baseline_path.is_none() {
         return Err(Problem::new("`--update-baseline` needs a baseline file")
             .help("name it with `--baseline <path>`, or set `baseline` in the configuration")
@@ -844,7 +895,7 @@ fn report(
     let covered = project.covers_entry();
     if let (Some(bp), Some(baseline)) = (&baseline_path, &recorded) {
         // An entry counts every report of its key, so the baseline compares all of them; a
-        // `--touched` run judges only the entries in view. Every report is on a file the run
+        // `--touched` run judges only the stale entries in view. Every report is on a file the run
         // covers. An entry is judged by a run covering its file: one of a group, of no one
         // file, by a run over the whole project, whose root its empty path names.
         let in_view = touched.map(|t| t.baseline_view(&diags, &key_path));
@@ -896,7 +947,7 @@ fn report(
                 }
             }
         }
-        for regression in cmp.regressions.iter().filter(|r| shown(&r.key, &[])) {
+        for regression in &cmp.regressions {
             log!(fmt, "{}", regression_note(regression, unit));
         }
         regressions = cmp.regressions.len();
@@ -965,8 +1016,13 @@ fn report(
     let unmatched_entries = report_unmatched_entries(args, analyzed)?;
     note_imports_left_out(project, fmt)?;
     let errors = Touched::errors(touched, &project.errors, fmt);
+    let fail_on = fail_on(args, &project.env.cfg.lint);
+    let mut not_shown = 0;
     if let Some(touched) = touched {
-        touched.keep(&mut diags);
+        if recorded.is_none() {
+            not_shown = touched.failing_not_shown(&diags, fail_on);
+        }
+        touched.keep(&mut diags, recorded.is_some());
     }
     // Suppressions and the baseline saw every report; only output folds them, among the ones
     // it shows.
@@ -994,10 +1050,11 @@ fn report(
             &source_line
         )
     );
-    if matches!(
+    let text = matches!(
         args.output_format,
         OutputFormat::Full | OutputFormat::Concise
-    ) {
+    );
+    if text {
         summary(
             &diags,
             errors.len(),
@@ -1006,11 +1063,11 @@ fn report(
             baseline_path.is_some(),
             touched.map(Touched::file_count),
         );
-        not_failing_hint(
-            &diags,
-            fail_on(args, &project.env.cfg.lint),
-            baseline_path.is_some(),
-        );
+    }
+    // Every format: a JSON array has no place for it.
+    not_shown_note(not_shown, fmt);
+    if text {
+        not_failing_hint(&diags, fail_on, baseline_path.is_some());
         heuristic_hint(
             analyzed.heuristic_off,
             Touched::shown(touched, &analyzed.withheld),
@@ -1028,15 +1085,12 @@ fn report(
     if matches!(args.output_format, OutputFormat::Full) {
         rule_pages(&diags);
     }
-    let code = if refused_update
-        || unused_entries
-        || unmatched_entries
-        || any_failing(&diags, fail_on(args, &project.env.cfg.lint))
-    {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
-    };
+    let code =
+        if refused_update || unused_entries || unmatched_entries || any_failing(&diags, fail_on) {
+            ExitCode::from(1)
+        } else {
+            ExitCode::SUCCESS
+        };
     finish(args.output_format, &failure::of_files(errors), code)
 }
 
@@ -1186,7 +1240,9 @@ fn not_written(what: &str, path: &Path, failed: usize) -> Problem {
 /// The last line of a text run, with the number of file errors it reports and whether an error
 /// it printed above fails it (a contract entry that matches nothing, a baseline entry that
 /// matches no report, a refused baseline update); `touched` is the number of analyzed files
-/// `--touched` names. Only a run that passes says that all checks passed.
+/// `--touched` names. Only a run of everything that passes says that all checks passed: a run
+/// over touched files says what it looked at, every regression with a baseline, and the reports
+/// that touch the files without one.
 fn summary(
     diags: &[Diagnostic],
     errors: usize,
@@ -1201,13 +1257,16 @@ fn summary(
         "diagnostic(s)"
     };
     let found = diags.len();
-    let scope = match touched {
+    let scope = match touched.filter(|_| !baseline) {
         None => format!("in {files} file(s)"),
         Some(touched) => format!("for {touched} touched file(s) ({files} file(s) analyzed)"),
     };
     let line = match (found, errors, failed, touched) {
         (0, 0, false, None) => format!("All checks passed ({files} file(s))."),
-        (0, 0, false, Some(_)) => format!("All checks passed {scope}."),
+        (0, 0, false, Some(_)) if baseline => format!("No Ratchet regressions {scope}."),
+        (0, 0, false, Some(touched)) => format!(
+            "No reports in or through {touched} touched file(s) ({files} file(s) analyzed)."
+        ),
         (0, 0, true, _) => format!("Found 0 {what} {scope}; the errors above fail the run."),
         (found, 0, _, _) => format!("Found {found} {what} {scope}."),
         (found, errors, _, _) => {
@@ -1215,6 +1274,17 @@ fn summary(
         }
     };
     eprintln!("{line}");
+}
+
+/// The note of a run over touched files without a baseline that leaves out `not_shown` reports
+/// failing it at its `fail-on`, in every format.
+fn not_shown_note(not_shown: usize, fmt: OutputFormat) {
+    if not_shown > 0 {
+        log!(
+            fmt,
+            "note: {not_shown} report(s) that would fail the run are not shown, as they do not touch the touched files; run `heki check` without `--touched` to see them"
+        );
+    }
 }
 
 /// After the summary of the full text format: where each reported rule is explained.
@@ -1367,6 +1437,7 @@ mod tests {
         ];
         let touched = Touched {
             files: FxHashSet::from_iter([PathBuf::from("a.py")]),
+            every_report: false,
             baseline_paths: FxHashSet::default(),
             unknown: Vec::new(),
             unknown_files: Vec::new(),

@@ -139,17 +139,32 @@ the baseline must be newer than 0.4.0 before a rewritten baseline is committed.
 
 ## pre-commit
 
-The hook passes the staged Python files to `heki check --touched`. heki follows calls across files,
-so it still analyzes the whole project, but it shows and fails on only the reports in those files
-and the reports whose call chain reaches one of them: after a change to `app/users.py`, the
-`EFF101` in `app/api.py` that reaches the change through two helpers is shown, and old findings in
-files the commit left alone are not. A project can run the hook from its first commit, without a
-baseline. A change can also make a report appear in a file the commit left alone without a call chain
-through the change, for example when a type annotation that another module relied on is removed;
-such a report is not shown here, so run the whole project in continuous integration. A local hook
-may also pass the files as paths (`entry: heki check`): a file given to `heki check` is checked in
-its project, as with `--touched`. With `--fix`, the hook rewrites only the staged files: the fix
-of a shown report in another file is left, and the run says how many were.
+The hook passes the staged Python files, and a staged `pyproject.toml`, `heki.toml`, or
+`.heki.toml` at the root, to `heki check --touched`. heki follows calls across files, so it still
+analyzes the whole project, but it shows and fails on only the reports in those files and the
+reports whose call chain reaches one of them: after a change to `app/users.py`, the `EFF101` in
+`app/api.py` that reaches the change through two helpers is shown, and old findings in files the
+commit left alone are not. A project can run the hook from its first commit, without a baseline.
+
+That is all a run over touched files can promise. A change can also make a report appear in a
+file the commit left alone without a call chain through the change: a module that re-exports
+another function, or a return annotation another module relied on. Whether a change added such a
+report cannot be told from the code after it, so:
+
+- Without a baseline, the run ends with a note counting the reports that would fail it and are
+  not shown, and when it passes, its last line says what it looked at (`No reports in or through
+  2 touched file(s) (40 file(s) analyzed).`), not that all checks passed.
+- With a baseline, every regression is shown and fails the run, wherever it is (see below).
+- A configuration file can change any report, so naming one (`pyproject.toml`, `heki.toml`,
+  `.heki.toml`, or `hatch.toml` at the root, the summary snapshot, the baseline) shows every
+  report, as a run without `--touched` does: a contract added to `heki.toml` is checked in the
+  whole project.
+
+Use `--touched` while editing and in the hook, and run the whole project, with the baseline, before
+finishing a change and in continuous integration. A local hook may also pass the files as paths
+(`entry: heki check`): a file given to `heki check` is checked in its project, as with `--touched`.
+With `--fix`, the hook rewrites only the staged Python files: the fix of a shown report in another
+file is left, and the run says how many were.
 
 ```yaml
 # .pre-commit-config.yaml
@@ -182,7 +197,8 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
             name: heki
             entry: uvx heki check --touched
             language: system   # needs uv on PATH
-            types: [python]
+            types_or: [python, toml]
+            files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
             pass_filenames: true
             require_serial: true
             verbose: true      # show warnings: they do not fail the hook
@@ -200,7 +216,8 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
             entry: heki check --touched
             language: python
             additional_dependencies: [heki]
-            types: [python]
+            types_or: [python, toml]
+            files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
             pass_filenames: true
             require_serial: true
             verbose: true      # show warnings: they do not fail the hook
@@ -215,9 +232,10 @@ The hook fails on exact errors and passes with warnings and heuristic reports, w
 make them fail it too, set `fail-on = "warning"` in `[tool.heki.lint]`, or add `--fail-on warning`
 before `--touched`.
 With a baseline configured, the hook fails only on new findings. A baseline entry counts every
-report of its key, so a run with `--touched` compares all of them, and judges the entries of the
-touched files and of the reports it shows: a grown entry fails the run when one of its reports
-touches a staged file, and a stale entry elsewhere is left to a run over the whole project.
+report of its key, so a run with `--touched` compares all of them and shows every regression: a
+grown entry fails the commit wherever its reports are, also in a file the commit left alone, since
+the commit added the report. It judges the stale entries of the touched files and of the reports
+that touch them only: a stale entry elsewhere is left to a run over the whole project.
 
 ## Continuous integration
 
@@ -258,7 +276,7 @@ On a pull request, a project with old findings can report only what the change t
 pre-commit hook does (the checkout needs `fetch-depth: 0` for the base branch):
 
 ```yaml
-- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' | xargs -0 -r uvx heki check --touched
+- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' pyproject.toml heki.toml .heki.toml | xargs -0 -r uvx heki check --touched
   env:
     BASE: ${{ github.base_ref }}
 ```

@@ -331,7 +331,7 @@ it stays quiet where it cannot tell. See [Scope and limitations](https://heki.ko
 
 The hook passes the staged files to `heki check --touched`, so old findings in other files do not
 block a commit. A report in an unstaged file whose call chain passes through a staged file is
-shown and fails it too:
+shown and fails it too, and with a baseline, so is every regression. Run the whole project in CI:
 
 ```yaml
 # .pre-commit-config.yaml
