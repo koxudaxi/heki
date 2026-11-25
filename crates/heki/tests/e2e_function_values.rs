@@ -6,7 +6,8 @@
 //! of which gives a function it defines, or a function or class a name binds, returns that
 //! object. A class attribute bound to a `functools.partial` object of a function, read through
 //! the class or wrapped in `staticmethod`, calls the function with the call's arguments and
-//! gives what it returns.
+//! gives what it returns; a class held either way is constructed, and the object it gives is
+//! new.
 //!
 //! Each premise changed leaves the call unresolved: a dataclass that is not frozen, one with a
 //! `__post_init__`, a field a method stores through `object.__setattr__`, a copy given other
@@ -697,4 +698,58 @@ def copies_through_a_partial(field: Field) -> Field:
 "#;
     p.write("pkg/passes.py", passes);
     assert_eq!(reported(&p), marked(passes));
+}
+
+/// A class a field or a partial class attribute holds is constructed by a call through it: the
+/// object the call returns is new, and writing it is a write of a fresh object, as for the class
+/// called directly.
+#[test]
+fn a_held_class_constructs_a_new_object() {
+    check_marks(
+        "function_values_held_classes",
+        r#"from __future__ import annotations
+
+from functools import partial
+from typing import NamedTuple
+
+from pkg.model import Field
+
+
+class Fresh(Field):
+    def __init__(self) -> None:
+        super().__init__()
+        self.required = True
+
+
+class Factories(NamedTuple):
+    make: type[Field]
+
+
+class Kit:
+    make = staticmethod(partial(Fresh))
+"#,
+        r#"from __future__ import annotations
+
+from pkg.defs import Factories, Fresh, Kit
+from pkg.model import Field
+
+
+def through_a_field() -> Field:
+    made = Factories(Fresh).make()
+    made.required = True
+    return made
+
+
+def through_a_partial() -> Field:
+    made = Kit().make()
+    made.required = True
+    return made
+
+
+def directly() -> Field:
+    made = Fresh()
+    made.required = True
+    return made
+"#,
+    );
 }

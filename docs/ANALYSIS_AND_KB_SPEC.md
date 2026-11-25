@@ -573,7 +573,8 @@ items of a container (`TABLE: tuple[Spec, ...] = (Spec(run=a), Spec(run=b))` giv
 given no other value). A copy given other values, `typing.Self` of a method's result, and a call
 of a class object that may be a subclass give an instance whose fields hold their declared types.
 Reading a field gives what it holds (`TypeCtx::field_held`, for typing and for the call targets
-of `obj.field(...)`, which binds no receiver) when the instance holds what the construction gave
+of `obj.field(...)`, which binds no receiver and constructs a class the field holds, as a
+partial class attribute of a class does) when the instance holds what the construction gave
 (`ProjectDecls::field_holds_given`): along the MRO, every class binding the name binds it as a
 field of its own to a default that is no descriptor (none, `None`, a literal, a display, a
 default factory, a project function or class; any default of a named tuple's field, which is one
