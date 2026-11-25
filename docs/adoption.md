@@ -23,7 +23,8 @@ Set `baseline = "heki-baseline.toml"` in the [configuration](configuration.md#to
 to use it without the flag, also in `--watch` and the language server.
 
 Entries are keyed by file, function, rule, and target, not by line number, so unrelated edits and
-reformatting do not break the baseline:
+reformatting do not break the baseline ([import cycle groups](#import-cycle-groups) are keyed by
+their modules):
 
 ```toml
 # heki Ratchet baseline: counts may only shrink (`heki check --update-baseline`).
@@ -72,6 +73,33 @@ A baseline without `version = 2` was written before heki counted sites, and coun
 
 A version this heki does not know is an error, and so is a file listing one entry twice (a hand
 merge of two baselines).
+
+### Import cycle groups
+
+An [`IMP101`](rules/import-cycle.md) entry records a group of modules that import each other, and
+names no file or function:
+
+```toml
+[[entries]]
+rule_code = "IMP101"
+target = "pkg.a, pkg.b, pkg.c"
+count = 1
+```
+
+A group is covered when one entry holds all of its modules, whichever import closes the cycle
+its report shows and whichever function holds that import:
+
+- A group that lost modules, or split into several groups, is covered: a note says the entry
+  can shrink to the groups there are now, and `--update-baseline` records them.
+- A group with a module no entry of it holds is a regression, and so is a group joining two
+  recorded groups: the note names the groups it joins and the modules none of them holds. A
+  renamed module is such a module.
+- An entry matches no report only when none of its modules is in a group.
+
+Since a group spans files, only a run over the whole project judges its entry, and
+`--update-baseline` over part of the project keeps it. An entry written by heki 0.4.0 or earlier
+names the file and function of the import its group was reported at; heki reads it as the entry
+of its group, and `--update-baseline` rewrites it.
 
 ## pre-commit
 

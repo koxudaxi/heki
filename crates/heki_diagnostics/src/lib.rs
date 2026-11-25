@@ -12,7 +12,7 @@ pub use suppression::{InlineIgnores, Suppression, SuppressionForm, parse_inline_
 use heki_ast::Span;
 use heki_env::Severity;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use style::paint;
@@ -161,6 +161,11 @@ pub struct Diagnostic {
     /// reports and when there is none; written to JSON only when not empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_examples: Vec<AllowedExample>,
+    /// The report stands for a group of modules, which its `target` lists (`IMP101`): its
+    /// baseline key names no file or function, and an entry of a group holding every one of
+    /// them covers it, wherever the report sits. Written by no output format.
+    #[serde(skip)]
+    pub group: bool,
 }
 
 /// Why a heuristic report of an exact rule is not exact.
@@ -700,12 +705,65 @@ pub fn sarif(
 // ------------------------------------------------------------------------------ ratchet
 
 /// Line-number-independent Ratchet baseline key (generalized from `dcg`'s `generation_store_allowlist.toml`).
+/// The key of a group report ([`Diagnostic::group`]) names no file or function (both are
+/// empty): its `target` lists the modules of the group.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct BaselineKey {
     pub path: String,
     pub qualname: String,
     pub rule_code: String,
     pub target: String,
+}
+
+impl BaselineKey {
+    /// Whether the key is of a group of modules, which is of no one file.
+    pub fn is_group(&self) -> bool {
+        self.path.is_empty()
+    }
+
+    /// The modules a group key's `target` lists.
+    fn members(&self) -> BTreeSet<&str> {
+        self.target.split(", ").collect()
+    }
+
+    /// The modules of this group key that none of the group keys `others` lists.
+    pub fn members_outside(&self, others: &[BaselineKey]) -> Vec<&str> {
+        let listed: BTreeSet<&str> = others.iter().flat_map(Self::members).collect();
+        self.members()
+            .into_iter()
+            .filter(|m| !listed.contains(m))
+            .collect()
+    }
+
+    /// The group keys of `counts` of this group key's rule that share a module with it.
+    fn meeting<'c>(
+        &self,
+        counts: &'c BTreeMap<BaselineKey, u32>,
+    ) -> impl Iterator<Item = &'c BaselineKey> {
+        let members = self.members();
+        (counts.keys())
+            .filter(move |k| k.is_group() && k.rule_code == self.rule_code)
+            .filter(move |k| !k.members().is_disjoint(&members))
+    }
+
+    /// The reports of `counts` that this entry matched: those of its key, or for a group entry,
+    /// the groups that share a module with it.
+    pub fn found_in(&self, counts: &BTreeMap<BaselineKey, u32>) -> u32 {
+        if self.is_group() {
+            u32::try_from(self.meeting(counts).count()).unwrap_or(u32::MAX)
+        } else {
+            counts.get(self).copied().unwrap_or(0)
+        }
+    }
+}
+
+impl std::fmt::Display for BaselineKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if !self.is_group() {
+            write!(f, "{}::{} ", self.path, self.qualname)?;
+        }
+        write!(f, "{} `{}`", self.rule_code, self.target)
+    }
 }
 
 /// What the counts of a Ratchet baseline count.
@@ -748,8 +806,29 @@ pub struct RatchetBaseline {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RatchetComparison {
-    pub regressions: Vec<(BaselineKey, u32, u32)>,
-    pub stale_entries: Vec<(BaselineKey, u32, u32)>,
+    pub regressions: Vec<Regression>,
+    pub stale_entries: Vec<StaleEntry>,
+}
+
+/// A report key with more reports than its entry allows, or a group no entry holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Regression {
+    pub key: BaselineKey,
+    pub allowed: u32,
+    pub found: u32,
+    /// The recorded groups a group no entry holds shares a module with: the groups it joins.
+    pub joins: Vec<BaselineKey>,
+}
+
+/// An entry that allows more than it matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleEntry {
+    pub key: BaselineKey,
+    pub allowed: u32,
+    /// [`BaselineKey::found_in`] the current reports.
+    pub found: u32,
+    /// The groups made of a group entry's modules only, which the entry can shrink to.
+    pub within: Vec<BaselineKey>,
 }
 
 #[derive(Debug, Error)]
@@ -773,9 +852,7 @@ pub enum BaselineError {
         "baseline {path} has version {version}; this heki reads versions 1 and {BASELINE_VERSION}"
     )]
     Version { path: PathBuf, version: u32 },
-    #[error(
-        "baseline {path} lists {}::{} {} `{}` more than once; keep one entry", key.path, key.qualname, key.rule_code, key.target
-    )]
+    #[error("baseline {path} lists {key} more than once; keep one entry")]
     Duplicate { path: PathBuf, key: BaselineKey },
 }
 
@@ -811,10 +888,7 @@ impl heki_env::Explain for BaselineError {
             ),
             Self::Duplicate { path, key } => (
                 path,
-                format!(
-                    "the baseline lists {}::{} {} `{}` more than once",
-                    key.path, key.qualname, key.rule_code, key.target
-                ),
+                format!("the baseline lists {key} more than once"),
                 "keep one of the entries",
             ),
         };
@@ -836,10 +910,14 @@ struct BaselineFile {
     entries: Vec<BaselineEntry>,
 }
 
+/// The entry of a group names no file or function. One written before a group was keyed by its
+/// modules names those of the import closing the cycle its report showed.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BaselineEntry {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     qualname: String,
     rule_code: String,
     target: String,
@@ -855,19 +933,57 @@ impl RatchetBaseline {
         }
     }
 
-    /// Compare current diagnostic counts against baseline (monotonic shrink).
+    /// Compare current diagnostic counts against baseline (monotonic shrink). A group is
+    /// covered by an entry of its rule holding all of its modules, whatever import its report
+    /// sits at. An entry of a group is stale when it holds groups other than the one of exactly
+    /// its modules (it can shrink to them), or when no group shares a module with it; a group
+    /// that shares modules with it and that it does not hold is a regression that names it.
     pub fn compare(&self, current: &BTreeMap<BaselineKey, u32>) -> RatchetComparison {
         let mut out = RatchetComparison::default();
         for (key, &cur) in current {
+            if key.is_group() {
+                let members = key.members();
+                let joins: Vec<&BaselineKey> = key.meeting(&self.counts).collect();
+                if !joins.iter().any(|e| members.is_subset(&e.members())) {
+                    out.regressions.push(Regression {
+                        key: key.clone(),
+                        allowed: 0,
+                        found: cur,
+                        joins: joins.into_iter().cloned().collect(),
+                    });
+                }
+                continue;
+            }
             let allowed = self.counts.get(key).copied().unwrap_or(0);
             if cur > allowed {
-                out.regressions.push((key.clone(), allowed, cur));
+                out.regressions.push(Regression {
+                    key: key.clone(),
+                    allowed,
+                    found: cur,
+                    joins: Vec::new(),
+                });
             }
         }
         for (key, &allowed) in &self.counts {
-            let cur = current.get(key).copied().unwrap_or(0);
-            if cur < allowed {
-                out.stale_entries.push((key.clone(), allowed, cur));
+            let found = key.found_in(current);
+            let (stale, within) = if key.is_group() {
+                let members = key.members();
+                let within: Vec<BaselineKey> = (key.meeting(current))
+                    .filter(|g| g.members().is_subset(&members))
+                    .cloned()
+                    .collect();
+                let exact = matches!(&within[..], [g] if g.members() == members);
+                (!exact && (found == 0 || !within.is_empty()), within)
+            } else {
+                (found < allowed, Vec::new())
+            };
+            if stale {
+                out.stale_entries.push(StaleEntry {
+                    key: key.clone(),
+                    allowed,
+                    found,
+                    within,
+                });
             }
         }
         out
@@ -882,13 +998,18 @@ impl RatchetBaseline {
         key_path: &dyn Fn(&Path) -> String,
     ) -> RatchetComparison {
         let cmp = self.compare(&baseline_counts(diags, key_path, self.unit));
-        let regressed: std::collections::BTreeSet<&BaselineKey> =
-            cmp.regressions.iter().map(|(k, _, _)| k).collect();
+        let regressed: BTreeSet<&BaselineKey> = cmp.regressions.iter().map(|r| &r.key).collect();
         diags.retain(|d| regressed.contains(&baseline_key(d, key_path(&d.path))));
         cmp
     }
 
-    pub fn from_toml_str(text: &str, path: &Path) -> Result<Self, BaselineError> {
+    /// Read a baseline. `group_rule` tells the rules whose reports stand for groups: their
+    /// entries written with the file and function of a report are read as entries of groups.
+    pub fn from_toml_str(
+        text: &str,
+        path: &Path,
+        group_rule: fn(&str) -> bool,
+    ) -> Result<Self, BaselineError> {
         let file: BaselineFile = toml::from_str(text).map_err(|cause| BaselineError::Toml {
             path: path.to_path_buf(),
             cause,
@@ -907,9 +1028,15 @@ impl RatchetBaseline {
         // allowances up, while each recorded the same findings.
         let mut counts = BTreeMap::new();
         for e in file.entries {
+            let group = e.path.is_empty() || group_rule(&e.rule_code);
+            let (file, qualname) = if group {
+                (String::new(), String::new())
+            } else {
+                (e.path, e.qualname)
+            };
             let key = BaselineKey {
-                path: e.path,
-                qualname: e.qualname,
+                path: file,
+                qualname,
                 rule_code: e.rule_code,
                 target: e.target,
             };
@@ -945,12 +1072,13 @@ impl RatchetBaseline {
         )
     }
 
-    pub fn load(path: &Path) -> Result<Self, BaselineError> {
+    /// [`Self::from_toml_str`] of the file at `path`.
+    pub fn load(path: &Path, group_rule: fn(&str) -> bool) -> Result<Self, BaselineError> {
         let text = std::fs::read_to_string(path).map_err(|cause| BaselineError::Read {
             path: path.to_path_buf(),
             cause,
         })?;
-        Self::from_toml_str(&text, path)
+        Self::from_toml_str(&text, path, group_rule)
     }
 
     pub fn save(&self, path: &Path) -> Result<(), BaselineError> {
@@ -963,9 +1091,15 @@ impl RatchetBaseline {
 
 /// Baseline key of one diagnostic (`path` = project-relative POSIX path).
 pub fn baseline_key(d: &Diagnostic, path: String) -> BaselineKey {
+    // Where a group's report sits is no part of the group.
+    let (path, qualname) = if d.group {
+        (String::new(), String::new())
+    } else {
+        (path, d.qualname.clone())
+    };
     BaselineKey {
         path,
-        qualname: d.qualname.clone(),
+        qualname,
         rule_code: d.rule_code.clone(),
         target: d.target.clone(),
     }
@@ -1030,6 +1164,7 @@ mod tests {
             open_records: Vec::new(),
             contracts: Vec::new(),
             allowed_examples: Vec::new(),
+            group: false,
         }
     }
 
@@ -1043,8 +1178,24 @@ mod tests {
         };
         let current = BTreeMap::from([(k1.clone(), 2), (k2.clone(), 1)]);
         let cmp = baseline.compare(&current);
-        assert_eq!(cmp.regressions, vec![(k1, 1, 2)]);
-        assert_eq!(cmp.stale_entries, vec![(k2, 2, 1)]);
+        assert_eq!(
+            cmp.regressions,
+            vec![Regression {
+                key: k1,
+                allowed: 1,
+                found: 2,
+                joins: Vec::new()
+            }]
+        );
+        assert_eq!(
+            cmp.stale_entries,
+            vec![StaleEntry {
+                key: k2,
+                allowed: 2,
+                found: 1,
+                within: Vec::new()
+            }]
+        );
     }
 
     #[test]
@@ -1057,12 +1208,17 @@ mod tests {
         let text = baseline.to_toml_string();
         assert!(text.find("src/a.py").unwrap() < text.find("src/z.py").unwrap());
         assert!(!text.contains("src/zero.py"));
-        let back = RatchetBaseline::from_toml_str(&text, Path::new("b.toml")).unwrap();
+        let back = RatchetBaseline::from_toml_str(&text, Path::new("b.toml"), |_| false).unwrap();
         assert_eq!(back, baseline);
         assert!(
-            RatchetBaseline::from_toml_str("[[entries]]\npath = 1\n", Path::new("b.toml")).is_err()
+            RatchetBaseline::from_toml_str("[[entries]]\npath = 1\n", Path::new("b.toml"), |_| {
+                false
+            })
+            .is_err()
         );
-        assert!(RatchetBaseline::from_toml_str("bogus = 1\n", Path::new("b.toml")).is_err());
+        assert!(
+            RatchetBaseline::from_toml_str("bogus = 1\n", Path::new("b.toml"), |_| false).is_err()
+        );
     }
 
     #[test]
@@ -1088,12 +1244,13 @@ mod tests {
         let entry = "[[entries]]\npath = \"a.py\"\nqualname = \"f\"\nrule_code = \"MUT201\"\ntarget = \"M.f\"\ncount = 1\n";
         // Files written before baselines counted sites keep counting diagnostics.
         for old in [entry.to_owned(), format!("version = 1\n{entry}")] {
-            let b = RatchetBaseline::from_toml_str(&old, path).unwrap();
+            let b = RatchetBaseline::from_toml_str(&old, path, |_| false).unwrap();
             assert_eq!(b.unit, CountUnit::Diagnostics);
             assert_eq!(b.unit.noun(), "diagnostic(s)");
             assert!(b.to_toml_string().contains("version = 1\n"));
         }
-        let new = RatchetBaseline::from_toml_str(&format!("version = 2\n{entry}"), path).unwrap();
+        let new = RatchetBaseline::from_toml_str(&format!("version = 2\n{entry}"), path, |_| false)
+            .unwrap();
         assert_eq!(new.unit, CountUnit::Sites);
         assert_eq!(new.unit.noun(), "site(s)");
         assert!(new.to_toml_string().contains("version = 2\n"));
@@ -1102,12 +1259,12 @@ mod tests {
             entry.replace("count = 1", "count = 4294967295")
         );
         assert_eq!(
-            RatchetBaseline::from_toml_str(&twice, path)
+            RatchetBaseline::from_toml_str(&twice, path, |_| false)
                 .unwrap_err()
                 .to_string(),
             "baseline b.toml lists a.py::f MUT201 `M.f` more than once; keep one entry"
         );
-        let err = RatchetBaseline::from_toml_str(&format!("version = 7\n{entry}"), path)
+        let err = RatchetBaseline::from_toml_str(&format!("version = 7\n{entry}"), path, |_| false)
             .unwrap_err()
             .to_string();
         assert_eq!(

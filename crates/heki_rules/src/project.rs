@@ -1263,11 +1263,12 @@ impl RulesRun<'_> {
     /// Whether the baseline entry `key`, which `found` reports of this check matched (the
     /// heuristic reports the selection withholds among them), is reported for matching none:
     /// with `lint.report-unused-suppressions`, when its file was checked (`checked` holds the
-    /// project-relative paths) and its rule ran there.
+    /// project-relative paths; an entry of a group, of no one file, is judged by a run over the
+    /// whole project) and its rule ran there.
     pub fn unused_entry(&self, key: &BaselineKey, found: u32, checked: &FxHashSet<&str>) -> bool {
         self.unused_reported()
             && found == 0
-            && checked.contains(key.path.as_str())
+            && (key.is_group() || checked.contains(key.path.as_str()))
             && self.reports(&key.rule_code, &key.path)
     }
 }
@@ -1406,6 +1407,7 @@ fn suppression_report(
         open_records: Vec::new(),
         contracts: Vec::new(),
         allowed_examples: Vec::new(),
+        group: false,
     })
 }
 

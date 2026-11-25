@@ -9,8 +9,9 @@ use crate::{AnalysisArgs, CheckArgs, ColorChoice, OutputFormat, SnapshotArgs};
 use anyhow::Result;
 use heki_ast::LineIndex;
 use heki_diagnostics::{
-    BASELINE_VERSION, BaselineKey, CountUnit, Diagnostic, FileFailure, RatchetBaseline, Stylesheet,
-    TextEdit, baseline_counts, fix_python_source, github_escape, path_text, render, unified_diff,
+    BASELINE_VERSION, BaselineKey, CountUnit, Diagnostic, FileFailure, RatchetBaseline, Regression,
+    StaleEntry, Stylesheet, TextEdit, baseline_counts, fix_python_source, github_escape, path_text,
+    render, unified_diff,
 };
 use heki_effect::ProjectIndex;
 use heki_env::{Docs, LintConfig, Problem, Severity, UnmatchedEntries};
@@ -459,8 +460,12 @@ struct BaselineView<'t> {
 }
 
 impl BaselineView<'_> {
-    fn shows(&self, key: &BaselineKey) -> bool {
-        self.keys.contains(key) || self.touched.baseline_paths.contains(&key.path)
+    /// Whether the run judges the entry or report `key`; a group entry also when it holds a
+    /// shown group, one of `within`.
+    fn shows(&self, key: &BaselineKey, within: &[BaselineKey]) -> bool {
+        self.keys.contains(key)
+            || self.touched.baseline_paths.contains(&key.path)
+            || within.iter().any(|g| self.keys.contains(g))
     }
 }
 
@@ -727,6 +732,44 @@ pub(crate) fn show_paths(diags: &mut [Diagnostic]) {
     }
 }
 
+/// The targets of `keys` for a note: "`a, b` and `c, d`".
+fn targets(keys: &[BaselineKey]) -> String {
+    let mut quoted: Vec<String> = keys.iter().map(|k| format!("`{}`", k.target)).collect();
+    let last = quoted.pop().unwrap_or_default();
+    if quoted.is_empty() {
+        last
+    } else {
+        format!("{} and {last}", quoted.join(", "))
+    }
+}
+
+/// The note on a regression: the counts of its key, or what a new group joins.
+fn regression_note(regression: &Regression, unit: CountUnit) -> String {
+    let Regression {
+        key,
+        allowed,
+        found,
+        joins,
+    } = regression;
+    if !key.is_group() {
+        return format!(
+            "note: baseline entry {key} allows {allowed} {}, found {found}",
+            unit.noun()
+        );
+    }
+    let outside = key.members_outside(joins).join(", ");
+    let how = match &joins[..] {
+        [] => "no baseline entry holds any of its modules".to_owned(),
+        [_] => format!("`{outside}` joined the baseline group {}", targets(joins)),
+        _ if outside.is_empty() => format!("it joins the baseline groups {}", targets(joins)),
+        _ => format!(
+            "it joins the baseline groups {} with `{outside}`",
+            targets(joins)
+        ),
+    };
+    format!("note: {key} is a new group: {how}")
+}
+
 /// Baseline handling, rendering, summary, and exit code of the reports `diags` of `analyzed`.
 fn report(
     args: &CheckArgs,
@@ -751,7 +794,9 @@ fn report(
     // `--update-baseline` records the current findings into a missing baseline, and otherwise
     // only lets it shrink: it compares like a check first.
     let recorded = match &baseline_path {
-        Some(bp) if !args.update_baseline || bp.exists() => Some(RatchetBaseline::load(bp)?),
+        Some(bp) if !args.update_baseline || bp.exists() => {
+            Some(RatchetBaseline::load(bp, heki_rules::reports_groups)?)
+        }
         _ => None,
     };
     let current = baseline_counts(&diags, &key_path, CountUnit::Sites);
@@ -766,10 +811,13 @@ fn report(
     let covered = project.covered();
     if let (Some(bp), Some(baseline)) = (&baseline_path, &recorded) {
         // An entry counts every report of its key, so the baseline compares all of them; a
-        // `--touched` run judges only the entries in view.
+        // `--touched` run judges only the entries in view. Every report is on a file the run
+        // covers. An entry is judged by a run covering its file: one of a group, of no one
+        // file, by a run over the whole project, whose root its empty path names.
         let in_view = touched.map(|t| t.baseline_view(&diags, &key_path));
-        let judged =
-            |key: &BaselineKey| covered(&key.path) && in_view.as_ref().is_none_or(|v| v.shows(key));
+        let shown = |key: &BaselineKey, within: &[BaselineKey]| {
+            in_view.as_ref().is_none_or(|v| v.shows(key, within))
+        };
         let unit = baseline.unit;
         if unit == CountUnit::Diagnostics && !args.update_baseline {
             log!(
@@ -784,40 +832,39 @@ fn report(
             let run = analyzed.rules_run();
             let checked = project.files.iter().map(|f| f.rel.as_str()).collect();
             let withheld = baseline_counts(&analyzed.withheld, &key_path, unit);
-            for (key, allowed, cur) in cmp.stale_entries.iter().filter(|(k, ..)| judged(k)) {
-                let found = cur + withheld.get(key).copied().unwrap_or(0);
-                if run.unused_entry(key, found, &checked) {
+            let judged = (cmp.stale_entries.iter())
+                .filter(|e| covered(&e.key.path) && shown(&e.key, &e.within));
+            for StaleEntry {
+                key,
+                allowed,
+                found,
+                within,
+            } in judged
+            {
+                if run.unused_entry(key, found + key.found_in(&withheld), &checked) {
                     log!(
                         fmt,
-                        "error: baseline entry {}::{} {} `{}` matched no report (`--update-baseline` removes it)",
-                        key.path,
-                        key.qualname,
-                        key.rule_code,
-                        key.target
+                        "error: baseline entry {key} matched no report (`--update-baseline` removes it)"
                     );
                     unused_entries = true;
                     continue;
                 }
-                log!(
-                    fmt,
-                    "note: baseline entry {}::{} {} `{}` can shrink {allowed} -> {cur} (`--update-baseline`)",
-                    key.path,
-                    key.qualname,
-                    key.rule_code,
-                    key.target
-                );
+                if within.is_empty() {
+                    log!(
+                        fmt,
+                        "note: baseline entry {key} can shrink {allowed} -> {found} (`--update-baseline`)"
+                    );
+                } else {
+                    log!(
+                        fmt,
+                        "note: baseline entry {key} can shrink to {} (`--update-baseline`)",
+                        targets(within)
+                    );
+                }
             }
         }
-        for (key, allowed, cur) in cmp.regressions.iter().filter(|(k, ..)| judged(k)) {
-            log!(
-                fmt,
-                "note: baseline entry {}::{} {} `{}` allows {allowed} {}, found {cur}",
-                key.path,
-                key.qualname,
-                key.rule_code,
-                key.target,
-                unit.noun()
-            );
+        for regression in cmp.regressions.iter().filter(|r| shown(&r.key, &[])) {
+            log!(fmt, "{}", regression_note(regression, unit));
         }
         regressions = cmp.regressions.len();
     }
@@ -826,6 +873,8 @@ fn report(
             failure::print(fmt, &not_written("baseline", bp, project.errors.len()));
             return finish(fmt, &failure::of_files(&project.errors), ExitCode::SUCCESS);
         }
+        // A run over part of the project knows only part of a group: it keeps the entries of
+        // groups, which cover its own groups.
         let kept: Vec<(&BaselineKey, &u32)> = recorded
             .iter()
             .flat_map(|b| &b.counts)
@@ -856,6 +905,8 @@ fn report(
             refused_update = true;
         } else {
             let mut counts = current;
+            // The groups of a run over part of the project are held by the entries it keeps.
+            counts.retain(|key, _| covered(&key.path));
             counts.extend(kept.into_iter().map(|(key, count)| (key.clone(), *count)));
             let baseline = RatchetBaseline::from_counts(counts);
             baseline.save(bp)?;
@@ -1240,6 +1291,7 @@ mod tests {
             open_records: Vec::new(),
             contracts: Vec::new(),
             allowed_examples: Vec::new(),
+            group: false,
         }
     }
 

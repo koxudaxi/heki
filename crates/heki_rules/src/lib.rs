@@ -908,6 +908,16 @@ pub fn find_rule(query: &str) -> Option<&'static RuleMeta> {
         .find(|r| r.code.eq_ignore_ascii_case(query) || r.slug.eq_ignore_ascii_case(query))
 }
 
+/// The rules whose report stands for a group of modules, which its target lists
+/// ([`Diagnostic::group`]): `IMP101` reports each group of modules importing each other once.
+const GROUP_RULES: [&str; 1] = ["IMP101"];
+
+/// Whether the reports of the rule `code` stand for groups of modules: a Ratchet baseline
+/// covers one by an entry of a group holding all of its modules.
+pub fn reports_groups(code: &str) -> bool {
+    GROUP_RULES.contains(&code)
+}
+
 // ==================================================================== project check
 
 /// One analyzed module: its summarization input plus source text for positions.
@@ -1684,6 +1694,7 @@ impl<'a> CheckContext<'a> {
             open_records: Vec::new(),
             contracts: Vec::new(),
             allowed_examples: Vec::new(),
+            group: reports_groups(meta.code),
         });
         out.last_mut()
     }

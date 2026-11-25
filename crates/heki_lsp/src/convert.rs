@@ -301,6 +301,7 @@ mod tests {
             open_records: Vec::new(),
             contracts: Vec::new(),
             allowed_examples: Vec::new(),
+            group: false,
         };
         let uri = Url::parse("file:///a.py").unwrap();
         let target = EditTarget {

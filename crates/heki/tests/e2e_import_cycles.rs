@@ -424,3 +424,378 @@ fn an_unknown_timing_class_is_a_configuration_error() {
     );
     assert!(err.contains("did you mean `function`?"), "{err}");
 }
+
+/// `pkg/<name>.py` for each `(name, imports)`: it imports `f_<m>` from each module `m` of
+/// `imports` while it loads and defines `f_<name>`.
+fn modules(p: &Project, files: &[(&str, &[&str])]) {
+    for (name, imports) in files {
+        let mut text: String = (imports.iter())
+            .map(|m| format!("from pkg.{m} import f_{m}\n"))
+            .collect();
+        text.push_str(&format!("\n\ndef f_{name}() -> int:\n    return 1\n"));
+        p.write(&format!("pkg/{name}.py"), &text);
+    }
+}
+
+/// A project of the package `pkg` and its modules ([`modules`]).
+fn package(name: &str, files: &[(&str, &[&str])]) -> Project {
+    let p = project(name, &[("pkg/__init__.py", "")]);
+    modules(&p, files);
+    p
+}
+
+/// `heki check --select IMP101 --baseline b.toml <args>`: exit code and stderr.
+fn ratchet(p: &Project, args: &[&str]) -> (i32, String) {
+    let mut all = vec!["--select", "IMP101", "--baseline", "b.toml"];
+    all.extend_from_slice(args);
+    let (code, _, err) = p.check(&all);
+    (code, err)
+}
+
+/// Record the baseline `b.toml` of the project as it is.
+fn record(p: &Project) {
+    let (code, err) = ratchet(p, &["--update-baseline"]);
+    assert_eq!(code, 0, "{err}");
+}
+
+/// The baseline file `--update-baseline` writes for the `IMP101` groups `targets`.
+fn group_entries(targets: &[&str]) -> String {
+    let mut text = "# heki Ratchet baseline: counts may only shrink (`heki check --update-baseline`).\nversion = 2\n".to_owned();
+    if targets.is_empty() {
+        text.push_str("entries = []\n");
+    }
+    for target in targets {
+        text.push_str(&format!(
+            "\n[[entries]]\nrule_code = \"IMP101\"\ntarget = \"{target}\"\ncount = 1\n"
+        ));
+    }
+    text
+}
+
+/// A recorded group is a group of modules, not the import its report sits at: after the
+/// imports of the cycle are reversed, the report sits at another import of the same modules,
+/// which the entry covers without a note.
+#[test]
+fn a_group_whose_cycle_is_reversed_is_covered() {
+    let p = package(
+        "import_cycles_baseline_reversed",
+        &[("a", &["b"]), ("b", &["c"]), ("c", &["a"])],
+    );
+    assert_eq!(
+        reports(&p, &[]),
+        ["pkg/c.py:1 <module> [pkg.a, pkg.b, pkg.c]"]
+    );
+    record(&p);
+    assert_eq!(p.read("b.toml"), group_entries(&["pkg.a, pkg.b, pkg.c"]));
+    modules(&p, &[("a", &["c"]), ("b", &["a"]), ("c", &["b"])]);
+    assert_eq!(
+        reports(&p, &[]),
+        ["pkg/b.py:1 <module> [pkg.a, pkg.b, pkg.c]"]
+    );
+    let (code, err) = ratchet(&p, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!err.contains("note:"), "{err}");
+    record(&p);
+    assert_eq!(p.read("b.toml"), group_entries(&["pkg.a, pkg.b, pkg.c"]));
+}
+
+/// When the import a group's report sits at is removed and another cycle of the same modules
+/// remains, the report moves to that cycle and the entry still covers it.
+#[test]
+fn a_group_whose_reported_import_is_removed_is_covered() {
+    let p = package(
+        "import_cycles_baseline_moved",
+        &[("a", &["b"]), ("b", &["a", "c"]), ("c", &["a"])],
+    );
+    assert_eq!(
+        reports(&p, &[]),
+        ["pkg/b.py:1 <module> [pkg.a, pkg.b, pkg.c]"]
+    );
+    record(&p);
+    modules(&p, &[("b", &["c"])]);
+    assert_eq!(
+        reports(&p, &[]),
+        ["pkg/c.py:1 <module> [pkg.a, pkg.b, pkg.c]"]
+    );
+    let (code, err) = ratchet(&p, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!err.contains("note:"), "{err}");
+    record(&p);
+    assert_eq!(p.read("b.toml"), group_entries(&["pkg.a, pkg.b, pkg.c"]));
+}
+
+/// A group whose closing import is inside a function (`cycle-edges` counts those) stays covered
+/// when the function is renamed: the entry names no function.
+#[test]
+fn a_group_closed_in_a_renamed_function_is_covered() {
+    let p = project(
+        "import_cycles_baseline_renamed",
+        &[
+            (
+                "pyproject.toml",
+                "[project]\nname = \"t\"\n\n[tool.heki.imports]\ncycle-edges = [\"body\", \"function\"]\n",
+            ),
+            ("pkg/__init__.py", ""),
+            ("pkg/a.py", "import pkg.b\n"),
+            ("pkg/b.py", "def load():\n    import pkg.a\n"),
+        ],
+    );
+    assert_eq!(reports(&p, &[]), ["pkg/b.py:2 load [pkg.a, pkg.b]"]);
+    record(&p);
+    p.write("pkg/b.py", "def load_all():\n    import pkg.a\n");
+    assert_eq!(reports(&p, &[]), ["pkg/b.py:2 load_all [pkg.a, pkg.b]"]);
+    let (code, err) = ratchet(&p, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!err.contains("note:"), "{err}");
+    record(&p);
+    assert_eq!(p.read("b.toml"), group_entries(&["pkg.a, pkg.b"]));
+}
+
+/// A group that loses modules is covered by the entry of the group it was: the entry can
+/// shrink to it, and `--update-baseline` records it. With `report-unused-suppressions`, the
+/// entry matches no report once none of its modules is in a group.
+#[test]
+fn a_group_that_loses_modules_is_covered_and_its_entry_can_shrink() {
+    let p = package(
+        "import_cycles_baseline_shrink",
+        &[("a", &["b"]), ("b", &["c"]), ("c", &["d"]), ("d", &["a"])],
+    );
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nreport-unused-suppressions = true\n",
+    );
+    record(&p);
+    assert_eq!(
+        p.read("b.toml"),
+        group_entries(&["pkg.a, pkg.b, pkg.c, pkg.d"])
+    );
+    modules(&p, &[("c", &["a"]), ("d", &[])]);
+    assert_eq!(
+        reports(&p, &[]),
+        ["pkg/c.py:1 <module> [pkg.a, pkg.b, pkg.c]"]
+    );
+    let (code, err) = ratchet(&p, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains(
+            "note: baseline entry IMP101 `pkg.a, pkg.b, pkg.c, pkg.d` can shrink to `pkg.a, pkg.b, pkg.c` (`--update-baseline`)"
+        ),
+        "{err}"
+    );
+    record(&p);
+    assert_eq!(p.read("b.toml"), group_entries(&["pkg.a, pkg.b, pkg.c"]));
+    let (code, err) = ratchet(&p, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!err.contains("note:"), "{err}");
+    modules(&p, &[("c", &[])]);
+    assert_eq!(reports(&p, &[]), Vec::<String>::new());
+    let (code, err) = ratchet(&p, &[]);
+    assert_eq!(code, 1, "{err}");
+    assert!(
+        err.contains(
+            "error: baseline entry IMP101 `pkg.a, pkg.b, pkg.c` matched no report (`--update-baseline` removes it)"
+        ),
+        "{err}"
+    );
+    record(&p);
+    assert_eq!(p.read("b.toml"), group_entries(&[]));
+}
+
+/// A group that splits into two is covered by its entry, which can shrink to both.
+#[test]
+fn a_group_that_splits_is_covered_and_its_entry_can_shrink() {
+    let p = package(
+        "import_cycles_baseline_split",
+        &[("a", &["b"]), ("b", &["c"]), ("c", &["d"]), ("d", &["a"])],
+    );
+    record(&p);
+    modules(&p, &[("b", &["a"]), ("d", &["c"])]);
+    assert_eq!(
+        reports(&p, &[]),
+        [
+            "pkg/b.py:1 <module> [pkg.a, pkg.b]",
+            "pkg/d.py:1 <module> [pkg.c, pkg.d]"
+        ]
+    );
+    let (code, err) = ratchet(&p, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains(
+            "note: baseline entry IMP101 `pkg.a, pkg.b, pkg.c, pkg.d` can shrink to `pkg.a, pkg.b` and `pkg.c, pkg.d` (`--update-baseline`)"
+        ),
+        "{err}"
+    );
+    record(&p);
+    assert_eq!(
+        p.read("b.toml"),
+        group_entries(&["pkg.a, pkg.b", "pkg.c, pkg.d"])
+    );
+    let (code, err) = ratchet(&p, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!err.contains("note:"), "{err}");
+}
+
+/// A group with a module its entry lacks is new, and the note names the module; its entry is
+/// not stale, since its modules are in a group. `--update-baseline` refuses.
+#[test]
+fn a_group_that_grows_is_a_regression() {
+    let p = package(
+        "import_cycles_baseline_grow",
+        &[("a", &["b"]), ("b", &["a"]), ("c", &[])],
+    );
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nreport-unused-suppressions = true\n",
+    );
+    record(&p);
+    modules(&p, &[("b", &["a", "c"]), ("c", &["a"])]);
+    assert_eq!(
+        reports(&p, &[]),
+        ["pkg/b.py:1 <module> [pkg.a, pkg.b, pkg.c]"]
+    );
+    let (code, err) = ratchet(&p, &[]);
+    assert_eq!(code, 1, "{err}");
+    assert!(
+        err.contains(
+            "note: IMP101 `pkg.a, pkg.b, pkg.c` is a new group: `pkg.c` joined the baseline group `pkg.a, pkg.b`"
+        ),
+        "{err}"
+    );
+    assert!(!err.contains("can shrink"), "{err}");
+    assert!(!err.contains("matched no report"), "{err}");
+    let (code, err) = ratchet(&p, &["--update-baseline"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("not updated: 1 entry(ies) grew"), "{err}");
+    assert_eq!(p.read("b.toml"), group_entries(&["pkg.a, pkg.b"]));
+}
+
+/// Two recorded groups that become one are a new group, and so is one of modules no entry
+/// holds: the notes name the groups it joins and the modules of none.
+#[test]
+fn two_groups_that_become_one_are_a_regression() {
+    let p = package(
+        "import_cycles_baseline_merge",
+        &[
+            ("a", &["b"]),
+            ("b", &["a"]),
+            ("c", &["d"]),
+            ("d", &["c"]),
+            ("e", &[]),
+        ],
+    );
+    record(&p);
+    assert_eq!(
+        p.read("b.toml"),
+        group_entries(&["pkg.a, pkg.b", "pkg.c, pkg.d"])
+    );
+    modules(&p, &[("b", &["a", "c"]), ("c", &["b", "d"])]);
+    modules(&p, &[("f", &["g"]), ("g", &["f"])]);
+    let (code, err) = ratchet(&p, &[]);
+    assert_eq!(code, 1, "{err}");
+    assert!(
+        err.contains(
+            "note: IMP101 `pkg.a, pkg.b, pkg.c, pkg.d` is a new group: it joins the baseline groups `pkg.a, pkg.b` and `pkg.c, pkg.d`\n"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains(
+            "note: IMP101 `pkg.f, pkg.g` is a new group: no baseline entry holds any of its modules"
+        ),
+        "{err}"
+    );
+    modules(&p, &[("b", &["a", "e"]), ("e", &["c"]), ("c", &["b", "d"])]);
+    let (code, err) = ratchet(&p, &[]);
+    assert_eq!(code, 1, "{err}");
+    assert!(
+        err.contains(
+            "note: IMP101 `pkg.a, pkg.b, pkg.c, pkg.d, pkg.e` is a new group: it joins the baseline groups `pkg.a, pkg.b` and `pkg.c, pkg.d` with `pkg.e`"
+        ),
+        "{err}"
+    );
+    assert!(!err.contains("can shrink"), "{err}");
+    let (code, err) = ratchet(&p, &["--update-baseline"]);
+    assert_eq!(code, 1, "{err}");
+    assert_eq!(
+        p.read("b.toml"),
+        group_entries(&["pkg.a, pkg.b", "pkg.c, pkg.d"])
+    );
+}
+
+/// An entry written when entries of groups named the file and function of the import closing
+/// the shown cycle is read as the entry of its group, and `--update-baseline` rewrites it.
+#[test]
+fn an_entry_naming_the_closing_import_is_read_as_its_group() {
+    let p = package(
+        "import_cycles_baseline_old_form",
+        &[("a", &["c"]), ("b", &["a"]), ("c", &["b"])],
+    );
+    p.write(
+        "b.toml",
+        "version = 2\n\n[[entries]]\npath = \"pkg/c.py\"\nqualname = \"<module>\"\nrule_code = \"IMP101\"\ntarget = \"pkg.a, pkg.b, pkg.c\"\ncount = 1\n",
+    );
+    assert_eq!(
+        reports(&p, &[]),
+        ["pkg/b.py:1 <module> [pkg.a, pkg.b, pkg.c]"]
+    );
+    let (code, err) = ratchet(&p, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!err.contains("note:"), "{err}");
+    modules(&p, &[("b", &[]), ("c", &["a"])]);
+    let (code, err) = ratchet(&p, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains(
+            "note: baseline entry IMP101 `pkg.a, pkg.b, pkg.c` can shrink to `pkg.a, pkg.c` (`--update-baseline`)"
+        ),
+        "{err}"
+    );
+    record(&p);
+    assert_eq!(p.read("b.toml"), group_entries(&["pkg.a, pkg.c"]));
+}
+
+/// A run over part of the project sees part of a group: its entry covers what the run sees,
+/// and stays as it is.
+#[test]
+fn a_run_over_part_of_a_group_keeps_its_entry() {
+    let p = package("import_cycles_baseline_part", &[("a", &["b"])]);
+    p.write("other/__init__.py", "");
+    p.write(
+        "pkg/b.py",
+        "from pkg.a import f_a\nfrom other.c import f_c\n\n\ndef f_b() -> int:\n    return 1\n",
+    );
+    p.write(
+        "other/c.py",
+        "from pkg.a import f_a\n\n\ndef f_c() -> int:\n    return 1\n",
+    );
+    record(&p);
+    assert_eq!(p.read("b.toml"), group_entries(&["other.c, pkg.a, pkg.b"]));
+    assert_eq!(
+        reports(&p, &["pkg"]),
+        ["pkg/b.py:1 <module> [pkg.a, pkg.b]"]
+    );
+    let (code, err) = ratchet(&p, &["pkg"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!err.contains("baseline entry"), "{err}");
+    let (code, err) = ratchet(&p, &["pkg", "--update-baseline"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(p.read("b.toml"), group_entries(&["other.c, pkg.a, pkg.b"]));
+}
+
+/// A `--touched` run judges the entry of a group when it shows a group the entry holds.
+#[test]
+fn a_touched_run_judges_the_entry_of_a_group_it_shows() {
+    let p = package(
+        "import_cycles_baseline_touched",
+        &[("a", &["b"]), ("b", &["c"]), ("c", &["d"]), ("d", &["a"])],
+    );
+    record(&p);
+    modules(&p, &[("c", &["a"]), ("d", &[])]);
+    let shrink = "note: baseline entry IMP101 `pkg.a, pkg.b, pkg.c, pkg.d` can shrink to `pkg.a, pkg.b, pkg.c` (`--update-baseline`)";
+    let (code, err) = ratchet(&p, &["--touched", "pkg/c.py"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains(shrink), "{err}");
+    let (code, err) = ratchet(&p, &["--touched", "pkg/d.py"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!err.contains(shrink), "{err}");
+}

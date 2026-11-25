@@ -166,7 +166,8 @@ pub(crate) fn run(args: &CheckArgs, question: &str) -> Result<ExitCode> {
     let project = &indexed.project;
     let baseline = baseline_path(&args.analysis, &project.env);
     if let Some(path) = &baseline {
-        RatchetBaseline::load(path)?.keep_regressions(&mut diags, &baseline_key(&project.files));
+        RatchetBaseline::load(path, heki_rules::reports_groups)?
+            .keep_regressions(&mut diags, &baseline_key(&project.files));
     }
     let touched = Touched::of(&args.touched, &paths.files, project);
     if let Some(touched) = &touched {
