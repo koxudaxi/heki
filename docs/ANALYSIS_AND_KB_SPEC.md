@@ -377,6 +377,19 @@ A module global the module body binds to a value of known type, and an instance 
 the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores`,
 `resolver::stores`).
 
+Some receivers have the class the language or the standard library gives them. An instance's
+own namespace (`obj.__dict__`, or `vars(obj)` of the builtin: `resolver::namespace_load`) is a
+builtin `dict`, of keys and values of any class, where reading it runs no code of the classes the
+instance may be (`invokes::reads_own_namespace`: no class defines `__getattribute__` or binds
+`__dict__`, and every base outside the project is a plain one or one whose `__setattr__` the
+catalog says stores on the instance, `pydantic.BaseModel`); a class object's namespace is a
+read-only proxy, which stays untyped. Its methods are then those of `dict`, and the entries it
+reads, stores, or removes stay reads and writes of the instance's attributes. The members a
+`NamedTuple` class takes from its base, and what the methods of a holder give of the value its
+type argument names (`ContextVar[T]`, kept as `types::Generic::Held` since annotations are read
+without the catalog), are catalog rows (4.2: `_replace`, `_make`, `_asdict`, `_fields`,
+`returns_held`).
+
 - **What a store stores into.** A store stores into what its receiver holds: `self` in a method
   (a copy of it, the closure cell of a function nested in the method, `super()`), or a value whose
   type the inference knows: an instance of a project class (`inst = cls()` in a class method, a
@@ -540,6 +553,39 @@ of its body (inferred as a child scope reading the function's cells), and a `fun
 object as a call of its callable with the arguments the object holds first (`partial.rs`, shared
 with the call targets).
 
+An instance of a `typing.NamedTuple` class, or of a `@dataclass(frozen=True)` that leaves `init`
+on, holds in each field what the call constructing it bound there, for as long as it lives: a
+store raises (`AttributeError` on a named tuple, `FrozenInstanceError` on a frozen dataclass).
+The class's generated constructor takes its fields in order (`ClassDecl::init_fields`,
+`ProjectDecls::constructor_fields`: a dataclass's dataclass bases first, a field it declares again
+keeping the base's place, the keyword-only ones after the others), unless the class defines
+`__init__`, `__new__`, `__post_init__`, `__setattr__`, `__getattr__`, or `__getattribute__`, an
+`InitVar`, or a field specifier heki does not read, has a metaclass heki does not know, or a base
+that is no such class or plain base. Calling exactly such a class (a name, not `cls`, which may be
+a subclass) binds each argument to the field of its position or keyword and an omitted field to
+its default; a call that unpacks `*` or `**`, passes too many positions, names no field, or
+leaves a field without a default unbound binds none. The instance's type keeps the fields that
+hold a named object (a function, a class, a lambda) or `None` (`types::Args::Fields`), and every
+reader of types sees them: a local, a closure cell, a global or an attribute every store of
+which binds such instances (also under an annotation of the class, `ProjectDecls::narrower`), the
+items of a container (`TABLE: tuple[Spec, ...] = (Spec(run=a), Spec(run=b))` gives one of `a` and
+`b`, `None` adding nothing), and a copy of the instance alone (`copy.copy`, `dataclasses.replace`
+given no other value; `copy.copy` and `copy.deepcopy` only where no copy hook of the class decides
+the copy, `ProjectDecls::copy_of`: a `__copy__` may return an instance holding anything). A copy
+given other values or made by a hook, `typing.Self` of a method's result, and a call of a class
+object that may be a subclass give an instance whose fields hold their declared types.
+Reading a field gives what it holds (`TypeCtx::field_held`, for typing and for the call targets
+of `obj.field(...)`, which binds no receiver and constructs a class the field holds, as a
+partial class attribute of a class does) when the instance holds what the construction gave
+(`ProjectDecls::field_holds_given`): along the MRO, every class binding the name binds it as a
+field of its own to a default that is no descriptor (none, `None`, a literal, a display, a
+default factory, a project function or class; any default of a named tuple's field, which is one
+of its items), no code of the project stores the attribute on an instance of a class along the MRO
+(`object.__setattr__(self, "run", f)` in a method) or attributes heki cannot name there, no module
+binds it on the class, and reading it runs no hook. A dataclass that is not frozen holds what any
+code holding an instance stores, through receivers heki may not type, and so does not keep its
+fields.
+
 A scope nested in a function (a comprehension or generator expression with a scope of its own, a
 lambda, a nested function or class) reads the function's variables through their closure cells.
 A cell holds every value the function binds to the variable, its parameter's and each
@@ -640,6 +686,18 @@ be (the class and its project subclasses, at most `DISPATCH_CLASS_LIMIT`); a cla
 finding the name as anything else leaves the call unresolved, and so do objects that bind a
 receiver differently. A call of a class bound so constructs it (`self.factory(...)`).
 
+A class-body name bound last, on every path, to a `functools.partial` object of such a name that
+holds keywords only (`copy = staticmethod(partial(copy_field, deep=False))`,
+`NamedAttr::body_partial`), under the same conditions, is that object, which calls the name with
+the call's arguments first and gives what it returns. Read through the class object, or wrapped
+in `staticmethod`, a call through it calls the name (constructs a class it names); a plain
+`partial` read on an instance is a method descriptor from Python 3.14 on, which binds the
+instance as its first argument, and older versions bind nothing, so such a call is unresolved.
+The keywords it holds are values the call does not show: its binding of the callable's
+parameters may pass any of them, so no parameter takes its default there
+(`Call::unseen_keywords`), and a library callable, whose catalog cases the arguments a call shows
+select, leaves the call unresolved. A partial holding a positional argument is not followed.
+
 A module-level function or class that the module body binds again, to named objects only, holds
 in the same way what binds it last (`ModuleDecls::aliases`), or one of the objects the bindings
 that may be last bind (`ModuleDecls::alias_paths`): a call through the name, in the module, from
@@ -663,7 +721,8 @@ A value bound to one of several named objects (a branch `f = a if c else b`, the
 table) is one of them (`Ty::OneOf`, at most `MAX_NAMED`, eight): a call runs every one, which must
 bind a receiver alike. A module global bound once, by the module body outside a loop, to a dict
 display with string-literal keys and no `**` entry, some value of which is a function, a class,
-or a partial object, and that no code changes in place (through its name or a module object,
+a partial object, or an instance whose fields hold such objects (`types::Args::Fields`), and
+that no code changes in place (through its name or a module object,
 the module's own included) or rebinds, is a table (`ModuleDecls::tables`, at most 256
 entries): reading it with a key a string constant gives (`HANDLERS["create"]`,
 `HANDLERS[KEY]`, in its module, imported, or through the module) gives that entry's value, a
@@ -698,16 +757,44 @@ decided in at most eight passes, each from the facts of the pass before. Its typ
 when they agree on one narrower than the annotation (`ProjectDecls::narrower`: a catalog class of
 the annotated library class, `sqlite3.connect(file)` of `-> sqlite3.Connection`, or a subclass
 of the annotated class): `FunctionDecl::declared_return` gives it in the annotation's place, for
-typing, `result_of`, and the globals and attributes of pass 2. A module constant the module
+typing, `result_of`, and the globals and attributes of pass 2. A function whose annotation names
+no class (none, `Any`, `object`, `Callable`) returns the named object every returned value is,
+or one of them (`Ty::OneOf`): a `def` or `lambda` it makes (`make_requirer()` returning the
+`requirer` it defines, whose cells a call away from it binds to nothing), or a function or class
+a name binds; a `return` of anything else, `None` included, gives no fact. Only the functions
+every value of which a definition, a module-level name, or a cell gives are inferred for it. A module constant the module
 body binds once, outside a loop, to a value that names a file (`ModuleDecls::file_constants`,
 `names_a_file`) names it where a function or another module reads it
 (`TypeCtx::names_file_constant`), unless another module rebinds it.
 
-A module-level `TypeVar` bound once with a `bound=` (a name, an attribute of one, or the string of
-an annotation) or constraints is that bound, or the union of the constraints, wherever an
-annotation names it, in its module or imported (`ModuleDecls::type_vars`,
-`ProjectDecls::declared_ty`): `for c in run.contexts` of `contexts: list[C]` with `C =
-TypeVar("C", bound=View)` gives a `View`. An unbounded one gives no class.
+A module-level name the module body binds once to a type expression reads as the type it names
+wherever an annotation names it, in its module, imported, or re-exported, also as a member of a
+union and inside `type[...]`, where a name that names one class names that class's objects
+(`ModuleDecls::type_names`, `ProjectDecls::declared_ty`). The name is chased through re-exports
+and module aliases up to the first name that names a type (`ProjectDecls::type_name`): an alias
+that is also a module alias of its class (`Operations = list[Added]` binds `list`) keeps its
+arguments wherever it is imported from. A type alias names its value:
+`Operation: TypeAlias = Added | Removed` (the string of an annotation too), `type Operation =
+Added | Removed` without type parameters, and an assignment of a subscript or a union without an
+annotation (`Operations = list[Added]`); its value may name an alias bound before it, and a type
+variable in it stands for any type, so it gives no class. A `TypeVar` with a `bound=` or
+constraints names that bound, or the union of the constraints: `for c in run.contexts` of
+`contexts: list[C]` with `C = TypeVar("C", bound=View)` gives a `View`. An unbounded one gives no
+class, and neither does a name bound twice or a variable annotated otherwise
+(`Declared: object = A | B`).
+
+The text of the type expression a value spells (`resolver::type_expression_text`: names of
+module-level objects, attributes of them, subscripts, unions, `None`, and strings, up to 64 parts
+counted as the text writes them: `kind | kind` writes `kind` twice) reads as the same text in an
+annotation does: the value of an alias, the bound of a type variable, and the
+type `typing.cast` names (`cast(list[Windows], hosts)` as `cast("list[Windows]", hosts)`). A
+subscript naming anything else (`list[kind]` of a parameter `kind`) names no type. A builtin or
+`collections` container class subscripted with types is an alias of the class
+(`types::runtime_generic`: `frozenset[str]` is a `types.GenericAlias`): calling it constructs the
+class (`frozenset[str]()`), also through a module-level name bound to it (`Names =
+frozenset[str]`, a module alias of the class). A subscript of any other class (a project generic
+class, whose alias may construct a subclass, or a `typing` alias, which may raise) calls nothing
+heki knows.
 
 A method that no project class of the receiver's MRO defines comes from the first base outside
 the project, when heki takes it to define the method (a base it knows nothing of coming first, an
@@ -820,8 +907,9 @@ EffectSummary(f) = {
                                                            // server): no value that may be parameter i's object,
                                                            // or a view of it, is stored, captured, yielded,
                                                            // returned, or handed to a call other than a project
-                                                           // call binding it to a parameter that only reads it
-                                                           // or a Layer 1 argument read_only / retained_in_return;
+                                                           // call binding it to a parameter that only reads it,
+                                                           // a Layer 1 argument read_only / retained_in_return,
+                                                           // or a cast handing it back (ownership::handed_back);
                                                            // greatest fixpoint in a call cycle, 0 past its pass
                                                            // limit; changes of the object itself are
                                                            // mutated_param_paths' (only_read_mask joins them)
@@ -831,7 +919,13 @@ EffectSummary(f) = {
                                                            // name is bound once but `if p is None: p = []`
                                                            // (bound_once); local
     returns_new:              bool,                        // returns an object it constructs, nothing else
-                                                           // holding it (fresh-objects)
+                                                           // holding it (fresh-objects); with the
+                                                           // parameters some returns give an element of
+                                                           // instead, new at a call binding each to a value
+                                                           // without elements (None, a number, ""); a call
+                                                           // of a function returning its parameter
+                                                           // (FunctionDecl::returns_param) gives the
+                                                           // object it hands it
     return_origins:           Option<Box<ReturnOrigins>>,  // MUT112, absent for most functions: what the
                                                            // returned object may be, path by path (new, held
                                                            // state, parameter i, or an element of parameter i;
@@ -1420,7 +1514,8 @@ which module imports which.
    class the operand may be under R2, the method found first along the MRO,
    `ProjectDecls::special_method_owner`, is `object`'s, a builtin type's, whose hash,
    comparison, and `repr()` run the items' own and whose dict or set lookups compare stored keys
-   under an equal hash, or a library class's called as a library call handed every operand,
+   under an equal hash (strings in an object's `__dict__`, which holds the names of its
+   attributes), or a library class's called as a library call handed every operand,
    R3; a value of an abstract class, a protocol, `object`, or no class heki knows establishes
    none); an attribute access that may run code of the project besides a getter heki resolves
    (`heki_effect::invokes::attribute_access_runs_project_code`: on a project class, a read that
@@ -1472,7 +1567,10 @@ which module imports which.
    loop, to a call of the builtin `object` with no argument, with the conditions of a string
    constant (no import binds the name; no star import, `exec`, or `globals()` may rebind it).
    `ProjectDecls::object_sentinel` reads one through re-exports and drops it when another
-   module rebinds or deletes it (`ProjectDecls::rebound_elsewhere`).
+   module rebinds or deletes it (`ProjectDecls::rebound_elsewhere`). Only this fact says that a
+   deep copy holds a new object for a value: a name bound to `sentinel(...)` (PEP 661, the
+   builtin from Python 3.15 or `typing_extensions.sentinel`), whose `__copy__` and `__deepcopy__`
+   return it, is none, so no claim of `MUT118` rests on it.
 2. **Held** (`ClassDecl::named_attrs`, read by `ProjectDecls::held_sentinels`): what a class's
    own code binds an attribute to among the names that may be sentinels (its module's own, a
    name an import binds, `module.NAME`). The class body's binding (`attr = S`, `attr: T = S`,
@@ -1493,7 +1591,7 @@ which module imports which.
    `stores_on_instance` reads the stored value).
 4. **Deep copies** (`EffectSummary::deep_copies`): a call that resolves to `copy.deepcopy` with
    one positional argument and no keyword, of an object whose project classes heki knows.
-   `ProjectDecls::deep_copy_of` says what the copy protocol does with a value of a class: a copy
+   `ProjectDecls::copy_of` says what the copy protocol does with a value of a class: a copy
    hook along its MRO (`__deepcopy__`, `__reduce__`, `__reduce_ex__`, `__getstate__`,
    `__setstate__`) or a `copyreg` registration of the class (`ModuleDecls::copy_registrations`,
    joined into a project index whose changes are class keys) decides it (no report); with none,
@@ -1517,6 +1615,11 @@ which module imports which.
    once per run, and a budget spent in another order by `heki check` and the language server
    would make them disagree). Each attribute of the copied class gives a heuristic claim naming
    that attribute.
+7. **Help and fix**: the help names `sentinel("NAME")` for a Python 3.15 target
+   (`RuntimeProfile::pep661_builtin_sentinel`) and `typing_extensions.sentinel` (4.16.0 or later)
+   below it. For a 3.15 target, a report in the file that binds the sentinel has an unsafe fix
+   (`--unsafe-fixes`): `resolver::object_sentinel_calls` finds the `object()` calls in the
+   module's own IR once per file, none when the module binds a global `sentinel`.
 
 #### `MUT119`: an in-place change lost on a new object (opt-in)
 1. **Sources** (`heki_effect::fresh::source`): what makes the object an instruction defines. Built
@@ -1819,10 +1922,19 @@ message = "write model state through GenerationStore instead"
        with a constant name loads
        `obj.a`, and so does a call or property read whose every project callee returns
        attribute `a` of the parameter the object binds on every `return`
-       (`FunctionDecl::returns_param_attr`: `node.members().append(1)` and
+       (`FunctionDecl::returns_param`: `node.members().append(1)` and
        `node.view.append(1)` with `return self.items`; never a `cached_property`), when every
        class the receiver may be takes the name from one of those callees: along its MRO, the
-       first class binding the name defines one (`ProjectDecls::function_taken`).
+       first class binding the name defines one (`ProjectDecls::function_taken`). A call
+       handing back what it is handed is that object itself (`Extractor::build_same_objects`,
+       one answer for every reader of the alias facts, and for the project calls the
+       construction recorder follows, `Recorder::handed_back`): `typing.cast(T, value)`
+       (`ownership::handed_back`, which `ownership::source` reads too), and a call whose every
+       project callee returns, on every `return`, the parameter the argument binds
+       (`FunctionDecl::returns_param` with no attribute: `return x`, `return cast(T, x)`),
+       by position or by a keyword naming it in every callee; a
+       function returning another call's result is open. Such a value is `retyped`: a type
+       checker types it by the call, so `MUT110` does not leave its changes to one.
   2. `typed_field_write_sites` propagate bottom-up with their call chains, from private callees
      only: a public callee reports its own writes. A write is allowed
      when a function on its chain matches `allowed-writers` or `exempt-methods`, when an
@@ -2345,13 +2457,26 @@ an import itself.
   anchored at the module's own `__package__` or `__name__`, absolutely otherwise (a relative text
   anchored at a package the code spells included), per module for a by-name call given both
   kinds, a module some absolute text gives counting as named absolutely. Each site carries its
-  function (`<module>` for the module body and the class bodies it runs), whether an
-  `ImportError` handler takes its failure (around the import, or around the class statement
-  holding it), whether a handler may take it (`caught`: also `except Exception`, a bare
-  `except`, a type heki cannot tell is another builtin exception, a `with` block's exit or a
-  `finally` body; `environment::may_take_import_error`), whether it is lazy, and whether it runs
-  on every path to a normal return of its function, outside loops (never established in a class
-  body).
+  function (`<module>` for the module body and the class bodies it runs), the failure its
+  handlers take (`ImportSite::handled`, around the import, or around the class statement holding
+  it: none, a missing module, or any import error, `imports::ImportFailure`), whether it is
+  lazy, and whether it runs on every path to a normal return of its function, outside loops
+  (never established in a class body). A handler takes a failure when a path through it lets the
+  code after it run (`imports::ImportHandlers`): an `except` clause whose classes may match it
+  (bare, `ImportError` and its bases, `ModuleNotFoundError` for a missing module only, a name
+  heki cannot tell is another builtin exception class) and whose body, the blocks its first
+  block dominates, may leave them by a normal edge or return; the exit of a `with` block; or a
+  `finally` body that may leave without raising again. A clause that certainly matches hides the
+  later ones; what a clause or a `finally` body raises goes to the handler around it, as the
+  same failure for a `raise` directly in the body and as an exception of unknown class
+  otherwise, also for a `raise` in a handler nested in the body, which raises that handler's
+  exception. Each handler of a function is walked once (unmetered: one step per handler block
+  and clause test), and the ends of all the bodies come from one sweep up the function's
+  dominator tree, each block's from its own edges and its children's: the bodies of clauses
+  that each lead on to the rest of the function hold each other, and walking each would cost
+  the function once per clause. A handler
+  taking a plain `ImportError` but passing a missing module on counts as taking any import
+  error, which keeps every rule's claim on the safe side.
 - **Body order** (`ModuleImports::bound_before`, `any_bound_before`, `code_before`): what the
   module body does between its sites, by the first site it happens before, so that the facts do
   not move with the code: each module global it may bind before a site (a store of the body; a
@@ -2363,8 +2488,8 @@ an import itself.
   model's guards); `function` in a function body; `lazy` for a lazy import (1.1) whose binding
   no read of the module body (or of a class body it runs) reaches, `body` when one may (the
   first such read loads the module there: the site is `unconditional` when a read only its
-  binding reaches runs on every path, and guarded when an `ImportError` handler takes every
-  such read). A read sees the bindings of its name (stores and star imports, which may bind any
+  binding reaches runs on every path, and its handled failure the narrowest of those around
+  such reads). A read sees the bindings of its name (stores and star imports, which may bind any
   name) that reach it through the module body's blocks, an exception edge passing on every
   binding of the block it leaves (`walk::Closure` per name and block, one budget of
   `Budget::STEPS_PER_UNIT` per IR unit of the module body); a read heki cannot place, in a class
@@ -2385,7 +2510,7 @@ an import itself.
   project has but an import may find elsewhere first (`ProjectDecls::holds_module`), or a name the
   code does not fix, is open. The lookups are declaration reads (`DeclKeys::modules`).
 - **Loads while it loads** (`ImportGraph::loads`): a module's `body` sites that run on every
-  path through the body (`unconditional`) and that no `ImportError` handler guards
+  path through the body (`unconditional`) and of which no handler takes a failure
   (`ImportSite::loads_while_its_module_loads`) load what they certainly load
   (`Target::certain`: the module, or the package of a `from` import) with its parent packages;
   a site on one branch (`if sys.platform == "win32": import winreg`), in a class body, or whose
@@ -2423,9 +2548,12 @@ an import itself.
   through the sites that may run while a module loads (`body`, or open). Each module of a group,
   and each package holding one outside the group whose import loads the group, is imported first
   in turn: its parent packages, then its body, run through their sites in order; a site that
-  imports whenever its module loads, where it is written, with no handler that may take an
-  `ImportError` (`ImportSite::always_imports_uncaught`), runs the body of each module it enters
-  that has not loaded yet before going on. A module of the group has not until the run enters
+  imports whenever its module loads, where it is written, with no handler that takes a plain
+  `ImportError` (`ImportSite::always_imports_leaving`), runs the body of each module it enters
+  that has not loaded yet before going on. A site of a module a project package lacks
+  (`Target::Missing`) stops the run unless a handler takes what it raises
+  (`Target::failure`: a missing module, or any import error for a relative import past the
+  top-level package). A module of the group has not until the run enters
   it; one outside the group has not when its load certainly loads a module of the group (a
   `walk::Closure` over those sites) and may reach the group through no import other than such
   hops (it cannot have run whole, nor be paused at an import leading to the entry), and changes
@@ -2443,8 +2571,8 @@ an import itself.
 - **Loads from the package** (`ImportGraph::loaded_from`, for `IMP301` and `IMP302`): one walk,
   breadth first from all the modules a rule judges at once (the package modules, or the base
   modules: the top-level package modules and the modules entry points name with their parent
-  packages), over the sites that import whenever their module loads with no handler that may
-  take an `ImportError` (`ImportSite::always_imports_uncaught`), into the modules
+  packages), over the sites that import whenever their module loads with no handler that takes
+  a missing module (`ImportSite::always_imports_leaving`), into the modules
   `ImportGraph::hops` enters except development code, which an installed package does not have.
   It keeps the hop into each module from the nearest one, so each module reached has a shortest
   chain from one start, and spends one step per module of one `Budget::of_graph` (owner
@@ -2655,7 +2783,10 @@ field validates it: pydantic 2's `BaseModel`), `return_type` (factories such as
 argument a call writes or serializes in the order of its elements, with the keyword that sorts
 mapping keys first and whether it sorts by default: `json.dumps`, `yaml.safe_dump`,
 `pprint.pprint`, `pathlib.Path.write_text`, `print`: `EFF112`),
-`waits_until_done` / `done_when_awaited` (futures), `result_of` (the call hands back, awaited or
+`waits_until_done` / `done_when_awaited` (futures), `returns_held` (the method returns the
+value its receiver holds, which the holder's type argument names (`ContextVar[T].get()`) or a
+future was given (`result()`); with `default`, the argument at that position where the receiver
+holds none: `ContextVar.get(default)`), `result_of` (the call hands back, awaited or
 by the future's `result()`, what calling the callable at position `arg` returns, with the
 positional arguments after it and, with `keywords`, the call's keywords: `asyncio.to_thread`,
 `loop.run_in_executor`, `anyio.to_thread.run_sync`, `executor.submit`; section 2.1),
@@ -2754,7 +2885,11 @@ attribute on an instance of a library class gives (`symbol = "openai.OpenAI.chat
 release its distribution's verified range admits, the value read has the catalogued members of
 that class; it says nothing of its identity or of what the read runs, so a plain attribute, a
 property, and a cached property are alike to it. It is a table of its own because an attribute is
-no method a class takes from its base (`external_defines`). The synchronous and asynchronous
+no method a class takes from its base (`external_defines`). A row of the standard library
+(`typing.NamedTuple._fields`, `contextvars.Token.var`) holds on every interpreter heki supports,
+which `tests/sentinel/verify_stdlib_kb.py` checks on CPython 3.11 to 3.15, with the other rows of
+the standard library that type a value (a method's `return_type`, a copy of its receiver,
+`returns_held`) on instances of each class it builds. The synchronous and asynchronous
 clients of a library have rows of their own at every step, and a row whose meaning changes
 across the verified releases under one name is left out. `[[distributions]]`
 (`heki_kb::Distribution`) names, per distribution (its PyPI name), the import packages its rows

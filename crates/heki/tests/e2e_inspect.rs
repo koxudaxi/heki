@@ -2975,3 +2975,48 @@ fn uses_the_read_only_type_allows_and_names_bound_once() {
         ["a", "b", "c", "d", "e"]
     );
 }
+
+/// A value `typing.cast` hands back is the parameter's object itself
+/// (`ownership::handed_back`): its uses are the parameter's.
+const READS_THROUGH_CAST: &str = r#"import typing
+from typing import cast
+
+
+def measures(xs: list[int]) -> int:
+    ys = cast(list[int], xs)
+    return len(ys) + ys[0]
+
+
+def measures_by_module(xs: list[int]) -> int:
+    return len(typing.cast(list[int], xs))
+
+
+def appends(xs: list[int]) -> None:
+    ys = cast(list[int], xs)
+    ys.append(1)
+
+
+def returns(xs: list[int]) -> list[int]:
+    return cast(list[int], xs)
+"#;
+
+#[test]
+fn a_value_a_cast_hands_back_is_read_as_the_parameter() {
+    let p = Project::new("inspect_reads_through_cast");
+    p.write("m.py", READS_THROUGH_CAST);
+    // Each function with the parameters it only reads and those whose uses the read-only type
+    // allows.
+    let cases: &[(&str, &[&str])] = &[
+        ("measures", &["xs"]),
+        ("measures_by_module", &["xs"]),
+        ("appends", &[]),
+        ("returns", &[]),
+    ];
+    let names: Vec<&str> = cases.iter().map(|(n, _)| *n).collect();
+    let found = only_reads(&p, "m", &names);
+    for ((name, expected), (qualname, [params, uses, once])) in cases.iter().zip(&found) {
+        assert_eq!(qualname, name);
+        assert_eq!((params, uses), (&strs(expected), &strs(expected)), "{name}");
+        assert_eq!(once, &strs(&["xs"]), "{name}");
+    }
+}

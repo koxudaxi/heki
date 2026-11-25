@@ -87,6 +87,9 @@ Options:
       --include-size-dependent
           Also run the opt-in rules with a `size-dependent` rewrite (`OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`), as if `--extend-select` named them, and with `--fix` or `--diff` apply their proven-safe rewrites, in every function
 
+      --unsafe-fixes
+          With `--fix` or `--diff`, also apply the unsafe fixes, which change what the program does in a way the rule's page states (`MUT118`)
+
       --diff
           Preview fixes as a unified diff without writing files
 

@@ -952,6 +952,31 @@ def reads_through_class_object(cls: type[KeywordsHost]) -> str:
 
 def writes_through_class_object(cls: type[KeywordsHost]) -> None:
     cls._kind = "x"
+
+
+from pkg.parser.hosts import Schemas, SchemaT
+
+
+def through_a_bound_class_object(cls: type[SchemaT], obj: dict) -> dict:
+    return cls._items_constraints(obj)
+
+
+def through_an_aliased_class_object(cls: type[Schemas], obj: dict) -> dict:
+    return cls._items_constraints(obj)
+"#;
+
+/// A protocol of another module, which `KEYWORDS` names through a bound type variable and a type
+/// alias.
+const HOSTS: &str = r#"from typing import Protocol, TypeVar
+
+
+class SchemaHost(Protocol):
+    @classmethod
+    def _items_constraints(cls, obj: dict) -> dict: ...
+
+
+SchemaT = TypeVar("SchemaT", bound=SchemaHost)
+type Schemas = SchemaHost
 "#;
 
 /// The three owner contracts on `Parser._*`, strict, judging the code where it is written, with
@@ -975,14 +1000,16 @@ fn class_object_project(name: &str, allowed: &str) -> Project {
     .write("pkg/__init__.py", "")
     .write("pkg/parser/__init__.py", "")
     .write("pkg/parser/base.py", KEYWORDS_BASE)
-    .write("pkg/parser/_keywords.py", KEYWORDS);
+    .write("pkg/parser/_keywords.py", KEYWORDS)
+    .write("pkg/parser/hosts.py", HOSTS);
     p
 }
 
 /// A class object typed `type[P]` of a protocol is of a class heki cannot tell (any
 /// implementation's), so its accesses are the strict rules' (`MUT205`, `MUT206`, `MUT207`); with
 /// `allowed-protocols` naming the protocol, those of a member it declares are allowed as through a
-/// value typed `P`: a parameter (also `Optional`), a local, or an attribute annotated so. The
+/// value typed `P`: a parameter (also `Optional`), a local, or an attribute annotated so, also
+/// with a type variable bound to the protocol or an alias of it in another module. The
 /// call through the class itself, through a protocol the key does not name, and of a member the
 /// protocol does not declare stay reported.
 #[test]
@@ -1017,6 +1044,18 @@ fn allowed_protocols_allow_the_accesses_through_a_class_object_of_a_named_protoc
         ),
         at(58, "MUT206", "reads_through_class_object", "_kind"),
         at(62, "MUT205", "writes_through_class_object", "_kind"),
+        at(
+            69,
+            "MUT207",
+            "through_a_bound_class_object",
+            "_items_constraints",
+        ),
+        at(
+            73,
+            "MUT207",
+            "through_an_aliased_class_object",
+            "_items_constraints",
+        ),
     ]);
     without.sort();
     assert_eq!(

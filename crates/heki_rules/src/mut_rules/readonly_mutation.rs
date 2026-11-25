@@ -19,8 +19,8 @@ use crate::{CheckContext, ModuleUnit, SitesByCaller};
 use heki_ast::Span;
 use heki_diagnostics::{Diagnostic, OpenPremise, OpenRecord, RelatedLocation};
 use heki_effect::{
-    BoundCallee, CallHop, CallSite, CallsByCaller, EffectSummary, FuncKey, ParamChange,
-    ProjectIndex, ReadOnlyAttr, ReadOnlyKind, SiteRole, Slot, WriteKind,
+    BoundCallee, CallHop, CallSite, CallsByCaller, EffectSummary, FuncKey, FunctionDecl,
+    ParamChange, ProjectIndex, ReadOnlyAttr, ReadOnlyKind, SiteRole, Slot, WriteKind,
 };
 use rustc_hash::FxHashSet;
 use std::collections::{BTreeMap, BTreeSet};
@@ -101,6 +101,20 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 && cx.index.file_of(&s.caller) == Some(path)
         }) {
             rule.handed_over(unit, path, site, out);
+        }
+        if params {
+            // Only a function with a read-only parameter, so with a declaration, has them.
+            let mut retyped: Vec<(&FuncKey, &EffectSummary, &FunctionDecl)> = (file.functions)
+                .iter()
+                .filter(|(k, s)| {
+                    s.retyped_param_changes.is_some() && cx.index.file_of(k) == Some(path)
+                })
+                .filter_map(|(k, s)| Some((k, &**s, cx.decls.function_decl(k)?)))
+                .collect();
+            retyped.sort_by(|a, b| a.0.cmp(b.0));
+            for (key, s, decl) in retyped {
+                rule.retyped_changes(unit, key, s, decl, out);
+            }
         }
     }
 }
@@ -230,6 +244,45 @@ impl Rule<'_, '_> {
         (target, what)
     }
 
+    /// The function's own in-place changes of a read-only parameter through a value a call
+    /// handed back as itself (`cast(list, items).append(1)`), which no type checker
+    /// reports: typed by the call, the value has the methods it calls.
+    fn retyped_changes(
+        &mut self,
+        unit: &ModuleUnit<'_>,
+        key: &FuncKey,
+        s: &EffectSummary,
+        decl: &FunctionDecl,
+        out: &mut Vec<Diagnostic>,
+    ) {
+        for (p, spans) in s.retyped_param_changes.iter().flat_map(|c| c.iter()) {
+            let name = &decl.param_names[usize::from(*p)];
+            let caller = &key.qualname;
+            let message = format!(
+                "`{caller}` changes its read-only parameter `{name}` in place, through a value a call hands back as itself"
+            );
+            let help = format!(
+                "change a copy (`list({name})` / `dict({name})` / `set({name})`), or annotate the parameter with a mutable type"
+            );
+            for span in spans {
+                let target = name.clone();
+                if let Some(d) = self.emit(
+                    out,
+                    "MUT110",
+                    unit,
+                    key,
+                    *span,
+                    target,
+                    message.clone(),
+                    &help,
+                    &[],
+                ) {
+                    d.certainty = premises::tier("MUT110", true).at_most(d.certainty);
+                }
+            }
+        }
+    }
+
     /// What one call hands over that its callee changes in place: a read-only attribute (or the
     /// object holding it), or a read-only parameter of the caller.
     fn handed_over(
@@ -262,7 +315,7 @@ impl Rule<'_, '_> {
             let annotated = cx
                 .decls
                 .function_decl(&bc.callee)
-                .map_or(0, |d| d.readonly_params | d.mutable_params);
+                .map_or((0, 0), |d| (d.readonly_params, d.mutable_params));
             for (k, o) in bc.params.iter().enumerate().take(64) {
                 let k = u8::try_from(k).expect("at most 64 parameters");
                 let itself = callee.changes_param(k, &ParamChange::Itself);
@@ -303,9 +356,18 @@ impl Rule<'_, '_> {
                 }
                 // A read-only parameter handed over as itself, to a parameter that no
                 // annotation makes read-only (that function reports its own changes) or mutable
-                // (a type checker reports the argument).
+                // (a type checker reports the argument). A value a call handed back
+                // (`cast(list[int], items)`) is typed by that call: no type checker reports it
+                // at a mutable parameter.
+                let checked_elsewhere = |(readonly, mutable): (u64, u64)| {
+                    if o.retyped {
+                        readonly
+                    } else {
+                        readonly | mutable
+                    }
+                };
                 if itself
-                    && annotated & (1u64 << k) == 0
+                    && checked_elsewhere(annotated) & (1u64 << k) == 0
                     && let Some((p, None)) = &o.param
                     && let Some(decl) = readonly.filter(|d| d.readonly_params & (1u64 << p) != 0)
                 {
@@ -314,7 +376,8 @@ impl Rule<'_, '_> {
                     // its own: a change reached only through one is not this call's report.
                     let unannotated = |f: &FuncKey, j: u8| {
                         cx.decls.function_decl(f).is_none_or(|d| {
-                            (d.readonly_params | d.mutable_params) & (1u64 << j) == 0
+                            checked_elsewhere((d.readonly_params, d.mutable_params)) & (1u64 << j)
+                                == 0
                         })
                     };
                     let itself = ParamChange::Itself;

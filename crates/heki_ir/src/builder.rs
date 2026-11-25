@@ -92,6 +92,7 @@ pub fn build_module_ir(
         class_bases: Vec::new(),
         statement_uses: Vec::new(),
         annotations: Vec::new(),
+        type_values: Vec::new(),
         free_names: Vec::new(),
         lowered_at: FxHashMap::default(),
         loop_hints: Vec::new(),
@@ -150,6 +151,9 @@ pub fn build_module_ir(
     let mut annotations = ctx.annotations;
     annotations.sort_unstable_by_key(|&(function, span)| (function, span.start));
     annotations.shrink_to_fit();
+    let mut type_values = ctx.type_values;
+    type_values.sort_by_key(|&(function, _, _)| function);
+    type_values.shrink_to_fit();
     ModuleIr {
         functions,
         module_fn,
@@ -160,6 +164,7 @@ pub fn build_module_ir(
         class_bases,
         statement_uses,
         annotations,
+        type_values,
     }
 }
 
@@ -347,6 +352,8 @@ struct ModuleLowerer<'a> {
     statement_uses: Vec<(FunctionId, VarId, Span)>,
     /// The annotations every lowered function evaluates (`ModuleIr::annotations`).
     annotations: Vec<(FunctionId, Span)>,
+    /// The `type` statement values of every lowered function (`ModuleIr::type_values`).
+    type_values: Vec<(FunctionId, VarId, String)>,
     /// The free variables of every lowered function, by `FunctionId` (sorted).
     free_names: Vec<Vec<String>>,
     /// The function lowered from each definition, by its span.
@@ -598,6 +605,12 @@ impl<'a> ModuleLowerer<'a> {
         );
         self.annotations
             .extend(lowered.annotations.into_iter().map(|span| (fn_id, span)));
+        self.type_values.extend(
+            lowered
+                .type_values
+                .into_iter()
+                .map(|(alias, value)| (fn_id, alias, value)),
+        );
         fn_id
     }
 }
@@ -773,6 +786,8 @@ struct FnBuilder<'m, 'a> {
     statement_uses: Vec<(VarId, Span)>,
     /// The annotations the function evaluates (`ModuleIr::annotations`).
     annotations: Vec<Span>,
+    /// The `type` statement values of the function (`ModuleIr::type_values`).
+    type_values: Vec<(VarId, String)>,
     /// Local names bound by importing a frame-introspection function, with its kind.
     introspection_locals: FxHashMap<String, &'static str>,
 
@@ -786,12 +801,13 @@ struct FnBuilder<'m, 'a> {
 }
 
 /// A lowered function, and the facts of it its module keeps (`ModuleIr::class_bases`,
-/// `ModuleIr::statement_uses`, `ModuleIr::annotations`).
+/// `ModuleIr::statement_uses`, `ModuleIr::annotations`, `ModuleIr::type_values`).
 struct Lowered {
     function: IrFunction,
     class_bases: Vec<(VarId, u32)>,
     statement_uses: Vec<(VarId, Span)>,
     annotations: Vec<Span>,
+    type_values: Vec<(VarId, String)>,
 }
 
 impl<'m, 'a> FnBuilder<'m, 'a> {
@@ -867,6 +883,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             str_heads: Vec::new(),
             statement_uses: Vec::new(),
             annotations: Vec::new(),
+            type_values: Vec::new(),
             introspection_locals: FxHashMap::default(),
             comp_target_renames: Vec::new(),
             units_left: unit_budget(span),
@@ -1470,6 +1487,10 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     },
                     span,
                 );
+                if ta.type_params.is_none() {
+                    let value = self.module.slice_text(Span::from(ta.value.range()));
+                    self.type_values.push((dst, value));
+                }
                 self.lower_assign_target(&ta.name, dst, span);
             }
             Stmt::Assign(a) => {
@@ -4066,6 +4087,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.str_heads.clear();
         self.statement_uses.clear();
         self.annotations.clear();
+        self.type_values.clear();
         if self.is_module_body {
             // The blocks the star imports were lowered in are gone; a star import runs only in
             // the module body.
@@ -4148,6 +4170,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         let class_bases = std::mem::take(&mut self.class_bases);
         let statement_uses = std::mem::take(&mut self.statement_uses);
         let annotations = std::mem::take(&mut self.annotations);
+        let type_values = std::mem::take(&mut self.type_values);
         let f = IrFunction {
             id: self.id,
             name: self.name,
@@ -4180,6 +4203,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             class_bases,
             statement_uses,
             annotations,
+            type_values,
         }
     }
 }

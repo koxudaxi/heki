@@ -403,6 +403,22 @@ With `fresh-objects = "allow"`, a write is no violation when it constructs the o
 
 A shallow copy's containers are the original's: only rebinding its attributes constructs it.
 
+A project function returns a new object at a call when every value it returns is one, or, on
+some paths, an element of an optional parameter (an item, `get`, `pop`, `setdefault`, or an
+iteration step of it) that the call leaves at a default without elements or passes such a
+constant: `None`, a bool, a number, or an empty string or tuple. `copy_tree(node)` of
+`def copy_tree(node, replacements=None)` returning `replacements[id(node)]` or a copy gives a new
+object; `copy_tree(node, table)` does not, nor does a call where the default is a dict display
+shared by every call (`memo={}`). A call of a function every `return` of which returns one of its
+parameters (`def with_origin(field, kind): ...; return field`) gives the object it hands that
+parameter: a new one stays new, and the input stays the input.
+
+In an effect boundary, a write a reached function makes to the object one of its parameters
+holds constructs that object when every call reaching the function hands it a new object that
+nothing kept yet, as the same write in the caller would: `set_flag(copy.copy(node))` with
+`def set_flag(node): node.flag = True`. A call handing it the scope function's input, or any
+other object, is reported, at that call.
+
 With `unlisted-dict-keys = "report"`, `MUT201` also reports a constant key written through the
 namespace of an object of a class a target covers (`field.__dict__[KEY] = v`,
 `field.__dict__.setdefault("_cache", v)`, `del vars(field)["k"]`) when no target covering that

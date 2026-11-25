@@ -8,7 +8,7 @@ opaque_packages = [
     "pathlib", "shutil", "sqlite3", "urllib", "http", "logging", "copy", "functools",
     "itertools", "collections", "threading", "multiprocessing", "concurrent", "dataclasses",
     "queue", "contextlib", "importlib", "platform", "sys", "sysconfig", "html", "json",
-    "pprint", "atexit", "signal", "weakref",
+    "pprint", "atexit", "signal", "weakref", "typing", "contextvars",
 ]
 
 # --- Sleep ---
@@ -291,6 +291,13 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "asyncio.BaseEventLoop.create_future"
 return_type = "asyncio.Future"
+opaque_to_layer3 = true
+
+# A done future's `result()` returns the result it was given (`returns_held`), and one not done
+# raises at once: it never waits.
+[[entries]]
+symbol = "asyncio.Future.result"
+returns_held = {}
 opaque_to_layer3 = true
 
 # --- Synchronous locks (EFF106, opt-in) ---
@@ -584,6 +591,7 @@ cases = [
     { arg = 0, param = "timeout", equals = 0, effects = [] },
 ]
 waits_until_done = true
+returns_held = {}
 opaque_to_layer3 = true
 
 [[entries]]
@@ -964,6 +972,43 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "collections.deque"
 copy_sanitizer = "shallow"
+opaque_to_layer3 = true
+
+# --- The methods a `NamedTuple` class gets ---
+# `class C(NamedTuple)` is built by `collections.namedtuple`, which gives the class these methods
+# and forbids its body to bind them: `_replace(**changes)` copies the instance with some fields
+# changed, as `copy.replace` does, `_make(iterable)` (a class method) builds a new instance of
+# the class it is called on, and `_asdict()` a new dict of the fields. None changes the
+# receiver. A subclass may define them again, and a call on its instances runs that definition.
+
+[[entries]]
+symbol = "typing.NamedTuple._replace"
+copy_sanitizer = "shallow"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "typing.NamedTuple._make"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "typing.NamedTuple._asdict"
+return_type = "builtins.dict"
+opaque_to_layer3 = true
+
+# --- Context variables ---
+# `ContextVar[T]` holds a `T` in each context: `get()` returns it (`returns_held`), and
+# `get(default)`, its only argument positional, returns `default` in a context where the
+# variable has no value. `set(value)` returns a `Token` for `reset`.
+
+[[entries]]
+symbol = "contextvars.ContextVar.get"
+returns_held = { default = 0 }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "contextvars.ContextVar.set"
+return_type = "contextvars.Token"
 opaque_to_layer3 = true
 
 # --- Result types (MUT114: `html.escape(text).split("\n")` is a list by construction) ---
@@ -1453,6 +1498,24 @@ opaque_to_layer3 = true
 symbol = "sys.flags"
 environment = "read"
 opaque_to_layer3 = true
+
+# --- Attribute types of standard library classes (`[[attributes]]`) ---
+# Checked on the running interpreter by `tests/sentinel/verify_stdlib_kb.py`, as the distributions'
+# rows are against their releases. A `NamedTuple` class keeps the names of its fields in the tuple
+# `_fields` and the defaults it has in the dict `_field_defaults`; a `Token` keeps the variable
+# whose `set` made it in `var`.
+
+[[attributes]]
+symbol = "typing.NamedTuple._fields"
+type = "builtins.tuple"
+
+[[attributes]]
+symbol = "typing.NamedTuple._field_defaults"
+type = "builtins.dict"
+
+[[attributes]]
+symbol = "contextvars.Token.var"
+type = "contextvars.ContextVar"
 
 # --- What a call runs of the values it is handed (`[[invokes]]`) ---
 # Each entry lists every argument the call runs code of: the special methods it runs on the

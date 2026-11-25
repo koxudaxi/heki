@@ -21,7 +21,7 @@ pub mod types;
 use crate::project::{
     Facts, Indexed, ParsedFile, Project, ProjectError, paths_leave_out, regressed,
 };
-use crate::selection::{RuleSelection, SelectionError, Selectors};
+use crate::selection::{RuleSelection, SelectionError, Selectors, not_failing_note};
 use crate::{CORE_RULES, Certainty, RuleConfigError, SummarySnapshot, fold_root_causes};
 use heki_diagnostics::{Diagnostic, RatchetBaseline};
 use heki_env::{ConfigLayout, HekiConfig, LintConfig, Severity};
@@ -627,12 +627,7 @@ fn exit_notes(now: &ReportsNow, fail_on: Severity) -> Vec<String> {
         ));
     }
     if fail_on == Severity::Error && judged > now.failing {
-        notes.push(format!(
-            "heki check does not fail on {} {which}: warnings, and heuristic reports, which can \
-             be wrong about the code and count as warnings; `fail-on = \"warning\"` in the lint \
-             settings makes them fail it.",
-            judged - now.failing
-        ));
+        notes.push(not_failing_note(judged - now.failing, which));
     }
     notes
 }

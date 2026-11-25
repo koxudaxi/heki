@@ -1223,7 +1223,11 @@ fn annotation_normalization() {
         classes: BTreeMap::from([("Local".into(), Box::default())]),
         ..ModuleDecls::default()
     };
-    let r = |a: &str| decls.resolve_annotation(a);
+    let r = |a: &str| {
+        decls
+            .resolve_annotation_ty(a)
+            .and_then(|t| t.obj().map(|o| o.class.clone()))
+    };
     assert_eq!(r("httpx.Client").as_deref(), Some("httpx.Client"));
     assert_eq!(r("Optional[Client]").as_deref(), Some("httpx.Client"));
     assert_eq!(r("t.Optional[Client]").as_deref(), Some("httpx.Client"));

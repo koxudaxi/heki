@@ -1093,6 +1093,13 @@ pub struct ModuleIr {
     /// import annotations`). The instructions inside one evaluate an annotation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub annotations: Vec<(FunctionId, Span)>,
+    /// The value of each `type` statement without type parameters, as written (`A | B` of `type
+    /// X = A | B`), by function (sorted) and the `dst` of the `MakeClosure` making the alias:
+    /// Python evaluates it lazily, so no instruction does. With type parameters, the value names
+    /// no type until they are given. Kept by module: few functions hold such a statement. An
+    /// annotation (Advisory lane only; `heki_soundness` ignores it).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub type_values: Vec<(FunctionId, VarId, String)>,
 }
 
 impl ModuleIr {
@@ -1141,6 +1148,17 @@ impl ModuleIr {
             .iter()
             .take_while(move |u| u.0 == id)
             .map(|&(_, value, span)| (value, span))
+    }
+
+    /// The value of the `type` statement whose `MakeClosure` in function `id` defines `alias`
+    /// ([`Self::type_values`]).
+    pub fn type_value(&self, id: FunctionId, alias: VarId) -> Option<&str> {
+        let start = self.type_values.partition_point(|t| t.0 < id);
+        self.type_values[start..]
+            .iter()
+            .take_while(|t| t.0 == id)
+            .find(|t| t.1 == alias)
+            .map(|t| t.2.as_str())
     }
 
     /// The spans of the annotations function `id` evaluates ([`Self::annotations`]), in order.

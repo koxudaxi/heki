@@ -42,6 +42,7 @@ import tomllib
 from pathlib import Path
 
 import ansi_svg
+import set_release_versions
 
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
@@ -146,6 +147,8 @@ def fix_label(rule: dict) -> str:
         return "Safe fix (`--fix`)"
     if rule["size_dependent_fix"]:
         return "Proven-safe suggestion (`--fix --include-size-dependent`)"
+    if rule["unsafe_fix"]:
+        return "Unsafe fix (`--fix --unsafe-fixes`)"
     return "No automatic fix"
 
 
@@ -617,6 +620,17 @@ def hand_written_pages() -> list[Path]:
     ]
 
 
+def stale_precommit_revs() -> list[str]:
+    """The pre-commit examples whose `rev:` is not the tag of the workspace version."""
+    version = set_release_versions.manifest_versions(ROOT)[set_release_versions.WORKSPACE_VERSION]
+    stale = []
+    for name, revs in set_release_versions.precommit_revs(ROOT).items():
+        if not revs:
+            stale.append(f"{name}: no pre-commit `rev:` line")
+        stale += [f"{name}: rev: v{rev}, not v{version}" for rev in revs if rev != version]
+    return stale
+
+
 def rule_cell_codes(row: str, codes: set[str]) -> set[str]:
     """The rules a table row names in cells of their own (`` `EFF103`, `EFF102` ``, a link)."""
     named = set()
@@ -709,6 +723,9 @@ def main() -> int:
         ),
         "Rules do not say what a report states": rules_without_claims(rules),
         "Rule pages and the premise table list different premises": premises_disagreeing(rules),
+        "Pre-commit examples pin another release than the workspace version": (
+            stale_precommit_revs()
+        ),
     }
     if any(disagreements.values()):
         for heading, entries in disagreements.items():
