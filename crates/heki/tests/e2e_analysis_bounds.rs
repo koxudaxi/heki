@@ -10,9 +10,10 @@
 //! locks `EFF109` follows, the values class statements pass as bases, the bindings the deque
 //! rewrite's candidates check, the star imports a name is bound through, many or nested deep,
 //! the sizes of a thousand lists each extending the next or of one list extending many deep
-//! chains, the walks over the import graph (`heki inspect --imports`), and the tests of their
+//! chains, the walks over the import graph (`heki inspect --imports`), the tests of their
 //! arguments that helpers hand on to their callers, through a long chain of helpers, for many
-//! parameters, or from many implementations of one call.
+//! parameters, or from many implementations of one call, and the type expressions aliases and
+//! casts spell.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -7310,4 +7311,44 @@ fn a_fact_needing_more_tests_than_the_bound_is_not_kept() {
     let waits = |certainty: &str| vec![("waits".to_owned(), certainty.to_owned())];
     assert_eq!(certainty(4), waits("exact"));
     assert_eq!(certainty(5), waits("heuristic"));
+}
+
+/// `aliases` type aliases of a subscript and a union each, one alias of a union of `aliases`
+/// members, and a function casting a value to a subscript `aliases` times: each type expression
+/// is spelled once, the wide union only up to its bound of parts.
+fn type_expressions(aliases: usize) -> String {
+    let mut out = vec![
+        "from typing import TypeAlias, cast".to_owned(),
+        String::new(),
+        String::new(),
+        "class C:".to_owned(),
+        "    pass".to_owned(),
+        String::new(),
+        String::new(),
+    ];
+    for i in 0..aliases {
+        out.push(format!(
+            "A{i}: TypeAlias = dict[str, list[tuple[C, int]]] | None"
+        ));
+    }
+    out.push(format!("Wide = {}", vec!["C"; aliases].join(" | ")));
+    out.extend([
+        String::new(),
+        String::new(),
+        "def casts(value: object) -> None:".to_owned(),
+    ]);
+    for i in 0..aliases {
+        out.push(format!("    c{i} = cast(dict[str, list[C]], value)"));
+    }
+    out.join("\n") + "\n"
+}
+
+#[test]
+fn type_expressions_are_spelled_once_each() {
+    let found = check_linear(800, |aliases| {
+        let p = Project::new(&format!("bounds_type_expressions_{aliases}"));
+        p.write("m.py", &type_expressions(aliases));
+        p
+    });
+    assert_eq!(found, Vec::<Value>::new());
 }

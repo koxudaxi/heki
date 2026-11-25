@@ -703,11 +703,29 @@ body binds once, outside a loop, to a value that names a file (`ModuleDecls::fil
 `names_a_file`) names it where a function or another module reads it
 (`TypeCtx::names_file_constant`), unless another module rebinds it.
 
-A module-level `TypeVar` bound once with a `bound=` (a name, an attribute of one, or the string of
-an annotation) or constraints is that bound, or the union of the constraints, wherever an
-annotation names it, in its module or imported (`ModuleDecls::type_vars`,
-`ProjectDecls::declared_ty`): `for c in run.contexts` of `contexts: list[C]` with `C =
-TypeVar("C", bound=View)` gives a `View`. An unbounded one gives no class.
+A module-level name the module body binds once to a type expression reads as the type it names
+wherever an annotation names it, in its module or imported, also as a member of a union
+(`ModuleDecls::type_names`, `ProjectDecls::declared_ty`). A type alias names its value:
+`Operation: TypeAlias = Added | Removed` (the string of an annotation too), `type Operation =
+Added | Removed` without type parameters, and an assignment of a subscript or a union without an
+annotation (`Operations = list[Added]`); its value may name an alias bound before it, and a type
+variable in it stands for any type, so it gives no class. A `TypeVar` with a `bound=` or
+constraints names that bound, or the union of the constraints: `for c in run.contexts` of
+`contexts: list[C]` with `C = TypeVar("C", bound=View)` gives a `View`. An unbounded one gives no
+class, and neither does a name bound twice or a variable annotated otherwise
+(`Declared: object = A | B`).
+
+The text of the type expression a value spells (`resolver::type_expression_text`: names of
+module-level objects, attributes of them, subscripts, unions, `None`, and strings) reads as the
+same text in an annotation does: the value of an alias, the bound of a type variable, and the
+type `typing.cast` names (`cast(list[Windows], hosts)` as `cast("list[Windows]", hosts)`). A
+subscript naming anything else (`list[kind]` of a parameter `kind`) names no type. A builtin or
+`collections` container class subscripted with types is an alias of the class
+(`types::runtime_generic`: `frozenset[str]` is a `types.GenericAlias`): calling it constructs the
+class (`frozenset[str]()`), also through a module-level name bound to it (`Names =
+frozenset[str]`, a module alias of the class). A subscript of any other class (a project generic
+class, whose alias may construct a subclass, or a `typing` alias, which may raise) calls nothing
+heki knows.
 
 A method that no project class of the receiver's MRO defines comes from the first base outside
 the project, when heki takes it to define the method (a base it knows nothing of coming first, an
