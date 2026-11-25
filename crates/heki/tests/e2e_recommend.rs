@@ -1332,11 +1332,13 @@ fn library_names_without_a_catalog_entry_are_listed_with_what_heki_would_report(
         (&blind["totals"]["tried"], &blind["totals"]["not_tried"]),
         (&json!(4), &json!(0))
     );
-    // The module also keeps an effect boundary (contract candidates), tried after the catalog.
+    // The module also keeps an effect boundary (contract candidates), tried after the catalog,
+    // and a parameter it only reads (a suggestion), tried first.
     assert_eq!(
         report["runs"],
-        json!([{"label": "discovery"}, {"label": "hypothetical-catalog"},
-               {"label": "contract-trial"}, {"label": "verification"}])
+        json!([{"label": "discovery"}, {"label": "annotation-trial"},
+               {"label": "hypothetical-catalog"}, {"label": "contract-trial"},
+               {"label": "verification"}])
     );
     // No catalog entry enters the block, and no count of reports takes the trial's.
     let keys: Vec<&String> = report["config"].as_object().unwrap().keys().collect();

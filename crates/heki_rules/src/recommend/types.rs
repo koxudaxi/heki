@@ -864,8 +864,7 @@ fn callees_take_it(
 }
 
 /// Premise 8, "Whole family", for a method: the same parameter of every definition of its
-/// override family (the project classes above and below it defining the name, and theirs, to a
-/// fixed point) is a candidate of the same kind, which joins the group, or already admits the
+/// override family ([`family`]) is a candidate of the same kind, which joins the group, or already admits the
 /// read-only type; the classes have no base outside the project but `object`, unless the
 /// method is a constructor; a body that states nothing needs a family member that does.
 fn whole_family(
@@ -890,7 +889,13 @@ fn whole_family(
         return (joined, open);
     };
     let method = c.key.qualname.rsplit('.').next().unwrap_or_default();
-    let members = family(cx, &class, method);
+    let (members, further) = family(cx, &class, method);
+    if further {
+        open.push(unmet(
+            false,
+            "its override family reaches further than the classes heki follows".to_owned(),
+        ));
+    }
     let mut stated = !stub;
     for (member_class, member) in &members {
         if !CONSTRUCTORS.contains(&method) {
@@ -958,37 +963,36 @@ fn whole_family(
     (joined, open)
 }
 
-/// The override family of `class.method`: each project class along the hierarchy above or below
-/// it that defines `method`, and the method, to a fixed point.
-fn family(cx: &Cx<'_>, class: &str, method: &str) -> Vec<(String, FuncKey)> {
+/// The override family of `class.method`: the definitions of `method` in `class` and its
+/// project ancestors, and in the project subclasses of each of them; `true` when a member's
+/// ancestors hold a definition outside these (a diamond heki does not follow further).
+fn family(cx: &Cx<'_>, class: &str, method: &str) -> (Vec<(String, FuncKey)>, bool) {
     let defines = |c: &str| {
         cx.decls
             .methods_of(c)
             .into_iter()
             .find(|k| k.qualname.rsplit('.').next() == Some(method))
     };
+    let mut above: Vec<String> = cx.decls.ancestors_of(class);
+    above.push(class.to_owned());
     let mut seen: BTreeMap<String, FuncKey> = BTreeMap::new();
-    let mut todo = vec![class.to_owned()];
-    let mut visited: FxHashSet<String> = FxHashSet::default();
-    while let Some(c) = todo.pop() {
-        if !visited.insert(c.clone()) {
-            continue;
-        }
-        if let Some(k) = defines(&c) {
+    for c in &above {
+        if let Some(k) = defines(c) {
             seen.insert(c.clone(), k);
         }
-        for related in cx
-            .decls
-            .ancestors_of(&c)
-            .into_iter()
-            .chain(cx.decls.subclasses_of(&c))
-        {
-            if !visited.contains(&related) && defines(&related).is_some() {
-                todo.push(related);
+    }
+    let definers: Vec<String> = seen.keys().cloned().collect();
+    for c in definers.iter().chain(std::iter::once(&class.to_owned())) {
+        for below in cx.decls.subclasses_of(c) {
+            if let Some(k) = defines(&below) {
+                seen.insert(below, k);
             }
         }
     }
-    seen.into_iter().collect()
+    let further = seen.keys().any(|c| {
+        (cx.decls.ancestors_of(c).iter()).any(|a| !seen.contains_key(a) && defines(a).is_some())
+    });
+    (seen.into_iter().collect(), further)
 }
 
 /// The project functions used as a value (a reference handing one on), each with its first
