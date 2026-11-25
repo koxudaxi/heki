@@ -1,6 +1,6 @@
 //! The `object()` sentinels of a module, the attributes its classes bind to one, and the classes
 //! it registers with `copyreg`: what `copy.deepcopy` does to an instance holding a sentinel
-//! ([`super::ProjectDecls::held_sentinels`], [`super::ProjectDecls::deep_copy_of`]).
+//! ([`super::ProjectDecls::held_sentinels`], [`super::ProjectDecls::copy_of`]).
 
 use super::{
     ModuleDecls, NamedAttr, PartialAttr, dataclass_decorator, decorator_parts,

@@ -734,18 +734,19 @@ pub struct HeldSentinel {
     pub stored: bool,
 }
 
-/// What `copy.deepcopy` makes of a value of a class ([`ProjectDecls::deep_copy_of`]).
+/// What `copy.deepcopy` or `copy.copy` makes of a value of a class ([`ProjectDecls::copy_of`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeepCopy {
-    /// A new instance whose attributes hold deep copies of the original's (a new object for an
-    /// `object()` sentinel), for every class the value may be.
+pub enum CopyMade {
+    /// A new instance whose attributes hold the original's values, deep copies of them for
+    /// `copy.deepcopy` (a new object for an `object()` sentinel), for every class the value may
+    /// be.
     Attributes,
     /// A copy hook along the class's own MRO, or a `copyreg` registration of the class, makes
     /// the copy, and may keep any value.
     Hooked,
     /// Heki cannot tell for some class the value may be: a hook in a subclass or a mixin, a
     /// base outside the project the catalog does not describe, a metaclass, or a `__getattr__`
-    /// / `__getattribute__` that the copy asks for `__deepcopy__`.
+    /// / `__getattribute__` that the copy may ask for its hook.
     Open,
 }
 
@@ -1004,7 +1005,8 @@ pub struct ModuleDecls {
     /// join of every store of the module (`stores::record`).
     pub global_types: BTreeMap<String, Ty>,
     /// Module globals bound once, by the module body, to a dict display whose keys are string
-    /// literals and some of whose values are functions or classes, that nothing changes in
+    /// literals and some of whose values are functions, classes, or instances whose fields hold
+    /// them, that nothing changes in
     /// place (`HANDLERS = {"create": create, "drop": drop}`): each key with its value's type
     /// (`None`: unknown), in order (`stores::record`). `HANDLERS["create"]` is that value
     /// ([`ProjectDecls::table`]).
@@ -4150,7 +4152,7 @@ impl ProjectDecls {
             for h in held {
                 if self.is_project_class(&h)
                     && seen.insert(h.clone())
-                    && !self.copy_decided_by_class(&h)
+                    && !self.copy_decided_by_class(&h, CopyDepth::Deep)
                 {
                     out.push((h, attr.to_owned()));
                 }
@@ -4178,16 +4180,17 @@ impl ProjectDecls {
         })
     }
 
-    /// Whether something of the class `class` itself decides what `copy.deepcopy` makes of its
-    /// instances, in place of copying their attributes: a copy hook along its MRO
-    /// (`__deepcopy__`, `__reduce__`, `__reduce_ex__`, `__getstate__`, `__setstate__`), or a
-    /// `copyreg` registration of the class ([`Self::copy_registered`]). Either may keep any value.
-    pub fn copy_decided_by_class(&self, class: &str) -> bool {
+    /// Whether something of the class `class` itself decides what a copy of `depth` makes of
+    /// its instances, in place of copying their attributes: a copy hook along its MRO
+    /// ([`copy_hooks`]), or a `copyreg` registration of the class ([`Self::copy_registered`]).
+    /// Either may keep any value.
+    pub fn copy_decided_by_class(&self, class: &str, depth: CopyDepth) -> bool {
         let class = self.canonical(class);
+        let hooks = copy_hooks(depth);
         self.mro(&class).iter().any(|c| {
             self.read(|k| note(&mut k.class_facts, c));
             self.class(c)
-                .is_some_and(|d| COPY_HOOKS.iter().any(|h| d.members.contains(*h)))
+                .is_some_and(|d| hooks.iter().any(|h| d.members.contains(*h)))
         }) || self.copy_registered(&class)
     }
 
@@ -4202,32 +4205,34 @@ impl ProjectDecls {
         self.copy_registered.contains(class) || self.copy_registered.contains("*")
     }
 
-    /// What `copy.deepcopy` (without a `memo`) does with a value of the project class `class`,
-    /// an instance of it or, under R2, of a project subclass ([`DeepCopy`]). The copy protocol
-    /// looks for `__deepcopy__` on the instance (where `__getattr__` and `__getattribute__`
-    /// may answer), then for a `copyreg` registration of its exact class, then for
-    /// `__reduce_ex__` / `__reduce__`, whose default reads `__getstate__` and makes the copy
-    /// take the state through `__setstate__` when the class defines one; with none of them, the
-    /// copy is a new instance whose attributes are deep copies of the original's.
-    pub fn deep_copy_of(&self, class: &str, kb: &EffectiveEcosystemKb) -> DeepCopy {
+    /// What `copy.deepcopy` (`depth` deep, without a `memo`) or `copy.copy` (shallow) does with
+    /// a value of the project class `class`, an instance of it or, under R2, of a project
+    /// subclass ([`CopyMade`]). The copy protocol looks for `__deepcopy__` on the instance (where
+    /// `__getattr__` and `__getattribute__` may answer; `copy.copy` looks for `__copy__` on the
+    /// class), then for a `copyreg` registration of its exact class, then for `__reduce_ex__` /
+    /// `__reduce__`, whose default reads `__getstate__` and makes the copy take the state
+    /// through `__setstate__` when the class defines one; with none of them, the copy is a new
+    /// instance whose attributes are the original's values, or deep copies of them.
+    pub fn copy_of(&self, class: &str, depth: CopyDepth, kb: &EffectiveEcosystemKb) -> CopyMade {
         let class = self.canonical(class);
-        let hooked = |d: &ClassDecl| COPY_HOOKS.iter().any(|h| d.members.contains(*h));
+        let hooks = copy_hooks(depth);
+        let hooked = |d: &ClassDecl| hooks.iter().any(|h| d.members.contains(*h));
         // A base outside the project: one known to define none of the hooks, or one whose
-        // `__deepcopy__` the catalog describes as copying the attributes deeply (R3).
+        // copy hook the catalog describes as copying the attributes to this depth (R3).
         let known_base = |c: &str| {
             HOOKLESS_BASES.contains(&c)
                 || kb
-                    .lookup(&format!("{c}.__deepcopy__"))
-                    .is_some_and(|e| e.copy_sanitizer == Some(CopyDepth::Deep))
+                    .lookup(&format!("{c}.{}", hooks[0]))
+                    .is_some_and(|e| e.copy_sanitizer == Some(depth))
         };
-        if self.copy_decided_by_class(&class) {
-            return DeepCopy::Hooked;
+        if self.copy_decided_by_class(&class, depth) {
+            return CopyMade::Hooked;
         }
         let mro = self.mro(&class);
-        let mut answer = DeepCopy::Attributes;
+        let mut answer = CopyMade::Attributes;
         for c in &mro {
             if !self.is_project_class(c) && !known_base(c) {
-                answer = DeepCopy::Open;
+                answer = CopyMade::Open;
             }
         }
         for c in self.value_classes(&class) {
@@ -4244,7 +4249,7 @@ impl ProjectDecls {
                 || unknown_base
                 || c != class && self.copy_registered(&c)
             {
-                answer = DeepCopy::Open;
+                answer = CopyMade::Open;
             }
         }
         answer
@@ -6417,15 +6422,22 @@ fn ty_classes(ty: &Ty, out: &mut Vec<String>) {
     }
 }
 
-/// The methods that decide what `copy.deepcopy` makes of an instance in place of copying its
-/// attributes ([`ProjectDecls::deep_copy_of`]).
-const COPY_HOOKS: [&str; 5] = [
-    "__deepcopy__",
-    "__reduce__",
-    "__reduce_ex__",
-    "__getstate__",
-    "__setstate__",
-];
+/// The methods that decide what a copy of `depth` makes of an instance in place of copying its
+/// attributes ([`ProjectDecls::copy_of`]): `__deepcopy__` for `copy.deepcopy`, `__copy__` for
+/// `copy.copy`, and the methods of pickling both fall back to.
+fn copy_hooks(depth: CopyDepth) -> [&'static str; 5] {
+    let own = match depth {
+        CopyDepth::Deep => "__deepcopy__",
+        CopyDepth::Shallow => "__copy__",
+    };
+    [
+        own,
+        "__reduce__",
+        "__reduce_ex__",
+        "__getstate__",
+        "__setstate__",
+    ]
+}
 
 /// The bases outside the project known to define none of the [`COPY_HOOKS`], `__getattr__`, or
 /// `__getattribute__`, and no metaclass other than `type` / `abc.ABCMeta`.

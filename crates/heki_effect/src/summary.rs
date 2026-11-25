@@ -2459,6 +2459,11 @@ impl<'a> Extractor<'a> {
                 Val::Ref(fqn) if fqn == "builtins.object.__new__" => self.bare_allocation(args),
                 _ => self.class_called(*c),
             },
+            InstKind::MethodCall { recv, method, .. }
+                if let Some(class) = self.held_class(*recv, method) =>
+            {
+                Some(class)
+            }
             InstKind::MethodCall {
                 recv, method, args, ..
             } => match self.val(*recv)? {
@@ -2734,6 +2739,29 @@ impl<'a> Extractor<'a> {
         self.bound_method(var).is_some_and(|(recv, method)| {
             self.cx.calls_partial_with_keywords(self.val(recv), &method)
         })
+    }
+
+    /// The project class `recv.method(...)` constructs when `method` holds it: a field of an
+    /// instance holding the class ([`TypeCtx::field_held`]), or a class attribute bound to a
+    /// `functools.partial` object of it (`ClassAlias::partial`).
+    fn held_class(&self, recv: VarId, method: &str) -> Option<String> {
+        let project = self.cx.project;
+        let class = match self
+            .inferred
+            .ty(recv)
+            .and_then(|t| self.cx.field_held(t, method))
+        {
+            Some(crate::types::Elem::Of(crate::types::Ty::Ref(fqn))) => fqn.clone(),
+            Some(_) => return None,
+            None => match self.val(recv)? {
+                Val::Ref(owner) | Val::Inst(owner) | Val::Class(owner) => {
+                    let partial = project.class_aliases(owner, method)?.partial?;
+                    project.object_named(&partial.callable)
+                }
+                _ => return None,
+            },
+        };
+        project.is_project_class(&class).then_some(class)
     }
 
     /// What `recv.method(...)` calls ([`TypeCtx::resolve_method_of`]).
@@ -3211,12 +3239,16 @@ impl<'a> Extractor<'a> {
             .collect();
         let lives = live.iter().filter(|l| **l).count();
         specials.iter().enumerate().any(|(own, s)| {
+            // An object's `__dict__` holds the names of its attributes, strings: looking a key up
+            // in it compares the key with strings, whose comparison runs only the key's own
+            // methods (the key's operand).
+            let keyed = s.keyed && !self.dict_of.contains_key(&s.value);
             invokes::special_methods_run_project_code(
                 self.cx.project,
                 self.cx.kb,
                 &operands[own],
                 lives == usize::from(live[own]),
-                s,
+                &heki_ir::SpecialMethods { keyed, ..*s },
             )
         })
     }

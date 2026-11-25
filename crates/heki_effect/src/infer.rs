@@ -32,7 +32,7 @@ use crate::invokes;
 use crate::ownership::CASTS;
 use crate::partial::Partial;
 use crate::resolver::stores::Read;
-use crate::resolver::{self, Callee, ProjectDecls, TypeCtx, Val};
+use crate::resolver::{self, Callee, CopyMade, ProjectDecls, TypeCtx, Val};
 use crate::types::{Added, Args, Change, Container, Elem, Obj, Operands, Ty};
 use heki_ast::Span;
 use heki_ir::walk::FnShape;
@@ -40,7 +40,7 @@ use heki_ir::{
     BinOpKind, BlockId, BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, Inst,
     InstKind, IrFunction, ModuleIr, PhiNode, Terminator, UnaryOpKind, VarId,
 };
-use heki_kb::{ArgFact, ResultOf};
+use heki_kb::{ArgFact, CopyDepth, ResultOf};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -2305,13 +2305,37 @@ impl<'e, 'a> Engine<'e, 'a> {
             {
                 let original = self.need(args[0])?;
                 let alone = args.len() == 1 && call.kwargs.is_empty() && call.star_from.is_none();
-                return Ok(original.map(|t| if alone { t.clone() } else { t.without_fields() }));
+                return Ok(original.map(|t| {
+                    if alone && self.copy_keeps_fields(fqn, t) {
+                        t.clone()
+                    } else {
+                        t.without_fields()
+                    }
+                }));
             }
             _ if let Some(fields) = self.constructed_fields(fqn, call) => {
                 Ty::container(fqn, fields)
             }
             _ => return Ok(self.cx.call_result(fqn, |i, k| self.passed(call, i, k))),
         }))
+    }
+
+    /// Whether the copy `fqn` makes of `original`, handed nothing else, holds the values its
+    /// fields hold: a replace (`dataclasses.replace`) passes them to the constructor again, and
+    /// `copy.copy` / `copy.deepcopy` copy the attributes of an instance whose class has no copy
+    /// hook ([`ProjectDecls::copy_of`]; a deep copy of a function or a class is itself). A hook
+    /// (`__copy__`) may return an instance holding anything.
+    fn copy_keeps_fields(&self, fqn: &str, original: &Ty) -> bool {
+        let depth = match fqn {
+            "copy.copy" => CopyDepth::Shallow,
+            "copy.deepcopy" => CopyDepth::Deep,
+            _ => return true,
+        };
+        let cx = self.cx;
+        original.members().iter().all(|o| {
+            !matches!(o.args, Args::Fields(_))
+                || cx.project.copy_of(&o.class, depth, cx.kb) == CopyMade::Attributes
+        })
     }
 
     /// The member `name` of the module or library class `recv` names (`os.listdir`), by its
@@ -2564,8 +2588,9 @@ impl<'e, 'a> Engine<'e, 'a> {
 
     /// The type the type expression in `var` names (`typing.cast`'s first argument): what its
     /// text names as an annotation (a string, `list[Model]`, `Model | None`, an alias), or else
-    /// a class object (`Exception`, a local bound to a class). A subscript whose text names
-    /// nothing (`list[kind]`) names no type, though it is an alias of its class.
+    /// a class object (`Exception`, a local bound to a class, an item of a tuple of classes). A
+    /// subscript of a builtin container class whose text names nothing (`list[kind]`) names no
+    /// type, though it is an alias of its class.
     fn type_form(&self, var: VarId) -> Option<Ty> {
         let cx = self.cx;
         let named = resolver::type_expression_text(self.shape, var)
@@ -2575,8 +2600,13 @@ impl<'e, 'a> Engine<'e, 'a> {
         if named.is_some() {
             return named;
         }
-        let subscript = self.shape.inst(self.shape.copy_root(var));
-        if subscript.is_some_and(|i| matches!(i.kind, InstKind::SubscriptLoad { .. })) {
+        let subscripted_class = match self.shape.inst(self.shape.copy_root(var)).map(|i| &i.kind) {
+            Some(InstKind::SubscriptLoad { obj, .. }) => {
+                matches!(self.fact(*obj), Fact::Known(Ty::Ref(class)) if crate::types::runtime_generic(&class))
+            }
+            _ => false,
+        };
+        if subscripted_class {
             return None;
         }
         match self.fact(var) {

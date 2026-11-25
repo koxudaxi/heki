@@ -570,10 +570,13 @@ reader of types sees them: a local, a closure cell, a global or an attribute eve
 which binds such instances (also under an annotation of the class, `ProjectDecls::narrower`), the
 items of a container (`TABLE: tuple[Spec, ...] = (Spec(run=a), Spec(run=b))` gives one of `a` and
 `b`, `None` adding nothing), and a copy of the instance alone (`copy.copy`, `dataclasses.replace`
-given no other value). A copy given other values, `typing.Self` of a method's result, and a call
-of a class object that may be a subclass give an instance whose fields hold their declared types.
+given no other value; `copy.copy` and `copy.deepcopy` only where no copy hook of the class decides
+the copy, `ProjectDecls::copy_of`: a `__copy__` may return an instance holding anything). A copy
+given other values or made by a hook, `typing.Self` of a method's result, and a call of a class
+object that may be a subclass give an instance whose fields hold their declared types.
 Reading a field gives what it holds (`TypeCtx::field_held`, for typing and for the call targets
-of `obj.field(...)`, which binds no receiver) when the instance holds what the construction gave
+of `obj.field(...)`, which binds no receiver and constructs a class the field holds, as a
+partial class attribute of a class does) when the instance holds what the construction gave
 (`ProjectDecls::field_holds_given`): along the MRO, every class binding the name binds it as a
 field of its own to a default that is no descriptor (none, `None`, a literal, a display, a
 default factory, a project function or class; any default of a named tuple's field, which is one
@@ -718,7 +721,8 @@ A value bound to one of several named objects (a branch `f = a if c else b`, the
 table) is one of them (`Ty::OneOf`, at most `MAX_NAMED`, eight): a call runs every one, which must
 bind a receiver alike. A module global bound once, by the module body outside a loop, to a dict
 display with string-literal keys and no `**` entry, some value of which is a function, a class,
-or a partial object, and that no code changes in place (through its name or a module object,
+a partial object, or an instance whose fields hold such objects (`types::Args::Fields`), and
+that no code changes in place (through its name or a module object,
 the module's own included) or rebinds, is a table (`ModuleDecls::tables`, at most 256
 entries): reading it with a key a string constant gives (`HANDLERS["create"]`,
 `HANDLERS[KEY]`, in its module, imported, or through the module) gives that entry's value, a
@@ -776,8 +780,9 @@ class, and neither does a name bound twice or a variable annotated otherwise
 (`Declared: object = A | B`).
 
 The text of the type expression a value spells (`resolver::type_expression_text`: names of
-module-level objects, attributes of them, subscripts, unions, `None`, and strings) reads as the
-same text in an annotation does: the value of an alias, the bound of a type variable, and the
+module-level objects, attributes of them, subscripts, unions, `None`, and strings, up to 64 parts
+counted as the text writes them: `kind | kind` writes `kind` twice) reads as the same text in an
+annotation does: the value of an alias, the bound of a type variable, and the
 type `typing.cast` names (`cast(list[Windows], hosts)` as `cast("list[Windows]", hosts)`). A
 subscript naming anything else (`list[kind]` of a parameter `kind`) names no type. A builtin or
 `collections` container class subscripted with types is an alias of the class
@@ -1490,7 +1495,8 @@ which module imports which.
    class the operand may be under R2, the method found first along the MRO,
    `ProjectDecls::special_method_owner`, is `object`'s, a builtin type's, whose hash,
    comparison, and `repr()` run the items' own and whose dict or set lookups compare stored keys
-   under an equal hash, or a library class's called as a library call handed every operand,
+   under an equal hash (strings in an object's `__dict__`, which holds the names of its
+   attributes), or a library class's called as a library call handed every operand,
    R3; a value of an abstract class, a protocol, `object`, or no class heki knows establishes
    none); an attribute access that may run code of the project besides a getter heki resolves
    (`heki_effect::invokes::attribute_access_runs_project_code`: on a project class, a read that
@@ -1563,7 +1569,7 @@ which module imports which.
    `stores_on_instance` reads the stored value).
 4. **Deep copies** (`EffectSummary::deep_copies`): a call that resolves to `copy.deepcopy` with
    one positional argument and no keyword, of an object whose project classes heki knows.
-   `ProjectDecls::deep_copy_of` says what the copy protocol does with a value of a class: a copy
+   `ProjectDecls::copy_of` says what the copy protocol does with a value of a class: a copy
    hook along its MRO (`__deepcopy__`, `__reduce__`, `__reduce_ex__`, `__getstate__`,
    `__setstate__`) or a `copyreg` registration of the class (`ModuleDecls::copy_registrations`,
    joined into a project index whose changes are class keys) decides it (no report); with none,
