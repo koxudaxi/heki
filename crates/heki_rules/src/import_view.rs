@@ -56,6 +56,7 @@ pub struct SiteReport {
     pub spelling: Option<&'static str>,
     /// `body`, `lazy`, `function`, `type-checking`; `None` when heki cannot tell.
     pub timing: Option<&'static str>,
+    /// A handler takes a failure of the import: a missing module or any import error.
     pub guarded: bool,
     pub unconditional: bool,
     /// The module the site certainly loads.
@@ -207,7 +208,7 @@ fn site_report(
             Answer::Known(t) => Some(t.as_str()),
             Answer::Open => None,
         },
-        guarded: site.guarded,
+        guarded: site.handled.is_some(),
         unconditional: site.unconditional,
         target: certain.map(|m| graph.name(m).to_owned()),
         group,

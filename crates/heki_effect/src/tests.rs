@@ -1223,7 +1223,11 @@ fn annotation_normalization() {
         classes: BTreeMap::from([("Local".into(), Box::default())]),
         ..ModuleDecls::default()
     };
-    let r = |a: &str| decls.resolve_annotation(a);
+    let r = |a: &str| {
+        decls
+            .resolve_annotation_ty(a)
+            .and_then(|t| t.obj().map(|o| o.class.clone()))
+    };
     assert_eq!(r("httpx.Client").as_deref(), Some("httpx.Client"));
     assert_eq!(r("Optional[Client]").as_deref(), Some("httpx.Client"));
     assert_eq!(r("t.Optional[Client]").as_deref(), Some("httpx.Client"));
@@ -1257,12 +1261,14 @@ fn mut108_resolve(name: &str) -> Option<String> {
         | "NotRequired"
         | "MutableSequence"
         | "Mapping"
+        | "AbstractSet"
         | "dataclass_transform" => format!("typing.{first}"),
         "te" => "typing_extensions".into(),
         "other" => "pkg.other".into(),
         "ReadOnly" => "typing_extensions.ReadOnly".into(),
         "InitVar" | "KW_ONLY" | "dataclass" => format!("dataclasses.{first}"),
         "Sequence" => "collections.abc.Sequence".into(),
+        "abc" => "collections.abc".into(),
         "deque" => "collections.deque".into(),
         "list" | "dict" | "int" => format!("builtins.{first}"),
         "t" => "typing".into(),
@@ -1343,6 +1349,19 @@ fn mut108_parameter_access() {
     assert_eq!(a("Annotated[Mapping[str, int], 'doc']"), ro);
     assert_eq!(a("'ReadOnly[list[int]]'"), ro);
     assert_eq!(a("t.Sequence[int]"), ro);
+    // The abstract set, in every spelling the sequence and the mapping take.
+    assert_eq!(a("AbstractSet[int]"), ro);
+    assert_eq!(a("AbstractSet"), ro);
+    assert_eq!(a("abc.Set[int]"), ro);
+    assert_eq!(a("abc.Set"), ro);
+    assert_eq!(a("t.AbstractSet[int] | None"), ro);
+    assert_eq!(a("Optional['abc.Set[int]']"), ro);
+    assert_eq!(a("Annotated[AbstractSet[int], 'doc']"), ro);
+    // `typing.Set` is the builtin `set`, and `MutableSet` a mutable one.
+    assert_eq!(a("t.Set[int]"), mutable);
+    assert_eq!(a("abc.MutableSet[int]"), mutable);
+    assert_eq!(a("AbstractSet[int] | set[int]"), None);
+    assert_eq!(a("te.AbstractSet[int]"), a("te.Mapping[str, int]"));
     assert_eq!(a("list[int]"), mutable);
     assert_eq!(a("dict[str, int] | None"), mutable);
     assert_eq!(a("MutableSequence[int]"), mutable);

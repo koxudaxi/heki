@@ -498,8 +498,8 @@ impl Workspace {
             .or_else(|| env_cfg.baseline.as_ref().map(|b| project.env.root.join(b)));
         let baseline = match baseline_path {
             Some(path) => {
-                let recorded =
-                    RatchetBaseline::load(&path).map_err(|e| EngineError::Baseline(Box::new(e)))?;
+                let recorded = RatchetBaseline::load(&path, heki_rules::reports_groups)
+                    .map_err(|e| EngineError::Baseline(Box::new(e)))?;
                 Some((path, recorded))
             }
             None => None,
@@ -595,6 +595,7 @@ impl Workspace {
                 root: &env.root,
                 modules: &env.layout,
             },
+            runtime: env.runtime,
         };
         check_project(&[], &env.cfg, &env.kb, &index, &selection, &extras)
             .map_err(EngineError::Rules)?;
@@ -726,6 +727,7 @@ impl Workspace {
                 root: &self.env.root,
                 modules: &self.env.layout,
             },
+            runtime: self.env.runtime,
         };
         let (mut diags, reads) = self.decls.completed().record(|| {
             let mut diags = check_project(

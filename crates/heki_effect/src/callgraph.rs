@@ -463,15 +463,16 @@ fn must_reads_through_self_calls(
                 .filter(|callee| {
                     let bound_to_self = callee.owner_class_qualname.is_some()
                         && !callee.decorators.iter().any(|d| {
+                            let head = d.split('(').next().unwrap_or(d).trim();
                             matches!(
-                                crate::decorators::last_name(d),
-                                "staticmethod" | "classmethod"
+                                head.rsplit('.').next(),
+                                Some("staticmethod" | "classmethod")
                             )
                         });
                     bound_to_self
                         && !in_scc(&bc.callee)
                         && runs_at_call(callee, site)
-                        && crate::decorators::keeps_returned_value(&callee.decorators)
+                        && !callee.decorator_may_replace
                 })
                 .map(EffectSummary::must_read_self_attrs);
             let reads: BTreeSet<AttrKeyPath> = reads.into_iter().flatten().cloned().collect();
@@ -724,7 +725,7 @@ fn site_steps(
                     }
                     continue;
                 }
-                if callee.is_some_and(|c| !crate::decorators::keeps_returned_value(&c.decorators))
+                if callee.is_some_and(|c| c.decorator_may_replace)
                     && steps.stops_at(MustGap::Decorated(key()))
                 {
                     return None;
@@ -1019,11 +1020,12 @@ impl Resolver<'_> {
     /// least kind of the objects its project functions return.
     fn holds(&self, cond: &NewCond, own: bool) -> Option<NewKind> {
         let mut kind = NewKind::Own;
-        for k in cond.returns() {
+        for from in cond.returns() {
+            let k = &from.callee;
             if (self.in_scc)(k) {
                 return None;
             }
-            let r = self.index.summary(k)?.returns_new.kind()?;
+            let r = (self.index.summary(k)?.returns_new).kind_at(from.empty_params)?;
             if own && r == NewKind::Copy {
                 return None;
             }
@@ -1078,58 +1080,58 @@ impl Resolver<'_> {
             .then_some(fact)
     }
 
-    /// Resolve the conditions of the function's own writes and of its returned object.
-    fn resolve_own(&self, s: &mut EffectSummary) {
-        let pending: Vec<TypedFieldWriteSite> = s
-            .typed_field_write_sites
-            .iter()
-            .filter(|t| match &t.construction {
-                Construction::Pending { .. } => true,
-                Construction::Param { cond, .. } => !cond.is_empty(),
-                _ => false,
-            })
-            .cloned()
-            .collect();
-        let unresolved: Vec<UnresolvedWriteSite> = s
-            .unresolved_write_sites
-            .iter()
-            .filter(|t| matches!(t.construction, Construction::Pending { .. }))
-            .cloned()
-            .collect();
-        for mut t in unresolved {
-            s.unresolved_write_sites.remove(&t);
-            t.construction = match &t.construction {
-                Construction::Pending { cond, own } if self.holds(cond, *own).is_some() => {
-                    Construction::Yes
-                }
-                _ => Construction::No,
-            };
-            s.unresolved_write_sites.insert(t);
-        }
-        for mut t in pending {
-            s.typed_field_write_sites.remove(&t);
-            t.construction = match &t.construction {
-                Construction::Pending { cond, own } if self.holds(cond, *own).is_some() => {
-                    Construction::Yes
-                }
-                Construction::Param { param, own, cond } if self.holds(cond, *own).is_some() => {
-                    Construction::Param {
+    /// A local construction with its conditions resolved (`None`: it has none to resolve).
+    fn resolved(&self, construction: &Construction) -> Option<Construction> {
+        Some(match construction {
+            Construction::Pending { cond, own } if self.holds(cond, *own).is_some() => {
+                Construction::Yes
+            }
+            Construction::Param { param, own, cond } if !cond.is_empty() => {
+                match self.holds(cond, *own) {
+                    Some(_) => Construction::Param {
                         param: *param,
                         own: *own,
                         cond: NewCond::default(),
-                    }
+                    },
+                    None => Construction::No,
                 }
-                _ => Construction::No,
-            };
+            }
+            Construction::Pending { .. } => Construction::No,
+            _ => return None,
+        })
+    }
+
+    /// Resolve the conditions of the function's own writes and of its returned object.
+    fn resolve_own(&self, s: &mut EffectSummary) {
+        let pending: Vec<(TypedFieldWriteSite, Construction)> = (s.typed_field_write_sites.iter())
+            .filter_map(|t| Some((t.clone(), self.resolved(&t.construction)?)))
+            .collect();
+        let unresolved: Vec<(UnresolvedWriteSite, Construction)> = (s.unresolved_write_sites)
+            .iter()
+            .filter_map(|t| Some((t.clone(), self.resolved(&t.construction)?)))
+            .collect();
+        for (mut t, construction) in unresolved {
+            s.unresolved_write_sites.remove(&t);
+            t.construction = construction;
+            s.unresolved_write_sites.insert(t);
+        }
+        for (mut t, construction) in pending {
+            s.typed_field_write_sites.remove(&t);
+            t.construction = construction;
             s.typed_field_write_sites.insert(t);
         }
-        if let ReturnsNew::New { kind, cond } = &s.returns_new
+        if let ReturnsNew::New {
+            kind,
+            cond,
+            elements_of,
+        } = &s.returns_new
             && !cond.is_empty()
         {
             s.returns_new = match self.holds(cond, false) {
                 Some(k) => ReturnsNew::New {
                     kind: (*kind).min(k),
                     cond: NewCond::default(),
+                    elements_of: *elements_of,
                 },
                 None => ReturnsNew::No,
             };
@@ -1390,10 +1392,7 @@ fn apply_edge(
         Facts::Body => s,
         Facts::Result => s.iterated.get_or_insert_with(Box::default),
     };
-    // Only facts that run during the call, in the caller's body, can construct the objects the
-    // call hands over.
-    let here = (d.from == Facts::Body && d.into == Facts::Body && runs_at_call(callee, site))
-        .then_some(resolver);
+    let here = constructs_at_call(&d, callee, site).then_some(resolver);
     let edge = Edge {
         site,
         bc,
@@ -2085,6 +2084,30 @@ pub(crate) fn bound_params(mask: u64, bc: &BoundCallee) -> u64 {
         .enumerate()
         .filter(|(k, _)| mask & (1u64 << k) != 0)
         .fold(0, |acc, (_, o)| acc | o.may_params)
+}
+
+/// Whether the facts `d` a call delivers of `callee` can construct the objects the call hands
+/// over: only facts that run during the call, in the caller's body, can.
+fn constructs_at_call(d: &Delivery<'_>, callee: &EffectSummary, site: &CallSite) -> bool {
+    d.from == Facts::Body && d.into == Facts::Body && runs_at_call(callee, site)
+}
+
+/// [`ProjectIndex::construction_at_call`] from the final summaries.
+pub(crate) fn construction_at_call(
+    index: &ProjectIndex,
+    (site, bc, d): (&CallSite, &BoundCallee, &Delivery<'_>),
+    param: u8,
+    own: bool,
+) -> Construction {
+    let runs_here = (index.summary(&bc.callee)).is_some_and(|c| constructs_at_call(d, c, site));
+    if !runs_here {
+        return Construction::No;
+    }
+    let resolver = Resolver {
+        index,
+        in_scc: &|_| false,
+    };
+    resolver.through_arg(bc.params.get(usize::from(param)), own)
 }
 
 /// Whether a call runs the callee's body: calling a generator function only creates the

@@ -133,6 +133,17 @@ impl ConstArg {
         })
     }
 
+    /// Whether no run can take an element from the value or add one to it: `None`, a bool, a
+    /// number, or an empty string or tuple. An item, `get`, `pop`, `setdefault`, or
+    /// `__getitem__` of one raises, and iterating it gives nothing.
+    pub fn has_no_elements(&self) -> bool {
+        match self.class {
+            ConstClass::None | ConstClass::Bool | ConstClass::Int | ConstClass::Float => true,
+            ConstClass::Str | ConstClass::Bytes | ConstClass::Tuple => self.truthy == Some(false),
+            _ => false,
+        }
+    }
+
     /// The constant view of `fact`, when its class is exact and one of [`ConstClass`].
     pub fn of_fact(fact: &ArgFact) -> Option<Self> {
         if !fact.exact {

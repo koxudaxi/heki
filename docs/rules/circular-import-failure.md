@@ -53,10 +53,14 @@ Its premises, each established or no report:
   cycle whenever it runs, and every way from its imports to the cycle is an import in a module
   body that heki names. Otherwise an import of a module outside the cycle that may load one of
   the cycle stops the run.
-- **No handler**: no handler takes the `ImportError` on the way: no `except` clause naming
-  `ImportError`, `Exception`, `BaseException`, a type heki cannot tell is another builtin
-  exception, or a bare `except`, and no `with` block or `finally` body around an import of the
-  chain or the statement.
+- **No handler**: no handler takes the `ImportError` on the way, a plain one: no `except` clause
+  naming `ImportError`, `Exception`, `BaseException`, a type heki cannot tell is another builtin
+  exception, or a bare `except`, whose body may end without raising, no `with` block, and no
+  `finally` body that may leave without raising it again, around an import of the chain or the
+  statement. `except ModuleNotFoundError:` does not take it (a subclass does not take its base),
+  a clause whose body raises on every path (`raise`) takes nothing, and a clause that certainly
+  matches hides the clauses after it. A handler taking the `ModuleNotFoundError` of a module a
+  project package lacks lets the module body go on past that import.
 - **Not a submodule**: the project has no module `M.name` (Python falls back to a submodule of
   that name once it is loaded), and `name` is not a dunder the import system sets
   (`__name__`, `__path__`).

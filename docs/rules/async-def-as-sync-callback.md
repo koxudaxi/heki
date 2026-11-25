@@ -38,9 +38,9 @@ run a callable on a worker thread (`offloads_blocking_arg`):
 
 The callable is the function itself, a bound method (`self.flush`), or a `functools.partial` of
 either. A report is worded as certain when every function the value calls is an `async def`
-without decorators other than `staticmethod`, `classmethod`, `abstractmethod`, or `override`;
-when a decorator replaces one, or another implementation of the method is a plain function, the
-report says the function may not create a coroutine.
+without decorators other than `staticmethod`, `classmethod`, `abstractmethod`, `override`, or
+`final`; when a decorator replaces one, or another implementation of the method is a plain
+function, the report says the function may not create a coroutine.
 
 It does not report:
 

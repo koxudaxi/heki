@@ -822,7 +822,8 @@ const TABLE_ENTRIES: usize = 256;
 
 /// [`ModuleDecls::tables`]: the module body's stores of a global it binds once (`body`, typed
 /// by `types`), outside a loop, to a dict display with string-literal keys and no `**`
-/// entry, one of whose values is a function, a class, or a `functools.partial` object, when
+/// entry, one of whose values is a function, a class, a `functools.partial` object, or an
+/// instance whose fields hold such objects (`crate::types::Args::Fields`), when
 /// no function of the module changes the global's object in place (`changed`,
 /// [`Classifier::changed_globals`]) and nothing may rebind the name (`unfixed`).
 fn tables(
@@ -870,11 +871,13 @@ fn tables(
                 table.retain(|(k, _)| **k != *key);
                 table.push((Box::from(key), types.ty(*value).cloned()));
             }
-            let callable = |t: &Option<Ty>| {
-                matches!(
-                    t,
-                    Some(Ty::Ref(_) | Ty::OneOf(_) | Ty::Class(_) | Ty::Partial(_))
-                )
+            let callable = |t: &Option<Ty>| match t {
+                Some(Ty::Ref(_) | Ty::OneOf(_) | Ty::Class(_) | Ty::Partial(_)) => true,
+                // An instance whose fields hold named objects (`{"a": Spec(run=f)}`).
+                Some(t) => t
+                    .obj()
+                    .is_some_and(|o| matches!(o.args, crate::types::Args::Fields(_))),
+                None => false,
             };
             if keyed && table.iter().any(|(_, t)| callable(t)) {
                 out.insert(name.clone(), table.into_boxed_slice());

@@ -90,8 +90,9 @@ attribute, an item, or a global, returned, yielded, raised, or held by a display
 (`[decide]`, `{"a": decide}`), also through an import alias (`from pkg.core import decide as
 chosen`), a module alias (`run = core.decide`), or a module attribute (`core.decide`). A use that
 only names a class is no reference: an argument of `isinstance`, `issubclass`, another builtin that
-only inspects its arguments (`print`, `getattr`, `type`), `super`, `typing.cast`, `typing.TypeVar`,
-`typing.NewType`, or `contextlib.suppress`; an `except` clause, a class's bases and keywords, a
+only inspects its arguments (`print`, `getattr`, `type`), `super`, `typing.TypeVar`,
+`typing.NewType`, or `contextlib.suppress`, and the type a `typing.cast` names (the value it hands
+back is the value itself: `register(cast(Callable[[int], int], decide))` hands `decide` on); an `except` clause, a class's bases and keywords, a
 function's defaults and annotations; a subscript (`Optional[Rule]`), a comparison (`f is decide`), a
 receiver (`Rule.of(...)`), and a module binding another name to it. A callable a builtin calls once
 per item (`sorted(xs, key=decide)`, `map(decide, xs)`) is a call already, and so is the

@@ -104,6 +104,8 @@ pub(crate) struct ConfigContracts {
     own_receiver_calls: bool,
     /// [`Contracts::write_protocols`].
     write_protocols: bool,
+    /// [`Contracts::judges_handed_objects`].
+    judges_handed_objects: bool,
 }
 
 /// What the contracts name outside the project ([`Contracts::external_call`],
@@ -287,6 +289,11 @@ impl ConfigContracts {
                 .write_owners
                 .iter()
                 .any(|r| !r.allowed_protocols.is_empty()),
+            judges_handed_objects: config.effect_boundaries.iter().any(|b| {
+                let judges_writes =
+                    !b.write_universe.is_empty() || b.forbid.iter().any(|f| f == "writes-targets");
+                judges_writes && b.fresh_objects.as_deref() != Some("report")
+            }),
         })
     }
 }
@@ -446,6 +453,10 @@ impl Contracts for ConfigContracts {
 
     fn write_protocols(&self) -> bool {
         self.write_protocols
+    }
+
+    fn judges_handed_objects(&self) -> bool {
+        self.judges_handed_objects
     }
 }
 

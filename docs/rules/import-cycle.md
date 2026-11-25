@@ -116,6 +116,9 @@ No automatic fix.
 - `[tool.heki.imports]`: `cycle-edges`, the timing classes of the imports that count
   ([configuration](../configuration.md#imports-toolhekiimports)).
 - Its reports are heuristic warnings: `lint.fail-on = "warning"` makes a cycle fail the run.
+- A [Ratchet baseline](../adoption.md#import-cycle-groups) records each group by its modules,
+  not by the import its report sits at: an entry covers a group when it holds all of the
+  group's modules.
 
 ## Known limitations
 - Imports heki does not see (`exec`, `runpy`, a module loaded from a file path, a write to
