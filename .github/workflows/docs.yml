@@ -61,6 +61,26 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.14"
+      # A release deploys docs that show its own tag in the pre-commit `rev:` lines, written the
+      # way the build jobs of release.yml write the version: the tagged tree still shows the
+      # previous release until the Release Sync pull request merges.
+      - name: Write the release into the manifests and the pre-commit examples
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          PUBLISHED_AT: ${{ github.event.release.published_at }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          version="${TAG#v}"
+          if [ -z "$version" ]; then
+            echo "::error::The release tag \`$TAG\` names no version."
+            exit 1
+          fi
+          date=""
+          if [ "$PRERELEASE" != true ]; then
+            date="${PUBLISHED_AT:0:10}"
+          fi
+          python scripts/set_release_versions.py "$version" ${date:+--changelog "$date"}
       - run: cargo build --release -p heki
       - name: Generated pages are up to date (rules, CLI reference, experimental features)
         run: python scripts/build_docs.py --heki target/release/heki --check

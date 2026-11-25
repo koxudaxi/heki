@@ -12,32 +12,12 @@ from pathlib import Path
 
 import pytest
 import set_release_versions as release
+from conftest import CHECKOUT_VERSION
 from helpers import ROOT
 
 DATA = Path(__file__).parent / "data" / "set_release_versions"
 MANIFESTS = ("Cargo.toml", "pyproject.toml", "Cargo.lock", "uv.lock")
 REPOSITORY = "https://github.com/koxudaxi/heki"
-CHECKOUT_VERSION = "0.1.1"
-"""The version of the copies, older than the releases the tests sync, whatever `main` declares."""
-
-
-@pytest.fixture
-def checkout(tmp_path: Path) -> Path:
-    """Copies of the repository's manifests and lock file at `CHECKOUT_VERSION`, and a CHANGELOG."""
-    for name in MANIFESTS:
-        shutil.copy(ROOT / name, tmp_path / name)
-    for name in release.PRECOMMIT_DOCS:
-        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(ROOT / name, tmp_path / name)
-    for member in tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"][
-        "members"
-    ]:
-        (tmp_path / member).mkdir(parents=True)
-        shutil.copy(ROOT / member / "Cargo.toml", tmp_path / member / "Cargo.toml")
-    for path, text in release.release_files(tmp_path, CHECKOUT_VERSION, None).items():
-        path.write_text(text, encoding="utf-8")
-    shutil.copy(DATA / "CHANGELOG.md", tmp_path / "CHANGELOG.md")
-    return tmp_path
 
 
 def texts(root: Path) -> dict[str, str]:
