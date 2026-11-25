@@ -2385,7 +2385,9 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      `OptInFacts::guarded`): `LockPoints` holds, per instruction, the thread locks certainly held
      (a forward must-dataflow over the acquisitions, `held::at_entry`, with a call of a function
      returning holding a lock as one more acquisition) and the locks a `release()` gives back on
-     every path from there (a backward must-dataflow, a worklist over at most 63 locks).
+     every path from there (a backward must-dataflow over the blocks, a `heki_ir::walk::fixpoint`
+     with a bit per lock released, at most 63). A variable a closure reads is a lock when its
+     type facts say so: the enclosing function binds it to one and no nested scope rebinds it.
      `EffectSummary::guarded` keeps the named locks a function returns holding and its own writes
      of shared state made holding one; `CallSite::under_thread_lock` says whether the caller holds
      one at the call. A write of shared state is an attribute of the method's instance (also
@@ -2397,10 +2399,10 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      (the `[[calls_unawaited]]` handoffs with `runs_on = "thread"` and the `run` of
      `threading.Thread` subclasses, then every project callee), the functions every call of which
      is made holding a lock and those only construction or after-fork handlers run, each up to
-     two calls above (memoized per function and depth). Each function of the checked file naming
-     a guarded attribute or global is typed, its writes found, and a write where `LockPoints`
-     (with its callees' `returns_holding` through the binding of `self`) finds nothing held is
-     reported once per state. The language server keeps the view and re-checks every file when
+     two calls above (found one depth at a time from the deepest, a step per call site and
+     depth). Each function of the checked file naming a guarded attribute or global is typed,
+     its writes found, and a write where `LockPoints` (with its callees' `returns_holding`
+     through the binding of `self`) finds nothing held is reported once per state. The language server keeps the view and re-checks every file when
      the guarded states change, and the files of the functions whose membership changed
      otherwise; the locked writes are places other files' reports show.
 

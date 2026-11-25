@@ -20,7 +20,7 @@ use heki_effect::guarded::{self, LockKey, LockPoints, StateKey, StateWrite, Writ
 use heki_effect::{
     FuncKey, ProjectDecls, ProjectIndex, TypeCtx, anchors_call_site, code_kind, ownership,
 };
-use heki_ir::walk::{Budget, FnShape};
+use heki_ir::walk::{Budget, FnShape, Visit, reach};
 use heki_ir::{Inst, InstKind, IrFunction, VarId};
 use heki_kb::RunsOn;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -100,26 +100,33 @@ impl GuardedView {
         // Index walks expand each function once per run: counted, never limited.
         let steps = Budget::unmetered("heki_rules::eff_rules::unlocked_writes::GuardedView");
         let mut threaded: BTreeSet<FuncKey> = BTreeSet::new();
-        let mut queue: Vec<&FuncKey> = entries.iter().copied().collect();
-        while let Some(f) = queue.pop() {
-            steps.take(1);
-            if threaded.insert(f.clone()) {
-                queue.extend(calls.get(f).into_iter().flatten().copied());
-            }
-        }
+        // Unmetered: the walk ends, visiting every function a thread entry reaches.
+        let _ = reach(
+            &steps,
+            entries.iter().copied(),
+            |f, out| out.extend(calls.get(f).into_iter().flatten().copied()),
+            |f| {
+                threaded.insert(f.clone());
+                Visit::<()>::Expand
+            },
+        );
         let is_setup = |f: &FuncKey| {
             forks.contains(f)
                 || CONSTRUCTORS.contains(&f.qualname.rsplit('.').next().unwrap_or_default())
         };
-        let (mut setup, mut held) = (Memo::default(), Memo::default());
+        let (setup, held) = (Walk::Setup(&is_setup), Walk::Held(&entries));
+        let (setup_callers, held_callers) = (
+            setup.by_callers(&callers, &steps),
+            held.by_callers(&callers, &steps),
+        );
         let (mut setup_only, mut entry_held) = (BTreeSet::new(), BTreeSet::new());
         for file in index.files.values() {
             for f in file.functions.keys() {
                 steps.take(1);
-                if setup.all_callers(f, 0, &callers, &Walk::Setup(&is_setup)) {
+                if setup.answers(f, &setup_callers) {
                     setup_only.insert(f.clone());
                 }
-                if held.all_callers(f, 0, &callers, &Walk::Held(&entries)) {
+                if held.answers(f, &held_callers) {
                     entry_held.insert(f.clone());
                 }
             }
@@ -213,7 +220,7 @@ impl GuardedView {
     }
 }
 
-/// What a walk up the callers of a function asks ([`Memo::all_callers`]).
+/// What a walk up the callers of a function asks ([`Walk::by_callers`]).
 enum Walk<'w, 'k> {
     /// Whether it runs only while objects are built: a function `setup` accepts, or one whose
     /// every caller does so.
@@ -223,41 +230,43 @@ enum Walk<'w, 'k> {
     Held(&'w FxHashSet<&'k FuncKey>),
 }
 
-/// The answers of one [`Walk`], by function and depth.
-#[derive(Default)]
-struct Memo<'k>(FxHashMap<(&'k FuncKey, usize), bool>);
+impl<'k> Walk<'_, 'k> {
+    /// The answer of `f` whatever its callers are.
+    fn own(&self, f: &FuncKey) -> Option<bool> {
+        match self {
+            Self::Setup(setup) => setup(f).then_some(true),
+            Self::Held(entries) => entries.contains(f).then_some(false),
+        }
+    }
 
-impl<'k> Memo<'k> {
-    /// Whether `f`, `depth` calls above the function asked about, answers `walk`, looking at
-    /// most [`CALLER_DEPTH`] calls above that function.
-    fn all_callers(
-        &mut self,
-        f: &'k FuncKey,
-        depth: usize,
+    /// Whether `f` answers the walk: by its own answer, or by its callers' (`by_callers`).
+    fn answers(&self, f: &FuncKey, by_callers: &FxHashSet<&FuncKey>) -> bool {
+        self.own(f).unwrap_or_else(|| by_callers.contains(f))
+    }
+
+    /// The functions without an answer of their own that answer the walk by their callers,
+    /// looking at most [`CALLER_DEPTH`] calls above: each has callers, and each call answers
+    /// (made holding a lock, for [`Walk::Held`]) or is made in a function answering one call
+    /// further up. The depth grows by one with each call up, so the answers are found one depth
+    /// at a time from the deepest, a step per call site and depth.
+    fn by_callers(
+        &self,
         callers: &FxHashMap<&'k FuncKey, Vec<(&'k FuncKey, bool)>>,
-        walk: &Walk<'_, 'k>,
-    ) -> bool {
-        match walk {
-            Walk::Setup(setup) if setup(f) => return true,
-            Walk::Held(entries) if entries.contains(f) => return false,
-            _ => {}
+        steps: &Budget,
+    ) -> FxHashSet<&'k FuncKey> {
+        // At the depth past the last one looked at, a function answers only by its own.
+        let mut above: FxHashSet<&'k FuncKey> = FxHashSet::default();
+        for _ in 0..CALLER_DEPTH {
+            let call_answers = |&(caller, held): &(&FuncKey, bool)| {
+                steps.take(1);
+                (held && matches!(self, Self::Held(_))) || self.answers(caller, &above)
+            };
+            above = (callers.iter())
+                .filter(|(f, sites)| self.own(f).is_none() && sites.iter().all(call_answers))
+                .map(|(f, _)| *f)
+                .collect();
         }
-        if depth >= CALLER_DEPTH {
-            return false;
-        }
-        if let Some(&done) = self.0.get(&(f, depth)) {
-            return done;
-        }
-        // A call cycle back to `f` answers no until `f` is answered.
-        self.0.insert((f, depth), false);
-        let sites = callers.get(f).map_or(&[][..], Vec::as_slice);
-        let answer = !sites.is_empty()
-            && sites.iter().all(|&(caller, held)| {
-                (held && matches!(walk, Walk::Held(_)))
-                    || self.all_callers(caller, depth + 1, callers, walk)
-            });
-        self.0.insert((f, depth), answer);
-        answer
+        above
     }
 }
 

@@ -7797,8 +7797,6 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// Whether the function certainly holds a lock before the instruction at `at`: a `with` or
-    /// an `acquire()` of a catalog lock (`locks::lock_steps`), computed once per function.
     /// The thread locks the function holds, by its own acquisitions and releases: the facts of
     /// its callees are not known yet ([`guarded::LockPoints::of`]).
     fn thread_lock_points(&self) -> &guarded::LockPoints {
@@ -7847,6 +7845,8 @@ impl<'a> Extractor<'a> {
         }
     }
 
+    /// Whether the function certainly holds a lock before the instruction at `at`: a `with` or
+    /// an `acquire()` of a catalog lock (`locks::lock_steps`), computed once per function.
     fn lock_held_at(&self, at: Position) -> bool {
         self.lock_held
             .get_or_init(|| {

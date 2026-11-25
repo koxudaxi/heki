@@ -147,7 +147,7 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
         rest,
         "heki recommend (experimental) on .: 8 file(s), 20 function(s)\n\
          \n\
-         Reports now  2 shown (2 exact, 0 heuristic), 2 heuristic withheld, 3 heuristic rule(s) \
+         Reports now  2 shown (2 exact, 0 heuristic), 2 heuristic withheld, 4 heuristic rule(s) \
          off\n\
          \n\
          Rules worth enabling here\n\
@@ -160,7 +160,7 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
          \x20 OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         \
          no: slower code, not a bug\n\
          \x20 No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF112, EFF114, EFF115, EFF116, \
-         IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT106, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, \
+         EFF117, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT106, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, \
          OPT103, OPT111, OPT112, OPT120, OPT121, OPT130\n\
          \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then \
          select it.\n\
@@ -193,7 +193,7 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
     );
     let (_, _, note) = p.heki(&["check"]);
     assert!(
-        note.contains("3 heuristic rule(s) are off and 2 heuristic report(s) are not shown"),
+        note.contains("4 heuristic rule(s) are off and 2 heuristic report(s) are not shown"),
         "{note}"
     );
     // The same counts as `heki check` for every selection, also with `lint.heuristic`.
@@ -716,7 +716,7 @@ fn rules_worth_enabling_follow_the_policy() {
         \x20 OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug\n\
         \x20 Optional (experimental, never in the block)\n\
         \x20 EFF109        1      -  bug          not measured                      -          no: experimental\n\
-        \x20 No reports here: EFF102, EFF105, EFF106, EFF110, EFF112, EFF114, EFF115, EFF116, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT108, MUT111, MUT112, MUT113, \
+        \x20 No reports here: EFF102, EFF105, EFF106, EFF110, EFF112, EFF114, EFF115, EFF116, EFF117, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT108, MUT111, MUT112, MUT113, \
         MUT115, MUT118, MUT120, OPT103, OPT111, OPT112, OPT120, OPT121, OPT130\n\
         \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it."
     );

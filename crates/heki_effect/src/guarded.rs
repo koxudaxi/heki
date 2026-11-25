@@ -19,7 +19,7 @@ use crate::held::{self, Acquisitions, Change};
 use crate::readonly::ContainerKind;
 use crate::resolver::{TypeCtx, Val};
 use heki_ast::Span;
-use heki_ir::walk::{Budget, FnShape};
+use heki_ir::walk::{And, Budget, Facts, FnShape, Sparse, Visit, fixpoint, reach};
 use heki_ir::{BlockId, Inst, InstKind, IrFunction, Terminator, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -308,22 +308,13 @@ pub fn state_writes<'i>(
 }
 
 /// Whether `var` is a thread lock: typed as an instance of a catalog class flagged
-/// `sync_lock_or_tx`, or, for a variable a closure reads, bound to one by the enclosing function.
-fn is_thread_lock<'i>(
-    tcx: &TypeCtx<'_>,
-    f: &IrFunction,
-    types: &FxHashMap<VarId, Val>,
-    def: &dyn Fn(VarId) -> Option<&'i Inst>,
-    var: VarId,
-) -> bool {
-    let class = match types.get(&var) {
-        Some(Val::Inst(c)) => Some(c.clone()),
-        _ => match def(through_copies(def, var)).map(|i| &i.kind) {
-            Some(InstKind::LoadDeref { name, .. }) => tcx.captured(f, name).and_then(|c| c.1),
-            _ => None,
-        },
-    };
-    class.is_some_and(|c| tcx.catalog(&c).is_some_and(|e| e.sync_lock_or_tx))
+/// `sync_lock_or_tx`. A variable a closure reads is typed so when the enclosing function binds it
+/// to one and no nested scope rebinds it.
+fn is_thread_lock(tcx: &TypeCtx<'_>, types: &FxHashMap<VarId, Val>, var: VarId) -> bool {
+    match types.get(&var) {
+        Some(Val::Inst(class)) => tcx.catalog(class).is_some_and(|e| e.sync_lock_or_tx),
+        _ => false,
+    }
 }
 
 /// How `f` names the lock `var`.
@@ -361,14 +352,14 @@ fn step<'i>(
             mgr,
             is_async: false,
             ..
-        } if is_thread_lock(tcx, f, types, def, *mgr) => Some(Step::Take(*mgr, true)),
+        } if is_thread_lock(tcx, types, *mgr) => Some(Step::Take(*mgr, true)),
         InstKind::ExitWith { mgr, .. } => Some(Step::Exit(*mgr)),
         InstKind::MethodCall {
             recv,
             method,
             is_awaited: false,
             ..
-        } if is_thread_lock(tcx, f, types, def, *recv) => match method.as_str() {
+        } if is_thread_lock(tcx, types, *recv) => match method.as_str() {
             "acquire" => Some(Step::Take(*recv, false)),
             "release" => Some(Step::Release(lock_key(tcx, f, types, def, *recv))),
             _ => None,
@@ -441,7 +432,7 @@ impl LockPoints {
             FxHashMap::default()
         } else {
             let steps = Budget::unmetered("heki_effect::guarded::released_later");
-            released_later(f, &taken, &changes, &releases, &steps)
+            released_later(shape, &taken, &changes, &releases, &steps)
         };
         let mut returns_holding: Option<BTreeSet<LockKey>> = None;
         if !taken.is_empty() {
@@ -501,18 +492,18 @@ impl LockPoints {
     }
 }
 
-/// The locks given back by `release()` on every path from each instruction of `f` before they
-/// are taken again (a backward must-dataflow, exception edges included, over at most 63 locks).
-/// A block from which no path leaves the function gives back nothing. A worklist: a block is
-/// visited again only when a successor lost a bit, so the visits are bounded by the blocks times
-/// the bits (counted by `budget`).
+/// The locks given back by `release()` on every path from each instruction of the function
+/// before they are taken again: a backward must-dataflow over the blocks, exception edges
+/// included, with a bit per lock released (at most 63). A block from which no path leaves the
+/// function gives back nothing.
 fn released_later(
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     taken: &Acquisitions<LockKey>,
     changes: &FxHashMap<(BlockId, usize), Change>,
     releases: &[((BlockId, usize), LockKey)],
     budget: &Budget,
 ) -> FxHashMap<(BlockId, usize), Vec<LockKey>> {
+    let f = shape.f;
     let mut keys: Vec<&LockKey> = releases.iter().map(|(_, k)| k).collect();
     keys.sort();
     keys.dedup();
@@ -527,38 +518,40 @@ fn released_later(
         Some(Change::Take(k)) => bit(taken.item(*k)).unwrap_or(0),
         _ => 0,
     };
-    let n = f.blocks.len();
-    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for bb in &f.blocks {
-        for s in bb.terminator.successors().into_iter().chain(bb.exc_target) {
-            preds[s.0 as usize].push(bb.id.0 as usize);
-        }
-    }
-    // The blocks from which a path leaves the function.
-    let mut leaves = vec![false; n];
-    let mut queue: Vec<usize> = (f.blocks.iter())
+    // The nodes: the blocks from which a path leaves the function, each listed after a block it
+    // has an edge to, so that a first visit mostly finds its successors' facts.
+    let exits = (f.blocks.iter())
         .filter(|b| matches!(b.terminator, Terminator::Return(_) | Terminator::Raise(_)))
-        .map(|b| b.id.0 as usize)
-        .collect();
-    while let Some(b) = queue.pop() {
-        if !std::mem::replace(&mut leaves[b], true) {
-            queue.extend(&preds[b]);
-        }
+        .map(|b| b.id);
+    let mut leaving: Vec<BlockId> = Vec::new();
+    // Unmetered: the walk ends, visiting every such block.
+    let _ = reach(
+        budget,
+        exits,
+        |b, out| out.extend(shape.preds(b)),
+        |b| {
+            leaving.push(b);
+            Visit::<()>::Expand
+        },
+    );
+    let mut node = vec![usize::MAX; f.blocks.len()];
+    for (i, b) in leaving.iter().enumerate() {
+        node[b.0 as usize] = i;
     }
-    // What block `b` gives back after its last instruction, from its successors' entries, and
-    // what its exception edge does after each instruction.
-    let exit_of = |b: usize, ins: &[u64]| -> (u64, u64) {
-        let bb = &f.blocks[b];
-        let exc = bb.exc_target.map_or(full, |e| ins[e.0 as usize]);
-        let succs = bb.terminator.successors();
-        let after = succs.iter().fold(full, |acc, s| acc & ins[s.0 as usize]);
-        (if succs.is_empty() { 0 } else { after & exc }, exc)
+    // What a block gives back from its entry on: every lock while its fact is not known yet,
+    // nothing for a block from which no path leaves.
+    let entry = |facts: &Facts<And>, b: BlockId| match node[b.0 as usize] {
+        usize::MAX => 0,
+        i => facts.get(i).map_or(full, |a| a.0),
     };
-    // The state before each instruction of block `b`.
-    let before = |b: usize, ins: &[u64]| -> Vec<u64> {
-        let bb = &f.blocks[b];
-        let (mut state, exc) = exit_of(b, ins);
-        let mut out = vec![0; bb.insts.len()];
+    // The state before each instruction of block `b`, then after its last one.
+    let before = |b: BlockId, facts: &Facts<And>| -> Vec<u64> {
+        let bb = f.block(b);
+        let exc = bb.exc_target.map_or(full, |e| entry(facts, e));
+        let succs = bb.terminator.successors();
+        let after = succs.iter().fold(full, |acc, s| acc & entry(facts, *s));
+        let mut state = if succs.is_empty() { 0 } else { after & exc };
+        let mut out = vec![state; bb.insts.len() + 1];
         for i in (0..bb.insts.len()).rev() {
             let at = (bb.id, i);
             state = ((state & !retaken(at)) | released.get(&at).copied().unwrap_or(0)) & exc;
@@ -566,40 +559,44 @@ fn released_later(
         }
         out
     };
-    let entry_of = |b: usize, ins: &[u64]| {
-        let states = before(b, ins);
-        states.first().copied().unwrap_or_else(|| exit_of(b, ins).0)
+    let readers = |i: usize, out: &mut Vec<usize>| {
+        out.extend(
+            (shape.preds(leaving[i]).iter())
+                .map(|p| node[p.0 as usize])
+                .filter(|j| *j != usize::MAX),
+        );
     };
-    let mut ins: Vec<u64> = (0..n).map(|b| if leaves[b] { full } else { 0 }).collect();
-    let mut work: Vec<usize> = (0..n).filter(|b| leaves[*b]).collect();
-    let mut queued = leaves.clone();
-    while let Some(b) = work.pop() {
-        queued[b] = false;
-        budget.take(1 + f.blocks[b].insts.len());
-        let now = entry_of(b, &ins);
-        if now != ins[b] {
-            ins[b] = now;
-            for &p in &preds[b] {
-                if leaves[p] && !std::mem::replace(&mut queued[p], true) {
-                    work.push(p);
+    let transfer = |i: usize, facts: &Facts<And>| {
+        let b = leaving[i];
+        budget.take(f.block(b).insts.len());
+        Some(And(before(b, facts)[0]))
+    };
+    // A block is visited once, then once per fact one of the three blocks it reads (two
+    // successors and the exception target) gets or bit it loses.
+    let spec = Sparse {
+        nodes: leaving.len(),
+        readers: &readers,
+        max_visits: 1 + 3 * (1 + 63),
+    };
+    // Unmetered and within the visit limit, the dataflow is never open.
+    fixpoint(budget, spec, transfer)
+        .map(|facts| {
+            let mut out = FxHashMap::default();
+            for &b in &leaving {
+                let states = before(b, &facts);
+                for (i, state) in states[..states.len() - 1].iter().enumerate() {
+                    let held: Vec<LockKey> = (0..keys.len())
+                        .filter(|k| state & (1u64 << k) != 0)
+                        .map(|k| keys[k].clone())
+                        .collect();
+                    if !held.is_empty() {
+                        out.insert((b, i), held);
+                    }
                 }
             }
-        }
-    }
-    let mut out = FxHashMap::default();
-    for b in (0..n).filter(|b| leaves[*b]) {
-        let id = f.blocks[b].id;
-        for (i, state) in before(b, &ins).into_iter().enumerate() {
-            let held: Vec<LockKey> = (0..keys.len())
-                .filter(|k| state & (1u64 << k) != 0)
-                .map(|k| keys[k].clone())
-                .collect();
-            if !held.is_empty() {
-                out.insert((id, i), held);
-            }
-        }
-    }
-    out
+            out
+        })
+        .open_means(FxHashMap::default())
 }
 
 /// `var` before the copies that produced it.
