@@ -5,11 +5,10 @@
 
 use heki_ir::walk::{Budget, FnShape, Visit, reach};
 use heki_ir::{BlockId, InstKind, Terminator};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::BTreeSet;
-use std::rc::Rc;
 
 /// A failure of an import, ordered by what a handler taking it takes: one that takes any import
 /// error takes a missing module too.
@@ -41,8 +40,8 @@ impl ImportFailure {
 }
 
 /// What reaches a handler: the import's failure, also raised again by a clause (`raise`), or
-/// an exception a clause raised in its place (`raise Error(...) from e`), whose class heki does
-/// not tell.
+/// an exception whose class heki does not tell: one a clause raised in its place (`raise
+/// Error(...) from e`), or one a handler nested in the clause raised again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Raised {
     Failure(ImportFailure),
@@ -66,16 +65,6 @@ enum Reached {
     PassedOn(Vec<(BlockId, Raised)>),
 }
 
-/// How a handler's body ends ([`ImportHandlers::body_end`]).
-#[derive(Debug, Default)]
-struct BodyEnd {
-    /// A path through it reaches the code after it, leaves a loop, or returns.
-    completes: bool,
-    /// Where the exceptions it raises on its other paths go, each with whether it is the one it
-    /// took (`raise`).
-    raises: Vec<(BlockId, bool)>,
-}
-
 /// What the handlers of one function take of the failures of its imports, each handler walked
 /// once.
 pub(crate) struct ImportHandlers<'s, 'f> {
@@ -83,7 +72,8 @@ pub(crate) struct ImportHandlers<'s, 'f> {
     /// The builtins the module may rebind.
     shadowed: &'s BTreeSet<String>,
     by_handler: RefCell<FxHashMap<BlockId, Option<ImportFailure>>>,
-    bodies: RefCell<FxHashMap<BlockId, Rc<BodyEnd>>>,
+    /// Built for the functions whose imports a handler may take only.
+    body_ends: OnceCell<BodyEnds>,
 }
 
 impl<'s, 'f> ImportHandlers<'s, 'f> {
@@ -92,7 +82,7 @@ impl<'s, 'f> ImportHandlers<'s, 'f> {
             shape,
             shadowed,
             by_handler: RefCell::default(),
-            bodies: RefCell::default(),
+            body_ends: OnceCell::new(),
         }
     }
 
@@ -135,8 +125,8 @@ impl<'s, 'f> ImportHandlers<'s, 'f> {
 
     /// What `raised` does at block `b`, a handler block or a clause test: the exit of a `with`
     /// block takes it (its context manager may suppress it); an `except` clause whose classes
-    /// may match it takes it when its body may end without raising ([`Self::body_end`]), and
-    /// one that certainly matches hides the later clauses; a `finally` body takes it when it may
+    /// may match it takes it when its body may end without raising ([`BodyEnds`]), and one
+    /// that certainly matches hides the later clauses; a `finally` body takes it when it may
     /// leave without raising it again. What a clause or a `finally` body raises goes to the
     /// handler around it.
     fn reached(&self, b: BlockId, raised: Raised) -> Reached {
@@ -145,86 +135,138 @@ impl<'s, 'f> ImportHandlers<'s, 'f> {
         if let Some(InstKind::ExitWith { .. }) = block.insts.first().map(|i| &i.kind) {
             return Reached::Taken;
         }
-        let clause = match block.terminator {
-            Terminator::Branch {
-                then_bb, else_bb, ..
-            } => match f.block(then_bb).insts.first().map(|i| &i.kind) {
-                Some(InstKind::CatchException { exc_types, .. }) => {
-                    Some((then_bb, else_bb, matches(exc_types, raised, self.shadowed)))
-                }
-                _ => None,
-            },
-            _ => None,
-        };
         let mut to = Vec::new();
-        let (body, matched) = match clause {
-            Some((then_bb, else_bb, matched)) => {
-                if matched != Match::Always {
-                    to.push((else_bb, raised));
-                }
-                (then_bb, matched)
+        let (body, matched) = if let Terminator::Branch {
+            then_bb, else_bb, ..
+        } = block.terminator
+            && let Some(InstKind::CatchException { exc_types, .. }) =
+                f.block(then_bb).insts.first().map(|i| &i.kind)
+        {
+            let matched = matches(exc_types, raised, self.shadowed);
+            if matched != Match::Always {
+                to.push((else_bb, raised));
             }
-            // A `finally` body, the end of the clauses (which raises the exception again),
-            // or the rest of an `except*` group.
-            None => (b, Match::Always),
+            (then_bb, matched)
+        } else {
+            // A `finally` body, the end of the clauses (which raises the exception again), or
+            // the rest of an `except*` group.
+            (b, Match::Always)
         };
         if matched != Match::Never {
-            let end = self.body_end(body);
-            if end.completes {
+            let ends = (self.body_ends).get_or_init(|| BodyEnds::of(self.shape));
+            if ends.completes[body.0 as usize] {
                 return Reached::Taken;
             }
             to.extend(
-                (end.raises.iter())
-                    .map(|&(at, same)| (at, if same { raised } else { Raised::Other })),
+                (ends.raises[body.0 as usize].iter())
+                    .map(|r| (r.to, if r.same { raised } else { Raised::Other })),
             );
         }
         Reached::PassedOn(to)
     }
+}
 
-    /// How the handler body starting in block `start` ends: its blocks are the ones `start`
-    /// dominates, and a path leaving them by a normal edge (to the code after the `try`, or out
-    /// of a loop) or returning completes it. A `raise` whose exception target is outside them
-    /// sends its exception to that handler; one inside them goes on in a `try` of the body.
-    /// Unmetered: one step per block of the body, each body walked once.
-    fn body_end(&self, start: BlockId) -> Rc<BodyEnd> {
-        if let Some(end) = self.bodies.borrow().get(&start) {
-            return Rc::clone(end);
-        }
-        let (f, dominators) = (self.shape.f, self.shape.dominators());
-        let inside = |b: BlockId| dominators.dominates(start, b);
-        let mut end = BodyEnd::default();
-        let next = |b: BlockId, out: &mut Vec<BlockId>| {
-            let block = f.block(b);
-            out.extend(block.terminator.successors());
-            out.extend(block.exc_target.filter(|&h| inside(h)));
+/// A `raise` that leaves the bodies of the blocks dominating it ([`BodyEnds`]) from one of them
+/// on.
+#[derive(Debug, Clone, Copy)]
+struct RaiseOut {
+    /// The handler it raises into.
+    to: BlockId,
+    /// Whether it raises again the exception the body took: a bare `raise` under no block of
+    /// the body but its first that an exception enters. Under such a block it raises what
+    /// entered that block (a nested handler's exception), which heki does not tell.
+    same: bool,
+    /// The first block, in the preorder of the dominator tree, whose body it leaves: the one
+    /// after the nearest block dominating both it and its handler.
+    leaves_from: u32,
+}
+
+/// How the body of each block of a function ends, the body being the blocks the block
+/// dominates: it completes when a path through it reaches a block outside it by a normal edge
+/// (the code after the `try`, or out of a loop) or returns, and otherwise it ends in the
+/// `raise`s whose handlers are outside it; a `raise` into a handler inside it goes on in a `try`
+/// of the body. An edge from block `b` to block `s` leaves the bodies of the blocks dominating
+/// `b` but not `s`, those after the nearest block dominating both in the preorder of the
+/// dominator tree. So one sweep up the tree from its leaves finds every body's end from its own
+/// block's edges and its children's bodies, and no body is walked: the bodies of a run of
+/// clauses each leading on to the rest of the function hold each other.
+struct BodyEnds {
+    /// Per block, whether its body completes; a block the entry does not reach dominates
+    /// nothing, and its body completes.
+    completes: Vec<bool>,
+    /// Per block, the `raise`s leaving its body: one per handler and [`RaiseOut::same`].
+    raises: Vec<Vec<RaiseOut>>,
+}
+
+impl BodyEnds {
+    fn of(shape: &FnShape<'_>) -> Self {
+        let (f, dominators) = (shape.f, shape.dominators());
+        let number = |b: BlockId| {
+            dominators
+                .number(b)
+                .expect("the entry reaches the blocks of the reverse postorder")
         };
-        let completes = reach(
-            &Budget::unmetered("import_handler_bodies"),
-            [start],
-            next,
-            |b| {
-                if !inside(b) {
-                    return Visit::Stop(());
-                }
-                let block = f.block(b);
-                match block.terminator {
-                    Terminator::Return(_) => return Visit::Stop(()),
-                    Terminator::Raise(raised) => {
-                        if let Some(to) = block.exc_target.filter(|&h| !inside(h)) {
-                            end.raises.push((to, raised.is_none()));
-                        }
+        // The nearest block dominating both ends of an edge is its target or the target's
+        // immediate dominator, found in one step up from the target.
+        let leaves_from = |b: BlockId, to: BlockId| number(dominators.common(to, b)) + 1;
+        let entered: FxHashSet<BlockId> = f.blocks.iter().filter_map(|b| b.exc_target).collect();
+        let blocks = f.blocks.len();
+        // Per block, the first block whose body an edge of the block's body leaves; a `return`
+        // leaves every body.
+        let mut leaving = vec![u32::MAX; blocks];
+        let mut out = Self {
+            completes: vec![true; blocks],
+            raises: vec![Vec::new(); blocks],
+        };
+        // The reverse postorder lists a block after the blocks dominating it, so backwards each
+        // block comes after the blocks of its body.
+        for &b in shape.rpo().iter().rev() {
+            let (i, block) = (b.0 as usize, f.block(b));
+            for s in block.terminator.successors() {
+                leaving[i] = leaving[i].min(leaves_from(b, s));
+            }
+            match block.terminator {
+                Terminator::Return(_) => leaving[i] = 0,
+                Terminator::Raise(raised) => {
+                    if let Some(to) = block.exc_target {
+                        let raise = RaiseOut {
+                            to,
+                            same: raised.is_none(),
+                            leaves_from: leaves_from(b, to),
+                        };
+                        keep(&mut out.raises[i], raise);
                     }
-                    _ => {}
                 }
-                Visit::Expand
-            },
-        )
-        .open_means(None)
-        .is_some();
-        end.completes = completes;
-        let end = Rc::new(end);
-        self.bodies.borrow_mut().insert(start, Rc::clone(&end));
-        end
+                _ => {}
+            }
+            let at = number(b);
+            out.completes[i] = leaving[i] <= at;
+            out.raises[i].retain(|r| r.leaves_from <= at);
+            let Some(parent) = dominators.strict_dominator(b) else {
+                continue;
+            };
+            let p = parent.0 as usize;
+            leaving[p] = leaving[p].min(leaving[i]);
+            let passed: Vec<RaiseOut> = (out.raises[i].iter())
+                .map(|&r| RaiseOut {
+                    same: r.same && !entered.contains(&b),
+                    ..r
+                })
+                .collect();
+            for raise in passed {
+                keep(&mut out.raises[p], raise);
+            }
+        }
+        out
+    }
+}
+
+/// Adds `raise` to `raises`, once per handler and [`RaiseOut::same`]: of two, the one leaving
+/// the larger bodies.
+fn keep(raises: &mut Vec<RaiseOut>, raise: RaiseOut) {
+    match (raises.iter_mut()).find(|r| (r.to, r.same) == (raise.to, raise.same)) {
+        Some(kept) => kept.leaves_from = kept.leaves_from.min(raise.leaves_from),
+        None => raises.push(raise),
     }
 }
 

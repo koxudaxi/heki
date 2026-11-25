@@ -383,7 +383,8 @@ fn a_handler_of_other_exceptions_leaves_the_report() {
 /// The name a partly loaded module lacks raises a plain `ImportError`: only a handler taking
 /// any import error, and whose body does not raise again, takes it. A handler of a missing
 /// module, one that raises again, and a `finally` body leave the report; a handler of the
-/// `try` around a nested one takes what the nested one passes on.
+/// `try` around a nested one takes what the nested one passes on, and may take what a handler
+/// nested in its clause raises again, which is that handler's exception, not the import's.
 #[test]
 fn only_a_handler_of_any_import_error_takes_the_failure() {
     const A: &str = "from pkg.b import helper_b\n\n\ndef helper_a():\n    return 1\n";
@@ -443,6 +444,11 @@ fn only_a_handler_of_any_import_error_takes_the_failure() {
             &reported,
         ),
         (
+            "a `finally` body that branches",
+            wrapped("finally:\n    if helper_b():\n        pass\n"),
+            &reported,
+        ),
+        (
             "a clause that certainly matches hides the later ones",
             wrapped("except ImportError:\n    raise\nexcept Exception:\n    helper_a = None\n"),
             &reported,
@@ -467,6 +473,22 @@ fn only_a_handler_of_any_import_error_takes_the_failure() {
             "an outer handler of a missing module",
             nested(
                 "    except OSError:\n        helper_a = None\n",
+                "except ModuleNotFoundError:\n    helper_a = None\n",
+            ),
+            &nested_reported,
+        ),
+        (
+            "an outer handler of what a handler nested in the clause raises again",
+            nested(
+                "    except ImportError:\n        try:\n            raise ModuleNotFoundError(\"no helper\")\n        except ModuleNotFoundError:\n            raise\n",
+                "except ModuleNotFoundError:\n    helper_a = None\n",
+            ),
+            &[],
+        ),
+        (
+            "an outer handler of a missing module, past a clause raising its own exception again",
+            nested(
+                "    except ImportError:\n        if helper_b():\n            raise\n        raise\n",
                 "except ModuleNotFoundError:\n    helper_a = None\n",
             ),
             &nested_reported,

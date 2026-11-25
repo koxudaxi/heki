@@ -2444,8 +2444,13 @@ an import itself.
   block dominates, may leave them by a normal edge or return; the exit of a `with` block; or a
   `finally` body that may leave without raising again. A clause that certainly matches hides the
   later ones; what a clause or a `finally` body raises goes to the handler around it, as the
-  same failure for `raise` and as an exception of unknown class otherwise. Each handler of a
-  function, and each clause body, is walked once (unmetered: one step per block). A handler
+  same failure for a `raise` directly in the body and as an exception of unknown class
+  otherwise, also for a `raise` in a handler nested in the body, which raises that handler's
+  exception. Each handler of a function is walked once (unmetered: one step per handler block
+  and clause test), and the ends of all the bodies come from one sweep up the function's
+  dominator tree, each block's from its own edges and its children's: the bodies of clauses
+  that each lead on to the rest of the function hold each other, and walking each would cost
+  the function once per clause. A handler
   taking a plain `ImportError` but passing a missing module on counts as taking any import
   error, which keeps every rule's claim on the safe side.
 - **Body order** (`ModuleImports::bound_before`, `any_bound_before`, `code_before`): what the
