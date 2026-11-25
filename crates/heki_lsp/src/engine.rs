@@ -594,6 +594,7 @@ impl Workspace {
                 root: &env.root,
                 modules: &env.layout,
             },
+            runtime: env.runtime,
         };
         check_project(&[], &env.cfg, &env.kb, &index, &selection, &extras)
             .map_err(EngineError::Rules)?;
@@ -725,6 +726,7 @@ impl Workspace {
                 root: &self.env.root,
                 modules: &self.env.layout,
             },
+            runtime: self.env.runtime,
         };
         let (mut diags, reads) = self.decls.completed().record(|| {
             let mut diags = check_project(

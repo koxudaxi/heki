@@ -60,7 +60,7 @@ use heki_effect::{
     CallHop, CallSite, ContractClass, EffectSummary, FileSummary, FuncKey, ModuleInput,
     ProjectDecls, ProjectIndex,
 };
-use heki_env::{Docs, Explain, HekiConfig, Problem, Setting, Severity};
+use heki_env::{Docs, Explain, HekiConfig, Problem, RuntimeProfile, Setting, Severity};
 use heki_ir::{IrFunction, ModuleConstants};
 use heki_kb::{EffectiveEcosystemKb, EffectiveSoundnessKb};
 use heki_semantic::mangling;
@@ -130,6 +130,9 @@ pub struct RuleMeta {
     pub auto_fix_default: bool,
     /// A proven-safe rewrite that `--fix` applies only with `--include-size-dependent`.
     pub size_dependent_fix: bool,
+    /// A fix that may change what the program does: `--fix` and `--diff` apply it only with
+    /// `--unsafe-fixes`, and the language server offers it as a quick fix that is not preferred.
+    pub unsafe_fix: bool,
     pub summary: &'static str,
     /// Ruff-style documentation (`crates/heki_rules/rule-docs/<CODE>.md`): printed by
     /// `heki rule <CODE>` and published as the rule's page.
@@ -215,6 +218,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Mutating an attribute read by `@cached_property` without invalidating the cache.",
         doc: include_str!("../rule-docs/MUT101.md"),
@@ -227,6 +231,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Interprocedural mutation/escape/effect regression against saved summary snapshot.",
         doc: include_str!("../rule-docs/MUT103.md"),
@@ -239,6 +244,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items).",
         doc: include_str!("../rule-docs/MUT106.md"),
@@ -251,6 +257,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: a method other than the initializers rebinds or changes in place an attribute that the `__hash__` of its instances reads.",
         doc: include_str!("../rule-docs/MUT107.md"),
@@ -263,6 +270,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper.",
         doc: include_str!("../rule-docs/MUT108.md"),
@@ -275,6 +283,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Default,
         consequence: Consequence::MinorBug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Handing a `Sequence` / `Mapping` / `AbstractSet` / `ReadOnly` parameter, as itself, to a function whose body (or a helper's) changes it in place at a named line.",
         doc: include_str!("../rule-docs/MUT110.md"),
@@ -287,6 +296,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports).",
         doc: include_str!("../rule-docs/MUT111.md"),
@@ -299,6 +309,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another.",
         doc: include_str!("../rule-docs/MUT112.md"),
@@ -311,6 +322,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: a dict, set, or deque of the instance changed while a method iterates it, by another method while a generator is suspended in the loop or by a function the loop's body calls (the next step raises `RuntimeError`).",
         doc: include_str!("../rule-docs/MUT113.md"),
@@ -323,6 +335,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Default,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Changing in place the list, dict, or set that a `functools.lru_cache` / `functools.cache` function returned (the cache hands the same object to later calls with the same arguments), directly or through the functions that return it.",
         doc: include_str!("../rule-docs/MUT114.md"),
@@ -335,6 +348,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: changing in place an object below a shallow copy the function made of state that outlives the call (`dict(x)`, `x.copy()`, `copy.copy(x)`, `model_copy()`): the copied value holds the same object, so the change is seen through it too.",
         doc: include_str!("../rule-docs/MUT115.md"),
@@ -347,6 +361,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Default,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: true,
         auto_fix_default: false,
         summary: "`copy.deepcopy` of an instance holding an `object()` sentinel in an attribute that a function tests against the sentinel by identity (the copy holds a new object, which the test does not match).",
         doc: include_str!("../rule-docs/MUT118.md"),
@@ -359,6 +374,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Default,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "An in-place change of a builtin container applied to a new object that nothing else holds and no name keeps (`list(xs).sort()`, `env = os.environ.copy().update(...)`, `obj.settings[k] = v` with a getter returning a new dict): the change is lost when the statement ends.",
         doc: include_str!("../rule-docs/MUT119.md"),
@@ -371,6 +387,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: changing a value held through a read-only view (a protocol or class whose members are all properties without a setter) where a type checker does not see it: a helper that does not see the view's type rebinds one of its properties, or code changes in place the container a property returns.",
         doc: include_str!("../rule-docs/MUT120.md"),
@@ -383,6 +400,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Contract,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`.",
         doc: include_str!("../rule-docs/MUT201.md"),
@@ -395,6 +413,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Contract,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Mutating a shared object returned by a declared `readonly-returns` producer, directly or through the functions that return it.",
         doc: include_str!("../rule-docs/MUT202.md"),
@@ -407,6 +426,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Contract,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`.",
         doc: include_str!("../rule-docs/MUT203.md"),
@@ -419,6 +439,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Contract,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Calling a guarded function or method, or constructing a guarded class (directly, via a bound method, `getattr`, or a helper), outside declared `call-owners`.",
         doc: include_str!("../rule-docs/MUT204.md"),
@@ -431,6 +452,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Contract,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Strict mode of a `write-owners` contract (`unresolved = \"report\"`): writing an attribute named like a target on an object of unknown class, or a computed attribute name on a guarded class.",
         doc: include_str!("../rule-docs/MUT205.md"),
@@ -443,6 +465,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Contract,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Strict mode of a `read-owners` contract (`unresolved = \"report\"`): reading an attribute named like a target on an object of unknown class.",
         doc: include_str!("../rule-docs/MUT206.md"),
@@ -455,6 +478,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Contract,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Strict mode of a `call-owners` contract (`unresolved = \"report\"`): calling a method named like a target on an object of unknown class.",
         doc: include_str!("../rule-docs/MUT207.md"),
@@ -467,6 +491,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Contract,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return.",
         doc: include_str!("../rule-docs/MUT208.md"),
@@ -479,6 +504,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Default,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "A call in `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop; its heuristic reports, a call that can reach a blocking call.",
         doc: include_str!("../rule-docs/EFF101.md"),
@@ -491,6 +517,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop.",
         doc: include_str!("../rule-docs/EFF102.md"),
@@ -503,6 +530,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "A loop over data whose every iteration sends a database statement; its heuristic reports, a loop that can run a database query on every iteration.",
         doc: include_str!("../rule-docs/EFF103.md"),
@@ -515,6 +543,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: blocking local filesystem I/O reachable from `async def`.",
         doc: include_str!("../rule-docs/EFF105.md"),
@@ -527,6 +556,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction.",
         doc: include_str!("../rule-docs/EFF106.md"),
@@ -539,6 +569,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored.",
         doc: include_str!("../rule-docs/EFF107.md"),
@@ -551,6 +582,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: a non-reentrant lock (`threading.Lock`, `asyncio.Lock`) taken again, directly or through a call, while it is held (the thread or task waits for itself).",
         doc: include_str!("../rule-docs/EFF109.md"),
@@ -563,6 +595,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: an object allowing one operation at a time (`asyncio.StreamReader`, an asyncpg connection, a WebSocket) used by tasks started together (`asyncio.gather`, a task group).",
         doc: include_str!("../rule-docs/EFF110.md"),
@@ -575,6 +608,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: the iteration order of a set of strings, which changes between runs, reaches a file, a stream, a serializer, or a raised exception's message across a call.",
         doc: include_str!("../rule-docs/EFF112.md"),
@@ -587,6 +621,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: an `except` clause around a recursion (a call cycle reached from its `try` body) takes the `RecursionError` and goes on without raising, so the result depends on the stack depth.",
         doc: include_str!("../rule-docs/EFF114.md"),
@@ -599,6 +634,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: an `async def` handed to a library call that calls it without awaiting what it returns (a thread's target, an executor's function, an `atexit` or signal handler, a `filter` predicate), so the call only creates a coroutine and the body does not run.",
         doc: include_str!("../rule-docs/EFF115.md"),
@@ -611,6 +647,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: a call of a generator function whose generator nothing iterates (a statement, a value only tested for truth, a function handed to a thread, an `atexit` handler, or a `filter` predicate), so its body does not run.",
         doc: include_str!("../rule-docs/EFF116.md"),
@@ -623,6 +660,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Contract,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope.",
         doc: include_str!("../rule-docs/EFF201.md"),
@@ -635,6 +673,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation.",
         doc: include_str!("../rule-docs/DATA101.md"),
@@ -647,6 +686,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::MinorBug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: project modules that import each other while they load (an import cycle), reported once per group at the import closing a shortest cycle.",
         doc: include_str!("../rule-docs/IMP101.md"),
@@ -659,6 +699,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: a `from M import name` that raises `ImportError` when a module of its import cycle is imported before the others, because `M` is still loading and has not bound `name`.",
         doc: include_str!("../rule-docs/IMP102.md"),
@@ -671,6 +712,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: a module of the package the project distributes imports test code, or a module outside the source roots of a src layout, by an import that runs.",
         doc: include_str!("../rule-docs/IMP104.md"),
@@ -683,6 +725,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Contract,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "An import that an `import-boundaries` contract does not allow: a forbidden module, or one outside the allowed imports.",
         doc: include_str!("../rule-docs/IMP201.md"),
@@ -695,6 +738,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Contract,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Strict mode of an `import-boundaries` contract (`unresolved = \"report\"`): an import whose module heki cannot name, which may be one the contract does not allow.",
         doc: include_str!("../rule-docs/IMP202.md"),
@@ -707,6 +751,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: a package module loads, while it loads, a module whose distribution the project declares only for development (a dependency group), not in its dependencies or extras.",
         doc: include_str!("../rule-docs/IMP301.md"),
@@ -719,6 +764,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: importing a top-level package or an entry point's module loads, while it loads, a module whose distribution the project declares only in extras, so the import fails without them.",
         doc: include_str!("../rule-docs/IMP302.md"),
@@ -731,6 +777,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: true,
         summary: "Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`).",
         doc: include_str!("../rule-docs/OPT101.md"),
@@ -743,6 +790,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: true,
         summary: "Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first).",
         doc: include_str!("../rule-docs/OPT102.md"),
@@ -755,6 +803,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).",
         doc: include_str!("../rule-docs/OPT103.md"),
@@ -767,6 +816,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: size-dependent `e in lst` inside a loop -> hoist `set` outside loop.",
         doc: include_str!("../rule-docs/OPT110.md"),
@@ -779,6 +829,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.",
         doc: include_str!("../rule-docs/OPT111.md"),
@@ -791,6 +842,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans).",
         doc: include_str!("../rule-docs/OPT112.md"),
@@ -803,6 +855,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index.",
         doc: include_str!("../rule-docs/OPT113.md"),
@@ -815,6 +868,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.",
         doc: include_str!("../rule-docs/OPT120.md"),
@@ -827,6 +881,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: size-dependent `q.insert(0, v)` -> `collections.deque`.",
         doc: include_str!("../rule-docs/OPT121.md"),
@@ -839,6 +894,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         activation: Activation::OptIn,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
+        unsafe_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: size-dependent loop-invariant container reconstruction (`e in set(keys)`).",
         doc: include_str!("../rule-docs/OPT130.md"),
@@ -1100,6 +1156,9 @@ pub struct CheckExtras<'a> {
     /// Where the project's files are, which decides the kind of code of each module
     /// ([`heki_effect::code_kind`]).
     pub layout: ProjectLayout<'a>,
+    /// The Python version the project targets (`target-version`, else `requires-python`): what
+    /// a report's help and fix may use (`MUT118` recommends the builtin `sentinel` from 3.15).
+    pub runtime: RuntimeProfile,
 }
 
 /// The project root and how module names derive from the paths below it.
@@ -1186,6 +1245,8 @@ pub(crate) struct CheckContext<'a> {
     /// [`CheckExtras::layout`]; `None` in a context over the declarations alone, which runs no
     /// rule.
     layout: Option<ProjectLayout<'a>>,
+    /// [`CheckExtras::runtime`].
+    pub runtime: RuntimeProfile,
 }
 
 /// Whether [`check_project`] runs the rule `code` on the file at the project-relative `rel_path`:
@@ -1239,6 +1300,7 @@ pub fn check_project(
             .open_premises
             .then(|| heki_effect::MustExplainer::new(index)),
         layout: Some(extras.layout),
+        runtime: extras.runtime,
     };
     let mut out = Vec::new();
     mut_rules::mut101_mut111(&cx, &mut out);
@@ -1375,6 +1437,8 @@ impl<'a> CheckContext<'a> {
             open_premises: false,
             must_explainer: None,
             layout: None,
+            // No rule runs over the declarations alone.
+            runtime: config.runtime_profile(),
         }
     }
 
@@ -2034,6 +2098,12 @@ mod registry_tests {
                     && r.code != "OPT103"
             });
             assert_eq!(r.size_dependent_fix, expected, "{}", r.code);
+            // An unsafe fix is never one `--fix` or `--include-size-dependent` applies.
+            assert!(
+                !r.unsafe_fix || !r.auto_fix_default && !r.size_dependent_fix,
+                "{}",
+                r.code
+            );
         }
     }
 

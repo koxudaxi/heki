@@ -9,35 +9,62 @@ use super::{
 use crate::ModuleInput;
 
 use crate::types::MAX_NAMED;
+use heki_ast::Span;
 use heki_ir::walk::FnShape;
-use heki_ir::{BlockId, FunctionId, GlobalStores, InstKind, IrFunction, LastBindings, VarId};
+use heki_ir::{
+    BlockId, FunctionId, GlobalStores, InstKind, IrFunction, LastBindings, ModuleIr, VarId,
+};
 use heki_semantic::{NameResolution, ScopeKind};
 use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
 
 /// [`ModuleDecls::object_sentinels`]: the module body's names stored once, outside a loop, from a
-/// call of the builtin `object` with no argument (through copies).
+/// call of the builtin `object` with no argument (through copies). Only such an object is one
+/// that `copy.deepcopy` replaces: a PEP 661 `sentinel(...)`, like any other value, is none.
 pub(super) fn object_sentinels(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     if input.ir.constants.dynamic || input.ir.has_star_import || !builtin_object(input, decls) {
         return out;
     }
     let module_stores = GlobalStores::of(&input.ir.functions);
-    for f in input.ir.functions.iter().filter(|f| f.is_module_body) {
+    object_calls(input.ir, |name, _| {
+        if module_stores.once(name) && !decls.imports.contains_key(name) {
+            out.insert(name.to_owned());
+        }
+    });
+    out
+}
+
+/// The `object()` calls the module body stores in globals outside a loop, by name, that a call
+/// of the builtin `sentinel` (PEP 661) can replace: none when the module binds a global named
+/// `sentinel`, which such a call would read instead. The module's
+/// [`ModuleDecls::object_sentinels`] are among the names.
+pub fn object_sentinel_calls(ir: &ModuleIr) -> FxHashMap<String, Span> {
+    let mut out = FxHashMap::default();
+    if !GlobalStores::of(&ir.functions).binds("sentinel") {
+        object_calls(ir, |name, call| {
+            out.insert(name.to_owned(), call);
+        });
+    }
+    out
+}
+
+/// Each store, outside a loop of the module body, of the result of a call `object()` in a global:
+/// the name and the call (through copies). Whether `object` is the builtin is for the caller.
+fn object_calls(ir: &ModuleIr, mut each: impl FnMut(&str, Span)) {
+    for f in ir.functions.iter().filter(|f| f.is_module_body) {
         let shape = FnShape::new(f);
         for b in f.blocks.iter().filter(|b| shape.loop_depth(b.id) == 0) {
             for inst in &b.insts {
                 let InstKind::StoreGlobal { name, value } = &inst.kind else {
                     continue;
                 };
-                let once = module_stores.once(name) && !decls.imports.contains_key(name);
-                if once && calls_object(&shape, *value) {
-                    out.insert(name.clone());
+                if let Some(call) = object_call(&shape, *value) {
+                    each(name, call);
                 }
             }
         }
     }
-    out
 }
 
 /// Whether the module reads `object` as the builtin: its module scope reads it so, and the module
@@ -57,25 +84,25 @@ fn builtin_object(input: &ModuleInput<'_>, decls: &ModuleDecls) -> bool {
         && !decls.unknown_globals.contains("object")
 }
 
-/// Whether `value` is the result of `object()`: a call, with no argument, of the global name
-/// `object` (the caller has established that it is the builtin).
-fn calls_object(shape: &FnShape<'_>, value: VarId) -> bool {
-    let Some(InstKind::Call {
+/// The call `object()` whose result `value` is: a call, with no argument, of the global name
+/// `object`.
+fn object_call(shape: &FnShape<'_>, value: VarId) -> Option<Span> {
+    let call = shape.inst(shape.copy_root(value))?;
+    let InstKind::Call {
         callee_var: Some(callee),
         args,
         kwargs,
         star_from: None,
         ..
-    }) = shape.inst(shape.copy_root(value)).map(|i| &i.kind)
+    } = &call.kind
     else {
-        return false;
+        return None;
     };
-    args.is_empty()
-        && kwargs.is_empty()
-        && matches!(
-            shape.inst(shape.copy_root(*callee)).map(|i| &i.kind),
-            Some(InstKind::LoadGlobal { name, .. }) if name == "object"
-        )
+    let of_object = matches!(
+        shape.inst(shape.copy_root(*callee)).map(|i| &i.kind),
+        Some(InstKind::LoadGlobal { name, .. }) if name == "object"
+    );
+    (args.is_empty() && kwargs.is_empty() && of_object).then_some(call.span)
 }
 
 /// The fqn of the module-level name that may be an `object()` sentinel which `value` holds: one

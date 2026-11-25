@@ -458,6 +458,8 @@ oldest version `requires-python` admits.
 - From Python 3.12, list, set, and dict comprehensions run in the enclosing function (PEP 709): a
   comprehension inside a loop can be reported for `py312` and not for `py311`.
 - From Python 3.14, annotations are evaluated lazily in `__annotate__` scopes (PEP 649).
+- From Python 3.15, `sentinel` is a builtin (PEP 661): a `MUT118` report recommends it, and
+  has a fix that uses it; for an older version it names `typing_extensions.sentinel`.
 - The parser reads Python 3.15 syntax for every target version: `lazy import` (PEP 810) is a lazy
   import also in code for an older version.
 - Syntax newer than the target version is analyzed, not reported: that is Ruff's check.

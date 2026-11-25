@@ -9,10 +9,12 @@
 
 use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
-use heki_diagnostics::{Certainty, Diagnostic};
+use heki_diagnostics::{Certainty, Diagnostic, TextEdit};
+use heki_effect::resolver::object_sentinel_calls;
 use heki_effect::{
     CopyMade, DeepCopySite, FuncKey, HeldSentinel, ProjectDecls, ProjectIndex, SentinelTest,
 };
+use heki_env::RuntimeProfile;
 use heki_ir::walk::{Answer, Budget, Closure, Join};
 use heki_kb::CopyDepth;
 use rustc_hash::FxHashMap;
@@ -368,6 +370,7 @@ pub(crate) fn mut118(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
         nearest: Closure::new(),
         budget: Budget::unmetered(OWNER),
     };
+    let mut sentinel_calls = SentinelCalls::default();
     for (unit, func, site) in sites {
         // One argument of one class: the deep copy's own premises.
         let one = site.only && site.classes.len() == 1;
@@ -389,7 +392,23 @@ pub(crate) fn mut118(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
             candidate.held.attr.clone(),
             candidate.held.sentinel.clone(),
         )];
-        report(cx, unit, func, site, candidate, &tested.tests, exact, out);
+        let fix = sentinel_fix(
+            &mut sentinel_calls,
+            unit,
+            &candidate.held.sentinel,
+            cx.runtime,
+        );
+        report(
+            cx,
+            unit,
+            func,
+            site,
+            candidate,
+            &tested.tests,
+            exact,
+            fix,
+            out,
+        );
     }
 }
 
@@ -402,6 +421,7 @@ fn report(
     claim: &Candidate,
     tests: &[&TestAt<'_>],
     exact: bool,
+    fix: Option<Vec<TextEdit>>,
     out: &mut Vec<Diagnostic>,
 ) {
     let class = cx
@@ -449,19 +469,60 @@ fn report(
         format!(
             "`copy.deepcopy` {copied}, whose `{attr}` can hold the `object()` sentinel `{sentinel}` that `{tester}` tests by identity: the copy holds a new object there, which the test does not match"
         ),
-        Some(format!(
-            "make `{sentinel}` an object that copies as itself (a class whose `__copy__`, `__deepcopy__`, and `__reduce__` return it, as `typing_extensions.Sentinel` does), or give `{class}` a `__deepcopy__` that keeps it"
-        )),
+        Some(sentinel_help(sentinel, cx.runtime)),
         &[],
     )
         .expect("the deep copies are those of the units the rule runs on");
     d.related = related;
+    d.fix = fix;
     let tier = if exact {
         Certainty::Exact
     } else {
         Certainty::Heuristic
     };
     d.certainty = tier.at_most(d.certainty);
+}
+
+/// The help of a report on the sentinel `name`: a PEP 661 sentinel of that name, which `copy`
+/// and `copy.deepcopy` return as it is, the builtin from Python 3.15 and the `typing_extensions`
+/// function (from its 4.16.0, which first spells it so) below it.
+fn sentinel_help(name: &str, runtime: RuntimeProfile) -> String {
+    let call = if runtime.pep661_builtin_sentinel {
+        format!("`sentinel(\"{name}\")`")
+    } else {
+        format!("`typing_extensions.sentinel(\"{name}\")` (typing_extensions 4.16.0 or later)")
+    };
+    format!("bind `{name}` to {call} instead of `object()`: a copy keeps it as the same object")
+}
+
+/// The `object()` calls of the checked files that a call of the builtin `sentinel` can replace
+/// ([`object_sentinel_calls`]), found once per file.
+type SentinelCalls<'u> = FxHashMap<&'u Path, FxHashMap<String, Span>>;
+
+/// The unsafe fix of a report on the sentinel `fqn` when the target has the builtin `sentinel`
+/// and the report's own file binds the sentinel (a fix edits that file only): its `object()`
+/// call becomes `sentinel("NAME")` of the name it is bound to, which `pickle` also finds the
+/// object by. The object's type and repr change, and so does what `pickle` makes of it.
+fn sentinel_fix<'u>(
+    calls: &mut SentinelCalls<'u>,
+    unit: &'u ModuleUnit<'_>,
+    fqn: &str,
+    runtime: RuntimeProfile,
+) -> Option<Vec<TextEdit>> {
+    if !runtime.pep661_builtin_sentinel {
+        return None;
+    }
+    let name = fqn
+        .strip_prefix(unit.input.module_name.as_str())?
+        .strip_prefix('.')?;
+    let span = *calls
+        .entry(unit.input.path.as_path())
+        .or_insert_with(|| object_sentinel_calls(unit.input.ir))
+        .get(name)?;
+    Some(vec![TextEdit {
+        span,
+        replacement: format!("sentinel(\"{name}\")"),
+    }])
 }
 
 /// What a sentinel test gives `MUT118` apart from where it is: the testing function (its reports
