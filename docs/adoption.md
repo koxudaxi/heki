@@ -10,6 +10,11 @@ heki step by step:
    rules where they matter.
 4. For a library, save [effect snapshots](#effect-snapshots-mut103) of its public functions.
 
+To have a coding agent do this, ask it to adopt heki: the [Agent Skill](coding-agents.md#agent-skill-experimental)
+carries a playbook that proposes the first one or two contracts, writes `heki.toml` with a
+`CODEOWNERS` line, the baseline, the hook and the CI job, and runs the whole project before it
+finishes.
+
 ## Ratchet baselines
 
 A Ratchet baseline records the findings you have today and fails only on new ones:

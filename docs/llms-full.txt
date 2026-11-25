@@ -1004,7 +1004,8 @@ project without contracts or a baseline, ends with a line that points to it:
 $ heki recommend
 ```
 
-See [Configuration Advice](https://heki.koxudaxi.dev/recommend/).
+See [Configuration Advice](https://heki.koxudaxi.dev/recommend/). To adopt heki in a repository step by step, see
+[Adopting heki](https://heki.koxudaxi.dev/adoption/).
 
 ## Read a diagnostic
 
@@ -2686,6 +2687,11 @@ heki step by step:
 3. [Roll out more rules](https://heki.koxudaxi.dev/adoption/#rolling-out-rules): contracts for your shared state, and the opt-in
    rules where they matter.
 4. For a library, save [effect snapshots](https://heki.koxudaxi.dev/adoption/#effect-snapshots-mut103) of its public functions.
+
+To have a coding agent do this, ask it to adopt heki: the [Agent Skill](https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental)
+carries a playbook that proposes the first one or two contracts, writes `heki.toml` with a
+`CODEOWNERS` line, the baseline, the hook and the CI job, and runs the whole project before it
+finishes.
 
 ## Ratchet baselines
 
@@ -4838,6 +4844,9 @@ A typical instruction for the agent:
 > code: confirm what its message says before changing anything. Apply `heki check --fix` for the
 > safe rewrites. Never silence a diagnostic with `# heki: ignore` unless the rule's documentation
 > describes the case as intended. When unsure, run `heki check --generate-prompt "<question>"`.
+> Before you finish, run `heki check` on the whole project (with `--baseline` when it has one):
+> `--touched` is for the loop while editing, and a change can cause a report in a file you did
+> not touch.
 
 ```console
 $ heki check --touched app/users.py app/api.py --output-format json
@@ -5064,8 +5073,8 @@ runs: `heki check --output-format json` on the project, the diagnostics the edit
 `related` and `heki rule <CODE>` to find the root cause, `heuristic` reports confirmed before
 acting on them, and only the fixes heki proves safe. `heki inspect` and
 `heki check --generate-prompt` are for when a function or a diagnostic is in question. Its
-`SKILL.md` links this page, and its `references/` hold the output fields and what to do when a
-command does not behave as expected.
+`SKILL.md` links this page, and its `references/` hold the output fields, what to do when a
+command does not behave as expected, and a playbook for adopting heki in a repository.
 
 The skill is experimental: its wording, when agents load it, and the install commands can change
 as the agents evolve.

@@ -16,6 +16,10 @@ const NAME: &str = "heki";
 pub(crate) const FILES: &[(&str, &str)] = &[
     ("SKILL.md", include_str!("../../../skills/heki/SKILL.md")),
     (
+        "references/adopt.md",
+        include_str!("../../../skills/heki/references/adopt.md"),
+    ),
+    (
         "references/output.md",
         include_str!("../../../skills/heki/references/output.md"),
     ),
