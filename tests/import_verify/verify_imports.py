@@ -198,7 +198,8 @@ def compare_failures(
 
 
 def matches(site: dict, target: str) -> bool:
-    if site.get("target") == target:
+    # A module the project lacks is the one the import tries, and fails, to load.
+    if target in (site.get("target"), site.get("missing")):
         return True
     for other in site.get("may_load", []):
         if other == target or (other.endswith("*") and target.startswith(other[:-1])):

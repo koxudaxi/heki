@@ -69,7 +69,8 @@ heki's diagnostics and fixes while you edit, with the results `heki check` repor
   (`codeDescription`).
 - `heki server --heuristic` (or `--no-heuristic`) overrides `lint.heuristic` of the
   configuration, as on the command line.
-- Quick fixes for the safe `OPT101` / `OPT102` rewrites.
+- Quick fixes for the safe `OPT101` / `OPT102` rewrites, and a quick fix that is not preferred
+  for the unsafe `MUT118` fix (`heki check --fix --unsafe-fixes`).
 - `refactor.rewrite.heki` code actions for the proven-safe size-dependent rewrites. A fix whose
   result would not parse is never offered, as `heki check --fix` refuses it.
 - A quick fix that appends `# heki: ignore[CODE]` to the line of any diagnostic, unless a comment

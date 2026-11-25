@@ -33,7 +33,7 @@ A type checker reports a write of a view's property made through the view
   mutable container type (`view.extras["k"] = v`, `view.items.append(x)`), directly, through a
   local alias, or through helpers (`fill(view.extras)`, `reset(view)` changing `p.extras`), as
   `MUT108` does for frozen fields. Through a helper, a property annotated with a read-only type
-  (`Sequence`, `Mapping`) counts too.
+  (`Sequence`, `Mapping`, `AbstractSet`) counts too.
 
 The rule does not report:
 
@@ -42,8 +42,8 @@ The rule does not report:
   hands it on to one that does not is reported at its own call;
 - a change made through a value of a class that implements the view (`field: Field`, not
   `field: FieldView`);
-- a direct change of a container a property annotated `Sequence` / `Mapping` returns: the type
-  checker reports it;
+- a direct change of a container a property annotated `Sequence` / `Mapping` / `AbstractSet`
+  returns: the type checker reports it;
 - a copy (`extras = dict(view.extras)`, `fill(list(view.items))`), and a container inside the one
   the property returns (`view.tables["a"].append(1)`);
 - a class with a setter or deleter, a plain attribute (`required: bool` in a protocol), a

@@ -12,6 +12,7 @@ from pathlib import Path
 
 import build_docs
 import pytest
+import set_release_versions
 
 
 def certification(census_false: int, holdout_false: int) -> dict:
@@ -153,3 +154,18 @@ def test_a_rule_page_lists_the_premises_of_the_table(listed: list[str], stale: l
 def test_a_heuristic_rule_without_premises_needs_none() -> None:
     rule = {"code": "EFF102", "certainty": "heuristic", "doc": page(["On every path"]), "premises": []}
     assert build_docs.premises_disagreeing([rule]) == []
+
+
+def test_a_precommit_example_must_pin_the_workspace_version(monkeypatch) -> None:
+    version = set_release_versions.manifest_versions(build_docs.ROOT)[
+        set_release_versions.WORKSPACE_VERSION
+    ]
+    assert build_docs.stale_precommit_revs() == []
+    pinned = {"README.md": [version], "docs/adoption.md": ["0.2.7"]}
+    monkeypatch.setattr(set_release_versions, "precommit_revs", lambda root: pinned)
+    assert build_docs.stale_precommit_revs() == [f"docs/adoption.md: rev: v0.2.7, not v{version}"]
+    monkeypatch.setitem(pinned, "README.md", [])
+    assert build_docs.stale_precommit_revs() == [
+        "README.md: no pre-commit `rev:` line",
+        f"docs/adoption.md: rev: v0.2.7, not v{version}",
+    ]

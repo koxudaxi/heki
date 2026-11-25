@@ -26,6 +26,9 @@ def checkout(tmp_path: Path) -> Path:
     """Copies of the repository's manifests and lock file at `CHECKOUT_VERSION`, and a CHANGELOG."""
     for name in MANIFESTS:
         shutil.copy(ROOT / name, tmp_path / name)
+    for name in release.PRECOMMIT_DOCS:
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(ROOT / name, tmp_path / name)
     for member in tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"][
         "members"
     ]:
@@ -82,9 +85,20 @@ def test_every_version_a_build_reads_is_written(checkout: Path, capsys) -> None:
     assert {name: text for name, text in after.items() if name.startswith("crates/")} == {
         name: text for name, text in before.items() if name.startswith("crates/")
     }
-    assert (
-        capsys.readouterr().out == "9.8.7: wrote Cargo.toml, pyproject.toml, Cargo.lock, uv.lock.\n"
-    )
+    written = "Cargo.toml, pyproject.toml, Cargo.lock, uv.lock, README.md, adoption.md"
+    assert capsys.readouterr().out == f"9.8.7: wrote {written}.\n"
+
+
+def test_the_precommit_examples_pin_the_release_tag(checkout: Path) -> None:
+    expected = {name: [CHECKOUT_VERSION] for name in release.PRECOMMIT_DOCS}
+    assert release.precommit_revs(checkout) == expected
+    release.main(["0.1.2", "--root", str(checkout)])
+    assert release.precommit_revs(checkout) == {name: ["0.1.2"] for name in release.PRECOMMIT_DOCS}
+
+
+def test_the_repository_pins_its_own_release_in_the_precommit_examples() -> None:
+    version = release.manifest_versions(ROOT)[release.WORKSPACE_VERSION]
+    assert release.precommit_revs(ROOT) == {name: [version] for name in release.PRECOMMIT_DOCS}
 
 
 def test_a_pre_release_version_is_written(checkout: Path) -> None:
@@ -286,6 +300,12 @@ def edit(root: Path, name: str, old: str, new: str) -> None:
             'version = "{v}"\nsource = { virtual = "." }',
             'version = "{v}"\nsource = { registry = "https://pypi.org/simple" }',
             "uv.lock `heki`: expected one line matching",
+        ),
+        (
+            "README.md",
+            "    rev: v{v}",
+            "    rev:  v{v}",
+            "README.md pre-commit example: expected one line matching",
         ),
         (
             "crates/heki_kb/Cargo.toml",

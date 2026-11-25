@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "heki"
-version = "0.4.0"
+version = "0.5.0"
 description = "Experimental static checker for Python that tracks side effects and mutations across function calls"
 readme = "README.md"
 license = "MIT"
@@ -51,6 +51,7 @@ include = [
     { path = "docs/llms.txt", format = "sdist" },
     { path = "scripts/build_docs.py", format = "sdist" },
     { path = "scripts/ansi_svg.py", format = "sdist" },
+    { path = "scripts/set_release_versions.py", format = "sdist" },
     { path = "zensical.toml", format = "sdist" },
     { path = "ARCHITECTURE.md", format = "sdist" },
     { path = "CHANGELOG.md", format = "sdist" },

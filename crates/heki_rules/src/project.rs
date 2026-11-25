@@ -957,6 +957,34 @@ impl Project {
         }
     }
 
+    /// The analyzed files a baseline entry or report is about: the file of a key, and for a
+    /// group key, which is of no one file, the files of the modules its target lists. Also
+    /// whether every module of the group is one of them: one that is not is deleted, or left
+    /// out of a run over part of the project.
+    pub fn entry_files<'a>(&'a self, key: &'a BaselineKey) -> (Vec<&'a str>, bool) {
+        if !key.is_group() {
+            return (vec![key.path.as_str()], true);
+        }
+        let members = key.members();
+        let listed: Vec<&ParsedFile> = (self.files.iter())
+            .filter(|f| members.contains(f.module_name.as_str()))
+            .collect();
+        let found: FxHashSet<&str> = listed.iter().map(|f| f.module_name.as_str()).collect();
+        let files = listed.into_iter().map(|f| f.rel.as_str()).collect();
+        (files, found.len() == members.len())
+    }
+
+    /// Whether the run covers every file of the entry `key` ([`Self::entry_files`]): it alone
+    /// decides the entry. A group with a module that is not an analyzed file is decided by a
+    /// run over the whole project.
+    pub fn covers_entry(&self) -> impl Fn(&BaselineKey) -> bool + '_ {
+        let covered = self.covered();
+        move |key| {
+            let (files, all) = self.entry_files(key);
+            (all || covered("")) && files.into_iter().all(&covered)
+        }
+    }
+
     pub fn inputs(&self) -> Vec<ModuleInput<'_>> {
         self.files.iter().map(ParsedFile::input).collect()
     }
@@ -1175,6 +1203,7 @@ impl Indexed {
                 root: &env.root,
                 modules: &env.layout,
             },
+            runtime: env.runtime,
         };
         check_project(
             units,
@@ -1262,12 +1291,20 @@ impl RulesRun<'_> {
     /// Whether the baseline entry `key`, which `found` reports of this check matched (the
     /// heuristic reports the selection withholds among them), is reported for matching none:
     /// with `lint.report-unused-suppressions`, when its file was checked (`checked` holds the
-    /// project-relative paths) and its rule ran there.
-    pub fn unused_entry(&self, key: &BaselineKey, found: u32, checked: &FxHashSet<&str>) -> bool {
+    /// project-relative paths) and its rule ran there. `files` are the files of the entry
+    /// ([`Project::entry_files`]): every one must be checked and run the rule.
+    pub fn unused_entry(
+        &self,
+        key: &BaselineKey,
+        found: u32,
+        files: &[&str],
+        checked: &FxHashSet<&str>,
+    ) -> bool {
         self.unused_reported()
             && found == 0
-            && checked.contains(key.path.as_str())
-            && self.reports(&key.rule_code, &key.path)
+            && files
+                .iter()
+                .all(|f| checked.contains(f) && self.reports(&key.rule_code, f))
     }
 }
 
@@ -1405,6 +1442,7 @@ fn suppression_report(
         open_records: Vec::new(),
         contracts: Vec::new(),
         allowed_examples: Vec::new(),
+        group: false,
     })
 }
 

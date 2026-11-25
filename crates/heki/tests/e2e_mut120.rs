@@ -3,10 +3,10 @@
 //! a property, one and two calls deep, and the container a property returns changed in place,
 //! directly, through an alias, and through a helper, also on the elements of a `Sequence` of
 //! views another view returns; every exclusion (a setter, a plain attribute, a method, a cached
-//! property, a helper whose parameter is the view, a `Sequence` / `Mapping` property changed
-//! directly, copies, undeclared attributes, the implementing class), the split from `MUT108`,
-//! the opt-in selection, suppressions, and `heki rule`. The incremental language server's steps
-//! are in `lsp_oracle.rs` (`mut120`).
+//! property, a helper whose parameter is the view, a `Sequence` / `Mapping` / `AbstractSet`
+//! property changed directly, copies, undeclared attributes, the implementing class), the split
+//! from `MUT108`, the opt-in selection, suppressions, and `heki rule`. The incremental language
+//! server's steps are in `lsp_oracle.rs` (`mut120`).
 
 mod common;
 
@@ -467,4 +467,47 @@ fn mut120_is_opt_in_and_honors_suppressions() {
         .map(|s| doc.find(s).unwrap_or_else(|| panic!("{s}: {doc}")))
         .collect();
     assert!(positions.is_sorted(), "{doc}");
+}
+
+/// A property annotated `AbstractSet` / `collections.abc.Set` promises what one annotated
+/// `Mapping` does: changed through a helper it counts, changed through the view the type checker
+/// reports it.
+const SET_VIEW: &str = r#"from collections.abc import Set
+from typing import AbstractSet, Protocol
+
+
+class TagsView(Protocol):
+    @property
+    def tags(self) -> AbstractSet[str]: ...
+
+    @property
+    def labels(self) -> Set[str]: ...
+
+
+def tag(view):
+    view.tags.add("x")
+
+
+def handed_to_a_helper(view: TagsView) -> None:
+    tag(view)
+
+
+def through_the_view(view: TagsView) -> None:
+    view.labels.add("x")
+"#;
+
+#[test]
+fn mut120_reads_set_abc_properties_as_read_only() {
+    let p = Project::new("mut120_set_view");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/views.py", SET_VIEW);
+    let diags = diagnostics(&p, &["--select", "MUT120"]);
+    assert_eq!(
+        found(&diags),
+        vec![d("MUT120", 18, "handed_to_a_helper", "TagsView.tags")]
+    );
+    assert_eq!(
+        diags[0]["message"],
+        "`handed_to_a_helper` changes `TagsView.tags`, a property of a read-only view, in place via `pkg.views.tag`"
+    );
 }

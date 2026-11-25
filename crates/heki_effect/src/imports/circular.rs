@@ -4,14 +4,14 @@
 //! sites ([`ImportGraph::circular_failures`]).
 //!
 //! A run claims a failure only from established facts: each hop of the chain runs whenever its
-//! module loads and no handler may take what it raises, `name` is no submodule of `M`, `M` has
-//! not bound it (nor `__getattr__`, nor any name) before the import it is paused at, and no other
-//! module binds it. Whatever else may load a module of the group while the run goes on stops the
-//! run: an import heki cannot place, one it cannot name, a module outside the group whose load
-//! may load one of the group, and, when some function or lazy import of the project may load one,
-//! any code a module body runs before the failing import.
+//! module loads and no handler takes the plain `ImportError` it passes on, `name` is no
+//! submodule of `M`, `M` has not bound it (nor `__getattr__`, nor any name) before the import it
+//! is paused at, and no other module binds it. Whatever else may load a module of the group while
+//! the run goes on stops the run: an import heki cannot place, one it cannot name, a module
+//! outside the group whose load may load one of the group, and, when some function or lazy
+//! import of the project may load one, any code a module body runs before the failing import.
 
-use super::{ImportForm, ImportGraph, ImportHop, ModuleRef, Named, Target, Timing};
+use super::{ImportFailure, ImportForm, ImportGraph, ImportHop, ModuleRef, Named, Target, Timing};
 use crate::resolver::ProjectDecls;
 use heki_ir::walk::{Answer, BitSet, Budget, Closure};
 use rustc_hash::FxHashMap;
@@ -134,8 +134,8 @@ impl ImportGraph<'_> {
     /// they run while the module they import a name from is loading and has not bound it, with
     /// that module and the name: `from M import name` of a module `M` of the group other than
     /// their own, which takes the name from `M` itself (not a submodule `M.name`, which Python
-    /// finds in `sys.modules` while it loads) and leaves the error to its module
-    /// ([`super::ImportSite::always_imports_uncaught`]); `name` is no module attribute the
+    /// finds in `sys.modules` while it loads) and leaves the plain `ImportError` to its module
+    /// ([`super::ImportSite::always_imports_leaving`]); `name` is no module attribute the
     /// import system binds (a dunder), the project has no module `M.name` (Python falls back to
     /// a submodule of that name once it is loaded), and no other module binds it
     /// ([`ProjectDecls::global_bound_elsewhere`]).
@@ -155,7 +155,7 @@ impl ImportGraph<'_> {
                 };
                 if *from == m
                     || group_of[*from as usize] != group_of[m as usize]
-                    || !site.always_imports_uncaught()
+                    || !site.always_imports_leaving(ImportFailure::AnyImportError)
                     || (name.starts_with("__") && name.ends_with("__"))
                 {
                     continue;
@@ -613,7 +613,11 @@ impl GroupRun<'_, '_> {
                 frame.site += 1;
                 continue;
             }
-            if site.always_imports_uncaught() && target.certain().is_some() {
+            // A hop the run follows leaves a plain `ImportError` raised below it to its module,
+            // as the failing import's own site does.
+            if site.always_imports_leaving(ImportFailure::AnyImportError)
+                && target.certain().is_some()
+            {
                 frame.hops = Some((graph.hops(m, j), 0));
                 frame.then = match target {
                     Target::PackageOrSubmodule { submodule, .. } => (graph.module(submodule))
@@ -629,8 +633,9 @@ impl GroupRun<'_, '_> {
             if (loads.into_iter()).any(|load| self.disturbs(load, state)) {
                 return Step::Stops;
             }
-            if site.always_imports_uncaught() && matches!(target, Target::Missing(_)) {
-                // The import raises whenever it runs: nothing after it runs.
+            if (target.failure()).is_some_and(|failure| site.always_imports_leaving(failure)) {
+                // The import raises whenever it runs, and no handler takes it: nothing after
+                // it runs.
                 return Step::Stops;
             }
             frame.site += 1;

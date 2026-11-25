@@ -549,7 +549,7 @@ fn with_baseline(
     let Some(path) = baseline_path(&args.analysis, &indexed.project.env) else {
         return Ok(diags.into_iter().map(|d| (d, None)).collect());
     };
-    let baseline = RatchetBaseline::load(&path)?;
+    let baseline = RatchetBaseline::load(&path, heki_rules::reports_groups)?;
     let regressed = regressed(&baseline, &diags, &indexed.project.files);
     Ok(diags
         .into_iter()

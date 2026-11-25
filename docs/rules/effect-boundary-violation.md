@@ -41,8 +41,9 @@ count for a read.
     through the helpers it passes `self` to (`_link(self)`, `self._init_fields()`,
     `super().__init__()`), while the same helper writing another object, or called after
     `__init__` returned, writes an existing one; neither is a write that constructs the object
-    it writes (`fresh-objects = "allow"`, the default; a write the reached function makes to an
-    object it allocated), as for `MUT201`;
+    it writes (`fresh-objects = "allow"`, the default: a write the reached function makes to an
+    object it allocated, or to the object a parameter holds when every call reaching it hands it
+    a new object nothing kept yet), as for `MUT201`;
   - `reads-targets`: reads of the `Class.attr` entries of `read-targets` (and their
     subclasses), in every form `MUT203` follows (`obj.attr`, `getattr(obj, "attr")`,
     `obj.__dict__["attr"]` or `vars(obj)["attr"]`, a property getter that reads it); a class's
