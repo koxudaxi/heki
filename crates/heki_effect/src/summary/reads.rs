@@ -6,6 +6,7 @@
 
 use super::{Extractor, Position, ProjectCall};
 use crate::ContainerParams;
+use crate::order_flow::ORDER_FREE_BUILTINS;
 use crate::readonly::{
     ContainerKind, container_mutator, result_detached_from_container, returns_container_view,
 };
@@ -19,20 +20,6 @@ use heki_kb::SoundnessParamEffect;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::Cell;
 use std::collections::BTreeMap;
-
-/// The library calls that take no order from a set they iterate: what they give is the same in
-/// any order of its elements.
-const ORDER_FREE: &[&str] = &[
-    "builtins.len",
-    "builtins.bool",
-    "builtins.set",
-    "builtins.frozenset",
-    "builtins.sorted",
-    "builtins.min",
-    "builtins.max",
-    "builtins.any",
-    "builtins.all",
-];
 
 /// The classes whose methods are those of a builtin list, dict, or set: the builtins, their
 /// `typing` aliases, and the abstract containers.
@@ -664,7 +651,7 @@ impl<'a> Extractor<'a> {
             (Place::Unpacked, _) => !sets,
             (Place::Mapping, _) => !derived && kind == ContainerKind::Dict,
             (Place::Position(j), Some(Callee::External(symbol))) => {
-                (!sets || ORDER_FREE.contains(&symbol.as_str()))
+                (!sets || ORDER_FREE_BUILTINS.contains(&symbol.as_str()))
                     && !matches!(self.layer1(symbol, j + offset, call.dst), Handling::Open)
             }
             (Place::Position(_) | Place::Keyword, Some(Callee::Project(..))) => !derived && project,

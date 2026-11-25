@@ -23,8 +23,9 @@ pub struct ContainerParams {
     /// iteration, membership tests, `len`, comparisons, and handing it to a call; and whose
     /// derived values (a slice of a list, a set operation of a set, a join with another value
     /// such as `p or []`) are only iterated, unpacked, tested, measured, or handed to a library
-    /// call Layer 1 lists as reading them. A set is iterated nowhere but by a call that takes no
-    /// order from it (`len`, `sorted`, `frozenset`, ...).
+    /// call Layer 1 lists as reading them. A set is iterated nowhere but by a builtin `EFF112`
+    /// counts as taking no order from it (`order_flow::ORDER_FREE_BUILTINS`: `len`, `sorted`,
+    /// `frozenset`, ...), so the annotation loses no fact of `EFF112`'s.
     pub abstract_use: u64,
     /// Those whose name is bound once: no assignment or `del` of it, except
     /// `if p is None: p = <a new container of its kind>`.

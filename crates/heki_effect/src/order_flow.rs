@@ -70,7 +70,7 @@ pub const KEEPING_BUILTINS: &[&str] = &[
 ];
 
 /// Builtins whose result does not depend on the order of their arguments, or restores one.
-const ORDER_FREE_BUILTINS: &[&str] = &[
+pub(crate) const ORDER_FREE_BUILTINS: &[&str] = &[
     "builtins.len",
     "builtins.sorted",
     "builtins.set",
