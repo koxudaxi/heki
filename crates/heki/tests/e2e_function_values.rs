@@ -1067,7 +1067,11 @@ def a_field_declared_again(field: Field) -> bool:
 /// positional argument to `field`) leaves the call unresolved.
 #[test]
 fn a_field_list_is_read_from_every_declaration_shape() {
-    check_marks("function_values_shapes", FIELD_SHAPE_DEFS, FIELD_SHAPE_CALLS);
+    check_marks(
+        "function_values_shapes",
+        FIELD_SHAPE_DEFS,
+        FIELD_SHAPE_CALLS,
+    );
 }
 
 const PARTIAL_LIBRARY_DEFS: &str = r#"from __future__ import annotations
