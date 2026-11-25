@@ -10,7 +10,7 @@ that implements or changes anything here follows the invariants and procedures b
    the gate a new rule has to pass.
 3. `docs/ANALYSIS_AND_KB_SPEC.md`: the IR, `EffectSummary`, the Soundness lane's abstract domain
    and proof obligations, the knowledge bases, and the Stage 0-A measurements.
-4. `docs/DESIGN_HISTORY_AND_ADR.md`: ADR-001 to ADR-022, what was decided and why the
+4. `docs/DESIGN_HISTORY_AND_ADR.md`: ADR-001 to ADR-023, what was decided and why the
    alternatives were rejected.
 
 When a document and the implementation disagree, update the document in the same change.
@@ -111,6 +111,11 @@ uvx --python 3.12 --from "pytest==8.4.2" --with "pyyaml==6.0.3" --with "jsonsche
   premises of its claim, and which of them a heuristic report may not have established. A false
   claim of an exact rule is fixed in the fact of the premise behind it, never by an exclusion in
   the rule.
+- A new suggestion kind of `heki recommend` (ADR-023) passes the same gate as a rule: counts on a
+  corpus, a sample judged by hand with no false claim (ADR-018 decision 12), and the mechanical
+  checks on every group. Its premises are listed like a rule's, a false exact suggestion is fixed
+  in the fact of a premise, and it gets a step in `crates/heki/tests/lsp_oracle.rs` that compares
+  the server's suggestions with `heki recommend FILE`.
 - Every new rule and every filter change comes with true-positive and true-negative regression
   tests: end-to-end tests through the real binary in `crates/heki/tests/`, plus
   `tests/semantic/fixtures.py` or `tests/difftest/` where they apply.

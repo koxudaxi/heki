@@ -6,7 +6,7 @@
 > Wave 1/2 corpora of 19 million lines, counterexample experiments, a study of
 > datamodel-code-generator's 196,000 lines and its 20,000 lines of in-house checkers, and checks
 > of CPython 3.15 PEP 810 and `ruff_python_parser` 0.17.5), the reasons for every revision from
-> v1.0 to v4.1, and every major decision (ADR-001 to ADR-022). The project's working name was
+> v1.0 to v4.1, and every major decision (ADR-001 to ADR-023). The project's working name was
 > `pyopt`; crate names below use the current `heki_*` names.
 
 ---
@@ -143,6 +143,8 @@ Baseline v4.1 (ADR-017) fixed the name `heki`, the interface shared with Ruff an
 incremental LSP design, and the Stage 0-A Wave 2 decisions. ADR-022 wrote heki's scope as five
 points and took imports into it as walls: import facts with the time each import runs, rules
 that need no configuration, the import contracts of other tools, and heki's own import contracts.
+ADR-023 ordered `heki recommend`'s advice by where an invariant is best stated: a standard type
+first, then a convention the code follows, then a contract.
 
 ---
 
@@ -498,6 +500,19 @@ that need no configuration, the import contracts of other tools, and heki's own 
       classes cluster by package); a rate threshold (wrong reports below 5%); an exception for
       `OPT101` and `OPT102` (they are certified like the others, so until then `heki check
       --fix` applies no fix without configuration).
+      *Amended by [ADR-023](#adr-023)*: a suggestion kind of `heki recommend` is certified on a
+      sample, as a kind has thousands of instances (about 11,300 read-only parameter candidates
+      on 41 packages of the development corpus). Two reviewers read 300 groups from at least 30
+      packages, since false claims cluster by package, and find no false claim, which bounds the
+      rate below 1%; a sample of 100 groups from the holdout corpus is read once; the run-time
+      oracle copies each suggested parameter's container at entry and compares it at exit, on
+      the differential test suite and on datamodel-code-generator; and the mechanical checks run
+      on every group: the result parses, it equals the original apart from annotations and the
+      added import, the annotation trial and the verification run find no change, and with
+      every exact suggestion applied `MUT110` reports nothing. A false claim found later is a
+      premise defect, fixed as for a rule. A sample is enough here, where it is not for a rule,
+      because the mechanical checks cover every group and a suggestion is read before it is
+      applied: a false one costs a reviewed edit, not a false report in every run.
   13. **The default set**: a rule runs by default when it is exact and its share of real harm
       is worth the line it prints. For 0.2.0 that is `EFF101`, `EFF103`, `OPT113`, and the
       proven tier of the `OPT` rules once each is certified; `MUT107`, `OPT112`, and `EFF102`
@@ -593,7 +608,8 @@ that need no configuration, the import contracts of other tools, and heki's own 
   3. A catalog entry enters the block only when heki can verify every key it sets. heki cannot
      verify a library's effects, so library entries never enter it; such calls are listed as
      questions, with what a trial entry would report. `src` enters only after its trial.
-  4. Annotations and code changes are never in the block.
+  4. Annotations and code changes are never in the block. Annotations are suggestions of their
+     own, with edits and a verification of their own ([ADR-023](#adr-023)).
   5. Likely truth quotes only published measurements, with their sample, interval, and date,
      or the open premises of these reports; what is not measured is said so. No score is
      synthesized.
@@ -601,6 +617,8 @@ that need no configuration, the import contracts of other tools, and heki's own 
   7. A hypothetical is printed as a conditional and kept out of the block and out of every
      count of reports.
   8. Paths narrower than the project root give a note, and lower the confidence of contracts.
+     *Replaced by [ADR-023](#adr-023) decision 12*: a path selects what is shown, and the
+     analysis covers the project.
   9. The same input gives the same report: caps are counts, never times, and output is sorted.
   10. It writes nothing, runs nothing, and keeps every value the configuration sets.
   11. A cause the facts do not record is shown as not recorded, never guessed.
@@ -695,6 +713,207 @@ that need no configuration, the import contracts of other tools, and heki's own 
   unused declared dependencies (plugins, entry points, and tools are used without an import);
   reporting the sites Ruff's own bans report; translating other tools' files into `[tool.heki]`
   tables (two declarations of one contract).
+
+<a id="adr-023"></a>
+### ADR-023: Type-first advice: `heki recommend` suggests the standard types the code already keeps
+- **Background**: `heki recommend` (ADR-020) proposes contracts for what the code already keeps:
+  the owners of attributes, effect boundaries, read-only returns. Many of these invariants are
+  what a standard annotation says. A `list` parameter that the function and every function it is
+  handed to only read is a `Sequence`; an attribute bound once while its object is constructed
+  is `Final`. A contract is read by heki alone, while an annotation is read by the type checker,
+  the editor, and everyone who reads the signature, and heki already follows read-only parameter
+  types across calls (`MUT110`). On datamodel-code-generator `heki recommend` proposes 90
+  contracts in 502 lines, and 4 of its 5 `write-owners` entries without writers state what
+  `Final` states.
+- **Decision**:
+  1. **Triage.** `heki recommend` puts each invariant it finds in the first of these places that
+     can say it, and prints its sections in this order:
+     1. the code, as a standard type or marker (`Sequence`, `Mapping`, `collections.abc.Set`,
+        `Final`, and later `@final`, `Literal`, and `ReadOnly`): an edit of annotations only,
+        enforced by the type checker where it sees the type and by an exact heki rule where it
+        does not;
+     2. a convention the code already follows (private modules imported only inside their
+        package, `__all__`, the dependency tables): nothing to add, since a rule without
+        configuration reads it;
+     3. a contract in the configuration, for what nothing in the code can say, in its shortest
+        form;
+     4. nowhere: an invariant nothing outside its module reads, one in test, generated, or
+        vendored code, or a claim heki cannot establish.
+
+     A fact the code can state in a standard form needs no second declaration that only heki
+     reads. heki never suggests a change of what runs: no `tuple` or `frozenset` conversion,
+     `frozen=True`, `__slots__`, rename, or import moved under `TYPE_CHECKING`; a proven rewrite
+     stays an `OPT` fix (ADR-007). *Rejected*: contracts first (a second place for a fact the code
+     can state); run-time changes as advice (they need the proof a fix needs, and a maintainer
+     cannot accept them by reading a claim).
+  2. **A suggestion is a claim with premises.** It states what the code keeps as a conjunction of
+     premises, each established or open, as a report does (ADR-018 decision 2), and carries the
+     edits that write the claim in standard typing. It is exact when every premise is
+     established: `Open`, a budget that runs out, or a fact heki lacks stops it. Each premise is
+     a row with one home, and the documentation lists them under "What a suggestion states". A
+     false exact suggestion is a defect of one premise's fact, fixed there with a counterexample.
+     When the claim holds and only a premise of the edit is open (a slice of the parameter is
+     stored, the function is used as a value), the suggestion is heuristic: listed with `--all`,
+     with the open premise and its place, and never in `--diff` or in the editor. When the claim
+     itself is open, nothing is listed, and the open cause is counted under what heki cannot see.
+     Edits that are valid only together form one group, applied whole or not at all: a parameter
+     and the parameters it is handed to, and the same parameter in every definition of an
+     override family. Of 40 read-only parameter candidates judged on the development corpus, 11
+     failed the type check when applied alone, 5 because the value is handed to another
+     annotated parameter and 4 because the method belongs to an override family.
+  3. **Assumptions.** R1 to R5 hold as for exact reports ([ARCHITECTURE.md
+     §3.4](../ARCHITECTURE.md)), and three more:
+     - **T1, annotations stay unread**: nothing reads the function's or its class's annotations
+       at run time except what heki checks for. A decorator outside the decorator table
+       (`heki_effect::decorators`, which gains a column for decorators that leave annotations
+       unread), class machinery the catalog does not list, and a use of the function as a value
+       leave the premise open. A registry that finds functions by scanning a namespace is not
+       seen; where the project has reader sites (`get_type_hints`, `inspect.signature`,
+       `__annotations__`), the notes say where. *Rejected*: one project-wide flag "reads
+       annotations somewhere" (on the development corpus it is set for 18 of 41 packages and
+       removes half of the candidates, while a reader needs the function object, which it gets
+       in one of the four ways above).
+     - **T2, the checked files are the project** (R5 for edits): overriders, implementers, and
+       callers outside the checked files are not known. A suggestion on a public name says so
+       (decision 11).
+     - **T3, a type checker runs**: half of each guard is the type checker's. heki looks for a
+       checker's configuration (`[tool.ty]`, `ty.toml`, `[tool.mypy]`, `mypy.ini`,
+       `[tool.pyright]`, `pyrightconfig.json`, `[tool.pyrefly]`) and says so when it finds none
+       (decision 14).
+  4. **The annotation trial and the verification run.** An annotation is also an input of heki's
+     own analysis (R2): a `set` parameter widened to `Set` no longer has a set's iteration order,
+     a slice of a `Sequence` is no longer known to copy, and a method call on a `Mapping` may
+     reach a project class that implements it. Before a group is shown, heki analyzes each of its
+     files again with the edits applied in memory, on the path the language server takes after
+     an edit, and compares the file's diagnostics with every rule selected and its functions'
+     summaries as Early Cutoff compares them, apart from the fields that restate the annotation.
+     Any difference withholds the group and names the report or fact that changed. The CLI then
+     verifies the whole set in one run over the project, as it verifies the block (ADR-020 rule
+     2): with every exact suggestion applied, the reports equal the reports now. A difference
+     there is a heki defect, printed in the notes; the tests and the corpus gate require none. A
+     suggestion therefore never removes or demotes a report, and never creates a report of its
+     own guard. *Rejected*: the verification run alone (it shows that a report changed, not
+     which group changed it).
+  5. **Advice, not a report or a fix.** A suggestion has no rule code, severity, `select` entry,
+     suppression comment, baseline entry, or exit code. `heki check` never prints one, and
+     `heki check --fix` never applies one: ADR-007 and ADR-011 judge the rewrite of a diagnostic
+     on safety and profitability, and a suggestion is neither a diagnostic nor a change of what
+     runs. Its safety statement is "annotation-only", which heki checks on the result before it
+     prints it: the edited file parses, and it equals the original once annotations and the
+     added import are removed from both syntax trees; a file that fails either check is withheld
+     and named in the notes. `heki recommend` gets no option that writes files:
+     `heki recommend --focus types --diff` prints the exact groups as one unified diff that
+     `git apply` applies, and the command still exits with 0, or 2 when it cannot run (ADR-020).
+     Once applied, a suggestion is enforced like any annotation: the type checker and heki report
+     a violation in the run that reports everything else. *Rejected*: `--fix` or a writing
+     option for suggestions (an edit of public signatures and of several files is the
+     maintainer's to review, and `--diff` leaves applying it to the tools that already do that).
+  6. **Each suggestion names its guard**, what reports a later violation of the type it writes:
+
+     | After the edit | The type checker reports | heki reports | Gap |
+     |---|---|---|---|
+     | a `Sequence` / `Mapping` parameter | a change in the function; handing it to a `list` / `dict` parameter | `MUT110` (exact, on by default, a warning): handing it to a function without annotations, or annotated `Any`, that changes it, any number of calls down | none while a type checker runs |
+     | a `Set` parameter | the same | `MUT110`, once it reads `collections.abc.Set` and `typing.AbstractSet`, which it does before the first `Set` suggestion | none after that |
+     | a `Final` attribute | rebinding where it sees the class | nothing by default; `MUT108` (opt-in, heuristic) reports in-place changes of the container it holds | rebinding in a function that does not see the type |
+     | a read-only constant, attribute, or result (`Final[Sequence[...]]` and the like) | a change through the name; handing it to a `list` parameter | `MUT110`, once its claim grows (decision 7) | none after that |
+     | `@final`, `Literal` | a subclass, an override, another value | nothing; they keep heki's own premises established | none |
+
+     `MUT110` stays a warning (ADR-019). It has no exact report in the default run of the 0.3.0
+     release on the 378 packages of the development corpus, so after adoption its reports are
+     regressions of annotations the maintainer accepted; the first such reports are read before
+     its severity changes, and `lint.severity` makes it fail a run for a team that wants that.
+  7. **`MUT108` is not promoted; `MUT110`'s claim grows.** `Final`, `frozen`, and `NamedTuple`
+     stop rebinding, and the container inside is often filled on purpose (PEP 591 promises no
+     more for `Final`). A review of 50 of `MUT108`'s 169 reports on the development corpus found
+     49 right and none harmful, so it stays opt-in by ADR-018 decision 13. The type that says
+     "not changed" is the read-only declared type, so `MUT110`'s claim grows from parameters to
+     every value declared `Sequence`, `Mapping`, or `Set` (an attribute, a module or class
+     constant, a call result, a property) handed as itself to a function that does not see the
+     type and changes it in place. It keeps the code `MUT110`: its premises stay
+     "read-only by declaration", "passed as itself", and "changed at the line", the read-only
+     judgment keeps its one home (`ParamAccess` in `heki_effect::resolver`), and a baseline keeps
+     holding. The wider claim passes the release gate of ADR-018 and ships before the constant
+     and result kinds it guards. *Rejected*: promoting `MUT108` (right reports that are rarely
+     harmful, by ADR-018 decision 13); a code of its own for the wider claim (one claim is one
+     code, ADR-018 decision 9).
+  8. **JSON version 3.** The JSON object becomes version 3 (`docs/schemas/recommend-3.json`,
+     generated from the types as before) once, in the release that adds suggestions and merges
+     contract candidates with equal owners into one entry with a list of `targets`: the new shape
+     of the contract entries is a change of meaning under the versioning rule, and one change of
+     version in a release is one migration for agents instead of two. A new object
+     `suggestions` holds the counts per kind, the type checker heki found, the groups, and the
+     groups withheld with their reasons. A group has an `id` without a line number (kind, module,
+     qualified name, target, as a baseline key has), its `kind`, `certainty`, `items`, byte-span
+     `edits` with a path each (a group can span files), `premises`, `open`, `related`, `guards`,
+     and `labels`. Lists hold at most 50 entries and say when they hold fewer than there are;
+     `--all` lifts the cap.
+  9. **In the editor, a hint and an action, no diagnostic.** The server's diagnostics stay what
+     `heki check` reports. A suggestion reaches the editor as an inlay hint after the annotation,
+     with the claim and the guard in its tooltip, on functions edited in the session
+     (`heki server --suggestions edited|all|off`, default `edited`), and as a code action
+     `refactor.rewrite.heki.annotate` whose workspace edit holds every edit of the group: never a
+     quick fix and never the preferred action. Groups over 8 edits or 3 files are left to the
+     CLI. For every file the server's groups equal those of
+     `heki recommend FILE --focus types --output-format json`, since both run the same function
+     over the index and the file's IR, and `lsp_oracle.rs` checks it. The hint and the action are
+     experimental, as `behavior.server-suggestions`. *Rejected*: a diagnostic of hint severity
+     (it would put suggestions among reports, where agents that read diagnostics act on them,
+     and the server's diagnostics would no longer equal `heki check`'s); the code action alone
+     (it is found only by asking).
+  10. **No note in `heki check --touched`.** It would repeat at every commit for a suggestion the
+      maintainer declined, and there is no dismissal (decision 16). The editor and an agent's
+      finish loop (`heki recommend --touched FILES --focus types`) are where suggestions reach
+      people.
+  11. **Labels.** `Sequence[str]` also admits a plain `str`, which `list[str]` rejects, so a
+      suggestion for a `list[str]` parameter is heuristic: labelled `list[str]`, left out of the
+      default list and of `--diff`, and shown with `--all`. Widening a parameter keeps every
+      caller valid, and only a subclass outside the project that overrides the method with `list`
+      gets a type error of its own (T2), so a suggestion on a name with no leading underscore
+      along its dotted name is shown, labelled `public`, and ranked like the others. A group
+      that holds an override family is labelled `family`.
+  12. **Paths select what is shown.** `heki recommend [PATHS]` analyzes the project the paths are
+      in and shows what concerns them: a directory gives the advice for that subpackage, a file
+      its suggestions. This replaces ADR-020 rule 8, under which a narrower path narrowed the
+      analysis and lowered every confidence, which no use of the command wants. `--touched
+      FILE...`, as in `heki check`, shows the groups with an edit in one of the files, and
+      `FILE:FIRST-LAST` the groups whose function overlaps those lines, for an agent that
+      changed part of a file.
+  13. **Generated and vendored code.** A file whose leading comment says it is generated
+      (`generated`, `DO NOT EDIT`) gets no suggestion, nor does a function a stub (`.pyi`)
+      declares, and the notes count them: the next generation drops the edit, and the type
+      checker reads the stub, not the edited source. Vendored directories are left to `exclude`,
+      since a directory name is no fact about the code.
+  14. **Projects without a type checker.** Read-only parameters are suggested with a note, since
+      `MUT110`'s half of their guard runs without one; `Final`, `@final`, and `Literal`, which
+      only the type checker would guard, are held back.
+  15. **Ratchets.** `heki recommend` also proposes changes that cost nothing today and report only
+      regressions: an exact rule that is off and has no report here, named in `extend-select`
+      (experimental exact rules such as `MUT101` and `MUT111` in a list apart that says they are
+      experimental), and an owner contract with `unresolved = "ignore"` whose trial with
+      `"report"` reports nothing. A heuristic rule is never proposed this way: a rule with no
+      report today can still print a false one tomorrow (ADR-018).
+  16. **No dismissal in the first release.** Suggestions are shown when asked for, the editor's
+      hint follows only edited functions, and `MutableSequence` or `MutableMapping` states the
+      opposite intent in the code, which heki never proposes to narrow. There is no new
+      suppression syntax and no configuration. If users ask for a dismissal, it is
+      `[tool.heki.recommend] ignore = [<id patterns>]`, in kebab-case under `[tool.heki]`
+      (ADR-017).
+  17. **No `@override`.** heki knows every override and could print the patch that marks them,
+      but the marker protects against a renamed base method, which the type checkers report
+      themselves when asked, and no fact heki establishes depends on it. `@final` is different:
+      it keeps an "every implementation" premise established against a later subclass, so once
+      the decorator table has a `final` row it is suggested where an exact report or an
+      established premise goes through the class or method, and nowhere else. *Rejected*:
+      `@override` suggestions for now (to revisit as a `--focus` of its own if users ask).
+  18. **A new kind passes the gate of a rule.** Each kind ships after counts on the corpus and the
+      certification of ADR-018 decision 12 as amended (a judged sample with no false claim, the
+      mechanical checks on every group), and gets a step in `lsp_oracle.rs`. The first kinds are
+      read-only container parameters, then attributes bound once while their object is
+      constructed, shown only when read in at least 2 modules other than their class's. Container
+      constants, read-only results, parameter classes, `Literal`, `@final`, existing read-only
+      views, and `ReadOnly` keys each wait for their own measurement.
+- **Status**: decided, not implemented yet. The parts ship under `command.recommend`, which is
+  experimental, so what it prints and its JSON object can change in the releases that add them.
 
 ---
 

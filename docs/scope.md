@@ -520,7 +520,10 @@ in order:
 
 1. **Can the syntax of one file decide it?** Then it belongs in a linter such as Ruff.
 2. **Is it a type error, or can an annotation express it?** Then it belongs in a type checker
-   such as ty.
+   such as ty. heki's part is to say where the code already keeps what such an annotation would
+   state, so that the annotation can be written and the type checker checks it from then on
+   (planned in [`heki recommend`](recommend.md),
+   [ADR-023](https://github.com/koxudaxi/heki/blob/main/docs/DESIGN_HISTORY_AND_ADR.md#adr-023)).
 3. **Can one import statement decide it?** Its order, its form, or a banned name: then it
    belongs in a linter such as Ruff.
 4. **Does it need at least one of the proofs below?** Only then is it a heki rule.
