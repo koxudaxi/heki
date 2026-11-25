@@ -329,11 +329,11 @@ impl ProjectDecls {
                 return true;
             };
             let binding_is_field = || {
-                let Some(own) = d.init_fields.as_deref() else {
-                    return false;
-                };
-                own.fields.iter().any(|f| {
-                    &*f.name == attr && (own.named_tuple || self.default_runs_nothing(&f.default))
+                d.init_fields.as_deref().is_some_and(|own| {
+                    own.fields.iter().any(|f| {
+                        &*f.name == attr
+                            && (own.named_tuple || self.default_runs_nothing(&f.default))
+                    })
                 })
             };
             (!d.members.contains(attr) || !d.properties.contains(attr) && binding_is_field())

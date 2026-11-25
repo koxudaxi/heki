@@ -18,7 +18,7 @@
 //! holding a positional argument.
 //!
 //! Every fixture marks the lines `EFF201` reports in `pkg/passes.py`: `# writes` for a write of
-//! `Field.required`, `# unresolved` for a call heki cannot resolve.
+//! `Field.required`, `# unresolved` for a call heki cannot resolve, `# unknown class` for a write on an object of unknown class.
 
 mod common;
 
@@ -56,7 +56,7 @@ def noop(field: Field) -> bool:
     return False
 "#;
 
-/// `(line, kind)` of every `EFF201` report in `pkg/passes.py`: `writes` or `unresolved`.
+/// `(line, kind)` of every `EFF201` report in `pkg/passes.py`: `writes`, `unresolved` or `unknown class`.
 fn reported(p: &Project) -> Vec<(u64, &'static str)> {
     let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
     assert!(code == 0 || code == 1, "exit {code}: {stdout}{stderr}");
@@ -68,6 +68,8 @@ fn reported(p: &Project) -> Vec<(u64, &'static str)> {
             let message = d["message"].as_str().unwrap();
             let kind = if message.contains("cannot resolve") {
                 "unresolved"
+            } else if message.contains("on an object of unknown class") {
+                "unknown class"
             } else if message.contains("writes `Field.required`") {
                 "writes"
             } else {
@@ -80,17 +82,20 @@ fn reported(p: &Project) -> Vec<(u64, &'static str)> {
     out
 }
 
-/// `(line, kind)` of every line of `text` ending in `# writes` or `# unresolved`.
+/// `(line, kind)` of every line of `text` ending in a comment `# kind` or `# kind, kind`.
 fn marked(text: &str) -> Vec<(u64, &'static str)> {
     let mut out = Vec::new();
     for (i, line) in text.lines().enumerate() {
-        let line = line.trim_end();
-        for kind in ["writes", "unresolved"] {
-            if line.ends_with(&format!("# {kind}")) {
+        let Some((_, comment)) = line.trim_end().rsplit_once("  # ") else {
+            continue;
+        };
+        for kind in ["writes", "unresolved", "unknown class"] {
+            if comment.split(", ").any(|c| c == kind) {
                 out.push((i as u64 + 1, kind));
             }
         }
     }
+    out.sort();
     out
 }
 
@@ -796,4 +801,412 @@ def directly() -> Field:
     return made
 "#,
     );
+}
+
+const FIELD_SHAPE_DEFS: &str = r#"from __future__ import annotations
+
+import dataclasses
+import typing
+from abc import ABC
+from collections.abc import Callable
+from dataclasses import KW_ONLY, InitVar, dataclass, field
+from typing import ClassVar, NamedTuple
+
+from pkg.model import Field, noop, require
+
+KW = True
+
+
+class Meta(type):
+    pass
+
+
+@dataclass(frozen=True)
+class Skipped:
+    run: Callable[[Field], bool]
+    typing.unused: int
+    count: ClassVar[int] = 0
+
+
+@dataclass(frozen=True)
+class After:
+    name: str
+    _: KW_ONLY
+    run: Callable[[Field], bool] = noop
+
+
+@dataclass(frozen=True)
+class Init:
+    run: Callable[[Field], bool]
+    scale: InitVar[int]
+
+
+@dataclass(frozen=True)
+class Twice:
+    run: Callable[[Field], bool]
+    run: Callable[[Field], bool]
+
+
+@dataclass(frozen=True)
+class Rebound:
+    run: Callable[[Field], bool] = noop
+    run = require
+
+
+@dataclass(frozen=True, kw_only=True)
+class AllKeywords:
+    run: Callable[[Field], bool]
+
+
+@dataclass(frozen=True, kw_only=KW)
+class MaybeKeywords:
+    run: Callable[[Field], bool]
+
+
+@dataclass(frozen=True)
+class Factory:
+    run: Callable[[Field], bool] = field(default_factory=lambda: require)
+    other: Callable[[Field], bool] = field(default=noop)
+
+
+@dataclass(frozen=True)
+class MaybeKeyword:
+    run: Callable[[Field], bool] = field(default=require, kw_only=KW)
+
+
+@dataclass(frozen=True)
+class Positional:
+    run: Callable[[Field], bool] = field(noop)
+
+
+class Tuple(NamedTuple):
+    run: Callable[[Field], bool] = field(default=require)
+
+
+@dataclass(frozen=True)
+class Metaed(metaclass=Meta):
+    run: Callable[[Field], bool]
+
+
+@dataclass(frozen=True)
+class MetaedChild(Metaed):
+    pass
+
+
+@dataclass(frozen=True)
+class Abstract(ABC):
+    run: Callable[[Field], bool]
+    other: Callable[[Field], bool] = lambda f: True
+    handler: ClassVar[Callable[[Field], bool]] = noop
+
+
+@dataclass(frozen=True)
+class Open:
+    run: Callable[[Field], bool]
+
+
+class Hooked(Open):
+    def __getattribute__(self, name: str) -> object:
+        return super().__getattribute__(name)
+
+
+@dataclass(frozen=True)
+class Narrowed(Abstract):
+    run: Callable[[Field], bool] = noop
+
+
+@dataclass(frozen=True)
+class Required:
+    name: str = "a"
+    run: Callable[[Field], bool] = field(kw_only=True)
+
+
+class Items(NamedTuple):
+    run: Callable[[Field], bool]
+    never: Callable[[Field], bool] | None = None
+    other: Callable[[Field], bool] = lambda f: True
+"#;
+
+const FIELD_SHAPE_CALLS: &str = r#"from __future__ import annotations
+
+from pkg.defs import (
+    Abstract,
+    After,
+    AllKeywords,
+    Factory,
+    Hooked,
+    Init,
+    Open,
+    Items,
+    Metaed,
+    MetaedChild,
+    MaybeKeyword,
+    MaybeKeywords,
+    Narrowed,
+    Positional,
+    Rebound,
+    Required,
+    Skipped,
+    Tuple,
+    Twice,
+)
+from pkg.model import Field, noop, require
+
+
+def a_non_field_annotation(field: Field) -> bool:
+    return Skipped(require).run(field)  # writes
+
+
+def after_the_keyword_only_marker(field: Field) -> bool:
+    return After("a", run=require).run(field)  # writes
+
+
+def an_init_only_variable(field: Field) -> bool:
+    return Init(require, 1).run(field)  # unresolved
+
+
+def a_field_declared_twice(field: Field) -> bool:
+    return Twice(require).run(field)  # unresolved
+
+
+def a_field_bound_twice(field: Field) -> bool:
+    return Rebound().run(field)  # unresolved
+
+
+def a_class_of_keyword_only_fields(field: Field) -> bool:
+    return AllKeywords(run=require).run(field)  # writes
+
+
+def a_class_that_may_be_keyword_only(field: Field) -> bool:
+    return MaybeKeywords(require).run(field)  # unresolved
+
+
+def a_default_factory(field: Field) -> bool:
+    return Factory().other(field)
+
+
+def a_factory_result_is_not_known(field: Field) -> bool:
+    return Factory().run(field)  # unresolved
+
+
+def a_field_that_may_be_keyword_only(field: Field) -> bool:
+    return MaybeKeyword().run(field)  # unresolved
+
+
+def a_field_given_a_positional_argument(field: Field) -> bool:
+    return Positional().run(field)  # unresolved
+
+
+def a_named_tuple_given_a_field_call(field: Field) -> bool:
+    return Tuple().run(field)  # unresolved
+
+
+def a_required_keyword_only_field(field: Field) -> bool:
+    return Required(run=require).run(field)  # writes
+
+
+def a_field_passed_twice(field: Field) -> bool:
+    return Items(require, run=require).run(field)  # unresolved
+
+
+def a_field_never_passed(field: Field) -> bool:
+    return Items().run(field)  # unresolved
+
+
+def an_argument_no_field_takes(field: Field) -> bool:
+    return Items(require, None, noop, noop).run(field)  # unresolved
+
+
+def a_keyword_no_field_takes(field: Field) -> bool:
+    return Items(require, extra=noop).run(field)  # unresolved
+
+
+def a_field_left_at_none(field: Field) -> bool:
+    return Items(require).never(field)  # unresolved
+
+
+def a_field_left_at_a_lambda(field: Field) -> bool:
+    return Items(require).other(field)  # unresolved
+
+
+def a_class_with_a_metaclass(field: Field) -> bool:
+    return Metaed(require).run(field)  # unresolved
+
+
+def a_subclass_of_a_class_with_a_metaclass(field: Field) -> bool:
+    return MetaedChild(require).run(field)  # unresolved
+
+
+def a_class_with_an_abstract_base(field: Field) -> bool:
+    return Abstract(require).run(field)  # writes
+
+
+def a_dataclass_field_left_at_a_lambda(field: Field) -> bool:
+    return Abstract(require).other(field)  # unresolved
+
+
+def a_field_passed_where_a_default_may_be_a_descriptor(field: Field) -> bool:
+    return Abstract(require, other=require).other(field)  # unresolved
+
+
+def a_class_whose_subclass_runs_code_on_reads(field: Field) -> bool:
+    return Open(require).run(field)  # unresolved
+
+
+def an_attribute_that_is_no_field(field: Field) -> bool:
+    return Abstract(require).handler(field)
+
+
+def a_field_declared_again(field: Field) -> bool:
+    return Narrowed().run(field)
+"#;
+
+/// The shapes a field list is read from: an annotation of an attribute, a `ClassVar`, the
+/// `KW_ONLY` marker and a `field` call with every keyword it takes; each shape the reader
+/// cannot follow (an `InitVar`, a name declared or bound twice, a flag that is no literal, a
+/// positional argument to `field`) leaves the call unresolved.
+#[test]
+fn a_field_list_is_read_from_every_declaration_shape() {
+    check_marks(
+        "function_values_shapes",
+        FIELD_SHAPE_DEFS,
+        FIELD_SHAPE_CALLS,
+    );
+}
+
+const PARTIAL_LIBRARY_DEFS: &str = r#"from __future__ import annotations
+
+import dataclasses
+from functools import partial
+
+from pkg.model import Field
+
+
+def copy_field(field: Field, *, deep: bool = True) -> Field:
+    return Field()
+
+
+class Copier:
+    _copy = staticmethod(partial(copy_field, deep=False))
+    _library = staticmethod(partial(dataclasses.replace, name="x"))
+
+    def with_keywords(self, field: Field) -> Field:
+        copied = self._library(field)
+        copied.required = True
+        return copied
+
+    def copy_required(self, field: Field) -> Field:
+        copied = self._copy(field)
+        copied.required = True
+        return copied
+
+
+class Replacing(Copier):
+    _copy = staticmethod(partial(dataclasses.replace))
+
+
+def a_read_of_the_attribute(field: Field) -> Field:
+    copy = Copier._copy
+    copied = copy(field)
+    copied.required = True
+    return copied
+
+
+def a_read_on_an_instance(field: Field) -> Field:
+    copy = Copier()._copy
+    copied = copy(field)
+    copied.required = True
+    return copied
+"#;
+
+const PARTIAL_LIBRARY_CALLS: &str = r#"from __future__ import annotations
+
+from pkg.defs import Copier, a_read_of_the_attribute, a_read_on_an_instance
+from pkg.model import Field
+
+
+def library_keywords(field: Field) -> Field:
+    return Copier().with_keywords(field)  # unknown class, unresolved
+
+
+def subclasses_binding_other_callables(copier: Copier, field: Field) -> Field:
+    return copier.copy_required(field)  # unresolved, writes
+
+
+def read_through_the_class(field: Field) -> Field:
+    return a_read_of_the_attribute(field)  # unresolved, writes
+
+
+def read_through_an_instance(field: Field) -> Field:
+    return a_read_on_an_instance(field)  # unresolved, writes
+"#;
+
+/// A partial class attribute holding keywords for a library function leaves the call
+/// unresolved (the catalog reads the arguments the call shows), and so does one a subclass
+/// binds to another callable; reading the attribute first and calling the value resolves it.
+#[test]
+fn a_partial_class_attribute_is_followed_through_reads_and_subclasses() {
+    check_marks(
+        "function_values_partial_reads",
+        PARTIAL_LIBRARY_DEFS,
+        PARTIAL_LIBRARY_CALLS,
+    );
+}
+
+const GLOBAL_DEFS: &str = r#"from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TypeVar
+
+import mystery
+
+from pkg.model import Field, noop, require
+
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class Spec:
+    when: Callable[[Field], bool] | None = None
+
+
+class Builder:
+    def partial(self, f: Callable[[Field], bool]) -> Callable[[Field], bool]:
+        return f
+
+
+class Held:
+    run = Builder().partial(require)
+
+
+MIXED = {"b": mystery.make(), "a": Spec(when=require), "c": Spec(when=noop)}
+DECLARED: dict[str, T] = {"a": require}
+"#;
+
+const GLOBAL_CALLS: &str = r#"from __future__ import annotations
+
+from pkg.defs import DECLARED, MIXED, Held
+from pkg.model import Field
+
+
+def a_table_with_an_unknown_value_first(field: Field) -> bool:
+    spec = MIXED["a"]
+    return spec.when is not None and spec.when(field)  # writes
+
+
+def a_global_whose_declared_items_are_no_class(field: Field) -> bool:
+    return DECLARED["a"](field)  # writes
+
+
+def a_class_attribute_a_method_call_gives(field: Field) -> bool:
+    return Held.run(field)  # unresolved
+"#;
+
+/// A table keeps the entries it types when another value is of unknown type, a declaration
+/// whose items name no class takes the items of what is stored, and a class attribute bound
+/// by a method call (not by the module's own `functools` call) is no partial.
+#[test]
+fn a_global_and_a_class_attribute_keep_what_they_are_bound_to() {
+    check_marks("function_values_globals", GLOBAL_DEFS, GLOBAL_CALLS);
 }

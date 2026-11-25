@@ -708,12 +708,12 @@ impl<'f> ReturnFacts<'_, 'f> {
                 .iter()
                 .map(|v| {
                     let t = inferred.ty(*v)?;
-                    match (&d.returned, &declared) {
-                        (Returned::Narrower(_), Some(declared)) => {
-                            project.narrower(t, declared, self.cx.kb).then(|| t.clone())
-                        }
-                        (Returned::Narrower(_), None) => None,
-                        (Returned::Named, _) => (!t.named().is_empty()).then(|| t.clone()),
+                    match &d.returned {
+                        Returned::Narrower(_) => declared
+                            .as_ref()
+                            .is_some_and(|declared| project.narrower(t, declared, self.cx.kb))
+                            .then(|| t.clone()),
+                        Returned::Named => (!t.named().is_empty()).then(|| t.clone()),
                     }
                 })
                 .collect::<Vec<_>>()
