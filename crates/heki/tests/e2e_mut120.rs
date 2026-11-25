@@ -499,7 +499,8 @@ def through_the_view(view: TagsView) -> None:
 #[test]
 fn mut120_reads_set_abc_properties_as_read_only() {
     let p = Project::new("mut120_set_view");
-    p.write("pkg/__init__.py", "").write("pkg/views.py", SET_VIEW);
+    p.write("pkg/__init__.py", "")
+        .write("pkg/views.py", SET_VIEW);
     let diags = diagnostics(&p, &["--select", "MUT120"]);
     assert_eq!(
         found(&diags),

@@ -793,7 +793,8 @@ def fill(config: Config, holder: Holder) -> None:
 #[test]
 fn mut108_set_abc_fields_hold_containers() {
     let p = Project::new("mut108_set_fields");
-    p.write("pkg/__init__.py", "").write("pkg/model.py", SET_FIELDS);
+    p.write("pkg/__init__.py", "")
+        .write("pkg/model.py", SET_FIELDS);
     let m = "pkg/model.py";
     assert_eq!(
         found(&diagnostics(&p, &["--select", "MUT108"])),

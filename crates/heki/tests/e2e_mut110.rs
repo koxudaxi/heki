@@ -814,7 +814,10 @@ fn mut110_reads_the_set_abcs_in_every_spelling_the_mapping_takes() {
         message(at(&diags, s, 36)),
         "`spelled` passes its read-only parameter `a` to `pkg.spellings.grow`; whenever line 16 of `grow` runs, it changes the caller's object in place"
     );
-    assert_eq!(chain(at(&diags, s, 36)), vec![(s.into(), 36), (s.into(), 16)]);
+    assert_eq!(
+        chain(at(&diags, s, 36)),
+        vec![(s.into(), 36), (s.into(), 16)]
+    );
     assert_eq!(
         at(&diags, s, 36)["help"],
         "pass a copy (`list(a)` / `dict(a)` / `set(a)`), or annotate the helper's parameter with a mutable type"
