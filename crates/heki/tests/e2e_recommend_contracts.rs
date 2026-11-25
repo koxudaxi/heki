@@ -577,6 +577,39 @@ fn a_class_pattern_is_kept_only_after_its_trial() {
 }
 
 #[test]
+fn a_class_pattern_leaves_an_effect_boundary_its_scopes() {
+    let p = owners("recommend_contract_pattern_and_boundary");
+    p.write(
+        "lib/a.py",
+        "def one() -> int:\n    return 1\n\n\ndef two() -> int:\n    return 2\n",
+    )
+    .write("lib/b.py", "def three() -> int:\n    return 3\n");
+    let report = recommend_json(&p, &["--all"]);
+    let scopes = scopes_of(&report, "lib");
+    assert_eq!(scopes, ["lib:*", "lib.*:*"], "{report:#}");
+    let block = report["config_toml"].as_str().unwrap();
+    assert!(block.contains("app.models:Cart.*"), "{block}");
+    p.write(
+        "pyproject.toml",
+        &applied("[project]\nname = \"t\"\n", block),
+    );
+    let forbidden = |p: &Project| -> Vec<String> {
+        checked(p, &[])
+            .iter()
+            .filter(|d| d["rule_code"] == "EFF201")
+            .map(|d| d["path"].as_str().unwrap().to_owned())
+            .filter(|path| path.starts_with("lib/"))
+            .collect()
+    };
+    assert_eq!(forbidden(&p), Vec::<String>::new());
+    p.write(
+        "lib/b.py",
+        "import time\n\n\nasync def three() -> None:\n    time.sleep(1)\n",
+    );
+    assert_eq!(forbidden(&p), ["lib/b.py"]);
+}
+
+#[test]
 fn blocks_past_the_first_three_of_a_kind_are_counted() {
     let p = owners("recommend_contract_blocks_shown");
     let report = recommend_json(&p, &["--ignore", "EFF201"]);
