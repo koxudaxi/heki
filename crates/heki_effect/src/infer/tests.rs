@@ -1230,7 +1230,7 @@ fn calls_on_unions_and_protocols_resolve_class_by_class() {
 }
 
 #[test]
-fn names_of_other_modules_that_are_no_classes_type_nothing() {
+fn imported_aliases_name_their_class_and_type_vars_nothing() {
     let m2 = r#"
 from typing import TypeVar
 
@@ -1248,9 +1248,10 @@ def f(a: Alias, t: "T", items: "list[Alias]"):
         pass
 "#;
     let t = types_at(&[("m", m), ("m2", m2)], PythonVersion::PY311, "f");
-    for name in ["x", "y", "z"] {
-        assert!(of(&t, name).is_empty(), "{name}: {:?}", of(&t, name));
-    }
+    // `Alias` is a type alias of `list[int]` bound once: an annotation naming it names a list.
+    assert_eq!(of(&t, "x"), one("builtins.list"));
+    assert_eq!(of(&t, "z"), one("builtins.list"));
+    assert!(of(&t, "y").is_empty(), "y: {:?}", of(&t, "y"));
     assert_eq!(of(&t, "items"), one("builtins.list"));
 }
 
@@ -1305,7 +1306,8 @@ def f(
     assert!(of(&t, "called").is_empty());
     assert_eq!(of(&t, "merged"), one("builtins.dict"));
     assert_eq!(of(&t, "from_none"), one("builtins.dict"));
-    assert!(of(&t, "alias").is_empty());
+    // `list[Model]` is an alias of the class `list`: calling it constructs a list.
+    assert_eq!(of(&t, "alias"), one("ref builtins.list"));
     assert!(of(&t, "sliced").is_empty());
     assert_eq!(of(&t, "any_item"), one("m.Field | m.Model"));
     // A starred target would shift the positions: no position is trusted, any item can be there.

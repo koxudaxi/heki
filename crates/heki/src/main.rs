@@ -155,6 +155,10 @@ struct CheckArgs {
     /// apply their proven-safe rewrites, in every function.
     #[arg(long)]
     include_size_dependent: bool,
+    /// With `--fix` or `--diff`, also apply the unsafe fixes, which change what the program does
+    /// in a way the rule's page states (`MUT118`).
+    #[arg(long)]
+    unsafe_fixes: bool,
     /// Preview fixes as a unified diff without writing files.
     #[arg(long)]
     diff: bool,

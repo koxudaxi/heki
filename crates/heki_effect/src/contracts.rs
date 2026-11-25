@@ -168,4 +168,11 @@ pub trait Contracts: Debug + Send + Sync {
     /// it names (`allowed-protocols`): the write sites then tell the writes through a protocol
     /// (`TypedFieldWriteSite::through_protocol`).
     fn write_protocols(&self) -> bool;
+
+    /// Whether an effect boundary judges writes with `fresh-objects = "allow"`: a write that a
+    /// function its scopes reach makes to the object a parameter holds constructs it when every
+    /// call reaching the function hands it a new one, so every function with parameters tells
+    /// the writes and call arguments that are its parameters' objects nothing kept yet
+    /// (`Construction::Param`, `NewArg::Param`), not only the private helpers.
+    fn judges_handed_objects(&self) -> bool;
 }

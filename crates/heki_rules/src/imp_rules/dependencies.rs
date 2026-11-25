@@ -11,7 +11,9 @@ use crate::{CheckContext, ProjectLayout, RuleSelection};
 use heki_diagnostics::Diagnostic;
 use heki_effect::ProjectIndex;
 use heki_effect::code_kind::CodeKind;
-use heki_effect::imports::{DeclaredOnly, Distributions, ImportGraph, ImportHop, ModuleRef, Only};
+use heki_effect::imports::{
+    DeclaredOnly, Distributions, ImportFailure, ImportGraph, ImportHop, ModuleRef, Only,
+};
 use heki_effect::resolver::ProjectDecls;
 use heki_env::HekiConfig;
 use heki_kb::EffectiveEcosystemKb;
@@ -110,7 +112,7 @@ fn findings(
             let Some(e @ ModuleRef::External(_)) = target.certain() else {
                 continue;
             };
-            if !site.always_imports_uncaught() {
+            if !site.always_imports_leaving(ImportFailure::MissingModule) {
                 continue;
             }
             let found = only
@@ -285,8 +287,9 @@ fn report(
             }
             message.push_str(&format!(", and the project declares {declared}"));
             let help = format!(
-                "declare {} in `[project] dependencies`, or import `{imported}` only inside the \
-                 functions that use it",
+                "declare {} in `[project] dependencies`, import `{imported}` only inside the \
+                 functions that use it, or give it a fallback under `except \
+                 ModuleNotFoundError:`",
                 listed(&names)
             );
             (message, help)

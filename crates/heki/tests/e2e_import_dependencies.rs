@@ -193,6 +193,14 @@ fn each_rule_reports_its_imports_in_a_src_layout() {
         "`<module>` imports `freezegun` while `acme.clock` loads, and the project declares \
          `freezegun`, which provides it, only in the development group `test`"
     );
+    let clock = (found.iter())
+        .find(|d| d["path"] == "src/acme/clock.py")
+        .unwrap();
+    assert_eq!(
+        clock["help"],
+        "declare `freezegun` in `[project] dependencies`, import `freezegun` only inside the \
+         functions that use it, or give it a fallback under `except ModuleNotFoundError:`"
+    );
     let report = (found.iter())
         .find(|d| d["target"] == "scripts.seed")
         .unwrap();
@@ -292,6 +300,148 @@ fn a_distribution_in_an_extra_and_a_group_is_an_extras() {
     );
 }
 
+/// A module that is not installed raises `ModuleNotFoundError`: a handler taking it gives the
+/// package a fallback, and none of the three rules reports the import. A handler of other
+/// classes, one that raises again, and a `finally` body leave every report; a handler of the
+/// `try` around a nested one takes what the nested one passes on.
+#[test]
+fn a_handler_taking_the_missing_module_silences_the_rules() {
+    let p = src_layout();
+    // `import acme.extras` loads the submodule; `from acme import extras` may take a name the
+    // package binds instead.
+    p.write(
+        "src/acme/__init__.py",
+        "import acme.extras\nimport acme.guarded\n",
+    );
+    let wrapped = |import: &str, handler: &str| format!("try:\n    {import}\n{handler}");
+    let nested = |import: &str, inner: &str, outer: &str| {
+        format!("try:\n    try:\n        {import}\n{inner}{outer}")
+    };
+    type Shape = Box<dyn Fn(&str) -> String>;
+    let reported = [
+        "IMP104 [tests.factories]",
+        "IMP301 [pytest]",
+        "IMP302 [redis]",
+    ];
+    let cases: Vec<(&str, Shape, &[&str])> = vec![
+        (
+            "a handler of the missing module",
+            Box::new(move |i| wrapped(i, "except ModuleNotFoundError:\n    fallback = None\n")),
+            &[],
+        ),
+        (
+            "a tuple holding it",
+            Box::new(move |i| {
+                wrapped(
+                    i,
+                    "except (ModuleNotFoundError, OSError):\n    fallback = None\n",
+                )
+            }),
+            &[],
+        ),
+        (
+            "an import error handler",
+            Box::new(move |i| wrapped(i, "except ImportError:\n    fallback = None\n")),
+            &[],
+        ),
+        (
+            "a handler of other classes",
+            Box::new(move |i| wrapped(i, "except (KeyError, OSError):\n    fallback = None\n")),
+            &reported,
+        ),
+        (
+            "a handler that raises it again",
+            Box::new(move |i| wrapped(i, "except ModuleNotFoundError:\n    raise\n")),
+            &reported,
+        ),
+        (
+            "a handler that raises another error",
+            Box::new(move |i| {
+                wrapped(
+                    i,
+                    "except ImportError as e:\n    raise RuntimeError(\"install the extra\") from e\n",
+                )
+            }),
+            &reported,
+        ),
+        (
+            "a `finally` body",
+            Box::new(move |i| wrapped(i, "finally:\n    fallback = None\n")),
+            &reported,
+        ),
+        (
+            "the outer handler takes what the nested one passes on",
+            Box::new(move |i| {
+                nested(
+                    i,
+                    "    except OSError:\n        fallback = None\n",
+                    "except ModuleNotFoundError:\n    fallback = None\n",
+                )
+            }),
+            &[],
+        ),
+        (
+            "the outer handler takes what the nested one raises again",
+            Box::new(move |i| {
+                nested(
+                    i,
+                    "    except ModuleNotFoundError:\n        raise\n",
+                    "except ImportError:\n    fallback = None\n",
+                )
+            }),
+            &[],
+        ),
+        (
+            "neither handler takes it",
+            Box::new(move |i| {
+                nested(
+                    i,
+                    "    except KeyError:\n        fallback = None\n",
+                    "except OSError:\n    fallback = None\n",
+                )
+            }),
+            &reported,
+        ),
+    ];
+    let modules = [
+        ("src/acme/guarded.py", "import pytest"),
+        ("src/acme/extras.py", "import redis"),
+        ("src/acme/optional_tests.py", "from tests import factories"),
+    ];
+    for (why, shape, expected) in &cases {
+        for (path, import) in modules {
+            p.write(path, &shape(import));
+        }
+        let mut found: Vec<String> = (diagnostics(&p).iter())
+            .filter(|d| modules.iter().any(|(path, _)| d["path"] == *path))
+            .map(|d| {
+                format!(
+                    "{} [{}]",
+                    d["rule_code"].as_str().unwrap(),
+                    d["target"].as_str().unwrap()
+                )
+            })
+            .collect();
+        found.sort();
+        assert_eq!(found, *expected, "{why}");
+    }
+    // In a function, a handler that returns gives the caller a fallback.
+    for (handler, reported) in [("ModuleNotFoundError", false), ("KeyError", true)] {
+        p.write(
+            "src/acme/optional_tests.py",
+            &format!(
+                "def sample():\n    try:\n        from tests import factories\n    except {handler}:\n        return None\n    return factories\n"
+            ),
+        );
+        let found = reports(&p);
+        assert_eq!(
+            found.contains(&"src/acme/optional_tests.py:3 IMP104 [tests.factories]".to_owned()),
+            reported,
+            "{handler}: {found:#?}"
+        );
+    }
+}
+
 /// A handler around an import on the way from the base module: importing it does not fail.
 #[test]
 fn a_handled_import_on_the_way_breaks_the_chain() {
@@ -302,6 +452,22 @@ fn a_handled_import_on_the_way_breaks_the_chain() {
     );
     let found = reports(&p);
     assert!(!found.iter().any(|r| r.contains("cache.py")), "{found:#?}");
+    // A handler of the missing module below it gives `Cache` a fallback; one raising it again
+    // does not.
+    for (handler, reported) in [("    Cache = None\n", false), ("    raise\n", true)] {
+        p.write(
+            "src/acme/__init__.py",
+            &format!(
+                "try:\n    from acme.cache import Cache\nexcept ModuleNotFoundError:\n{handler}"
+            ),
+        );
+        let found = reports(&p);
+        assert_eq!(
+            found.contains(&"src/acme/cache.py:1 IMP302 [redis]".to_owned()),
+            reported,
+            "{handler}: {found:#?}"
+        );
+    }
     // On one branch only, it need not run.
     p.write(
         "src/acme/__init__.py",

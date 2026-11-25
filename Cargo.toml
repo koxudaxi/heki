@@ -15,7 +15,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT"
@@ -26,16 +26,16 @@ description = "Experimental static checker for Python that tracks side effects a
 [workspace.dependencies]
 # Internal crates (crates.io needs a version next to each path; it must equal
 # `workspace.package.version`, which the release workflow checks)
-heki_ast = { path = "crates/heki_ast", version = "0.4.0" }
-heki_env = { path = "crates/heki_env", version = "0.4.0" }
-heki_semantic = { path = "crates/heki_semantic", version = "0.4.0" }
-heki_ir = { path = "crates/heki_ir", version = "0.4.0" }
-heki_kb = { path = "crates/heki_kb", version = "0.4.0" }
-heki_soundness = { path = "crates/heki_soundness", version = "0.4.0" }
-heki_effect = { path = "crates/heki_effect", version = "0.4.0" }
-heki_rules = { path = "crates/heki_rules", version = "0.4.0" }
-heki_diagnostics = { path = "crates/heki_diagnostics", version = "0.4.0" }
-heki_lsp = { path = "crates/heki_lsp", version = "0.4.0" }
+heki_ast = { path = "crates/heki_ast", version = "0.5.0" }
+heki_env = { path = "crates/heki_env", version = "0.5.0" }
+heki_semantic = { path = "crates/heki_semantic", version = "0.5.0" }
+heki_ir = { path = "crates/heki_ir", version = "0.5.0" }
+heki_kb = { path = "crates/heki_kb", version = "0.5.0" }
+heki_soundness = { path = "crates/heki_soundness", version = "0.5.0" }
+heki_effect = { path = "crates/heki_effect", version = "0.5.0" }
+heki_rules = { path = "crates/heki_rules", version = "0.5.0" }
+heki_diagnostics = { path = "crates/heki_diagnostics", version = "0.5.0" }
+heki_lsp = { path = "crates/heki_lsp", version = "0.5.0" }
 
 # Frontend parser (STRICTLY isolated to heki_ast per ADR-009 / ADR-016)
 ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.17.5" }
@@ -82,15 +82,24 @@ cap = { version = "0.1.2", features = ["stats"] }
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
-# The test and coverage builds of CI (`--cargo-profile ci`): the workspace crates as in `dev`, the
-# dependencies optimized. The end-to-end tests run the real binary thousands of times, and the
-# optimized dependencies (the parser among them) make those runs about 1.6 times as fast; CI
-# caches them. Optimizing the workspace crates as well would speed the runs up 1.7 times more but
-# triple their compile time, which CI pays on every run. Coverage measures only the workspace
-# crates, so its report has the lines of `dev`. Line tables keep the backtraces readable.
+# The test builds of CI (`--cargo-profile ci`): `dev` with the workspace crates
+# optimized at level 1 and the dependencies at 3. The end-to-end and language-server tests run the real binary
+# thousands of times, and the slowest of them run 3.7 times as fast as in `dev`; level 2 gains
+# only 5 % more for a build that is 15 % slower. Line tables keep the backtraces readable.
 [profile.ci]
 inherits = "dev"
+opt-level = 1
 debug = "line-tables-only"
 
 [profile.ci.package."*"]
+opt-level = 3
+
+# The coverage build of CI (`--cargo-profile ci-coverage`): the workspace crates as in `dev`, the
+# dependencies optimized. Coverage measures only the workspace crates; optimizing them changes
+# which lines the report leaves uncovered (inlined code), so the report has the lines of `dev`.
+[profile.ci-coverage]
+inherits = "dev"
+debug = "line-tables-only"
+
+[profile.ci-coverage.package."*"]
 opt-level = 3

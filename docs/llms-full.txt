@@ -105,6 +105,7 @@ app/orders.py:11:37: EFF103 (loop-db-query) [warning] every iteration over param
   = help: batch the queries, or load the data once before the loop
 
 Found 1 diagnostic(s) in 1 file(s).
+heki check does not fail on 1 report(s) shown now: warnings, and heuristic reports, which can be wrong about the code and count as warnings; `fail-on = "warning"` in the lint settings makes them fail it.
 note: 3 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 EFF103 (loop-db-query): `heki rule EFF103`, https://heki.koxudaxi.dev/rules/loop-db-query/
 ```
@@ -598,7 +599,10 @@ Missed findings close as heki learns more:
   what it returns changes the attribute's object.
 - `vars(obj)` (the builtin, not a name shadowing it) is `obj.__dict__`: an entry stored, deleted,
   set by a container method, or updated in place (`vars(obj) |= other`, also on
-  `obj.__dict__`) through either is a write of the attribute it names.
+  `obj.__dict__`) through either is a write of the attribute it names. Where reading it runs no
+  code of the instance's classes, the namespace is a builtin `dict`, so its methods resolve
+  (`obj.__dict__.get(KEY)` is no call heki cannot resolve); a class object's namespace is a
+  read-only proxy and has no class.
 - A write-owners contract sees a container change through what a method or a property returns
   when it returns the attribute itself on every `return` (`node.members().append(x)` with
   `return self.items`) and every class the object may be runs it. A `cached_property` hands out
@@ -623,8 +627,10 @@ Missed findings close as heki learns more:
 - A write in an unannotated helper is still found where a caller passes it an object of a known
   class. A read is not.
 - Not typed: values declared `Any` or `types.ModuleType`, generics substituted through
-  unbounded `TypeVar`s (a bounded or constrained one gives its bound or constraints), and calls
-  of `type[C]` attributes.
+  unbounded `TypeVar`s (a bounded or constrained one gives its bound or constraints), names a
+  module binds to a type expression more than once or with type parameters (a type alias bound
+  once names its value), calls of a subscripted class other than a builtin or `collections`
+  container (`Box[int]()`), and calls of `type[C]` attributes.
 - A module-level table of functions (`HANDLERS = {"create": create}`) gives the value of a key
   a string constant gives, and one of its values for any other key, only while no code changes
   it in place; a change through a call it is handed to (`register(HANDLERS)`) is not seen.
@@ -632,6 +638,15 @@ Missed findings close as heki learns more:
   adds to its items when heki types it (`append(x)` with `x: Field`, `extend` or `+=` of a list
   of known items, `d[k] = v` with `v` of a known class), and leaves its items untyped otherwise.
   A change of an item it holds (`d[k].append(x)`) is not seen.
+- A function a value holds is known where the code that makes the value shows it: a field of a
+  `NamedTuple` or a frozen dataclass whose generated constructor the code calls (also through a
+  table of such instances bound once), the function a factory returns when every `return` gives
+  one, and a class attribute bound to `functools.partial` of a function, read through the class
+  or wrapped in `staticmethod`. A call through a field of a dataclass that is not frozen, one with
+  a `__post_init__`, or a class a `dataclass_transform` decorator builds, through a value handed
+  in as a parameter (a view or a callback a caller passes), through a plain `partial` attribute
+  read on an instance (Python 3.14 binds the instance to it, older versions do not), and through
+  a `partial` holding a positional argument is a call heki cannot resolve.
 - The type of a module global or an instance attribute joins every store of it through a
   receiver whose type heki knows: `self`, an instance of the class (a parameter `obj: Helper`,
   `cls()` in a class method, one the storing module keeps in its own attribute or global, as
@@ -773,6 +788,8 @@ oldest version `requires-python` admits.
 - From Python 3.12, list, set, and dict comprehensions run in the enclosing function (PEP 709): a
   comprehension inside a loop can be reported for `py312` and not for `py311`.
 - From Python 3.14, annotations are evaluated lazily in `__annotate__` scopes (PEP 649).
+- From Python 3.15, `sentinel` is a builtin (PEP 661): a `MUT118` report recommends it, and
+  has a fix that uses it; for an older version it names `typing_extensions.sentinel`.
 - The parser reads Python 3.15 syntax for every target version: `lazy import` (PEP 810) is a lazy
   import also in code for an older version.
 - Syntax newer than the target version is analyzed, not reported: that is Ruff's check.
@@ -1534,6 +1551,22 @@ With `fresh-objects = "allow"`, a write is no violation when it constructs the o
   write.
 
 A shallow copy's containers are the original's: only rebinding its attributes constructs it.
+
+A project function returns a new object at a call when every value it returns is one, or, on
+some paths, an element of an optional parameter (an item, `get`, `pop`, `setdefault`, or an
+iteration step of it) that the call leaves at a default without elements or passes such a
+constant: `None`, a bool, a number, or an empty string or tuple. `copy_tree(node)` of
+`def copy_tree(node, replacements=None)` returning `replacements[id(node)]` or a copy gives a new
+object; `copy_tree(node, table)` does not, nor does a call where the default is a dict display
+shared by every call (`memo={}`). A call of a function every `return` of which returns one of its
+parameters (`def with_origin(field, kind): ...; return field`) gives the object it hands that
+parameter: a new one stays new, and the input stays the input.
+
+In an effect boundary, a write a reached function makes to the object one of its parameters
+holds constructs that object when every call reaching the function hands it a new object that
+nothing kept yet, as the same write in the caller would: `set_flag(copy.copy(node))` with
+`def set_flag(node): node.flag = True`. A call handing it the scope function's input, or any
+other object, is reported, at that call.
 
 With `unlisted-dict-keys = "report"`, `MUT201` also reports a constant key written through the
 namespace of an object of a class a target covers (`field.__dict__[KEY] = v`,
@@ -2483,6 +2516,7 @@ must prove.
 $ heki check --diff                              # preview (exit code 1 when something would change)
 $ heki check --fix                               # apply safe, unconditional fixes
 $ heki check --fix --include-size-dependent      # also the proven-safe size-dependent rewrites
+$ heki check --fix --unsafe-fixes                # also the unsafe fixes
 ```
 
 - A fix comes with a report: `--fix` applies only the fixes of the reports shown. A report whose
@@ -2501,6 +2535,10 @@ $ heki check --fix --include-size-dependent      # also the proven-safe size-dep
   rewrites in every function (with `--diff`, it shows them), also over a loop whose trip count
   the data does not decide. After the fixes, the run lists their reports it could not rewrite, each with the obligation that
   blocks it.
+- An unsafe fix may change what the program does, and applies only with `--unsafe-fixes`. One
+  rule has one: a [`MUT118`](https://heki.koxudaxi.dev/rules/sentinel-lost-in-deepcopy/) report for a Python 3.15
+  target replaces the `object()` sentinel with `sentinel("NAME")`, whose type, repr, and
+  pickling differ ([Fix safety](https://heki.koxudaxi.dev/rules/sentinel-lost-in-deepcopy/#fix-safety)).
 - `--diff` takes the same flags as `--fix` and writes nothing.
 - With `--touched`, or files given as paths, `--fix` and `--diff` rewrite only those files. A
   shown report in another file (one whose call chain reaches a touched file) keeps its fix, and
@@ -2665,7 +2703,8 @@ Set `baseline = "heki-baseline.toml"` in the [configuration](https://heki.koxuda
 to use it without the flag, also in `--watch` and the language server.
 
 Entries are keyed by file, function, rule, and target, not by line number, so unrelated edits and
-reformatting do not break the baseline:
+reformatting do not break the baseline ([import cycle groups](https://heki.koxudaxi.dev/adoption/#import-cycle-groups) are keyed by
+their modules):
 
 ```toml
 # heki Ratchet baseline: counts may only shrink (`heki check --update-baseline`).
@@ -2715,6 +2754,38 @@ A baseline without `version = 2` was written before heki counted sites, and coun
 A version this heki does not know is an error, and so is a file listing one entry twice (a hand
 merge of two baselines).
 
+### Import cycle groups
+
+An [`IMP101`](https://heki.koxudaxi.dev/rules/import-cycle/) entry records a group of modules that import each other, and
+names no file or function:
+
+```toml
+[[entries]]
+rule_code = "IMP101"
+target = "pkg.a, pkg.b, pkg.c"
+count = 1
+```
+
+A group is covered when one entry holds all of its modules, whichever import closes the cycle
+its report shows and whichever function holds that import:
+
+- A group that lost modules, or split into several groups, is covered: a note says the entry
+  can shrink to the groups there are now, and `--update-baseline` records them.
+- A group with a module no entry of it holds is a regression, and so is a group joining two
+  recorded groups: the note names the groups it joins and the modules none of them holds. A
+  renamed module is such a module.
+- An entry matches no report only when none of its modules is in a group.
+
+A group spans files, so a run decides its entry only when it covers every file of the group: then
+the entry is dropped when no group is left within it, or replaced by the groups there are. A run
+over part of the project keeps the entries of the other groups, and records every group it
+reports. An entry is reported as unused only when the run checked every file of its group and
+`IMP101` runs on every one of them (`per-file-ignores` turning it off on one file leaves it
+unjudged). An entry written by heki 0.4.0 or earlier names the file and function of the import its
+group was reported at; heki reads it as the entry of its group, and `--update-baseline` rewrites
+it. heki 0.4.0 and earlier cannot read a group entry written without them, so every heki that reads
+the baseline must be newer than 0.4.0 before a rewritten baseline is committed.
+
 ## pre-commit
 
 The hook passes the staged Python files to `heki check --touched`. heki follows calls across files,
@@ -2733,7 +2804,7 @@ of a shown report in another file is left, and the run says how many were.
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.2.7
+    rev: v0.5.0
     hooks:
       - id: heki
 ```
@@ -3484,6 +3555,9 @@ Options:
 
       --include-size-dependent
           Also run the opt-in rules with a `size-dependent` rewrite (`OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`), as if `--extend-select` named them, and with `--fix` or `--diff` apply their proven-safe rewrites, in every function
+
+      --unsafe-fixes
+          With `--fix` or `--diff`, also apply the unsafe fixes, which change what the program does in a way the rule's page states (`MUT118`)
 
       --diff
           Preview fixes as a unified diff without writing files
@@ -4689,7 +4763,8 @@ heki's diagnostics and fixes while you edit, with the results `heki check` repor
   (`codeDescription`).
 - `heki server --heuristic` (or `--no-heuristic`) overrides `lint.heuristic` of the
   configuration, as on the command line.
-- Quick fixes for the safe `OPT101` / `OPT102` rewrites.
+- Quick fixes for the safe `OPT101` / `OPT102` rewrites, and a quick fix that is not preferred
+  for the unsafe `MUT118` fix (`heki check --fix --unsafe-fixes`).
 - `refactor.rewrite.heki` code actions for the proven-safe size-dependent rewrites. A fix whose
   result would not parse is never offered, as `heki check --fix` refuses it.
 - A quick fix that appends `# heki: ignore[CODE]` to the line of any diagnostic, unless a comment
@@ -5210,15 +5285,16 @@ $ cargo llvm-cov --workspace --show-missing-lines --fail-uncovered-lines 3
 $ cargo nextest run --workspace --cargo-profile ci
 ```
 
-- CI builds the tests once per platform in the `ci` profile of `Cargo.toml` (the workspace crates
-  as in `dev`, the dependencies optimized) and runs them in parallel shards with
+- CI builds the tests once per platform in the `ci` profile of `Cargo.toml` (the workspace
+  crates at `opt-level = 1`, the dependencies at 3: the real binary the tests spawn runs 3.7 times
+  as fast as in `dev`) and runs them in parallel shards with
   [cargo-nextest](https://nexte.st), each test in a process of its own. A test that holds a long
   sequence of steps, such as the language server's editing sessions, is split into independent
   tests, so the shards stay short.
 - On Linux the tests are built and run from the unpacked source distribution, which must
   therefore carry every file they embed or read (`include` in `pyproject.toml`).
-- Coverage runs the same way, in the same profile, whose workspace crates give the report the
-  lines of `dev`: each shard merges its profiles, and one job reports and enforces the limit.
+- Coverage runs the same way, in the `ci-coverage` profile (the workspace crates as in `dev`: optimizing them changes
+  which lines the report leaves uncovered), in 8 shards: each shard merges its profiles, and one job reports and enforces the limit.
 
 ## Checks against CPython
 
@@ -5227,6 +5303,7 @@ $ cargo build
 $ python3 tests/symtable_verify/verify_symtable.py --heki target/debug/heki tests/symtable_verify/fixtures/ tests/corpus/
 $ python3 tests/import_verify/verify_imports.py --heki target/debug/heki tests/import_verify/fixtures/
 $ python3 tests/sentinel/verify_soundness_kb.py
+$ python3 tests/sentinel/verify_stdlib_kb.py
 $ python3 tests/difftest/counterexamples.py
 $ python3 tests/difftest/soundness_e2e_counterexamples.py
 $ python3.15 tests/difftest/ir_counterexamples.py
@@ -5239,6 +5316,7 @@ CI runs them on CPython 3.11 to 3.15 (`ir_counterexamples.py` on 3.15 only).
 | `verify_symtable.py` | heki's scope analysis against CPython's `symtable`: the scope tree (kind, name, definition line, parent), bindings, parameters, `global` / `nonlocal` declarations, and every read. Every target must exist and every file must parse on the running CPython, except fixtures marked for a newer one in their name (`312_315`, `313_315`, `_314`, `pep810`); a run that compares no file fails. |
 | `verify_imports.py` | heki's import facts (`heki inspect --imports`) against CPython: each fixture module is imported first in a fresh interpreter that records the imports the module bodies run, and the `body` edges are compared both ways (every recorded import is one of heki's `body` sites, and every unconditional one heki lists that no `ImportError` handler guards is recorded); an `ast` reader checks the function, `TYPE_CHECKING`, and `lazy` classes. The fixtures under `py315` need CPython 3.15. |
 | `verify_soundness_kb.py` | every claim of the Layer 1 knowledge base (`kb/soundness/builtins.toml`), on the running interpreter |
+| `verify_stdlib_kb.py` | the Layer 2 rows of the standard library that type a value (`kb/ecosystem/stdlib.toml`: attribute rows, the class a method returns, a method's copy of its receiver, the value a holder's method returns), on instances it builds of each class, subclasses too |
 | `counterexamples.py` | that the naive rewrites heki refuses really change behavior |
 | `soundness_e2e_counterexamples.py` | that the rewrites earlier versions of heki made of these shapes change behavior; the end-to-end tests check that heki now blocks or disproves each |
 | `ir_counterexamples.py` | that the rewrites heki made before the IR modeled a shape (a binding, an alias, a path) change behavior; needs CPython 3.15 |
@@ -6405,7 +6483,7 @@ Its premises:
   where heki establishes what implements it on every class the operand may be (R2): `object`'s;
   a builtin type's, with what it runs on the items it holds (a container's comparison, hash, or
   `repr()` runs its items', and a dict or set compares a key with each key it holds under an
-  equal hash); or a library class's, as a call of that library (R3). A value of an abstract
+  equal hash, the names of attributes, strings, in an object's `__dict__`); or a library class's, as a call of that library (R3). A value of an abstract
   class or a protocol, one annotated `object`, and one of a class heki does not know establish
   none, and a comparison's or a conversion's result is a builtin `bool` or `str` only where
   those methods are `object`'s or a builtin type's. No attribute access may run a `__getattr__`,
@@ -6836,8 +6914,9 @@ attribute, an item, or a global, returned, yielded, raised, or held by a display
 (`[decide]`, `{"a": decide}`), also through an import alias (`from pkg.core import decide as
 chosen`), a module alias (`run = core.decide`), or a module attribute (`core.decide`). A use that
 only names a class is no reference: an argument of `isinstance`, `issubclass`, another builtin that
-only inspects its arguments (`print`, `getattr`, `type`), `super`, `typing.cast`, `typing.TypeVar`,
-`typing.NewType`, or `contextlib.suppress`; an `except` clause, a class's bases and keywords, a
+only inspects its arguments (`print`, `getattr`, `type`), `super`, `typing.TypeVar`,
+`typing.NewType`, or `contextlib.suppress`, and the type a `typing.cast` names (the value it hands
+back is the value itself: `register(cast(Callable[[int], int], decide))` hands `decide` on); an `except` clause, a class's bases and keywords, a
 function's defaults and annotations; a subscript (`Optional[Rule]`), a comparison (`f is decide`), a
 receiver (`Rule.of(...)`), and a module binding another name to it. A callable a builtin calls once
 per item (`sorted(xs, key=decide)`, `map(decide, xs)`) is a call already, and so is the
@@ -7268,10 +7347,14 @@ Its premises, each established or no report:
   cycle whenever it runs, and every way from its imports to the cycle is an import in a module
   body that heki names. Otherwise an import of a module outside the cycle that may load one of
   the cycle stops the run.
-- **No handler**: no handler takes the `ImportError` on the way: no `except` clause naming
-  `ImportError`, `Exception`, `BaseException`, a type heki cannot tell is another builtin
-  exception, or a bare `except`, and no `with` block or `finally` body around an import of the
-  chain or the statement.
+- **No handler**: no handler takes the `ImportError` on the way, a plain one: no `except` clause
+  naming `ImportError`, `Exception`, `BaseException`, a type heki cannot tell is another builtin
+  exception, or a bare `except`, whose body may end without raising, no `with` block, and no
+  `finally` body that may leave without raising it again, around an import of the chain or the
+  statement. `except ModuleNotFoundError:` does not take it (a subclass does not take its base),
+  a clause whose body raises on every path (`raise`) takes nothing, and a clause that certainly
+  matches hides the clauses after it. A handler taking the `ModuleNotFoundError` of a module a
+  project package lacks lets the module body go on past that import.
 - **Not a submodule**: the project has no module `M.name` (Python falls back to a submodule of
   that name once it is loaded), and `name` is not a dunder the import system sets
   (`__name__`, `__path__`).
@@ -7516,8 +7599,8 @@ Opt-in: a module of the package the project distributes imports test code, or a 
 Reports an import, in a module of the package the project distributes, of development code: test
 code beside the package, or a module outside the source roots of a src layout. The import runs: it
 is in the module body, a lazy import, or inside a function. An import under `TYPE_CHECKING` never
-runs, and an import a handler may take the `ImportError` of expects the module to be missing;
-neither is reported. One report is given per function and module imported, at its first import: the
+runs, and an import whose missing module a handler takes (`except ModuleNotFoundError:` with a
+fallback) expects the module to be missing; neither is reported. One report is given per function and module imported, at its first import: the
 names of one `from` statement are one import.
 
 heki finds it without configuration, from the project's layout and `pyproject.toml`:
@@ -7551,9 +7634,12 @@ Its premises, each established or no report:
   `from a import c`, the package `a`, which it loads in any case).
 - **Runs**: the import is in the module body, a lazy import, or in a function, not under
   `TYPE_CHECKING`.
-- **No handler**: no handler may take its `ImportError`: no `except` clause naming
-  `ImportError`, `Exception`, `BaseException`, a type heki cannot tell is another builtin
-  exception, or a bare `except`, and no `with` block or `finally` body around it.
+- **No handler**: no handler may take its `ModuleNotFoundError`, which an installation without
+  the module raises: no `except` clause naming `ModuleNotFoundError`, `ImportError`,
+  `Exception`, `BaseException`, a type heki cannot tell is another builtin exception, or a bare
+  `except`, whose body may end without raising, no `with` block around it, and no `finally` body
+  that may leave without raising the error again. A clause whose body raises on every path
+  (`raise`) takes nothing, and a clause that certainly matches hides the clauses after it.
 
 ## Why is this bad?
 An installed package usually holds only its own modules. Test helpers, `conftest.py`, and the
@@ -7645,9 +7731,13 @@ Its premises, each established or no report:
 - **Chain**: the reported import, and each import leading to it from that module, is in a module
   body (or a class body it runs, or a constant by-name import there), runs on every path through
   the body, is no lazy import, and loads the module shown, its parent packages first.
-- **No handler**: no handler may take the `ImportError` of any of them: no `except` clause naming
-  `ImportError`, `Exception`, `BaseException`, a type heki cannot tell is another builtin
-  exception, or a bare `except`, and no `with` block or `finally` body around one.
+- **No handler**: no handler may take the `ModuleNotFoundError` of any of them, which a module
+  that is not installed raises: no `except` clause naming `ModuleNotFoundError`, `ImportError`,
+  `Exception`, `BaseException`, a type heki cannot tell is another builtin exception, or a bare
+  `except`, whose body may end without raising, no `with` block around one, and no `finally`
+  body that may leave without raising the error again. A clause whose body raises on every path
+  (`raise`, `raise RuntimeError(...) from e`) takes nothing, and a clause that certainly matches
+  hides the clauses after it.
 - **Distribution**: the distributions that may provide the imported module are, when
   `[tool.heki.imports] module-distributions` names the module or a package holding it, the ones it
   lists; otherwise the ones the catalog lists for it (`PyYAML` provides `yaml`, `pytest` provides
@@ -7697,7 +7787,7 @@ def frozen(at: str):
 ```
 
 or declare `freezegun` in `[project] dependencies` (or in an extra, which [`IMP302`](https://heki.koxudaxi.dev/rules/optional-dependency-at-import-time/)
-then judges).
+then judges), or give the import a fallback under `except ModuleNotFoundError:`.
 
 ## Fix safety
 No automatic fix.
@@ -7768,8 +7858,9 @@ count for a read.
     through the helpers it passes `self` to (`_link(self)`, `self._init_fields()`,
     `super().__init__()`), while the same helper writing another object, or called after
     `__init__` returned, writes an existing one; neither is a write that constructs the object
-    it writes (`fresh-objects = "allow"`, the default; a write the reached function makes to an
-    object it allocated), as for `MUT201`;
+    it writes (`fresh-objects = "allow"`, the default: a write the reached function makes to an
+    object it allocated, or to the object a parameter holds when every call reaching it hands it
+    a new object nothing kept yet), as for `MUT201`;
   - `reads-targets`: reads of the `Class.attr` entries of `read-targets` (and their
     subclasses), in every form `MUT203` follows (`obj.attr`, `getattr(obj, "attr")`,
     `obj.__dict__["attr"]` or `vars(obj)["attr"]`, a property getter that reads it); a class's
@@ -8722,6 +8813,9 @@ No automatic fix.
 - `[tool.heki.imports]`: `cycle-edges`, the timing classes of the imports that count
   ([configuration](https://heki.koxudaxi.dev/configuration/#imports-toolhekiimports)).
 - Its reports are heuristic warnings: `lint.fail-on = "warning"` makes a cycle fail the run.
+- A [Ratchet baseline](https://heki.koxudaxi.dev/adoption/#import-cycle-groups) records each group by its modules,
+  not by the import its report sits at: an entry covers a group when it holds all of the
+  group's modules.
 
 ## Known limitations
 - Imports heki does not see (`exec`, `runpy`, a module loaded from a file path, a write to
@@ -10429,9 +10523,13 @@ Its premises, each established or no report:
 - **Chain**: the reported import, and each import leading to it from that module, is in a module
   body (or a class body it runs, or a constant by-name import there), runs on every path through
   the body, is no lazy import, and loads the module shown, its parent packages first.
-- **No handler**: no handler may take the `ImportError` of any of them: no `except` clause naming
-  `ImportError`, `Exception`, `BaseException`, a type heki cannot tell is another builtin
-  exception, or a bare `except`, and no `with` block or `finally` body around one.
+- **No handler**: no handler may take the `ModuleNotFoundError` of any of them, which a module
+  that is not installed raises: no `except` clause naming `ModuleNotFoundError`, `ImportError`,
+  `Exception`, `BaseException`, a type heki cannot tell is another builtin exception, or a bare
+  `except`, whose body may end without raising, no `with` block around one, and no `finally`
+  body that may leave without raising the error again. A clause whose body raises on every path
+  (`raise`, `raise RuntimeError(...) from e`) takes nothing, and a clause that certainly matches
+  hides the clauses after it.
 - **Distribution**: the distributions that may provide the imported module are found as for
   [`IMP301`](https://heki.koxudaxi.dev/rules/development-dependency-at-import-time/), with its premise that the project holds no
   copy of the module. The project declares at least one of them, and each one it declares is in
@@ -10549,7 +10647,8 @@ read target names `Class.attr` (an entry is a configuration error).
 The read object's class is the one heki infers for it, with annotations as hints: a
 parameter, local, attribute, or return annotation, including the items of `list[...]`,
 `Sequence[...]`, `Iterable[...]`, `Iterator[...]`, `Generator[...]`, `dict[...]`,
-`Mapping[...]`, `tuple[...]`, and `set[...]`; a constructor call; and what the object comes
+`Mapping[...]`, `tuple[...]`, and `set[...]`, and a type alias naming one (`Models: TypeAlias =
+list[Model]`); a constructor call; and what the object comes
 from: a loop over such a container (`for model in models`), a subscript (`models[0]`,
 `by_name["a"]`), unpacking (`model, _ = pair`), `dict` views and `get` / `pop`, `enumerate`,
 `zip`, `reversed`, `sorted`, `iter`, `next`, `list` / `tuple` / `set`, `itertools.chain`, a
@@ -10558,9 +10657,10 @@ method call or a `@property` / `cached_property` read has the return annotation 
 definition the receiver's class finds first along its MRO, as for a type checker (`typing.Self`
 is the receiver's class); a copy (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`,
 `model_copy`) has its original's class, calling a `functools.partial` object returns what the
-wrapped function returns, and `typing.cast` names the class of a value nothing else types
-(a cast to `Any` or to a base class keeps the class the value is known to have, as an annotated
-local does). A variable rebound in a loop
+wrapped function returns, and `typing.cast` names the class of its value, its type read as
+an annotation (`cast(list[Model], x)` as `cast("list[Model]", x)`): a cast to a subclass narrows
+a value known as its base, and a cast to `Any` or to a base class keeps the class the value is
+known to have, as an annotated local does. A variable rebound in a loop
 (`node = node.parent`) or assigned on some paths only (a walrus inside `and` / `or`) has the
 classes of the values reaching it; a value of two or three classes (`Model | Node`, from an
 annotation or from different assignments) is each of them, and an `isinstance` check narrows it
@@ -10726,8 +10826,10 @@ Handing a `Sequence` / `Mapping` / `AbstractSet` / `ReadOnly` parameter, as itse
 Checks functions that hand a parameter annotated as a read-only container to code that changes
 it in place: a parameter annotated `Sequence[...]`, `Mapping[...]`, `AbstractSet[...]`
 (`typing.AbstractSet` or `collections.abc.Set`, not `typing.Set`, which is `set`), or
-`ReadOnly[...]` (also inside `Optional`, `| None`, `Annotated`, and quotes), passed as itself or
-through a local alias (`alias = items`) to a function that changes its argument in place
+`ReadOnly[...]` (also inside `Optional`, `| None`, `Annotated`, and quotes), passed as itself,
+through a local alias (`alias = items`), or through a call that hands it back as itself
+(`typing.cast(list[int], items)`, a project function returning its parameter on every path) to
+a function that changes its argument in place
 (`items.sort()`, `items.append(...)`, `table[key] = ...`, `tags.add(...)`), itself or through
 further helpers, any number of calls deep.
 
@@ -10739,13 +10841,16 @@ created and never iterated changes nothing.
 It does not report:
 
 - a change in the function itself (`items.append(1)`, `alias = items; alias.append(1)`): type
-  checkers report it on the read-only type;
+  checkers report it on the read-only type. A change through a value a call hands back as
+  itself is reported, at the change: `cast(list, items).append(1)` and
+  `same(items).append(1)` hide the read-only type from the type checker;
 - a container inside the argument (`values["a"].append(1)` with
   `values: Mapping[str, list[int]]`): only the argument itself counts;
 - a call that hands over a copy (`helper(list(items))`, `helper(dict(table))`,
   `helper(set(tags))`);
 - a helper parameter annotated with a mutable type (`list[int]`, `dict[str, int]`,
-  `set[int]`, `MutableSequence[int]`, `deque[int]`, ...): the type checker reports the argument;
+  `set[int]`, `MutableSequence[int]`, `deque[int]`, ...): the type checker reports the argument,
+  unless a call handed it back (`fill(cast(list[int], items))`), which the type checker accepts;
 - a helper parameter annotated read-only: that helper is checked in turn (its own handing over is
   reported, a change in its own body is a type error); a change reached only through such a
   helper, or through one whose parameter is annotated with a mutable type, further down the
@@ -10756,15 +10861,20 @@ It does not report:
 
 A report states that the function hands its parameter annotated `Sequence`, `Mapping`,
 `AbstractSet`, or `ReadOnly`, as itself, to a function, and that whenever the named line runs
-during that call, it changes the caller's object in place. It does not say that every call
+during that call, it changes the caller's object in place. A report at a change in the function
+itself states that the line changes the object bound to the parameter in place, through a value a
+call handed back as itself. It does not say that every call
 reaches the line: the change often sits under a test of the argument's type
 (`if isinstance(values, list):`), and the claim is anchored there.
 
 Its premises:
 
 - **Read-only parameter**: the parameter's annotation. Established.
-- **Passed as itself**: on every path to the call, the argument is the parameter or a local
-  alias of it, not a copy or another value. Established.
+- **Passed as itself**: on every path to the call (or to the change in the function itself),
+  the value is the parameter, a local alias of it, or what a call hands back of it as itself:
+  `typing.cast`, or a call binding only project functions that return that parameter on every
+  path. Not a copy or another value. Established. A function returning another call's result
+  (`return same(x)`) is open, and its call hands nothing back.
 - **Changed at the line**: the named line changes in place the object bound to the parameter of
   the function it is in, on every path to the line, a builtin container there (`list`, `dict`,
   `set`, `bytearray`, `deque`, ... by annotation, construction, or an `isinstance` test), and
@@ -11336,7 +11446,7 @@ Source: https://heki.koxudaxi.dev/rules/sentinel-lost-in-deepcopy/
 
 # sentinel-lost-in-deepcopy (MUT118)
 
-Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` (a bug) · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` (a bug) · Unsafe fix (`--fix --unsafe-fixes`)
 
 `copy.deepcopy` of an instance holding an `object()` sentinel in an attribute that a function tests against the sentinel by identity (the copy holds a new object, which the test does not match).
 
@@ -11378,8 +11488,9 @@ followed.
 
 It does not report:
 
-- a sentinel that copies as itself (`typing_extensions.Sentinel`, an instance of a class with
-  `__deepcopy__`), or any other value bound to the name;
+- a sentinel that copies as itself (`sentinel("MISSING")`: the builtin from Python 3.15, or
+  `typing_extensions.sentinel`, also through `import typing_extensions as te`; an instance of a
+  class with `__deepcopy__`), or any other value bound to the name;
 - a sentinel only used as a parameter default or a `dict.get` default, never stored on an
   instance;
 - a class whose own code (or a base's) decides how it is copied: `__deepcopy__`, `__reduce__`,
@@ -11452,10 +11563,15 @@ def isolated(field: Field) -> Field:
 
 Use instead:
 ```python
-from typing_extensions import Sentinel
-
-MISSING = Sentinel("MISSING")  # copies and pickles as itself
+MISSING = sentinel("MISSING")  # copies as itself
 ```
+
+`sentinel` (PEP 661) is a builtin from Python 3.15; for an older target, import it from
+`typing_extensions` 4.16.0 or later (`from typing_extensions import sentinel`). The help of a
+report names the one the [target version](https://heki.koxudaxi.dev/scope/#the-target-python-version) has.
+`typing_extensions` 4.14 and 4.15 spell it `Sentinel`, and `copy.deepcopy` of one of those raises
+`TypeError`. A sentinel's repr is its name, and `pickle` finds it by that name in its module, so
+give it the name it is bound to.
 
 ## Known limitations
 - A deep copy of a container (`copy.deepcopy([field])`) is not followed, and an instance below
@@ -11466,7 +11582,16 @@ MISSING = Sentinel("MISSING")  # copies and pickles as itself
   SPEC = copy.deepcopy(...)`) is not seen; one in a class defined in a function is.
 
 ## Fix safety
-No automatic fix.
+When the target version is Python 3.15 or later and the file of the report binds the sentinel,
+the report has an unsafe fix: it replaces the `object()` call with `sentinel("NAME")`, `NAME`
+being the name the sentinel is bound to, and needs no import. `heki check --fix` alone never
+applies it; `--fix --unsafe-fixes` does (`--diff --unsafe-fixes` shows it), and the language
+server offers it as a quick fix. It is unsafe because the object changes: its type is `sentinel`
+instead of `object`, its repr is `NAME` instead of `<object object at 0x...>`, and `pickle` of an
+object holding it stores the sentinel by its name and loads it as the same object, where it made
+a new `object()` before. heki assumes that the module-level name is how `pickle` finds it. The
+fix is not offered when the module binds the name `sentinel` (an import of
+`unittest.mock.sentinel`, a function, an assignment), or below Python 3.15.
 
 
 ---
@@ -12504,7 +12629,8 @@ entries, a write of the entry is reported once, under the entry.
 The written object's class is the one heki infers for it, with annotations as hints: a
 parameter, local, attribute, or return annotation, including the items of `list[...]`,
 `Sequence[...]`, `Iterable[...]`, `Iterator[...]`, `Generator[...]`, `dict[...]`,
-`Mapping[...]`, `tuple[...]`, and `set[...]`; a constructor call; and what the object comes
+`Mapping[...]`, `tuple[...]`, and `set[...]`, and a type alias naming one (`Models: TypeAlias =
+list[Model]`); a constructor call; and what the object comes
 from: a loop over such a container (`for model in models`), a subscript (`models[0]`,
 `by_name["a"]`), unpacking (`model, _ = pair`), `dict` views and `get` / `pop`, `enumerate`,
 `zip`, `reversed`, `sorted`, `iter`, `next`, `list` / `tuple` / `set`, `itertools.chain`, a
@@ -12513,9 +12639,13 @@ method call or a `@property` / `cached_property` read has the return annotation 
 definition the receiver's class finds first along its MRO, as for a type checker (`typing.Self`
 is the receiver's class); a copy (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`,
 `model_copy`) has its original's class, calling a `functools.partial` object returns what the
-wrapped function returns, and `typing.cast` names the class of a value nothing else types
-(a cast to `Any` or to a base class keeps the class the value is known to have, as an annotated
-local does). A variable rebound in a loop
+wrapped function returns, and `typing.cast` names the class of its value, its type read as
+an annotation (`cast(list[Model], x)` as `cast("list[Model]", x)`): a cast to a subclass narrows
+a value known as its base, and a cast to `Any` or to a base class keeps the class the value is
+known to have, as an annotated local does. A cast hands back the object it is given, and so does
+a project function returning its parameter on every path (`def same(x): return x`, also
+`return cast(T, x)`): `cast(list[int], store.items).append(x)` and `same(store.items).append(x)`
+change `store.items`, as an alias does. A variable rebound in a loop
 (`node = node.parent`) or assigned on some paths only (a walrus inside `and` / `or`) has the
 classes of the values reaching it; a value of two or three classes (`Model | Node`, from an
 annotation or from different assignments) is each of them, and an `isinstance` check narrows it
@@ -12593,7 +12723,9 @@ A write that constructs the object it writes is allowed too (`fresh-objects = "a
 default): the object was allocated in the same call chain, by calling its class, by
 `object.__new__(Model)` (also `Model.__new__(Model)` when no class defines `__new__`), by copying
 (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`, `.copy()`, `.model_copy()`), or by a
-project function that returns such an object, and nothing else can hold it yet: no store into
+project function that returns such an object (at a call leaving an optional parameter at a
+default without elements, such as `None`, the paths returning an element of it return
+nothing) or returns the one it is handed, and nothing else can hold it yet: no store into
 another object, a container, a global, or a closure, no `yield`, and no call that may keep it
 ran before the write. A project function keeps an object it stores, yields, or hands to code
 heki does not follow or to a function that keeps it; reading or writing it keeps nothing. Writes

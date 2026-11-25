@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::Project;
+use common::{Project, run_python};
 use serde_json::Value;
 
 fn diagnostics(p: &Project, args: &[&str]) -> Vec<Value> {
@@ -746,4 +746,193 @@ def isolated_pair(pair: Pair):
         "`copy.deepcopy` may copy an instance of `DataModel` held in `reference` or in what it holds, whose `default` can hold the `object()` sentinel `UNDEFINED` that `DataModel.has_default` tests by identity: the copy holds a new object there, which the test does not match"
     );
     assert_eq!(diags[0]["certainty"], "heuristic");
+}
+
+/// A module whose sentinel, bound by `binding`, a dataclass holds as a field default that a
+/// function tests by identity, with a deep copy of the dataclass (line 23) and one of a class
+/// holding it in a typed attribute (line 27, a heuristic `reference` claim).
+fn copied_sentinel(binding: &str) -> String {
+    format!(
+        r#"import copy
+from dataclasses import dataclass
+
+{binding}
+
+
+@dataclass
+class Field:
+    name: str
+    default: object = MISSING
+
+
+class Holder:
+    def __init__(self, field: Field) -> None:
+        self.field = field
+
+
+def has_default(item: Field) -> bool:
+    return item.default is not MISSING
+
+
+def isolated(item: Field) -> Field:
+    return copy.deepcopy(item)
+
+
+def isolated_holder(holder: Holder) -> Holder:
+    return copy.deepcopy(holder)
+"#
+    )
+}
+
+/// A PEP 661 `sentinel(...)` keeps its identity through `copy.deepcopy`, whatever the target
+/// version: the builtin, `typing_extensions.sentinel`, and the function read through the
+/// module under another name give no report, exact or `reference`, where `object()` gives both.
+#[test]
+fn a_sentinel_made_by_sentinel_is_kept_by_deep_copies() {
+    let p = Project::new("mut118_pep661");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/plain.py", &copied_sentinel("MISSING = object()"))
+        .write(
+            "pkg/builtin.py",
+            &copied_sentinel("MISSING = sentinel(\"MISSING\")"),
+        )
+        .write(
+            "pkg/imported.py",
+            &copied_sentinel(
+                "from typing_extensions import sentinel\n\nMISSING = sentinel(\"MISSING\")",
+            ),
+        )
+        .write(
+            "pkg/aliased.py",
+            &copied_sentinel(
+                "import typing_extensions as te\n\nMISSING = te.sentinel(\"MISSING\")",
+            ),
+        );
+    for version in ["py312", "py315"] {
+        let diags = diagnostics(&p, &["--target-version", version]);
+        assert_eq!(
+            reported(&diags),
+            vec![("plain.py".to_owned(), 23), ("plain.py".to_owned(), 27)],
+            "{version}"
+        );
+    }
+}
+
+/// The help names `sentinel` as the target version has it: the builtin from Python 3.15 (by
+/// `target-version` or `requires-python`), `typing_extensions.sentinel` below it.
+#[test]
+fn the_help_names_the_sentinel_of_the_target_version() {
+    let p = Project::new("mut118_help");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/fields.py", &copied_sentinel("MISSING = object()"));
+    let help = |args: &[&str]| diagnostics(&p, args)[0]["help"].clone();
+    let builtin = "bind `MISSING` to `sentinel(\"MISSING\")` instead of `object()`: a copy keeps it as the same object";
+    let backport = "bind `MISSING` to `typing_extensions.sentinel(\"MISSING\")` (typing_extensions 4.16.0 or later) instead of `object()`: a copy keeps it as the same object";
+    assert_eq!(help(&["--target-version", "py315"]), builtin);
+    assert_eq!(help(&["--target-version", "py314"]), backport);
+    assert_eq!(help(&[]), backport, "the default target is Python 3.12");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"pkg\"\nrequires-python = \">=3.15\"\n",
+    );
+    assert_eq!(help(&[]), builtin);
+}
+
+/// For a Python 3.15 target, `--fix --unsafe-fixes` makes the sentinel a `sentinel` of its
+/// name: the fixed module parses, `MUT118` no longer reports it, and on CPython the copy keeps
+/// the default. `--fix` alone, or with `--include-size-dependent`, and a Python 3.14 target
+/// leave the file as it is.
+#[test]
+fn the_unsafe_fix_binds_the_sentinel_to_sentinel() {
+    let p = Project::new("mut118_fix");
+    let source = copied_sentinel("MISSING = object()");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/fields.py", &source)
+        .write(
+            "run.py",
+            "from pkg.fields import Field, has_default, isolated\n\nprint(has_default(isolated(Field(\"a\"))))\n",
+        );
+    assert_eq!(run_python(&p.dir, "run.py").trim(), "True");
+    let fix = |args: &[&str]| {
+        let mut all = vec!["--select", "MUT118", "--fix"];
+        all.extend_from_slice(args);
+        p.check(&all)
+    };
+    let diags = diagnostics(&p, &["--target-version", "py315"]);
+    assert_eq!(
+        diags[0]["fix"],
+        serde_json::json!([{
+            "span": {"start": 57, "end": 65},
+            "replacement": "sentinel(\"MISSING\")"
+        }])
+    );
+    assert_eq!(diags[1]["fix"], diags[0]["fix"]);
+    for args in [
+        &["--target-version", "py315"][..],
+        &["--target-version", "py315", "--include-size-dependent"],
+        &["--target-version", "py314", "--unsafe-fixes"],
+    ] {
+        let (code, _, stderr) = fix(args);
+        assert_eq!(code, 1, "{args:?}: {stderr}");
+        assert!(stderr.contains("Fixed 0 issue(s)"), "{args:?}: {stderr}");
+        assert_eq!(p.read("pkg/fields.py"), source, "{args:?}");
+    }
+    assert!(diagnostics(&p, &["--target-version", "py314"])[0]["fix"].is_null());
+    let (code, stdout, stderr) = fix(&["--target-version", "py315", "--unsafe-fixes"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("Fixed 1 issue(s) in 1 file(s)."),
+        "{stderr}"
+    );
+    assert_eq!(
+        p.read("pkg/fields.py"),
+        source.replace("MISSING = object()", "MISSING = sentinel(\"MISSING\")")
+    );
+    assert!(diagnostics(&p, &["--target-version", "py315"]).is_empty());
+    assert_eq!(run_python(&p.dir, "run.py").trim(), "False");
+}
+
+/// The fix is not offered where `sentinel` would not read as the builtin (the module binds the
+/// name), nor for a sentinel another file binds: a fix edits the file of its report.
+#[test]
+fn no_fix_where_the_builtin_sentinel_cannot_replace_the_object() {
+    let p = Project::new("mut118_no_fix");
+    let marks = copied_sentinel("MISSING = object()").replace(
+        "import copy\n",
+        "import copy\nfrom unittest.mock import sentinel\n",
+    );
+    p.write("pkg/__init__.py", "")
+        .write("pkg/mocked.py", &marks)
+        .write("pkg/marks.py", "UNSET = object()\n")
+        .write(
+            "pkg/elsewhere.py",
+            r#"import copy
+from dataclasses import dataclass
+
+from pkg.marks import UNSET
+
+
+@dataclass
+class Option:
+    value: object = UNSET
+
+
+def is_set(option: Option) -> bool:
+    return option.value is not UNSET
+
+
+def isolated(option: Option) -> Option:
+    return copy.deepcopy(option)
+"#,
+        );
+    let diags = diagnostics(&p, &["--target-version", "py315"]);
+    assert_eq!(
+        reported(&diags),
+        vec![
+            ("elsewhere.py".to_owned(), 17),
+            ("mocked.py".to_owned(), 24),
+            ("mocked.py".to_owned(), 28)
+        ]
+    );
+    assert!(diags.iter().all(|d| d["fix"].is_null()), "{diags:#?}");
 }

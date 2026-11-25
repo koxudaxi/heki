@@ -463,18 +463,29 @@ fn globals_read(decls: &ModuleDecls, definitions: &[TypedReturns<'_>]) -> Vec<St
     out
 }
 
-/// One definition whose returned values may be of a class narrower than its annotation: the
-/// values, and the annotation.
+/// One definition whose returned values may say more than its annotation: the values, and what
+/// they may say.
 struct TypedReturns<'f> {
     f: &'f IrFunction,
     values: Vec<VarId>,
-    declared: Ty,
+    returned: Returned,
 }
 
-/// The functions of the module whose every definition returns a value on every `return` and is
-/// annotated with a class a narrower one may specialize ([`ProjectDecls::specializes`]): a
-/// library class some catalog class has the methods of (`sqlite3.Connection`, of a connection
-/// on a file), or a class of the module that another of its classes names as a base.
+/// What the values a definition returns may say beyond its annotation ([`typed_candidates`]).
+enum Returned {
+    /// A class narrower than the annotated one ([`ProjectDecls::narrower`]).
+    Narrower(Ty),
+    /// The named objects they are (a `def` or `lambda` the function makes, a function or class a
+    /// name binds), where the annotation names no class (none, `Any`, `object`, `Callable`).
+    Named,
+}
+
+/// The functions of the module whose every definition returns a value on every `return` and
+/// whose values may say more than the annotation: one annotated with a class a narrower one may
+/// specialize ([`ProjectDecls::specializes`]: a library class some catalog class has the methods
+/// of, `sqlite3.Connection` of a connection on a file, or a class of the module that another of
+/// its classes names as a base), or one whose annotation names no class and every value of
+/// which may be a named object ([`may_return_named`]).
 fn typed_candidates<'f>(
     input: &'f ModuleInput<'_>,
     decls: &ModuleDecls,
@@ -498,15 +509,26 @@ fn typed_candidates<'f>(
         let declared = decls
             .functions
             .get(&f.qualname)
-            .and_then(|d| d.return_type.as_ref())
-            .filter(|t| t.obj().is_some_and(|o| specializable(&o.class)))
-            .cloned();
-        let values = declared.as_ref().and_then(|_| returned_values(decls, f));
-        match declared.zip(values) {
-            Some((declared, values)) => out.entry(&f.qualname).or_default().push(TypedReturns {
+            .and_then(|d| d.return_type.as_ref());
+        let values = returned_values(decls, f);
+        let returned = match (declared, &values) {
+            (Some(t), Some(_)) if t.obj().is_some_and(|o| specializable(&o.class)) => {
+                Some(Returned::Narrower(t.clone()))
+            }
+            (None, Some(values)) => may_return_named(decls, f, values).then_some(Returned::Named),
+            (Some(t), Some(values))
+                if t.obj().is_some_and(|o| names_no_class(&o.class))
+                    && may_return_named(decls, f, values) =>
+            {
+                Some(Returned::Named)
+            }
+            _ => None,
+        };
+        match returned.zip(values) {
+            Some((returned, values)) => out.entry(&f.qualname).or_default().push(TypedReturns {
                 f,
                 values,
-                declared,
+                returned,
             }),
             None => ruled_out.push(&f.qualname),
         }
@@ -515,6 +537,40 @@ fn typed_candidates<'f>(
         out.remove(q);
     }
     out
+}
+
+/// Whether an annotation of `class` says nothing of the object a function returns that a named
+/// object would not: `Any`, `object`, or any `Callable`.
+fn names_no_class(class: &str) -> bool {
+    super::of_any_class(class) || super::is_any_callable(class)
+}
+
+/// Whether every value `f` returns may be a named object, by what makes it: a `def` or `lambda`
+/// of `f`, a name its module binds to a definition, an import, or an alias, or a name a scope
+/// enclosing it binds. Only such functions are inferred for a [`Returned::Named`] fact.
+fn may_return_named(decls: &ModuleDecls, f: &IrFunction, values: &[VarId]) -> bool {
+    let shape = FnShape::new(f);
+    let named = |name: &str| {
+        decls.functions.contains_key(name)
+            || decls.classes.contains_key(name)
+            || decls.imports.contains_key(name)
+            || decls.aliases.contains_key(name)
+            || decls.alias_paths.contains_key(name)
+    };
+    values
+        .iter()
+        .all(|v| match shape.inst(shape.copy_root(*v)).map(|i| &i.kind) {
+            Some(InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. }) => {
+                named(name)
+            }
+            Some(
+                InstKind::LoadDeref { .. }
+                | InstKind::MakeClosure {
+                    func_id: Some(_), ..
+                },
+            ) => true,
+            _ => false,
+        })
 }
 
 /// The value of every `return` of `f`, when calling it runs its body and gives what it returns
@@ -636,23 +692,40 @@ impl<'f> ReturnFacts<'_, 'f> {
             .then_some(first)
     }
 
-    /// The type every value of `definitions` returns, when they agree on one narrower than the
-    /// annotation.
+    /// The type every value of `definitions` returns, past what the annotations say: one class
+    /// narrower than the annotation that they agree on, or the named objects they are, when
+    /// each is one ([`Returned::Named`]: a function returning one of two functions returns one of
+    /// them).
     fn returned_type(&self, definitions: &[TypedReturns<'_>]) -> Option<Ty> {
         let project = self.cx.project;
         let mut each = definitions.iter().flat_map(|d| {
             let inferred = self.cx.infer_types(d.f);
-            let declared = project.declared_ty(&d.declared);
+            let declared = match &d.returned {
+                Returned::Narrower(t) => project.declared_ty(t),
+                Returned::Named => None,
+            };
             d.values
                 .iter()
                 .map(|v| {
-                    let declared = declared.as_ref()?;
                     let t = inferred.ty(*v)?;
-                    project.narrower(t, declared, self.cx.kb).then(|| t.clone())
+                    match &d.returned {
+                        Returned::Narrower(_) => declared
+                            .as_ref()
+                            .is_some_and(|declared| project.narrower(t, declared, self.cx.kb))
+                            .then(|| t.clone()),
+                        Returned::Named => (!t.named().is_empty()).then(|| t.clone()),
+                    }
                 })
                 .collect::<Vec<_>>()
         });
         let first = each.next().flatten()?;
+        if !first.named().is_empty() {
+            let mut named: Vec<String> = first.named().to_vec();
+            for t in each {
+                named.extend(t?.named().iter().cloned());
+            }
+            return Ty::one_of(named);
+        }
         each.all(|t| t.as_ref() == Some(&first)).then_some(first)
     }
 

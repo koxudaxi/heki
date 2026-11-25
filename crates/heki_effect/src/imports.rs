@@ -8,12 +8,15 @@
 
 mod circular;
 mod distributions;
+mod handlers;
 
 pub use circular::CircularFailure;
 pub use distributions::{DeclaredOnly, Distributions, Only};
+pub use handlers::ImportFailure;
+pub(crate) use handlers::ImportHandlers;
 
 use crate::resolver::{FromImport, ProjectDecls, resolve_relative_module};
-use crate::{FileSummary, ModuleInput, environment, is_stub, scc};
+use crate::{FileSummary, ModuleInput, is_stub, scc};
 use heki_ast::Span;
 use heki_ir::walk::{Answer, BitSet, Budget, Closure, FnShape, Visit, reach, reach_breadth_first};
 use heki_ir::{
@@ -148,14 +151,12 @@ pub struct ImportSite {
     #[serde(default)]
     pub spelling: Spelling,
     pub timing: Answer<Timing>,
-    /// An `ImportError` handler takes the failure of the import (the `try` around it, or
-    /// around the class statement whose body holds it).
-    pub guarded: bool,
-    /// A handler may take an `ImportError` the import raises, so that the code after it runs
-    /// on (`environment::may_take_import_error`): one `guarded` names, `except Exception`, a
-    /// bare `except`, a type heki cannot tell passes it on, or the exit of a `with` block.
-    #[serde(default)]
-    pub caught: bool,
+    /// The widest failure of the import that a handler takes, so that the code after the
+    /// handler runs on ([`ImportHandlers::taken_at`]): around the import, around the class
+    /// statement whose body holds it, or, for a lazy import, around every read that may load
+    /// it. `None` when every failure leaves the function.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handled: Option<ImportFailure>,
     /// The site runs on every path through its function's body to a normal return, outside
     /// loops; never established in a class body.
     pub unconditional: bool,
@@ -166,22 +167,27 @@ pub struct ImportSite {
 }
 
 impl ImportSite {
-    /// Whether the site imports whenever its module loads: in the body, on every path through
-    /// it, and with no `ImportError` handler taking a failure. A site on one branch (`if
-    /// sys.platform == "win32": import winreg`) is not one.
-    pub fn loads_while_its_module_loads(&self) -> bool {
-        self.timing == Answer::Known(Timing::Body) && self.unconditional && !self.guarded
+    /// Whether a handler takes `failure` of the import ([`Self::handled`]).
+    pub fn handles(&self, failure: ImportFailure) -> bool {
+        self.handled >= Some(failure)
     }
 
-    /// Whether the site imports where it is written whenever its module loads, and an
-    /// `ImportError` it raises leaves the module: in the module body, on every path through it,
-    /// not lazy, and no handler may take the error ([`Self::caught`]). A handler of only
-    /// `ModuleNotFoundError` guards the site but does not take the error.
-    pub fn always_imports_uncaught(&self) -> bool {
+    /// Whether the site imports whenever its module loads: in the body, on every path through
+    /// it, and with no handler taking a failure of it. A site on one branch (`if sys.platform
+    /// == "win32": import winreg`) is not one.
+    pub fn loads_while_its_module_loads(&self) -> bool {
+        self.timing == Answer::Known(Timing::Body) && self.unconditional && self.handled.is_none()
+    }
+
+    /// Whether the site imports where it is written whenever its module loads, and its
+    /// `failure` leaves the module: in the module body, on every path through it, not lazy, and
+    /// no handler takes that failure. A rule asks for the failure it claims: a handler of only
+    /// `ModuleNotFoundError` takes a missing module and passes a plain `ImportError` on.
+    pub fn always_imports_leaving(&self, failure: ImportFailure) -> bool {
         self.timing == Answer::Known(Timing::Body)
             && self.unconditional
             && !self.lazy
-            && !self.caught
+            && !self.handles(failure)
     }
 
     /// The site with its positions zeroed: what Early Cutoff compares.
@@ -247,36 +253,13 @@ impl ModuleImports {
     }
 }
 
-/// What the handlers around a statement do with an `ImportError` it raises.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-struct Handled {
-    /// A handler naming it takes it ([`environment::guarded_against_import_errors`]).
-    guarded: bool,
-    /// A handler may take it ([`environment::may_take_import_error`]).
-    caught: bool,
-}
+/// The widest failure of a statement's import the handlers around it take
+/// ([`ImportSite::handled`]). Handlers around the statement and around what runs it (a class
+/// statement) take what either takes: the wider one.
+type Handled = Option<ImportFailure>;
 
-impl Handled {
-    /// What the handlers of block `bb` of `f` in module `ir` do.
-    fn at(ir: &ModuleIr, f: &IrFunction, bb: BlockId) -> Self {
-        Self {
-            guarded: environment::guarded_against_import_errors(f, bb),
-            caught: environment::may_take_import_error(f, bb, &ir.constants.shadowed),
-        }
-    }
-
-    /// Handled as by `self` or by `other`: by the handlers around it and those around what
-    /// runs it.
-    fn or(self, other: Self) -> Self {
-        Self {
-            guarded: self.guarded || other.guarded,
-            caught: self.caught || other.caught,
-        }
-    }
-}
-
-/// A class body a function runs, and what the handlers around its class statement do with an
-/// `ImportError` (in the function, or around the statement of an enclosing class body).
+/// A class body a function runs, and the failure of its imports the handlers around its class
+/// statement take (in the function, or around the statement of an enclosing class body).
 struct ClassBody<'m> {
     body: &'m IrFunction,
     handled: Handled,
@@ -287,10 +270,12 @@ struct ClassBody<'m> {
 fn class_bodies<'m>(ir: &'m ModuleIr, f: &'m IrFunction) -> Vec<ClassBody<'m>> {
     let mut out: Vec<ClassBody<'m>> = Vec::new();
     let mut index: FxHashMap<u32, usize> = FxHashMap::default();
-    // Each node is a function and what the handlers do around the class statements leading to
-    // it.
+    // Each node is a function and the failure the handlers around the class statements leading
+    // to it take.
     let next = |(id, outer): (u32, Handled), out: &mut Vec<(u32, Handled)>| {
         let g = ir.function(FunctionId(id));
+        let shape = FnShape::new(g);
+        let handlers = ImportHandlers::new(&shape, &ir.constants.shadowed);
         for bb in &g.blocks {
             for inst in &bb.insts {
                 if let InstKind::MakeClosure {
@@ -299,27 +284,27 @@ fn class_bodies<'m>(ir: &'m ModuleIr, f: &'m IrFunction) -> Vec<ClassBody<'m>> {
                 } = &inst.kind
                     && ir.function(*body).is_class_body
                 {
-                    out.push((body.0, outer.or(Handled::at(ir, g, bb.id))));
+                    out.push((body.0, outer.max(handlers.taken_at(bb.id))));
                 }
             }
         }
     };
-    // Unmetered: a function's class statements are walked once per way they are handled, and
-    // the walk is never open.
+    // Unmetered: a function's class statements are walked once per failure they take, and the
+    // walk is never open.
     reach(
         &Budget::unmetered("import_sites"),
-        [(f.id.0, Handled::default())],
+        [(f.id.0, None)],
         next,
         |(id, handled)| {
             if id != f.id.0 {
                 let at = *index.entry(id).or_insert_with(|| {
                     out.push(ClassBody {
                         body: ir.function(FunctionId(id)),
-                        handled: Handled::default(),
+                        handled: None,
                     });
                     out.len() - 1
                 });
-                out[at].handled = out[at].handled.or(handled);
+                out[at].handled = out[at].handled.max(handled);
             }
             Visit::<()>::Expand
         },
@@ -342,15 +327,16 @@ struct Placements<'m> {
     /// The functions that are no class bodies: each runs its own body and its class bodies.
     runners: Vec<&'m IrFunction>,
     /// By the span of the imported name: one entry for the copies of a statement in a
-    /// `finally` body, guarded or unconditional when one copy is.
+    /// `finally` body, handled as the copy whose handlers take most, and unconditional when one
+    /// copy is.
     placed: FxHashMap<Span, Placed>,
     /// The reads of names a lazy import binds in the module body and the class bodies it runs.
     lazy_reads: Vec<LazyRead<'m>>,
     /// By the span of the imported name, what the module body's reads load of a lazy import
     /// ([`lazy_loads`]).
     lazy_loads: FxHashMap<Span, LazyLoad>,
-    /// The class bodies with an `ImportError` handler around their class statement that takes
-    /// or may take it.
+    /// The class bodies with a handler around their class statement that takes a failure of
+    /// their imports.
     handled_classes: Vec<(Span, Handled)>,
 }
 
@@ -377,28 +363,38 @@ impl<'m> Placements<'m> {
 
     /// The imports `f`, the function `runner`, runs in its body and its class bodies.
     fn place(&mut self, ir: &'m ModuleIr, runner: usize, f: &'m IrFunction) {
+        let shape = FnShape::new(f);
         // Built for the functions holding an import only.
-        let shape: OnceCell<FnShape<'_>> = OnceCell::new();
         let ends: OnceCell<LastBindings> = OnceCell::new();
         let always = |bb: BlockId| {
-            let shape = shape.get_or_init(|| FnShape::new(f));
-            ends.get_or_init(|| LastBindings::of(shape))
-                .always_runs(shape, bb)
+            ends.get_or_init(|| LastBindings::of(&shape))
+                .always_runs(&shape, bb)
         };
+        let shadowed = &ir.constants.shadowed;
+        let own = ImportHandlers::new(&shape, shadowed);
         let bodies = class_bodies(ir, f);
         (self.handled_classes).extend(
             (bodies.iter())
-                .filter(|c| c.handled != Handled::default())
+                .filter(|c| c.handled.is_some())
                 .map(|c| (c.body.span, c.handled)),
         );
-        let holders = std::iter::once((f, false, Handled::default()))
+        let holders = std::iter::once((f, false, None))
             .chain(bodies.iter().map(|c| (c.body, true, c.handled)));
         for (g, in_class, outer) in holders {
+            let class_shape;
+            let class_handlers;
+            let handlers = if in_class {
+                class_shape = FnShape::new(g);
+                class_handlers = ImportHandlers::new(&class_shape, shadowed);
+                &class_handlers
+            } else {
+                &own
+            };
             for bb in &g.blocks {
                 for (index, inst) in bb.insts.iter().enumerate() {
                     match &inst.kind {
                         InstKind::Import { .. } => {
-                            let handled = outer.or(Handled::at(ir, g, bb.id));
+                            let handled = outer.max(handlers.taken_at(bb.id));
                             let unconditional = !in_class && always(bb.id);
                             self.add(inst.span, runner, in_class, handled, unconditional);
                         }
@@ -410,7 +406,7 @@ impl<'m> Placements<'m> {
                             name,
                             at: (!in_class).then_some((bb.id, index)),
                             unconditional: !in_class && always(bb.id),
-                            handled: outer.or(Handled::at(ir, g, bb.id)),
+                            handled: outer.max(handlers.taken_at(bb.id)),
                         }),
                         _ => {}
                     }
@@ -419,7 +415,7 @@ impl<'m> Placements<'m> {
         }
         if f.is_module_body {
             for &(bb, span) in &ir.star_imports {
-                self.add(span, runner, false, Handled::at(ir, f, bb), always(bb));
+                self.add(span, runner, false, own.taken_at(bb), always(bb));
             }
         }
     }
@@ -428,10 +424,10 @@ impl<'m> Placements<'m> {
         let at = self.placed.entry(span).or_insert(Placed {
             runner,
             in_class,
-            handled: Handled::default(),
+            handled: None,
             unconditional: false,
         });
-        at.handled = at.handled.or(handled);
+        at.handled = at.handled.max(handled);
         at.unconditional |= always;
     }
 }
@@ -447,16 +443,26 @@ struct LazyRead<'m> {
 
 /// What the module body's reads load of one lazy import. An entry without `read` comes from a
 /// read whose binding heki cannot tell, which may load it.
-#[derive(Default)]
 struct LazyLoad {
     /// A read its binding may reach: the first such read loads the module there.
     read: bool,
     /// A read only its binding reaches runs on every path through the body.
     unconditional: bool,
-    /// A read that may load it is outside every `ImportError` handler.
-    unguarded: bool,
-    /// A read that may load it is outside every handler that may take an `ImportError`.
-    uncaught: bool,
+    /// The failure the handlers around every read that may load it take: the narrowest of
+    /// theirs, since any of them may be the read that loads it.
+    handled: Handled,
+}
+
+impl Default for LazyLoad {
+    /// Before any read: each read that may load it narrows `handled` to what its own handlers
+    /// take.
+    fn default() -> Self {
+        Self {
+            read: false,
+            unconditional: false,
+            handled: Some(ImportFailure::AnyImportError),
+        }
+    }
 }
 
 /// What the module body's `reads` of lazily imported names load (PEP 810): a read loads the
@@ -481,15 +487,13 @@ fn lazy_loads(ir: &ModuleIr, reads: &[LazyRead<'_>]) -> FxHashMap<Span, LazyLoad
                     let load = out.entry(import).or_default();
                     load.read = true;
                     load.unconditional |= only && read.unconditional;
-                    load.unguarded |= !read.handled.guarded;
-                    load.uncaught |= !read.handled.caught;
+                    load.handled = load.handled.min(read.handled);
                 }
             }
             Answer::Open => {
                 for import in (0..name.all.len()).filter_map(|b| name.import(b)) {
                     let load = out.entry(import).or_default();
-                    load.unguarded |= !read.handled.guarded;
-                    load.uncaught |= !read.handled.caught;
+                    load.handled = load.handled.min(read.handled);
                 }
             }
         }
@@ -702,8 +706,7 @@ pub(crate) fn module_imports(
     for site in &mut by_name {
         for (class, handled) in &placements.handled_classes {
             if class.start <= site.span.start && site.span.end <= class.end {
-                site.guarded |= handled.guarded;
-                site.caught |= handled.caught;
+                site.handled = site.handled.max(*handled);
             }
         }
     }
@@ -867,8 +870,7 @@ fn statement_site(
         ),
     };
     let mut unconditional = at.unconditional && !at.in_class;
-    let mut guarded = at.handled.guarded;
-    let mut caught = at.handled.caught;
+    let mut handled = at.handled;
     let is_lazy = matches!(statement, Statement::Import(imp) if imp.is_lazy);
     let timing = match statement {
         _ if in_type_checking => Answer::Known(Timing::TypeChecking),
@@ -878,8 +880,7 @@ fn statement_site(
         Statement::Import(_) if is_lazy => match placements.lazy_loads.get(&span) {
             Some(load) if load.read => {
                 unconditional = load.unconditional;
-                guarded = !load.unguarded;
-                caught = !load.uncaught;
+                handled = load.handled;
                 Answer::Known(Timing::Body)
             }
             Some(_) => Answer::Open,
@@ -910,8 +911,7 @@ fn statement_site(
             Spelling::Absolute
         },
         timing,
-        guarded,
-        caught,
+        handled,
         unconditional,
         lazy: is_lazy,
     }
@@ -973,6 +973,17 @@ impl Target {
     pub fn certain(&self) -> Option<ModuleRef> {
         match self {
             Self::Module(m) | Self::PackageOrSubmodule { package: m, .. } => Some(*m),
+            _ => None,
+        }
+    }
+
+    /// The failure the site raises whenever it runs: of a module a project package does not
+    /// have, `ModuleNotFoundError`; of a relative import climbing past its top-level package,
+    /// a plain `ImportError`.
+    pub fn failure(&self) -> Option<ImportFailure> {
+        match self {
+            Self::Missing(name) if name.is_empty() => Some(ImportFailure::AnyImportError),
+            Self::Missing(_) => Some(ImportFailure::MissingModule),
             _ => None,
         }
     }
@@ -1355,7 +1366,7 @@ impl<'i> ImportGraph<'i> {
     /// What loading the project module `m` loads in one step: the module each of its sites
     /// that certainly runs while it loads loads ([`ImportSite::loads_while_its_module_loads`],
     /// [`Target::certain`]), with the parent packages it loads first. A site on one branch, one
-    /// an `ImportError` handler guards, and one whose timing or module heki cannot tell, add
+    /// whose failure a handler takes, and one whose timing or module heki cannot tell, add
     /// nothing: loading `m` loads at least these.
     pub fn loads(&self, m: u32) -> &[ModuleRef] {
         &self.loads[m as usize]
@@ -1387,8 +1398,9 @@ impl<'i> ImportGraph<'i> {
     }
 
     /// The project modules that loading any of the project modules `starts` loads while it
-    /// loads, through imports whose failure leaves their module
-    /// ([`ImportSite::always_imports_uncaught`]) of the modules `enters` takes: breadth first,
+    /// loads, through imports a missing module below them fails along with their module
+    /// ([`ImportSite::always_imports_leaving`] a missing module) of the modules `enters` takes:
+    /// breadth first,
     /// so that each module is reached by a shortest chain of [`Self::hops`] from the start
     /// nearest to it. One walk from all the starts, linear in the modules and sites and
     /// unmetered: each module is visited once.
@@ -1406,7 +1418,7 @@ impl<'i> ImportGraph<'i> {
             starts,
             |m, next| {
                 for (j, (site, _)) in self.sites(m).into_iter().flatten().enumerate() {
-                    if !site.always_imports_uncaught() {
+                    if !site.always_imports_leaving(ImportFailure::MissingModule) {
                         continue;
                     }
                     for hop in self.hops(m, j) {

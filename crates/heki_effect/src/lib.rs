@@ -86,7 +86,7 @@ pub use readonly::{
 };
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
-    Callee, CapturedParams, ClassDecl, DeclKeys, DeclPasses, DeepCopy, FunctionDecl, HeldSentinel,
+    Callee, CapturedParams, ClassDecl, CopyMade, DeclKeys, DeclPasses, FunctionDecl, HeldSentinel,
     ModuleDecls, ModuleLayout, NamedAttr, ProjectDecls, ReadOnlyAttr, ReadOnlyKind, StrConstant,
     StrValue, TypeCtx, Val, aliases_of, detect_source_roots, func_qualname, is_source_dir,
     module_name_for_path, module_prefix, resolve_relative_module, self_aliases,
@@ -564,16 +564,27 @@ pub struct NewCond(Option<Box<CondParts>>);
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct CondParts {
     /// The object comes from calls of these project functions: each must return a new object
-    /// (`EffectSummary::returns_new`).
-    pub returns: Vec<FuncKey>,
+    /// at its call (`EffectSummary::returns_new`).
+    pub returns: Vec<NewFrom>,
     /// Earlier calls handed the object to these `(callee, parameter)`: none may keep it
     /// (`EffectSummary::retains_params`).
     pub keeps: Vec<(FuncKey, u8)>,
 }
 
+/// A project function whose result an object is, at one call of it ([`CondParts::returns`]).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct NewFrom {
+    pub callee: FuncKey,
+    /// The callee's parameters the call binds to a value that has no elements
+    /// ([`ConstArg::has_no_elements`]), so the returns giving an element of one of them return
+    /// nothing there ([`ReturnsNew::kind_at`]).
+    #[serde(default)]
+    pub empty_params: u64,
+}
+
 impl NewCond {
     /// The conditions, sorted and without duplicates.
-    pub fn new(mut returns: Vec<FuncKey>, mut keeps: Vec<(FuncKey, u8)>) -> Self {
+    pub fn new(mut returns: Vec<NewFrom>, mut keeps: Vec<(FuncKey, u8)>) -> Self {
         returns.sort();
         returns.dedup();
         keeps.sort();
@@ -588,7 +599,7 @@ impl NewCond {
         self.0.is_none()
     }
 
-    pub fn returns(&self) -> &[FuncKey] {
+    pub fn returns(&self) -> &[NewFrom] {
         self.0.as_ref().map_or(&[], |c| &c.returns)
     }
 
@@ -657,14 +668,29 @@ pub enum ReturnsNew {
     New {
         kind: NewKind,
         cond: NewCond,
+        /// Parameters some returns give an element of instead (an item, `get`, `pop`,
+        /// `setdefault`, an iteration step): the result is new only at a call binding each of
+        /// them to a value that has no elements, where those returns return nothing.
+        #[serde(default)]
+        elements_of: u64,
     },
 }
 
 impl ReturnsNew {
-    /// The kind of a resolved `New` (a final summary's).
+    /// The kind of a resolved `New` (a final summary's) at every call.
     pub fn kind(&self) -> Option<NewKind> {
+        self.kind_at(0)
+    }
+
+    /// The kind of a resolved `New` at a call binding the parameters `empty_params` to values
+    /// that have no elements ([`NewFrom::empty_params`]).
+    pub fn kind_at(&self, empty_params: u64) -> Option<NewKind> {
         match self {
-            Self::New { kind, cond } if cond.is_empty() => Some(*kind),
+            Self::New {
+                kind,
+                cond,
+                elements_of,
+            } if cond.is_empty() && elements_of & !empty_params == 0 => Some(*kind),
             _ => None,
         }
     }
@@ -990,6 +1016,12 @@ pub struct EffectSummary {
     /// or a type test: the changes `MUT110` names. A local fact, never propagated.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub param_inplace_sites: BTreeMap<u8, BTreeSet<Span>>,
+    /// The `param_inplace_sites` of parameters annotated read-only
+    /// (`FunctionDecl::readonly_params`) where the changed value is one a call handed back as
+    /// itself (`cast(list, items).append(1)`): typed by that call, it is no type checker's
+    /// report (`MUT110`). A local fact, never propagated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retyped_param_changes: Option<Box<BTreeMap<u8, BTreeSet<Span>>>>,
     /// `param index -> slots`: the containers held in these slots of the argument itself
     /// (`p.a`, `p["k"]`) are changed in place (`p.a.append(...)`, `p["k"][i] = v`), also through
     /// local copies and calls. Rebinding a slot, `setattr`, and `__dict__` writes do not count,
@@ -1078,7 +1110,8 @@ pub struct EffectSummary {
     /// generator over it), is stored (an attribute, an item, a global, a closure cell, a
     /// display), captured by a nested function, yielded, returned, or handed to a call other than
     /// a project call whose targets are every implementation it can run, binding it to a
-    /// parameter, not a constructor, or a library call Layer 1 lists as reading that argument;
+    /// parameter, not a constructor, a library call Layer 1 lists as reading that argument, or a
+    /// cast handing it back as itself (`ownership::handed_back`, whose result is the object);
     /// and every project function it is handed to only reads it there. Inside a call cycle the
     /// greatest fixpoint. `0` while [`OptInFacts::only_read`] is off, and for a function heki does
     /// not model (a stub's, one with an A1 hazard).
@@ -1679,6 +1712,7 @@ impl EffectSummary {
             }
         }
         out.param_inplace_sites.clear();
+        out.retyped_param_changes = None;
         for w in &mut out.capacity_waits {
             w.hop.span = Span { start: 0, end: 0 };
         }
@@ -1743,6 +1777,7 @@ impl EffectSummary {
                 (!propagated.is_empty()).then(|| Arc::new(propagated))
             }),
             param_inplace_sites: BTreeMap::new(),
+            retyped_param_changes: None,
             iterations: s.iterations.as_ref().and_then(|f| f.propagated()),
             unresolved_write_sites: BTreeSet::new(),
             unresolved_access_sites: BTreeSet::new(),
@@ -2004,6 +2039,11 @@ pub struct ArgOrigin {
     pub implementers: Option<Implementers>,
     /// Caller parameters the argument may be, as itself (through copies and phis).
     pub may_params: u64,
+    /// The argument is a value a call handed back as itself (`typing.cast(T, p)`, a project
+    /// function returning its parameter): a type checker types it by that call, so it reports
+    /// no mismatch of the original's annotation at this call.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retyped: bool,
     /// The argument is an instance the caller constructs (`Model(...)`), or an attribute of one.
     pub fresh: bool,
     /// Where the argument comes from among the objects that existed before the call (`MUT208`;
@@ -3128,6 +3168,20 @@ impl ProjectIndex {
     /// `Through` sites of the object a call returns run what iterating it runs.
     pub fn delivery<'s>(&self, site: &'s CallSite, callee: &EffectSummary) -> Option<Delivery<'s>> {
         callgraph::delivery(|k| self.summary(k), site, callee)
+    }
+
+    /// The construction, in the caller, of a write the callee `bc.callee` makes to the object
+    /// bound to its parameter `param` (`Construction::Param`; `own`: an in-place change), at the
+    /// call `site` delivering its facts `d`: `Yes` when the call hands it a new object nothing
+    /// kept, `Param` when the caller's own parameter, as propagation decides it for the writes a
+    /// callee hands its callers.
+    pub fn construction_at_call(
+        &self,
+        call: (&CallSite, &BoundCallee, &Delivery<'_>),
+        param: u8,
+        own: bool,
+    ) -> Construction {
+        callgraph::construction_at_call(self, call, param, own)
     }
 
     /// Final summary of `func`, if known.

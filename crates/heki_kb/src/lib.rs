@@ -465,6 +465,20 @@ pub struct EcosystemEntry {
     /// (`heki_effect::imports`). `importlib.util.find_spec` only finds one. Boxed: a few of the
     /// catalog's entries have one, and every entry holds the field.
     pub loads_module: Option<Box<LoadsModule>>,
+    /// The method returns the value its receiver holds ([`HeldValue`]): what a holder class's
+    /// type argument names (`ContextVar[T].get()`), or the result a future was given
+    /// (`concurrent.futures.Future.result`).
+    pub returns_held: Option<HeldValue>,
+}
+
+/// What a method returning the value its receiver holds returns
+/// (`EcosystemEntry::returns_held`): that value, or, with `default`, the argument at that
+/// position (the receiver not counted) when the call passes one and the receiver holds no value
+/// (`ContextVar.get(default)`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HeldValue {
+    pub default: Option<u8>,
 }
 
 /// Where a call building an instance of its receiver's class takes the values of the fields
@@ -2535,6 +2549,7 @@ mod tests {
                     "copy.copy",
                     "copy.replace",
                     "dataclasses.replace",
+                    "typing.NamedTuple._replace",
                     "builtins.dict.copy",
                     "builtins.list.copy",
                     "builtins.set.copy",
@@ -2548,6 +2563,24 @@ mod tests {
                     "collections.deque",
                 ]),
                 copy_sanitizer(CopyDepth::Shallow),
+            ),
+            (
+                s(&["typing.NamedTuple._make"]),
+                returning(SELF_RETURN_TYPE, entry(&[])),
+            ),
+            (
+                s(&["typing.NamedTuple._asdict"]),
+                returning("builtins.dict", entry(&[])),
+            ),
+            (
+                s(&["contextvars.ContextVar.set"]),
+                returning("contextvars.Token", entry(&[])),
+            ),
+            // What the methods returning the value their receiver holds return is pinned by
+            // `RETURNS_HELD`.
+            (
+                s(&["contextvars.ContextVar.get", "asyncio.Future.result"]),
+                entry(&[]),
             ),
             // `MUT119`: `os.environ.copy()` is `dict(os.environ)`, a new dict.
             (
@@ -4121,6 +4154,16 @@ mod tests {
 
     /// The calls handing back what a callable they are handed returns: `(arg, keywords,
     /// symbols)` of [`ResultOf`].
+    /// The methods returning the value their receiver holds, by the position of the default
+    /// they return instead ([`HeldValue`]).
+    const RETURNS_HELD: &[(Option<u8>, &[&str])] = &[
+        (
+            None,
+            &["asyncio.Future.result", "concurrent.futures.Future.result"],
+        ),
+        (Some(0), &["contextvars.ContextVar.get"]),
+    ];
+
     const RESULTS_OF: &[(u8, bool, &[&str])] = &[
         (
             0,
@@ -4221,6 +4264,10 @@ mod tests {
                         arg: *arg,
                         keywords: *keywords,
                     });
+                let returns_held = RETURNS_HELD
+                    .iter()
+                    .find(|(_, symbols)| symbols.contains(&symbol.as_str()))
+                    .map(|(default, _)| HeldValue { default: *default });
                 // The methods of the classes of what `sqlite3.connect` returns are the library's.
                 let api = [SQLITE3_MEMORY, SQLITE3_FILE].iter().find_map(|class| {
                     let method = symbol.strip_prefix(&format!("{class}."))?;
@@ -4249,6 +4296,7 @@ mod tests {
                     api,
                     writes_in_order,
                     result_of,
+                    returns_held,
                     ..expected.clone()
                 };
                 assert_eq!(kb.lookup(&symbol), Some(&expected), "{symbol}");
@@ -4325,10 +4373,10 @@ mod tests {
         assert_eq!(seen.len(), ASYNC_NAMESPACES.len(), "{seen:?}");
     }
 
-    /// A `return_type` naming a class without catalogued methods would leave the factory's
-    /// result unresolved without any sign (a typo, or a class spelled another way), unless the
-    /// class itself is the fact ([`FUTURE_CLASSES`]) or a builtin type, whose methods the
-    /// receiver typing knows. A call of a capitalized name is typed as
+    /// A `return_type` naming a class without catalogued members (methods, or attributes it
+    /// types) would leave the factory's result unresolved without any sign (a typo, or a class
+    /// spelled another way), unless the class itself is the fact ([`FUTURE_CLASSES`]) or a
+    /// builtin type, whose methods the receiver typing knows. A call of a capitalized name is typed as
     /// an instance of that name (`TypeCtx::call_result`), so a `return_type` there would be
     /// ignored: aliases such as `redis.StrictRedis` cannot be declared this way.
     #[test]
@@ -4339,6 +4387,7 @@ mod tests {
                 let methods = format!("{class}.");
                 assert!(
                     kb.entries.keys().any(|k| k.starts_with(&methods))
+                        || kb.attributes.keys().any(|k| k.starts_with(&methods))
                         || FUTURE_CLASSES.contains(&class)
                         || class.starts_with("builtins."),
                     "{symbol} -> {class}"
@@ -4946,9 +4995,10 @@ mod tests {
         assert_ne!(kb.digest, builtin.digest);
     }
 
-    /// Every attribute row names a class with catalogued members and is no entry (an attribute
-    /// is not a method the class defines), and the releases of its package that the row was
-    /// checked against are listed ([`Distribution`]).
+    /// Every attribute row names a class with catalogued members, or a builtin type, and is no
+    /// entry (an attribute is not a method the class defines), and the releases of its package
+    /// that the row was checked against are listed ([`Distribution`]); a row of the standard
+    /// library is checked on the running interpreter (`tests/sentinel/verify_stdlib_kb.py`).
     #[test]
     fn attribute_rows_name_catalogued_classes_in_verified_distributions() {
         let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
@@ -4973,14 +5023,17 @@ mod tests {
             let members = format!("{class}.");
             assert!(
                 kb.entries.keys().any(|k| k.starts_with(&members))
-                    || kb.attributes.keys().any(|k| k.starts_with(&members)),
+                    || kb.attributes.keys().any(|k| k.starts_with(&members))
+                    || class.starts_with("builtins."),
                 "{symbol} -> {class}"
             );
             assert_eq!(kb.lookup(symbol), None, "{symbol}");
+            let package = symbol.split('.').next().unwrap_or(symbol);
             assert!(
-                distributions
-                    .iter()
-                    .any(|d| d.packages.iter().any(|p| under(symbol, p))),
+                heki_env::is_stdlib_module(package)
+                    || distributions
+                        .iter()
+                        .any(|d| d.packages.iter().any(|p| under(symbol, p))),
                 "{symbol}"
             );
         }

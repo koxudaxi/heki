@@ -7,6 +7,7 @@
 
 use super::{Extractor, Position, ProjectCall};
 use crate::order_flow::ORDER_FREE_BUILTINS;
+use crate::ownership;
 use crate::readonly::{
     ContainerFamily, ContainerKind, container_mutator, result_detached_from_container,
     returns_container_view,
@@ -287,6 +288,9 @@ impl<'a> Extractor<'a> {
         v: VarId,
         call: &CallOperands<'_>,
     ) -> Handling {
+        if self.hands_back(v, call) {
+            return Handling::holds(call.dst);
+        }
         match self.callees.get(&call.at) {
             Some(Callee::Project(keys, _)) => self.project_handling(walks, k, v, call, keys),
             Some(Callee::External(symbol)) => self.library_handling(v, call, symbol),
@@ -690,8 +694,11 @@ impl<'a> Extractor<'a> {
                         .all(|e| !matches!(e, DictEntry::KeyValue { key, value } if *key == v || *value == v))
             }
             InstKind::Call { callee_var, .. } if *callee_var == Some(v) => false,
-            kind_ => CallOperands::of(kind_, (bb, i))
-                .is_some_and(|call| self.abstract_call(walks, kind, v, derived, &call)),
+            kind_ => match CallOperands::of(kind_, (bb, i)) {
+                Some(call) if self.hands_back(v, &call) => return Some(Some(call.dst)),
+                Some(call) => self.abstract_call(walks, kind, v, derived, &call),
+                None => false,
+            },
         };
         allowed.then_some(None)
     }
@@ -731,6 +738,17 @@ impl<'a> Extractor<'a> {
             (Place::Position(_) | Place::Keyword, Some(Callee::Project(..))) => !derived && project,
             _ => false,
         })
+    }
+
+    /// Whether `call` is a library call handing `v` back as itself, `typing.cast(T, v)`
+    /// ([`ownership::handed_back`]): its result is the object, and the call does nothing else
+    /// with it.
+    fn hands_back(&self, v: VarId, call: &CallOperands<'_>) -> bool {
+        matches!(
+            self.callees.get(&call.at),
+            Some(Callee::External(symbol))
+                if ownership::handed_back(symbol, call.args, call.star_from) == Some(v)
+        )
     }
 
     /// How many leading parameters of a library call no argument binds: one for a method of an

@@ -10,7 +10,7 @@ use super::when_text;
 use crate::CheckContext;
 use heki_diagnostics::Diagnostic;
 use heki_effect::code_kind::{CodeKind, is_test_module};
-use heki_effect::imports::{ImportGraph, ModuleRef, Timing};
+use heki_effect::imports::{ImportFailure, ImportGraph, ModuleRef, Timing};
 use heki_ir::walk::Answer;
 use rustc_hash::FxHashSet;
 
@@ -41,7 +41,9 @@ pub(crate) fn imp104(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 site.timing,
                 Answer::Known(Timing::Body | Timing::Lazy | Timing::Function)
             );
-            let Some(ModuleRef::Project(d)) = target.certain().filter(|_| runs && !site.caught)
+            // A handler taking the missing module gives the package a fallback.
+            let falls_back = site.handles(ImportFailure::MissingModule);
+            let Some(ModuleRef::Project(d)) = target.certain().filter(|_| runs && !falls_back)
             else {
                 continue;
             };
