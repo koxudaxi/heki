@@ -96,8 +96,9 @@ pub struct Restated {
     /// The names the import statements the edit adds bind.
     pub imports: BTreeSet<String>,
     /// The first names of the annotation heads it replaces and of their replacements (`list`,
-    /// `Sequence`, `t` of `t.Sequence`): a class body that defines the function loads them,
-    /// and `ClassDecl::code_attrs` counts the names a class body loads.
+    /// `Sequence`, `t` of `t.Sequence`): a class body or a function that defines the function
+    /// loads them, and `ClassDecl::code_attrs` counts the names a class body loads,
+    /// `ReturnFact::ty_globals` the globals a function loads.
     pub head_names: BTreeSet<String>,
     /// What the heads it replaces and their replacements name (`collections.abc.Mapping`): the
     /// module hands such an object to the function's annotations, which
@@ -228,6 +229,13 @@ impl Changes {
         map: &OffsetMap,
     ) {
         let (mut now, mut then) = (now.clone(), then.clone());
+        // What a function defining an edited one reads of the heads, by each side's imports.
+        let head_reads = |decls: &ModuleDecls| -> BTreeSet<String> {
+            (restated.head_names.iter())
+                .map(|name| decls.global_read(name))
+                .collect()
+        };
+        let (reads_now, reads_then) = (head_reads(&now), head_reads(&then));
         let (functions_now, functions_then) = (
             std::mem::take(&mut now.functions),
             std::mem::take(&mut then.functions),
@@ -260,16 +268,23 @@ impl Changes {
         let keys: BTreeSet<&String> = functions_now.keys().chain(functions_then.keys()).collect();
         for qualname in keys {
             let mask = !restated.params.get(qualname).copied().unwrap_or(0);
-            let unrestated = |decls: &BTreeMap<String, Box<FunctionDecl>>| {
-                decls.get(qualname).map(|d| FunctionDecl {
-                    readonly_params: d.readonly_params & mask,
-                    mutable_params: d.mutable_params & mask,
-                    ..(**d).clone()
+            let unrestated = |decls: &BTreeMap<String, Box<FunctionDecl>>,
+                              head_reads: &BTreeSet<String>| {
+                decls.get(qualname).map(|d| {
+                    let mut d = FunctionDecl {
+                        readonly_params: d.readonly_params & mask,
+                        mutable_params: d.mutable_params & mask,
+                        ..(**d).clone()
+                    };
+                    if let Some(returns) = &mut d.returns {
+                        (returns.ty_globals).retain(|fqn| !head_reads.contains(fqn));
+                    }
+                    d
                 })
             };
             let fields = differing_fields(
-                &unrestated(&functions_now),
-                &unrestated(&functions_then),
+                &unrestated(&functions_now, &reads_now),
+                &unrestated(&functions_then, &reads_then),
                 map,
             );
             self.add(

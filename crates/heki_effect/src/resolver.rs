@@ -1271,6 +1271,14 @@ impl ModuleDecls {
         })
     }
 
+    /// The fqn a function of the module reads as the global `name`: what its runtime import
+    /// binds ([`Self::fixed_import`]), or the module's own global (`ReturnFact::ty_globals`).
+    pub fn global_read(&self, name: &str) -> String {
+        self.fixed_import(name)
+            .cloned()
+            .unwrap_or_else(|| format!("{}.{name}", self.module_name))
+    }
+
     /// Whether a statement of the module itself binds the module global `name` at run time: an
     /// import, a `def` or `class` statement, a module alias, or any other store or deletion.
     pub fn binds(&self, name: &str) -> bool {
