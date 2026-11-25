@@ -7028,7 +7028,8 @@ const TYPED_F: &str = "from typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n  
 /// The report's related location moves with the import, a package's `__init__` closes a cycle
 /// through the parent package an import loads first, a module created turns a `from` import of
 /// a name into an import of the submodule, which then closes a cycle, and a package binding the
-/// name (no import changes) takes it back.
+/// name (no import changes) takes it back. A baseline entry of a group holding a group's
+/// modules covers its report, in the editor as in `heki check`.
 #[test]
 fn lsp_diagnostics_equal_a_full_check_through_import_cycles() {
     let files = vec![
@@ -7153,8 +7154,34 @@ fn lsp_diagnostics_equal_a_full_check_through_import_cycles() {
             vec![save("pkg/h.py", "def load():\n    import pkg.i\n")],
         )
         .present(&[("pkg/i.py", "IMP101")]),
+        Step::new(
+            "a baseline records a group holding the two modules and one more",
+            vec![
+                Action::Write("heki-baseline.toml", group_baseline("pkg.h, pkg.i, pkg.j")),
+                Action::Configure(format!(
+                    "{}\n[tool.heki.imports]\ncycle-edges = [\"body\", \"function\"]\n",
+                    CYCLES_CONFIG.replace(
+                        "[tool.heki.lint]",
+                        "[tool.heki]\nbaseline = \"heki-baseline.toml\"\n\n[tool.heki.lint]"
+                    )
+                )),
+            ],
+        )
+        .absent(&[("pkg/i.py", "IMP101")]),
+        Step::new(
+            "the baseline's group lacks one of the two modules",
+            vec![Action::Write("heki-baseline.toml", group_baseline("pkg.h, pkg.j"))],
+        )
+        .present(&[("pkg/i.py", "IMP101")]),
     ];
     run_steps(s, &steps);
+}
+
+/// A baseline whose one entry records the `IMP101` group of the modules `target` lists.
+fn group_baseline(target: &str) -> String {
+    format!(
+        "version = 2\n\n[[entries]]\nrule_code = \"IMP101\"\ntarget = \"{target}\"\ncount = 1\n"
+    )
 }
 
 // ------------------------------------------------------------------ circular imports that fail
