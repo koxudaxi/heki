@@ -7318,10 +7318,12 @@ fn a_fact_needing_more_tests_than_the_bound_is_not_kept() {
 /// union doubling its text in each of `DOUBLINGS` links: each type expression is spelled once,
 /// the wide and the doubling union only up to their bound of parts. The wide union has a fixed
 /// width: a chain of operators as long as `aliases` overflows the 1 MiB main thread stack of a
-/// debug build on Windows.
+/// debug build on Windows. The doubling union has few enough links that its values (two a link)
+/// stay within the bound, so only the parts its text writes stop it: without that bound, its
+/// text would grow to 2^`DOUBLINGS` parts.
 fn type_expressions(aliases: usize) -> String {
     const WIDE: usize = 70;
-    const DOUBLINGS: usize = 40;
+    const DOUBLINGS: usize = 29;
     let mut out = vec![
         "from typing import TypeAlias, cast".to_owned(),
         String::new(),

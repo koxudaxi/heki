@@ -717,8 +717,12 @@ body binds once, outside a loop, to a value that names a file (`ModuleDecls::fil
 (`TypeCtx::names_file_constant`), unless another module rebinds it.
 
 A module-level name the module body binds once to a type expression reads as the type it names
-wherever an annotation names it, in its module or imported, also as a member of a union
-(`ModuleDecls::type_names`, `ProjectDecls::declared_ty`). A type alias names its value:
+wherever an annotation names it, in its module, imported, or re-exported, also as a member of a
+union and inside `type[...]`, where a name that names one class names that class's objects
+(`ModuleDecls::type_names`, `ProjectDecls::declared_ty`). The name is chased through re-exports
+and module aliases up to the first name that names a type (`ProjectDecls::type_name`): an alias
+that is also a module alias of its class (`Operations = list[Added]` binds `list`) keeps its
+arguments wherever it is imported from. A type alias names its value:
 `Operation: TypeAlias = Added | Removed` (the string of an annotation too), `type Operation =
 Added | Removed` without type parameters, and an assignment of a subscript or a union without an
 annotation (`Operations = list[Added]`); its value may name an alias bound before it, and a type
