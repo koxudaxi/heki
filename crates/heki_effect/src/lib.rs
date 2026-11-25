@@ -1127,6 +1127,12 @@ pub struct EffectSummary {
     /// Module-relative class qualname of a method (`Outer.Inner`), as in `IrFunction`.
     pub owner_class_qualname: Option<String>,
     pub decorators: Vec<String>,
+    /// A decorator may not run the body on every call or may hand out another object than it
+    /// returns: not every decorator is bound, in the function's module, to one that keeps the
+    /// result (`decorators::keeps_returned_value`). Callers read it here, without the module's
+    /// bindings (`MustGap::Decorated`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub decorator_may_replace: bool,
 
     /// The guards every occurrence of an execution effect depends on (`guards`); an effect
     /// without an entry runs whenever the function does.

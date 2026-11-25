@@ -18,7 +18,8 @@ set that a cached function returned:
   `maxsize` is left out, `None`, or a literal number above `0` (a name holding `0` would keep
   nothing), known by what its name is bound to (`from functools import lru_cache as _lru_cache`
   counts, a `cache` decorator the module defines itself does not), and
-  otherwise only with `staticmethod` / `classmethod`;
+  otherwise only with `staticmethod`, `classmethod`, `typing.override`, or `typing.final` (also
+  of `typing_extensions`);
 - it takes a parameter besides a method's `self` / `cls`, so the cache keys its results;
 - every return a run can reach hands out a builtin container of one kind: its return annotation
   names `list`, `dict`, or `set` as a whole (`dict[str, Any]`, not `dict | None`), or each

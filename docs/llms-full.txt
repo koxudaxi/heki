@@ -5867,9 +5867,11 @@ Each step of the chain is established, not assumed:
   `super()` read is in (a class finding a class attribute, a method, a value stored on the class
   outside its body, or nothing instead, a base heki does not know before the getter,
   `__getattribute__`, or a metaclass heki does not know leaves the read not followed); a
-  decorator other than `staticmethod`, `classmethod`, `property`, `abstractmethod`, or
-  `override` may not run the body, and is not followed; a function defined twice is not
-  followed, and neither is a function, class, or method whose name the project binds to another
+  decorator other than `staticmethod`, `classmethod`, `property`, `abstractmethod`, `override`,
+  or `final` may not run the body, and is not followed, each known by what its name is bound to
+  in the decorated function's module (the builtins, `abc`, `typing`, or `typing_extensions`: a
+  `final` the project defines or imports from elsewhere is another); a function defined twice
+  is not followed, and neither is a function, class, or method whose name the project binds to another
   object (assumption R1; a name its module body or class body binds last to one named object on
   every path is that object): another store or a `del` of the name in its module (also on a
   branch, after `global`, or by `globals()` or `exec`), in its class body, or on its class
@@ -6137,9 +6139,9 @@ run a callable on a worker thread (`offloads_blocking_arg`):
 
 The callable is the function itself, a bound method (`self.flush`), or a `functools.partial` of
 either. A report is worded as certain when every function the value calls is an `async def`
-without decorators other than `staticmethod`, `classmethod`, `abstractmethod`, or `override`;
-when a decorator replaces one, or another implementation of the method is a plain function, the
-report says the function may not create a coroutine.
+without decorators other than `staticmethod`, `classmethod`, `abstractmethod`, `override`, or
+`final`; when a decorator replaces one, or another implementation of the method is a plain
+function, the report says the function may not create a coroutine.
 
 It does not report:
 
@@ -6550,7 +6552,8 @@ set that a cached function returned:
   `maxsize` is left out, `None`, or a literal number above `0` (a name holding `0` would keep
   nothing), known by what its name is bound to (`from functools import lru_cache as _lru_cache`
   counts, a `cache` decorator the module defines itself does not), and
-  otherwise only with `staticmethod` / `classmethod`;
+  otherwise only with `staticmethod`, `classmethod`, `typing.override`, or `typing.final` (also
+  of `typing_extensions`);
 - it takes a parameter besides a method's `self` / `cls`, so the cache keys its results;
 - every return a run can reach hands out a builtin container of one kind: its return annotation
   names `list`, `dict`, or `set` as a whole (`dict[str, Any]`, not `dict | None`), or each
@@ -8048,8 +8051,8 @@ It reports a call of a project generator function:
   handed itself, as a bound method (`self.drain`), or through `functools.partial`.
 
 Every function the call may run is a generator function without decorators other than
-`staticmethod`, `classmethod`, `abstractmethod`, or `override`: a call of a method that a
-subclass overrides with a plain function is no report. When the name is bound to more than one
+`staticmethod`, `classmethod`, `abstractmethod`, `override`, or `final`: a call of a method that
+a subclass overrides with a plain function is no report. When the name is bound to more than one
 definition (`def` under `if` and `else`), the report says that the last one is a generator
 function.
 
@@ -12242,7 +12245,7 @@ It does not report:
 - receivers of unknown type;
 - an argument known not to be a coroutine, from which no new task is made: the result of a
   project function that is a plain `def` or a generator function without decorators other than
-  `staticmethod`, `classmethod`, `abstractmethod`, or `override` (`create_task` raises
+  `staticmethod`, `classmethod`, `abstractmethod`, `override`, or `final` (`create_task` raises
   `TypeError` on what it returns, and `ensure_future` returns a future it is handed unchanged),
   or a value typed as a future or a task (`loop.run_in_executor(...)`, `loop.create_future()`,
   `asyncio.gather(...)`, `asyncio.wrap_future(...)`, `executor.submit(...)`, or an annotated
