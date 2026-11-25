@@ -2213,6 +2213,22 @@ enum Holds {
     Maybe,
 }
 
+/// How far [`ProjectDecls::follow`] chases a name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Chase {
+    /// Through re-exports ([`ProjectDecls::canonical`]).
+    Reexports,
+    /// Through re-exports, `None` past one its module binds again
+    /// ([`ProjectDecls::canonical_value`]).
+    Values,
+    /// Through re-exports and the module aliases they name ([`ProjectDecls::object_named`]).
+    Objects,
+    /// [`Self::Objects`] up to a name that names a type ([`ModuleDecls::type_names`]), which a
+    /// type expression reads as that type, whatever object its module also binds to it
+    /// ([`ProjectDecls::type_name`]).
+    Types,
+}
+
 /// `a`, `a.b`, and `a.b.c` of `a.b.c`.
 fn dotted_prefixes(name: &str) -> impl Iterator<Item = &str> {
     name.match_indices('.')
@@ -3083,29 +3099,29 @@ impl ProjectDecls {
 
     /// Chase re-exports (`pkg.Foo` where `pkg/__init__.py` does `from .sub import Foo`).
     pub fn canonical(&self, fqn: &str) -> String {
-        self.chase(fqn, false)
+        self.chase(fqn, Chase::Reexports)
     }
 
     /// [`Self::canonical`] for a value read through the name (a constant, a small display):
     /// `None` when a module on the way binds the name it re-exports again
     /// ([`ModuleDecls::fixed_import`]).
     pub fn canonical_value(&self, fqn: &str) -> Option<String> {
-        self.follow(fqn, false, true).map(|(found, _)| found)
+        self.follow(fqn, Chase::Values).map(|(found, _)| found)
     }
 
-    /// `fqn` through re-exports and, with `aliases`, the module aliases it names (at most
-    /// `MAX_ALIAS_CHASE` steps).
-    fn chase(&self, fqn: &str, aliases: bool) -> String {
-        self.follow(fqn, aliases, false)
+    /// `fqn` chased as `how` says (at most `MAX_ALIAS_CHASE` steps).
+    fn chase(&self, fqn: &str, how: Chase) -> String {
+        self.follow(fqn, how)
             .map_or_else(|| fqn.to_owned(), |(found, _)| found)
     }
 
-    /// [`Self::chase`]; with `values`, `None` past a re-export its module binds again. With the
-    /// name found, whether it is the object a class or function statement made rather than
-    /// what the name holds once its module has run: a module alias names the object it bound
-    /// (`_orig = fetch`, then `fetch = _patched`), so a definition the module binds again stays
-    /// that definition past it.
-    fn follow(&self, fqn: &str, aliases: bool, values: bool) -> Option<(String, bool)> {
+    /// [`Self::chase`]: `None` only for [`Chase::Values`]. With the name found, whether it is
+    /// the object a class or function statement made rather than what the name holds once its
+    /// module has run: a module alias names the object it bound (`_orig = fetch`, then `fetch =
+    /// _patched`), so a definition the module binds again stays that definition past it.
+    fn follow(&self, fqn: &str, how: Chase) -> Option<(String, bool)> {
+        let aliases = matches!(how, Chase::Objects | Chase::Types);
+        let values = how == Chase::Values;
         let mut cur = fqn.to_owned();
         let mut aliased_in: Option<String> = None;
         for _ in 0..MAX_ALIAS_CHASE {
@@ -3119,6 +3135,9 @@ impl ProjectDecls {
                 Some((f, t)) => (f, Some(t)),
                 None => (rest, None),
             };
+            if how == Chase::Types && tail.is_none() && m.type_names.contains_key(first) {
+                break;
+            }
             // `imports` holds the names an import binds once the module has run
             // (`ModuleImport::rebound_at`): a class or function of the same name is shadowed by
             // it.
@@ -3183,9 +3202,15 @@ impl ProjectDecls {
     /// through the module aliases it names (`pkg.model._set` for `_set = object.__setattr__` in
     /// `pkg.model`). The name itself stays the alias's: only values are the object.
     pub fn object_named(&self, fqn: &str) -> String {
-        let named = self.chase(fqn, true);
+        self.named_through(fqn, Chase::Objects)
+    }
+
+    /// The name `fqn` chased as `how` says, also past the class body binding it to another
+    /// name ([`Self::class_aliased`]).
+    fn named_through(&self, fqn: &str, how: Chase) -> String {
+        let named = self.chase(fqn, how);
         self.class_aliased(&named)
-            .map_or(named, |target| self.chase(&target, true))
+            .map_or(named, |target| self.chase(&target, how))
     }
 
     /// The name `Class.attr` stands for when the class body defining `attr` binds it last to one
@@ -3206,7 +3231,7 @@ impl ProjectDecls {
     /// of them, each through [`Self::object_named`], a definition of the module or class as the
     /// object its statement made.
     pub(crate) fn named_on_paths(&self, fqn: &str) -> Option<Ty> {
-        let (named, definition) = self.follow(fqn, true, false)?;
+        let (named, definition) = self.follow(fqn, Chase::Objects)?;
         if definition {
             return None;
         }
@@ -4765,8 +4790,9 @@ impl ProjectDecls {
     /// of a project module that is no class and names no type (a constant, an unbounded
     /// `TypeVar`); an item of such a type is unknown. A project name that names a type (a type
     /// alias, a bound `TypeVar`: [`ModuleDecls::type_names`]) is that type, also as a member of a
-    /// union. A name below a module heki does not see (a compiled submodule of a project package)
-    /// stays as it is. A class object (`type[C]`) is [`Self::class_object`].
+    /// union, and inside `type[...]` ([`Self::class_named`]). A name below a module heki does not
+    /// see (a compiled submodule of a project package) stays as it is. A class object (`type[C]`)
+    /// is [`Self::class_object`].
     pub(crate) fn declared_ty(&self, ty: &Ty) -> Option<Ty> {
         self.declared_ty_with(ty, true)
     }
@@ -4775,7 +4801,7 @@ impl ProjectDecls {
     /// ([`ModuleDecls::type_names`]), whose own names are taken as they are.
     fn declared_ty_with(&self, ty: &Ty, names: bool) -> Option<Ty> {
         if let Ty::Class(class) = ty {
-            return self.class_object(&self.object_named(class));
+            return self.class_object(&self.class_named(class, names)?);
         }
         let named = |o: &crate::types::Obj| self.type_name(&o.class).filter(|_| names);
         let canonical = |o: &crate::types::Obj| {
@@ -4816,15 +4842,25 @@ impl ProjectDecls {
         Ty::of_members(objs)
     }
 
-    /// The type the project name `fqn` names ([`ModuleDecls::type_names`]), as written or past
-    /// re-exports: an alias that is also a module alias of a class (`Names = frozenset[str]`)
-    /// names the type with its arguments.
+    /// The type the project name `fqn` names ([`ModuleDecls::type_names`]): that of the first
+    /// name along its re-exports and module aliases ([`Self::object_named`]) that names one. An
+    /// alias that is also a module alias of a class (`Names = frozenset[str]` binds the class
+    /// `frozenset`) names the type with its arguments.
     fn type_name(&self, fqn: &str) -> Option<&Ty> {
-        let named = |fqn: &str| {
-            let (m, rest) = self.split_module(fqn)?;
-            m.type_names.get(rest)
-        };
-        named(fqn).or_else(|| named(&self.object_named(fqn)))
+        let named = self.named_through(fqn, Chase::Types);
+        let (m, rest) = self.split_module(&named)?;
+        m.type_names.get(rest)
+    }
+
+    /// The canonical class of the class object type `type[C]` ([`Ty::Class`]) for the name `C`
+    /// (`class`): the class `C` names through re-exports and module aliases, or with `names`, the
+    /// one class of the type `C` names ([`Self::type_name`]: `type Kind = Model`, a type variable
+    /// bound to `Model`); `None` when that type is no instance of one class (a union).
+    fn class_named(&self, class: &str, names: bool) -> Option<String> {
+        match self.type_name(class).filter(|_| names) {
+            Some(t) => Some(self.object_named(&t.obj()?.class)),
+            None => Some(self.object_named(class)),
+        }
     }
 
     /// The type of a class object that is the canonical class `class` or one of its subclasses
@@ -4842,7 +4878,7 @@ impl ProjectDecls {
         let Ty::Class(class) = ty else {
             return None;
         };
-        let class = self.object_named(class);
+        let class = self.class_named(class, true)?;
         self.protocol(&class).is_some().then_some(class)
     }
 

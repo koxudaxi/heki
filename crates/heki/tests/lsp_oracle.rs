@@ -7028,11 +7028,11 @@ fn lsp_diagnostics_equal_a_full_check_below_a_git_working_tree() {
 // `ModuleDecls::stores_elsewhere`), a class attribute bound to a `staticmethod`
 // (`ClassDecl::named_attrs`, a subclass binding the name to a method), a function returning a
 // module it imports (`FunctionDecl::returned_import`), and the type a `TypeVar`'s bound or a
-// type alias names (`ModuleDecls::type_names`).
+// type alias names (`ModuleDecls::type_names`), also through a module re-exporting the alias.
 const BOUND_CONFIG: &str = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"uses\"\nscopes = [\"pkg.use_*.*\"]\nwrite-universe = [\"Field.required\"]\nallow-writes = []\n";
 const BOUND_MODEL: &str = "class Field:\n    def __init__(self):\n        self.required = False\n";
 const BOUND_HELPERS: &str = "from pkg.model import Field\n\n\ndef require(field: Field):\n    field.required = True\n\n\ndef skip(field: Field):\n    pass\n";
-const BOUND_DEFS: &str = "from typing import Protocol, TypeAlias, TypeVar\n\nfrom pkg.helpers import require, skip\nfrom pkg.model import Field\n\nTABLE = {\"run\": require, \"skip\": skip}\n\n\nclass Holder:\n    RUN = staticmethod(require)\n\n\ndef ops():\n    from pkg import helpers\n\n    return helpers\n\n\nclass View(Protocol):\n    @property\n    def fields(self) -> list[Field]: ...\n\n\nclass Other:\n    pass\n\n\nV = TypeVar(\"V\", bound=View)\n\n\nclass Writer:\n    def touch(self, field: Field):\n        field.required = True\n\n\nclass Reader:\n    def touch(self, field: Field):\n        pass\n\n\nTouching: TypeAlias = Writer | Reader\n";
+const BOUND_DEFS: &str = "from typing import Protocol, TypeAlias, TypeVar\n\nfrom pkg.helpers import require, skip\nfrom pkg.model import Field\n\nTABLE = {\"run\": require, \"skip\": skip}\n\n\nclass Holder:\n    RUN = staticmethod(require)\n\n\ndef ops():\n    from pkg import helpers\n\n    return helpers\n\n\nclass View(Protocol):\n    @property\n    def fields(self) -> list[Field]: ...\n\n\nclass Other:\n    pass\n\n\nV = TypeVar(\"V\", bound=View)\n\n\nclass Writer:\n    def touch(self, field: Field):\n        field.required = True\n\n\nclass Reader:\n    def touch(self, field: Field):\n        pass\n\n\nTouching: TypeAlias = Writer | Reader\nTouchers = list[Writer]\n";
 const BOUND_TABLE_USE: &str =
     "from pkg.defs import TABLE\n\n\ndef use(field):\n    TABLE[\"run\"](field)\n";
 const BOUND_ALIAS_USE: &str =
@@ -7045,6 +7045,8 @@ const BOUND_MODULE_USE: &str =
 const BOUND_TYPE_VAR_USE: &str = "from pkg.defs import V\n\n\ndef use(view: V):\n    for field in view.fields:\n        field.required = True\n";
 const BOUND_TYPE_ALIAS_USE: &str =
     "from pkg.defs import Touching\n\n\ndef use(value: Touching, field):\n    value.touch(field)\n";
+const BOUND_EXPORTS: &str = "from pkg.defs import Touchers\n";
+const BOUND_EXPORTED_ALIAS_USE: &str = "from pkg.exports import Touchers\n\n\ndef use(values: Touchers, field):\n    for value in values:\n        value.touch(field)\n";
 // The items of a list attribute another module appends to (`StoredElsewhere::changed`).
 const BOUND_LISTED: &str = "from pkg.model import Field\n\n\nclass Model:\n    def __init__(self, fields: list[Field]):\n        self.fields = self.validate(fields) if fields else []\n\n    def validate(self, fields: list[Field]) -> list[Field]:\n        return fields\n";
 const BOUND_LIST_USE: &str = "from pkg.listed import Model\n\n\ndef use(model: Model):\n    for field in model.fields:\n        field.required = True\n";
@@ -7063,6 +7065,11 @@ fn lsp_diagnostics_equal_a_full_check_through_bound_values_across_modules() {
         ("pkg/use_module.py", BOUND_MODULE_USE.to_owned()),
         ("pkg/use_type_var.py", BOUND_TYPE_VAR_USE.to_owned()),
         ("pkg/use_type_alias.py", BOUND_TYPE_ALIAS_USE.to_owned()),
+        ("pkg/exports.py", BOUND_EXPORTS.to_owned()),
+        (
+            "pkg/use_exported_alias.py",
+            BOUND_EXPORTED_ALIAS_USE.to_owned(),
+        ),
     ];
     let s = Session::start_with("lsp_oracle_bound_values", BOUND_CONFIG, files, false);
     let all: &[(&str, &str)] = &[
@@ -7071,6 +7078,7 @@ fn lsp_diagnostics_equal_a_full_check_through_bound_values_across_modules() {
         ("pkg/use_module.py", "EFF201"),
         ("pkg/use_type_var.py", "EFF201"),
         ("pkg/use_type_alias.py", "EFF201"),
+        ("pkg/use_exported_alias.py", "EFF201"),
     ];
     let steps = [
         Step::new("initial index", Vec::new()).present(all),
@@ -7134,6 +7142,16 @@ fn lsp_diagnostics_equal_a_full_check_through_bound_values_across_modules() {
         )
         .absent(&[("pkg/use_type_alias.py", "EFF201")]),
         Step::new("the alias names the writer again", vec![save("pkg/defs.py", BOUND_DEFS)])
+            .present(all),
+        Step::new(
+            "the re-exported alias names a list of the class that writes nothing",
+            vec![save(
+                "pkg/defs.py",
+                &BOUND_DEFS.replace("Touchers = list[Writer]", "Touchers = list[Reader]"),
+            )],
+        )
+        .absent(&[("pkg/use_exported_alias.py", "EFF201")]),
+        Step::new("it names a list of the writer again", vec![save("pkg/defs.py", BOUND_DEFS)])
             .present(all),
         Step::new(
             "the table's module changes it through its own module object",

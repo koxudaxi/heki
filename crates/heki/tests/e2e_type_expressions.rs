@@ -1,7 +1,7 @@
 //! What class a type expression names, end to end through the real binary: a name bound to a
 //! type alias (`X: TypeAlias = A | B`, `type X = A | B`, an assignment of a subscript or a union
-//! the module makes once) reads as its value wherever an annotation names it, in its module or
-//! imported; a builtin container class subscripted with types and called (`frozenset[str]()`)
+//! the module makes once) reads as its value wherever an annotation names it, in its module,
+//! imported, or re-exported, also inside `type[...]`; a builtin container class subscripted with types and called (`frozenset[str]()`)
 //! constructs the class; and `typing.cast` reads a subscripted type (`cast(list[Model], x)`) as
 //! the same text in a string. A name that is no alias, an alias of type parameters, and a
 //! subscript of any other class name nothing.
@@ -408,6 +408,97 @@ fn a_type_expression_names_its_class_in_annotations_calls_and_casts() {
         .write("pkg/statements.py", STATEMENTS)
         .write("pkg/passes.py", PASSES);
     assert_eq!(reported(&p), marked(PASSES));
+}
+
+/// Aliases another module names, reached through re-exports and module aliases: an alias that is
+/// also a module alias of its class (`Operations = list[Added]` binds the class `list`) keeps the
+/// type of its items, and inside `type[...]` an alias or a bound type variable names its class.
+/// A union inside `type[...]` names no one class.
+const ALIASES_MODEL: &str = r#"from typing import TypeVar
+
+
+class Field:
+    def __init__(self) -> None:
+        self.required = False
+
+
+class Added:
+    def apply_to(self, field: Field) -> None:
+        field.required = True
+
+
+class Removed:
+    def apply_to(self, field: Field) -> None:
+        pass
+
+
+Operations = list[Added]
+type Single = Added
+type Either = Added | Removed
+AddedT = TypeVar("AddedT", bound=Added)
+"#;
+
+const ALIASES_EXPORTS: &str = r#"from pkg.model import Operations, Single
+
+Listed = Operations
+"#;
+
+const ALIASES_REEXPORTS: &str = "from pkg.exports import Listed, Operations, Single\n";
+
+const ALIASES_PASSES: &str = r#"from pkg import exports, reexports
+from pkg.model import AddedT, Either, Field, Operations, Single
+
+
+def over_the_items(field: Field, operations: Operations) -> None:
+    for operation in operations:
+        operation.apply_to(field)  # writes
+
+
+def over_reexported_items(field: Field, operations: exports.Operations) -> None:
+    for operation in operations:
+        operation.apply_to(field)  # writes
+
+
+def over_items_reexported_twice(field: Field, operations: reexports.Operations) -> None:
+    for operation in operations:
+        operation.apply_to(field)  # writes
+
+
+def over_items_of_a_reexported_module_alias(field: Field, operations: reexports.Listed) -> None:
+    for operation in operations:
+        operation.apply_to(field)  # writes
+
+
+def builds_the_class_an_alias_names(field: Field, kind: type[Single]) -> None:
+    kind().apply_to(field)  # writes
+
+
+def builds_the_class_a_reexported_alias_names(field: Field, kind: type[reexports.Single]) -> None:
+    kind().apply_to(field)  # writes
+
+
+def builds_the_class_of_a_bound(field: Field, kind: type[AddedT]) -> None:
+    kind().apply_to(field)  # writes
+
+
+def builds_a_class_of_a_union(field: Field, kind: type[Either]) -> None:
+    kind().apply_to(field)  # unknown
+
+
+def builds_through_a_reexported_alias() -> int:
+    return len(reexports.Operations())
+"#;
+
+#[test]
+fn an_alias_of_another_module_keeps_its_type_through_reexports_and_class_objects() {
+    let p = Project::new("type_expressions_reexported");
+    p.write("pyproject.toml", CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/model.py", ALIASES_MODEL)
+        .write("pkg/exports.py", ALIASES_EXPORTS)
+        .write("pkg/reexports.py", ALIASES_REEXPORTS)
+        .write("pkg/passes.py", ALIASES_PASSES);
+    assert_eq!(reported(&p), marked(ALIASES_PASSES));
 }
 
 /// The reproduction of the request: a method called on a union a `TypeAlias` names writes what
