@@ -15,7 +15,7 @@ use crate::readonly::ContainerKind;
 use crate::resolver::{TypeCtx, func_qualname, is_unknown_base, param_annotation};
 use crate::{BoundCallee, EffectSummary, ProjectDecls, decorators};
 use heki_ast::Span;
-use heki_ir::IrFunction;
+use heki_ir::{IrFunction, PatternShape};
 use heki_kb::{AnnotationsRead, EffectiveEcosystemKb};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -127,19 +127,44 @@ impl ReadKinds {
     pub const BY_NAME: Self = Self(1 << 7);
     /// An attribute a library call names, which may be one the class lacks.
     pub const ANY_ATTRIBUTE: Self = Self(1 << 8);
-    /// Every read: a library call whose `[[invokes]]` entry does not say what it runs.
+    /// A read heki has no list of methods for: it may run any method or attribute the class
+    /// binds, so the tables of the other kinds do not bound it. The last bit, clear of
+    /// [`Self::NAMED`]'s.
+    pub const ANY_METHOD: Self = Self(1 << 31);
+    /// Every read: a library call whose `[[invokes]]` entry does not say what it runs, a method
+    /// no kind names.
     pub const ALL: Self = Self(u32::MAX);
     /// An operand of an operator whose other operand is a builtin: besides the operand's own
-    /// operator methods, what the builtin's runs of it (`xs += v` iterates `v`, `d |= v` reads
-    /// its `keys()` and items unless `v` iterates as a `dict` does).
-    pub const OPERAND: Self =
-        Self(Self::OPERATORS.0 | Self::ITERATION.0 | Self::ITEM.0 | Self::BY_NAME.0 | Self::KEYS);
-    /// `{**v}`, `f(**v)`: the mapping's `keys()` and items, or its iteration as a `dict`.
-    pub const MAPPING_UNPACK: Self =
-        Self(Self::ITERATION.0 | Self::ITEM.0 | Self::BY_NAME.0 | Self::KEYS);
+    /// operator methods, what the builtin's runs of it. `xs += v` extends a list, as
+    /// [`Self::UNPACKING`] does; `d |= v` looks `keys` up on `v` by name (`__getattr__` when the
+    /// class has none), then reads `keys()` and the items, or iterates `v` as pairs.
+    pub const OPERAND: Self = Self(
+        Self::OPERATORS.0
+            | Self::UNPACKING.0
+            | Self::ITEM.0
+            | Self::BY_NAME.0
+            | Self::ANY_ATTRIBUTE.0
+            | Self::KEYS,
+    );
+    /// `[*v]`, `(*v,)`, `{*v}`, `f(*v)`, `a, *rest = v`: iteration, and the length hint
+    /// (`__len__`, else `__length_hint__`) CPython takes before it extends a list or builds a
+    /// tuple from `v`. A set display and a starred target take none; they are read alike, which
+    /// only leaves out more.
+    pub const UNPACKING: Self = Self(Self::ITERATION.0 | Self::SIZE.0);
+    /// `a, b = v`: iteration, never an item read.
+    pub const TARGET_UNPACKING: Self = Self::ITERATION;
+    /// `{**v}`, `f(**v)`: `keys()`, looked up by name, then the item of each key. A `dict` whose
+    /// `__iter__` is its own is copied from its storage, which runs neither.
+    pub const MAPPING_UNPACK: Self = Self(Self::ITEM.0 | Self::BY_NAME.0 | Self::KEYS);
+    /// `case [a, b]`, `case []`: the subject's length, then its iteration, or its items when a
+    /// `*_` sits among them.
+    pub const SEQUENCE_PATTERN: Self = Self(Self::SIZE.0 | Self::ITERATION.0 | Self::ITEM.0);
+    /// `case {"k": v}`: the subject's length and its `get`, looked up by name.
+    pub const MAPPING_PATTERN: Self = Self(Self::SIZE.0 | Self::BY_NAME.0 | Self::GET);
 
-    /// The implicit reads, by bit, with what they are and the special methods each may run.
-    const IMPLICIT: [(Self, &str, &[&str]); 9] = [
+    /// The implicit reads, by bit, with what they are and the special methods each may run
+    /// (none listed for [`Self::ANY_METHOD`]: [`read_override`] takes every member).
+    const IMPLICIT: [(Self, &str, &[&str]); 10] = [
         (Self::ITEM, "item access", &["__getitem__", "__missing__"]),
         (
             Self::ITERATION,
@@ -171,10 +196,11 @@ impl ReadKinds {
             &["__getattribute__", "__class__"],
         ),
         (Self::ANY_ATTRIBUTE, "any attribute", &["__getattr__"]),
+        (Self::ANY_METHOD, "any method", &[]),
     ];
 
     /// The methods of `list`, `dict`, and `set` that only read or give a view, called by name:
-    /// bit `9 + i` each, `keys` first ([`Self::KEYS`]).
+    /// bit `9 + i` each, `keys` first ([`Self::KEYS`]), then `get` ([`Self::GET`]).
     pub const NAMED: [&str; 16] = [
         "keys",
         "get",
@@ -199,6 +225,15 @@ impl ReadKinds {
     }
 
     const KEYS: u32 = Self::named_bit(0);
+    const GET: u32 = Self::named_bit(1);
+
+    /// What the shape test of a pattern reads of its subject.
+    pub(crate) const fn of_pattern(shape: PatternShape) -> Self {
+        match shape {
+            PatternShape::Sequence => Self::SEQUENCE_PATTERN,
+            PatternShape::Mapping => Self::MAPPING_PATTERN,
+        }
+    }
 
     pub fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
@@ -268,6 +303,9 @@ impl ReadKinds {
     }
 }
 
+// The named methods' bits stay below `ANY_METHOD`'s.
+const _: () = assert!(ReadKinds::named_bit(ReadKinds::NAMED.len()) <= ReadKinds::ANY_METHOD.0);
+
 impl std::ops::BitOr for ReadKinds {
     type Output = Self;
     fn bitor(self, other: Self) -> Self {
@@ -324,18 +362,20 @@ const OPERATOR_METHODS: &[&str] = &[
 ];
 
 /// A project class whose code a read of a builtin container's object may run (R2): a class
-/// the object may be binds the method the read runs, or a metaclass heki does not know creates
+/// the object may be binds the method the read runs, or any member when a read has no list of
+/// the methods it runs ([`ReadKinds::ANY_METHOD`]), or a metaclass heki does not know creates
 /// it, which may install one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadOverride {
     Binds { class: String, method: &'static str },
+    BindsAny { class: String, member: String },
     Metaclass { class: String },
 }
 
 /// The first project class, in [`ProjectDecls::implementers`]' order, whose code the reads
 /// `kinds` of an object of the builtin `kind` may run: one binding a method the reads run
-/// ([`ReadKinds::methods`]), or created by a metaclass heki does not know. `None` when every
-/// read is the builtin's own.
+/// ([`ReadKinds::methods`]), one binding anything when a read may run any method, or one
+/// created by a metaclass heki does not know. `None` when every read is the builtin's own.
 pub fn read_override(
     decls: &ProjectDecls,
     kind: ContainerKind,
@@ -345,13 +385,20 @@ pub fn read_override(
         return None;
     }
     let methods: Vec<&'static str> = kinds.methods().collect();
+    let any = kinds.contains(ReadKinds::ANY_METHOD);
     decls
         .implementers(kind.class())
         .into_iter()
         .find_map(|class| {
             let d = decls.class_decl(&class)?;
-            match methods.iter().find(|m| d.members.contains(**m)) {
-                Some(method) => Some(ReadOverride::Binds { class, method }),
+            if let Some(method) = methods.iter().find(|m| d.members.contains(**m)) {
+                return Some(ReadOverride::Binds { class, method });
+            }
+            match d.members.first().filter(|_| any) {
+                Some(member) => Some(ReadOverride::BindsAny {
+                    member: member.clone(),
+                    class,
+                }),
                 None => d
                     .custom_metaclass
                     .then_some(ReadOverride::Metaclass { class }),

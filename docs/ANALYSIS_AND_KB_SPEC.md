@@ -245,8 +245,10 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     rules that read an unknown size as data-sized report the loop (`range(3)`).
   - `NaturalLoop.len_caps` (`LenCap`) records `while len(x) < N` caps up to 4096
     (`LEN_CAP_MAX`); `LoopCarriedInfo.updates` lists the real updates of a loop-carried value.
-  - `IrFunction.starred` marks starred display elements, `ModuleIr.class_bases` the bases a
-    class statement passes, `ModuleIr.statement_uses` the values a statement uses without an
+  - `IrFunction.starred` marks starred display elements, `IrFunction.pattern_subjects` the
+    subjects of sequence and mapping patterns (their shape tests read the subject's length, and a
+    mapping's `get`, behind an opaque branch), `ModuleIr.class_bases` the bases a class statement
+    passes, `ModuleIr.statement_uses` the values a statement uses without an
     instruction reading them (a decorator, a function's or lambda's default, a class statement's
     keyword, the class of a class pattern, the types of an `except` clause, the cause of
     `raise ... from`, each with its expression's span), `ModuleIr.annotations` the spans of the

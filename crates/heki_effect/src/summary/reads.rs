@@ -44,9 +44,11 @@ impl Handling {
     }
 }
 
-/// The project calls of the function by position, and the budget of the walks over its values.
+/// The project calls of the function by position, what the shape tests of its patterns read of
+/// their subjects, and the budget of the walks over its values.
 struct Walks<'x> {
     calls_at: FxHashMap<Position, &'x ProjectCall>,
+    patterns: FxHashMap<VarId, ReadKinds>,
     budget: Budget,
 }
 
@@ -56,8 +58,13 @@ impl<'a> Extractor<'a> {
     /// a body too large to model) establish nothing.
     pub(super) fn only_read_facts(&mut self) {
         let f = self.f;
+        let mut patterns: FxHashMap<VarId, ReadKinds> = FxHashMap::default();
+        for &(subject, shape) in &f.pattern_subjects {
+            *patterns.entry(subject).or_default() |= ReadKinds::of_pattern(shape);
+        }
         let walks = Walks {
             calls_at: self.project_calls.iter().map(|c| (c.at, c)).collect(),
+            patterns,
             budget: Budget::of_function("summary::only_read", f),
         };
         if crate::is_stub(self.path) || !f.a1_hazards.is_empty() {
@@ -98,6 +105,8 @@ impl<'a> Extractor<'a> {
             &walks.budget,
             seeds,
             |v, next| {
+                let tested = walks.patterns.get(&v).copied().unwrap_or_default();
+                kinds.set(kinds.get() | tested);
                 for &u in self.shape.readers(v) {
                     let (held, read) = match self.handling(walks, k, v, u) {
                         Handling::Reads(read) | Handling::Bound(None, read) => (None, read),
@@ -138,7 +147,7 @@ impl<'a> Extractor<'a> {
         let inst = &self.f.block(bb).insts[i];
         match &inst.kind {
             InstKind::Copy { dst, .. } if self.f.var_name(*dst) == Some(UNPACKED) => {
-                Handling::Reads(ReadKinds::ITERATION)
+                Handling::Reads(ReadKinds::UNPACKING)
             }
             InstKind::Copy { dst, .. } => Handling::holds(*dst),
             InstKind::BinOp {
@@ -159,6 +168,11 @@ impl<'a> Extractor<'a> {
                 }
                 _ => self.operand_handling(bb, v, *lhs, *rhs, ReadKinds::COMPARISON),
             },
+            InstKind::SubscriptLoad { obj, index, .. }
+                if *obj == v && crate::consumption::is_unpacking(self.shape, *index, inst.span) =>
+            {
+                Handling::Reads(ReadKinds::TARGET_UNPACKING)
+            }
             InstKind::SubscriptLoad { obj, index, .. }
             | InstKind::SubscriptDelete { obj, index, .. } => {
                 // A key is hashed and compared, an index converted (`__index__`).
@@ -324,12 +338,10 @@ impl<'a> Extractor<'a> {
                 .is_some_and(|d| d.is_generator || d.is_async && !self.sites[site.site].is_awaited)
         });
         // The callees' kinds of read join where propagation joins their facts; what the call
-        // reads itself is the items it unpacks.
-        let unpacked = places.iter().fold(ReadKinds::NONE, |read, p| match p {
-            Place::Unpacked => read | ReadKinds::ITERATION,
-            Place::Mapping => read | ReadKinds::MAPPING_UNPACK,
-            _ => read,
-        });
+        // reads itself is what it unpacks.
+        let unpacked = places
+            .iter()
+            .fold(ReadKinds::NONE, |read, p| read | p.unpacking());
         Handling::Bound(creates.then_some(call.dst), unpacked)
     }
 
@@ -372,8 +384,7 @@ impl<'a> Extractor<'a> {
             let handling = match place {
                 Place::Receiver => self.receiver_handling(symbol, call.dst),
                 Place::Position(j) => self.layer1(symbol, j + offset, call.dst, || invoked(j)),
-                Place::Unpacked => Handling::Reads(ReadKinds::ITERATION),
-                Place::Mapping => Handling::Reads(ReadKinds::MAPPING_UNPACK),
+                Place::Unpacked | Place::Mapping => Handling::Reads(place.unpacking()),
                 Place::AfterUnpacking | Place::Keyword => Handling::Open,
             };
             match handling {
@@ -747,6 +758,18 @@ enum Place {
     Keyword,
     /// Unpacked with `**`: the call takes the mapping's items.
     Mapping,
+}
+
+impl Place {
+    /// What the call reads of a value it unpacks here ([`ReadKinds::UNPACKING`],
+    /// [`ReadKinds::MAPPING_UNPACK`]); none where it hands the value over whole.
+    fn unpacking(self) -> ReadKinds {
+        match self {
+            Self::Unpacked => ReadKinds::UNPACKING,
+            Self::Mapping => ReadKinds::MAPPING_UNPACK,
+            _ => ReadKinds::NONE,
+        }
+    }
 }
 
 /// The operands of a `Call` or `MethodCall` instruction at `at`, other than the value it calls.

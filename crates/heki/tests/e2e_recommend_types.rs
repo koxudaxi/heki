@@ -1354,7 +1354,7 @@ fn a_read_no_kind_names_reads_every_kind_and_a_mapping_unpack_reads_items() {
     let strs = |names: &[&str]| -> Vec<String> { names.iter().map(|n| (*n).to_owned()).collect() };
     assert_eq!(
         reads_of(&p, "app.reads.unpacks")["table"],
-        strs(&["item access", "iteration", "a method by name", "keys"])
+        strs(&["item access", "a method by name", "keys"])
     );
 }
 
@@ -1499,4 +1499,254 @@ fn a_project_subclass_that_binds_a_read_leaves_out_the_functions_running_it() {
         ]
     );
     assert!(causes.is_empty(), "{causes:?}");
+}
+
+/// What a project with `classes` (`app/sub.py`) suggests for the functions of `reads`
+/// (`app/reads.py`): those it lists or the trial withholds for another fact, those it lists
+/// exact, and the causes of "The builtin's own reads".
+struct OwnReads {
+    kept: Vec<String>,
+    exact: Vec<String>,
+    causes: Vec<(String, u64)>,
+}
+
+fn own_reads_of(name: &str, reads: &str, classes: &str) -> OwnReads {
+    let p = Project::new(name);
+    p.write("app/__init__.py", "")
+        .write("app/reads.py", reads)
+        .write("app/sub.py", classes);
+    let (report, _) = recommend(&p, &["--all"]);
+    let function = |id: &str| Some(id.strip_prefix("app.reads:")?.split(':').next()?.to_owned());
+    let found = groups(&report);
+    let exact = (found.iter())
+        .filter(|(_, g)| g["certainty"] == "exact")
+        .filter_map(|(id, _)| function(id))
+        .collect();
+    let mut kept: Vec<String> = (found.keys().chain(withheld(&report).keys()))
+        .filter_map(|id| function(id))
+        .collect();
+    kept.sort();
+    let causes = (report["suggestions"]["by_premise"]
+        .as_array()
+        .unwrap()
+        .iter())
+    .filter(|r| r["premise"] == "The builtin's own reads")
+    .flat_map(|r| r["causes"].as_array().unwrap())
+    .map(|c| {
+        let cause = c["cause"].as_str().unwrap().to_owned();
+        (cause, c["not_listed"].as_u64().unwrap())
+    })
+    .collect();
+    OwnReads {
+        kept,
+        exact,
+        causes,
+    }
+}
+
+/// A library call with no `[[invokes]]` entry (`bytes`), beside one whose entry lists what it
+/// runs (`sorted`).
+const UNLISTED_CALL: &str = r#"def encode(rows: list[int]) -> bytes:
+    return bytes(rows)
+
+
+def ordered(rows: list[int]) -> list[int]:
+    return sorted(rows)
+"#;
+
+#[test]
+fn a_read_with_no_list_of_methods_may_run_any_member_of_a_subclass() {
+    let builtin = own_reads_of("recommend_types_unlisted_builtin", UNLISTED_CALL, "");
+    assert_eq!(builtin.kept, ["encode", "ordered"]);
+    assert!(builtin.causes.is_empty(), "{:?}", builtin.causes);
+    // `bytes(rows)` runs `__bytes__`, which no kind lists: a `list` subclass whose
+    // `__bytes__` appends to the object leaves `encode` out, not `ordered`.
+    let hook = own_reads_of(
+        "recommend_types_unlisted_hook",
+        UNLISTED_CALL,
+        "class Rows(list):\n    def __bytes__(self):\n        self.append(0)\n        \
+         return b\"\"\n",
+    );
+    assert_eq!(hook.kept, ["ordered"]);
+    assert_eq!(hook.exact, builtin.exact);
+    assert_eq!(
+        hook.causes,
+        [(
+            "`app.sub.Rows` binds `__bytes__`, and a read of it may run any method".to_owned(),
+            1
+        )]
+    );
+}
+/// What unpacks a `list` parameter: starred displays, `*` into a project and a library call,
+/// `+=` onto a list, `sorted`, and target unpacking.
+const UNPACKED_READS: &str = r#"def take(*xs: int) -> int:
+    return len(xs)
+
+
+def listed(rows: list[int]) -> list[int]:
+    return [*rows]
+
+
+def tupled(rows: list[int]) -> tuple[int, ...]:
+    return (*rows,)
+
+
+def called(rows: list[int]) -> int:
+    return take(*rows)
+
+
+def printed(rows: list[int]) -> None:
+    print(*rows)
+
+
+def extended(rows: list[int]) -> list[int]:
+    out: list[int] = []
+    out += rows
+    return out
+
+
+def ordered(rows: list[int]) -> list[int]:
+    return sorted(rows)
+
+
+def pair(rows: list[int]) -> int:
+    a, b = rows
+    return a + b
+"#;
+
+#[test]
+fn an_unpacking_takes_the_length_hint_and_a_target_unpacking_iterates() {
+    let all = [
+        "called", "extended", "listed", "ordered", "pair", "printed", "tupled",
+    ];
+    let builtin = own_reads_of("recommend_types_unpacked_builtin", UNPACKED_READS, "");
+    assert_eq!(builtin.kept, all);
+    assert_eq!(builtin.exact, ["ordered", "printed"]);
+    assert!(builtin.causes.is_empty(), "{:?}", builtin.causes);
+    // CPython takes the length hint of what it extends a list or builds a tuple from: a `list`
+    // whose `__len__` appends to itself leaves out each of those, not the target unpacking.
+    let len = own_reads_of(
+        "recommend_types_unpacked_len",
+        UNPACKED_READS,
+        "class Rows(list):\n    def __len__(self):\n        self.append(0)\n        \
+         return 0\n",
+    );
+    assert_eq!(len.kept, ["pair"]);
+    assert!(len.exact.is_empty(), "{:?}", len.exact);
+    assert_eq!(
+        len.causes,
+        [(
+            "`app.sub.Rows` binds `__len__`, which a read of it runs".to_owned(),
+            6
+        )]
+    );
+    // `a, b = rows` iterates the object and reads no item; `sorted` and `+=` list item reads,
+    // which they make of a value of another class.
+    let item = own_reads_of(
+        "recommend_types_unpacked_getitem",
+        UNPACKED_READS,
+        "class Rows(list):\n    def __getitem__(self, i):\n        self.append(0)\n        \
+         return 0\n",
+    );
+    assert_eq!(item.kept, ["called", "listed", "pair", "printed", "tupled"]);
+    let iteration = own_reads_of(
+        "recommend_types_unpacked_iter",
+        UNPACKED_READS,
+        "class Rows(list):\n    def __iter__(self):\n        self.append(0)\n        \
+         return iter([])\n",
+    );
+    assert!(iteration.kept.is_empty(), "{:?}", iteration.kept);
+}
+
+/// `**` of a `dict` parameter into a display and a call, and `dict(m)`.
+const MAPPING_READS: &str = r#"def target(**rest: int) -> int:
+    return len(rest)
+
+
+def shown(m: dict[str, int]) -> dict[str, int]:
+    return {**m}
+
+
+def passed(m: dict[str, int]) -> int:
+    return target(**m)
+
+
+def copied(m: dict[str, int]) -> dict[str, int]:
+    return dict(m)
+"#;
+
+#[test]
+fn a_mapping_unpack_runs_keys_by_name_and_the_items_not_the_iteration() {
+    let all = ["copied", "passed", "shown"];
+    let builtin = own_reads_of("recommend_types_mapping_builtin", MAPPING_READS, "");
+    assert_eq!(builtin.kept, all);
+    // A `dict` whose `__iter__` is not its own is copied through `keys()` and its items: its
+    // `__iter__` never runs. `dict(m)` lists it, which it runs of a value with no `keys`.
+    let iteration = own_reads_of(
+        "recommend_types_mapping_iter",
+        MAPPING_READS,
+        "class D(dict):\n    def __iter__(self):\n        self.clear()\n        \
+         return iter(())\n",
+    );
+    assert_eq!(iteration.kept, ["passed", "shown"]);
+    assert_eq!(iteration.exact, ["passed", "shown"]);
+    // `keys` is looked up by name, through `__getattribute__`.
+    let by_name = own_reads_of(
+        "recommend_types_mapping_getattribute",
+        MAPPING_READS,
+        "class D(dict):\n    def __getattribute__(self, name):\n        self.clear()\n        \
+         return dict.__getattribute__(self, name)\n",
+    );
+    assert!(by_name.kept.is_empty(), "{:?}", by_name.kept);
+    assert_eq!(
+        by_name.causes,
+        [(
+            "`app.sub.D` binds `__getattribute__`, which a read of it runs".to_owned(),
+            3
+        )]
+    );
+}
+
+/// A sequence and a mapping pattern with a parameter as the subject.
+const PATTERN_READS: &str = r#"def empty(rows: list[int]) -> bool:
+    match rows:
+        case []:
+            return True
+    return False
+
+
+def keyed(m: dict[str, int]) -> int:
+    match m:
+        case {"a": v}:
+            return v
+    return 0
+"#;
+
+#[test]
+fn a_pattern_reads_the_length_of_its_subject_and_a_mapping_its_get() {
+    let builtin = own_reads_of("recommend_types_patterns_builtin", PATTERN_READS, "");
+    assert_eq!(builtin.kept, ["empty", "keyed"]);
+    assert!(builtin.causes.is_empty(), "{:?}", builtin.causes);
+    // `case []` takes the length of the subject and `case {"a": v}` calls its `get`.
+    let hooks = own_reads_of(
+        "recommend_types_patterns_hooks",
+        PATTERN_READS,
+        "class Rows(list):\n    def __len__(self):\n        self.append(0)\n        \
+         return 0\n\n\nclass D(dict):\n    def get(self, k, default=None):\n        \
+         self.clear()\n        return default\n",
+    );
+    assert!(hooks.kept.is_empty(), "{:?}", hooks.kept);
+    assert_eq!(
+        hooks.causes,
+        [
+            (
+                "`app.sub.D` binds `get`, which a read of it runs".to_owned(),
+                1
+            ),
+            (
+                "`app.sub.Rows` binds `__len__`, which a read of it runs".to_owned(),
+                1
+            )
+        ]
+    );
 }

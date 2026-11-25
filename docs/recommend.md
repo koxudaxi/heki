@@ -390,17 +390,19 @@ reads. What a suggestion states:
   the facts `MUT110` reads, so the suggestion and its guard cannot disagree. When one is open,
   nothing is listed. A method called on a parameter annotated `Sequence`, `Mapping`, or
   `AbstractSet` reads as the same method of the builtin.
-- **The builtin's own reads**: the claim's last part (R2). A value of `dict` may be an instance of
-  a project class deriving from `dict`, or from a standard-library class that derives from it
+- **The builtin's own reads**: the claim's last part (R2). A value of `dict` may be an instance of a
+  project class deriving from `dict`, or from a standard-library class that derives from it
   (`OrderedDict`, `defaultdict`, `Counter`). The function's reads of the object, and those of the
   functions it hands it to, run that class's code if the class binds the method they run: item
-  access (with `__missing__`), iteration, size and truth, membership, comparison, conversion to
-  text, operators, the methods called by name (and `__getattribute__` for those), and what the
-  catalog's `[[invokes]]` entry of a library call reading it names (any method without an
-  entry). Such a class, or one a metaclass heki does not know creates, leaves the parameter out,
-  counted by cause: `class Cache(dict)` with its own `__contains__` leaves out `k in m` on a
-  `dict` parameter, not `m.get(k)`. A class outside the project is taken to run what the builtin
-  runs.
+  access (with `__missing__`), iteration (with the length hint `[*v]`, `f(*v)`, and `xs += v` take;
+  `a, b = v` iterates too), size and truth, membership, comparison, conversion to text, operators,
+  `keys()` and the items for `**v`, the length `case []` and `case {"k": v}` test and the `get` of
+  the latter, the methods called by name (and `__getattribute__` for those), and what the catalog's
+  `[[invokes]]` entry of a library call reading it names. A read with no such list (a library call
+  without an entry, such as `bytes(v)`, or a method the builtin lacks) may run any member of the
+  class. Such a class, or one a metaclass heki does not know creates, leaves the parameter out,
+  counted by cause: `class Cache(dict)` with its own `__contains__` leaves out `k in m` on a `dict`
+  parameter, not `m.get(k)`. A class outside the project is taken to run what the builtin runs.
 - **Literal container annotation**: a builtin `list`, `dict`, or `set`, or its `typing` form,
   after `Optional`, `| None`, and quotes; not `Annotated[...]`, a `Mutable*` ABC, or an alias.
 - **Abstract use**: every use exists on the read-only type; a set gives no iteration order.
