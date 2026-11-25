@@ -314,16 +314,20 @@ impl Suggestions {
 }
 
 /// A parameter annotated with a literal container that no premise left out before grouping.
-#[derive(Debug, Clone)]
-struct Candidate {
+struct Candidate<'a> {
     key: FuncKey,
     /// The file the index has it in.
     path: PathBuf,
+    /// That file, parsed.
+    file: &'a crate::project::ParsedFile,
     param: u8,
     name: String,
     lit: LiteralAnnotation,
     /// The function scope the parameter binds in.
     scope: Option<ScopeId>,
+    summary: &'a EffectSummary,
+    /// The function's annotation facts in its file.
+    facts: &'a AnnotationFacts,
 }
 
 /// Why a premise is not established for a candidate.
@@ -533,27 +537,32 @@ fn groups(cx: &Cx<'_>, current: &RuleSelection) -> Found {
     paths.sort();
     for path in paths {
         let file = &cx.index.files[path];
-        let Some(tables) = file.opt_in_tables.as_deref() else {
+        let (Some(tables), Some(&parsed)) =
+            (file.opt_in_tables.as_deref(), cx.files.get(path.as_path()))
+        else {
             continue;
         };
         if heki_effect::is_stub(path) || tables.annotation_facts.is_empty() {
             continue;
         }
-        let parsed = cx.files.get(path.as_path());
-        let rel = parsed.map_or("", |p| p.rel.as_str());
-        let generated = parsed.is_some_and(|p| says_generated(&p.source));
-        let parameters = parsed.map(|p| p.semantic.parameters());
-        for (qualname, facts) in &tables.annotation_facts {
+        let generated = says_generated(&parsed.source);
+        let parameters = parsed.semantic.parameters();
+        // The index has a summary of every function of the file.
+        let functions = (tables.annotation_facts.iter()).filter_map(|(qualname, facts)| {
+            let key = FuncKey {
+                module: file.module_name.clone(),
+                qualname: qualname.clone(),
+            };
+            let summary = cx.index.summary(&key)?;
+            Some((key, facts, summary))
+        });
+        for (key, facts, summary) in functions {
             for (i, p) in facts.params.iter().enumerate().take(64) {
                 let ParamAnnotation::Literal(lit) = p else {
                     continue;
                 };
-                let key = FuncKey {
-                    module: file.module_name.clone(),
-                    qualname: qualname.clone(),
-                };
                 let param = u8::try_from(i).expect("at most 64 positions");
-                if heki_effect::code_kind::is_test_code(qualname, rel) {
+                if heki_effect::code_kind::is_test_code(&key.qualname, &parsed.rel) {
                     left_out.test_code += 1;
                 } else if generated {
                     left_out.generated_files += 1;
@@ -562,12 +571,15 @@ fn groups(cx: &Cx<'_>, current: &RuleSelection) -> Found {
                 } else {
                     let name = cx.param_name(&key, param).unwrap_or_default();
                     candidates.push(Candidate {
-                        key,
+                        key: key.clone(),
                         path: path.clone(),
+                        file: parsed,
                         param,
                         name,
                         lit: (**lit).clone(),
-                        scope: (parameters.as_ref()).and_then(|ps| ps.function_at(lit.span.start)),
+                        scope: parameters.function_at(lit.span.start),
+                        summary,
+                        facts,
                     });
                 }
             }
@@ -583,17 +595,15 @@ fn groups(cx: &Cx<'_>, current: &RuleSelection) -> Found {
     let values = value_uses(cx);
     let calls = Calls::of(cx.index);
     for (i, c) in candidates.iter().enumerate() {
-        let summary = cx.index.summary(&c.key);
-        let facts = cx.facts(&c.key);
-        unmet[i].extend(claim(c, summary));
-        unmet[i].extend(local_premises(cx, c, summary, facts, &values));
-        let (edges, open, rel) = callees_take_it(cx, c, &at, &candidates);
+        unmet[i].extend(claim(c));
+        unmet[i].extend(local_premises(cx, c, &values));
+        let (edges, open, rel) = callees_take_it(cx, c, &at);
         for j in edges {
             union.join(i, j);
         }
         unmet[i].extend(open);
         related[i].extend(rel);
-        let (edges, open) = whole_family(cx, c, facts, &at, &candidates);
+        let (edges, open) = whole_family(cx, c, &at);
         family[i] = !edges.is_empty();
         for j in edges {
             union.join(i, j);
@@ -647,19 +657,14 @@ fn groups(cx: &Cx<'_>, current: &RuleSelection) -> Found {
 
 /// The claim's premises: only read here, and through every call (`MUT110`'s facts, one
 /// judgment with two readers).
-fn claim(c: &Candidate, summary: Option<&EffectSummary>) -> Vec<Unmet> {
+fn claim(c: &Candidate<'_>) -> Vec<Unmet> {
     let unmet = |name, cause: &str| Unmet {
         premise: premise(name),
         drops: true,
         cause: cause.to_owned(),
         at: None,
     };
-    let Some(s) = summary else {
-        return vec![unmet(
-            "Only read here",
-            "heki has no summary of the function",
-        )];
-    };
+    let s = c.summary;
     let bit = 1u64 << c.param;
     let changed = s
         .mutated_param_paths
@@ -681,9 +686,7 @@ fn claim(c: &Candidate, summary: Option<&EffectSummary>) -> Vec<Unmet> {
 /// family's local part, not replaced, annotations stay unread, a name for the type.
 fn local_premises(
     cx: &Cx<'_>,
-    c: &Candidate,
-    summary: Option<&EffectSummary>,
-    facts: Option<&AnnotationFacts>,
+    c: &Candidate<'_>,
     values: &FxHashMap<FuncKey, (PathBuf, u32)>,
 ) -> Vec<Unmet> {
     let mut out = Vec::new();
@@ -696,7 +699,7 @@ fn local_premises(
         });
     };
     let bit = 1u64 << c.param;
-    let container = summary.and_then(|s| s.container_params.as_deref());
+    let container = c.summary.container_params.as_deref();
     if container.is_none_or(|p| p.abstract_use & bit == 0) {
         push(
             "Abstract use",
@@ -724,38 +727,37 @@ fn local_premises(
             None,
         );
     }
-    if let Some(f) = facts {
-        if f.overloaded {
-            push(
-                "Whole family",
-                true,
-                "the function has @overload signatures".to_owned(),
-                None,
-            );
-        }
-        if f.definitions > 1 {
-            push(
-                "Whole family",
-                false,
-                "the name is defined more than once".to_owned(),
-                None,
-            );
-        }
-        match &f.reads {
-            AnnotationReads::Unread => {}
-            AnnotationReads::Read(by) => push(
-                "Annotations stay unread",
-                true,
-                format!("`{by}` reads the annotations at run time"),
-                None,
-            ),
-            AnnotationReads::Unknown(by) => push(
-                "Annotations stay unread",
-                false,
-                format!("`{by}` may read the annotations at run time"),
-                None,
-            ),
-        }
+    let f = c.facts;
+    if f.overloaded {
+        push(
+            "Whole family",
+            true,
+            "the function has @overload signatures".to_owned(),
+            None,
+        );
+    }
+    if f.definitions > 1 {
+        push(
+            "Whole family",
+            false,
+            "the name is defined more than once".to_owned(),
+            None,
+        );
+    }
+    match &f.reads {
+        AnnotationReads::Unread => {}
+        AnnotationReads::Read(by) => push(
+            "Annotations stay unread",
+            true,
+            format!("`{by}` reads the annotations at run time"),
+            None,
+        ),
+        AnnotationReads::Unknown(by) => push(
+            "Annotations stay unread",
+            false,
+            format!("`{by}` may read the annotations at run time"),
+            None,
+        ),
     }
     if let Some((path, span)) = values.get(&c.key) {
         push(
@@ -785,28 +787,43 @@ fn local_premises(
 }
 
 /// Premise 13 for the candidate `c` in its module's declarations `module` ([`type_name`]).
-fn naming(cx: &Cx<'_>, c: &Candidate, module: Option<&ModuleDecls>) -> Naming {
-    let parsed = cx.files.get(c.path.as_path());
-    let future = parsed.is_some_and(|f| f.semantic.has_future_annotations);
+fn naming(cx: &Cx<'_>, c: &Candidate<'_>, module: Option<&ModuleDecls>) -> Naming {
+    let future = c.file.semantic.has_future_annotations;
     let binder = |name: &str| annotation_binder(cx, c, name);
     module.map_or(Naming::Taken("nothing heki knows".to_owned()), |m| {
         type_name(m, future, &c.lit, c.lit.kind, &binder)
     })
 }
 
-/// The scope between the candidate's `def` and its module that binds `name` where the def's
-/// annotations read it, by its name ([`heki_semantic::SemanticModel::annotation_binder`]); one
-/// heki does not know when it finds no function scope for the parameter.
-fn annotation_binder(cx: &Cx<'_>, c: &Candidate, name: &str) -> Option<String> {
-    let file = cx.files.get(c.path.as_path()).zip(c.scope);
-    file.map_or(
-        Some("a scope heki does not know".to_owned()),
-        |(p, scope)| {
-            p.semantic
-                .annotation_binder(scope, name)
-                .map(|s| s.name.clone())
+/// What binds `name` where the candidate's annotations read it besides the module's own
+/// bindings ([`ModuleDecls::binds`]): a scope between the `def` and the module
+/// ([`heki_semantic::SemanticModel::annotation_binder`]; one heki does not know when it finds
+/// no function scope for the parameter), else a star import of the module, which binds names at
+/// run time or, under `if TYPE_CHECKING:`, for the type checker
+/// ([`ProjectDecls::star_import_may_bind`]).
+fn annotation_binder(cx: &Cx<'_>, c: &Candidate<'_>, name: &str) -> Option<String> {
+    let (file, module) = (c.file, &c.key.module);
+    let scope = c.scope.map_or(
+        Some("a binding in a scope heki does not know".to_owned()),
+        |scope| {
+            (file.semantic.annotation_binder(scope, name))
+                .map(|s| format!("the binding in `{}`", s.name))
         },
-    )
+    );
+    // A star import climbing past the top-level package imports nothing: it raises.
+    let mut sources = (file.semantic.star_imports.iter()).filter_map(|star| {
+        heki_effect::resolver::resolve_relative_module(
+            module,
+            file.is_package,
+            star.level,
+            star.module.as_deref(),
+            file.root_is_package,
+        )
+    });
+    scope.or_else(|| {
+        (sources.find(|source| cx.decls.star_import_may_bind(module, source, name)))
+            .map(|source| format!("what `from {source} import *` may bind"))
+    })
 }
 
 /// The class `key` is a method of, by its fully qualified name.
@@ -822,9 +839,8 @@ fn owner_class(cx: &Cx<'_>, key: &FuncKey) -> Option<String> {
 /// and where it is handed on.
 fn callees_take_it(
     cx: &Cx<'_>,
-    c: &Candidate,
+    c: &Candidate<'_>,
     at: &FxHashMap<(&FuncKey, u8), usize>,
-    candidates: &[Candidate],
 ) -> (Vec<usize>, Vec<Unmet>, Vec<Related>) {
     let (mut joined, mut open, mut related) = (Vec::new(), Vec::new(), Vec::new());
     let sites = cx
@@ -884,7 +900,6 @@ fn callees_take_it(
             }
         }
     }
-    let _ = candidates;
     (joined, open, related)
 }
 
@@ -913,10 +928,8 @@ fn takes_readonly(
 /// method is a constructor; a body that states nothing needs a family member that does.
 fn whole_family(
     cx: &Cx<'_>,
-    c: &Candidate,
-    facts: Option<&AnnotationFacts>,
+    c: &Candidate<'_>,
     at: &FxHashMap<(&FuncKey, u8), usize>,
-    candidates: &[Candidate],
 ) -> (Vec<usize>, Vec<Unmet>) {
     let (mut joined, mut open) = (Vec::new(), Vec::new());
     let unmet = |drops, cause: String| Unmet {
@@ -925,7 +938,7 @@ fn whole_family(
         cause,
         at: None,
     };
-    let stub = facts.is_some_and(|f| f.stub_body);
+    let stub = c.facts.stub_body;
     let Some(class) = owner_class(cx, &c.key) else {
         if stub {
             open.push(unmet(true, "the body states nothing of its own".to_owned()));
@@ -991,7 +1004,6 @@ fn whole_family(
     }
     open.sort_by(|a, b| a.cause.cmp(&b.cause));
     open.dedup_by(|a, b| a.cause == b.cause);
-    let _ = candidates;
     (joined, open)
 }
 
@@ -1097,7 +1109,6 @@ fn group(
     let (mut call_sites, mut state_arguments) = (0, 0);
     for c in &members {
         let module = cx.module(&c.key);
-        let parsed = cx.files.get(c.path.as_path());
         let naming = naming(cx, c, module.as_deref());
         let name = naming.name(c.lit.kind);
         let head_at = (c.lit.head.start - c.lit.span.start) as usize;
@@ -1151,32 +1162,20 @@ fn group(
             && !entry.imports.contains(&name)
         {
             entry.imports.push(name.clone());
-            let placed = parsed.and_then(|p| {
-                let module_fn = p.ir.functions.iter().find(|f| f.is_module_body)?;
-                let import = NewImport {
-                    module: "collections.abc",
-                    is_from: true,
-                    statement,
-                };
-                let (span, text) = import_edit(&p.source, module_fn, &import)?;
-                Some(as_insertion(&p.source, span, text))
+            let import = NewImport {
+                module: "collections.abc",
+                is_from: true,
+                statement,
+            };
+            let (source, ir) = (&c.file.source, &c.file.ir);
+            let (span, text) = import_edit(source, ir.function(ir.module_fn), &import);
+            let (span, text) = as_insertion(source, span, text);
+            entry.edits.push((span, text.clone()));
+            edits.push(Edit {
+                path: path.clone(),
+                span: [span.start, span.end],
+                replacement: text,
             });
-            match placed {
-                Some((span, text)) => {
-                    entry.edits.push((span, text.clone()));
-                    edits.push(Edit {
-                        path: path.clone(),
-                        span: [span.start, span.end],
-                        replacement: text,
-                    });
-                }
-                None => open.push(OpenPremise {
-                    premise: "A name for the type".to_owned(),
-                    cause: format!("no place in the module's leading imports for `{statement}`"),
-                    path: path.clone(),
-                    line: 1,
-                }),
-            }
             // Without an `__all__` that leaves it out, the name the import binds is bound in
             // every module that imports this one with `*` too.
             let exported = module.as_deref().is_none_or(|m| m.exports.is_none());
@@ -1379,9 +1378,9 @@ impl Naming {
 /// Premise 13, "A name for the type" (B.4 of the design): an existing binding of the read-only
 /// type in the module is reused (one under `if TYPE_CHECKING:` too when the module's
 /// annotations are not evaluated at run time); otherwise the edit imports it from
-/// `collections.abc`, unless the name is bound to something else there. `binder` names the
-/// scope short of the module that binds a name where the annotation reads it (a class body for
-/// a method): no name such a scope binds is written.
+/// `collections.abc`, unless the name is bound to something else there. `binder` names what
+/// binds a name where the annotation reads it besides the module's own bindings (a class body
+/// for a method, a star import): no name it binds is written.
 fn type_name(
     decls: &ModuleDecls,
     future_annotations: bool,
@@ -1424,8 +1423,8 @@ fn type_name(
     if future_annotations && let Some(name) = bound_in(&decls.type_checking_imports) {
         return Naming::Bound(name);
     }
-    if let Some(scope) = binder(simple) {
-        return Naming::Taken(format!("the binding in `{scope}`"));
+    if let Some(binding) = binder(simple) {
+        return Naming::Taken(binding);
     }
     if let Some(other) = decls
         .imports
@@ -2116,10 +2115,11 @@ fn attribute_facts(
     }
 }
 
-/// A report that differs between the discovery run and the trial: whether the trial has it,
-/// its function, rule, and line in the original file.
+/// A report that differs between the discovery run and the trial: what the trial does with it
+/// (`would be reported`, `would no longer be reported`), its function, rule, and line in the
+/// original file.
 struct ChangedReport {
-    added: bool,
+    change: &'static str,
     qualname: String,
     rule: String,
     line: u32,
@@ -2135,12 +2135,7 @@ fn attribute_reports(
 ) {
     for r in changed {
         let function = BTreeSet::from([r.qualname.as_str()]);
-        let what = if r.added {
-            "would be reported"
-        } else {
-            "would no longer be reported"
-        };
-        let text = format!("`{}` at line {} {what}", r.rule, r.line);
+        let text = format!("`{}` at line {} {}", r.rule, r.line, r.change);
         for g in culprits(groups, path, set, Phase::Exact, Some(&function)) {
             withhold(groups, g, "report-would-change", &text);
         }
@@ -2158,47 +2153,39 @@ fn changed_reports<'m>(
     lines: &LineIndex,
 ) -> Vec<ChangedReport> {
     let none = |_: &Path| None;
-    let mut a: Vec<(ReportKey, &Diagnostic)> = (now.iter())
+    let now: Vec<(ReportKey, &Diagnostic)> = (now.iter())
         .map(|d| (ReportKey::of(d, &none), *d))
         .collect();
-    let mut b: Vec<(ReportKey, &Diagnostic)> = (then.iter())
+    let then: Vec<(ReportKey, &Diagnostic)> = (then.iter())
         .map(|d| (ReportKey::of(d, maps), *d))
         .collect();
-    a.sort_by(|x, y| x.0.cmp(&y.0));
-    b.sort_by(|x, y| x.0.cmp(&y.0));
-    let mut out = Vec::new();
-    let (mut i, mut j) = (0, 0);
-    while i < a.len() || j < b.len() {
-        let order = match (a.get(i), b.get(j)) {
-            (Some(x), Some(y)) => x.0.cmp(&y.0),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            _ => std::cmp::Ordering::Greater,
-        };
-        match order {
-            std::cmp::Ordering::Equal => (i, j) = (i + 1, j + 1),
-            std::cmp::Ordering::Less => {
-                let d = a[i].1;
-                out.push(ChangedReport {
-                    added: false,
-                    qualname: d.qualname.clone(),
-                    rule: d.rule_code.clone(),
-                    line: d.line,
-                });
-                i += 1;
-            }
-            std::cmp::Ordering::Greater => {
-                let (key, d) = &b[j];
-                out.push(ChangedReport {
-                    added: true,
-                    qualname: d.qualname.clone(),
-                    rule: d.rule_code.clone(),
-                    line: lines.line_col(key.span.0).0,
-                });
-                j += 1;
+    let mut out: Vec<(&ReportKey, ChangedReport)> = Vec::new();
+    for (change, from, to) in [
+        ("would no longer be reported", &now, &then),
+        ("would be reported", &then, &now),
+    ] {
+        // Each report of `to` matches one equal report of `from`; the others of `from` differ.
+        let mut unmatched: BTreeMap<&ReportKey, usize> = BTreeMap::new();
+        for (key, _) in to {
+            *unmatched.entry(key).or_default() += 1;
+        }
+        for (key, d) in from {
+            match unmatched.get_mut(key) {
+                Some(n) if *n > 0 => *n -= 1,
+                _ => out.push((
+                    key,
+                    ChangedReport {
+                        change,
+                        qualname: d.qualname.clone(),
+                        rule: d.rule_code.clone(),
+                        line: lines.line_col(key.span.0).0,
+                    },
+                )),
             }
         }
     }
-    out
+    out.sort_by(|a, b| a.0.cmp(b.0));
+    out.into_iter().map(|(_, r)| r).collect()
 }
 
 /// What the trial compares of a report.

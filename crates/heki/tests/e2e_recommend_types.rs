@@ -345,11 +345,20 @@ fn each_premise_keeps_a_parameter_or_leaves_it_out() {
 #[test]
 fn the_trial_withholds_a_group_whose_edit_changes_what_heki_knows() {
     let p = project("recommend_types_trial");
+    p.write(
+        "app/sliced.py",
+        "def helper(rows) -> int:\n    return 1\n\n\n\
+         def tail(rows: list[int]) -> int:\n    return helper(rows[1:])\n",
+    );
     let (report, _) = recommend(&p, &["--all"]);
     let withheld = withheld(&report);
     // A `Mapping`'s `get` is not one heki knows to only read, as a `dict`'s is.
     let changed = &withheld["app.core:lookup:table"];
     assert!(changed.contains("only_read_params"), "{changed}");
+    // A slice of a `list` is a new list, one of a `Sequence` a value heki cannot tell: the call
+    // it is handed to binds another argument.
+    let sliced = &withheld["app.sliced:tail:rows"];
+    assert!(sliced.contains("call_sites"), "{sliced}");
     assert!(!groups(&report).contains_key("app.core:lookup:table"));
     let runs: Vec<&Value> = report["runs"]
         .as_array()
@@ -718,7 +727,25 @@ fn a_name_bound_where_the_annotation_is_read_is_not_written() {
              def has(self, rows: list[int]) -> bool:\n            return 1 in rows\n\n\n\
              def make():\n    Sequence = int\n\n    \
              def has(rows: list[int]) -> bool:\n        return 1 in rows\n\n    return has\n",
-        );
+        )
+        .write("app/models.py", "class Sequence:\n    pass\n")
+        .write("app/helpers.py", "def helper() -> None:\n    pass\n");
+    let has = "\n\ndef has(rows: list[int]) -> bool:\n    return 1 in rows\n";
+    for (module, head) in [
+        ("star_own", "from app.models import *\n"),
+        (
+            "star_reuse",
+            "from collections.abc import Sequence\n\nfrom app.models import *\n",
+        ),
+        ("star_lib", "from sqlalchemy import *\n"),
+        (
+            "star_tc",
+            "from typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    from .models import *\n",
+        ),
+        ("star_free", "from app.helpers import *\n"),
+    ] {
+        p.write(&format!("app/{module}.py"), &format!("{head}{has}"));
+    }
     let (report, _) = recommend(&p, &["--all"]);
     let found = groups(&report);
     let open = |id: &str| {
@@ -752,6 +779,24 @@ fn a_name_bound_where_the_annotation_is_read_is_not_written() {
     assert_eq!(nested["certainty"], "exact", "{nested:#}");
     assert_eq!(nested["items"][0]["proposed"], "Sequence[int]");
     assert_eq!(nested["edits"].as_array().unwrap().len(), 1, "{nested:#}");
+    // A star import of the module binds what its module exports, there the simple name, over
+    // the module's own import too; one of a module outside the project may bind any name, and
+    // one under `if TYPE_CHECKING:` binds for the type checker.
+    for (module, source) in [
+        ("star_own", "app.models"),
+        ("star_reuse", "app.models"),
+        ("star_lib", "sqlalchemy"),
+        ("star_tc", "app.models"),
+    ] {
+        assert_eq!(
+            open(&format!("app.{module}:has:rows")),
+            format!("`Sequence` names what `from {source} import *` may bind here")
+        );
+    }
+    // One that binds neither leaves the import the edit adds in force.
+    let free = &found["app.star_free:has:rows"];
+    assert_eq!(free["certainty"], "exact", "{free:#}");
+    assert_eq!(free["edits"].as_array().unwrap().len(), 2, "{free:#}");
 }
 
 #[test]
@@ -810,6 +855,14 @@ def takes_iter(rows: t.Iterable[int]) -> bool:
 
 def outer_iter(rows: list[int]) -> bool:
     return takes_iter(rows)
+
+
+def takes_map(table: t.Mapping[str, int]) -> int:
+    return len(table)
+
+
+def outer_map(table: dict[str, int]) -> int:
+    return takes_map(table)
 
 
 def outer_gen(rows: list[int]) -> bool:
@@ -884,6 +937,51 @@ class Model(pydantic.BaseModel):
         return 1 in rows
 
 
+def takes_set(ids: set[int]) -> bool:
+    return 1 in ids
+
+
+def outer_set(ids: list[int]) -> bool:
+    return takes_set(ids)
+
+
+def relay_a(rows: list[int]) -> bool:
+    return 1 in rows
+
+
+def relay_b(rows: list[int]) -> bool:
+    return relay_c(rows)
+
+
+def relay_c(rows: list[int]) -> bool:
+    return relay_a(rows)
+
+
+class Left:
+    def has(self, rows: list[int]) -> bool:
+        return 1 in rows
+
+
+class Right:
+    def has(self, rows: list[int]) -> bool:
+        return 2 in rows
+
+
+class Both(Left, Right):
+    def has(self, rows: list[int]) -> bool:
+        return 3 in rows
+
+
+class Store:
+    def has(self, rows: list[int]) -> bool:
+        return 1 in rows
+
+
+class Strict(Store):
+    def has(self, rows: t.MutableSequence[int]) -> bool:
+        return 2 in rows
+
+
 def describe(f):
     return f.__annotations__
 "#;
@@ -930,23 +1028,26 @@ fn each_way_a_premise_stays_open_names_its_cause() {
             })
             .collect()
     };
-    for id in ["outer_any", "outer_iter", "Ordered.has"] {
-        let key = format!("app.shapes:{id}:rows");
+    for key in [
+        "outer_any:rows",
+        "outer_iter:rows",
+        "outer_map:table",
+        "Ordered.has:rows",
+    ] {
+        let key = format!("app.shapes:{key}");
         let g = found.get(&key).unwrap_or_else(|| {
             let all: Vec<String> = (found.iter())
                 .map(|(k, g)| format!("{k} {} {:?}", g["certainty"], causes(k)))
                 .collect();
             panic!("{key}: {all:#?}")
         });
-        assert_eq!(g["certainty"], "exact", "{id}: {g:#}");
+        assert_eq!(g["certainty"], "exact", "{key}: {g:#}");
     }
-    assert_eq!(
-        found["app.shapes:c1:rows"]["items"]
-            .as_array()
-            .unwrap()
-            .len(),
-        3
-    );
+    // `relay_b` joins `relay_c` before `relay_c` joins `relay_a`, the group's first.
+    for id in ["c1", "relay_a"] {
+        let items = found[&format!("app.shapes:{id}:rows")]["items"].as_array();
+        assert_eq!(items.unwrap().len(), 3, "{id}");
+    }
     assert_eq!(
         found["app.shapes:tags:names"]["items"][0]["proposed"],
         "t.AbstractSet[str]"
@@ -983,6 +1084,18 @@ fn each_way_a_premise_stays_open_names_its_cause() {
         (
             "app.exported:has:rows",
             "A name for the type: `from app.exported import *` would bind `Sequence` too",
+        ),
+        (
+            "app.shapes:outer_set:ids",
+            "Callees take it: `app.shapes.takes_set` takes it as `ids: set[int]`",
+        ),
+        (
+            "app.shapes:Left.has:rows",
+            "Whole family: its override family reaches further than the classes heki follows",
+        ),
+        (
+            "app.shapes:Store.has:rows",
+            "Whole family: `app.shapes.Strict.has` of its override family cannot take the read-only type",
         ),
     ] {
         let all = causes(id);

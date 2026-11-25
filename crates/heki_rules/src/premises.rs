@@ -888,8 +888,11 @@ pub const READONLY_PARAMETER: &[&Premise] = &[
     },
     &Premise {
         name: "A name for the type",
-        states: "the module binds the read-only type under a name, or the name the edit imports it as is free there",
-        decided_in: &["crate::recommend::types::type_name"],
+        states: "the module binds the read-only type under a name, or the name the edit imports it as is free there; no name is written that a scope the annotation is read in before the module (a method's class body, an enclosing function) or a star import of the module binds",
+        decided_in: &[
+            "crate::recommend::types::type_name",
+            "crate::recommend::types::annotation_binder",
+        ],
     },
 ];
 

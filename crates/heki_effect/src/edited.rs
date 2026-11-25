@@ -19,6 +19,7 @@ use rustc_hash::FxHashMap;
 use serde::Serialize;
 use serde::ser::{self, SerializeMap, SerializeSeq, SerializeStruct};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 /// Where the offsets of a file with edits applied were in the original file.
 #[derive(Debug, Clone, Default)]
@@ -143,16 +144,13 @@ impl FileSummary {
             opt_in_tables,
         } = edited;
         let mut changes = Changes::default();
-        let comparable = |s: &EffectSummary| EffectSummary {
+        let comparable = |s: &Arc<EffectSummary>| EffectSummary {
             // The annotations' own facts: what the edit writes.
             container_params: None,
             ..s.without_locations()
         };
         for (key, now, then) in by_function(&self.local_functions, local_functions) {
-            let fields = match (now, then) {
-                (Some(a), Some(b)) => differing_fields(&comparable(a), &comparable(b), map),
-                _ => vec!["summary".to_owned()],
-            };
+            let fields = differing_fields(&now.map(comparable), &then.map(comparable), map);
             changes.add(Some(key), fields);
         }
         for (name, now, then) in [
@@ -235,15 +233,13 @@ impl Changes {
             std::mem::take(&mut then.functions),
         );
         // The added imports' own entries: the binding, and what the module's tables of its
-        // globals say of it.
+        // globals say of it. An edit imports only a name the module does not bind.
         for name in &restated.imports {
-            if !now.imports.contains_key(name) {
-                then.imports.remove(name);
-                then.global_types.remove(name);
-                then.global_capacities.remove(name);
-                if let Some(rebound) = &mut then.rebound_imports {
-                    rebound.remove(name);
-                }
+            then.imports.remove(name);
+            then.global_types.remove(name);
+            then.global_capacities.remove(name);
+            if let Some(rebound) = &mut then.rebound_imports {
+                rebound.remove(name);
             }
         }
         if then
@@ -271,10 +267,11 @@ impl Changes {
                     ..(**d).clone()
                 })
             };
-            let fields = match (unrestated(&functions_now), unrestated(&functions_then)) {
-                (Some(a), Some(b)) => differing_fields(&a, &b, map),
-                _ => vec!["declaration".to_owned()],
-            };
+            let fields = differing_fields(
+                &unrestated(&functions_now),
+                &unrestated(&functions_then),
+                map,
+            );
             self.add(
                 Some(qualname),
                 fields.iter().map(|f| format!("decls.{f}")).collect(),
@@ -313,12 +310,8 @@ impl Changes {
             &std::mem::take(&mut then.unawaited_handoffs),
             map,
         );
-        let imports_now = now.imports.take();
-        let imports_then = (then.imports.take())
+        then.imports = (then.imports.take())
             .map(|i| Box::new(i.without_sites(|s| map.in_edit(s.span.start), &restated.imports)));
-        if !same(&imports_now, &imports_then, map) {
-            self.add(None, vec!["imports".to_owned()]);
-        }
         let fields = differing_fields(&now, &then, map);
         self.add(None, fields);
     }
@@ -361,7 +354,8 @@ fn same<T: Serialize + ?Sized>(now: &T, then: &T, map: &OffsetMap) -> bool {
     }
 }
 
-/// The fields of the structs `now` and `then` that differ, as [`same`] compares them.
+/// The fields of the structs `now` and `then` that differ, as [`same`] compares them: every
+/// field of the one that is there when the other is `None`.
 fn differing_fields<T: Serialize>(now: &T, then: &T, map: &OffsetMap) -> Vec<String> {
     let (Some(a), Some(b)) = (Canon::tokens(now, None), Canon::tokens(then, Some(map))) else {
         return vec!["fields".to_owned()];
@@ -377,8 +371,9 @@ fn differing_fields<T: Serialize>(now: &T, then: &T, map: &OffsetMap) -> Vec<Str
         .collect()
 }
 
-/// The fields of a struct's tokens, each with the tokens of its value.
+/// The fields of a struct's tokens (also of `Some` struct), each with the tokens of its value.
 fn fields(tokens: &[Tok]) -> BTreeMap<&'static str, &[Tok]> {
+    let tokens = tokens.strip_prefix(&[Tok::Some]).unwrap_or(tokens);
     let mut out = BTreeMap::new();
     let inner = tokens
         .get(1..tokens.len().saturating_sub(1))

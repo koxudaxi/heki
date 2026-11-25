@@ -1893,31 +1893,12 @@ pub(crate) fn param_annotation(
     if found.annotated {
         return ParamAnnotation::Other;
     }
-    let (list, dict, set) = (
-        ContainerKind::List.bit(),
-        ContainerKind::Dict.bit(),
-        ContainerKind::Set.bit(),
-    );
     let kind = match fqn.as_str() {
         "builtins.list" | "typing.List" => ContainerKind::List,
         "builtins.dict" | "typing.Dict" => ContainerKind::Dict,
         "builtins.set" | "typing.Set" => ContainerKind::Set,
         "typing.Any" | "typing_extensions.Any" | "builtins.object" => return ParamAnnotation::Any,
-        abc => {
-            let name = abc
-                .strip_prefix("typing.")
-                .or_else(|| abc.strip_prefix("collections.abc."));
-            return match name {
-                Some("Iterable" | "Collection" | "Container" | "Sized") => {
-                    ParamAnnotation::Admits(list | dict | set)
-                }
-                Some("Sequence" | "Reversible") => ParamAnnotation::Admits(list),
-                Some("Mapping") => ParamAnnotation::Admits(dict),
-                Some("AbstractSet") => ParamAnnotation::Admits(set),
-                Some("Set") if abc.starts_with("collections.abc.") => ParamAnnotation::Admits(set),
-                _ => ParamAnnotation::Other,
-            };
-        }
+        other => return abstract_annotation(other),
     };
     let offset = |part: &str| {
         let at = part.as_ptr() as usize - text.as_ptr() as usize;
@@ -1934,6 +1915,30 @@ pub(crate) fn param_annotation(
         },
         str_items: kind == ContainerKind::List && found.args.map(str::trim) == Some("str"),
     }))
+}
+
+/// What a parameter annotation resolved to `fqn`, no literal container (`typing.Set` is one) and
+/// not `Any`, says to a read-only annotation ([`ParamAnnotation::Admits`] or
+/// [`ParamAnnotation::Other`]).
+fn abstract_annotation(fqn: &str) -> ParamAnnotation {
+    let (list, dict, set) = (
+        ContainerKind::List.bit(),
+        ContainerKind::Dict.bit(),
+        ContainerKind::Set.bit(),
+    );
+    let Some(name) = (fqn.strip_prefix("typing.")).or_else(|| fqn.strip_prefix("collections.abc."))
+    else {
+        return ParamAnnotation::Other;
+    };
+    match name {
+        "Iterable" | "Collection" | "Container" | "Sized" => {
+            ParamAnnotation::Admits(list | dict | set)
+        }
+        "Sequence" | "Reversible" => ParamAnnotation::Admits(list),
+        "Mapping" => ParamAnnotation::Admits(dict),
+        "AbstractSet" | "Set" => ParamAnnotation::Admits(set),
+        _ => ParamAnnotation::Other,
+    }
 }
 
 /// The only element of `parts`.
@@ -3122,6 +3127,18 @@ impl ProjectDecls {
             held.insert(m.module_name.clone(), Holds::No);
             self.stars_bind(m, name, &mut held, 0)
         })
+    }
+
+    /// Whether `from source import *`, a star import of the module `importer`, may bind `name`:
+    /// a module outside the project may bind any name; one of the project binds what
+    /// [`Self::star_binding`] reads through it.
+    pub fn star_import_may_bind(&self, importer: &str, source: &str, name: &str) -> bool {
+        let mut held = FxHashMap::default();
+        held.insert(importer.to_owned(), Holds::No);
+        !matches!(
+            self.star_import_binds(source, name, &mut held, 1),
+            StarSource::Nothing
+        )
     }
 
     /// [`Self::star_binding`] for the star imports of `m`, which `depth` star imports nest;

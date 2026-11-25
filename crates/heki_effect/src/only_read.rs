@@ -209,11 +209,11 @@ fn annotation_reads(cx: &TypeCtx<'_>, f: &IrFunction) -> AnnotationReads {
     let Some(owner) = &f.owner_class_qualname else {
         return reads;
     };
-    if let Some(body) = (cx.ir().functions.iter()).find(|g| g.is_class_body && &g.qualname == owner)
-    {
-        for d in &body.decorators {
-            reads = reads.or(decorator_reads(cx, d));
-        }
+    let class_decorators = (cx.ir().functions.iter())
+        .filter(|g| g.is_class_body && &g.qualname == owner)
+        .flat_map(|g| &g.decorators);
+    for d in class_decorators {
+        reads = reads.or(decorator_reads(cx, d));
     }
     let class = format!("{}.{owner}", cx.module.module_name);
     for c in cx.project.mro_of(&class) {
