@@ -1574,7 +1574,8 @@ impl<'a> Extractor<'a> {
         if handed_back.is_empty() {
             return;
         }
-        // Forward from the calls' results, each value once.
+        // Forward from the calls' results, each value once. Past the budget nothing is retyped:
+        // the type checker's exclusions of `MUT110` stand.
         let mut onward: FxHashMap<VarId, Vec<VarId>> = FxHashMap::default();
         for (dst, src) in &self.same_objects {
             onward.entry(*src).or_default().push(*dst);
@@ -1584,10 +1585,19 @@ impl<'a> Extractor<'a> {
                 onward.entry(*v).or_default().push(phi.dst);
             }
         }
-        while let Some(v) = handed_back.pop() {
-            if self.retyped.insert(v) {
-                handed_back.extend(onward.get(&v).into_iter().flatten());
-            }
+        let budget = Budget::of_function("summary::build_same_objects", self.f);
+        let mut retyped = FxHashSet::default();
+        let walked = heki_ir::walk::reach(
+            &budget,
+            handed_back,
+            |v, next| next.extend(onward.get(&v).into_iter().flatten()),
+            |v| {
+                retyped.insert(v);
+                heki_ir::walk::Visit::<()>::Expand
+            },
+        );
+        if matches!(walked, Answer::Known(_)) {
+            self.retyped = retyped;
         }
     }
 
