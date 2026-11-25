@@ -282,14 +282,14 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: coverage-o1
+          shared-key: coverage-o0
           workspaces: ". -> coverage/target"
       - &install-llvm-cov
         uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.152
       - run: >-
-          cargo llvm-cov nextest-archive --workspace --locked --cargo-profile ci
+          cargo llvm-cov nextest-archive --workspace --locked --cargo-profile ci-coverage
           --archive-file coverage-tests.tar.zst
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -387,10 +387,10 @@ jobs:
       # Every line is covered except 3 that cannot run: the `_ => {}` arms for assignment,
       # augmented-assignment and `del` targets in `heki_ir/src/builder.rs`, which ruff's parser
       # rejects (see `docs/development.md`). Lower the limit whenever one goes away.
-      - run: cargo llvm-cov report --profile ci --lcov --output-path lcov.info --fail-uncovered-lines 3
+      - run: cargo llvm-cov report --profile ci-coverage --lcov --output-path lcov.info --fail-uncovered-lines 3
       # On failure too: the summary lists the uncovered lines, the artifact has the full report.
       - if: always()
-        run: cargo llvm-cov report --profile ci --summary-only --show-missing-lines
+        run: cargo llvm-cov report --profile ci-coverage --summary-only --show-missing-lines
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

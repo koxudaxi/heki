@@ -82,15 +82,24 @@ cap = { version = "0.1.2", features = ["stats"] }
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
-# The test and coverage builds of CI (`--cargo-profile ci`): `dev` with the workspace crates
+# The test builds of CI (`--cargo-profile ci`): `dev` with the workspace crates
 # optimized at level 1 and the dependencies at 3. The end-to-end and language-server tests run the real binary
 # thousands of times, and the slowest of them run 3.7 times as fast as in `dev`; level 2 gains
-# only 5 % more for a build that is 15 % slower. Coverage builds in it too: the lines the report
-# leaves uncovered are the same as in `dev`. Line tables keep the backtraces readable.
+# only 5 % more for a build that is 15 % slower. Line tables keep the backtraces readable.
 [profile.ci]
 inherits = "dev"
 opt-level = 1
 debug = "line-tables-only"
 
 [profile.ci.package."*"]
+opt-level = 3
+
+# The coverage build of CI (`--cargo-profile ci-coverage`): the workspace crates as in `dev`, the
+# dependencies optimized. Coverage measures only the workspace crates; optimizing them changes
+# which lines the report leaves uncovered (inlined code), so the report has the lines of `dev`.
+[profile.ci-coverage]
+inherits = "dev"
+debug = "line-tables-only"
+
+[profile.ci-coverage.package."*"]
 opt-level = 3
