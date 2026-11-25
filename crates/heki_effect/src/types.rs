@@ -151,6 +151,19 @@ pub(crate) fn generic(class: &str) -> Option<Generic> {
     GENERICS.iter().find(|(c, _)| *c == class).map(|(_, g)| *g)
 }
 
+/// Whether `class` is a generic container class of the runtime, the builtin and `collections`
+/// classes of [`GENERICS`]: subscripting the class object with types gives an alias of it
+/// (`types.GenericAlias`: `frozenset[str]`), which constructs the class when called and reads
+/// the class's attributes. The `typing` names are aliases that need not construct anything
+/// (`typing.List[int]()` raises), and the `collections.abc` classes are abstract.
+pub(crate) fn runtime_generic(class: &str) -> bool {
+    generic(class).is_some()
+        && matches!(
+            class.rsplit_once('.'),
+            Some(("builtins" | "collections", _))
+        )
+}
+
 /// Augmented assignments changing a container in place, by the container's class: `xs += ys`
 /// extends a list, `s |= t` updates a set (`__iadd__`, `__ior__`, ...).
 const IN_PLACE_OPERATORS: &[(&str, &[BinOpKind])] = &[

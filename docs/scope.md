@@ -294,8 +294,10 @@ Missed findings close as heki learns more:
 - A write in an unannotated helper is still found where a caller passes it an object of a known
   class. A read is not.
 - Not typed: values declared `Any` or `types.ModuleType`, generics substituted through
-  unbounded `TypeVar`s (a bounded or constrained one gives its bound or constraints), and calls
-  of `type[C]` attributes.
+  unbounded `TypeVar`s (a bounded or constrained one gives its bound or constraints), names a
+  module binds to a type expression more than once or with type parameters (a type alias bound
+  once names its value), calls of a subscripted class other than a builtin or `collections`
+  container (`Box[int]()`), and calls of `type[C]` attributes.
 - A module-level table of functions (`HANDLERS = {"create": create}`) gives the value of a key
   a string constant gives, and one of its values for any other key, only while no code changes
   it in place; a change through a call it is handed to (`register(HANDLERS)`) is not seen.

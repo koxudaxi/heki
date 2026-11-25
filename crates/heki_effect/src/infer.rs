@@ -902,8 +902,6 @@ struct Engine<'e, 'a> {
     declared: FxHashMap<VarId, Ty>,
     /// Integer constants, with the span of their literal.
     ints: FxHashMap<VarId, (i64, Span)>,
-    /// String constants (the annotations `typing.cast` takes as text).
-    strs: FxHashMap<VarId, String>,
     /// How many targets the unpacking assignments of each variable have (`a, b = pair`).
     unpacked: FxHashMap<VarId, usize>,
     /// Container displays built in the function (`[]`, `{}`, `set()` is a call), by kind.
@@ -1036,7 +1034,6 @@ impl<'e, 'a> Engine<'e, 'a> {
             names: FxHashMap::default(),
             declared: FxHashMap::default(),
             ints: FxHashMap::default(),
-            strs: FxHashMap::default(),
             unpacked: FxHashMap::default(),
             displays: FxHashMap::default(),
             kept_displays: FxHashMap::default(),
@@ -1176,12 +1173,6 @@ impl<'e, 'a> Engine<'e, 'a> {
                     literal: ConstLiteral::Int(n),
                 } => {
                     self.ints.insert(*dst, (*n, inst.span));
-                }
-                InstKind::Const {
-                    dst,
-                    literal: ConstLiteral::Str(text),
-                } => {
-                    self.strs.insert(*dst, text.clone());
                 }
                 InstKind::AllocBuiltin { dst, kind, .. } => {
                     self.displays.insert(*dst, *kind);
@@ -1898,6 +1889,14 @@ impl<'e, 'a> Engine<'e, 'a> {
         if !is_slice && let Some(item) = self.table_item(obj, index) {
             return Ok(item);
         }
+        // A builtin container class subscripted with types (`frozenset[str]`) is an alias of the
+        // class: calling it constructs the class, and its attributes are the class's.
+        if !is_slice
+            && let Some(Ty::Ref(class)) = container
+            && crate::types::runtime_generic(class)
+        {
+            return Ok(Some(Ty::Ref(class.clone())));
+        }
         let Some(o) = container.and_then(Ty::obj) else {
             return Ok(None);
         };
@@ -2433,20 +2432,32 @@ impl<'e, 'a> Engine<'e, 'a> {
         }
     }
 
-    /// The type the type expression in `var` names (`typing.cast`'s first argument): a string
-    /// annotation, or a class object.
+    /// The type the type expression in `var` names (`typing.cast`'s first argument): what its
+    /// text names as an annotation (a string, `list[Model]`, `Model | None`, an alias), or else
+    /// a class object (`Exception`, a local bound to a class, an item of a tuple of classes). A
+    /// subscript of a builtin container class whose text names nothing (`list[kind]`) names no
+    /// type, though it is an alias of its class.
     fn type_form(&self, var: VarId) -> Option<Ty> {
         let cx = self.cx;
-        match self.strs.get(&var) {
-            Some(text) => cx
-                .module
-                .resolve_annotation_ty(text)
-                .and_then(|t| cx.project.declared_ty(&t))
-                .and_then(|t| t.bind_self(self.self_ty.as_ref())),
-            None => match self.fact(var) {
-                Fact::Known(Ty::Ref(class) | Ty::Class(class)) => Some(Ty::inst(class)),
-                _ => None,
-            },
+        let named = resolver::type_expression_text(self.shape, var)
+            .and_then(|text| cx.module.resolve_annotation_ty(&text))
+            .and_then(|t| cx.project.declared_ty(&t))
+            .and_then(|t| t.bind_self(self.self_ty.as_ref()));
+        if named.is_some() {
+            return named;
+        }
+        let subscripted_class = match self.shape.inst(self.shape.copy_root(var)).map(|i| &i.kind) {
+            Some(InstKind::SubscriptLoad { obj, .. }) => {
+                matches!(self.fact(*obj), Fact::Known(Ty::Ref(class)) if crate::types::runtime_generic(&class))
+            }
+            _ => false,
+        };
+        if subscripted_class {
+            return None;
+        }
+        match self.fact(var) {
+            Fact::Known(Ty::Ref(class) | Ty::Class(class)) => Some(Ty::inst(class)),
+            _ => None,
         }
     }
 
