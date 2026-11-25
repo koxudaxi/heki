@@ -34,6 +34,7 @@ mod edited;
 pub use edited::{FactChange, OffsetMap, Restated};
 mod environment;
 pub mod fresh;
+pub mod guarded;
 pub mod guards;
 pub mod held;
 pub mod imports;
@@ -1156,6 +1157,11 @@ pub struct EffectSummary {
     /// [`Self::exclusive_uses`]; propagated).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclusive: Option<Box<BTreeMap<ObjRef, ExclusiveUse>>>,
+    /// The `EFF117` facts: the thread locks the function returns holding and its writes of
+    /// shared state made holding one (`None` when it has neither, as most functions, and while
+    /// the rule does not run: [`OptInFacts::guarded`]; local).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guarded: Option<Box<guarded::GuardFacts>>,
 
     // Async offload & Sync-over-Async relaxation (dcg empirical findings)
     pub offloads_blocking_params: u64,
@@ -1715,6 +1721,7 @@ impl EffectSummary {
         }
         out.param_inplace_sites.clear();
         out.retyped_param_changes = None;
+        out.guarded = out.guarded.map(|g| Box::new(g.without_locations()));
         for w in &mut out.capacity_waits {
             w.hop.span = Span { start: 0, end: 0 };
         }
@@ -2281,6 +2288,10 @@ pub struct CallSite {
     /// time is kept to one task at a time (`EFF110`; only computed while the rule runs).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub under_lock: bool,
+    /// The caller certainly holds a thread lock at the call ([`guarded::LockPoints`]): a
+    /// callee called only so runs holding one (`EFF117`; only computed while the rule runs).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub under_thread_lock: bool,
     /// The targets are every implementation the call can run under R2 and R5: the receiver
     /// is no protocol, every member of a union resolves, and no project subclass's
     /// implementation is missing; for a read that runs property getters, every class the
@@ -2554,6 +2565,10 @@ pub struct UnawaitedHandoff {
     /// The API gives what the callable returns back to its caller
     /// (`heki_kb::UnawaitedCall::hands_back`).
     pub hands_back: bool,
+    /// Where the API runs the handed value when not on the caller's thread
+    /// (`heki_kb::UnawaitedCall::runs_on`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runs_on: Option<heki_kb::RunsOn>,
     /// `callees` are every implementation calling the handed value can run, as
     /// [`CallSite::complete`] says of a call.
     pub complete: bool,
@@ -2887,6 +2902,8 @@ pub struct OptInFacts {
     pub call_cycles: bool,
     /// [`OptInTables::unawaited_handoffs`] (`EFF115`, `EFF116`).
     pub unawaited_handoffs: bool,
+    /// [`EffectSummary::guarded`] and [`CallSite::under_thread_lock`] (`EFF117`).
+    pub guarded: bool,
     /// [`OptInTables::fresh_returns`].
     pub fresh_returns: bool,
     /// [`OptInTables::imports`].
@@ -2916,6 +2933,7 @@ impl OptInFacts {
         set_order: true,
         call_cycles: true,
         unawaited_handoffs: true,
+        guarded: true,
         fresh_returns: true,
         imports: true,
         only_read: true,

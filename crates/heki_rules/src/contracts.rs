@@ -567,9 +567,11 @@ pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
             .iter()
             .any(|code| selection.is_enabled(code)),
         call_cycles: selection.is_enabled("EFF114"),
-        unawaited_handoffs: ["EFF115", "EFF116"]
+        // `EFF117` finds the functions handed to threads among the handoffs.
+        unawaited_handoffs: ["EFF115", "EFF116", "EFF117"]
             .iter()
             .any(|code| selection.is_enabled(code)),
+        guarded: selection.is_enabled("EFF117"),
         fresh_returns: selection.is_enabled("MUT119"),
         shared_state: false,
         blind_spots: false,

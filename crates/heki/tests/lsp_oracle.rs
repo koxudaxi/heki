@@ -28,7 +28,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "EFF115", "EFF116", "MUT115", "MUT118", "MUT119", "MUT120", "OPT103", "OPT110", "OPT111", "OPT120", "OPT121", "OPT130"]
+extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "EFF115", "EFF116", "EFF117", "MUT115", "MUT118", "MUT119", "MUT120", "OPT103", "OPT110", "OPT111", "OPT120", "OPT121", "OPT130"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -945,6 +945,13 @@ const GEN_SUB: &str = "from pkg.gen_base import Source\n\n\nclass Cached(Source)
 const GEN_SUB_PLAIN: &str = "from pkg.gen_base import Source\n\n\nclass Cached(Source):\n    def rows(self):\n        return [2]\n";
 const GEN_USE: &str = "import threading\n\nfrom pkg.gen_base import Source\nfrom pkg.gen_jobs import rows\n\n\ndef start(n, source: Source):\n    rows(n)\n    threading.Thread(target=rows, args=(n,)).start()\n    source.rows()\n    if not rows(n):\n        return 0\n    return 1\n";
 
+// State a thread writes holding a lock (`EFF117`): the thread's writer, the helper taking the
+// lock, and the start of the thread are in the base class's module; a subclass in another module
+// writes the state.
+const LOCKED_BASE: &str = "import threading\n\n\nclass Counter:\n    def __init__(self):\n        self._lock = threading.Lock()\n        self.count = 0\n\n    def start(self):\n        threading.Thread(target=self._tick).start()\n\n    def _tick(self):\n        with self._lock:\n            self.count += 1\n\n    def _acquire(self):\n        self._lock.acquire()\n\n    def _give(self):\n        self._lock.release()\n";
+const LOCKED_USE: &str = "from pkg.locked_base import Counter\n\n\nclass Resettable(Counter):\n    def reset(self):\n        self.count = 0\n";
+const LOCKED_USE_HELD: &str = "from pkg.locked_base import Counter\n\n\nclass Resettable(Counter):\n    def reset(self):\n        self._acquire()\n        self.count = 0\n        self._give()\n";
+
 // `MUT115`: the declarations of a copied class and of the builtin containers' subclasses in
 // other modules, and a helper in another module, decide whether a change below a copy states
 // the exact claim.
@@ -1055,6 +1062,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/rec_walk.py", REC_WALK),
         ("pkg/coro_jobs.py", CORO_JOBS),
         ("pkg/coro_use.py", CORO_USE),
+        ("pkg/locked_base.py", LOCKED_BASE),
+        ("pkg/locked_use.py", LOCKED_USE),
         ("pkg/gen_jobs.py", GEN_JOBS),
         ("pkg/gen_base.py", GEN_BASE),
         ("pkg/gen_sub.py", GEN_SUB),
@@ -4877,6 +4886,55 @@ fn steps_eff115() -> Vec<Step> {
     ]
 }
 
+/// `EFF117`: whether the subclass's write is reported comes from the base class's module, whose
+/// thread writes the state holding the lock, whose helper takes the lock, and which starts the
+/// thread; the locked write's line, which the report shows, moves there too.
+fn steps_eff117() -> Vec<Step> {
+    let unlocked = LOCKED_BASE.replace(
+        "        with self._lock:\n            self.count += 1\n",
+        "        self.count += 1\n",
+    );
+    let unstarted = LOCKED_BASE.replace(
+        "        threading.Thread(target=self._tick).start()\n",
+        "        self._tick()\n",
+    );
+    vec![
+        Step::new(
+            "the thread's writer in another module stops holding the lock",
+            vec![save("pkg/locked_base.py", &unlocked)],
+        )
+        .absent(&[("pkg/locked_use.py", "EFF117")]),
+        Step::new(
+            "it holds the lock again",
+            vec![save("pkg/locked_base.py", LOCKED_BASE)],
+        )
+        .present(&[("pkg/locked_use.py", "EFF117")]),
+        Step::new(
+            "the lines above the locked write move",
+            vec![save(
+                "pkg/locked_base.py",
+                &format!("# counters\n{LOCKED_BASE}"),
+            )],
+        )
+        .present(&[("pkg/locked_use.py", "EFF117")]),
+        Step::new(
+            "the subclass takes the lock through the base class's helper",
+            vec![save("pkg/locked_use.py", LOCKED_USE_HELD)],
+        )
+        .absent(&[("pkg/locked_use.py", "EFF117")]),
+        Step::new(
+            "the subclass writes without the lock again",
+            vec![save("pkg/locked_use.py", LOCKED_USE)],
+        )
+        .present(&[("pkg/locked_use.py", "EFF117")]),
+        Step::new(
+            "the base class no longer starts the thread",
+            vec![save("pkg/locked_base.py", &unstarted)],
+        )
+        .absent(&[("pkg/locked_use.py", "EFF117")]),
+    ]
+}
+
 /// `EFF116`: whether a call's callees are generator functions comes from their declarations in
 /// other modules, a function's and a method's and its override's, which change between a
 /// generator function and a plain one; a call that may run a plain override is no report.
@@ -6641,6 +6699,7 @@ sessions!(editing, Session::start, {
     eff114: steps_eff114,
     eff115: steps_eff115,
     eff116: steps_eff116,
+    eff117: steps_eff117,
     attribute_types: steps_attribute_types,
     builtin_receivers: steps_builtin_receivers,
     receiver_typing: steps_receiver_typing,
