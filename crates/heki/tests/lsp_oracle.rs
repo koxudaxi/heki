@@ -769,6 +769,12 @@ const EXACT_MADE_ON_A_BRANCH: &str = "import os\nimport time\n\n\ndef _define():
 const EXACT_MADE_LOCAL: &str = "import time\n\n\ndef _define():\n    class Made:\n        def __init__(self):\n            time.sleep(1)\n\n\n_define()\n";
 const EXACT_MADE_USE: &str =
     "from pkg import exact_made\n\n\nasync def serve():\n    exact_made.Made()\n";
+// The base's method gets decorators: `typing.final` returns the method it is handed, and a
+// decorator outside the ones heki knows may replace it, also one named `final` that another
+// library defines.
+const EXACT_BASE_FINAL: &str = "from typing import final\n\nimport requests\n\n\nclass Base:\n    @final\n    def fetch(self, url):\n        return requests.get(url)\n";
+const EXACT_BASE_OTHER_FINAL: &str = "from mylib import final\n\nimport requests\n\n\nclass Base:\n    @final\n    def fetch(self, url):\n        return requests.get(url)\n";
+const EXACT_BASE_TRACED: &str = "from typing import final\n\nimport requests\n\n\ndef traced(fn):\n    return fn\n\n\nclass Base:\n    @final\n    @traced\n    def fetch(self, url):\n        return requests.get(url)\n";
 
 // Store types (`ModuleDecls::global_types`, `ClassDecl::attr_stores`): an `async def` calls a
 // method on a module global, in its module and through an import, and on an instance attribute;
@@ -1537,6 +1543,36 @@ fn steps_exact_effects() -> Vec<Step> {
         )
         .present(&[("pkg/exact_made_use.py", "EFF101")])
         .absent(&[("pkg/exact_made_use.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "the base's method is decorated with `typing.final`",
+            vec![save("pkg/exact_base.py", EXACT_BASE_FINAL)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF101")])
+        .absent(&[("pkg/exact_use.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "a decorator heki does not know is added below it",
+            vec![save("pkg/exact_base.py", EXACT_BASE_TRACED)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF101 [heuristic]")])
+        .absent(&[("pkg/exact_use.py", "EFF101")]),
+        Step::new(
+            "only `typing.final` is left",
+            vec![save("pkg/exact_base.py", EXACT_BASE_FINAL)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF101")])
+        .absent(&[("pkg/exact_use.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "`final` is imported from another library",
+            vec![save("pkg/exact_base.py", EXACT_BASE_OTHER_FINAL)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF101 [heuristic]")])
+        .absent(&[("pkg/exact_use.py", "EFF101")]),
+        Step::new(
+            "`final` is imported from `typing` again",
+            vec![save("pkg/exact_base.py", EXACT_BASE_FINAL)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF101")])
+        .absent(&[("pkg/exact_use.py", "EFF101 [heuristic]")]),
     ]
 }
 

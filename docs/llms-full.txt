@@ -787,6 +787,8 @@ oldest version `requires-python` admits.
 - From Python 3.12, list, set, and dict comprehensions run in the enclosing function (PEP 709): a
   comprehension inside a loop can be reported for `py312` and not for `py311`.
 - From Python 3.14, annotations are evaluated lazily in `__annotate__` scopes (PEP 649).
+- From Python 3.15, `sentinel` is a builtin (PEP 661): a `MUT118` report recommends it, and
+  has a fix that uses it; for an older version it names `typing_extensions.sentinel`.
 - The parser reads Python 3.15 syntax for every target version: `lazy import` (PEP 810) is a lazy
   import also in code for an older version.
 - Syntax newer than the target version is analyzed, not reported: that is Ruff's check.
@@ -2510,6 +2512,7 @@ must prove.
 $ heki check --diff                              # preview (exit code 1 when something would change)
 $ heki check --fix                               # apply safe, unconditional fixes
 $ heki check --fix --include-size-dependent      # also the proven-safe size-dependent rewrites
+$ heki check --fix --unsafe-fixes                # also the unsafe fixes
 ```
 
 - A fix comes with a report: `--fix` applies only the fixes of the reports shown. A report whose
@@ -2528,6 +2531,10 @@ $ heki check --fix --include-size-dependent      # also the proven-safe size-dep
   rewrites in every function (with `--diff`, it shows them), also over a loop whose trip count
   the data does not decide. After the fixes, the run lists their reports it could not rewrite, each with the obligation that
   blocks it.
+- An unsafe fix may change what the program does, and applies only with `--unsafe-fixes`. One
+  rule has one: a [`MUT118`](https://heki.koxudaxi.dev/rules/sentinel-lost-in-deepcopy/) report for a Python 3.15
+  target replaces the `object()` sentinel with `sentinel("NAME")`, whose type, repr, and
+  pickling differ ([Fix safety](https://heki.koxudaxi.dev/rules/sentinel-lost-in-deepcopy/#fix-safety)).
 - `--diff` takes the same flags as `--fix` and writes nothing.
 - With `--touched`, or files given as paths, `--fix` and `--diff` rewrite only those files. A
   shown report in another file (one whose call chain reaches a touched file) keeps its fix, and
@@ -3414,6 +3421,9 @@ Options:
 
       --include-size-dependent
           Also run the opt-in rules with a `size-dependent` rewrite (`OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`), as if `--extend-select` named them, and with `--fix` or `--diff` apply their proven-safe rewrites, in every function
+
+      --unsafe-fixes
+          With `--fix` or `--diff`, also apply the unsafe fixes, which change what the program does in a way the rule's page states (`MUT118`)
 
       --diff
           Preview fixes as a unified diff without writing files
@@ -4616,7 +4626,8 @@ heki's diagnostics and fixes while you edit, with the results `heki check` repor
   (`codeDescription`).
 - `heki server --heuristic` (or `--no-heuristic`) overrides `lint.heuristic` of the
   configuration, as on the command line.
-- Quick fixes for the safe `OPT101` / `OPT102` rewrites.
+- Quick fixes for the safe `OPT101` / `OPT102` rewrites, and a quick fix that is not preferred
+  for the unsafe `MUT118` fix (`heki check --fix --unsafe-fixes`).
 - `refactor.rewrite.heki` code actions for the proven-safe size-dependent rewrites. A fix whose
   result would not parse is never offered, as `heki check --fix` refuses it.
 - A quick fix that appends `# heki: ignore[CODE]` to the line of any diagnostic, unless a comment
@@ -5899,9 +5910,11 @@ Each step of the chain is established, not assumed:
   `super()` read is in (a class finding a class attribute, a method, a value stored on the class
   outside its body, or nothing instead, a base heki does not know before the getter,
   `__getattribute__`, or a metaclass heki does not know leaves the read not followed); a
-  decorator other than `staticmethod`, `classmethod`, `property`, `abstractmethod`, or
-  `override` may not run the body, and is not followed; a function defined twice is not
-  followed, and neither is a function, class, or method whose name the project binds to another
+  decorator other than `staticmethod`, `classmethod`, `property`, `abstractmethod`, `override`,
+  or `final` may not run the body, and is not followed, each known by what its name is bound to
+  in the decorated function's module (the builtins, `abc`, `typing`, or `typing_extensions`: a
+  `final` the project defines or imports from elsewhere is another); a function defined twice
+  is not followed, and neither is a function, class, or method whose name the project binds to another
   object (assumption R1; a name its module body or class body binds last to one named object on
   every path is that object): another store or a `del` of the name in its module (also on a
   branch, after `global`, or by `globals()` or `exec`), in its class body, or on its class
@@ -6169,9 +6182,9 @@ run a callable on a worker thread (`offloads_blocking_arg`):
 
 The callable is the function itself, a bound method (`self.flush`), or a `functools.partial` of
 either. A report is worded as certain when every function the value calls is an `async def`
-without decorators other than `staticmethod`, `classmethod`, `abstractmethod`, or `override`;
-when a decorator replaces one, or another implementation of the method is a plain function, the
-report says the function may not create a coroutine.
+without decorators other than `staticmethod`, `classmethod`, `abstractmethod`, `override`, or
+`final`; when a decorator replaces one, or another implementation of the method is a plain
+function, the report says the function may not create a coroutine.
 
 It does not report:
 
@@ -6582,7 +6595,8 @@ set that a cached function returned:
   `maxsize` is left out, `None`, or a literal number above `0` (a name holding `0` would keep
   nothing), known by what its name is bound to (`from functools import lru_cache as _lru_cache`
   counts, a `cache` decorator the module defines itself does not), and
-  otherwise only with `staticmethod` / `classmethod`;
+  otherwise only with `staticmethod`, `classmethod`, `typing.override`, or `typing.final` (also
+  of `typing_extensions`);
 - it takes a parameter besides a method's `self` / `cls`, so the cache keys its results;
 - every return a run can reach hands out a builtin container of one kind: its return annotation
   names `list`, `dict`, or `set` as a whole (`dict[str, Any]`, not `dict | None`), or each
@@ -8081,8 +8095,8 @@ It reports a call of a project generator function:
   handed itself, as a bound method (`self.drain`), or through `functools.partial`.
 
 Every function the call may run is a generator function without decorators other than
-`staticmethod`, `classmethod`, `abstractmethod`, or `override`: a call of a method that a
-subclass overrides with a plain function is no report. When the name is bound to more than one
+`staticmethod`, `classmethod`, `abstractmethod`, `override`, or `final`: a call of a method that
+a subclass overrides with a plain function is no report. When the name is bound to more than one
 definition (`def` under `if` and `else`), the report says that the last one is a generator
 function.
 
@@ -11263,7 +11277,7 @@ Source: https://heki.koxudaxi.dev/rules/sentinel-lost-in-deepcopy/
 
 # sentinel-lost-in-deepcopy (MUT118)
 
-Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` (a bug) · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` (a bug) · Unsafe fix (`--fix --unsafe-fixes`)
 
 `copy.deepcopy` of an instance holding an `object()` sentinel in an attribute that a function tests against the sentinel by identity (the copy holds a new object, which the test does not match).
 
@@ -11305,8 +11319,9 @@ followed.
 
 It does not report:
 
-- a sentinel that copies as itself (`typing_extensions.Sentinel`, an instance of a class with
-  `__deepcopy__`), or any other value bound to the name;
+- a sentinel that copies as itself (`sentinel("MISSING")`: the builtin from Python 3.15, or
+  `typing_extensions.sentinel`, also through `import typing_extensions as te`; an instance of a
+  class with `__deepcopy__`), or any other value bound to the name;
 - a sentinel only used as a parameter default or a `dict.get` default, never stored on an
   instance;
 - a class whose own code (or a base's) decides how it is copied: `__deepcopy__`, `__reduce__`,
@@ -11379,10 +11394,15 @@ def isolated(field: Field) -> Field:
 
 Use instead:
 ```python
-from typing_extensions import Sentinel
-
-MISSING = Sentinel("MISSING")  # copies and pickles as itself
+MISSING = sentinel("MISSING")  # copies as itself
 ```
+
+`sentinel` (PEP 661) is a builtin from Python 3.15; for an older target, import it from
+`typing_extensions` 4.16.0 or later (`from typing_extensions import sentinel`). The help of a
+report names the one the [target version](https://heki.koxudaxi.dev/scope/#the-target-python-version) has.
+`typing_extensions` 4.14 and 4.15 spell it `Sentinel`, and `copy.deepcopy` of one of those raises
+`TypeError`. A sentinel's repr is its name, and `pickle` finds it by that name in its module, so
+give it the name it is bound to.
 
 ## Known limitations
 - A deep copy of a container (`copy.deepcopy([field])`) is not followed, and an instance below
@@ -11393,7 +11413,16 @@ MISSING = Sentinel("MISSING")  # copies and pickles as itself
   SPEC = copy.deepcopy(...)`) is not seen; one in a class defined in a function is.
 
 ## Fix safety
-No automatic fix.
+When the target version is Python 3.15 or later and the file of the report binds the sentinel,
+the report has an unsafe fix: it replaces the `object()` call with `sentinel("NAME")`, `NAME`
+being the name the sentinel is bound to, and needs no import. `heki check --fix` alone never
+applies it; `--fix --unsafe-fixes` does (`--diff --unsafe-fixes` shows it), and the language
+server offers it as a quick fix. It is unsafe because the object changes: its type is `sentinel`
+instead of `object`, its repr is `NAME` instead of `<object object at 0x...>`, and `pickle` of an
+object holding it stores the sentinel by its name and loads it as the same object, where it made
+a new `object()` before. heki assumes that the module-level name is how `pickle` finds it. The
+fix is not offered when the module binds the name `sentinel` (an import of
+`unittest.mock.sentinel`, a function, an assignment), or below Python 3.15.
 
 
 ---
@@ -12277,7 +12306,7 @@ It does not report:
 - receivers of unknown type;
 - an argument known not to be a coroutine, from which no new task is made: the result of a
   project function that is a plain `def` or a generator function without decorators other than
-  `staticmethod`, `classmethod`, `abstractmethod`, or `override` (`create_task` raises
+  `staticmethod`, `classmethod`, `abstractmethod`, `override`, or `final` (`create_task` raises
   `TypeError` on what it returns, and `ensure_future` returns a future it is handed unchanged),
   or a value typed as a future or a task (`loop.run_in_executor(...)`, `loop.create_future()`,
   `asyncio.gather(...)`, `asyncio.wrap_future(...)`, `executor.submit(...)`, or an annotated
