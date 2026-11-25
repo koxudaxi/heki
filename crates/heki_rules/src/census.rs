@@ -12,8 +12,11 @@
 //! container (`obj.attr["k"].append(v)`) and do not answer whether a write constructs its
 //! object; a contract trial, which declares the contracts, sees those.
 
+use crate::mut_rules::binds_receiver;
 use heki_ast::Span;
-use heki_effect::{BLOCKING_EFFECTS, EffectSummary, FuncKey, ProjectIndex, initializes_own_self};
+use heki_effect::{
+    BLOCKING_EFFECTS, EffectSummary, FuncKey, ProjectDecls, ProjectIndex, initializes_own_self,
+};
 use rustc_hash::FxHashSet;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -27,6 +30,9 @@ pub struct Accesses<'i> {
     /// The first access in source order.
     pub first: Span,
     pub sites: usize,
+    /// Every access is through the receiver of the method making it (`self.attr`, `cls.attr`),
+    /// which `own-receiver = "allow"` allows.
+    pub own_receiver: bool,
 }
 
 /// One function's writes of one attribute outside the initialization of its own instance.
@@ -111,8 +117,8 @@ struct Gathered<'i> {
 
 impl<'i> Census<'i> {
     /// The census of `index`, whose blind spots (`heki_rules::recommend_facts`) count for
-    /// [`ModuleUse::unseen`] when it has them.
-    pub fn of(index: &'i ProjectIndex) -> Self {
+    /// [`ModuleUse::unseen`] when it has them; `decls` are its declarations.
+    pub fn of(index: &'i ProjectIndex, decls: &ProjectDecls) -> Self {
         let mut attributes: BTreeMap<(&str, &str), Gathered<'_>> = BTreeMap::new();
         let mut classes: BTreeMap<&str, FxHashSet<&str>> = BTreeMap::new();
         let mut modules: BTreeMap<&str, ModuleUse<'_>> = BTreeMap::new();
@@ -144,7 +150,9 @@ impl<'i> Census<'i> {
                 unseen: Vec::new(),
             });
             for &(function, local) in &functions {
-                gather(&mut attributes, &mut classes, module, path, function, local);
+                let binds = decls.function_decl(function).is_some_and(binds_receiver);
+                let at = (module, path, function, binds);
+                gather(&mut attributes, &mut classes, at, local);
                 if function.qualname == "<module>" {
                     continue;
                 }
@@ -215,24 +223,28 @@ impl<'i> Census<'i> {
     }
 }
 
-/// Add the typed accesses of `function` (in `module`, file `path`; `local` its own summary).
+/// Add the typed accesses of `function` (in `module`, file `path`; `binds_receiver`: it is a
+/// method binding a receiver; `local` its own summary).
 fn gather<'i>(
     attributes: &mut BTreeMap<(&'i str, &'i str), Gathered<'i>>,
     classes: &mut BTreeMap<&'i str, FxHashSet<&'i str>>,
-    module: &'i str,
-    path: &'i Path,
-    function: &'i FuncKey,
+    (module, path, function, binds_receiver): (&'i str, &'i Path, &'i FuncKey, bool),
     local: &'i EffectSummary,
 ) {
-    let access = |span| Accesses {
+    // As the owner contracts judge `own-receiver`: an object that may be the receiver gets the
+    // benefit of the doubt.
+    let through_receiver = |obj_params: u64| binds_receiver && obj_params & 1 != 0;
+    let access = |span, obj_params| Accesses {
         function,
         path,
         first: span,
         sites: 1,
+        own_receiver: through_receiver(obj_params),
     };
-    let add = |into: &mut Accesses<'i>, span: Span| {
+    let add = |into: &mut Accesses<'i>, span: Span, obj_params| {
         into.first = into.first.min(span);
         into.sites += 1;
+        into.own_receiver &= through_receiver(obj_params);
     };
     for site in &local.typed_field_write_sites {
         let class = site.class_qualname.as_str();
@@ -240,9 +252,10 @@ fn gather<'i>(
         let gathered = attributes.entry((class, site.attr.as_str())).or_default();
         if initializes_own_instance(function, local, class, site.obj_params) {
             match gathered.initializers.get_mut(function) {
-                Some(a) => add(a, site.span),
+                Some(a) => add(a, site.span, site.obj_params),
                 None => {
-                    gathered.initializers.insert(function, access(site.span));
+                    let first = access(site.span, site.obj_params);
+                    gathered.initializers.insert(function, first);
                 }
             }
             continue;
@@ -252,7 +265,7 @@ fn gather<'i>(
         let in_place = !rebinds;
         match gathered.writers.get_mut(function) {
             Some(w) => {
-                add(&mut w.accesses, site.span);
+                add(&mut w.accesses, site.span, site.obj_params);
                 w.rebinds |= rebinds;
                 w.in_place |= in_place;
                 w.fresh &= site.fresh;
@@ -261,7 +274,7 @@ fn gather<'i>(
                 gathered.writers.insert(
                     function,
                     Writes {
-                        accesses: access(site.span),
+                        accesses: access(site.span, site.obj_params),
                         rebinds,
                         in_place,
                         fresh: site.fresh,
@@ -279,9 +292,11 @@ fn gather<'i>(
         classes.entry(class).or_default().insert(module);
         let gathered = attributes.entry((class, site.attr.as_str())).or_default();
         match gathered.readers.get_mut(function) {
-            Some(a) => add(a, site.span),
+            Some(a) => add(a, site.span, site.obj_params),
             None => {
-                gathered.readers.insert(function, access(site.span));
+                gathered
+                    .readers
+                    .insert(function, access(site.span, site.obj_params));
             }
         }
     }

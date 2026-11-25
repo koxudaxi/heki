@@ -1,8 +1,10 @@
 //! `heki recommend` (experimental), contract candidates end to end: the `write-owners`,
 //! `read-owners`, and `effect-boundaries` entries it draws from the census, each kept only when
-//! a trial of its rules reports nothing, their confidence, the candidates the trial rejects, what
-//! the configuration already declares, the cap, and that `heki check` with the block applied
-//! prints what the section promised.
+//! a trial of its rules reports nothing, the blocks the kept ones merge into, the class patterns
+//! the pattern trial keeps or refuses, their confidence, the sites keeping them at
+//! `unresolved = "ignore"`, the candidates the trial rejects, what the configuration already
+//! declares, the caps, and that `heki check` with the block applied prints what the section
+//! promised.
 
 mod common;
 
@@ -229,8 +231,8 @@ fn checked(p: &Project, args: &[&str]) -> Vec<Value> {
     serde_json::from_str::<Vec<Value>>(&out).unwrap_or_else(|e| panic!("{e}: {out}{err}"))
 }
 
-/// `(kind, target, confidence, unresolved)` of each candidate the block declares.
-fn kept(report: &Value) -> Vec<(String, String, String, Value)> {
+/// `(kind, targets, confidence, unresolved)` of each block the configuration block declares.
+fn kept(report: &Value) -> Vec<(String, Vec<String>, String, Value)> {
     let text = |v: &Value| v.as_str().unwrap().to_owned();
     report["contracts"]
         .as_array()
@@ -239,7 +241,7 @@ fn kept(report: &Value) -> Vec<(String, String, String, Value)> {
         .map(|c| {
             (
                 text(&c["kind"]),
-                text(&c["target"]),
+                c["targets"].as_array().unwrap().iter().map(text).collect(),
                 text(&c["confidence"]),
                 c["entry"]["unresolved"].clone(),
             )
@@ -247,14 +249,44 @@ fn kept(report: &Value) -> Vec<(String, String, String, Value)> {
         .collect()
 }
 
-/// The candidate of `kind` on `target`.
+/// What every block of the report is about, its targets or the packages and modules of its
+/// scopes, and the targets its kept class patterns stand for.
+fn targets(report: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    for c in report["contracts"].as_array().unwrap() {
+        for t in c["targets"].as_array().unwrap() {
+            out.push(t.as_str().unwrap().to_owned());
+        }
+        for p in c["patterns"].as_array().unwrap() {
+            if p["kept"] == true {
+                for t in p["replaces"].as_array().unwrap() {
+                    out.push(t.as_str().unwrap().to_owned());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The block of `kind` about `target`, or whose kept class pattern stands for it.
 fn candidate<'r>(report: &'r Value, kind: &str, target: &str) -> &'r Value {
     report["contracts"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|c| c["kind"] == kind && c["target"] == target)
+        .find(|c| {
+            c["kind"] == kind
+                && (c["targets"].as_array().unwrap().contains(&json!(target))
+                    || c["patterns"].as_array().unwrap().iter().any(|p| {
+                        p["kept"] == true
+                            && p["replaces"].as_array().unwrap().contains(&json!(target))
+                    }))
+        })
         .unwrap_or_else(|| panic!("no {kind} {target}: {report:#}"))
+}
+
+fn strings(items: &[&str]) -> Vec<String> {
+    items.iter().map(|t| (*t).to_owned()).collect()
 }
 
 /// The text of the contract candidates section.
@@ -271,69 +303,62 @@ fn s(text: &str) -> String {
 #[test]
 fn ownership_candidates_follow_the_census_and_the_trial() {
     let p = owners("recommend_contract_owners");
-    let report = recommend_json(&p, &["--ignore", "EFF201"]);
+    let report = recommend_json(&p, &["--ignore", "EFF201", "--all"]);
     let report_unresolved = json!("report");
     let ignore_unresolved = json!("ignore");
     assert_eq!(
         kept(&report),
         [
-            // Changed in place first, then by audience.
+            // Changed in place first, then by audience times candidates. Candidates with the
+            // same owner and keys are one block: `Sub.x` is left out, the target on `Base`
+            // covers its subclasses.
             (
                 s("write-owners"),
-                s("app.models:Cart.tags"),
-                s("medium"),
-                ignore_unresolved.clone()
-            ),
-            (
-                s("write-owners"),
-                s("app.models:Order.items"),
+                strings(&["app.models:Base.x", "app.models:Order.items"]),
                 s("high"),
                 report_unresolved.clone()
             ),
+            // The same owner, but accesses of `tags` on an object of unknown class make both
+            // medium. Every attribute of `Cart` is the store's: the pattern names them.
             (
                 s("write-owners"),
-                s("app.models:Order.tags"),
+                strings(&["app.models:Cart.*", "app.models:Order.tags"]),
                 s("medium"),
                 ignore_unresolved.clone()
             ),
-            // `Sub.x` is left out: the target on `Base` covers its subclasses.
-            (
-                s("write-owners"),
-                s("app.models:Base.x"),
-                s("high"),
-                report_unresolved.clone()
-            ),
-            // Written only while its objects are constructed, a factory filling the object it
+            // Written only while their objects are constructed, a factory filling the object it
             // constructs included.
             (
                 s("write-owners"),
-                s("app.models:Order.kind"),
-                s("high"),
-                report_unresolved.clone()
-            ),
-            (
-                s("write-owners"),
-                s("app.models:Order.oid"),
+                strings(&["app.models:Order.kind", "app.models:Order.oid"]),
                 s("high"),
                 report_unresolved.clone()
             ),
             (
                 s("read-owners"),
-                s("app.models:Order._cache"),
+                strings(&["app.models:Order._cache"]),
                 s("high"),
                 report_unresolved.clone()
             ),
             (
                 s("read-owners"),
-                s("app.models:Order._hits"),
+                strings(&["app.models:Order._hits"]),
                 s("medium"),
                 ignore_unresolved.clone()
+            ),
+            // A subclass in a module of its own reads it through its own receiver: the class
+            // family's.
+            (
+                s("read-owners"),
+                strings(&["app.models:Order._level"]),
+                s("high"),
+                report_unresolved.clone()
             ),
             // A private helper of the module reading it for its callers is allowed where they
             // call it.
             (
                 s("read-owners"),
-                s("app.models:Order._seen"),
+                strings(&["app.models:Order._seen"]),
                 s("high"),
                 report_unresolved.clone()
             ),
@@ -343,13 +368,16 @@ fn ownership_candidates_follow_the_census_and_the_trial() {
     let items = candidate(&report, "write-owners", "app.models:Order.items");
     assert_eq!(
         items["entry"],
-        json!({"name": "Order.items writers", "targets": ["app.models:Order.items"],
+        json!({"name": "attributes written by app.store:Store.*",
+               "targets": ["app.models:Base.x", "app.models:Order.items"],
                "allowed-writers": ["app.store:Store.*"], "unresolved": "report"})
     );
+    assert_eq!(items["candidates"], json!(2));
     assert_eq!(
         items["evidence"],
         json!({
-            "functions": {"count": 2, "items": ["app.store.Store.add_item", "app.store.Store.clear"],
+            "functions": {"count": 4, "items": ["app.store.Store.add_item", "app.store.Store.clear",
+                                                "app.store.Store.set_base", "app.store.Store.set_sub"],
                           "truncated": false},
             "modules": {"count": 1, "items": ["app.store"], "truncated": false},
             "audience": {"count": 2, "items": ["app.api", "app.views"], "truncated": false},
@@ -361,30 +389,39 @@ fn ownership_candidates_follow_the_census_and_the_trial() {
         items["trial"],
         json!({"reports": {"MUT201": 0, "MUT205": 0}, "suppressed": 0, "examples": []})
     );
-    // An access of `tags` on an object of unknown class: either class's, so both contracts
-    // count it.
-    for target in ["app.models:Order.tags", "app.models:Cart.tags"] {
-        let tags = candidate(&report, "write-owners", target);
-        assert_eq!(tags["trial"]["reports"], json!({"MUT201": 0, "MUT205": 1}));
-        assert_eq!(
-            (
-                &tags["trial"]["examples"][0]["path"],
-                &tags["trial"]["examples"][0]["line"]
-            ),
-            (&json!("app/admin.py"), &json!(14))
-        );
-    }
+    // An access of `tags` on an object of unknown class: either class's, so both candidates
+    // count it, and their block counts it once.
+    let tags = candidate(&report, "write-owners", "app.models:Order.tags");
+    assert_eq!(tags["trial"]["reports"], json!({"MUT201": 0, "MUT205": 1}));
+    assert_eq!(
+        (
+            &tags["trial"]["examples"][0]["path"],
+            &tags["trial"]["examples"][0]["line"]
+        ),
+        (&json!("app/admin.py"), &json!(14))
+    );
+    let level = candidate(&report, "read-owners", "app.models:Order._level");
+    assert_eq!(
+        level["entry"],
+        json!({"name": "Order._level readers", "targets": ["app.models:Order._level"],
+               "allowed-readers": ["app.models:Order.*"], "unresolved": "report",
+               "own-receiver": "allow"})
+    );
+    assert_eq!(
+        level["evidence"]["functions"]["items"],
+        json!(["app.models.Order.level", "app.rush.Rush.speed"])
+    );
     assert_eq!(
         candidate(&report, "write-owners", "app.models:Order.oid")["entry"],
-        json!({"name": "Order.oid writers", "targets": ["app.models:Order.oid"],
+        json!({"name": "attributes written only while constructed",
+               "targets": ["app.models:Order.kind", "app.models:Order.oid"],
                "unresolved": "report"})
     );
     assert_eq!(
         candidate(&report, "read-owners", "app.models:Order._seen")["entry"]["allowed-readers"],
         json!(["app.models:*"])
     );
-    // A helper in another module changing `notes`, and a subclass reading `_level` in its own
-    // module: the census does not see them, the trial does.
+    // A helper in another module changing `notes`: the census does not see it, the trial does.
     let rejected: Vec<(&Value, &Value, &Value, &Value)> = report["rejected_contracts"]
         .as_array()
         .unwrap()
@@ -400,59 +437,213 @@ fn ownership_candidates_follow_the_census_and_the_trial() {
         .collect();
     assert_eq!(
         rejected,
-        [
-            (
-                &json!("app.models:Order.notes"),
-                &json!("contract-trial"),
-                &json!("MUT201"),
-                &json!("app/admin.py")
-            ),
-            (
-                &json!("app.models:Order._level"),
-                &json!("contract-trial"),
-                &json!("MUT203"),
-                &json!("app/rush.py")
-            ),
-        ]
+        [(
+            &json!("app.models:Order.notes"),
+            &json!("contract-trial"),
+            &json!("MUT201"),
+            &json!("app/admin.py")
+        )]
     );
     // `Order.status` is written in two modules; `Named.status` is a protocol's; `Order.limit` is
     // never written, only read; `Order._debug` is read in another module.
     assert!(
-        report["contracts"].as_array().unwrap().iter().all(|c| {
-            let target = c["target"].as_str().unwrap();
+        targets(&report).iter().all(|target| {
             ![".status", ".limit", "._debug"]
                 .iter()
                 .any(|attr| target.ends_with(attr))
         }),
         "{report:#}"
     );
-    let (_, out, _) = p.heki(&["recommend", "--ignore", "EFF201"]);
+    let (_, out, _) = p.heki(&["recommend", "--ignore", "EFF201", "--all"]);
     let text = section(&out);
     for line in [
-        "  write-owners  app.models:Order.items  high\n    written by 2 function(s), all in \
-         app.store (Store.add_item, Store.clear), changed in place; read in 2 other module(s)\n    \
-         trial: MUT201 0, MUT205 0 (unresolved = \"report\")\n",
-        "  write-owners  app.models:Order.tags  medium\n    written by 1 function(s), all in \
-         app.store (Store.tag), changed in place; read in 2 other module(s)\n    trial: MUT201 0, \
-         MUT205 1 (at app/admin.py:14), so unresolved = \"ignore\"\n",
-        "  write-owners  app.models:Order.oid  high\n    written only while its objects are \
-         constructed; read in 2 other module(s)\n",
+        "  write-owners  app.models:Base.x, app.models:Order.items  high\n    written by 4 \
+         function(s), all in app.store (Store.add_item, Store.clear, Store.set_base, ...), \
+         changed in place; read in 2 other module(s)\n",
+        "    trial: MUT201 0, MUT205 0 (unresolved = \"report\")\n",
+        "  write-owners  app.models:Cart.*, app.models:Order.tags  medium\n    written by 2 \
+         function(s), all in app.store (Store.cart_tag, Store.tag), changed in place; read in 2 \
+         other module(s)\n",
+        "    trial: MUT201 0, MUT205 1 (sites below), so unresolved = \"ignore\"\n",
+        "  write-owners  app.models:Order.kind, app.models:Order.oid  high\n    written only \
+         while their objects are constructed; read in 2 other module(s)\n",
         "  read-owners  app.models:Order._cache  high\n    read by 1 function(s), all in \
          app.models (Order.lookup); the class is used in 4 other module(s)\n",
+        "  read-owners  app.models:Order._level  high\n    read by 2 function(s), outside \
+         app.models only through their own receiver (app.models.Order.level, \
+         app.rush.Rush.speed); the class is used in 4 other module(s)\n",
         "  Rejected: write-owners app.models:Order.notes (MUT201 1, MUT205 0): MUT201 at \
          app/admin.py:10\n",
-        "  Rejected: read-owners app.models:Order._level (MUT203 1, MUT206 0): MUT203 at \
-         app/rush.py:6\n",
     ] {
         assert!(text.contains(line), "{line}\nin\n{text}");
     }
     assert!(
         text.ends_with(
-            "  For every candidate, accesses inside code heki cannot follow (unresolved calls, \
+            "  For every block, accesses inside code heki cannot follow (unresolved calls, \
              libraries without a catalog) are not seen."
         ),
         "{text}"
     );
+    // The block declares the blocks shown.
+    let block = report["config_toml"].as_str().unwrap();
+    assert!(
+        block.contains(
+            "[[tool.heki.write-owners]]\nname = \"attributes written by app.store:Store.*\"\n\
+             targets = [\"app.models:Base.x\", \"app.models:Order.items\"]\n\
+             allowed-writers = [\"app.store:Store.*\"]\nunresolved = \"report\"\n"
+        ),
+        "{block}"
+    );
+}
+
+#[test]
+fn a_class_pattern_is_kept_only_after_its_trial() {
+    let p = owners("recommend_contract_patterns");
+    let report = recommend_json(&p, &["--ignore", "EFF201"]);
+    assert_eq!(
+        report["runs"],
+        json!([{"label": "discovery"}, {"label": "contract-trial"},
+               {"label": "pattern-trial"}, {"label": "verification"}])
+    );
+    let patterns = |target: &str| candidate(&report, "write-owners", target)["patterns"].clone();
+    // The store writes every attribute of `Cart`: the pattern trial reports no write outside
+    // it, and the block reports no access of unknown class, so the pattern replaces the target.
+    let cart = &patterns("app.models:Cart.tags")[0];
+    assert_eq!(
+        (
+            &cart["pattern"],
+            &cart["replaces"],
+            &cart["kept"],
+            &cart["trial"]["reports"]
+        ),
+        (
+            &json!("app.models:Cart.*"),
+            &json!(["app.models:Cart.tags"]),
+            &json!(true),
+            &json!({"MUT201": 0, "MUT205": 1})
+        )
+    );
+    // `Base.*` names any attribute a write of unknown class may add, and the block reports
+    // such writes: the pattern trial reports one the target did not, so the block keeps it.
+    let base = &patterns("app.models:Base.x")[0];
+    assert_eq!(
+        (&base["pattern"], &base["kept"], &base["trial"]["reports"]),
+        (
+            &json!("app.models:Base.*"),
+            &json!(false),
+            &json!({"MUT201": 0, "MUT205": 1})
+        )
+    );
+    // `Order` has writers the store's block does not allow: no pattern is tried for it.
+    assert_eq!(
+        candidate(&report, "write-owners", "app.models:Order.kind")["patterns"],
+        json!([])
+    );
+    let (_, out, _) = p.heki(&["recommend", "--ignore", "EFF201"]);
+    let text = section(&out);
+    for line in [
+        "    app.models:Cart.* names every attribute of the class and its subclasses, also those \
+         added later, in place of app.models:Cart.tags\n",
+        "    app.models:Base.* was tried in place of app.models:Base.x (MUT201 0, MUT205 1): \
+         MUT205 at app/admin.py:14, so the block lists the targets\n",
+    ] {
+        assert!(text.contains(line), "{line}\nin\n{text}");
+    }
+    // With the block, an attribute the store does not write that the code adds later is a
+    // report of the pattern.
+    let block = report["config_toml"].as_str().unwrap();
+    p.write(
+        "pyproject.toml",
+        &applied("[project]\nname = \"t\"\n", block),
+    );
+    let contract_reports = |p: &Project| -> Vec<(String, u64)> {
+        checked(p, &[])
+            .iter()
+            .filter(|d| ["MUT201", "MUT203"].contains(&d["rule_code"].as_str().unwrap()))
+            .map(|d| {
+                (
+                    d["path"].as_str().unwrap().to_owned(),
+                    d["line"].as_u64().unwrap(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(contract_reports(&p), []);
+    p.write(
+        "app/later.py",
+        "from app.models import Cart\n\n\ndef mark(cart: Cart) -> None:\n    cart.seen = True\n",
+    );
+    assert_eq!(contract_reports(&p), [("app/later.py".to_owned(), 5)]);
+}
+
+#[test]
+fn a_class_pattern_leaves_an_effect_boundary_its_scopes() {
+    let p = owners("recommend_contract_pattern_and_boundary");
+    p.write(
+        "lib/a.py",
+        "def one() -> int:\n    return 1\n\n\ndef two() -> int:\n    return 2\n",
+    )
+    .write("lib/b.py", "def three() -> int:\n    return 3\n");
+    let report = recommend_json(&p, &["--all"]);
+    let scopes = scopes_of(&report, "lib");
+    assert_eq!(scopes, ["lib:*", "lib.*:*"], "{report:#}");
+    let block = report["config_toml"].as_str().unwrap();
+    assert!(block.contains("app.models:Cart.*"), "{block}");
+    p.write(
+        "pyproject.toml",
+        &applied("[project]\nname = \"t\"\n", block),
+    );
+    let forbidden = |p: &Project| -> Vec<String> {
+        checked(p, &[])
+            .iter()
+            .filter(|d| d["rule_code"] == "EFF201")
+            .map(|d| d["path"].as_str().unwrap().to_owned())
+            .filter(|path| path.starts_with("lib/"))
+            .collect()
+    };
+    assert_eq!(forbidden(&p), Vec::<String>::new());
+    p.write(
+        "lib/b.py",
+        "import time\n\n\nasync def three() -> None:\n    time.sleep(1)\n",
+    );
+    assert_eq!(forbidden(&p), ["lib/b.py"]);
+}
+
+#[test]
+fn blocks_past_the_first_three_of_a_kind_are_counted() {
+    let p = owners("recommend_contract_blocks_shown");
+    let report = recommend_json(&p, &["--ignore", "EFF201"]);
+    // Four `read-owners` blocks: the first three by rank are shown and declared.
+    let reads: Vec<Vec<String>> = (kept(&report).into_iter())
+        .filter(|(kind, _, _, _)| kind == "read-owners")
+        .map(|(_, targets, _, _)| targets)
+        .collect();
+    assert_eq!(
+        reads,
+        [
+            strings(&["app.models:Order._cache"]),
+            strings(&["app.models:Order._hits"]),
+            strings(&["app.models:Order._level"]),
+        ]
+    );
+    assert_eq!(
+        report["contracts_not_shown"],
+        json!([{"kind": "read-owners", "blocks": 1, "candidates": 1}])
+    );
+    assert_eq!(report["config"]["read-owners"].as_array().unwrap().len(), 3);
+    let (_, out, _) = p.heki(&["recommend", "--ignore", "EFF201"]);
+    let text = section(&out);
+    assert!(
+        text.contains(
+            "  Not shown: 1 more read-owners block(s) of 1 candidate(s); heki recommend --all \
+             shows every block\n"
+        ) && !out.contains("Order._seen"),
+        "{out}"
+    );
+    // `--all` shows and declares every one.
+    let all = recommend_json(&p, &["--ignore", "EFF201", "--all"]);
+    assert_eq!(all["contracts_not_shown"], json!([]));
+    assert_eq!(all["config"]["read-owners"].as_array().unwrap().len(), 4);
 }
 
 #[test]
@@ -472,8 +663,8 @@ fn a_class_of_a_test_module_gets_no_candidate_and_the_same_class_elsewhere_does(
         .write("app/probe.py", class)
         .write("app/use_a.py", &reader("app.probe", "a"))
         .write("app/use_b.py", &reader("app.probe", "b"));
-    let report = recommend_json(&p, &[]);
-    let targets: Vec<String> = kept(&report).into_iter().map(|c| c.1).collect();
+    let report = recommend_json(&p, &["--all"]);
+    let targets = targets(&report);
     assert!(targets.contains(&s("app.probe:Probe.log")), "{targets:?}");
     assert!(
         !targets.iter().any(|t| t.starts_with("tests.")),
@@ -482,59 +673,114 @@ fn a_class_of_a_test_module_gets_no_candidate_and_the_same_class_elsewhere_does(
 }
 
 #[test]
-fn a_candidate_lists_the_first_accesses_on_objects_of_unknown_class() {
-    let p = owners("recommend_contracts_unresolved_examples");
+fn each_site_keeping_blocks_at_unresolved_ignore_is_listed_once() {
+    let p = owners("recommend_contracts_blockers");
     p.write(
         "app/reset.py",
         "def a(o) -> None:\n    o.tags = []\n\n\ndef b(o) -> None:\n    o.tags = []\n\n\n\
-         def c(o) -> None:\n    o.tags = []\n",
+         def c(o) -> None:\n    o.tags = []\n\n\ndef d(o) -> None:\n    o.tags = []\n\n\n\
+         def e(o) -> None:\n    o.tags = []\n",
+    );
+    let report = recommend_json(&p, &["--ignore", "EFF201"]);
+    // Each write of `tags` on an object of unknown class is one site of both `tags` candidates,
+    // in one block; `o._hits` is a read of the `Order._hits` one.
+    let blocker = |path: &str, line: u32, rule: &str, function: &str, candidates: usize| {
+        json!({"rule": rule, "path": path, "line": line, "function": function,
+               "candidates": candidates, "blocks": 1})
+    };
+    let listed: Vec<Value> = (report["contract_blockers"]["items"]
+        .as_array()
+        .unwrap()
+        .iter())
+    .map(|b| {
+        let mut b = b.clone();
+        b.as_object_mut().unwrap().remove("message");
+        b
+    })
+    .collect();
+    assert_eq!(
+        listed,
+        [
+            blocker("app/admin.py", 14, "MUT205", "retag", 2),
+            blocker("app/reset.py", 2, "MUT205", "a", 2),
+            blocker("app/reset.py", 6, "MUT205", "b", 2),
+            blocker("app/reset.py", 10, "MUT205", "c", 2),
+            blocker("app/reset.py", 14, "MUT205", "d", 2),
+        ],
+        "{report:#}"
+    );
+    assert_eq!(
+        (
+            &report["contract_blockers"]["count"],
+            &report["contract_blockers"]["truncated"]
+        ),
+        (&json!(7), &json!(true))
     );
     let (_, out, _) = p.heki(&["recommend", "--ignore", "EFF201"]);
-    let line = "    trial: MUT201 0, MUT205 4 (at app/admin.py:14, app/reset.py:2, app/reset.py:6, \
-                ...), so unresolved = \"ignore\"\n";
-    assert!(section(&out).contains(line), "{out}");
+    let text = section(&out);
+    assert!(
+        text.contains("    trial: MUT201 0, MUT205 6 (sites below), so unresolved = \"ignore\"\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "  Accesses heki cannot tie to a class, each keeping the blocks it reaches at \
+             unresolved = \"ignore\":\n    app/admin.py:14  MUT205  retag: 2 candidate(s) in 1 \
+             block(s)\n    app/reset.py:2  MUT205  a: 2 candidate(s) in 1 block(s)\n"
+        ) && text.contains(
+            "    and 2 more site(s)\n    An annotation naming the object's class resolves such a \
+             site: heki then judges the access by that class.\n"
+        ),
+        "{text}"
+    );
+    // Once each, not under every block it holds back.
+    assert_eq!(text.matches("app/reset.py:2").count(), 1, "{text}");
+    let all = recommend_json(&p, &["--ignore", "EFF201", "--all"]);
+    assert_eq!(
+        (
+            all["contract_blockers"]["items"].as_array().unwrap().len(),
+            &all["contract_blockers"]["truncated"]
+        ),
+        (7, &json!(false))
+    );
+}
+
+/// The `scopes` of the boundary block that name `prefix` or the modules below it.
+fn scopes_of(report: &Value, prefix: &str) -> Vec<String> {
+    let block = candidate(report, "effect-boundaries", prefix);
+    (block["entry"]["scopes"].as_array().unwrap().iter())
+        .map(|v| v.as_str().unwrap().to_owned())
+        .filter(|scope| {
+            scope.starts_with(&format!("{prefix}:")) || scope.starts_with(&format!("{prefix}."))
+        })
+        .collect()
 }
 
 #[test]
 fn effect_boundaries_cover_modules_and_packages_reaching_no_blocking_call() {
     let p = layers("recommend_contract_boundaries");
     let report = recommend_json(&p, &[]);
+    // Every boundary forbids the same effects: one block, as medium as the least of them.
     assert_eq!(
         kept(&report),
-        [
-            // Called from other modules first.
-            (
-                s("effect-boundaries"),
-                s("app.pricing"),
-                s("high"),
-                Value::Null
-            ),
-            (
-                s("effect-boundaries"),
-                s("app.domain"),
-                s("high"),
-                Value::Null
-            ),
-            (
-                s("effect-boundaries"),
-                s("app.payments"),
-                s("medium"),
-                Value::Null
-            ),
-            (s("effect-boundaries"), s("lib"), s("high"), Value::Null),
-        ],
+        [(
+            s("effect-boundaries"),
+            strings(&["app.domain", "app.payments", "app.pricing", "lib"]),
+            s("medium"),
+            Value::Null
+        )],
         "{report:#}"
     );
-    let scopes =
-        |target: &str| candidate(&report, "effect-boundaries", target)["entry"]["scopes"].clone();
     // A package is named by its own module and the modules below it, a namespace package too:
     // code its `__init__.py` gets later is inside the boundary. A module is named alone.
+    let block = candidate(&report, "effect-boundaries", "lib");
     assert_eq!(
-        scopes("app.domain"),
-        json!(["app.domain:*", "app.domain.*:*"])
+        block["entry"],
+        json!({"name": "scopes without blocking calls",
+               "scopes": ["app.domain:*", "app.domain.*:*", "app.payments:*", "app.pricing:*",
+                          "lib:*", "lib.*:*"],
+               "forbid": ["blocking"]})
     );
-    assert_eq!(scopes("lib"), json!(["lib:*", "lib.*:*"]));
-    assert_eq!(scopes("app.pricing"), json!(["app.pricing:*"]));
     let declared = Project::new("recommend_contract_boundaries_declared");
     for file in ["lib/a.py", "lib/b.py"] {
         declared.write(file, &std::fs::read_to_string(p.dir.join(file)).unwrap());
@@ -544,7 +790,7 @@ fn effect_boundaries_cover_modules_and_packages_reaching_no_blocking_call() {
             "pyproject.toml",
             &format!(
                 "[project]\nname = \"t\"\n\n[[tool.heki.effect-boundaries]]\nname = \"lib\"\nscopes = {}\nforbid = [\"blocking\"]\n",
-                scopes("lib")
+                json!(scopes_of(&report, "lib"))
             ),
         )
         .write(
@@ -553,42 +799,35 @@ fn effect_boundaries_cover_modules_and_packages_reaching_no_blocking_call() {
         );
     let (_, out, err) = declared.heki(&["check", "--output-format", "concise"]);
     assert!(out.contains("lib/__init__.py:5:5: EFF201"), "{out}{err}");
-    let pricing = candidate(&report, "effect-boundaries", "app.pricing");
+    // Called from other modules than the block's; a call of a library name without a catalog
+    // entry: heki cannot see what it does.
     assert_eq!(
-        (&pricing["entry"]["name"], &pricing["entry"]["forbid"]),
-        (
-            &json!("app.pricing without blocking calls"),
-            &json!(["blocking"])
-        )
-    );
-    assert_eq!(
-        pricing["evidence"]["audience"]["items"],
+        block["evidence"]["audience"]["items"],
         json!(["app.http", "tests.test_pricing"])
     );
-    // A call of a library name without a catalog entry: heki cannot see what it does.
-    let payments = candidate(&report, "effect-boundaries", "app.payments");
     assert_eq!(
-        payments["evidence"]["unseen"]["items"],
+        block["evidence"]["unseen"]["items"],
         json!(["app.payments.charge", "app.payments.refund"])
     );
     assert_eq!(
-        payments["caveats"][0],
+        block["caveats"][0],
         json!("2 function(s) of the scopes reach code heki does not see")
     );
     let (_, out, _) = p.heki(&["recommend"]);
     assert!(
         section(&out).contains(
-            "  effect-boundaries  app.payments  medium\n    3 function(s) in 1 module(s) reach no \
-             blocking call heki sees; 2 reach code heki does not see (app.payments.charge, \
+            "  effect-boundaries  app.domain, app.payments, app.pricing, ... (4 in all)  medium\n    \
+             12 function(s) in 6 module(s) reach no blocking call heki sees; called from 2 other \
+             module(s); 2 reach code heki does not see (app.payments.charge, \
              app.payments.refund)\n    trial: EFF201 0\n"
         ),
         "{out}"
     );
     // The module reaching `requests.get`, and the tests, keep no boundary.
     assert!(
-        kept(&report)
+        targets(&report)
             .iter()
-            .all(|(_, target, _, _)| target != "app.http" && !target.starts_with("tests")),
+            .all(|target| target != "app.http" && !target.starts_with("tests")),
         "{report:#}"
     );
     assert!(report["rejected_contracts"].as_array().unwrap().is_empty());
@@ -604,22 +843,23 @@ fn a_package_holding_a_test_module_names_its_other_modules_one_by_one() {
     );
     let report = recommend_json(&p, &[]);
     // A wildcard would cover the test module, and its blocking call would reject the boundary.
-    let domain = candidate(&report, "effect-boundaries", "app.domain");
     assert_eq!(
-        domain["entry"]["scopes"],
-        json!(["app.domain:*", "app.domain.rules:*"])
+        scopes_of(&report, "app.domain"),
+        ["app.domain:*", "app.domain.rules:*"]
     );
-    assert_eq!(
-        (
-            &domain["evidence"]["modules"]["count"],
-            &domain["evidence"]["modules"]["items"]
-        ),
-        (&json!(2), &json!(["app.domain", "app.domain.rules"])),
-        "{domain:#}"
+    let modules = &candidate(&report, "effect-boundaries", "app.domain")["evidence"]["modules"];
+    assert!(
+        modules["items"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("app.domain.rules"))
+            && !modules["items"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("app.domain.test_rules")),
+        "{modules:#}"
     );
-    assert_eq!(domain["confidence"], "high");
-    let lib = candidate(&report, "effect-boundaries", "lib");
-    assert_eq!(lib["entry"]["scopes"], json!(["lib:*", "lib.*:*"]));
+    assert_eq!(scopes_of(&report, "lib"), ["lib:*", "lib.*:*"]);
     assert_eq!(report["rejected_contracts"], json!([]), "{report:#}");
 }
 
@@ -640,21 +880,14 @@ fn a_module_defining_a_test_function_is_test_code_too() {
          def test_one() -> None:\n    assert one() == 1\n",
     );
     let report = recommend_json(&p, &[]);
-    let domain = candidate(&report, "effect-boundaries", "app.domain");
     assert_eq!(
-        domain["entry"]["scopes"],
-        json!(["app.domain:*", "app.domain.rules:*"])
+        scopes_of(&report, "app.domain"),
+        ["app.domain:*", "app.domain.rules:*"]
     );
     // The package's own module is named too, and names none of the modules below it.
-    let lib = candidate(&report, "effect-boundaries", "lib");
-    assert_eq!(
-        lib["entry"]["scopes"],
-        json!(["lib:*", "lib.a:*", "lib.b:*"])
-    );
+    assert_eq!(scopes_of(&report, "lib"), ["lib:*", "lib.a:*", "lib.b:*"]);
     assert!(
-        kept(&report)
-            .iter()
-            .all(|(_, target, _, _)| target != "lib.c"),
+        targets(&report).iter().all(|target| target != "lib.c"),
         "{report:#}"
     );
 }
@@ -682,8 +915,8 @@ fn a_module_a_pattern_cannot_name_gets_no_candidate() {
         )
         .write("app/show.py", &reader("show"))
         .write("app/feed.py", &reader("feed"));
-    let report = recommend_json(&p, &[]);
-    let targets: Vec<String> = kept(&report).into_iter().map(|c| c.1).collect();
+    let report = recommend_json(&p, &["--all"]);
+    let targets = targets(&report);
     assert!(
         targets.contains(&s("lib"))
             && !targets
@@ -710,9 +943,13 @@ fn a_file_heki_cannot_parse_makes_every_candidate_medium() {
                     && unresolved == &json!("ignore")),
         "{report:#}"
     );
-    assert_eq!(
-        candidate(&report, "write-owners", "app.models:Order.items")["caveats"][0],
-        json!("1 Python file(s) heki could not read or parse: their accesses are not seen")
+    assert!(
+        (candidate(&report, "write-owners", "app.models:Order.items")["caveats"].as_array())
+            .unwrap()
+            .contains(&json!(
+                "1 Python file(s) heki could not read or parse: their accesses are not seen"
+            )),
+        "{report:#}"
     );
 }
 
@@ -893,10 +1130,11 @@ fn files_the_paths_leave_out_make_every_candidate_medium() {
     let p = layers("recommend_contract_left_out");
     let report = recommend_json(&p, &["app"]);
     let confidences: Vec<String> = kept(&report).into_iter().map(|c| c.2).collect();
-    assert_eq!(confidences, ["medium", "medium", "medium"], "{report:#}");
+    assert_eq!(confidences, ["medium"], "{report:#}");
     assert_eq!(
         candidate(&report, "effect-boundaries", "app.pricing")["caveats"],
         json!([
+            "2 function(s) of the scopes reach code heki does not see",
             "Python files below the project root were not analyzed: their accesses are not seen",
             "accesses inside code heki cannot follow (unresolved calls, libraries without a \
              catalog) are not seen"
@@ -922,10 +1160,9 @@ fn files_the_paths_leave_out_make_every_candidate_medium() {
     let (_, out, _) = q.heki(&["recommend", "app", "--ignore", "EFF201"]);
     assert!(
         section(&out).contains(
-            "  write-owners  app.models:Order.items  medium\n    written by 2 function(s), all \
-             in app.store (Store.add_item, Store.clear), changed in place; read in 2 other \
-             module(s)\n    trial: MUT201 0, MUT205 0 (unresolved = \"ignore\", as for every \
-             medium candidate)\n"
+            "  write-owners  app.models:Order.kind, app.models:Order.oid  medium\n    written \
+             only while their objects are constructed; read in 2 other module(s)\n    trial: \
+             MUT201 0, MUT205 0 (unresolved = \"ignore\", as for every medium candidate)\n"
         ),
         "{out}"
     );
@@ -948,12 +1185,14 @@ fn a_count_of_the_files_left_out_that_stops_early_makes_every_candidate_medium()
         !confidences.is_empty() && confidences.iter().all(|c| c == "medium"),
         "{report:#}"
     );
-    assert_eq!(
-        candidate(&report, "effect-boundaries", "app.pricing")["caveats"][0],
-        json!(
-            "the count of the Python files below the project root stopped before the end: files \
-             it did not reach may be left out, and their accesses are not seen"
-        )
+    assert!(
+        (candidate(&report, "effect-boundaries", "app.pricing")["caveats"].as_array())
+            .unwrap()
+            .contains(&json!(
+                "the count of the Python files below the project root stopped before the end: \
+                 files it did not reach may be left out, and their accesses are not seen"
+            )),
+        "{report:#}"
     );
     assert!(
         report["notes"][0]
@@ -975,30 +1214,32 @@ fn what_the_configuration_declares_or_ignores_is_not_proposed() {
          [[tool.heki.write-owners]]\nname = \"Order.oid writers\"\ntargets = [\"Store.nothing\"]\n\n\
          [[tool.heki.write-owners]]\nname = \"app.models:Order.oid writers\"\ntargets = [\"Store.none\"]\n\n\
          [[tool.heki.write-owners]]\nname = \"items\"\ntargets = [\"Order.items\"]\nallowed-writers = [\"app.store.*\"]\n\n\
+         [[tool.heki.write-owners]]\nname = \"kind\"\ntargets = [\"app.models:Order.kind\"]\n\n\
          [[tool.heki.read-owners]]\nname = \"cache\"\ntargets = [\"app.models:Order._cache\"]\nallowed-readers = [\"app.models:*\"]\n\n\
          [[tool.heki.effect-boundaries]]\nname = \"pricing\"\nscopes = [\"app.pricing:*\"]\nforbid = [\"blocking\"]\n\n\
          [[tool.heki.effect-boundaries]]\nname = \"domain sleeps\"\nscopes = [\"app.domain:*\"]\nforbid = [\"sleep\"]\n",
     );
-    let report = recommend_json(&p, &[]);
-    let targets: Vec<String> = kept(&report).into_iter().map(|c| c.1).collect();
-    // Declared: `Order.items` (a suffix target), `Order._cache`, and `app.pricing` under a
-    // boundary forbidding every blocking effect. A boundary forbidding `sleep` only leaves
-    // `app.domain` to propose.
+    let report = recommend_json(&p, &["--all"]);
+    let targets = targets(&report);
+    // Declared: `Order.items` (a suffix target), `Order.kind`, `Order._cache`, and `app.pricing`
+    // under a boundary forbidding every blocking effect. A boundary forbidding `sleep` only
+    // leaves `app.domain` to propose.
     for target in [
         "app.models:Order.items",
+        "app.models:Order.kind",
         "app.models:Order._cache",
         "app.pricing",
     ] {
         assert!(!targets.contains(&s(target)), "{target}: {targets:?}");
     }
     assert!(targets.contains(&s("app.domain")), "{targets:?}");
-    // The names the configuration has: the full form, then a number.
+    // The names the configuration has for a block of one target: the full form, then a number.
     assert_eq!(
         candidate(&report, "write-owners", "app.models:Order.oid")["entry"]["name"],
         json!("app.models:Order.oid writers (2)")
     );
     // A kind whose rule the configuration ignores.
-    let ignoring = recommend_json(&p, &["--ignore", "MUT203,EFF201"]);
+    let ignoring = recommend_json(&p, &["--ignore", "MUT203,EFF201", "--all"]);
     assert!(
         kept(&ignoring)
             .iter()
@@ -1045,7 +1286,7 @@ fn a_rule_of_unresolved_accesses_the_configuration_ignores_stays_off() {
     };
     // A high `write-owners` candidate sets `unresolved = "ignore"`; `read-owners` still reports.
     assert_eq!(
-        unresolved("write-owners", "app.models:Order.items"),
+        unresolved("write-owners", "app.models:Order.kind"),
         (json!("high"), json!("ignore"))
     );
     assert_eq!(
@@ -1062,10 +1303,9 @@ fn a_rule_of_unresolved_accesses_the_configuration_ignores_stays_off() {
     let (_, out, _) = p.heki(&["recommend"]);
     assert!(
         section(&out).contains(
-            "  write-owners  app.models:Order.items  high\n    written by 2 function(s), all in \
-             app.store (Store.add_item, Store.clear), changed in place; read in 2 other \
-             module(s)\n    trial: MUT201 0, MUT205 0 (unresolved = \"ignore\": the configuration \
-             ignores MUT205)\n"
+            "  write-owners  app.models:Order.kind, app.models:Order.oid  high\n    written only \
+             while their objects are constructed; read in 2 other module(s)\n    trial: MUT201 0, \
+             MUT205 0 (unresolved = \"ignore\": the configuration ignores MUT205)\n"
         ),
         "{out}"
     );
@@ -1214,6 +1454,231 @@ fn a_block_setting_src_leaves_contracts_to_a_run_with_it() {
     let again = recommend_json(&p, &[]);
     assert_eq!(
         kept(&again),
-        [(s("effect-boundaries"), s("pricing"), s("high"), Value::Null)]
+        [(
+            s("effect-boundaries"),
+            strings(&["pricing"]),
+            s("high"),
+            Value::Null
+        )]
     );
+}
+
+#[test]
+fn test_code_never_defines_an_owner() {
+    let p = Project::new("recommend_contract_test_owner");
+    let reader = |name: &str| {
+        format!(
+            "from app.job import Job\n\n\ndef {name}(job: Job) -> list[object]:\n    \
+             return [job.state, job.log, job.done]\n"
+        )
+    };
+    p.write("app/__init__.py", "")
+        .write(
+            "app/job.py",
+            "class Job:\n    def __init__(self) -> None:\n        self.state = \"new\"\n        \
+             self.log: list[str] = []\n        self.done = False\n\n\n\
+             def note(job: Job, x: str) -> None:\n    job.log.append(x)\n\n\n\
+             def close(job: Job) -> None:\n    job.done = True\n",
+        )
+        .write("app/show.py", &reader("show"))
+        .write("app/feed.py", &reader("feed"))
+        .write(
+            "tests/test_job.py",
+            "from app.job import Job\n\n\ndef finish(job: Job) -> None:\n    job.state = \
+             \"done\"\n    job.log.append(\"x\")\n\n\ndef test_finish() -> None:\n    \
+             finish(Job())\n",
+        );
+    let report = recommend_json(&p, &["--all"]);
+    // `state` is written outside construction only by a test helper, `log` by the program and
+    // by it: neither has an owner. `done` has one.
+    let targets = targets(&report);
+    assert!(
+        targets.contains(&s("app.job:Job.done"))
+            && !targets
+                .iter()
+                .any(|t| t.ends_with(".state") || t.ends_with(".log")),
+        "{report:#}"
+    );
+    assert_eq!(report["rejected_contracts"], json!([]), "{report:#}");
+}
+
+#[test]
+fn a_subclass_writing_through_its_own_receiver_is_of_the_class_family() {
+    let p = Project::new("recommend_contract_own_receiver");
+    p.write("app/__init__.py", "")
+        .write(
+            "app/base.py",
+            "class Base:\n    def __init__(self) -> None:\n        self.items: list[str] = []\n        \
+             self.tags: list[str] = []\n        self.marks: list[str] = []\n        \
+             self.name = \"\"\n        self._a = 1\n        self._b = 2\n        self._c = 3\n\n    \
+             def add(self, x: str) -> None:\n        self.items.append(x)\n        \
+             self.tags.append(x)\n\n    def a(self) -> int:\n        return self._a\n\n    \
+             def b(self) -> int:\n        return self._b\n",
+        )
+        .write(
+            "app/sub.py",
+            "from app.base import Base\n\n\nclass Sub(Base):\n    def add_twice(self, x: str) -> \
+             None:\n        self.items.append(x)\n        self.tags.append(x)\n        \
+             self.marks.append(x)\n",
+        )
+        .write(
+            "app/other.py",
+            "from app.base import Base\n\n\nclass Other(Base):\n    def mark(self, x: str) -> \
+             None:\n        self.marks.append(x)\n",
+        )
+        .write(
+            "app/rename.py",
+            "from app.base import Base\n\n\ndef rename(b: Base) -> None:\n    b.name = \"x\"\n",
+        )
+        .write(
+            "app/show.py",
+            "from app.base import Base\n\n\ndef show(b: Base) -> list[list[str]]:\n    \
+             return [b.items, b.tags, b.marks]\n",
+        )
+        .write(
+            "app/feed.py",
+            "from app.sub import Sub\n\n\ndef feed(s: Sub) -> list[list[str]]:\n    \
+             return [s.items, s.tags, s.marks]\n",
+        );
+    let report = recommend_json(&p, &[]);
+    // The subclasses change their own lists through `self`, in modules of their own: the entries
+    // allow that, and the subclasses' readers are the attributes' audience too.
+    let items = candidate(&report, "write-owners", "app.base:Base.items");
+    assert_eq!(
+        (&items["entry"], &items["confidence"]),
+        (
+            &json!({"name": "attributes written by app.base:Base.* and through their own receiver",
+                    "targets": ["app.base:Base.items", "app.base:Base.tags"],
+                    "allowed-writers": ["app.base:Base.*"], "unresolved": "report",
+                    "own-receiver": "allow"}),
+            &json!("high")
+        )
+    );
+    assert_eq!(
+        items["evidence"]["audience"]["items"],
+        json!(["app.feed", "app.show"])
+    );
+    // `rename` writes another attribute of `Base`: no pattern is tried for the class.
+    assert_eq!(items["patterns"], json!([]));
+    // Only the subclasses' own methods change `marks`.
+    assert_eq!(
+        candidate(&report, "write-owners", "app.base:Base.marks")["entry"],
+        json!({"name": "Base.marks writers", "targets": ["app.base:Base.marks"],
+               "unresolved": "report", "own-receiver": "allow"})
+    );
+    // Every private attribute of `Base` is read only by its methods: one pattern names them.
+    let private = candidate(&report, "read-owners", "app.base:Base._a");
+    assert_eq!(
+        (&private["targets"], &private["entry"]["allowed-readers"]),
+        (&json!(["app.base:Base._*"]), &json!(["app.base:Base.*"]))
+    );
+    let (_, out, _) = p.heki(&["recommend"]);
+    let text = section(&out);
+    for line in [
+        "  write-owners  app.base:Base.items, app.base:Base.tags  high\n    written by 2 \
+         function(s), outside app.base only through their own receiver (app.base.Base.add, \
+         app.sub.Sub.add_twice), changed in place; read in 2 other module(s)\n",
+        "  write-owners  app.base:Base.marks  high\n    written by 2 function(s), only through \
+         their own receiver (app.other.Other.mark, app.sub.Sub.add_twice), changed in place; \
+         read in 2 other module(s)\n",
+        "  read-owners  app.base:Base._*  high\n",
+        "    app.base:Base._* names every private attribute of the class and its subclasses, also \
+         those added later, in place of app.base:Base._a, app.base:Base._b\n",
+    ] {
+        assert!(text.contains(line), "{line}\nin\n{text}");
+    }
+    // With the block, nothing is reported; without `own-receiver`, the subclasses' writes are.
+    let block = report["config_toml"].as_str().unwrap();
+    p.write(
+        "pyproject.toml",
+        &applied("[project]\nname = \"t\"\n", block),
+    );
+    let reports = |p: &Project| -> Vec<(String, String)> {
+        (checked(p, &[]).iter())
+            .filter(|d| ["MUT201", "MUT203"].contains(&d["rule_code"].as_str().unwrap()))
+            .map(|d| {
+                (
+                    d["rule_code"].as_str().unwrap().to_owned(),
+                    d["path"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(reports(&p), []);
+    p.write(
+        "pyproject.toml",
+        &applied(
+            "[project]\nname = \"t\"\n",
+            &block.replace("own-receiver = \"allow\"\n", ""),
+        ),
+    );
+    let without = reports(&p);
+    assert!(
+        without.contains(&(s("MUT201"), s("app/sub.py")))
+            && without.contains(&(s("MUT201"), s("app/other.py"))),
+        "{without:?}"
+    );
+}
+
+#[test]
+fn a_class_pattern_hiding_a_report_of_a_configured_contract_is_refused() {
+    let p = Project::new("recommend_contract_pattern_hides");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.write-owners]]\nname = \"a owners\"\n\
+         targets = [\"app.models:Store.a\"]\nallowed-writers = [\"app.models:*\"]\n\
+         unlisted-dict-keys = \"report\"\n",
+    )
+    .write("app/__init__.py", "")
+    .write(
+        "app/models.py",
+        "class Store:\n    def __init__(self) -> None:\n        self.a = 0\n        self.b = 0\n        \
+         self.c = 0\n",
+    )
+    .write(
+        "app/store.py",
+        "from app.models import Store\n\n\ndef bump(s: Store) -> None:\n    s.b = s.b + 1\n\n\n\
+         def reset(s: Store) -> None:\n    s.__dict__[\"c\"] = 0\n",
+    )
+    .write(
+        "app/views.py",
+        "from app.models import Store\n\n\ndef show(s: Store) -> int:\n    return s.b\n",
+    )
+    .write(
+        "app/api.py",
+        "from app.models import Store\n\n\ndef dump(s: Store) -> int:\n    return s.b + 1\n",
+    );
+    let reported_now = |p: &Project| -> Vec<(String, u64)> {
+        (checked(p, &["--select", "MUT201"]).iter())
+            .map(|d| {
+                (
+                    d["path"].as_str().unwrap().to_owned(),
+                    d["line"].as_u64().unwrap(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(reported_now(&p), [("app/store.py".to_owned(), 9)]);
+    // `Store.b` lists no key `c`, but `Store.*` names it, which would stop `a owners` from
+    // reporting the write of the key.
+    let report = recommend_json(&p, &[]);
+    let b = candidate(&report, "write-owners", "app.models:Store.b");
+    assert_eq!(b["targets"], json!(["app.models:Store.b"]));
+    let pattern = &b["patterns"][0];
+    assert_eq!(
+        (
+            &pattern["pattern"],
+            &pattern["kept"],
+            &pattern["trial"]["reports"]
+        ),
+        (
+            &json!("app.models:Store.*"),
+            &json!(false),
+            &json!({"MUT201": 1, "MUT205": 0})
+        )
+    );
+    let block = report["config_toml"].as_str().unwrap();
+    let existing = std::fs::read_to_string(p.dir.join("pyproject.toml")).unwrap();
+    p.write("pyproject.toml", &applied(&existing, block));
+    assert_eq!(reported_now(&p), [("app/store.py".to_owned(), 9)]);
 }

@@ -296,6 +296,11 @@ struct RecommendArgs {
     /// Print the JSON Schema of the object of `--output-format json` and exit.
     #[arg(long)]
     output_format_json_schema: bool,
+    /// Show every block of contracts (by default the first 3 of each kind) and up to 50 of the
+    /// sites keeping them at `unresolved = "ignore"` (by default 5), in the report and in the
+    /// keys to add.
+    #[arg(long)]
+    all: bool,
     #[command(flatten)]
     analysis: AnalysisArgs,
 }

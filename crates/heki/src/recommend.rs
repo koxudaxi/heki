@@ -45,6 +45,7 @@ pub(crate) fn run(args: &RecommendArgs) -> Result<ExitCode> {
         paths: &args.paths,
         shown: &shown_text,
         errors: errors.clone(),
+        all: args.all,
     })?;
     match args.output_format {
         ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),

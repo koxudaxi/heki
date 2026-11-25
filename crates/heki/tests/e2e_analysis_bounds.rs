@@ -6388,7 +6388,7 @@ fn the_source_root_trial_tries_a_bounded_number_of_directories() {
 
 /// The `write-owners` candidates of thousands of classes, each attribute written in one module
 /// and read in two others, are ranked and capped before the contract trial: the trial declares
-/// the first 32.
+/// the first 32, which are one block, and the pattern trial one pattern per class of it.
 #[test]
 fn contract_candidates_of_thousands_of_classes_are_capped_before_the_trial() {
     let classes = 3_000;
@@ -6404,23 +6404,81 @@ fn contract_candidates_of_thousands_of_classes_are_capped_before_the_trial() {
         report["contracts_not_tried"],
         json!([{"kind": "write-owners", "tried": 32, "candidates": 3 * classes - 32}])
     );
-    let tried = report["contracts"]
+    let blocks: Vec<&Value> = report["contracts"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|c| c["kind"] == "write-owners")
-        .count();
-    assert_eq!(tried, 32);
+        .collect();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["candidates"], json!(32));
+    let patterns = blocks[0]["patterns"].as_array().unwrap();
+    assert!(
+        patterns.len() == 32 && patterns.iter().all(|p| p["kept"] == true),
+        "{:#}",
+        blocks[0]
+    );
     assert_eq!(
         report["runs"],
         json!([{"label": "discovery"}, {"label": "contract-trial"},
-               {"label": "verification"}])
+               {"label": "pattern-trial"}, {"label": "verification"}])
+    );
+}
+
+/// A class with thousands of project subclasses, each read in one module: the `write-owners`
+/// candidate of the base class is judged by the accesses of its whole family, found by class
+/// and attribute once per subclass.
+#[test]
+fn an_ownership_candidate_of_a_class_with_thousands_of_subclasses_reads_each_once() {
+    let subclasses = 3_000;
+    let p = Project::new("bounds_recommend_family");
+    let mut models = vec![
+        "class Base:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.items = []".to_owned(),
+    ];
+    let mut views = vec!["import app.models as m".to_owned()];
+    for i in 0..subclasses {
+        models.extend([
+            String::new(),
+            String::new(),
+            format!("class S{i}(Base):"),
+            "    pass".to_owned(),
+        ]);
+        views.extend([
+            String::new(),
+            String::new(),
+            format!("def show{i}(s: m.S{i}):"),
+            "    return s.items".to_owned(),
+        ]);
+    }
+    p.write("app/models.py", &(models.join("\n") + "\n"))
+        .write("app/views.py", &(views.join("\n") + "\n"))
+        .write(
+            "app/store.py",
+            "import app.models as m\n\n\ndef put(b: m.Base, x):\n    b.items.append(x)\n",
+        )
+        .write(
+            "app/api.py",
+            "import app.models as m\n\n\ndef dump(b: m.Base):\n    return b.items\n",
+        );
+    let report = recommend(&p);
+    // The reads on the subclasses' objects are the base's audience too.
+    let base = report["contracts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["entry"]["allowed-writers"] == json!(["app.store:*"]))
+        .unwrap_or_else(|| panic!("{report:#}"));
+    assert_eq!(
+        (&base["candidates"], &base["evidence"]["audience"]["items"]),
+        (&json!(1), &json!(["app.api", "app.views"]))
     );
 }
 
 /// Thousands of modules in packages of fifty, whose functions reach no blocking call, next to
-/// one that does: each package is one scope, found from the modules' names in one pass, and
-/// the trial declares the first 32 scopes.
+/// one that does: each package is one scope, found from the modules' names in one pass, the
+/// trial declares the first 32 scopes, and they are one block.
 #[test]
 fn boundary_candidates_of_thousands_of_modules_are_one_pass_over_their_names() {
     let (modules, packages) = (2_000, 40);
@@ -6443,8 +6501,16 @@ fn boundary_candidates_of_thousands_of_modules_are_one_pass_over_their_names() {
     );
     let first = &report["contracts"][0];
     assert_eq!(
-        (&first["target"], &first["evidence"]["modules"]["count"]),
-        (&json!("app.p0"), &json!(modules / packages + 1))
+        (
+            &first["targets"][0],
+            &first["candidates"],
+            &first["evidence"]["modules"]["count"]
+        ),
+        (
+            &json!("app.p0"),
+            &json!(32),
+            &json!(32 * (modules / packages + 1))
+        )
     );
 }
 

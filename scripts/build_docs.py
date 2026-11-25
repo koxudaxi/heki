@@ -10,8 +10,9 @@
 - `docs/recommend.md`: the report of `heki recommend` on the example project the page shows.
 - `docs/getting-started.md`: the list of the exact rules, between the markers of its generated
   part.
-- `docs/schemas/recommend-2.json`: the JSON Schema of `heki recommend --output-format json`
-  (`recommend-1.json` stays published, unchanged, for the objects of version 1).
+- `docs/schemas/recommend-3.json`: the JSON Schema of `heki recommend --output-format json`
+  (`recommend-1.json` and `recommend-2.json` stay published, unchanged, for the objects of
+  versions 1 and 2).
 - `docs/assets/example-check.svg`: `heki check --color always` on the README's examples, drawn
   as a terminal shows it (`scripts/ansi_svg.py`).
 
@@ -52,7 +53,7 @@ CHANGELOG = ROOT / "CHANGELOG.md"
 PRECISION_PAGE = DOCS / "precision.md"
 GETTING_STARTED_PAGE = DOCS / "getting-started.md"
 RECOMMEND_PAGE = DOCS / "recommend.md"
-RECOMMEND_SCHEMA = DOCS / "schemas" / "recommend-2.json"
+RECOMMEND_SCHEMA = DOCS / "schemas" / "recommend-3.json"
 # The command the example of `docs/recommend.md` runs in the project of its Python blocks.
 RECOMMEND_EXAMPLE = ("recommend", "app")
 README = ROOT / "README.md"
