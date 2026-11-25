@@ -182,7 +182,7 @@ pub const NOT_RUN_AT_THE_CALL: OpenCause = OpenCause {
 pub const DECORATED: OpenCause = OpenCause {
     id: "decorated",
     premise: &EVERY_IMPLEMENTATION,
-    states: "a decorator of a target may not run its body on every call (only `staticmethod`, `classmethod`, `property`, `abstractmethod`, and `override` are known to)",
+    states: "a decorator of a target may not run its body on every call (only `staticmethod`, `classmethod`, `property`, `abstractmethod`, `override`, and `final` are known to)",
     closer: Closer::None,
 };
 

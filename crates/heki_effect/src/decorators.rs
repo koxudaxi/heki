@@ -5,6 +5,9 @@
 /// One decorator heki knows, and which premises about the function it keeps.
 pub(crate) struct Decorator {
     pub name: &'static str,
+    /// The modules that define it, for a reader that knows the decorator by the symbol its name
+    /// is bound to rather than by its spelling ([`defines`]).
+    pub modules: &'static [&'static str],
     /// Calling the function still runs its body as written: a generator function returns a
     /// generator, an `async def` a coroutine, a plain `def` what its body returns
     /// (`FunctionDecl::called_as_defined`).
@@ -14,13 +17,19 @@ pub(crate) struct Decorator {
     pub keeps_return: bool,
     /// Reading the attribute on an instance runs the function (a getter).
     pub getter: bool,
-    /// A `functools` cache beside it still keeps the function's own results (`MUT114`).
+    /// A `functools` cache beside it still keeps the function's own results (`MUT114`): it
+    /// returns the object it is handed, or calls it as defined.
     pub beside_cache: bool,
 }
+
+/// `typing.override` and `typing.final` only set an attribute on the object they are handed
+/// (`__override__`, `__final__`) and return it; `typing_extensions` defines the same functions.
+const TYPING: &[&str] = &["typing", "typing_extensions"];
 
 pub(crate) const DECORATORS: &[Decorator] = &[
     Decorator {
         name: "staticmethod",
+        modules: &["builtins"],
         keeps_call: true,
         keeps_return: true,
         getter: false,
@@ -28,6 +37,7 @@ pub(crate) const DECORATORS: &[Decorator] = &[
     },
     Decorator {
         name: "classmethod",
+        modules: &["builtins"],
         keeps_call: true,
         keeps_return: true,
         getter: false,
@@ -35,6 +45,7 @@ pub(crate) const DECORATORS: &[Decorator] = &[
     },
     Decorator {
         name: "abstractmethod",
+        modules: &["abc"],
         keeps_call: true,
         keeps_return: true,
         getter: false,
@@ -42,13 +53,23 @@ pub(crate) const DECORATORS: &[Decorator] = &[
     },
     Decorator {
         name: "override",
+        modules: TYPING,
         keeps_call: true,
         keeps_return: true,
         getter: false,
-        beside_cache: false,
+        beside_cache: true,
+    },
+    Decorator {
+        name: "final",
+        modules: TYPING,
+        keeps_call: true,
+        keeps_return: true,
+        getter: false,
+        beside_cache: true,
     },
     Decorator {
         name: "property",
+        modules: &["builtins"],
         keeps_call: false,
         keeps_return: true,
         getter: true,
@@ -56,6 +77,7 @@ pub(crate) const DECORATORS: &[Decorator] = &[
     },
     Decorator {
         name: "cached_property",
+        modules: &["functools"],
         keeps_call: false,
         keeps_return: false,
         getter: true,
@@ -82,6 +104,16 @@ pub(crate) fn names(keep: impl Fn(&Decorator) -> bool) -> Vec<&'static str> {
 /// Whether the decorator named `name` (a last dotted name) has `keep`.
 pub(crate) fn keeps(name: &str, keep: impl Fn(&Decorator) -> bool) -> bool {
     DECORATORS.iter().any(|d| d.name == name && keep(d))
+}
+
+/// Whether `symbol`, the dotted name a decorator's head is bound to (`typing.final`), is a
+/// decorator of the table, from one of the modules that define it, that has `keep`.
+pub(crate) fn defines(symbol: &str, keep: impl Fn(&Decorator) -> bool) -> bool {
+    symbol.rsplit_once('.').is_some_and(|(module, name)| {
+        DECORATORS
+            .iter()
+            .any(|d| d.name == name && d.modules.contains(&module) && keep(d))
+    })
 }
 
 /// Whether every decorator of `decorators` (their source text) has `keep`.

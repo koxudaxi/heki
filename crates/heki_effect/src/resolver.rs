@@ -762,13 +762,13 @@ pub struct FunctionDecl {
     pub has_kwargs: bool,
     /// The literal defaults, by parameter position (`guards`: an omitted argument).
     pub defaults: Vec<(u8, ArgFact)>,
-    /// Calling it returns a fresh (async) generator: a generator function without decorators
-    /// other than `staticmethod` / `classmethod` / `abstractmethod` / `override` (a
-    /// `@contextmanager` generator returns a context manager). `MUT106` single-pass sources.
+    /// Calling it returns a fresh (async) generator: a generator function whose every decorator
+    /// keeps the call (`decorators::Decorator::keeps_call`: `staticmethod`, `typing.final`, ...;
+    /// a `@contextmanager` generator returns a context manager). `MUT106` single-pass sources.
     pub is_generator: bool,
-    /// No decorator replaces it: it has none other than `staticmethod` / `classmethod` /
-    /// `abstractmethod` / `override`, so calling it does what its definition says (see
-    /// [`FunctionDecl::makes_no_coroutine`]).
+    /// No decorator replaces it: every decorator it has keeps the call
+    /// (`decorators::Decorator::keeps_call`: `staticmethod`, `typing.final`, ...), so calling it
+    /// does what its definition says (see [`FunctionDecl::makes_no_coroutine`]).
     pub called_as_defined: bool,
     /// A property getter that reading the attribute on an instance runs: a method decorated
     /// with `property` / `cached_property` (any decorator whose last dotted component is one of
@@ -6653,11 +6653,11 @@ fn external_defines(kb: &EffectiveEcosystemKb, base: &str, name: &str) -> bool {
 }
 
 /// [`FunctionDecl::returns_param_attr`] of one definition: a function (not a generator or a
-/// coroutine, decorated by nothing but `staticmethod`, `classmethod`, `abstractmethod`,
-/// `override`, or `property`) whose every `return` returns the same attribute of the same
-/// positional parameter, read directly or through local copies, and which stores or deletes no
-/// attribute of that name. A `cached_property` is none: a read after the first returns what
-/// the instance holds, which an assignment can replace.
+/// coroutine, decorated by nothing but `property` and the decorators that keep the call,
+/// [`decorators::Decorator::keeps_call`]) whose every `return` returns the same attribute of
+/// the same positional parameter, read directly or through local copies, and which stores or
+/// deletes no attribute of that name. A `cached_property` is none: a read after the first
+/// returns what the instance holds, which an assignment can replace.
 fn returned_param_attr(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, String)> {
     let plain_decorators = f.decorators.iter().all(|d| {
         let (head, _) = decorator_parts(d);
@@ -7889,9 +7889,9 @@ fn compares_false(
         })
 }
 
-/// Whether calling `f` returns a fresh (async) generator: a generator function without
-/// decorators other than `staticmethod` / `classmethod` / `abstractmethod` / `override` (a
-/// `@contextmanager` generator returns a context manager, which runs the body at `with`). A
+/// Whether calling `f` returns a fresh (async) generator: a generator function whose every
+/// decorator keeps the call ([`is_called_as_defined`]; a `@contextmanager` generator returns a
+/// context manager, which runs the body at `with`). A
 /// generator expression is no generator function: its scope is never called, and its body
 /// counts where it is written, where it is almost always consumed (`sum(x for x in xs)`).
 pub(crate) fn is_generator_function(f: &IrFunction) -> bool {

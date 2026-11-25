@@ -566,8 +566,9 @@ fn annotated_kind(text: &str, resolve: &impl Fn(&str) -> Option<String>) -> Opti
     }
 }
 
-/// The one `functools` cache among the decorators, when the others are only `staticmethod` /
-/// `classmethod` and the cache keeps results (no `maxsize` of the literal `0`).
+/// The one `functools` cache among the decorators, when every other one keeps the cache's
+/// results ([`crate::decorators::Decorator::beside_cache`]) and the cache keeps results (no
+/// `maxsize` of the literal `0`).
 fn cache_decorator(
     decorators: &[String],
     resolve: &impl Fn(&str) -> Option<String>,
@@ -579,11 +580,12 @@ fn cache_decorator(
             None => (d.trim(), None),
         };
         let target = resolve(head);
+        // A name that no import or definition of the module binds is a builtin.
+        let symbol = || target.clone().unwrap_or_else(|| format!("builtins.{head}"));
         let decorator = match target.as_deref() {
             Some("functools.lru_cache") => CacheDecorator::LruCache,
             Some("functools.cache") if args.is_none() => CacheDecorator::Cache,
-            // The builtins, which no import or definition of the module rebinds.
-            None if args.is_none() && crate::decorators::keeps(head, |d| d.beside_cache) => {
+            _ if args.is_none() && crate::decorators::defines(&symbol(), |d| d.beside_cache) => {
                 continue;
             }
             _ => return None,

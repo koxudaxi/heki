@@ -14,7 +14,9 @@
 //! target without the fact. `MUT114`'s claim that the changed object is what a cached function
 //! returned rests on the same targets, and a module constant set through `setattr` is no
 //! constant. A local bound once to a bound method or a `functools.partial` object calls what it
-//! holds, exactly.
+//! holds, exactly. A decorator binds the name to what it returns: `typing.final` and
+//! `typing.override` return the function or class they are handed, and any other decorator may
+//! return another object.
 //!
 //! Every fixture marks each line with the report it must get ([`MARKS`]).
 
@@ -52,6 +54,20 @@ const MARKS: &[Mark] = &[
         &[("Same object", "not-the-result-on-every-path")],
     ),
     ("# MUT114 exact", "MUT114", &[]),
+    (
+        "# EFF101 [heuristic] decorated",
+        "EFF101 [heuristic]",
+        &[("Every implementation", "decorated")],
+    ),
+    (
+        "# MUT114 not cached",
+        "MUT114",
+        &[
+            ("Cached", "cached-result-not-established"),
+            ("Keyed", "cached-result-not-established"),
+            ("Container kind", "cached-result-not-established"),
+        ],
+    ),
 ];
 
 /// Every report of the rules [`MARKS`] names, before reports are grouped (`heki
@@ -641,6 +657,178 @@ fn a_cached_function_bound_again_hands_out_no_established_result() {
             ("pkg/patches.py", CACHED_PATCH),
             ("pkg/app.py", CACHED_CALLS),
         ],
+    );
+}
+
+const MARKED: &str = r#"import functools
+import time
+import typing
+import typing as t
+from typing import final, override
+
+import typing_extensions
+
+
+def traced(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+class Base:
+    def renew(self) -> None:
+        return None
+
+    def rotate(self) -> None:
+        return None
+
+    def revoke(self) -> None:
+        return None
+
+    def refresh(self) -> None:
+        return None
+
+    def reset(self) -> None:
+        return None
+
+    def rows(self, key: str) -> list[str]:
+        return []
+
+
+class Client(Base):
+    @final
+    def fetch(self) -> None:
+        time.sleep(1)
+
+    @typing.final
+    def fetch_typing(self) -> None:
+        time.sleep(1)
+
+    @typing_extensions.final
+    def fetch_extensions(self) -> None:
+        time.sleep(1)
+
+    @t.final
+    def fetch_alias(self) -> None:
+        time.sleep(1)
+
+    @override
+    def renew(self) -> None:
+        time.sleep(1)
+
+    @typing.override
+    def rotate(self) -> None:
+        time.sleep(1)
+
+    @typing_extensions.override
+    def revoke(self) -> None:
+        time.sleep(1)
+
+    @t.override
+    def refresh(self) -> None:
+        time.sleep(1)
+
+    @final
+    @override
+    def reset(self) -> None:
+        time.sleep(1)
+
+    @final
+    @classmethod
+    def build(cls) -> None:
+        time.sleep(1)
+
+    @final
+    @traced
+    def traced_fetch(self) -> None:
+        time.sleep(1)
+
+    @override
+    @functools.cache
+    def rows(self, key: str) -> list[str]:
+        return [key]
+
+    @functools.lru_cache
+    @typing_extensions.final
+    def names(self, key: str) -> dict[str, int]:
+        return {key: 1}
+
+    @traced
+    @functools.cache
+    def tags(self, key: str) -> set[str]:
+        return {key}
+
+
+@final
+class Sealed:
+    def fetch(self) -> None:
+        time.sleep(1)
+"#;
+
+const MARKED_CALLS: &str = r#"from pkg.marked import Client, Sealed
+
+
+async def fetch(c: Client) -> None:
+    c.fetch()  # EFF101
+    c.fetch_typing()  # EFF101
+    c.fetch_extensions()  # EFF101
+    c.fetch_alias()  # EFF101
+
+
+async def renew(c: Client) -> None:
+    c.renew()  # EFF101
+    c.rotate()  # EFF101
+    c.revoke()  # EFF101
+    c.refresh()  # EFF101
+    c.reset()  # EFF101
+
+
+async def build() -> None:
+    Client.build()  # EFF101
+
+
+async def traced_fetch(c: Client) -> None:
+    c.traced_fetch()  # EFF101 [heuristic] decorated
+
+
+async def sealed(s: Sealed) -> None:
+    s.fetch()  # EFF101
+    Sealed().fetch()  # EFF101
+
+
+def cached(c: Client) -> None:
+    c.rows("a").append("b")  # MUT114 exact
+    c.names("a")["b"] = 2  # MUT114 exact
+    c.tags("a").add("b")  # MUT114 not cached
+"#;
+
+/// `typing.final` and `typing.override` (also of `typing_extensions`, and through a module
+/// alias) only set `__final__` or `__override__` on what they are handed and return it: on a
+/// method, a class method, a class, beside each other, and beside a `functools` cache, the call
+/// runs the function as defined and the cache keeps its results. A decorator outside them
+/// leaves the target open. No rule reports the attribute they set.
+#[test]
+fn final_and_override_return_what_they_decorate() {
+    let files = [("pkg/marked.py", MARKED), ("pkg/app.py", MARKED_CALLS)];
+    let p = Project::new("final_override");
+    p.write("pyproject.toml", "[project]\nname = \"t\"\n");
+    p.write("pkg/__init__.py", "");
+    for (path, text) in files {
+        p.write(path, text);
+    }
+    assert_eq!(reported(&p), marked(&files));
+    let (code, stdout, stderr) = p.check(&["--select", "ALL", "--output-format", "json"]);
+    assert_eq!(code, 1, "{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let rules: Vec<&str> = diags
+        .iter()
+        .map(|d| d["rule_code"].as_str().unwrap())
+        .collect();
+    assert!(
+        rules.iter().all(|r| ["EFF101", "MUT114"].contains(r)),
+        "{stdout}"
     );
 }
 
