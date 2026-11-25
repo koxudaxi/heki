@@ -1902,9 +1902,11 @@ impl<'e, 'a> Engine<'e, 'a> {
             return Ok(None);
         };
         let item = match (&o.args, is_slice) {
-            (Args::None | Args::Result(_), false) => return Ok(self.dunder(o, "__getitem__")),
+            (Args::None | Args::Result(_) | Args::Fields(_), false) => {
+                return Ok(self.dunder(o, "__getitem__"));
+            }
             // A slice of a builtin sequence is one of its class, whatever its items.
-            (Args::None | Args::Result(_), true) => {
+            (Args::None | Args::Result(_) | Args::Fields(_), true) => {
                 return Ok(SLICED_SEQUENCES
                     .contains(&o.class.as_str())
                     .then(|| Ty::inst(o.class.as_str())));
@@ -2104,10 +2106,64 @@ impl<'e, 'a> Engine<'e, 'a> {
             Some(Ty::Ref(fqn)) if fqn == "builtins.super" && call.args.is_empty() => {
                 self.owner.clone().map(Ty::Super)
             }
-            Some(Ty::Ref(fqn) | Ty::Class(fqn)) => return self.call_named(fqn, call),
+            Some(Ty::Ref(fqn)) => return self.call_named(fqn, call),
+            // `cls(...)` may construct a subclass, whose constructor binds other fields.
+            Some(Ty::Class(fqn)) => {
+                return Ok(self.call_named(fqn, call)?.map(|t| t.without_fields()));
+            }
             Some(callee) => self.called(callee, call),
             None => None,
         })
+    }
+
+    /// What the instance a call of exactly the class `fqn` constructs holds in its fields
+    /// ([`ProjectDecls::constructor_fields`]): a field a position or a keyword binds holds the
+    /// argument, any other its default; those holding a named object or `None` are tracked
+    /// ([`Args::Fields`]). `None` when the call may bind fields heki does not see (`*` or `**`
+    /// unpacking) or raises `TypeError` (too many positions, a keyword naming no field or one a
+    /// position binds, a field without a default left unbound).
+    fn constructed_fields(&self, fqn: &str, call: Passed<'_>) -> Option<Args> {
+        let fields = self.cx.project.constructor_fields(fqn)?;
+        if call.star_from.is_some() || call.kwargs.iter().any(|(k, _)| k.is_none()) {
+            return None;
+        }
+        let positional: Vec<&str> = fields
+            .iter()
+            .filter(|f| !f.kw_only)
+            .map(|f| &*f.name)
+            .collect();
+        let named = |k: &Option<String>| fields.iter().any(|f| Some(&*f.name) == k.as_deref());
+        if call.args.len() > positional.len() || !call.kwargs.iter().all(|(k, _)| named(k)) {
+            return None;
+        }
+        let mut out: Vec<(Box<str>, Elem)> = Vec::new();
+        for field in fields {
+            let at = positional.iter().position(|p| *p == &*field.name);
+            let by_position = at.and_then(|i| call.args.get(i));
+            let by_keyword = call
+                .kwargs
+                .iter()
+                .find_map(|(k, v)| (k.as_deref() == Some(&*field.name)).then_some(v));
+            let held = match (by_position, by_keyword) {
+                (Some(_), Some(_)) => return None,
+                (Some(v), None) | (None, Some(v)) => self.fact(*v).elem(),
+                (None, None) => match &field.default {
+                    resolver::FieldDefault::Required => return None,
+                    resolver::FieldDefault::None => Elem::Empty,
+                    resolver::FieldDefault::Named(name) => Elem::Of(self.cx.named(name)),
+                    resolver::FieldDefault::Value | resolver::FieldDefault::Other => Elem::Unknown,
+                },
+            };
+            let tracked = match &held {
+                Elem::Empty => true,
+                Elem::Of(t) => !t.named().is_empty(),
+                Elem::Unknown => false,
+            };
+            if tracked {
+                out.push((field.name.clone(), held));
+            }
+        }
+        Some(Args::fields(out.into_boxed_slice()))
     }
 
     /// The [`crate::partial::parts`] of the call making `object`, when it calls
@@ -2236,14 +2292,19 @@ impl<'e, 'a> Engine<'e, 'a> {
                 return Ok(self.cx.call_result(fqn, |i, k| self.passed(call, i, k)));
             }
             // A copy (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`) has its original's
-            // type.
+            // type; given other values too (`replace(spec, run=f)`), not its fields'.
             _ if !args.is_empty()
                 && self
                     .cx
                     .catalog(fqn)
                     .is_some_and(|e| e.copy_sanitizer.is_some()) =>
             {
-                return Ok(self.need(args[0])?.cloned());
+                let original = self.need(args[0])?;
+                let alone = args.len() == 1 && call.kwargs.is_empty() && call.star_from.is_none();
+                return Ok(original.map(|t| if alone { t.clone() } else { t.without_fields() }));
+            }
+            _ if let Some(fields) = self.constructed_fields(fqn, call) => {
+                Ty::container(fqn, fields)
             }
             _ => return Ok(self.cx.call_result(fqn, |i, k| self.passed(call, i, k))),
         }))
@@ -2289,7 +2350,8 @@ impl<'e, 'a> Engine<'e, 'a> {
     /// past it (`super()`), and the instance `Self` stands for there.
     fn static_receiver<'t>(&self, recv: &'t Ty) -> Option<(&'t str, bool, Ty)> {
         match recv {
-            Ty::Inst(o) => Some((&o.class, false, recv.clone())),
+            // Another instance of the class, which a method may return as `Self`.
+            Ty::Inst(o) => Some((&o.class, false, recv.without_fields())),
             Ty::Super(c) => Some((c, true, Ty::inst(c.as_str()))),
             Ty::Ref(c) | Ty::Class(c) if self.cx.project.is_project_class(c) => {
                 Some((c, false, Ty::inst(c.as_str())))
@@ -2328,6 +2390,9 @@ impl<'e, 'a> Engine<'e, 'a> {
             return (!bound.is_empty()).then(|| join_all(bound)).ok_or(Pending);
         }
         let cx = self.cx;
+        if let Some(held) = self.cx.field_held(recv, attr) {
+            return item_ty(held.clone());
+        }
         let Some((class, skip_self, self_ty)) = self.static_receiver(recv) else {
             return Ok(None);
         };
@@ -2369,13 +2434,26 @@ impl<'e, 'a> Engine<'e, 'a> {
             );
         }
         let cx = self.cx;
+        // A field holding a named object: the call calls it, binding no receiver.
+        if let Some(held) = self.cx.field_held(recv, method) {
+            return match held {
+                Elem::Of(t) => self.called(t, call),
+                Elem::Empty | Elem::Unknown => None,
+            };
+        }
         let (class, skip_self, self_ty) = self.static_receiver(recv)?;
         // A class body binding `method` to a name (`factory = Scope`): the call calls what it
         // names, a bound method returning what the function does. Bound to different objects on
         // different paths, the call gives what one of them returns, of no one type.
         if !skip_self && let Some(alias) = cx.project.class_aliases(class, method) {
-            return match (&alias.names[..], alias.defined) {
-                ([(named, _)], None) => self.called(&cx.named(named), call),
+            return match (&alias.names[..], alias.defined, alias.partial) {
+                ([(named, _)], None, None) => self.called(&cx.named(named), call),
+                // Whether it binds the instance or not, the partial object calls the callable it
+                // holds, which gives what it returns.
+                ([], None, Some(partial)) => {
+                    let callable = Ty::Partial(Box::new(cx.named(&partial.callable)));
+                    self.called(&callable, call)
+                }
                 _ => None,
             };
         }

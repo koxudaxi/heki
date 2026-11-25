@@ -68,6 +68,12 @@ pub enum Args {
     Tuple(Vec<Elem>),
     /// A future (`FUTURE_CLASSES`): what awaiting it, or its `result()`, gives.
     Result(Box<Elem>),
+    /// What an instance of a class whose constructor `@dataclass(frozen=True)` or
+    /// `typing.NamedTuple` generates holds in its fields, by name, for the fields that hold a
+    /// named object (a function, a class) or `None` (`Elem::Empty`): what the call constructing
+    /// it bound them to (`resolver::fields`). A field not listed holds a value of its declared
+    /// type.
+    Fields(Box<[(Box<str>, Elem)]>),
 }
 
 /// The type of the items in one slot of a container.
@@ -275,6 +281,22 @@ impl Ty {
         }
     }
 
+    /// The type of another instance of the same classes: the fields of every instance hold
+    /// values of their declared types. `typing.Self` of a method's result, a copy given other
+    /// values, and a class object's call (`cls(...)`, which may construct a subclass) make one.
+    pub(crate) fn without_fields(&self) -> Ty {
+        self.map_members(|o| {
+            Some(Obj {
+                class: o.class.clone(),
+                args: match &o.args {
+                    Args::Fields(_) => Args::None,
+                    other => other.clone(),
+                },
+            })
+        })
+        .unwrap_or_else(|| self.clone())
+    }
+
     /// The type with the items of every instance unknown: what a container holds once code
     /// heki does not follow item by item adds to it.
     pub(crate) fn without_items(&self) -> Ty {
@@ -289,7 +311,7 @@ impl Ty {
 
     /// The type once changes in place have added `added` to the value: each list, deque, set,
     /// or dict joins the items, or the keys and values, of its kind; any other instance keeps no
-    /// items.
+    /// items, and the fields it holds ([`Args::Fields`], which no change in place stores).
     pub(crate) fn with_added(&self, added: &Added) -> Ty {
         self.map_members(|o| {
             let args = match (Container::of_class(&o.class), &o.args) {
@@ -298,6 +320,7 @@ impl Ty {
                 (Some(Container::Map), Args::Map(k, v)) => {
                     Args::map(k.join(&added.keys), v.join(&added.values))
                 }
+                (_, Args::Fields(fields)) => Args::Fields(fields.clone()),
                 _ => Args::None,
             };
             Some(Obj {
@@ -312,7 +335,7 @@ impl Ty {
     /// mentions `Self` without a receiver; an item mentioning it is then unknown.
     pub(crate) fn bind_self(&self, recv: Option<&Ty>) -> Option<Ty> {
         match self {
-            Ty::SelfType => recv.cloned(),
+            Ty::SelfType => recv.map(Ty::without_fields),
             _ => self.map_members(|o| {
                 Some(Obj {
                     class: o.class.clone(),
@@ -409,6 +432,25 @@ impl Args {
         }
     }
 
+    /// `Fields(fields)`, without tracking an instance whose fields all hold values of their
+    /// declared types.
+    pub(crate) fn fields(fields: Box<[(Box<str>, Elem)]>) -> Self {
+        if fields.is_empty() {
+            Args::None
+        } else {
+            Args::Fields(fields)
+        }
+    }
+
+    /// What the instance holds in its field `name` ([`Args::Fields`]): `None` when it is not
+    /// listed.
+    pub(crate) fn field(&self, name: &str) -> Option<&Elem> {
+        match self {
+            Args::Fields(fs) => fs.iter().find(|(n, _)| &**n == name).map(|(_, e)| e),
+            _ => None,
+        }
+    }
+
     /// The arguments with `f` applied to every tracked type (an item `f` gives none for is
     /// unknown).
     pub(crate) fn map_elems(&self, f: impl Fn(&Ty) -> Option<Ty>) -> Args {
@@ -422,6 +464,9 @@ impl Args {
             Args::Map(k, v) => Args::Map(Box::new(elem(k)), Box::new(elem(v))),
             Args::Tuple(es) => Args::Tuple(es.iter().map(elem).collect()),
             Args::Result(e) => Args::Result(Box::new(elem(e))),
+            Args::Fields(fs) => {
+                Args::Fields(fs.iter().map(|(n, e)| (n.clone(), elem(e))).collect())
+            }
         }
     }
 
@@ -429,7 +474,7 @@ impl Args {
     /// which yields itself while it waits).
     pub(crate) fn item(&self) -> Elem {
         match self {
-            Args::None | Args::Result(_) => Elem::Unknown,
+            Args::None | Args::Result(_) | Args::Fields(_) => Elem::Unknown,
             Args::Items(e) | Args::Map(e, _) => (**e).clone(),
             Args::Tuple(es) => es.iter().fold(Elem::Empty, |acc, e| acc.join(e)),
         }
@@ -447,6 +492,17 @@ impl Args {
                 Args::items(self.item().join(&other.item()))
             }
             (Args::Result(a), Args::Result(b)) => Args::result(a.join(b)),
+            // A field one of them leaves to its declared type is the declared type's.
+            (Args::Fields(a), Args::Fields(b)) => {
+                let joined: Box<[(Box<str>, Elem)]> = a
+                    .iter()
+                    .filter_map(|(name, x)| {
+                        let (_, y) = b.iter().find(|(other, _)| other == name)?;
+                        Some((name.clone(), x.join(y))).filter(|(_, e)| *e != Elem::Unknown)
+                    })
+                    .collect();
+                Args::fields(joined)
+            }
             _ => Args::None,
         }
     }
@@ -457,6 +513,7 @@ impl Args {
             Args::Items(e) | Args::Result(e) => e.depth(),
             Args::Map(k, v) => k.depth().max(v.depth()),
             Args::Tuple(es) => es.iter().map(Elem::depth).max().unwrap_or(0),
+            Args::Fields(fs) => fs.iter().map(|(_, e)| e.depth()).max().unwrap_or(0),
         }
     }
 
