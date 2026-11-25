@@ -16,8 +16,8 @@ impl Extractor<'_> {
     /// ([`FileSummary::reference_sites`]): a load of one (a global, a name, an attribute, or a
     /// closure cell, which holds what the enclosing function binds to the name, a local import
     /// included), or the function a `def` or `lambda` makes, whose value reaches, through copies, phis, and the displays holding it, a use
-    /// handing it on ([`Usage::HandsOn`]), or with [`Contracts::reference_reads`] another use
-    /// ([`Usage::Reads`]), which a load handing it on is not. The value as a callee is a call (its
+    /// handing it on ([`Usage::HandsOn`]), or with [`Contracts::reference_reads`] or `heki
+    /// recommend`'s suggestions another use ([`Usage::Reads`]), which a load handing it on is not. The value as a callee is a call (its
     /// own site), and so is a callable a library API runs (`Self::handed_callable`); a closure's
     /// captures, a binding of another name, and a deletion use nothing. A site is at the load; a
     /// name an import or the module body binds is read without a load of its own (the bound
@@ -26,7 +26,9 @@ impl Extractor<'_> {
     /// [`FileSummary::reference_sites`]: crate::FileSummary::reference_sites
     /// [`Contracts::reference_reads`]: crate::Contracts::reference_reads
     pub(super) fn reference_sites(&mut self) -> Vec<CallSite> {
-        let reads = self.contracts.is_some_and(|c| c.reference_reads());
+        // A suggestion's premise that the function's annotations stay unread counts every
+        // use of its value (`size.__annotations__`).
+        let reads = self.opt_in.suggestions || self.contracts.is_some_and(|c| c.reference_reads());
         let flow = HandedValues::of(
             (self.f, self.cx.ir()),
             |at| self.callees.get(&at).is_some_and(names_only),

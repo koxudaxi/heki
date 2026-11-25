@@ -11,11 +11,12 @@
 //! not bind for the reads to be the builtin's own (R2, [`read_override`]).
 
 use crate::callgraph::bound_params;
+use crate::decorators::{self, ReadsAnnotations};
 use crate::readonly::ContainerKind;
 use crate::resolver::{TypeCtx, func_qualname, is_unknown_base, param_annotation};
-use crate::{BoundCallee, EffectSummary, ProjectDecls, decorators};
+use crate::{BoundCallee, EffectSummary, ProjectDecls};
 use heki_ast::Span;
-use heki_ir::{IrFunction, PatternShape};
+use heki_ir::{ConstLiteral, InstKind, IrFunction, PatternShape};
 use heki_kb::{AnnotationsRead, EffectiveEcosystemKb};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -547,11 +548,21 @@ fn annotation_reads(cx: &TypeCtx<'_>, f: &IrFunction) -> AnnotationReads {
     let Some(owner) = &f.owner_class_qualname else {
         return reads;
     };
-    let class_decorators = (cx.ir().functions.iter())
-        .filter(|g| g.is_class_body && &g.qualname == owner)
-        .flat_map(|g| &g.decorators);
-    for d in class_decorators {
-        reads = reads.or(decorator_reads(cx, d));
+    let constructor = matches!(f.name.as_str(), "__new__" | "__init__");
+    let class_bodies =
+        (cx.ir().functions.iter()).filter(|g| g.is_class_body && &g.qualname == owner);
+    for body in class_bodies {
+        let signature_read = constructor && !has_docstring(body);
+        for d in &body.decorators {
+            reads = reads.or(decorator_reads(cx, d));
+            let documents = |e: &decorators::Decorator| {
+                e.annotations == ReadsAnnotations::ConstructorWithoutDocstring
+            };
+            if signature_read && decorators::is(d, cx.module, documents) {
+                let by = cx.module.decorator_symbol(d).unwrap_or_else(|| d.clone());
+                reads = reads.or(AnnotationReads::Read(by.as_str().into()));
+            }
+        }
     }
     let class = format!("{}.{owner}", cx.module.module_name);
     for c in cx.project.mro_of(&class) {
@@ -568,9 +579,23 @@ fn annotation_reads(cx: &TypeCtx<'_>, f: &IrFunction) -> AnnotationReads {
     reads
 }
 
-/// What the decorator `text` (its source) reads of what it decorates.
+/// Whether the class body `body` starts with a docstring.
+fn has_docstring(body: &IrFunction) -> bool {
+    let mut insts: Vec<_> = body.blocks.iter().flat_map(|b| &b.insts).collect();
+    insts.sort_by_key(|i| i.span.start);
+    insts.first().is_some_and(|first| match &first.kind {
+        InstKind::Const {
+            dst,
+            literal: ConstLiteral::Str(_),
+        } => insts.iter().all(|i| !i.kind.operands().contains(dst)),
+        _ => false,
+    })
+}
+
+/// What the decorator `text` (its source) reads of what it decorates, besides a constructor's
+/// signature ([`annotation_reads`]).
 fn decorator_reads(cx: &TypeCtx<'_>, text: &str) -> AnnotationReads {
-    if decorators::is(text, cx.module, |d| d.leaves_annotations_unread) {
+    if decorators::is(text, cx.module, |_| true) {
         return AnnotationReads::Unread;
     }
     let symbol = cx.module.decorator_symbol(text);

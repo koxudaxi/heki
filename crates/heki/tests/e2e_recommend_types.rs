@@ -264,9 +264,11 @@ fn each_premise_keeps_a_parameter_or_leaves_it_out() {
     absent("app.core:stated:items");
     absent("app.core:noted:items");
     exact("app.core:members:tags");
-    // Abstract use: a `.copy()` the read-only type lacks keeps it heuristic before the trial.
+    // Abstract use: a `.copy()` the read-only type lacks keeps it heuristic, and the trial
+    // withholds it; a premise counts the heuristic groups shown.
     assert!(!groups.contains_key("app.core:copied:rows"));
-    assert_eq!(by_premise(&report, "Abstract use").1, 1);
+    assert!(withheld(&report).contains_key("app.core:copied:rows"));
+    assert_eq!(by_premise(&report, "Abstract use").1, 0);
     // Name bound once.
     heuristic("app.core:rebound:rows", "Name bound once");
     // Callees take it: a callee's literal container joins the group; a `MutableSequence`
@@ -468,7 +470,7 @@ fn apply_exact(p: &Project, report: &Value) {
 fn applied_suggestions_give_their_guard_nothing_to_report() {
     let p = project("recommend_types_guard");
     let mut_110 = |p: &Project| {
-        let (_, out, err) = p.heki(&[
+        let (code, out, err) = p.heki(&[
             "check",
             "--select",
             "MUT110",
@@ -476,6 +478,8 @@ fn applied_suggestions_give_their_guard_nothing_to_report() {
             "--output-format",
             "json",
         ]);
+        // Every file parses and is checked: an edit that broke one would exit with 2.
+        assert_eq!(code, 0, "{out}{err}");
         let reports: Vec<Value> =
             serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {err}"));
         reports
@@ -1749,4 +1753,197 @@ fn a_pattern_reads_the_length_of_its_subject_and_a_mapping_its_get() {
             )
         ]
     );
+}
+
+/// The edits of a group: (path, span start, replacement).
+fn edits(group: &Value) -> Vec<(String, u64, String)> {
+    (group["edits"].as_array().unwrap().iter())
+        .map(|e| {
+            (
+                e["path"].as_str().unwrap().to_owned(),
+                e["span"][0].as_u64().unwrap(),
+                e["replacement"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn an_import_below_the_def_binds_no_name_for_its_annotation() {
+    let p = Project::new("recommend_types_import_below");
+    let total = "def total(rows: list[int]) -> int:\n    return sorted(rows)[0]\n\n\n";
+    p.write("app/__init__.py", "")
+        .write(
+            "app/below.py",
+            &format!("{total}from collections.abc import Sequence\n"),
+        )
+        .write(
+            "app/postponed.py",
+            &format!(
+                "from __future__ import annotations\n\n\n{total}from collections.abc import Sequence\n"
+            ),
+        )
+        .write(
+            "app/other.py",
+            &format!("{total}from typing import Sequence as Sequence\n"),
+        );
+    let (report, _) = recommend(&p, &["--all"]);
+    let groups = groups(&report);
+    // `def` evaluates the annotation before the import below it binds the name, and an edit
+    // imports no name the module binds.
+    for module in ["below", "other"] {
+        let group = groups[format!("app.{module}:total:rows").as_str()];
+        assert_eq!(open_premises(group), ["A name for the type"], "{group:#}");
+        let cause = group["open"][0]["cause"].as_str().unwrap();
+        assert!(
+            cause.ends_with("from an import below the `def` here"),
+            "{cause}"
+        );
+    }
+    // Postponed annotations are evaluated after the module ran.
+    let postponed = groups["app.postponed:total:rows"];
+    assert_eq!(postponed["certainty"], "exact", "{postponed:#}");
+    assert_eq!(
+        edits(postponed),
+        [("app/postponed.py".to_owned(), 53, "Sequence".to_owned())]
+    );
+}
+
+#[test]
+fn a_type_checker_is_found_by_its_own_table() {
+    let p = Project::new("recommend_types_checker_table");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.mypy_plugins]\nx = 1\n",
+    )
+    .write("app/__init__.py", "")
+    .write(
+        "app/core.py",
+        "def total(rows: list[int]) -> int:\n    return sorted(rows)[0]\n",
+    );
+    let found = |p: &Project| recommend(p, &[]).0["suggestions"]["type_checker"]["found"].clone();
+    assert_eq!(found(&p), Value::Null);
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.ty.rules]\nunused-ignore-comment = \"ignore\"\n",
+    );
+    assert_eq!(found(&p), "ty");
+    p.write("pyproject.toml", "[project]\nname = \"t\"\n")
+        .write("setup.cfg", "[mypy-app.*]\nignore_errors = True\n");
+    assert_eq!(found(&p), Value::Null);
+    p.write("setup.cfg", "[mypy]\nstrict = True\n");
+    assert_eq!(found(&p), "mypy");
+    // A checker's own file counts whatever it holds.
+    p.write("setup.cfg", "").write("ty.toml", "");
+    assert_eq!(found(&p), "ty");
+}
+
+#[test]
+fn what_reads_annotations_at_run_time_is_found_in_every_use() {
+    let p = Project::new("recommend_types_run_time_reads");
+    p.write("app/__init__.py", "")
+        .write(
+            "app/size.py",
+            "def size(items: list[int]) -> int:\n    return sorted(items)[0]\n",
+        )
+        .write(
+            "app/peek.py",
+            "from app.size import size\n\nHINTS = size.__annotations__\n",
+        )
+        .write(
+            "app/dc.py",
+            "from dataclasses import dataclass\n\n\n\
+             @dataclass\nclass Bare:\n    def __init__(self, rows: list[int]) -> None:\n        \
+             self.has = 1 in rows\n\n\n\
+             @dataclass\nclass Documented:\n    \"\"\"Rows.\"\"\"\n\n    \
+             def __init__(self, rows: list[int]) -> None:\n        self.has = 1 in rows\n",
+        );
+    let (report, _) = recommend(&p, &["--all"]);
+    let groups = groups(&report);
+    // A use of the function's value other than a call may read its annotations.
+    let size = groups["app.size:size:items"];
+    assert_eq!(open_premises(size), ["Annotations stay unread"], "{size:#}");
+    // Without a docstring, `dataclass` writes one from the constructor's signature.
+    assert!(
+        !groups.contains_key("app.dc:Bare.__init__:rows"),
+        "{report:#}"
+    );
+    assert_eq!(by_premise(&report, "Annotations stay unread"), (1, 1));
+    assert_eq!(
+        groups["app.dc:Documented.__init__:rows"]["certainty"],
+        "exact"
+    );
+}
+
+#[test]
+fn the_counts_and_premises_of_heuristic_groups_are_those_shown() {
+    let p = Project::new("recommend_types_heuristic_counts");
+    p.write("app/__init__.py", "")
+        .write(
+            "app/m.py",
+            "def total(rows: list[int]) -> int:\n    return sorted(rows)[0]\n",
+        )
+        .write("app/user.py", "from app.m import *\n")
+        .write(
+            "app/n.py",
+            "def total(rows: list[int]) -> int:\n    return sorted(rows)[0]\n",
+        );
+    let (report, _) = recommend(&p, &["--all"]);
+    let groups = groups(&report);
+    let starred = groups["app.m:total:rows"];
+    assert_eq!(
+        open_premises(starred),
+        ["A name for the type"],
+        "{starred:#}"
+    );
+    assert_eq!(by_premise(&report, "A name for the type"), (0, 1));
+    let no_fact_lost = |group: &Value| {
+        (group["premises"].as_array().unwrap().iter())
+            .find(|s| s["name"] == "No fact lost")
+            .map(|s| s["established"].clone())
+            .unwrap()
+    };
+    // The trial compares a heuristic group's facts, not its reports.
+    assert_eq!(no_fact_lost(starred), false);
+    assert_eq!(no_fact_lost(groups["app.n:total:rows"]), true);
+}
+
+#[test]
+fn an_import_a_walk_reaches_withholds_its_group_in_the_importer() {
+    let p = Project::new("recommend_types_import_walk");
+    let boundary = |forbidden: &str| {
+        format!(
+            "[project]\nname = \"t\"\n\n[[tool.heki.import-boundaries]]\nname = \"client\"\n\
+             importers = [\"app.client\"]\nreach = \"all\"\nforbidden-imports = [\"{forbidden}\"]\n"
+        )
+    };
+    p.write("pyproject.toml", &boundary("collections.abc"))
+        .write("app/__init__.py", "")
+        .write("app/client.py", "import app.core\nimport app.extra\n");
+    let total = "def total(rows: list[int]) -> int:\n    return sorted(rows)[0]\n";
+    for module in ["core", "extra", "free"] {
+        p.write(&format!("app/{module}.py"), total);
+    }
+    let (report, _) = recommend(&p, &["--all"]);
+    let (exact, withheld) = kept_and_withheld(&report);
+    // `client.py` has no edit; the import each edit adds is reached from it, by one chain once
+    // the other is withheld. Its reports change with every import a group adds, so after the
+    // second check the group in `free.py` is withheld too.
+    assert!(exact.is_empty(), "{report:#}");
+    assert_eq!(withheld["trial-limit"], ["app.free:total:rows"]);
+    let changed = self::withheld(&report);
+    assert_eq!(
+        changed["app.core:total:rows"],
+        "`IMP201` at line 1 would be reported"
+    );
+    assert_eq!(
+        changed["app.extra:total:rows"],
+        "`IMP201` at line 2 would be reported"
+    );
+    // The boundary allows the import.
+    p.write("pyproject.toml", &boundary("json"));
+    let (report, _) = recommend(&p, &["--all"]);
+    let (exact, withheld) = kept_and_withheld(&report);
+    assert_eq!(exact.len(), 3, "{report:#}");
+    assert!(withheld.is_empty(), "{withheld:?}");
 }

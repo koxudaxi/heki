@@ -61,7 +61,8 @@ project without contracts or a baseline, ends with a line that points to it:
 $ heki recommend
 ```
 
-See [Configuration Advice](recommend.md).
+See [Configuration Advice](recommend.md). To adopt heki in a repository step by step, see
+[Adopting heki](adoption.md).
 
 ## Read a diagnostic
 
