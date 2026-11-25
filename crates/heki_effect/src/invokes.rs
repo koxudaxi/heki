@@ -8,9 +8,14 @@
 //! the items), or a class's outside the project, called as a library call handed the value and
 //! the instruction's other operands (R3). A class of the project that binds it, and a value
 //! whose class heki does not establish (an abstract class of the library, a protocol, `object`,
-//! an unknown value), may run anything. A call the table lists as `lazy` returns an iterator
-//! that runs the same code again while it is iterated.
+//! an unknown value), may run anything. A value of a nominal container ABC (`Sequence`,
+//! `Mapping`, `collections.abc.Set`, their mutable ABCs) is one of its family's builtins or of
+//! another class outside the project that implements it, taken to run what the builtin runs, or
+//! of a project implementer (`ProjectDecls::implementers`), unless the project opens the family.
+//! A call the table lists as `lazy` returns an iterator that runs the same code again while it
+//! is iterated.
 
+use crate::readonly::{ContainerFamily, ContainerKind};
 use crate::resolver::{MethodOwner, ProjectDecls, Symbol, Val};
 use heki_kb::{EffectiveEcosystemKb, InvokedValue};
 
@@ -118,7 +123,7 @@ pub(crate) const ITERATION: &[&str] = &["__iter__", "__next__", "__getitem__"];
 /// The modules of the library whose classes are abstract: a value of one may be of any class
 /// that implements it (a generator for `typing.Iterator`, a class of the project registered or
 /// recognized by its methods), so neither its class nor what implements its methods is
-/// established.
+/// established; but see [`abstract_value`].
 const ABSTRACT_MODULES: &[&str] = &[
     "typing",
     "typing_extensions",
@@ -142,14 +147,16 @@ const ABSTRACT_CLASSES: &[&str] = &[
 ];
 
 /// Whether `class` is an abstract class of the library ([`ABSTRACT_MODULES`],
-/// [`ABSTRACT_CLASSES`]).
-fn abstract_class(class: &str) -> bool {
-    ABSTRACT_CLASSES.contains(&class)
+/// [`ABSTRACT_CLASSES`]) whose instances' classes heki does not establish: not a nominal
+/// container ABC of a family the project leaves closed ([`ProjectDecls::established_abc`]).
+fn abstract_value(project: &ProjectDecls, class: &str) -> bool {
+    let abstract_class = ABSTRACT_CLASSES.contains(&class)
         || ABSTRACT_MODULES.iter().any(|m| {
             class
                 .strip_prefix(m)
                 .is_some_and(|rest| rest.starts_with('.'))
-        })
+        });
+    abstract_class && !project.established_abc(class)
 }
 
 /// The builtin types that find a key by its hash and then compare it with each key they hold
@@ -162,12 +169,14 @@ const HASHED_CONTAINERS: &[&str] = &[
     "builtins.dict_items",
 ];
 
-/// Whether `class` is a builtin dict or set, or derives from one: it finds a key by its hash,
-/// then compares it with each key it holds under an equal hash.
+/// Whether `class` is a builtin dict or set, derives from one, or is a nominal ABC of their
+/// families (whose builtins a value of it is taken to be): it finds a key by its hash, then
+/// compares it with each key it holds under an equal hash.
 fn hashed_container(project: &ProjectDecls, class: &str) -> bool {
     HASHED_CONTAINERS
         .iter()
         .any(|h| class == *h || project.is_subclass(class, h))
+        || ContainerFamily::nominal_abc(class).is_some_and(|(kind, _)| kind != ContainerKind::List)
 }
 
 /// What a builtin type's own special method `name` runs on the items a value of `class` holds:
@@ -235,7 +244,8 @@ pub(crate) struct Handed<'v> {
 /// catalog does not describe `[[invokes]]` for, when it is handed a value that may run code of
 /// the project ([`inert`]); one it describes runs only the code its entry names. `iterated`:
 /// the iterator the call of a `lazy` entry returned is iterated, and every callable it calls
-/// runs there, not at its own site.
+/// runs there, not at its own site. A method of a nominal container ABC is read as the same
+/// method of its family's builtin ([`abc_method`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn runs_project_code(
     project: &ProjectDecls,
@@ -247,6 +257,15 @@ pub(crate) fn runs_project_code(
     star: bool,
     iterated: bool,
 ) -> bool {
+    let builtin_method;
+    let symbol = match abc_method(project, symbol) {
+        AbcMethod::NotOne => symbol,
+        AbcMethod::Open => return true,
+        AbcMethod::Builtin(method) => {
+            builtin_method = method;
+            builtin_method.as_str()
+        }
+    };
     if RUNS_CODE.contains(&symbol) || !catalogued(kb, symbol) || star {
         return true;
     }
@@ -280,6 +299,32 @@ pub(crate) fn runs_project_code(
         || keywords
             .iter()
             .any(|(k, h)| runs(h, &|v| v.names(None, *k)))
+}
+
+/// What a method `symbol` of a nominal container ABC runs ([`abc_method`]).
+enum AbcMethod {
+    /// `symbol` is no method of one.
+    NotOne,
+    /// The family is open, or a project implementer may run other code for the method (it binds
+    /// it, or inherits it from a class outside the project whose code it is, such as the ABC's
+    /// own mixin method, which calls the implementer's methods by name).
+    Open,
+    /// The same method of the family's builtin, which runs what a value of the ABC runs.
+    Builtin(String),
+}
+
+/// [`AbcMethod`] of `symbol`.
+fn abc_method(project: &ProjectDecls, symbol: &str) -> AbcMethod {
+    let (class, method) = symbol.rsplit_once('.').unwrap_or_default();
+    let Some((kind, _)) = ContainerFamily::nominal_abc(class) else {
+        return AbcMethod::NotOne;
+    };
+    if !project.established_abc(class)
+        || project.special_method_owner(class, method) > MethodOwner::Builtin
+    {
+        return AbcMethod::Open;
+    }
+    AbcMethod::Builtin(format!("{}.{method}", kind.class()))
 }
 
 /// Whether `symbol` is a function of a library the ecosystem catalog covers: an entry of its
@@ -421,14 +466,16 @@ pub(crate) fn reads_own_namespace(
 }
 
 /// Whether iterating `h` runs only its builtin class's own iteration: a builtin container,
-/// string, range, or view whose iteration no project subclass replaces (R2), or a display built
-/// in the calling function.
+/// string, range, or view, or a value of a nominal container ABC of a closed family, whose
+/// iteration no project subclass or implementer replaces (R2), or a display built in the
+/// calling function.
 pub(crate) fn iterates_builtin(
     project: &ProjectDecls,
     kb: &EffectiveEcosystemKb,
     h: &Handed<'_>,
 ) -> bool {
-    let builtin = |class: &str| BUILTIN_ITERABLES.contains(&class);
+    let builtin =
+        |class: &str| BUILTIN_ITERABLES.contains(&class) || project.established_abc(class);
     let iterates_own = || !ITERATION.iter().any(|m| may_define(project, kb, h, m));
     h.built
         || match h.val {
@@ -491,7 +538,7 @@ fn class_method_runs(
     name: &str,
 ) -> bool {
     let instance = |class: &str| {
-        if abstract_class(class) || project.protocol(class).is_some() {
+        if abstract_value(project, class) || project.protocol(class).is_some() {
             return true;
         }
         if name == "*" {
@@ -641,7 +688,7 @@ pub(crate) fn interpreter_own(
     scalar: bool,
 ) -> bool {
     let established = |class: &String| {
-        !abstract_class(class)
+        !abstract_value(project, class)
             && project.protocol(class).is_none()
             && methods
                 .iter()
@@ -666,7 +713,7 @@ pub(crate) fn interpreter_own(
 /// may.
 pub(crate) fn may_keep_under(project: &ProjectDecls, h: &Handed<'_>, attr: &str) -> bool {
     let keeps = |class: &str| {
-        abstract_class(class)
+        abstract_value(project, class)
             || project.protocol(class).is_some()
             || project.binds_property(class, attr)
     };
@@ -715,12 +762,12 @@ pub(crate) fn inert(project: &ProjectDecls, h: &Handed<'_>) -> bool {
 }
 
 /// Whether the class of `h` is established as a library class that is not callable, not
-/// abstract ([`abstract_class`]), and that no project class derives from (R2).
+/// abstract ([`abstract_value`]), and that no project class derives from or implements (R2).
 fn of_library_class(project: &ProjectDecls, h: &Handed<'_>) -> bool {
     let library = |class: &str| {
         !project.is_project_class(class)
             && !CALLABLE_CLASSES.contains(&class)
-            && !abstract_class(class)
+            && !abstract_value(project, class)
             && project.value_classes(class).is_empty()
     };
     match h.val {

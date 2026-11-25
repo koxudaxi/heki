@@ -393,9 +393,12 @@ reads. What a suggestion states:
   object to the other operand's special method (`other == p` may run `other.__eq__(p)`, and which
   side Python tries first depends on the classes): only a builtin's keeps nothing, so the other operand is a value built in the function or of a
   builtin class no project class derives from. An item read of a `defaultdict` changes it.
-- **The builtin's own reads**: the claim's last part (R2). A value of `dict` may be an instance of a
-  project class deriving from `dict`, or from a standard-library class that derives from it
-  (`OrderedDict`, `defaultdict`, `Counter`). The function's reads of the object, and those of the
+- **The builtin's own reads**: the claim's last part (R2, read for the type the suggestion writes).
+  A `Mapping` may be an instance of a project class deriving from `dict`, from a standard-library
+  class of its family (`OrderedDict`, `defaultdict`, `Counter`, `UserDict`, `ChainMap`, ...), or
+  from `Mapping` itself, or of a project class registered with one; a `Sequence` or an
+  `AbstractSet` likewise. A `register` call heki cannot resolve, or a `__subclasshook__` in such
+  a class, admits any class and leaves every parameter of the family out. The function's reads of the object, and those of the
   functions it hands it to, run that class's code if the class binds the method they run: item
   access (with `__missing__`), iteration (with the length hint `[*v]`, `f(*v)`, and `xs += v` take;
   `a, b = v` iterates too), size and truth, membership, comparison, conversion to text, operators,

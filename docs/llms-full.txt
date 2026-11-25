@@ -3405,9 +3405,12 @@ reads. What a suggestion states:
   object to the other operand's special method (`other == p` may run `other.__eq__(p)`, and which
   side Python tries first depends on the classes): only a builtin's keeps nothing, so the other operand is a value built in the function or of a
   builtin class no project class derives from. An item read of a `defaultdict` changes it.
-- **The builtin's own reads**: the claim's last part (R2). A value of `dict` may be an instance of a
-  project class deriving from `dict`, or from a standard-library class that derives from it
-  (`OrderedDict`, `defaultdict`, `Counter`). The function's reads of the object, and those of the
+- **The builtin's own reads**: the claim's last part (R2, read for the type the suggestion writes).
+  A `Mapping` may be an instance of a project class deriving from `dict`, from a standard-library
+  class of its family (`OrderedDict`, `defaultdict`, `Counter`, `UserDict`, `ChainMap`, ...), or
+  from `Mapping` itself, or of a project class registered with one; a `Sequence` or an
+  `AbstractSet` likewise. A `register` call heki cannot resolve, or a `__subclasshook__` in such
+  a class, admits any class and leaves every parameter of the family out. The function's reads of the object, and those of the
   functions it hands it to, run that class's code if the class binds the method they run: item
   access (with `__missing__`), iteration (with the length hint `[*v]`, `f(*v)`, and `xs += v` take;
   `a, b = v` iterates too), size and truth, membership, comparison, conversion to text, operators,
@@ -4331,6 +4334,11 @@ Exact claims hold in every run consistent with seven assumptions
 - **R1**: the functions and classes on a call chain are not replaced at run time.
 - **R2**: a value annotated `C` is an instance of `C` or of a project subclass. A premise that
   goes through a method call holds only when every implementation in such a subclass has it.
+  A value annotated with a nominal container ABC (`Sequence`, `Mapping`, `Set`, and their mutable
+  ABCs) is one of its family's builtins or another library class implementing it, taken to run
+  what the builtin runs, or a project class implementing it (deriving from it or from a class of
+  its family, or registered with it); a `register` heki cannot resolve or a `__subclasshook__`
+  leaves such values open, as are those of a structural ABC (`Iterable`) or a protocol.
   Rewrites never rely on annotations.
 - **R3**: the ecosystem catalog describes the library, an effect with its condition.
 - **R4**: imports resolve as configured.
@@ -5328,8 +5336,10 @@ $ python3 tests/symtable_verify/verify_symtable.py --heki target/debug/heki test
 $ python3 tests/import_verify/verify_imports.py --heki target/debug/heki tests/import_verify/fixtures/
 $ python3 tests/sentinel/verify_soundness_kb.py
 $ python3 tests/sentinel/verify_stdlib_kb.py
+$ python3 tests/sentinel/verify_container_families.py
 $ python3 tests/difftest/counterexamples.py
 $ python3 tests/difftest/soundness_e2e_counterexamples.py
+$ python3 tests/difftest/container_abc_counterexamples.py
 $ python3.15 tests/difftest/ir_counterexamples.py
 ```
 
@@ -5341,9 +5351,11 @@ CI runs them on CPython 3.11 to 3.15 (`ir_counterexamples.py` on 3.15 only).
 | `verify_imports.py` | heki's import facts (`heki inspect --imports`) against CPython: each fixture module is imported first in a fresh interpreter that records the imports the module bodies run, and the `body` edges are compared both ways (every recorded import is one of heki's `body` sites, and every unconditional one heki lists that no `ImportError` handler guards is recorded); an `ast` reader checks the function, `TYPE_CHECKING`, and `lazy` classes. The fixtures under `py315` need CPython 3.15. |
 | `verify_soundness_kb.py` | every claim of the Layer 1 knowledge base (`kb/soundness/builtins.toml`), on the running interpreter |
 | `verify_stdlib_kb.py` | the Layer 2 rows of the standard library that type a value (`kb/ecosystem/stdlib.toml`: attribute rows, the class a method returns, a method's copy of its receiver, the value a holder's method returns), on instances it builds of each class, subclasses too |
+| `verify_container_families.py` | the container family table (`ContainerFamily::TABLE`): each row's class is in its family as the row says, every public class of the standard library that a class can derive from and that implements a family's read-only ABC has a row, the ABCs of the rows are nominal, and what opens a family (a registration, a subclass's `__subclasshook__`) |
 | `counterexamples.py` | that the naive rewrites heki refuses really change behavior |
 | `soundness_e2e_counterexamples.py` | that the rewrites earlier versions of heki made of these shapes change behavior; the end-to-end tests check that heki now blocks or disproves each |
 | `ir_counterexamples.py` | that the rewrites heki made before the IR modeled a shape (a binding, an alias, a path) change behavior; needs CPython 3.15 |
+| `container_abc_counterexamples.py` | that a value of a container ABC may be of a class that runs project code when the writer iterates it (a project implementer through the ABC, `UserDict`, or `list`, a registered class, a `register` heki cannot resolve, a `__subclasshook__`, a structural ABC); `e2e_mut101_exact.rs` checks that heki reports each heuristic |
 
 The Layer 2 rows of the distributions the catalog lists (`[[distributions]]`) are checked against
 releases of each distribution:
@@ -6507,9 +6519,19 @@ Its premises:
   where heki establishes what implements it on every class the operand may be (R2): `object`'s;
   a builtin type's, with what it runs on the items it holds (a container's comparison, hash, or
   `repr()` runs its items', and a dict or set compares a key with each key it holds under an
-  equal hash, the names of attributes, strings, in an object's `__dict__`); or a library class's, as a call of that library (R3). A value of an abstract
-  class or a protocol, one annotated `object`, and one of a class heki does not know establish
-  none, and a comparison's or a conversion's result is a builtin `bool` or `str` only where
+  equal hash, the names of attributes, strings, in an object's `__dict__`); or a library class's, as a call of that library (R3). A value of a nominal
+  container ABC (`Sequence`, `Mapping`, `collections.abc.Set`, and their mutable ABCs, which
+  accept only the classes deriving from them or registered with them) is one of its family's
+  builtins or of another class outside the project, taken to run what they run, or of a project
+  class implementing it: one deriving, through project classes, from the ABC or from a class of
+  its family (`list`, `tuple`, `dict`, `OrderedDict`, `UserDict`, `ChainMap`, ...), or one
+  registered with them (`Mapping.register(C)`, `@Mapping.register`), and the method it runs is
+  established as on those classes (a method of the ABC as the builtin's, unless such a class
+  binds it or inherits it from a class outside the project). A `register` heki cannot resolve,
+  or a `__subclasshook__` of such a class (which may accept any class), leaves the family's
+  values established by none. A value of any other abstract class (`Iterable`, `Collection`) or
+  of a protocol, one annotated `object`, and one of a class heki does not know establish none,
+  and a comparison's or a conversion's result is a builtin `bool` or `str` only where
   those methods are `object`'s or a builtin type's. No attribute access may run a `__getattr__`,
   `__setattr__`, property, or other descriptor of the project that heki does not resolve (an
   access on a library object counts as a call of that attribute), no `raise` may construct a
@@ -6662,7 +6684,9 @@ An exact report states that the function's own body reads the cached property on
 class of which runs a write that `MUT101` reports exact: the value read may have been computed
 before that write and kept after it.
 
-The first five premises are those of that `MUT101` report, as its page states them.
+The first five premises are those of that `MUT101` report, as its page states them: a value of
+a container ABC that the writer uses after its write, for one, counts as one of the classes of its
+family (**Kept to the return**).
 
 Its premises:
 

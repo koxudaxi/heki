@@ -1,6 +1,7 @@
 //! The `object()` sentinels of a module, the attributes its classes bind to one, and the classes
 //! it registers with `copyreg`: what `copy.deepcopy` does to an instance holding a sentinel
-//! ([`super::ProjectDecls::held_sentinels`], [`super::ProjectDecls::copy_of`]).
+//! ([`super::ProjectDecls::held_sentinels`], [`super::ProjectDecls::copy_of`]). Also the classes
+//! it registers with an ABC ([`super::ProjectDecls::implementers`]).
 
 use super::{
     ModuleDecls, NamedAttr, PartialAttr, dataclass_decorator, decorator_parts,
@@ -16,7 +17,7 @@ use heki_ir::{
 };
 use heki_semantic::{NameResolution, ScopeKind};
 use rustc_hash::FxHashMap;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// [`ModuleDecls::object_sentinels`]: the module body's names stored once, outside a loop, from a
 /// call of the builtin `object` with no argument (through copies). Only such an object is one
@@ -624,6 +625,68 @@ pub(super) fn copy_registrations(input: &ModuleInput<'_>, decls: &ModuleDecls) -
                     .and_then(|c| dotted(*c))
                     .unwrap_or_else(|| "*".to_owned()),
             );
+        }
+    }
+    out
+}
+
+/// [`ModuleDecls::abc_registrations`]: by the fqn of the class registered with, the classes a
+/// `register` call names in any function of the module (`Mapping.register(C)`) and those a
+/// class decorator registers (`@Mapping.register`), `*` for an argument heki cannot name. A
+/// receiver heki names no global or attribute chain for (a local, `self`) is not read.
+pub(super) fn abc_registrations(
+    input: &ModuleInput<'_>,
+    decls: &ModuleDecls,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (qualname, class) in &decls.classes {
+        for (head, _) in &class.decorators {
+            if let Some(receiver) = head.strip_suffix(".register") {
+                (out.entry(receiver.to_owned()).or_default())
+                    .insert(format!("{}.{qualname}", decls.module_name));
+            }
+        }
+    }
+    for f in &input.ir.functions {
+        let mentions = (f.blocks.iter().flat_map(|b| &b.insts)).any(|i| match &i.kind {
+            InstKind::MethodCall { method, .. } => method == "register",
+            InstKind::AttrLoad { attr, .. } => attr == "register",
+            _ => false,
+        });
+        if !mentions {
+            continue;
+        }
+        let shape = FnShape::new(f);
+        let stored_as: FxHashMap<VarId, &str> = (f.blocks.iter().flat_map(|b| &b.insts))
+            .filter_map(|i| match &i.kind {
+                InstKind::StoreGlobal { name, value } => {
+                    Some((shape.copy_root(*value), name.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        let dotted = |var: VarId| dotted_name(&shape, &stored_as, var, decls);
+        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+            let (receiver, args) = match &inst.kind {
+                InstKind::MethodCall {
+                    recv, method, args, ..
+                } if method == "register" => (dotted(*recv), args),
+                InstKind::Call {
+                    callee_var: Some(callee),
+                    args,
+                    ..
+                } => match dotted(*callee) {
+                    Some(name) if name.ends_with(".register") => (
+                        Some(name[..name.len() - ".register".len()].to_owned()),
+                        args,
+                    ),
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            let Some(receiver) = receiver else { continue };
+            let class = (args.first().and_then(|c| dotted(*c))).unwrap_or_else(|| "*".to_owned());
+            out.entry(receiver).or_default().insert(class);
         }
     }
     out

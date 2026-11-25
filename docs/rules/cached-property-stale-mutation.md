@@ -76,9 +76,19 @@ Its premises:
   where heki establishes what implements it on every class the operand may be (R2): `object`'s;
   a builtin type's, with what it runs on the items it holds (a container's comparison, hash, or
   `repr()` runs its items', and a dict or set compares a key with each key it holds under an
-  equal hash, the names of attributes, strings, in an object's `__dict__`); or a library class's, as a call of that library (R3). A value of an abstract
-  class or a protocol, one annotated `object`, and one of a class heki does not know establish
-  none, and a comparison's or a conversion's result is a builtin `bool` or `str` only where
+  equal hash, the names of attributes, strings, in an object's `__dict__`); or a library class's, as a call of that library (R3). A value of a nominal
+  container ABC (`Sequence`, `Mapping`, `collections.abc.Set`, and their mutable ABCs, which
+  accept only the classes deriving from them or registered with them) is one of its family's
+  builtins or of another class outside the project, taken to run what they run, or of a project
+  class implementing it: one deriving, through project classes, from the ABC or from a class of
+  its family (`list`, `tuple`, `dict`, `OrderedDict`, `UserDict`, `ChainMap`, ...), or one
+  registered with them (`Mapping.register(C)`, `@Mapping.register`), and the method it runs is
+  established as on those classes (a method of the ABC as the builtin's, unless such a class
+  binds it or inherits it from a class outside the project). A `register` heki cannot resolve,
+  or a `__subclasshook__` of such a class (which may accept any class), leaves the family's
+  values established by none. A value of any other abstract class (`Iterable`, `Collection`) or
+  of a protocol, one annotated `object`, and one of a class heki does not know establish none,
+  and a comparison's or a conversion's result is a builtin `bool` or `str` only where
   those methods are `object`'s or a builtin type's. No attribute access may run a `__getattr__`,
   `__setattr__`, property, or other descriptor of the project that heki does not resolve (an
   access on a library object counts as a call of that attribute), no `raise` may construct a

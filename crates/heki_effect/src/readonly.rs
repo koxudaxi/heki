@@ -14,6 +14,7 @@ use heki_ir::{DictEntry, Inst, InstKind, IrFunction, PhiNode, Terminator, VarId}
 use heki_kb::{CopyDepth, EffectiveEcosystemKb};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 
 /// Builtin sequences whose slices are new objects holding the same elements (`xs[:]`,
 /// `xs[1:]`): a slice of one is a shallow copy. Other objects' slices may be views (`numpy`).
@@ -519,19 +520,69 @@ pub fn returns_container_view(method: &str) -> bool {
 pub enum FamilyRole {
     /// The builtin itself, or its `typing` alias (`list`, `typing.List`).
     Builtin,
-    /// A standard-library class deriving from the builtin (`collections.OrderedDict` is a
-    /// `dict`): under R2 a value of the builtin may be one, or an instance of a project class
-    /// deriving from one.
+    /// A standard-library class deriving from the builtin that annotations name as a container
+    /// of the family (`collections.OrderedDict` is a `dict`): under R2 a value of the builtin may
+    /// be one, or an instance of a project class deriving from one.
     Derived,
+    /// Another standard-library class deriving from the builtin (`traceback.StackSummary` is a
+    /// `list`), or the builtin under another name: a value of the builtin may be an instance of
+    /// a project class deriving from it, and annotations do not read it.
+    Lineage,
     /// The read-only ABC of the family (`Sequence`, `Mapping`, `collections.abc.Set`, and the
     /// `typing` spellings).
     ReadOnly,
     /// The mutable ABC of the family (`MutableSequence`, `MutableMapping`, `MutableSet`).
     Mutable,
+    /// A narrower ABC of the family (`KeysView` is a `Set`).
+    Abc,
+    /// Another standard-library class that CPython registers with an ABC of the family or that
+    /// derives from one, whose methods the read-only ABC lists are the interpreter's own
+    /// (`tuple`, `deque`, a named tuple); `mutable`: it is an instance of the mutable ABC.
+    Native { mutable: bool },
+    /// The same, with some of those methods Python code (`UserDict`, `ChainMap`, `StrEnum`).
+    Implements { mutable: bool },
+}
+
+/// How much of a family a value annotated with one of its classes may be: the builtin and its
+/// lineage, the mutable ABC's classes, or the read-only ABC's (every class of the family).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum FamilyLevel {
+    Builtin,
+    Mutable,
+    ReadOnly,
+}
+
+impl FamilyLevel {
+    pub const EVERY: [Self; 3] = [Self::Builtin, Self::Mutable, Self::ReadOnly];
+
+    /// The role of the classes a value annotated with is read at this level.
+    pub fn role(self) -> FamilyRole {
+        match self {
+            Self::Builtin => FamilyRole::Builtin,
+            Self::Mutable => FamilyRole::Mutable,
+            Self::ReadOnly => FamilyRole::ReadOnly,
+        }
+    }
+
+    /// Whether an instance of a class of `role` is a value at this level.
+    pub fn admits(self, role: FamilyRole) -> bool {
+        use FamilyRole::{Abc, Builtin, Derived, Implements, Lineage, Mutable, Native, ReadOnly};
+        match role {
+            Builtin | Derived | Lineage => true,
+            Mutable | Native { mutable: true } | Implements { mutable: true } => {
+                self != Self::Builtin
+            }
+            ReadOnly | Abc | Native { mutable: false } | Implements { mutable: false } => {
+                self == Self::ReadOnly
+            }
+        }
+    }
 }
 
 /// One class of the container families of `list`, `dict`, and `set`, by the fqn an annotation
-/// or a base resolves to: the one table the readers of these classes share.
+/// or a base resolves to: the one table the readers of these classes share. It lists the
+/// standard library's public classes of the families that a class can derive from, as
+/// `tests/sentinel/verify_container_families.py` checks against CPython.
 #[derive(Debug, Clone, Copy)]
 pub struct ContainerFamily {
     pub class: &'static str,
@@ -539,137 +590,253 @@ pub struct ContainerFamily {
     pub role: FamilyRole,
 }
 
+/// A row of [`ContainerFamily::TABLE`].
+macro_rules! row {
+    ($class:literal, $kind:expr, $role:expr $(,)?) => {
+        ContainerFamily {
+            class: $class,
+            kind: $kind,
+            role: $role,
+        }
+    };
+}
+
 impl ContainerFamily {
     pub const TABLE: &[Self] = {
         use ContainerKind::{Dict, List, Set};
-        use FamilyRole::{Builtin, Derived, Mutable, ReadOnly};
+        use FamilyRole::{Abc, Builtin, Derived, Implements, Lineage, Mutable, Native, ReadOnly};
         &[
-            ContainerFamily {
-                class: "builtins.list",
-                kind: List,
-                role: Builtin,
-            },
-            ContainerFamily {
-                class: "builtins.dict",
-                kind: Dict,
-                role: Builtin,
-            },
-            ContainerFamily {
-                class: "builtins.set",
-                kind: Set,
-                role: Builtin,
-            },
-            ContainerFamily {
-                class: "typing.List",
-                kind: List,
-                role: Builtin,
-            },
-            ContainerFamily {
-                class: "typing.Dict",
-                kind: Dict,
-                role: Builtin,
-            },
-            ContainerFamily {
-                class: "typing.Set",
-                kind: Set,
-                role: Builtin,
-            },
-            ContainerFamily {
-                class: "collections.OrderedDict",
-                kind: Dict,
-                role: Derived,
-            },
-            ContainerFamily {
-                class: "collections.defaultdict",
-                kind: Dict,
-                role: Derived,
-            },
-            ContainerFamily {
-                class: "collections.Counter",
-                kind: Dict,
-                role: Derived,
-            },
-            ContainerFamily {
-                class: "typing.OrderedDict",
-                kind: Dict,
-                role: Derived,
-            },
-            ContainerFamily {
-                class: "typing.DefaultDict",
-                kind: Dict,
-                role: Derived,
-            },
-            ContainerFamily {
-                class: "typing.Counter",
-                kind: Dict,
-                role: Derived,
-            },
-            ContainerFamily {
-                class: "typing.Sequence",
-                kind: List,
-                role: ReadOnly,
-            },
-            ContainerFamily {
-                class: "typing.Mapping",
-                kind: Dict,
-                role: ReadOnly,
-            },
-            ContainerFamily {
-                class: "typing.AbstractSet",
-                kind: Set,
-                role: ReadOnly,
-            },
-            ContainerFamily {
-                class: "collections.abc.Sequence",
-                kind: List,
-                role: ReadOnly,
-            },
-            ContainerFamily {
-                class: "collections.abc.Mapping",
-                kind: Dict,
-                role: ReadOnly,
-            },
-            ContainerFamily {
-                class: "collections.abc.Set",
-                kind: Set,
-                role: ReadOnly,
-            },
-            ContainerFamily {
-                class: "typing.MutableSequence",
-                kind: List,
-                role: Mutable,
-            },
-            ContainerFamily {
-                class: "typing.MutableMapping",
-                kind: Dict,
-                role: Mutable,
-            },
-            ContainerFamily {
-                class: "typing.MutableSet",
-                kind: Set,
-                role: Mutable,
-            },
-            ContainerFamily {
-                class: "collections.abc.MutableSequence",
-                kind: List,
-                role: Mutable,
-            },
-            ContainerFamily {
-                class: "collections.abc.MutableMapping",
-                kind: Dict,
-                role: Mutable,
-            },
-            ContainerFamily {
-                class: "collections.abc.MutableSet",
-                kind: Set,
-                role: Mutable,
-            },
+            row!("builtins.list", List, Builtin),
+            row!("typing.List", List, Builtin),
+            row!("typing.Sequence", List, ReadOnly),
+            row!("collections.abc.Sequence", List, ReadOnly),
+            row!("typing.MutableSequence", List, Mutable),
+            row!("collections.abc.MutableSequence", List, Mutable),
+            row!("collections.abc.ByteString", List, Abc),
+            row!("typing.ByteString", List, Abc),
+            row!("importlib.metadata.DeprecatedList", List, Lineage),
+            row!("importlib.metadata.EntryPoints", List, Lineage),
+            row!("logging.config.ConvertingList", List, Lineage),
+            row!("traceback.StackSummary", List, Lineage),
+            row!("xml.dom.minicompat.NodeList", List, Lineage),
+            row!("array.ArrayType", List, Native { mutable: true }),
+            row!("array.array", List, Native { mutable: true }),
+            row!("builtins.bytearray", List, Native { mutable: true }),
+            row!("collections.deque", List, Native { mutable: true }),
+            row!("typing.Deque", List, Native { mutable: true }),
+            row!("collections.UserList", List, Implements { mutable: true }),
+            row!(
+                "multiprocessing.managers.BaseListProxy",
+                List,
+                Implements { mutable: true },
+            ),
+            row!(
+                "multiprocessing.managers.ListProxy",
+                List,
+                Implements { mutable: true },
+            ),
+            row!("builtins.bytes", List, Native { mutable: false }),
+            row!("builtins.str", List, Native { mutable: false }),
+            row!("builtins.tuple", List, Native { mutable: false }),
+            row!("typing.NamedTuple", List, Native { mutable: false }),
+            row!("typing.Text", List, Native { mutable: false }),
+            row!("typing.Tuple", List, Native { mutable: false }),
+            row!("codecs.CodecInfo", List, Native { mutable: false }),
+            row!("decimal.DecimalTuple", List, Native { mutable: false }),
+            row!("difflib.Match", List, Native { mutable: false }),
+            row!("dis.Instruction", List, Native { mutable: false }),
+            row!("dis.Positions", List, Native { mutable: false }),
+            row!("doctest.TestResults", List, Native { mutable: false }),
+            row!(
+                "email.headerregistry.BaseHeader",
+                List,
+                Native { mutable: false },
+            ),
+            row!(
+                "importlib.resources.Resource",
+                List,
+                Native { mutable: false },
+            ),
+            row!("inspect.ArgInfo", List, Native { mutable: false }),
+            row!("inspect.Arguments", List, Native { mutable: false }),
+            row!("inspect.Attribute", List, Native { mutable: false }),
+            row!("inspect.ClosureVars", List, Native { mutable: false }),
+            row!("inspect.FrameInfo", List, Native { mutable: false }),
+            row!("inspect.FullArgSpec", List, Native { mutable: false }),
+            row!("inspect.Traceback", List, Native { mutable: false }),
+            row!(
+                "multiprocessing.process.AuthenticationString",
+                List,
+                Native { mutable: false },
+            ),
+            row!("nntplib.ArticleInfo", List, Native { mutable: false }),
+            row!("nntplib.GroupInfo", List, Native { mutable: false }),
+            row!("pkgutil.ModuleInfo", List, Native { mutable: false }),
+            row!("platform.AndroidVer", List, Native { mutable: false }),
+            row!("platform.IOSVersionInfo", List, Native { mutable: false }),
+            row!("sched.Event", List, Native { mutable: false }),
+            row!("selectors.SelectorKey", List, Native { mutable: false }),
+            row!("sndhdr.SndHeaders", List, Native { mutable: false }),
+            row!("sqlite3.Row", List, Native { mutable: false }),
+            row!("ssl.DefaultVerifyPaths", List, Native { mutable: false }),
+            row!(
+                "statistics.LinearRegression",
+                List,
+                Native { mutable: false },
+            ),
+            row!("tokenize.TokenInfo", List, Native { mutable: false }),
+            row!("turtle.Vec2D", List, Native { mutable: false }),
+            row!("urllib.parse.DefragResult", List, Native { mutable: false }),
+            row!(
+                "urllib.parse.DefragResultBytes",
+                List,
+                Native { mutable: false },
+            ),
+            row!("urllib.parse.ParseResult", List, Native { mutable: false }),
+            row!(
+                "urllib.parse.ParseResultBytes",
+                List,
+                Native { mutable: false },
+            ),
+            row!("urllib.parse.SplitResult", List, Native { mutable: false }),
+            row!(
+                "urllib.parse.SplitResultBytes",
+                List,
+                Native { mutable: false },
+            ),
+            row!(
+                "urllib.robotparser.RequestRate",
+                List,
+                Native { mutable: false },
+            ),
+            row!(
+                "xml.dom.minicompat.EmptyNodeList",
+                List,
+                Native { mutable: false },
+            ),
+            row!(
+                "collections.UserString",
+                List,
+                Implements { mutable: false },
+            ),
+            row!("enum.EnumCheck", List, Implements { mutable: false }),
+            row!("enum.FlagBoundary", List, Implements { mutable: false }),
+            row!("enum.StrEnum", List, Implements { mutable: false }),
+            row!("http.HTTPMethod", List, Implements { mutable: false }),
+            row!(
+                "logging.config.ConvertingTuple",
+                List,
+                Implements { mutable: false },
+            ),
+            row!("platform.uname_result", List, Implements { mutable: false }),
+            row!("pstats.SortKey", List, Implements { mutable: false }),
+            row!("ssl.Purpose", List, Implements { mutable: false }),
+            row!(
+                "symtable.SymbolTableType",
+                List,
+                Implements { mutable: false },
+            ),
+            row!("tkinter.EventType", List, Implements { mutable: false }),
+            row!("tracemalloc.Traceback", List, Implements { mutable: false }),
+            row!("builtins.dict", Dict, Builtin),
+            row!("typing.Dict", Dict, Builtin),
+            row!("typing.Mapping", Dict, ReadOnly),
+            row!("collections.abc.Mapping", Dict, ReadOnly),
+            row!("typing.MutableMapping", Dict, Mutable),
+            row!("collections.abc.MutableMapping", Dict, Mutable),
+            row!("collections.OrderedDict", Dict, Derived),
+            row!("collections.defaultdict", Dict, Derived),
+            row!("collections.Counter", Dict, Derived),
+            row!("typing.OrderedDict", Dict, Derived),
+            row!("typing.DefaultDict", Dict, Derived),
+            row!("typing.Counter", Dict, Derived),
+            row!("distutils.command.bdist.ListCompat", Dict, Lineage),
+            row!("enum.EnumDict", Dict, Lineage),
+            row!("http.cookies.BaseCookie", Dict, Lineage),
+            row!("http.cookies.Morsel", Dict, Lineage),
+            row!("http.cookies.SimpleCookie", Dict, Lineage),
+            row!("importlib.metadata.SelectableGroups", Dict, Lineage),
+            row!("logging.config.ConvertingDict", Dict, Lineage),
+            row!("builtins.frozendict", Dict, Native { mutable: false }),
+            row!("collections.ChainMap", Dict, Implements { mutable: true }),
+            row!("typing.ChainMap", Dict, Implements { mutable: true }),
+            row!("collections.UserDict", Dict, Implements { mutable: true }),
+            row!(
+                "configparser.ConfigParser",
+                Dict,
+                Implements { mutable: true },
+            ),
+            row!(
+                "configparser.ConverterMapping",
+                Dict,
+                Implements { mutable: true },
+            ),
+            row!(
+                "configparser.RawConfigParser",
+                Dict,
+                Implements { mutable: true },
+            ),
+            row!(
+                "configparser.SafeConfigParser",
+                Dict,
+                Implements { mutable: true },
+            ),
+            row!(
+                "configparser.SectionProxy",
+                Dict,
+                Implements { mutable: true },
+            ),
+            row!(
+                "multiprocessing.managers.DictProxy",
+                Dict,
+                Implements { mutable: true },
+            ),
+            row!(
+                "multiprocessing.managers.SetProxy",
+                Dict,
+                Implements { mutable: true },
+            ),
+            row!("shelve.BsdDbShelf", Dict, Implements { mutable: true }),
+            row!("shelve.DbfilenameShelf", Dict, Implements { mutable: true }),
+            row!("shelve.Shelf", Dict, Implements { mutable: true }),
+            row!(
+                "weakref.WeakKeyDictionary",
+                Dict,
+                Implements { mutable: true },
+            ),
+            row!(
+                "weakref.WeakValueDictionary",
+                Dict,
+                Implements { mutable: true },
+            ),
+            row!("builtins.set", Set, Builtin),
+            row!("typing.Set", Set, Builtin),
+            row!("typing.AbstractSet", Set, ReadOnly),
+            row!("collections.abc.Set", Set, ReadOnly),
+            row!("typing.MutableSet", Set, Mutable),
+            row!("collections.abc.MutableSet", Set, Mutable),
+            row!("collections.abc.ItemsView", Set, Abc),
+            row!("collections.abc.KeysView", Set, Abc),
+            row!("typing.ItemsView", Set, Abc),
+            row!("typing.KeysView", Set, Abc),
+            row!("distutils.dir_util.SkipRepeatAbsolutePaths", Set, Lineage),
+            row!("multiprocessing.managers.ProcessLocalSet", Set, Lineage),
+            row!("builtins.frozenset", Set, Native { mutable: false }),
+            row!("typing.FrozenSet", Set, Native { mutable: false }),
+            row!("weakref.WeakSet", Set, Implements { mutable: true }),
         ]
     };
 
     /// The row of the resolved class `class`.
     pub fn of(class: &str) -> Option<&'static Self> {
-        Self::TABLE.iter().find(|r| r.class == class)
+        // Asked of every class a value may be: one lookup, not a scan of the table.
+        static BY_CLASS: LazyLock<FxHashMap<&str, &ContainerFamily>> = LazyLock::new(|| {
+            ContainerFamily::TABLE
+                .iter()
+                .map(|r| (r.class, r))
+                .collect()
+        });
+        BY_CLASS.get(class).copied()
     }
 
     /// The role of `class` in its family, if it has one.
@@ -677,14 +844,32 @@ impl ContainerFamily {
         Self::of(class).map(|r| r.role)
     }
 
-    /// The classes of `kind`'s family with one of `roles`.
-    pub fn classes(
-        kind: ContainerKind,
-        roles: &'static [FamilyRole],
-    ) -> impl Iterator<Item = &'static str> {
+    /// The classes of `kind`'s family whose instances are values at `level`.
+    pub fn within(kind: ContainerKind, level: FamilyLevel) -> impl Iterator<Item = &'static str> {
         (Self::TABLE.iter())
-            .filter(move |r| r.kind == kind && roles.contains(&r.role))
+            .filter(move |r| r.kind == kind && level.admits(r.role))
             .map(|r| r.class)
+    }
+
+    /// The family and level a value annotated `class` is read at: the builtin's for the builtin
+    /// and its alias, the ABC's for a read-only or mutable ABC. `None` for the other classes,
+    /// whose values are of the class itself.
+    pub fn level_of(class: &str) -> Option<(ContainerKind, FamilyLevel)> {
+        let r = Self::of(class)?;
+        let level = match r.role {
+            FamilyRole::Builtin => FamilyLevel::Builtin,
+            FamilyRole::Mutable => FamilyLevel::Mutable,
+            FamilyRole::ReadOnly => FamilyLevel::ReadOnly,
+            _ => return None,
+        };
+        Some((r.kind, level))
+    }
+
+    /// The family and level of `class` when it is a nominal container ABC: the read-only or the
+    /// mutable ABC of a family, which defines no `__subclasshook__`, so an instance derives from
+    /// it or from a class registered with it.
+    pub fn nominal_abc(class: &str) -> Option<(ContainerKind, FamilyLevel)> {
+        Self::level_of(class).filter(|(_, level)| *level != FamilyLevel::Builtin)
     }
 
     /// The read methods ([`crate::ReadKinds::methods`]) a standard-library class of the
@@ -695,25 +880,14 @@ impl ContainerFamily {
         ("typing.DefaultDict", "__missing__"),
     ];
 
-    /// Standard-library classes whose methods are Python code calling other methods by name
-    /// (`Counter.most_common` calls `self.items()`), so a subclass that defines any member can
-    /// change the object in a read heki lists as the builtin's own.
-    const PYTHON_METHOD_BASES: &[&str] = &[
-        "collections.Counter",
-        "collections.OrderedDict",
-        "collections.defaultdict",
-        "collections.ChainMap",
-        "collections.UserDict",
-        "collections.UserList",
-        "typing.Counter",
-        "typing.OrderedDict",
-        "typing.DefaultDict",
-        "typing.ChainMap",
-    ];
-
-    /// Whether `class` is one of [`Self::PYTHON_METHOD_BASES`].
+    /// Whether `class` is a standard-library class of the families whose methods are Python code
+    /// calling other methods by name (`Counter.most_common` calls `self.items()`, an ABC's
+    /// `get` calls `self[key]`), so a subclass that defines any member can change the object in
+    /// a read heki lists as the builtin's own: every class of the table but the builtins and the
+    /// classes whose read methods are the interpreter's own ([`FamilyRole::Native`]).
     pub fn runs_python_methods(class: &str) -> bool {
-        Self::PYTHON_METHOD_BASES.contains(&class)
+        Self::of(class)
+            .is_some_and(|r| !matches!(r.role, FamilyRole::Builtin | FamilyRole::Native { .. }))
     }
 
     /// The method of `methods` that `class` binds and whose code changes the object
@@ -725,12 +899,10 @@ impl ContainerFamily {
     }
 
     /// The builtin whose methods a method called on a value of `class` is read as: the builtin's
-    /// own, its alias's, and its ABCs' (a `Mapping`'s `get` is a `dict`'s). A derived class may
-    /// add or change methods (`Counter.update` adds counts), so it has none.
+    /// own, its alias's, and its ABCs' (a `Mapping`'s `get` is a `dict`'s). Any other class of the
+    /// family may add or change methods (`Counter.update` adds counts), so it has none.
     pub fn read_as_builtin(class: &str) -> Option<ContainerKind> {
-        Self::of(class)
-            .filter(|r| r.role != FamilyRole::Derived)
-            .map(|r| r.kind)
+        Self::level_of(class).map(|(kind, _)| kind)
     }
 }
 

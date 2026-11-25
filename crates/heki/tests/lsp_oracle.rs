@@ -4362,6 +4362,55 @@ fn steps_mut111() -> Vec<Step> {
     ]
 }
 
+const ABC_BOARD: &str = "from collections.abc import Mapping\nfrom functools import cached_property\n\n\nclass Board:\n    def __init__(self, raw: dict[str, str]) -> None:\n        self.raw = raw\n\n    @cached_property\n    def title(self) -> str:\n        return self.raw.get(\"k\", \"\")\n\n    def replace(self, raw: dict[str, str], rows: Mapping[str, str]) -> None:\n        self.raw = raw\n        for _ in rows:\n            pass\n";
+const ABC_HEADING: &str = "from pkg.abc_board import Board\n\n\ndef heading(board: Board) -> str:\n    return board.title\n";
+const ABC_ROWS: &str = "class Rows:\n    def __iter__(self):\n        return iter(())\n";
+const ABC_ROWS_MAPPING: &str = "from collections.abc import Mapping\n\n\nclass Rows(Mapping):\n    def __getitem__(self, key):\n        raise KeyError(key)\n\n    def __len__(self):\n        return 0\n\n    def __iter__(self):\n        return iter(())\n";
+const ABC_ROWS_REGISTERED: &str = "from collections.abc import Mapping\n\n\nclass Rows:\n    def __iter__(self):\n        return iter(())\n\n\nMapping.register(Rows)\n";
+
+/// The tier of `MUT101` and of the `MUT111` reader behind it on a value of `Mapping` follows the
+/// classes other files make one (`ProjectDecls::implementers`): the CLI's tier turns heuristic
+/// when another file's class starts deriving from `Mapping` with its own `__iter__`, which the
+/// writer runs after the write, and exact when it stops; then the same when the file registers
+/// the class with `Mapping`, and stops. The server's tier must follow each save.
+fn steps_container_abcs() -> Vec<Step> {
+    const BOTH: &[(&str, &str)] = &[
+        ("pkg/abc_board.py", "MUT101"),
+        ("pkg/abc_heading.py", "MUT111"),
+    ];
+    vec![
+        Step::new(
+            "a writer iterating a `Mapping` after leaving a cached property stale, and its reader",
+            vec![
+                Action::Create("pkg/abc_board.py", ABC_BOARD.to_owned()),
+                Action::Create("pkg/abc_heading.py", ABC_HEADING.to_owned()),
+                Action::Create("pkg/abc_rows.py", ABC_ROWS.to_owned()),
+            ],
+        )
+        .present(BOTH),
+        Step::new(
+            "another file's class derives from `Mapping` and binds `__iter__`",
+            vec![save("pkg/abc_rows.py", ABC_ROWS_MAPPING)],
+        )
+        .present(BOTH),
+        Step::new(
+            "the class derives from nothing again",
+            vec![save("pkg/abc_rows.py", ABC_ROWS)],
+        )
+        .present(BOTH),
+        Step::new(
+            "the file registers the class with `Mapping`",
+            vec![save("pkg/abc_rows.py", ABC_ROWS_REGISTERED)],
+        )
+        .present(BOTH),
+        Step::new(
+            "the `register` call goes",
+            vec![save("pkg/abc_rows.py", ABC_ROWS)],
+        )
+        .present(BOTH),
+    ]
+}
+
 /// `MUT118`: a deep copy follows the sentinel, the class, and the tests in other modules (the
 /// declarations its check reads, and the sentinel tests of each file,
 /// `heki_rules::sentinel_tests_in`): the sentinel becomes one that copies as itself and back,
@@ -6631,6 +6680,7 @@ sessions!(editing, Session::start, {
     inherited_writers: steps_inherited_writers,
     hash_writers: steps_hash_writers,
     mut111: steps_mut111,
+    container_abcs: steps_container_abcs,
     mut118: steps_mut118,
     mut119: steps_mut119,
     mut112: steps_mut112,
