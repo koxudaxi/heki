@@ -1337,10 +1337,13 @@ fn group(
     };
     let others = members.len() - 1;
     let message = if others == 0 {
-        format!("`{}` is only read in `{}`", first.name, first.key.qualname)
+        format!(
+            "`{}` itself is never changed in `{}`",
+            first.name, first.key.qualname
+        )
     } else {
         format!(
-            "`{}` is only read in `{}` and in the {others} other function(s) of its group",
+            "`{}` itself is never changed in `{}` and the {others} other function(s) of its group",
             first.name, first.key.qualname
         )
     };

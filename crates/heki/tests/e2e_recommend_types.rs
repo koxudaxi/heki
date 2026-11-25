@@ -1453,18 +1453,22 @@ fn a_project_subclass_that_binds_a_read_leaves_out_the_functions_running_it() {
             (binds("app.sub.D", "get"), 1)
         ]
     );
-    // An `OrderedDict` subclass is a `dict`: its `__missing__` runs on an item read, its
-    // `__repr__` only where the function formats the object.
+    // An `OrderedDict` subclass is a `dict`, and the methods `OrderedDict` has in Python call
+    // others by name: any member the subclass defines opens every read.
     let (kept, causes) = own_reads(
         "recommend_types_ordered_subclass",
         "from collections import OrderedDict\n\n\nclass O(OrderedDict):\n    \
          def __missing__(self, k):\n        self[k] = 0\n        return 0\n\n    \
          def __repr__(self):\n        return \"O\"\n",
     );
-    assert_eq!(kept, ["got", "member", "equal", "outer_in"]);
+    assert!(kept.is_empty(), "{kept:?}");
     assert_eq!(
         causes,
         [
+            (
+                "`app.sub.O` binds `__missing__`, and a read of it may run any method".to_owned(),
+                4
+            ),
             (binds("app.sub.O", "__missing__"), 2),
             (binds("app.sub.O", "__repr__"), 1)
         ]
@@ -2066,4 +2070,69 @@ fn an_import_a_walk_reaches_withholds_its_group_in_the_importer() {
     let (exact, withheld) = kept_and_withheld(&report);
     assert_eq!(exact.len(), 3, "{report:#}");
     assert!(withheld.is_empty(), "{withheld:?}");
+}
+
+/// A read of a `dict` parameter that a `Counter` may be passed to.
+const COUNTER_READ: &str = r#"from collections import Counter
+
+
+def top(c: dict[str, int]) -> int:
+    return c["a"] + len(c)
+
+
+def run() -> int:
+    return top(Counter("abc"))
+"#;
+
+#[test]
+fn a_project_subclass_of_a_stdlib_class_with_python_methods_opens_every_read() {
+    let subclassed = Project::new("recommend_types_counter_subclass");
+    subclassed
+        .write("app/__init__.py", "")
+        .write("app/reads.py", COUNTER_READ)
+        .write(
+            "app/tally.py",
+            "from collections import Counter\n\n\nclass Tally(Counter):\n    \
+             def items(self):\n        self[\"seen\"] = 1\n        return super().items()\n",
+        );
+    let (report, _) = recommend(&subclassed, &["--all"]);
+    let exact: Vec<&str> = (report["suggestions"]["groups"].as_array().unwrap().iter())
+        .filter(|g| g["certainty"] == "exact")
+        .map(|g| g["id"].as_str().unwrap())
+        .collect();
+    assert!(exact.is_empty(), "{report:#}");
+
+    // The member may come from a project mixin that does not derive from the stdlib class.
+    let mixed = Project::new("recommend_types_counter_mixin");
+    mixed
+        .write("app/__init__.py", "")
+        .write("app/reads.py", COUNTER_READ)
+        .write(
+            "app/tally.py",
+            "from collections import Counter\n\n\nclass ItemsMixin:\n    \
+             def items(self):\n        self[\"seen\"] = 1\n        return super().items()\n\n\n\
+             class Tally(ItemsMixin, Counter):\n    pass\n",
+        );
+    let (report, _) = recommend(&mixed, &["--all"]);
+    let exact: Vec<&str> = (report["suggestions"]["groups"].as_array().unwrap().iter())
+        .filter(|g| g["certainty"] == "exact")
+        .map(|g| g["id"].as_str().unwrap())
+        .collect();
+    assert!(exact.is_empty(), "{report:#}");
+
+    let plain = Project::new("recommend_types_counter_plain");
+    plain
+        .write("app/__init__.py", "")
+        .write("app/reads.py", COUNTER_READ);
+    let (report, _) = recommend(&plain, &["--all"]);
+    let found = groups(&report);
+    assert_eq!(
+        found.keys().collect::<Vec<_>>(),
+        ["app.reads:top:c"],
+        "{report:#}"
+    );
+    assert_eq!(
+        found["app.reads:top:c"]["message"], "`c` itself is never changed in `top`",
+        "{report:#}"
+    );
 }

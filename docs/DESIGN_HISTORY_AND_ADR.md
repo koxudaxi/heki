@@ -945,6 +945,17 @@ first, then a convention the code follows, then a contract.
       constructed, shown only when read in at least 2 modules other than their class's. Container
       constants, read-only results, parameter classes, `Literal`, `@final`, existing read-only
       views, and `ReadOnly` keys each wait for their own measurement.
+  19. **Certification of the read-only parameter suggestion.** The claim is that the parameter
+      itself is never changed, in the function and in every function it is handed to, and that
+      it does not leave. A judged sample of 300 exact groups from 257 packages was read by two
+      reviewers independently; they agreed on 300 of 300, and none was false under that claim.
+      Five of the 300 change an element reached through the parameter (`acc[k].append(...)`, or
+      a write into dicts held by a list). The claim allows this, since `Mapping` and `Sequence`
+      do not restrict the elements, but a reader may take "only read" to mean deep, so the
+      message says that the parameter itself is never changed. The release gates held on the
+      whole corpus: whole-corpus time 1.42 times the base (limit 1.5), no failed run, peak heap
+      of the recommend run 0.7 % above the base, no failing package, and no difference in the
+      reports of the other commands.
 - **Status**: decided, not implemented yet. The parts ship under `command.recommend`, which is
   experimental, so what it prints and its JSON object can change in the releases that add them.
 

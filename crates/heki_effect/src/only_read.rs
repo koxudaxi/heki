@@ -394,7 +394,9 @@ pub enum ReadOverride {
 /// `kinds` of an object of the builtin `kind` may run: one binding a method the reads run
 /// ([`ReadKinds::methods`]), one whose MRO has a base outside the project binding one that
 /// changes the object ([`ContainerFamily::changing_read`]), one binding anything when a read
-/// may run any method, or one created by a metaclass heki does not know. `None` when every read
+/// may run any method or inherits a standard-library class whose methods are Python code
+/// ([`ContainerFamily::runs_python_methods`]) and binds any member, or one created by a
+/// metaclass heki does not know. `None` when every read
 /// is the builtin's own.
 pub fn read_override(
     decls: &ProjectDecls,
@@ -411,7 +413,20 @@ pub fn read_override(
         .into_iter()
         .find_map(|class| {
             let d = decls.class_decl(&class)?;
-            if let Some(method) = methods.iter().find(|m| d.members.contains(**m)) {
+            // The project classes the receiver takes its methods from: the class and every
+            // project base in its MRO, mixins that do not derive from the builtin included.
+            let mro = decls.mro_of(&class);
+            let project: Vec<&crate::ClassDecl> = std::iter::once(d)
+                .chain(
+                    (mro.iter())
+                        .filter(|b| **b != class)
+                        .filter_map(|b| decls.class_decl(b)),
+                )
+                .collect();
+            if let Some(method) = methods
+                .iter()
+                .find(|m| project.iter().any(|p| p.members.contains(**m)))
+            {
                 return Some(ReadOverride::Binds { class, method });
             }
             let inherited = (decls.mro_of(&class).into_iter())
@@ -423,7 +438,9 @@ pub fn read_override(
                     method,
                 });
             }
-            match d.members.first().filter(|_| any) {
+            let python_based = mro.iter().any(|b| ContainerFamily::runs_python_methods(b));
+            let member = project.iter().find_map(|p| p.members.first());
+            match member.filter(|_| any || python_based) {
                 Some(member) => Some(ReadOverride::BindsAny {
                     member: member.clone(),
                     class,
