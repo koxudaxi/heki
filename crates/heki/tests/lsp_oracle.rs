@@ -1279,6 +1279,9 @@ struct Step {
     /// `(function, parameters)`: the container parameters `heki inspect` says the function
     /// only reads after the step.
     only_reads: Option<(&'static str, &'static [&'static str])>,
+    /// `(function, parameter, kinds)`: the kinds of read `heki inspect` says reach the
+    /// parameter's object after the step.
+    reads: Option<(&'static str, &'static str, &'static [&'static str])>,
 }
 
 impl Step {
@@ -1291,6 +1294,7 @@ impl Step {
             cutoff: false,
             propagates: false,
             only_reads: None,
+            reads: None,
         }
     }
 
@@ -1316,6 +1320,16 @@ impl Step {
 
     fn only_reads(mut self, function: &'static str, params: &'static [&'static str]) -> Self {
         self.only_reads = Some((function, params));
+        self
+    }
+
+    fn reads(
+        mut self,
+        function: &'static str,
+        param: &'static str,
+        kinds: &'static [&'static str],
+    ) -> Self {
+        self.reads = Some((function, param, kinds));
         self
     }
 }
@@ -4938,6 +4952,8 @@ const READS_TOP: &str = "from pkg.reads.low import tally\n\n\ndef total(items: l
 /// diagnostic shows: a callee in another file starts changing its parameter, or keeping it,
 /// and the caller's fact goes after the save, in the server's index (it re-analyzes the
 /// caller's file) and in `heki inspect` alike; an edit that keeps the fact stops at the file.
+/// The kinds of read the callee makes (`EffectSummary::read_kinds`) follow the same way: it
+/// starts reading an item of its parameter, then measures it again.
 fn steps_only_read() -> Vec<Step> {
     let low = |body: &str| READS_LOW.replace("    return len(values)\n", body);
     vec![
@@ -4949,7 +4965,8 @@ fn steps_only_read() -> Vec<Step> {
                 Action::Create("pkg/reads/top.py", READS_TOP.to_owned()),
             ],
         )
-        .only_reads("pkg.reads.top.total", &["items"]),
+        .only_reads("pkg.reads.top.total", &["items"])
+        .reads("pkg.reads.top.total", "items", &["size and truth"]),
         Step::new(
             "the helper starts changing its parameter",
             vec![save(
@@ -4983,6 +5000,19 @@ fn steps_only_read() -> Vec<Step> {
         )
         .cutoff()
         .only_reads("pkg.reads.top.total", &["items"]),
+        Step::new(
+            "the helper starts reading an item of its parameter",
+            vec![save("pkg/reads/low.py", &low("    return values[0]\n"))],
+        )
+        .propagates()
+        .only_reads("pkg.reads.top.total", &["items"])
+        .reads("pkg.reads.top.total", "items", &["item access"]),
+        Step::new(
+            "the helper measures its parameter again",
+            vec![save("pkg/reads/low.py", READS_LOW)],
+        )
+        .propagates()
+        .reads("pkg.reads.top.total", "items", &["size and truth"]),
     ]
 }
 
@@ -6233,6 +6263,23 @@ impl Session {
             .into_iter()
             .map(|d| format!("step `{}`: {d}", step.name))
             .collect();
+        if let Some((function, param, expected)) = step.reads {
+            let (code, json, err) = self
+                .p
+                .heki(&["inspect", function, "--output-format", "json"]);
+            assert_eq!(code, 0, "step `{}`: {err}", step.name);
+            let report: Value = serde_json::from_str(&json).unwrap();
+            let kinds: Vec<&str> = (report["only_reads"]["reads"][param].as_array())
+                .map_or(Vec::new(), |k| {
+                    k.iter().map(|k| k.as_str().unwrap()).collect()
+                });
+            if kinds != expected {
+                out.push(format!(
+                    "step `{}`: `heki inspect {function}` reads {param} as {kinds:?}, not {expected:?}",
+                    step.name
+                ));
+            }
+        }
         if let Some((function, expected)) = step.only_reads {
             let (code, json, err) = self
                 .p

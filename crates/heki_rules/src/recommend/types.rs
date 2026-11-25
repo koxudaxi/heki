@@ -24,7 +24,8 @@ use heki_diagnostics::Diagnostic;
 use heki_effect::readonly::ContainerKind;
 use heki_effect::{
     AnnotationFacts, AnnotationReads, CallSite, DeclPasses, EffectSummary, FactChange, FuncKey,
-    LiteralAnnotation, ModuleDecls, OffsetMap, ParamAnnotation, ProjectDecls, Restated,
+    LiteralAnnotation, ModuleDecls, OffsetMap, ParamAnnotation, ProjectDecls, ReadOverride,
+    Restated,
 };
 use heki_ir::InstKind;
 use heki_semantic::ScopeId;
@@ -245,6 +246,42 @@ pub struct PremiseCount {
     pub not_listed: usize,
     /// The parameters in heuristic groups that leave it open.
     pub heuristic: usize,
+    /// The parameters not listed because of it by cause, the most first: the first 10 causes.
+    pub causes: Vec<CauseCount>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct CauseCount {
+    pub cause: String,
+    pub not_listed: usize,
+}
+
+/// How many causes a premise's count lists ([`PremiseCount::causes`]).
+const MAX_CAUSES: usize = 10;
+
+/// What [`PremiseCount`] counts of one premise, while the groups are found.
+#[derive(Debug, Default)]
+struct PremiseTally {
+    not_listed: usize,
+    heuristic: usize,
+    causes: FxHashMap<String, usize>,
+}
+
+impl PremiseTally {
+    fn finish(self, premise: String) -> PremiseCount {
+        let mut causes: Vec<CauseCount> = (self.causes.into_iter())
+            .map(|(cause, not_listed)| CauseCount { cause, not_listed })
+            .collect();
+        causes.sort_by(|a, b| (b.not_listed, &a.cause).cmp(&(a.not_listed, &b.cause)));
+        causes.truncate(MAX_CAUSES);
+        PremiseCount {
+            premise,
+            not_listed: self.not_listed,
+            heuristic: self.heuristic,
+            causes,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
@@ -422,8 +459,7 @@ pub fn suggest(
 struct Found {
     groups: Vec<Pending>,
     left_out: LeftOut,
-    /// Per premise: (not listed, heuristic) parameters.
-    by_premise: BTreeMap<usize, (usize, usize)>,
+    by_premise: BTreeMap<usize, PremiseTally>,
     type_checker: TypeChecker,
     reader_sites: ReaderSites,
     withheld: BTreeMap<&'static str, Vec<WithheldGroup>>,
@@ -502,11 +538,7 @@ impl Found {
                 .collect(),
             left_out: self.left_out,
             by_premise: (self.by_premise.into_iter())
-                .map(|(i, (not_listed, heuristic))| PremiseCount {
-                    premise: names(i),
-                    not_listed,
-                    heuristic,
-                })
+                .map(|(i, tally)| tally.finish(names(i)))
                 .collect(),
             type_checker: self.type_checker,
             reader_sites: self.reader_sites,
@@ -595,7 +627,7 @@ fn groups(cx: &Cx<'_>, current: &RuleSelection) -> Found {
     let values = value_uses(cx);
     let calls = Calls::of(cx.index);
     for (i, c) in candidates.iter().enumerate() {
-        unmet[i].extend(claim(c));
+        unmet[i].extend(claim(cx, c));
         unmet[i].extend(local_premises(cx, c, &values));
         let (edges, open, rel) = callees_take_it(cx, c, &at);
         for j in edges {
@@ -614,7 +646,7 @@ fn groups(cx: &Cx<'_>, current: &RuleSelection) -> Found {
     for i in 0..candidates.len() {
         members.entry(union.find(i)).or_default().push(i);
     }
-    let mut by_premise: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
+    let mut by_premise: BTreeMap<usize, PremiseTally> = BTreeMap::new();
     let mut pending = Vec::new();
     for items in members.into_values() {
         let first_drop = items
@@ -623,7 +655,9 @@ fn groups(cx: &Cx<'_>, current: &RuleSelection) -> Found {
             .filter(|u| u.drops)
             .min_by_key(|u| premise_index(u.premise));
         if let Some(u) = first_drop {
-            by_premise.entry(premise_index(u.premise)).or_default().0 += items.len();
+            let tally = by_premise.entry(premise_index(u.premise)).or_default();
+            tally.not_listed += items.len();
+            *tally.causes.entry(u.cause.clone()).or_default() += items.len();
             continue;
         }
         let mut open_premises: FxHashSet<usize> = FxHashSet::default();
@@ -631,7 +665,7 @@ fn groups(cx: &Cx<'_>, current: &RuleSelection) -> Found {
             open_premises.insert(premise_index(u.premise));
         }
         for p in &open_premises {
-            by_premise.entry(*p).or_default().1 += items.len();
+            by_premise.entry(*p).or_default().heuristic += items.len();
         }
         pending.push(group(
             cx,
@@ -656,8 +690,8 @@ fn groups(cx: &Cx<'_>, current: &RuleSelection) -> Found {
 }
 
 /// The claim's premises: only read here, and through every call (`MUT110`'s facts, one
-/// judgment with two readers).
-fn claim(c: &Candidate<'_>) -> Vec<Unmet> {
+/// judgment with two readers), each read the builtin's own (R2).
+fn claim(cx: &Cx<'_>, c: &Candidate<'_>) -> Vec<Unmet> {
     let unmet = |name, cause: &str| Unmet {
         premise: premise(name),
         drops: true,
@@ -679,7 +713,18 @@ fn claim(c: &Candidate<'_>) -> Vec<Unmet> {
             "it is kept, or handed to a call that may change or keep it",
         )];
     }
-    Vec::new()
+    let kinds = s.read_kinds_of(c.param);
+    match heki_effect::read_override(&cx.decls, c.lit.kind, kinds) {
+        Some(ReadOverride::Binds { class, method }) => vec![unmet(
+            "The builtin's own reads",
+            &format!("`{class}` binds `{method}`, which a read of it runs"),
+        )],
+        Some(ReadOverride::Metaclass { class }) => vec![unmet(
+            "The builtin's own reads",
+            &format!("a metaclass heki does not know creates `{class}`"),
+        )],
+        None => Vec::new(),
+    }
 }
 
 /// The premises decided by the function's own facts: abstract use, name bound once, whole

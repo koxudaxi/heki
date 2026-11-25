@@ -816,9 +816,9 @@ pub const UNNAMED: Premise = Premise {
 
 /// Every premise of the table, once.
 /// The premises of a `readonly-parameter` suggestion of `heki recommend`
-/// ([`crate::recommend::types`]), in order: the claim is the first three ("the function only
-/// reads the container bound to the parameter, and so does every function it hands it to"),
-/// the rest are the edit's. A suggestion is no report, so these rows are not in [`ALL`].
+/// ([`crate::recommend::types`]), in order: the claim is the first four ("the function only
+/// reads the container bound to the parameter, and so does every function it hands it to, with
+/// the builtin's own methods"), the rest are the edit's. A suggestion is no report, so these rows are not in [`ALL`].
 pub const READONLY_PARAMETER: &[&Premise] = &[
     &Premise {
         name: "Only read here",
@@ -834,6 +834,15 @@ pub const READONLY_PARAMETER: &[&Premise] = &[
         name: "Every call resolves and only reads",
         states: "each call it is handed to resolves to project functions whose parameter only reads it in every implementation, or to a library call Layer 1 lists as only reading that argument",
         decided_in: &["heki_effect::EffectSummary::only_read_params"],
+    },
+    &Premise {
+        name: "The builtin's own reads",
+        states: "no project class a value of the builtin may be (R2: one deriving, through project classes, from it or from a standard-library class deriving from it, such as OrderedDict) binds a method the reads of the object here and in its callees run: item access with __missing__, iteration, size and truth, membership, comparison, conversion to text, operators, the methods called by name, and what the [[invokes]] entry of a library call reading it names (every method without one); none is created by a metaclass heki does not know, and none defines __getattribute__ where a method is called by name; a class outside the project is taken to run what the builtin runs",
+        decided_in: &[
+            "heki_effect::EffectSummary::read_kinds",
+            "heki_effect::ProjectDecls::implementers",
+            "heki_effect::read_override",
+        ],
     },
     &Premise {
         name: "Literal container annotation",

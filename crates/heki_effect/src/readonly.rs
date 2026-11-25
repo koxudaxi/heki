@@ -514,6 +514,100 @@ pub fn returns_container_view(method: &str) -> bool {
     )
 }
 
+/// What a class of a container family is to the family's builtin ([`ContainerFamily`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FamilyRole {
+    /// The builtin itself, or its `typing` alias (`list`, `typing.List`).
+    Builtin,
+    /// A standard-library class deriving from the builtin (`collections.OrderedDict` is a
+    /// `dict`): under R2 a value of the builtin may be one, or an instance of a project class
+    /// deriving from one.
+    Derived,
+    /// The read-only ABC of the family (`Sequence`, `Mapping`, `collections.abc.Set`, and the
+    /// `typing` spellings).
+    ReadOnly,
+    /// The mutable ABC of the family (`MutableSequence`, `MutableMapping`, `MutableSet`).
+    Mutable,
+}
+
+/// One class of the container families of `list`, `dict`, and `set`, by the fqn an annotation
+/// or a base resolves to: the one table the readers of these classes share.
+#[derive(Debug, Clone, Copy)]
+pub struct ContainerFamily {
+    pub class: &'static str,
+    pub kind: ContainerKind,
+    pub role: FamilyRole,
+}
+
+impl ContainerFamily {
+    pub const TABLE: &[Self] = {
+        use ContainerKind::{Dict, List, Set};
+        use FamilyRole::{Builtin, Derived, Mutable, ReadOnly};
+        const fn row(
+            class: &'static str,
+            kind: ContainerKind,
+            role: FamilyRole,
+        ) -> ContainerFamily {
+            ContainerFamily { class, kind, role }
+        }
+        &[
+            row("builtins.list", List, Builtin),
+            row("builtins.dict", Dict, Builtin),
+            row("builtins.set", Set, Builtin),
+            row("typing.List", List, Builtin),
+            row("typing.Dict", Dict, Builtin),
+            row("typing.Set", Set, Builtin),
+            row("collections.OrderedDict", Dict, Derived),
+            row("collections.defaultdict", Dict, Derived),
+            row("collections.Counter", Dict, Derived),
+            row("typing.OrderedDict", Dict, Derived),
+            row("typing.DefaultDict", Dict, Derived),
+            row("typing.Counter", Dict, Derived),
+            row("typing.Sequence", List, ReadOnly),
+            row("typing.Mapping", Dict, ReadOnly),
+            row("typing.AbstractSet", Set, ReadOnly),
+            row("collections.abc.Sequence", List, ReadOnly),
+            row("collections.abc.Mapping", Dict, ReadOnly),
+            row("collections.abc.Set", Set, ReadOnly),
+            row("typing.MutableSequence", List, Mutable),
+            row("typing.MutableMapping", Dict, Mutable),
+            row("typing.MutableSet", Set, Mutable),
+            row("collections.abc.MutableSequence", List, Mutable),
+            row("collections.abc.MutableMapping", Dict, Mutable),
+            row("collections.abc.MutableSet", Set, Mutable),
+        ]
+    };
+
+    /// The row of the resolved class `class`.
+    pub fn of(class: &str) -> Option<&'static Self> {
+        Self::TABLE.iter().find(|r| r.class == class)
+    }
+
+    /// The role of `class` in its family, if it has one.
+    pub fn role_of(class: &str) -> Option<FamilyRole> {
+        Self::of(class).map(|r| r.role)
+    }
+
+    /// The classes of `kind`'s family with one of `roles`.
+    pub fn classes(
+        kind: ContainerKind,
+        roles: &'static [FamilyRole],
+    ) -> impl Iterator<Item = &'static str> {
+        (Self::TABLE.iter())
+            .filter(move |r| r.kind == kind && roles.contains(&r.role))
+            .map(|r| r.class)
+    }
+
+    /// The builtin whose methods a method called on a value of `class` is read as: the builtin's
+    /// own, its alias's, and its ABCs' (a `Mapping`'s `get` is a `dict`'s). A derived class may
+    /// add or change methods (`Counter.update` adds counts), so it has none.
+    pub fn read_as_builtin(class: &str) -> Option<ContainerKind> {
+        Self::of(class)
+            .filter(|r| r.role != FamilyRole::Derived)
+            .map(|r| r.kind)
+    }
+}
+
 /// A function whose results a `functools` cache keeps and hands to every later call with the
 /// same arguments (`MUT114`'s producer): decorated with `functools.cache`, or with
 /// `functools.lru_cache` whose `maxsize` is left out, `None`, or a literal number above 0,

@@ -352,14 +352,16 @@ fn the_trial_withholds_a_group_whose_edit_changes_what_heki_knows() {
     );
     let (report, _) = recommend(&p, &["--all"]);
     let withheld = withheld(&report);
-    // A `Mapping`'s `get` is not one heki knows to only read, as a `dict`'s is.
-    let changed = &withheld["app.core:lookup:table"];
-    assert!(changed.contains("only_read_params"), "{changed}");
+    // A `Mapping`'s `get` reads as a `dict`'s.
+    let lookup = withheld.get("app.core:lookup:table");
+    assert!(
+        lookup.is_none_or(|changed| !changed.contains("only_read_params")),
+        "{lookup:?}"
+    );
     // A slice of a `list` is a new list, one of a `Sequence` a value heki cannot tell: the call
     // it is handed to binds another argument.
     let sliced = &withheld["app.sliced:tail:rows"];
     assert!(sliced.contains("call_sites"), "{sliced}");
-    assert!(!groups(&report).contains_key("app.core:lookup:table"));
     let runs: Vec<&Value> = report["runs"]
         .as_array()
         .unwrap()
@@ -514,15 +516,18 @@ fn kept_and_withheld(report: &Value) -> (Vec<String>, BTreeMap<String, Vec<Strin
 
 #[test]
 fn one_group_changing_a_fact_withholds_it_alone_of_thirty_in_a_file() {
-    // The imports of two groups, `Sequence` and `Mapping`, go above the blank lines.
+    // The import of the groups, `Sequence`, goes above the blank lines.
     let mut source = "\n\n\n\n".to_owned();
     for i in 0..29 {
         source.push_str(&format!(
             "def f{i}(rows: list[int]) -> bool:\n    return {i} in rows\n\n\n"
         ));
     }
-    // A `Mapping`'s `get` is not one heki knows to only read, as a `dict`'s is.
-    source.push_str("def lookup(table: dict[str, int]) -> int:\n    return table.get(\"a\", 0)\n");
+    // A slice of a `Sequence` is a value heki cannot tell, handed to a call.
+    source.push_str(
+        "def helper(rows) -> int:\n    return 1\n\n\n\
+         def lookup(rows: list[int]) -> int:\n    return helper(rows[1:])\n",
+    );
     let p = Project::new("recommend_types_thirty");
     p.write("app/__init__.py", "").write("app/many.py", &source);
     let (report, _) = recommend(&p, &["--all"]);
@@ -536,7 +541,7 @@ fn one_group_changing_a_fact_withholds_it_alone_of_thirty_in_a_file() {
         withheld,
         BTreeMap::from([(
             "fact-would-change".to_owned(),
-            vec!["app.many:lookup:table".to_owned()]
+            vec!["app.many:lookup:rows".to_owned()]
         )])
     );
     let first = &groups(&report)["app.many:f0:rows"]["edits"][0];
@@ -656,13 +661,14 @@ fn a_group_over_two_files_is_kept_or_withheld_in_both() {
         .write(
             "app/a.py",
             "from app import b\n\n\ndef outer(rows: list[int]) -> bool:\n    return b.inner(rows)\n\n\n\
-             def outer_get(table: dict[str, int]) -> int:\n    return b.inner_get(table)\n\n\n\
+             def outer_cut(rows: list[int]) -> int:\n    return b.inner_cut(rows)\n\n\n\
              def alone(rows: list[int]) -> bool:\n    return 3 in rows\n",
         )
         .write(
             "app/b.py",
             "def inner(rows: list[int]) -> bool:\n    return 1 in rows\n\n\n\
-             def inner_get(table: dict[str, int]) -> int:\n    return table.get(\"a\", 0)\n",
+             def helper(rows) -> int:\n    return 1\n\n\n\
+             def inner_cut(rows: list[int]) -> int:\n    return helper(rows[1:])\n",
         );
     let (report, _) = recommend(&p, &["--all"]);
     let (exact, withheld) = kept_and_withheld(&report);
@@ -679,12 +685,12 @@ fn a_group_over_two_files_is_kept_or_withheld_in_both() {
         paths.contains(&"app/a.py") && paths.contains(&"app/b.py"),
         "{paths:?}"
     );
-    // `inner_get`'s change withholds the group in `a.py` too.
+    // `inner_cut`'s change withholds the group in `a.py` too.
     assert_eq!(
         withheld,
         BTreeMap::from([(
             "fact-would-change".to_owned(),
-            vec!["app.a:outer_get:table".to_owned()]
+            vec!["app.a:outer_cut:rows".to_owned()]
         )])
     );
 }
@@ -694,8 +700,9 @@ fn a_heuristic_group_changing_a_fact_leaves_the_exact_one_of_its_function() {
     let p = Project::new("recommend_types_phases");
     p.write("app/__init__.py", "").write(
         "app/core.py",
-        "def both(rows: list[int], names: list[str]) -> bool:\n    \
-         return 1 in rows and names.index(\"a\") > 0\n",
+        "def helper(names) -> bool:\n    return True\n\n\n\
+         def both(rows: list[int], names: list[str]) -> bool:\n    \
+         return 1 in rows and helper(names[1:])\n",
     );
     let (report, _) = recommend(&p, &["--all"]);
     let (exact, withheld) = kept_and_withheld(&report);
@@ -1006,13 +1013,14 @@ fn each_way_a_premise_stays_open_names_its_cause() {
             "def has(rows: list[int]) -> bool:\n    return 1 in rows\n",
         )
         .write(
-            "app/a_get.py",
-            "def inner_get(table: dict[str, int]) -> int:\n    return table.get(\"a\", 0)\n",
+            "app/a_cut.py",
+            "def helper(rows) -> int:\n    return 1\n\n\n\
+             def inner_cut(rows: list[int]) -> int:\n    return helper(rows[1:])\n",
         )
         .write(
             "app/z_call.py",
-            "from app import a_get\n\n\ndef outer_get(table: dict[str, int]) -> int:\n    \
-             return a_get.inner_get(table)\n",
+            "from app import a_cut\n\n\ndef outer_cut(rows: list[int]) -> int:\n    \
+             return a_cut.inner_cut(rows)\n",
         );
     let (report, _) = recommend(&p, &["--all"]);
     let found = groups(&report);
@@ -1107,7 +1115,7 @@ fn each_way_a_premise_stays_open_names_its_cause() {
     for id in [
         "app.own:has:rows",
         "app.shapes:Box.__init__:rows",
-        "app.a_get:inner_get:table",
+        "app.a_cut:inner_cut:rows",
     ] {
         assert!(withheld.contains_key(id), "{id}: {withheld:#?}");
     }
@@ -1132,11 +1140,15 @@ fn a_file_analyzed_four_times_in_a_phase_withholds_the_groups_it_has_left() {
         }
     };
     for j in 1..=5 {
-        let mut source = format!("from app import {}\n", next(j));
+        let mut source = format!(
+            "from app import {}\n\n\ndef helper(rows) -> bool:\n    return True\n",
+            next(j)
+        );
         for i in 1..=j {
             let call = format!("{}.f{i}(rows)", next(j));
+            // A slice of a `Sequence` is a value heki cannot tell, handed to a call.
             let body = if i == j {
-                format!("rows.index(0) > 0 and {call}")
+                format!("helper(rows[1:]) and {call}")
             } else {
                 call
             };
@@ -1163,4 +1175,292 @@ fn a_file_analyzed_four_times_in_a_phase_withholds_the_groups_it_has_left() {
             ("trial-limit".to_owned(), vec!["app.a5:f5:rows".to_owned()]),
         ])
     );
+}
+
+/// One method or operation of the read-only type on a parameter of each kind, and the same
+/// reads of parameters annotated with the ABCs themselves.
+const ABC_READS: &str = r#"from collections.abc import Mapping, Sequence, Set
+
+
+def s_index(rows: list[int]) -> int:
+    return rows.index(0)
+
+
+def s_count(rows: list[int]) -> int:
+    return rows.count(0)
+
+
+def s_len(rows: list[int]) -> int:
+    return len(rows)
+
+
+def s_iter(rows: list[int]) -> int:
+    return sum(r for r in rows)
+
+
+def s_in(rows: list[int]) -> bool:
+    return 0 in rows
+
+
+def m_get(table: dict[str, int]) -> int:
+    return table.get("a", 0)
+
+
+def m_keys(table: dict[str, int]) -> list[str]:
+    return sorted(table.keys())
+
+
+def m_items(table: dict[str, int]) -> int:
+    return len(table.items())
+
+
+def m_values(table: dict[str, int]) -> int:
+    return sum(table.values())
+
+
+def m_in(table: dict[str, int]) -> bool:
+    return "a" in table
+
+
+def t_disjoint(tags: set[str]) -> bool:
+    return tags.isdisjoint({"a"})
+
+
+def t_in(tags: set[str]) -> bool:
+    return "a" in tags
+
+
+def seq(rows: Sequence[int]) -> int:
+    return rows.index(0) + rows.count(0) + len(rows) + sum(r for r in rows)
+
+
+def mapping(table: Mapping[str, int]) -> int:
+    return table.get("a", 0) + sum(table.values()) + len(table.keys()) + ("a" in table)
+
+
+def tags(tags: Set[str]) -> bool:
+    return tags.isdisjoint({"a"}) and "a" in tags
+"#;
+
+/// `only_reads.reads` of `heki inspect <symbol>`.
+fn reads_of(p: &Project, symbol: &str) -> BTreeMap<String, Vec<String>> {
+    let (code, out, err) = p.heki(&["inspect", symbol, "--output-format", "json"]);
+    assert_eq!(code, 0, "{err}");
+    let report: Value = serde_json::from_str(&out).unwrap();
+    serde_json::from_value(report["only_reads"]["reads"].clone()).unwrap()
+}
+
+#[test]
+fn a_read_only_abc_method_reads_as_the_builtins() {
+    let p = Project::new("recommend_types_abc_reads");
+    p.write("app/__init__.py", "")
+        .write("app/reads.py", ABC_READS);
+    let (report, _) = recommend(&p, &["--all"]);
+    let found = groups(&report);
+    let withheld = withheld(&report);
+    // The edit leaves what each function only reads: its group is listed, or the trial withholds
+    // it for another fact.
+    for id in [
+        "s_index:rows",
+        "s_count:rows",
+        "s_len:rows",
+        "s_iter:rows",
+        "s_in:rows",
+        "m_get:table",
+        "m_keys:table",
+        "m_items:table",
+        "m_values:table",
+        "m_in:table",
+        "t_disjoint:tags",
+        "t_in:tags",
+    ] {
+        let id = format!("app.reads:{id}");
+        let changed = withheld.get(&id);
+        assert!(
+            found.contains_key(&id) || changed.is_some(),
+            "{id}: {report:#}"
+        );
+        assert!(
+            changed.is_none_or(|c| !c.contains("only_read_params")),
+            "{id}: {changed:?}"
+        );
+    }
+    for id in ["s_index:rows", "s_count:rows", "s_in:rows", "m_in:table"] {
+        let id = format!("app.reads:{id}");
+        assert_eq!(found[&id]["certainty"], "exact", "{id}");
+    }
+    // A parameter annotated with the ABC itself is only read, with the kinds of read of the
+    // builtin's methods.
+    let strs = |names: &[&str]| -> Vec<String> { names.iter().map(|n| (*n).to_owned()).collect() };
+    assert_eq!(
+        reads_of(&p, "app.reads.seq")["rows"],
+        strs(&[
+            "item access",
+            "iteration",
+            "size and truth",
+            "a method by name",
+            "index",
+            "count"
+        ])
+    );
+    assert_eq!(
+        reads_of(&p, "app.reads.mapping")["table"],
+        strs(&[
+            "item access",
+            "iteration",
+            "size and truth",
+            "membership",
+            "a method by name",
+            "keys",
+            "get",
+            "values"
+        ])
+    );
+    assert_eq!(
+        reads_of(&p, "app.reads.tags")["tags"],
+        strs(&["membership", "a method by name", "isdisjoint"])
+    );
+}
+
+/// Reads of a `dict` parameter, here and in an unannotated callee.
+const DICT_READS: &str = r#"def item(m: dict[str, int]) -> int:
+    return m["a"]
+
+
+def got(m: dict[str, int]) -> int:
+    return m.get("a", 0)
+
+
+def shown(m: dict[str, int]) -> str:
+    return f"{m}"
+
+
+def member(m: dict[str, int], k: str) -> bool:
+    return k in m
+
+
+def equal(m: dict[str, int]) -> bool:
+    return m == {}
+
+
+def outer(m: dict[str, int]) -> int:
+    return helper(m)
+
+
+def helper(x):
+    return x["a"]
+
+
+def outer_in(m: dict[str, int], k: str) -> bool:
+    return has(m, k)
+
+
+def has(x, k):
+    return k in x
+"#;
+
+/// The parameters of [`DICT_READS`] a project with `classes` lists or withholds, and the causes
+/// of "The builtin's own reads".
+fn own_reads(name: &str, classes: &str) -> (Vec<&'static str>, Vec<(String, u64)>) {
+    let p = Project::new(name);
+    p.write("app/__init__.py", "")
+        .write("app/reads.py", DICT_READS)
+        .write("app/sub.py", classes);
+    let (report, _) = recommend(&p, &["--all"]);
+    let found = groups(&report);
+    let withheld = withheld(&report);
+    let kept = [
+        "item", "got", "shown", "member", "equal", "outer", "outer_in",
+    ]
+    .into_iter()
+    .filter(|f| {
+        let id = format!("app.reads:{f}:m");
+        found.contains_key(&id) || withheld.contains_key(&id)
+    })
+    .collect();
+    let causes = (report["suggestions"]["by_premise"]
+        .as_array()
+        .unwrap()
+        .iter())
+    .filter(|r| r["premise"] == "The builtin's own reads")
+    .flat_map(|r| r["causes"].as_array().unwrap())
+    .map(|c| {
+        (
+            c["cause"].as_str().unwrap().to_owned(),
+            c["not_listed"].as_u64().unwrap(),
+        )
+    })
+    .collect();
+    (kept, causes)
+}
+
+#[test]
+fn a_project_subclass_that_binds_a_read_leaves_out_the_functions_running_it() {
+    let binds =
+        |class: &str, method: &str| format!("`{class}` binds `{method}`, which a read of it runs");
+    // A `dict` subclass binding `__getitem__` and `get`: an item read, here or in the callee it
+    // is handed to, and a `get`, run them; formatting, membership, and equality do not.
+    let (kept, causes) = own_reads(
+        "recommend_types_dict_subclass",
+        "class D(dict):\n    def __getitem__(self, k):\n        return 0\n\n    \
+         def get(self, k, default=None):\n        return 0\n",
+    );
+    assert_eq!(kept, ["shown", "member", "equal", "outer_in"]);
+    assert_eq!(
+        causes,
+        [
+            (binds("app.sub.D", "__getitem__"), 2),
+            (binds("app.sub.D", "get"), 1)
+        ]
+    );
+    // An `OrderedDict` subclass is a `dict`: its `__missing__` runs on an item read, its
+    // `__repr__` only where the function formats the object.
+    let (kept, causes) = own_reads(
+        "recommend_types_ordered_subclass",
+        "from collections import OrderedDict\n\n\nclass O(OrderedDict):\n    \
+         def __missing__(self, k):\n        self[k] = 0\n        return 0\n\n    \
+         def __repr__(self):\n        return \"O\"\n",
+    );
+    assert_eq!(kept, ["got", "member", "equal", "outer_in"]);
+    assert_eq!(
+        causes,
+        [
+            (binds("app.sub.O", "__missing__"), 2),
+            (binds("app.sub.O", "__repr__"), 1)
+        ]
+    );
+    // A `dict` whose `__contains__` stores an item: `k in m` was exact before R2 was asked.
+    let (kept, causes) = own_reads(
+        "recommend_types_storing_contains",
+        "class Cache(dict):\n    def __contains__(self, k):\n        self[k] = 1\n        \
+         return True\n",
+    );
+    assert_eq!(kept, ["item", "got", "shown", "equal", "outer"]);
+    assert_eq!(causes, [(binds("app.sub.Cache", "__contains__"), 2)]);
+    // A metaclass heki does not know may install any method.
+    let (kept, causes) = own_reads(
+        "recommend_types_dict_metaclass",
+        "class Meta(type):\n    pass\n\n\nclass M(dict, metaclass=Meta):\n    pass\n",
+    );
+    assert!(kept.is_empty(), "{kept:?}");
+    assert_eq!(
+        causes,
+        [(
+            "a metaclass heki does not know creates `app.sub.M`".to_owned(),
+            7
+        )]
+    );
+    // A value of a library class deriving from `dict` is taken to run what `dict` runs.
+    let (kept, causes) = own_reads(
+        "recommend_types_library_subclass",
+        "from lib import LibDict\n\nfrom app.reads import member\n\n\n\
+         def run() -> bool:\n    return member(LibDict(), \"a\")\n",
+    );
+    assert_eq!(
+        kept,
+        [
+            "item", "got", "shown", "member", "equal", "outer", "outer_in"
+        ]
+    );
+    assert!(causes.is_empty(), "{causes:?}");
 }

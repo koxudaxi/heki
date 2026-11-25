@@ -191,7 +191,7 @@ $ printf '%s\n' app.users.load_user 'app.orders.*' | heki inspect - --output-for
 | `effects` | the network, database, file, subprocess, sleep, and lock waits it reaches, and the clients and queries it creates, each with the shortest call chain |
 | `changes` | the parameters, `self` attributes, other objects' attributes, module globals, and closure cells it changes, directly or through calls, with the call chain to the change |
 | `retains` | the parameters it stores where they outlive the call |
-| `only_reads` | its parameters annotated with a mutable container (`list`, `dict`, `set`), those it and every function it hands them to only read (no change, no store, every call resolved), those whose uses the read-only type (`Sequence`, `Mapping`, `AbstractSet`) allows, and those whose name it binds once |
+| `only_reads` | its parameters annotated with a mutable container (`list`, `dict`, `set`), those it and every function it hands them to only read (no change, no store, every call resolved), those whose uses the read-only type (`Sequence`, `Mapping`, `AbstractSet`) allows, those whose name it binds once, and, by parameter it only reads, the kinds of read that reach the object here and in the functions it is handed to (`reads`) |
 | `returns` | whether its result is a new object, a parameter, or state that outlives the call |
 | `purity` | `pure`, `impure` with the reasons, or `unknown` with the reasons; whatever the verdict, the functions below it whose calls heki cannot resolve, nearest first, each with the call chain to it; and what the verdict assumes |
 | `callers` | who calls it, whether in a loop; with `--callers`, transitively |

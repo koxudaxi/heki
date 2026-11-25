@@ -46,6 +46,7 @@ pub mod one_at_a_time;
 mod only_read;
 pub use only_read::{
     AnnotationFacts, AnnotationReads, ContainerParams, LiteralAnnotation, ParamAnnotation,
+    ReadKinds, ReadOverride, read_override,
 };
 pub mod order_flow;
 pub mod ownership;
@@ -80,7 +81,8 @@ pub use ownership::{LocalOrigins, Origins, ResultOf, ReturnOrigins};
 pub use query::{CallerSite, Callers, CallsByCaller, ChangeChain, HandedChange, ParamChange};
 pub use readonly::container_mutator;
 pub use readonly::{
-    CacheDecorator, CachedResult, ContainerKind, ProtectedReturn, ReturnStep, Shared,
+    CacheDecorator, CachedResult, ContainerFamily, ContainerKind, FamilyRole, ProtectedReturn,
+    ReturnStep, Shared,
 };
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
@@ -1086,6 +1088,13 @@ pub struct EffectSummary {
     /// for a function without one, and while [`OptInFacts::only_read`] is off. A local fact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_params: Option<Box<ContainerParams>>,
+    /// The kinds of read that reach the object of each position ([`ReadKinds`]): the
+    /// function's own reads of a value that may be it or a view of it, joined with those of
+    /// every project function it hands the object to, as [`Self::only_read_params`] is (a
+    /// position outside it may have fewer). A position without one is absent. `None` without
+    /// any, and while [`OptInFacts::only_read`] is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_kinds: Option<Box<BTreeMap<u8, ReadKinds>>>,
     /// The function returns a new object that nothing else holds (`fresh-objects`).
     pub returns_new: ReturnsNew,
     /// `MUT112`: what the object the function returns may be, path by path: a new one, state
@@ -2840,8 +2849,9 @@ pub struct OptInFacts {
     pub fresh_returns: bool,
     /// [`OptInTables::imports`].
     pub imports: bool,
-    /// [`EffectSummary::only_read_params`] and [`EffectSummary::container_params`], which
-    /// `heki inspect` shows and the language server keeps current.
+    /// [`EffectSummary::only_read_params`], [`EffectSummary::read_kinds`], and
+    /// [`EffectSummary::container_params`], which `heki inspect` shows and the language server
+    /// keeps current.
     pub only_read: bool,
     /// What `heki recommend`'s read-only annotations read besides [`Self::only_read`]:
     /// [`OptInTables::annotation_facts`], and the references handing a project function on
