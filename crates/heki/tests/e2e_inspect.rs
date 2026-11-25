@@ -2844,6 +2844,15 @@ def default_then_copies(xs: list[int] | None = None) -> int:
     return len(xs.copy())
 
 
+MISSING: list[int] = []
+
+
+def default_after_sentinel(xs: list[int] = MISSING) -> int:
+    if xs is MISSING:
+        xs = []
+    return len(xs)
+
+
 def default_after_equality(xs: list[int] | None = None) -> int:
     if xs == None:
         xs = []
@@ -2941,6 +2950,7 @@ fn uses_the_read_only_type_allows_and_names_bound_once() {
         ("default_dict", all(&["d"]), all(&["d"])),
         ("default_set", all(&["s"]), all(&["s"])),
         ("default_then_copies", vec![], all(&["xs"])),
+        ("default_after_sentinel", all(&["xs"]), vec![]),
         ("default_after_equality", all(&["xs"]), vec![]),
         ("default_after_not", all(&["xs"]), vec![]),
         ("rebinds", all(&["xs"]), vec![]),
