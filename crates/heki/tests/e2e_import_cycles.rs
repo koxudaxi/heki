@@ -799,3 +799,92 @@ fn a_touched_run_judges_the_entry_of_a_group_it_shows() {
     assert_eq!(code, 0, "{err}");
     assert!(!err.contains(shrink), "{err}");
 }
+
+/// The packages `pkg` (`a` and `b` import each other, `c` imports `a`) and `other` (`c` and `d`
+/// import each other): two groups, `pkg.a, pkg.b` and `other.c, other.d`.
+fn two_groups(name: &str) -> Project {
+    let p = package(name, &[("a", &["b"]), ("b", &["a"])]);
+    p.write("other/__init__.py", "");
+    p.write(
+        "other/c.py",
+        "from other.d import f_d\n\n\ndef f_c() -> int:\n    return 1\n",
+    );
+    p.write(
+        "other/d.py",
+        "from other.c import f_c\n\n\ndef f_d() -> int:\n    return 1\n",
+    );
+    p
+}
+
+/// A run over part of the project that reports a group records it, and keeps the entries of
+/// the groups it does not cover.
+#[test]
+fn a_run_over_part_of_the_project_records_its_own_groups() {
+    let p = two_groups("import_cycles_baseline_part_records");
+    record(&p);
+    let both = group_entries(&["other.c, other.d", "pkg.a, pkg.b"]);
+    assert_eq!(p.read("b.toml"), both);
+    let (code, err) = ratchet(&p, &["pkg", "--update-baseline"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(p.read("b.toml"), both);
+}
+
+/// A run covering every file of a recorded group decides it: dropped when no group is left,
+/// replaced by the groups within it; the groups of other files stay.
+#[test]
+fn a_run_covering_a_group_drops_or_replaces_its_entry() {
+    let p = two_groups("import_cycles_baseline_part_decides");
+    p.write(
+        "b.toml",
+        &group_entries(&["other.c, other.d", "pkg.a, pkg.b, pkg.c"]),
+    );
+    modules(&p, &[("c", &["a"])]);
+    let (code, err) = ratchet(&p, &["pkg", "--update-baseline"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        p.read("b.toml"),
+        group_entries(&["other.c, other.d", "pkg.a, pkg.b"])
+    );
+    modules(&p, &[("a", &[]), ("b", &[])]);
+    let (code, err) = ratchet(&p, &["pkg", "--update-baseline"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(p.read("b.toml"), group_entries(&["other.c, other.d"]));
+}
+
+/// A group an entry is kept for that a run does not cover entirely is not dropped, and the part
+/// of it the run sees is not recorded beside it.
+#[test]
+fn a_group_with_a_file_the_run_does_not_cover_is_kept() {
+    let p = two_groups("import_cycles_baseline_part_kept");
+    p.write("b.toml", &group_entries(&["other.c, other.d, pkg.a, pkg.b"]));
+    modules(&p, &[("a", &[]), ("b", &[])]);
+    let (code, err) = ratchet(&p, &["pkg", "--update-baseline"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        p.read("b.toml"),
+        group_entries(&["other.c, other.d, pkg.a, pkg.b"])
+    );
+}
+
+/// `per-file-ignores` turning `IMP101` off on a file of a recorded group leaves the entry
+/// unjudged; one on none of its files is reported when it matches no group.
+#[test]
+fn a_group_is_unused_only_where_the_rule_runs_on_all_its_files() {
+    let p = two_groups("import_cycles_baseline_unused");
+    p.write(
+        "heki.toml",
+        "[lint]\nreport-unused-suppressions = true\nper-file-ignores = { \"pkg/**\" = [\"IMP101\"] }\n",
+    );
+    p.write("b.toml", &group_entries(&["other.c, other.d", "pkg.a, pkg.b"]));
+    let (code, err) = ratchet(&p, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!err.contains("matched no report"), "{err}");
+    p.write("other/d.py", "def f_d() -> int:\n    return 1\n");
+    let (code, err) = ratchet(&p, &[]);
+    assert_eq!(code, 1, "{err}");
+    assert!(
+        err.contains("baseline entry IMP101 `other.c, other.d` matched no report"),
+        "{err}"
+    );
+    assert!(!err.contains("`pkg.a, pkg.b` matched no report"), "{err}");
+}

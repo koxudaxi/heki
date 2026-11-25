@@ -2742,10 +2742,15 @@ its report shows and whichever function holds that import:
   renamed module is such a module.
 - An entry matches no report only when none of its modules is in a group.
 
-Since a group spans files, only a run over the whole project judges its entry, and
-`--update-baseline` over part of the project keeps it. An entry written by heki 0.4.0 or earlier
-names the file and function of the import its group was reported at; heki reads it as the entry
-of its group, and `--update-baseline` rewrites it.
+A group spans files, so a run decides its entry only when it covers every file of the group: then
+the entry is dropped when no group is left within it, or replaced by the groups there are. A run
+over part of the project keeps the entries of the other groups, and records every group it
+reports. An entry is reported as unused only when the run checked every file of its group and
+`IMP101` runs on every one of them (`per-file-ignores` turning it off on one file leaves it
+unjudged). An entry written by heki 0.4.0 or earlier names the file and function of the import its
+group was reported at; heki reads it as the entry of its group, and `--update-baseline` rewrites
+it. heki 0.4.0 and earlier cannot read a group entry written without them, so every heki that reads
+the baseline must be newer than 0.4.0 before a rewritten baseline is committed.
 
 ## pre-commit
 

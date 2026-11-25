@@ -808,7 +808,7 @@ fn report(
     let mut unused_entries = false;
     // A run over part of the project knows nothing of the other files' reports: it leaves their
     // entries as they are.
-    let covered = project.covered();
+    let covered = project.covers_entry();
     if let (Some(bp), Some(baseline)) = (&baseline_path, &recorded) {
         // An entry counts every report of its key, so the baseline compares all of them; a
         // `--touched` run judges only the entries in view. Every report is on a file the run
@@ -833,7 +833,7 @@ fn report(
             let checked = project.files.iter().map(|f| f.rel.as_str()).collect();
             let withheld = baseline_counts(&analyzed.withheld, &key_path, unit);
             let judged = (cmp.stale_entries.iter())
-                .filter(|e| covered(&e.key.path) && shown(&e.key, &e.within));
+                .filter(|e| covered(&e.key) && shown(&e.key, &e.within));
             for StaleEntry {
                 key,
                 allowed,
@@ -841,7 +841,8 @@ fn report(
                 within,
             } in judged
             {
-                if run.unused_entry(key, found + key.found_in(&withheld), &checked) {
+                let (files, _) = project.entry_files(key);
+                if run.unused_entry(key, found + key.found_in(&withheld), &files, &checked) {
                     log!(
                         fmt,
                         "error: baseline entry {key} matched no report (`--update-baseline` removes it)"
@@ -873,12 +874,13 @@ fn report(
             failure::print(fmt, &not_written("baseline", bp, project.errors.len()));
             return finish(fmt, &failure::of_files(&project.errors), ExitCode::SUCCESS);
         }
-        // A run over part of the project knows only part of a group: it keeps the entries of
-        // groups, which cover its own groups.
+        // A run decides the entries whose files it covers and keeps the others. A group it
+        // reports that a kept entry holds is that entry's: the entry may hold modules the run
+        // does not see, so it stays and the group is not counted beside it.
         let kept: Vec<(&BaselineKey, &u32)> = recorded
             .iter()
             .flat_map(|b| &b.counts)
-            .filter(|(key, _)| !covered(&key.path))
+            .filter(|(key, _)| !covered(key))
             .collect();
         let legacy_kept = !kept.is_empty()
             && recorded
@@ -905,8 +907,13 @@ fn report(
             refused_update = true;
         } else {
             let mut counts = current;
-            // The groups of a run over part of the project are held by the entries it keeps.
-            counts.retain(|key, _| covered(&key.path));
+            // A run records every group it reports, and the entries of the files it covers.
+            counts.retain(|key, _| {
+                if key.is_group() {
+                    return !kept.iter().any(|(entry, _)| entry.holds(key));
+                }
+                covered(key)
+            });
             counts.extend(kept.into_iter().map(|(key, count)| (key.clone(), *count)));
             let baseline = RatchetBaseline::from_counts(counts);
             baseline.save(bp)?;

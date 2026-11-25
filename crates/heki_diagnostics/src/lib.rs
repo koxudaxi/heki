@@ -722,8 +722,15 @@ impl BaselineKey {
     }
 
     /// The modules a group key's `target` lists.
-    fn members(&self) -> BTreeSet<&str> {
+    pub fn members(&self) -> BTreeSet<&str> {
         self.target.split(", ").collect()
+    }
+
+    /// Whether this group key, of the same rule, lists every module of the group key `other`.
+    pub fn holds(&self, other: &BaselineKey) -> bool {
+        self.is_group()
+            && self.rule_code == other.rule_code
+            && other.members().is_subset(&self.members())
     }
 
     /// The modules of this group key that none of the group keys `others` lists.
