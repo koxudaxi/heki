@@ -4793,6 +4793,83 @@ fn steps_attribute_types() -> Vec<Step> {
     ]
 }
 
+/// The receivers whose class the language or the standard library fixes: an instance's
+/// namespace is a dict while reading it runs no code of its class, a `NamedTuple` instance has
+/// `_replace`, and a `ContextVar[T]` gives a `T`, each decided by declarations in another module.
+fn steps_builtin_receivers() -> Vec<Step> {
+    const MODEL: &str = "from contextvars import ContextVar\nfrom typing import NamedTuple\n\n\nclass Holder:\n    def __init__(self) -> None:\n        self.required = False\n\n\nclass Memo:\n    def bump(self, h: Holder) -> None:\n        pass\n\n\nclass Spot(NamedTuple):\n    module: str\n\n\nMEMO: ContextVar[Memo] = ContextVar(\"memo\")\n";
+    const PEEK: &str = "from pkg.rcv_model import Holder\n\n\ndef peek(h: Holder) -> object:\n    return h.__dict__.get(\"x\")\n";
+    const MOVED: &str = "from pkg.rcv_model import Spot\n\n\ndef moved(s: Spot) -> Spot:\n    return s._replace(module=\"m\")\n";
+    const BUMPED: &str = "from pkg.rcv_model import MEMO, Holder\n\n\ndef bumped(h: Holder) -> None:\n    MEMO.get().bump(h)\n";
+    const ALL: &[(&str, &str)] = &[
+        ("pkg/rcv_peek.py", "EFF201"),
+        ("pkg/rcv_moved.py", "EFF201"),
+        ("pkg/rcv_bumped.py", "EFF201"),
+    ];
+    let boundary = format!(
+        "{CONFIG}\n[[tool.heki.effect-boundaries]]\nname = \"receivers\"\nscopes = [\"pkg.rcv_peek\", \"pkg.rcv_moved\", \"pkg.rcv_bumped\"]\nwrite-universe = [\"Holder.required\"]\nallow-writes = []\nunresolved = \"report\"\n"
+    );
+    vec![
+        Step::new(
+            "modules read an instance's namespace, copy a named tuple, and call what a context \
+             variable holds",
+            vec![
+                Action::Configure(boundary),
+                Action::Create("pkg/rcv_model.py", MODEL.to_owned()),
+                Action::Create("pkg/rcv_peek.py", PEEK.to_owned()),
+                Action::Create("pkg/rcv_moved.py", MOVED.to_owned()),
+                Action::Create("pkg/rcv_bumped.py", BUMPED.to_owned()),
+            ],
+        )
+        .absent(ALL),
+        Step::new(
+            "the class defines `__getattribute__`: reading its namespace may run code",
+            vec![save(
+                "pkg/rcv_model.py",
+                &MODEL.replace(
+                    "        self.required = False\n",
+                    "        self.required = False\n\n    def __getattribute__(self, name: str) -> object:\n        return object.__getattribute__(self, name)\n",
+                ),
+            )],
+        )
+        .present(&[("pkg/rcv_peek.py", "EFF201")])
+        .absent(&[("pkg/rcv_moved.py", "EFF201"), ("pkg/rcv_bumped.py", "EFF201")]),
+        Step::new(
+            "the named tuple becomes a plain class",
+            vec![save(
+                "pkg/rcv_model.py",
+                &MODEL.replace("class Spot(NamedTuple):", "class Spot:"),
+            )],
+        )
+        .present(&[("pkg/rcv_moved.py", "EFF201")])
+        .absent(&[("pkg/rcv_peek.py", "EFF201"), ("pkg/rcv_bumped.py", "EFF201")]),
+        Step::new(
+            "the context variable loses its type argument",
+            vec![save(
+                "pkg/rcv_model.py",
+                &MODEL.replace("MEMO: ContextVar[Memo] =", "MEMO ="),
+            )],
+        )
+        .present(&[("pkg/rcv_bumped.py", "EFF201")])
+        .absent(&[("pkg/rcv_peek.py", "EFF201"), ("pkg/rcv_moved.py", "EFF201")]),
+        Step::new(
+            "the declarations are as before",
+            vec![save("pkg/rcv_model.py", MODEL)],
+        )
+        .absent(ALL),
+        Step::new(
+            "the files and the boundary are removed",
+            vec![
+                Action::Delete("pkg/rcv_peek.py"),
+                Action::Delete("pkg/rcv_moved.py"),
+                Action::Delete("pkg/rcv_bumped.py"),
+                Action::Delete("pkg/rcv_model.py"),
+                Action::Configure(CONFIG.to_owned()),
+            ],
+        ),
+    ]
+}
+
 /// The initial index.
 fn steps_initial_index() -> Vec<Step> {
     vec![Step::new("initial index", Vec::new()).present(&[
@@ -6270,6 +6347,7 @@ sessions!(editing, Session::start, {
     eff115: steps_eff115,
     eff116: steps_eff116,
     attribute_types: steps_attribute_types,
+    builtin_receivers: steps_builtin_receivers,
     receiver_typing: steps_receiver_typing,
     effect_index: steps_effect_index,
     exact_effects: steps_exact_effects,

@@ -66,7 +66,9 @@ pub enum Args {
     Map(Box<Elem>, Box<Elem>),
     /// A tuple of known length, by position.
     Tuple(Vec<Elem>),
-    /// A future (`FUTURE_CLASSES`): what awaiting it, or its `result()`, gives.
+    /// The value the object holds: what awaiting a future (`FUTURE_CLASSES`) gives, and what
+    /// the methods the catalog says return it give (`returns_held`: a future's `result()`, a
+    /// context variable's `get()`).
     Result(Box<Elem>),
 }
 
@@ -79,7 +81,7 @@ pub enum Elem {
     Unknown,
 }
 
-/// What the arguments of a generic container class mean.
+/// What the type arguments of a generic class mean.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Generic {
     /// `C[T]`: iterating yields `T`.
@@ -92,10 +94,14 @@ pub(crate) enum Generic {
     Counter,
     /// `tuple[A, B]` / `tuple[T, ...]`.
     Tuple,
+    /// `C[T]`: the object holds one value of `T` ([`Args::Result`]).
+    Held,
 }
 
-/// Generic containers by the fqn an annotation resolves to (`typing.List` and the other
-/// aliases of builtins resolve to the builtin).
+/// Generic containers and holders by the fqn an annotation resolves to (`typing.List` and the
+/// other aliases of builtins resolve to the builtin). Annotations are read without the catalog,
+/// so the meaning of a class's arguments is kept here; what its methods return of them is the
+/// catalog's (`returns_held`).
 const GENERICS: &[(&str, Generic)] = &[
     ("builtins.list", Generic::Items),
     ("builtins.set", Generic::Items),
@@ -144,9 +150,10 @@ const GENERICS: &[(&str, Generic)] = &[
     ("collections.abc.AsyncGenerator", Generic::Items),
     ("collections.abc.Mapping", Generic::Map),
     ("collections.abc.MutableMapping", Generic::Map),
+    ("contextvars.ContextVar", Generic::Held),
 ];
 
-/// The generic container `class` is, if any.
+/// The generic container or holder `class` is, if any.
 pub(crate) fn generic(class: &str) -> Option<Generic> {
     GENERICS.iter().find(|(c, _)| *c == class).map(|(_, g)| *g)
 }

@@ -3185,12 +3185,16 @@ impl<'a> Extractor<'a> {
             .collect();
         let lives = live.iter().filter(|l| **l).count();
         specials.iter().enumerate().any(|(own, s)| {
+            // An object's `__dict__` holds the names of its attributes, strings: looking a key up
+            // in it compares the key with strings, whose comparison runs only the key's own
+            // methods (the key's operand).
+            let keyed = s.keyed && !self.dict_of.contains_key(&s.value);
             invokes::special_methods_run_project_code(
                 self.cx.project,
                 self.cx.kb,
                 &operands[own],
                 lives == usize::from(live[own]),
-                s,
+                &heki_ir::SpecialMethods { keyed, ..*s },
             )
         })
     }
@@ -3349,22 +3353,9 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// Whether `obj.__dict__` reads the instance's own namespace, running no code: `obj` is an
-    /// instance whose every class may be reads the attribute plainly
-    /// ([`invokes::attribute_access_runs_project_code`]).
+    /// [`invokes::reads_own_namespace`] of `obj`.
     fn reads_own_namespace(&self, obj: VarId) -> bool {
-        let val = self.types.get(&obj);
-        matches!(val, Some(Val::Inst(_) | Val::Union(_)))
-            && !invokes::attribute_access_runs_project_code(
-                self.cx.project,
-                self.cx.kb,
-                &invokes::Handed {
-                    val,
-                    ..invokes::Handed::default()
-                },
-                "__dict__",
-                invokes::AttrAccess::Read,
-            )
+        invokes::reads_own_namespace(self.cx.project, self.cx.kb, self.types.get(&obj))
     }
 
     /// What the function establishes of the class of the value `v` holds ([`Built`]).
@@ -3442,9 +3433,12 @@ impl<'a> Extractor<'a> {
                     InstKind::AllocBuiltin { .. } | InstKind::DictLiteral { .. } => {
                         set(dst, BuiltRule::Is(Built::Exact), none);
                     }
-                    // An instance's own namespace, read without running code, is a builtin dict.
-                    InstKind::AttrLoad { obj, attr, .. }
-                        if attr == "__dict__" && self.reads_own_namespace(*obj) =>
+                    // An instance's own namespace (`obj.__dict__`, `vars(obj)`), read without
+                    // running code, is a builtin dict.
+                    kind @ (InstKind::AttrLoad { .. } | InstKind::Call { .. })
+                        if self
+                            .namespace_load(kind)
+                            .is_some_and(|(_, obj)| self.reads_own_namespace(obj)) =>
                     {
                         set(dst, BuiltRule::Is(Built::Exact), none);
                     }
