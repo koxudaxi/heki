@@ -949,7 +949,8 @@ fn takes_readonly(
 }
 
 /// Premise 8, "Whole family", for a method: the same parameter of every definition of its
-/// override family ([`family`]) is a candidate of the same kind, which joins the group, or already admits the
+/// override family ([`family`]) is a candidate of the same kind, which joins the group, or already
+/// admits the
 /// read-only type; the classes have no base outside the project but `object`, unless the
 /// method is a constructor; a body that states nothing needs a family member that does.
 fn whole_family(
@@ -1417,7 +1418,8 @@ impl Naming {
 /// type in the module is reused when it is made before the annotation is evaluated (an import
 /// above the `def`; one under `if TYPE_CHECKING:` or below it too when the module's annotations
 /// are not evaluated at run time); otherwise the edit imports it from `collections.abc`,
-/// unless the module binds the name already (below the `def`, or to something else). `binder` names what binds a name where
+/// unless the module binds the name already (below the `def`, or to something else). `binder` names
+/// what binds a name where
 /// the annotation reads it besides the module's own bindings (a class body for a method, a star
 /// import): no name it binds is written. `bound_above` tells whether the module's imports of a
 /// name bind it before the annotation is evaluated.
@@ -2300,7 +2302,8 @@ fn attribute_reports(
 }
 
 /// The reports of a file that differ between the discovery run (`now`) and the trial (`then`),
-/// compared by rule, certainty, severity, function, target, places, message, and sites: the places of
+/// compared by rule, certainty, severity, function, target, places, message, and sites: the places
+/// of
 /// an edited file at their offsets in the original (`maps`), the numbers of the messages aside
 /// (rules print lines). `lines` are the file's, as it is.
 fn changed_reports<'m>(

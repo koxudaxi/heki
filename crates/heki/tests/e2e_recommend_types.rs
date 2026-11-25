@@ -1247,6 +1247,9 @@ fn a_type_checker_is_found_by_its_own_table() {
     assert_eq!(found(&p), Value::Null);
     p.write("setup.cfg", "[mypy]\nstrict = True\n");
     assert_eq!(found(&p), "mypy");
+    // A checker's own file counts whatever it holds.
+    p.write("setup.cfg", "").write("ty.toml", "");
+    assert_eq!(found(&p), "ty");
 }
 
 #[test]
