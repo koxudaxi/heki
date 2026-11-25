@@ -79,6 +79,8 @@ pub struct RuntimeProfile {
     pub pep649_deferred_annotations: bool,
     /// PEP 810 (3.15+): explicit `lazy import` / `lazy from ... import ...`.
     pub pep810_lazy_imports: bool,
+    /// PEP 661 (3.15+): the builtin `sentinel`, whose objects `copy.copy` and `copy.deepcopy` keep.
+    pub pep661_builtin_sentinel: bool,
 }
 
 impl From<PythonVersion> for RuntimeProfile {
@@ -88,6 +90,7 @@ impl From<PythonVersion> for RuntimeProfile {
             pep709_inlined_comprehensions: v >= PythonVersion::PY312,
             pep649_deferred_annotations: v >= PythonVersion::PY314,
             pep810_lazy_imports: v >= PythonVersion::PY315,
+            pep661_builtin_sentinel: v >= PythonVersion::PY315,
         }
     }
 }

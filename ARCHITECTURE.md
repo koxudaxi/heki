@@ -209,6 +209,9 @@ Automatic rewrites (family 3, `OPT`) are judged on two orthogonal axes: **behavi
 - The size-dependent rules are opt-in (ADR-018, decision 13 as amended). A `safe` but
   `size-dependent` fix is a **suggestion proven to preserve behavior**, applied only with
   `--include-size-dependent`, which also runs the rules that offer one.
+- An unsafe fix changes what the program does in a way its rule page states, and applies only
+  with `--unsafe-fixes`: `MUT118` replaces an `object()` sentinel with `sentinel("NAME")` for a
+  Python 3.15 target, whose type, repr, and pickling differ.
 - Measured: the default `heki check --fix` applies very rarely (about 20 provable cases in 13.2
   million lines of mature code, 1 in 6.5 million lines of new code, 0 in datamodel-code-
   generator's 196,000 lines). heki's everyday CI value is in **family 1 (mutation, state, and

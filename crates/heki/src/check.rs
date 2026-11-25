@@ -183,11 +183,13 @@ fn analyze(
 
 /// Whether `--fix` / `--diff` applies this diagnostic's fix: `safe` + `unconditional` rules
 /// (`OPT101` / `OPT102`) and reports on suppression comments always; `size-dependent` ones with
-/// `--include-size-dependent`.
+/// `--include-size-dependent`, and unsafe ones (`MUT118`) with `--unsafe-fixes`.
 fn applicable(d: &Diagnostic, args: &CheckArgs) -> bool {
+    let rule = find_rule(&d.rule_code);
     d.fix.is_some()
         && (fixes_unconditionally(d)
-            || find_rule(&d.rule_code).is_some() && args.include_size_dependent)
+            || rule.is_some_and(|r| r.size_dependent_fix) && args.include_size_dependent
+            || rule.is_some_and(|r| r.unsafe_fix) && args.unsafe_fixes)
 }
 
 /// Fix passes before `--fix` / `--diff` stop (each pass re-proves every candidate on the text

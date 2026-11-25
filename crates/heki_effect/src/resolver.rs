@@ -48,6 +48,7 @@ pub(crate) mod stores;
 mod workspace;
 
 pub use returns::{CallItems, NoItems, ReturnFact, ReturnedItems};
+pub use sentinels::object_sentinel_calls;
 
 /// The derived indexes of a [`ProjectDecls`] version (`ProjectDecls::index_changes`).
 struct Indexes {

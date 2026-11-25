@@ -5,8 +5,9 @@
 //!   `Diagnostic.related` →
 //!   `DiagnosticRelatedInformation` (every call-chain hop), then `Diagnostic.help` as one more
 //!   entry at the diagnostic's own range (`help: ...`), as rust-analyzer shows a `help:` child.
-//! - `Diagnostic.fix` of `safe` + `unconditional` rules → `quickfix`; size-dependent `OPT`
-//!   suggestions → `refactor.rewrite.heki`; a fix whose result would not parse is withheld.
+//! - `Diagnostic.fix` of `safe` + `unconditional` rules → preferred `quickfix`; an unsafe fix
+//!   (`MUT118`) → `quickfix` that is not preferred; size-dependent `OPT` suggestions →
+//!   `refactor.rewrite.heki`; a fix whose result would not parse is withheld.
 //! - Every diagnostic → a `quickfix` appending `# heki: ignore[CODE]` to its line, unless no
 //!   comment fits there (the line ends inside a string or with a `\` continuation).
 
@@ -184,6 +185,8 @@ pub fn code_actions(
         let on_suppression = is_suppression_report(&d.rule_code);
         if let Some(fix) = d.fix.as_ref().filter(|fix| applies_cleanly(text, fix)) {
             let unconditional = fixes_unconditionally(d);
+            let unsafe_fix =
+                !unconditional && find_rule(&d.rule_code).is_some_and(|r| r.unsafe_fix);
             let edits = fix
                 .iter()
                 .map(|e| TextEdit {
@@ -200,13 +203,15 @@ pub fn code_actions(
                     title
                 } else if unconditional {
                     format!("Apply the safe {} fix", d.rule_code)
+                } else if unsafe_fix {
+                    format!("Apply the unsafe {} fix", d.rule_code)
                 } else {
                     format!(
                         "Apply the proven-safe {} rewrite (size-dependent)",
                         d.rule_code
                     )
                 },
-                kind: Some(if unconditional {
+                kind: Some(if unconditional || unsafe_fix {
                     CodeActionKind::QUICKFIX
                 } else {
                     CodeActionKind::new(REWRITE_KIND)
