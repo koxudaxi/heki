@@ -1556,7 +1556,10 @@ fn a_subclass_writing_through_its_own_receiver_is_of_the_class_family() {
     }
     // With the block, nothing is reported; without `own-receiver`, the subclasses' writes are.
     let block = report["config_toml"].as_str().unwrap();
-    p.write("pyproject.toml", &applied("[project]\nname = \"t\"\n", block));
+    p.write(
+        "pyproject.toml",
+        &applied("[project]\nname = \"t\"\n", block),
+    );
     let reports = |p: &Project| -> Vec<(String, String)> {
         (checked(p, &[]).iter())
             .filter(|d| ["MUT201", "MUT203"].contains(&d["rule_code"].as_str().unwrap()))
@@ -1614,7 +1617,12 @@ fn a_class_pattern_hiding_a_report_of_a_configured_contract_is_refused() {
     );
     let reported_now = |p: &Project| -> Vec<(String, u64)> {
         (checked(p, &["--select", "MUT201"]).iter())
-            .map(|d| (d["path"].as_str().unwrap().to_owned(), d["line"].as_u64().unwrap()))
+            .map(|d| {
+                (
+                    d["path"].as_str().unwrap().to_owned(),
+                    d["line"].as_u64().unwrap(),
+                )
+            })
             .collect()
     };
     assert_eq!(reported_now(&p), [("app/store.py".to_owned(), 9)]);
