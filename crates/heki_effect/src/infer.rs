@@ -11,7 +11,8 @@
 //! closure cell the function binds later.
 //!
 //! Types come from parameter, local, attribute, and return annotations (with the arguments of
-//! generic containers), constructors, constants, imports, and `type(obj)`; they flow through
+//! generic containers and holders), constructors, constants, imports, `type(obj)`, and an
+//! instance's own namespace (`obj.__dict__`, `vars(obj)`); they flow through
 //! copies, the augmented assignments that change a built-in container in place (`xs += ys`
 //! gives `xs`), attributes, calls, and the items of containers: iteration, subscripts,
 //! unpacking, `dict` views and `get` / `pop`, the builtins that wrap an iterable (`enumerate`,
@@ -27,6 +28,7 @@
 //! await gives a coroutine's result, or a future's where the call making it hands back what a
 //! callable returns: `await asyncio.to_thread(f, x)` gives what `f(x)` does.
 
+use crate::invokes;
 use crate::ownership::CASTS;
 use crate::partial::Partial;
 use crate::resolver::stores::Read;
@@ -902,8 +904,6 @@ struct Engine<'e, 'a> {
     declared: FxHashMap<VarId, Ty>,
     /// Integer constants, with the span of their literal.
     ints: FxHashMap<VarId, (i64, Span)>,
-    /// String constants (the annotations `typing.cast` takes as text).
-    strs: FxHashMap<VarId, String>,
     /// How many targets the unpacking assignments of each variable have (`a, b = pair`).
     unpacked: FxHashMap<VarId, usize>,
     /// Container displays built in the function (`[]`, `{}`, `set()` is a call), by kind.
@@ -1036,7 +1036,6 @@ impl<'e, 'a> Engine<'e, 'a> {
             names: FxHashMap::default(),
             declared: FxHashMap::default(),
             ints: FxHashMap::default(),
-            strs: FxHashMap::default(),
             unpacked: FxHashMap::default(),
             displays: FxHashMap::default(),
             kept_displays: FxHashMap::default(),
@@ -1176,12 +1175,6 @@ impl<'e, 'a> Engine<'e, 'a> {
                     literal: ConstLiteral::Int(n),
                 } => {
                     self.ints.insert(*dst, (*n, inst.span));
-                }
-                InstKind::Const {
-                    dst,
-                    literal: ConstLiteral::Str(text),
-                } => {
-                    self.strs.insert(*dst, text.clone());
                 }
                 InstKind::AllocBuiltin { dst, kind, .. } => {
                     self.displays.insert(*dst, *kind);
@@ -1650,6 +1643,9 @@ impl<'e, 'a> Engine<'e, 'a> {
 
     fn step(&self, inst: &Inst) -> Step {
         let cx = self.cx;
+        if let Some(namespace) = self.namespace(&inst.kind) {
+            return namespace;
+        }
         Ok(match &inst.kind {
             InstKind::Const {
                 literal: ConstLiteral::None,
@@ -1897,6 +1893,14 @@ impl<'e, 'a> Engine<'e, 'a> {
         let container = self.need(obj)?;
         if !is_slice && let Some(item) = self.table_item(obj, index) {
             return Ok(item);
+        }
+        // A builtin container class subscripted with types (`frozenset[str]`) is an alias of the
+        // class: calling it constructs the class, and its attributes are the class's.
+        if !is_slice
+            && let Some(Ty::Ref(class)) = container
+            && crate::types::runtime_generic(class)
+        {
+            return Ok(Some(Ty::Ref(class.clone())));
         }
         let Some(o) = container.and_then(Ty::obj) else {
             return Ok(None);
@@ -2339,11 +2343,39 @@ impl<'e, 'a> Engine<'e, 'a> {
             return self.call_named("builtins.object.__new__", call);
         }
         if let Some(o) = r.and_then(Ty::obj)
-            && let Some(item) = self.container_method(o, method, args)
+            && let Some(item) = self
+                .container_method(o, method, args)
+                .or_else(|| self.held_value(o, method, call))
         {
             return item_ty(item);
         }
         Ok(r.and_then(|recv| self.member_call(recv, method, call)))
+    }
+
+    /// What calling `method` on `o`, a holder whose value its type argument names
+    /// ([`Args::Result`]), returns when the catalog says the method returns that value
+    /// ([`heki_kb::HeldValue`]): the value, or the default the call passes instead.
+    fn held_value(&self, o: &Obj, method: &str, call: Passed<'_>) -> Option<Elem> {
+        let Args::Result(held) = &o.args else {
+            return None;
+        };
+        let cx = self.cx;
+        let Callee::External(symbol) = cx.project.method_targets(&o.class, method, false, cx.kb)
+        else {
+            return None;
+        };
+        let returns = cx.catalog(&symbol)?.returns_held?;
+        let Some(at) = returns.default.map(usize::from) else {
+            return Some((**held).clone());
+        };
+        // A `*` argument may pass the default.
+        if call.star_from.is_some_and(|s| usize::from(s) <= at) {
+            return Some(Elem::Unknown);
+        }
+        Some(match call.args.get(at) {
+            Some(default) => held.join(&self.fact(*default).elem()),
+            None => (**held).clone(),
+        })
     }
 
     /// The class the static type of a member of `recv` comes from, whether the lookup starts
@@ -2364,6 +2396,25 @@ impl<'e, 'a> Engine<'e, 'a> {
             | Ty::Union(_)
             | Ty::OneOf(_) => None,
         }
+    }
+
+    /// The type of an instance's own namespace loaded by `kind` (`obj.__dict__`, `vars(obj)`:
+    /// [`resolver::namespace_load`]) when reading it runs no code
+    /// ([`invokes::reads_own_namespace`]): a builtin `dict`, of keys and values of any class.
+    /// `None` for any other instruction, and for a load whose read may run code, which is typed
+    /// as the attribute read or the call it is.
+    fn namespace(&self, kind: &InstKind) -> Option<Step> {
+        let called = OnceCell::new();
+        let (_, obj) = resolver::namespace_load(kind, |f| {
+            let held = self.need(f).ok().flatten().and_then(Ty::val)?;
+            Some(called.get_or_init(|| held))
+        })?;
+        let obj = match self.need(obj) {
+            Ok(t) => t.and_then(Ty::val),
+            Err(pending) => return Some(Err(pending)),
+        };
+        invokes::reads_own_namespace(self.cx.project, self.cx.kb, obj.as_ref())
+            .then(|| Ok(Some(Ty::inst("builtins.dict"))))
     }
 
     /// The value of the module global `name` read inside this module (no value yet while the
@@ -2511,25 +2562,31 @@ impl<'e, 'a> Engine<'e, 'a> {
         }
     }
 
-    /// The type the type expression in `var` names (`typing.cast`'s first argument): a string
-    /// annotation, or a class object.
+    /// The type the type expression in `var` names (`typing.cast`'s first argument): what its
+    /// text names as an annotation (a string, `list[Model]`, `Model | None`, an alias), or else
+    /// a class object (`Exception`, a local bound to a class). A subscript whose text names
+    /// nothing (`list[kind]`) names no type, though it is an alias of its class.
     fn type_form(&self, var: VarId) -> Option<Ty> {
         let cx = self.cx;
-        match self.strs.get(&var) {
-            Some(text) => cx
-                .module
-                .resolve_annotation_ty(text)
-                .and_then(|t| cx.project.declared_ty(&t))
-                .and_then(|t| t.bind_self(self.self_ty.as_ref())),
-            None => match self.fact(var) {
-                Fact::Known(Ty::Ref(class) | Ty::Class(class)) => Some(Ty::inst(class)),
-                _ => None,
-            },
+        let named = resolver::type_expression_text(self.shape, var)
+            .and_then(|text| cx.module.resolve_annotation_ty(&text))
+            .and_then(|t| cx.project.declared_ty(&t))
+            .and_then(|t| t.bind_self(self.self_ty.as_ref()));
+        if named.is_some() {
+            return named;
+        }
+        let subscript = self.shape.inst(self.shape.copy_root(var));
+        if subscript.is_some_and(|i| matches!(i.kind, InstKind::SubscriptLoad { .. })) {
+            return None;
+        }
+        match self.fact(var) {
+            Fact::Known(Ty::Ref(class) | Ty::Class(class)) => Some(Ty::inst(class)),
+            _ => None,
         }
     }
 
     /// What a method of a container with known arguments returns: the views and values of a
-    /// mapping, the item `pop` removes, and the result of a future.
+    /// mapping, and the item `pop` removes.
     fn container_method(&self, o: &Obj, method: &str, args: &[VarId]) -> Option<Elem> {
         let view = |class: &str, item: Elem| Elem::Of(Ty::container(class, Args::items(item)));
         // A `None` default adds nothing.
@@ -2546,7 +2603,6 @@ impl<'e, 'a> Engine<'e, 'a> {
             (Args::Map(_, v), "get" | "pop" | "setdefault") => or_default(v),
             (Args::Map(k, v), "popitem") => pair((**k).clone(), (**v).clone()),
             (Args::Items(e), "pop") => (**e).clone(),
-            (Args::Result(r), "result") => (**r).clone(),
             _ => return None,
         })
     }

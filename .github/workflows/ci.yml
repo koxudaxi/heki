@@ -421,6 +421,8 @@ jobs:
         run: python tests/import_verify/verify_imports.py --heki target/debug/heki tests/import_verify/fixtures/
       - name: Layer 1 knowledge base sentinels
         run: python tests/sentinel/verify_soundness_kb.py
+      - name: Standard library catalog sentinels
+        run: python tests/sentinel/verify_stdlib_kb.py
       - name: Adversarial counterexamples
         run: python tests/difftest/counterexamples.py
       - name: Counterexamples of the Soundness rewrites, end to end

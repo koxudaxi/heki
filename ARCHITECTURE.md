@@ -643,7 +643,9 @@ not part of `heki_soundness` (ADR-004).)*
    must make a counterexample reappear.
 3. **Layer 1 sentinel verification**: sentinel objects with weak references, change detectors,
    and custom special methods check that the knowledge base (`retained_in_return` included)
-   matches real CPython (`tests/sentinel/verify_soundness_kb.py`).
+   matches real CPython (`tests/sentinel/verify_soundness_kb.py`); the Layer 2 rows of the
+   standard library that type a value are checked the same way (`verify_stdlib_kb.py`), and those
+   of the distributions against their releases (`verify_ecosystem_kb.py`).
 4. **Regression tests and dogfooding for families 1 and 2**: the edge cases from Stage 0-A and
    datamodel-code-generator (`in_thread` wrappers, sync-over-async, two-phase initialization,
    memo dicts, disjoint dict keys, `for.iter`, awaited calls, `subprocess.Popen`, DDL, the
@@ -684,7 +686,7 @@ heki/
 └── tests/
     ├── symtable_verify/        # heki_semantic vs the CPython symtable, both ways
     ├── difftest/               # adversarial differential tests (S1–S28 and {**other, **d})
-    ├── sentinel/               # Layer 1 knowledge base sentinels
+    ├── sentinel/               # knowledge base sentinels (Layer 1, Layer 2 rows)
     ├── semantic/               # family 1 and family 2 regression and noise fixtures
     └── corpus/                 # syntax tour files for the frontend
 ```

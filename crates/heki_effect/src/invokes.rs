@@ -356,19 +356,19 @@ pub(crate) fn attribute_access_runs_project_code(
     if h.built {
         return false;
     }
-    let reads_plainly = |class: &str| {
-        if OBJECT_ATTRS.contains(&attr) {
-            let read = project.attr_read(class, attr);
-            read.bases_known && read.binders.is_empty() && !read.runs_hook(false)
-        } else {
-            project.plain_attr(class, attr) || project.method_read_runs_no_code(class, attr)
-        }
-    };
     // A base outside the project whose `__setattr__` the catalog says stores on the instance
-    // (R3: `pydantic.BaseModel`).
+    // (R3: `pydantic.BaseModel`), which defines no `__getattribute__` and keeps the instance's
+    // attributes in its own `__dict__`.
     let catalog_stores = |base: &str| {
         kb.lookup(&format!("{base}.__setattr__"))
             .is_some_and(|e| e.stores_on_instance)
+    };
+    let reads_plainly = |class: &str| {
+        if OBJECT_ATTRS.contains(&attr) {
+            project.object_attr_read_runs_no_code(class, attr, catalog_stores)
+        } else {
+            project.plain_attr(class, attr) || project.method_read_runs_no_code(class, attr)
+        }
     };
     let instance = |class: &str| {
         if !project.is_project_class(class) {
@@ -396,6 +396,28 @@ pub(crate) fn attribute_access_runs_project_code(
         Some(Val::Class(_) | Val::Ref(_)) => false,
         Some(Val::Super(_) | Val::OneOf(_)) | None => true,
     }
+}
+
+/// Whether `obj.__dict__` (and `vars(obj)`, which returns it) reads the instance's own
+/// namespace, a builtin `dict`, running no code: `val`, what `obj` holds, is an instance whose
+/// every class may be reads the attribute plainly ([`attribute_access_runs_project_code`]). A
+/// class object's is a read-only proxy instead, and a value of unknown class may give anything.
+pub(crate) fn reads_own_namespace(
+    project: &ProjectDecls,
+    kb: &EffectiveEcosystemKb,
+    val: Option<&Val>,
+) -> bool {
+    matches!(val, Some(Val::Inst(_) | Val::Union(_)))
+        && !attribute_access_runs_project_code(
+            project,
+            kb,
+            &Handed {
+                val,
+                ..Handed::default()
+            },
+            "__dict__",
+            AttrAccess::Read,
+        )
 }
 
 /// Whether iterating `h` runs only its builtin class's own iteration: a builtin container,

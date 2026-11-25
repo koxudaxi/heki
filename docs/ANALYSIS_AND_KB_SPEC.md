@@ -377,6 +377,19 @@ A module global the module body binds to a value of known type, and an instance 
 the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores`,
 `resolver::stores`).
 
+Some receivers have the class the language or the standard library gives them. An instance's
+own namespace (`obj.__dict__`, or `vars(obj)` of the builtin: `resolver::namespace_load`) is a
+builtin `dict`, of keys and values of any class, where reading it runs no code of the classes the
+instance may be (`invokes::reads_own_namespace`: no class defines `__getattribute__` or binds
+`__dict__`, and every base outside the project is a plain one or one whose `__setattr__` the
+catalog says stores on the instance, `pydantic.BaseModel`); a class object's namespace is a
+read-only proxy, which stays untyped. Its methods are then those of `dict`, and the entries it
+reads, stores, or removes stay reads and writes of the instance's attributes. The members a
+`NamedTuple` class takes from its base, and what the methods of a holder give of the value its
+type argument names (`ContextVar[T]`, kept as `types::Generic::Held` since annotations are read
+without the catalog), are catalog rows (4.2: `_replace`, `_make`, `_asdict`, `_fields`,
+`returns_held`).
+
 - **What a store stores into.** A store stores into what its receiver holds: `self` in a method
   (a copy of it, the closure cell of a function nested in the method, `super()`), or a value whose
   type the inference knows: an instance of a project class (`inst = cls()` in a class method, a
@@ -750,11 +763,29 @@ body binds once, outside a loop, to a value that names a file (`ModuleDecls::fil
 `names_a_file`) names it where a function or another module reads it
 (`TypeCtx::names_file_constant`), unless another module rebinds it.
 
-A module-level `TypeVar` bound once with a `bound=` (a name, an attribute of one, or the string of
-an annotation) or constraints is that bound, or the union of the constraints, wherever an
-annotation names it, in its module or imported (`ModuleDecls::type_vars`,
-`ProjectDecls::declared_ty`): `for c in run.contexts` of `contexts: list[C]` with `C =
-TypeVar("C", bound=View)` gives a `View`. An unbounded one gives no class.
+A module-level name the module body binds once to a type expression reads as the type it names
+wherever an annotation names it, in its module or imported, also as a member of a union
+(`ModuleDecls::type_names`, `ProjectDecls::declared_ty`). A type alias names its value:
+`Operation: TypeAlias = Added | Removed` (the string of an annotation too), `type Operation =
+Added | Removed` without type parameters, and an assignment of a subscript or a union without an
+annotation (`Operations = list[Added]`); its value may name an alias bound before it, and a type
+variable in it stands for any type, so it gives no class. A `TypeVar` with a `bound=` or
+constraints names that bound, or the union of the constraints: `for c in run.contexts` of
+`contexts: list[C]` with `C = TypeVar("C", bound=View)` gives a `View`. An unbounded one gives no
+class, and neither does a name bound twice or a variable annotated otherwise
+(`Declared: object = A | B`).
+
+The text of the type expression a value spells (`resolver::type_expression_text`: names of
+module-level objects, attributes of them, subscripts, unions, `None`, and strings) reads as the
+same text in an annotation does: the value of an alias, the bound of a type variable, and the
+type `typing.cast` names (`cast(list[Windows], hosts)` as `cast("list[Windows]", hosts)`). A
+subscript naming anything else (`list[kind]` of a parameter `kind`) names no type. A builtin or
+`collections` container class subscripted with types is an alias of the class
+(`types::runtime_generic`: `frozenset[str]` is a `types.GenericAlias`): calling it constructs the
+class (`frozenset[str]()`), also through a module-level name bound to it (`Names =
+frozenset[str]`, a module alias of the class). A subscript of any other class (a project generic
+class, whose alias may construct a subclass, or a `typing` alias, which may raise) calls nothing
+heki knows.
 
 A method that no project class of the receiver's MRO defines comes from the first base outside
 the project, when heki takes it to define the method (a base it knows nothing of coming first, an
@@ -2686,7 +2717,10 @@ field validates it: pydantic 2's `BaseModel`), `return_type` (factories such as
 argument a call writes or serializes in the order of its elements, with the keyword that sorts
 mapping keys first and whether it sorts by default: `json.dumps`, `yaml.safe_dump`,
 `pprint.pprint`, `pathlib.Path.write_text`, `print`: `EFF112`),
-`waits_until_done` / `done_when_awaited` (futures), `result_of` (the call hands back, awaited or
+`waits_until_done` / `done_when_awaited` (futures), `returns_held` (the method returns the
+value its receiver holds, which the holder's type argument names (`ContextVar[T].get()`) or a
+future was given (`result()`); with `default`, the argument at that position where the receiver
+holds none: `ContextVar.get(default)`), `result_of` (the call hands back, awaited or
 by the future's `result()`, what calling the callable at position `arg` returns, with the
 positional arguments after it and, with `keywords`, the call's keywords: `asyncio.to_thread`,
 `loop.run_in_executor`, `anyio.to_thread.run_sync`, `executor.submit`; section 2.1),
@@ -2785,7 +2819,11 @@ attribute on an instance of a library class gives (`symbol = "openai.OpenAI.chat
 release its distribution's verified range admits, the value read has the catalogued members of
 that class; it says nothing of its identity or of what the read runs, so a plain attribute, a
 property, and a cached property are alike to it. It is a table of its own because an attribute is
-no method a class takes from its base (`external_defines`). The synchronous and asynchronous
+no method a class takes from its base (`external_defines`). A row of the standard library
+(`typing.NamedTuple._fields`, `contextvars.Token.var`) holds on every interpreter heki supports,
+which `tests/sentinel/verify_stdlib_kb.py` checks on CPython 3.11 to 3.15, with the other rows of
+the standard library that type a value (a method's `return_type`, a copy of its receiver,
+`returns_held`) on instances of each class it builds. The synchronous and asynchronous
 clients of a library have rows of their own at every step, and a row whose meaning changes
 across the verified releases under one name is left out. `[[distributions]]`
 (`heki_kb::Distribution`) names, per distribution (its PyPI name), the import packages its rows

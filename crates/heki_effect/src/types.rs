@@ -66,7 +66,9 @@ pub enum Args {
     Map(Box<Elem>, Box<Elem>),
     /// A tuple of known length, by position.
     Tuple(Vec<Elem>),
-    /// A future (`FUTURE_CLASSES`): what awaiting it, or its `result()`, gives.
+    /// The value the object holds: what awaiting a future (`FUTURE_CLASSES`) gives, and what
+    /// the methods the catalog says return it give (`returns_held`: a future's `result()`, a
+    /// context variable's `get()`).
     Result(Box<Elem>),
     /// What an instance of a class whose constructor `@dataclass(frozen=True)` or
     /// `typing.NamedTuple` generates holds in its fields, by name, for the fields that hold a
@@ -85,7 +87,7 @@ pub enum Elem {
     Unknown,
 }
 
-/// What the arguments of a generic container class mean.
+/// What the type arguments of a generic class mean.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Generic {
     /// `C[T]`: iterating yields `T`.
@@ -98,10 +100,14 @@ pub(crate) enum Generic {
     Counter,
     /// `tuple[A, B]` / `tuple[T, ...]`.
     Tuple,
+    /// `C[T]`: the object holds one value of `T` ([`Args::Result`]).
+    Held,
 }
 
-/// Generic containers by the fqn an annotation resolves to (`typing.List` and the other
-/// aliases of builtins resolve to the builtin).
+/// Generic containers and holders by the fqn an annotation resolves to (`typing.List` and the
+/// other aliases of builtins resolve to the builtin). Annotations are read without the catalog,
+/// so the meaning of a class's arguments is kept here; what its methods return of them is the
+/// catalog's (`returns_held`).
 const GENERICS: &[(&str, Generic)] = &[
     ("builtins.list", Generic::Items),
     ("builtins.set", Generic::Items),
@@ -150,11 +156,25 @@ const GENERICS: &[(&str, Generic)] = &[
     ("collections.abc.AsyncGenerator", Generic::Items),
     ("collections.abc.Mapping", Generic::Map),
     ("collections.abc.MutableMapping", Generic::Map),
+    ("contextvars.ContextVar", Generic::Held),
 ];
 
-/// The generic container `class` is, if any.
+/// The generic container or holder `class` is, if any.
 pub(crate) fn generic(class: &str) -> Option<Generic> {
     GENERICS.iter().find(|(c, _)| *c == class).map(|(_, g)| *g)
+}
+
+/// Whether `class` is a generic container class of the runtime, the builtin and `collections`
+/// classes of [`GENERICS`]: subscripting the class object with types gives an alias of it
+/// (`types.GenericAlias`: `frozenset[str]`), which constructs the class when called and reads
+/// the class's attributes. The `typing` names are aliases that need not construct anything
+/// (`typing.List[int]()` raises), and the `collections.abc` classes are abstract.
+pub(crate) fn runtime_generic(class: &str) -> bool {
+    generic(class).is_some()
+        && matches!(
+            class.rsplit_once('.'),
+            Some(("builtins" | "collections", _))
+        )
 }
 
 /// Augmented assignments changing a container in place, by the container's class: `xs += ys`
