@@ -1438,7 +1438,8 @@ which module imports which.
    class the operand may be under R2, the method found first along the MRO,
    `ProjectDecls::special_method_owner`, is `object`'s, a builtin type's, whose hash,
    comparison, and `repr()` run the items' own and whose dict or set lookups compare stored keys
-   under an equal hash, or a library class's called as a library call handed every operand,
+   under an equal hash (strings in an object's `__dict__`, which holds the names of its
+   attributes), or a library class's called as a library call handed every operand,
    R3; a value of an abstract class, a protocol, `object`, or no class heki knows establishes
    none); an attribute access that may run code of the project besides a getter heki resolves
    (`heki_effect::invokes::attribute_access_runs_project_code`: on a project class, a read that
