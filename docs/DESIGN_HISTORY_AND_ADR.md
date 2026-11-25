@@ -210,6 +210,12 @@ that need no configuration, the import contracts of other tools, and heki's own 
   observes the set's iteration order (`SetOrderUnobserved`): growing a set in place and copying
   it into a new one can order the same elements differently, and the order of an `int` set is the
   same in every run.
+- **Amended after 0.4.0**: a fix may also be unsafe (`RuleMeta::unsafe_fix`): one that changes
+  what the program does in a way the rule's page states, applied only with `--unsafe-fixes`
+  (Ruff's flag) and offered by the language server as a quick fix that is not preferred. The
+  first is `MUT118`'s: an `object()` sentinel becomes `sentinel("NAME")` (PEP 661) for a Python
+  3.15 target, which copies keep, while its type, repr, and pickling change. *Rejected*: applying
+  it with `--include-size-dependent`, whose fixes keep what the program does.
 
 <a id="adr-008"></a>
 ### ADR-008: Advisory precision (staging, boundary aggregation, offload wrapper propagation, sync-over-async relaxation, `EFF104` rejected)

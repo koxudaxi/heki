@@ -1458,7 +1458,10 @@ which module imports which.
    loop, to a call of the builtin `object` with no argument, with the conditions of a string
    constant (no import binds the name; no star import, `exec`, or `globals()` may rebind it).
    `ProjectDecls::object_sentinel` reads one through re-exports and drops it when another
-   module rebinds or deletes it (`ProjectDecls::rebound_elsewhere`).
+   module rebinds or deletes it (`ProjectDecls::rebound_elsewhere`). Only this fact says that a
+   deep copy holds a new object for a value: a name bound to `sentinel(...)` (PEP 661, the
+   builtin from Python 3.15 or `typing_extensions.sentinel`), whose `__copy__` and `__deepcopy__`
+   return it, is none, so no claim of `MUT118` rests on it.
 2. **Held** (`ClassDecl::named_attrs`, read by `ProjectDecls::held_sentinels`): what a class's
    own code binds an attribute to among the names that may be sentinels (its module's own, a
    name an import binds, `module.NAME`). The class body's binding (`attr = S`, `attr: T = S`,
@@ -1503,6 +1506,11 @@ which module imports which.
    once per run, and a budget spent in another order by `heki check` and the language server
    would make them disagree). Each attribute of the copied class gives a heuristic claim naming
    that attribute.
+7. **Help and fix**: the help names `sentinel("NAME")` for a Python 3.15 target
+   (`RuntimeProfile::pep661_builtin_sentinel`) and `typing_extensions.sentinel` (4.16.0 or later)
+   below it. For a 3.15 target, a report in the file that binds the sentinel has an unsafe fix
+   (`--unsafe-fixes`): `resolver::object_sentinel_calls` finds the `object()` calls in the
+   module's own IR once per file, none when the module binds a global `sentinel`.
 
 #### `MUT119`: an in-place change lost on a new object (opt-in)
 1. **Sources** (`heki_effect::fresh::source`): what makes the object an instruction defines. Built
