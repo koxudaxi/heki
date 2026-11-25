@@ -9404,21 +9404,7 @@ impl<'a> TypeCtx<'a> {
     /// unresolved when the targets bind differently; too many past [`DISPATCH_CLASS_LIMIT`]
     /// classes.
     fn alias_call_targets(&self, recv: Recv<'_>, method: &str) -> Option<Callee> {
-        let (class, on_instance, family) = match recv {
-            Recv::Ref(class) if self.project.is_project_class(class) => (class, false, false),
-            Recv::Class(class) => (class, false, true),
-            Recv::Inst(class) => (class, true, true),
-            Recv::Ref(_) | Recv::Super(_) => return None,
-        };
-        // Every method call asks, and the receiver's class may have thousands of subclasses:
-        // they are listed only for a name some class body binds.
-        if !self.project.binds_alias(method) {
-            return None;
-        }
-        let mut classes = vec![self.project.canonical(class)];
-        if family {
-            classes.extend(self.project.subclasses_of(class));
-        }
+        let (classes, on_instance) = self.alias_classes(recv, method)?;
         // As for the implementations of a method (`instance_targets_complete`). Past the limit,
         // the first class binding the name to a name decides, not what each one binds.
         if classes.len() > DISPATCH_CLASS_LIMIT {
@@ -9474,6 +9460,29 @@ impl<'a> TypeCtx<'a> {
         out
     }
 
+    /// The classes whose bodies may bind `method` for a call on `recv`, and whether the call is
+    /// on an instance: a class object is exactly its class, an instance or `cls` also a project
+    /// subclass. `None` when no class body binds the name to a name, or `recv` is no class or
+    /// instance of one.
+    fn alias_classes(&self, recv: Recv<'_>, method: &str) -> Option<(Vec<String>, bool)> {
+        let (class, on_instance, family) = match recv {
+            Recv::Ref(class) if self.project.is_project_class(class) => (class, false, false),
+            Recv::Class(class) => (class, false, true),
+            Recv::Inst(class) => (class, true, true),
+            Recv::Ref(_) | Recv::Super(_) => return None,
+        };
+        // Every method call asks, and the receiver's class may have thousands of subclasses:
+        // they are listed only for a name some class body binds.
+        if !self.project.binds_alias(method) {
+            return None;
+        }
+        let mut classes = vec![self.project.canonical(class)];
+        if family {
+            classes.extend(self.project.subclasses_of(class));
+        }
+        Some((classes, on_instance))
+    }
+
     /// The callable a call through the `functools.partial` object `partial` of a class
     /// attribute calls, read on the class object or on an instance (`on_instance`), by its fqn:
     /// the object calls it with the call's arguments and then the keywords it holds. `None` for
@@ -9487,34 +9496,22 @@ impl<'a> TypeCtx<'a> {
     /// holds keywords ([`PartialAttr::keywords`]) on some class `recv` may be: the call passes
     /// the callable keywords it does not show, which may bind any parameter.
     pub(crate) fn calls_partial_with_keywords(&self, recv: Option<&Val>, method: &str) -> bool {
-        if !self.project.binds_alias(method) {
-            return false;
-        }
-        let holds_keywords = |class: &str, family: bool| {
-            let mut classes = vec![self.project.canonical(class)];
-            if family {
-                classes.extend(self.project.subclasses_of(class));
-            }
+        let holds_keywords = |recv: Recv<'_>| {
             // Past the limit the call has too many targets to bind (`alias_call_targets`).
-            if classes.len() > DISPATCH_CLASS_LIMIT {
-                return false;
-            }
-            classes.iter().any(|c| {
-                self.project
-                    .class_aliases(c, method)
-                    .and_then(|a| a.partial)
-                    .is_some_and(|p| p.keywords)
-            })
+            self.alias_classes(recv, method)
+                .filter(|(classes, _)| classes.len() <= DISPATCH_CLASS_LIMIT)
+                .is_some_and(|(classes, _)| {
+                    classes.iter().any(|c| {
+                        self.project
+                            .class_aliases(c, method)
+                            .and_then(|a| a.partial)
+                            .is_some_and(|p| p.keywords)
+                    })
+                })
         };
-        if let Some(classes) = self.dispatch_classes(recv) {
-            return classes.iter().any(|c| holds_keywords(c, true));
-        }
-        match recv.and_then(Val::recv) {
-            Some(Recv::Ref(class)) if self.project.is_project_class(class) => {
-                holds_keywords(class, false)
-            }
-            Some(Recv::Class(class) | Recv::Inst(class)) => holds_keywords(class, true),
-            _ => false,
+        match self.dispatch_classes(recv) {
+            Some(classes) => classes.iter().any(|c| holds_keywords(Recv::Inst(c))),
+            None => recv.and_then(Val::recv).is_some_and(holds_keywords),
         }
     }
 

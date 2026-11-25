@@ -219,10 +219,11 @@ fn field_value(
                 .find_map(|(k, v)| (k.as_deref() == Some(key)).then_some(*v))
         };
         let flag = |key: &str| keyword(key).map(|v| shape.bool_const(v));
+        let init_left_on = flag("init") != Some(Some(false));
         let (default, init) = match field_default(shape, value, &resolve) {
             Some((default, init)) => (default_of(shape, default, decls, stores), init),
-            None if keyword("default_factory").is_some() => (FieldDefault::Value, true),
-            None => (FieldDefault::Required, flag("init") != Some(Some(false))),
+            None if keyword("default_factory").is_some() => (FieldDefault::Value, init_left_on),
+            None => (FieldDefault::Required, init_left_on),
         };
         let kw_only = match flag("kw_only") {
             None => false,
