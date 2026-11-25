@@ -109,9 +109,9 @@ jobs:
             fi
           done
 
-  # The test binaries, built once per platform in the `ci` profile (optimized dependencies, see
-  # Cargo.toml) and archived for that platform's `test` shards, which wait for their own build
-  # only. Linux builds them from the unpacked source distribution, so its shards run every test
+  # The test binaries, built once per platform in the `ci-test` profile (optimized dependencies and workspace
+  # crates, see Cargo.toml) and archived for that platform's `test` shards, which wait for their
+  # own build only. Linux builds them from the unpacked source distribution, so its shards run every test
   # from it: platforms without a wheel build from the source distribution, and packagers run its
   # tests, so it must carry every file the build and the tests embed or read (`pyproject.toml`).
   # The other platforms build the checkout.
@@ -159,7 +159,7 @@ jobs:
           TREE: ${{ runner.os == 'Linux' && 'sdist-tree' || '.' }}
           CARGO_NET_GIT_FETCH_WITH_CLI: ${{ runner.os == 'Windows' && 'true' || 'false' }}
         run: >-
-          cargo nextest archive --workspace --locked --cargo-profile ci
+          cargo nextest archive --workspace --locked --cargo-profile ci-test
           --manifest-path "$TREE/Cargo.toml" --archive-file tests.tar.zst
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -306,8 +306,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6]
-        shards: [6]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shards: [8]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

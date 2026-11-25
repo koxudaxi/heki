@@ -82,15 +82,21 @@ cap = { version = "0.1.2", features = ["stats"] }
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
-# The test and coverage builds of CI (`--cargo-profile ci`): the workspace crates as in `dev`, the
-# dependencies optimized. The end-to-end tests run the real binary thousands of times, and the
-# optimized dependencies (the parser among them) make those runs about 1.6 times as fast; CI
-# caches them. Optimizing the workspace crates as well would speed the runs up 1.7 times more but
-# triple their compile time, which CI pays on every run. Coverage measures only the workspace
-# crates, so its report has the lines of `dev`. Line tables keep the backtraces readable.
+# The coverage build of CI (`--cargo-profile ci`): the workspace crates as in `dev`, the
+# dependencies optimized. Coverage measures only the workspace crates, so its report has the
+# lines of `dev`. Line tables keep the backtraces readable.
 [profile.ci]
 inherits = "dev"
 debug = "line-tables-only"
 
 [profile.ci.package."*"]
 opt-level = 3
+
+# The test builds of CI (`--cargo-profile ci-test`): `ci` with the workspace crates optimized at
+# level 1. The end-to-end and language-server tests run the real binary thousands of times, and
+# the slowest of them run 3.7 times as fast as in `ci`; level 2 gains only 5 % more for a build
+# that is 15 % slower. The coverage build stays in `ci`: its counters and line tables are those
+# of unoptimized code.
+[profile.ci-test]
+inherits = "ci"
+opt-level = 1
