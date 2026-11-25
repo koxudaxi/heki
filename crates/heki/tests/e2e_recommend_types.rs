@@ -2102,6 +2102,24 @@ fn a_project_subclass_of_a_stdlib_class_with_python_methods_opens_every_read() {
         .collect();
     assert!(exact.is_empty(), "{report:#}");
 
+    // The member may come from a project mixin that does not derive from the stdlib class.
+    let mixed = Project::new("recommend_types_counter_mixin");
+    mixed
+        .write("app/__init__.py", "")
+        .write("app/reads.py", COUNTER_READ)
+        .write(
+            "app/tally.py",
+            "from collections import Counter\n\n\nclass ItemsMixin:\n    \
+             def items(self):\n        self[\"seen\"] = 1\n        return super().items()\n\n\n\
+             class Tally(ItemsMixin, Counter):\n    pass\n",
+        );
+    let (report, _) = recommend(&mixed, &["--all"]);
+    let exact: Vec<&str> = (report["suggestions"]["groups"].as_array().unwrap().iter())
+        .filter(|g| g["certainty"] == "exact")
+        .map(|g| g["id"].as_str().unwrap())
+        .collect();
+    assert!(exact.is_empty(), "{report:#}");
+
     let plain = Project::new("recommend_types_counter_plain");
     plain
         .write("app/__init__.py", "")
