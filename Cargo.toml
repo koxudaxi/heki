@@ -65,10 +65,10 @@ smallvec = "1.13"
 strsim = "0.11"
 thiserror = "2.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "time", "sync"] }
-toml = "0.8"
+toml = "1.2"
 # The positions of the keys and values of a configuration file, for its errors (`toml` already
 # builds this crate).
-toml_edit = { version = "0.22", default-features = false, features = ["parse"] }
+toml_edit = { version = "0.25", default-features = false, features = ["parse"] }
 tower-lsp = "0.20"
 # The `file:` URIs of the end-to-end LSP tests (the version `tower-lsp` uses).
 url = "2.5"

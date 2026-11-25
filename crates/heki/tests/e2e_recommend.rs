@@ -170,7 +170,7 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
          \x20   3 function(s) in 1 module(s) reach no blocking call heki sees; 1 reach code heki \
          does not see (app.lists.logged_names)\n\
          \x20   trial: EFF201 0\n\
-         \x20 For every candidate, accesses inside code heki cannot follow (unresolved calls, \
+         \x20 For every block, accesses inside code heki cannot follow (unresolved calls, \
          libraries without a catalog) are not seen.\n\
          \n\
          Notes\n\
@@ -268,7 +268,7 @@ fn the_json_object_names_the_project_and_its_run() {
         (&report["kind"], &report["version"], &report["heki"]),
         (
             &json!("heki-recommend"),
-            &json!(2),
+            &json!(3),
             &json!(env!("CARGO_PKG_VERSION"))
         )
     );

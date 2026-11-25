@@ -172,7 +172,7 @@ pub(crate) fn run(args: &DumpRecommendFactsArgs) -> Result<ExitCode> {
         in_place: w.in_place,
         fresh: w.fresh,
     };
-    let census = Census::of(&index);
+    let census = Census::of(&index, &index.project_decls());
     let spots = BlindSpots::of(&index);
     let totals = spots.totals();
     let facts = Facts {

@@ -33,10 +33,10 @@ use thiserror::Error;
 
 /// The `version` of the JSON object: it changes when a field is removed or changes meaning;
 /// fields are only added within a version.
-pub const RECOMMEND_VERSION: u32 = 2;
+pub const RECOMMEND_VERSION: u32 = 3;
 
-/// Where the JSON Schema of the object is published (`docs/schemas/recommend-2.json`).
-pub const SCHEMA_URL: &str = "https://heki.koxudaxi.dev/schemas/recommend-2.json";
+/// Where the JSON Schema of the object is published (`docs/schemas/recommend-3.json`).
+pub const SCHEMA_URL: &str = "https://heki.koxudaxi.dev/schemas/recommend-3.json";
 
 /// The most entries a list of the JSON object holds; the list says when it holds fewer than
 /// there are.
@@ -93,6 +93,9 @@ pub struct Request<'a> {
     pub shown: &'a dyn Fn(&Path) -> String,
     /// The files that could not be read or parsed, as `heki check` reports them.
     pub errors: Vec<String>,
+    /// Show every block of contracts and every site keeping them at `unresolved = "ignore"`
+    /// (up to [`MAX_LISTED`]), not the first few of each.
+    pub all: bool,
 }
 
 /// The JSON object `heki recommend --output-format json` prints.
@@ -127,10 +130,17 @@ pub struct RecommendReport {
     /// Every rule the configuration does not run in full: the rules it leaves off, and the exact
     /// rules whose heuristic reports it withholds. The block's rules come first.
     pub rules: Vec<rules::RuleAdvice>,
-    /// The contracts the code keeps, which the block declares: each kept by the contract trial,
-    /// then applied with the whole block by the verification run. By kind, then by rank within
-    /// it.
+    /// The contracts the code keeps, as the blocks the configuration block declares: candidates
+    /// the contract trial kept, merged where their entries differ only in their targets or
+    /// scopes, then applied with the whole block by the verification run. By kind, then by rank
+    /// within it: the first 3 of each kind, or every one with `heki recommend --all`.
     pub contracts: Vec<contracts::ContractAdvice>,
+    /// The blocks past the first 3 of their kind, which neither the report nor the configuration
+    /// block holds.
+    pub contracts_not_shown: Vec<contracts::NotShown>,
+    /// The accesses heki cannot tie to a class that keep blocks at `unresolved = "ignore"`, each
+    /// site once.
+    pub contract_blockers: contracts::ContractBlockers,
     /// The candidates a run with them declared reported for: not in the block.
     pub rejected_contracts: Vec<contracts::RejectedContract>,
     /// The candidates past the cap of their kind, which no trial declared.
@@ -202,6 +212,9 @@ pub enum RunLabel {
     HypotheticalCatalog,
     /// The configuration with every contract candidate declared, the contract rules selected.
     ContractTrial,
+    /// The configuration with each class pattern of the blocks shown declared alone, the rules
+    /// of their kinds selected.
+    PatternTrial,
     /// The configuration with the whole block applied, the block's rules and contracts selected.
     Verification,
 }
@@ -234,7 +247,7 @@ pub struct BaselineSplit {
     pub regressions: usize,
 }
 
-/// The JSON Schema of [`RecommendReport`], as `docs/schemas/recommend-2.json` publishes it.
+/// The JSON Schema of [`RecommendReport`], as `docs/schemas/recommend-3.json` publishes it.
 pub fn json_schema() -> serde_json::Value {
     let mut schema = schemars::schema_for!(RecommendReport);
     schema.insert("$id".to_owned(), SCHEMA_URL.into());
@@ -252,6 +265,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         paths,
         shown,
         errors,
+        all,
     } = request;
     let env = &project.env;
     // Without a configuration file, the keys go into a new `pyproject.toml`.
@@ -343,8 +357,21 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
             &configured_now,
             (&left_out, project.errors.len()),
             shown,
+            all,
         )
     };
+    // The pattern trial: each class pattern of the blocks shown, declared alone in place of the
+    // class's targets.
+    let mut section = section;
+    if let Some(trial) = section.pattern_config(&user) {
+        let rules_run = section.pattern_rules();
+        let (analyzed, kept, suppressed) = analyze(project, trial, &rules_run)?;
+        project = analyzed;
+        runs.push(Run {
+            label: RunLabel::PatternTrial,
+        });
+        section.judge_patterns(&user, (&kept, &suppressed), &configured_now, shown);
+    }
     // The verification run: `heki check` with the block's rules and contracts applied, which
     // gives the counts the block promises. One run suffices: discovery ran every rule, so it has
     // every fact this run has, and the contracts come from its census, so a kept contract never
@@ -422,6 +449,8 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         blind_spots,
         rules,
         contracts: section.advice(),
+        contracts_not_shown: section.not_shown,
+        contract_blockers: section.blockers,
         rejected_contracts: section.rejected,
         contracts_not_tried: section.not_tried,
         unmatched_entries,
@@ -667,8 +696,12 @@ pub fn render_text(report: &RecommendReport) -> String {
     contracts::render(
         &mut out,
         &report.contracts,
-        &report.rejected_contracts,
-        &report.contracts_not_tried,
+        (
+            &report.rejected_contracts,
+            &report.contracts_not_tried,
+            &report.contracts_not_shown,
+        ),
+        &report.contract_blockers,
     );
     if !report.unmatched_entries.is_empty() {
         out.push_str("\nContract entries that match nothing\n");
