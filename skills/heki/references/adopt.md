@@ -23,7 +23,10 @@ before writing it.
 ## 3. Write the files
 
 1. Put the contracts, `fail-on`, and the baseline path in `heki.toml`, not in code the agent edits
-   as part of its task.
+   as part of its task. heki reads only the first of `heki.toml`, `.heki.toml` and `[tool.heki]` in
+   `pyproject.toml` that exists, without merging them. If the repository already configures heki in
+   `.heki.toml` or `pyproject.toml`, add to that file, or move all of its settings into the new
+   `heki.toml` in the same change.
 2. Add a `CODEOWNERS` line for `heki.toml` (or the host's rule for protected files), so that a
    change to a contract is a reviewed change and a report cannot be removed by moving the wall.
 3. When `heki check` reports old findings, record them once:
