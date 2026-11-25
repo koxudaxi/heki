@@ -1003,7 +1003,7 @@ fn kept_to_the_return_stripped_the_classes_a_container_abc_value_may_be() {
         .map(|e| e.unwrap().path())
         .collect();
     cases.sort();
-    assert_eq!(cases.len(), 7, "{cases:?}");
+    assert_eq!(cases.len(), 8, "{cases:?}");
     for path in cases {
         let case = path.file_stem().unwrap().to_str().unwrap().to_owned();
         let source = std::fs::read_to_string(&path).unwrap();
@@ -1188,6 +1188,31 @@ fn kept_to_the_return_stripped_where_an_implementer_may_run_the_use() {
             ITERATES,
             "\n\nclass Rows:\n    def __iter__(self):\n        return iter(())\n\n\n\
              def setup() -> None:\n    register = Mapping.register\n    register(Rows)\n",
+        ),
+        // A `register` bound to a module-level name and called by another function, passed on
+        // as a value, or bound differently on two paths.
+        (
+            mapping,
+            "Mapping[str, str]",
+            ITERATES,
+            "\n\nclass Rows:\n    def __iter__(self):\n        return iter(())\n\n\n\
+             register_mapping = Mapping.register\n\n\ndef setup() -> None:\n    \
+             register_mapping(Rows)\n",
+        ),
+        (
+            mapping,
+            "Mapping[str, str]",
+            ITERATES,
+            "\n\nregister_mapping = Mapping.register\n\n\ndef setup(call) -> None:\n    \
+             call(register_mapping)\n",
+        ),
+        (
+            mapping,
+            "Mapping[str, str]",
+            ITERATES,
+            "\n\nif __debug__:\n    register_mapping = Mapping.register\nelse:\n    \
+             register_mapping = print\n\n\ndef setup(rows) -> None:\n    \
+             register_mapping(rows)\n",
         ),
         // A class registered with the mutable ABC is a value of the read-only one too.
         (
