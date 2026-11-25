@@ -316,6 +316,11 @@ fn extract_module(
 /// The class bodies the `class` statements of `f` run, nested classes included, each once (a
 /// `class` statement in a `finally` body is made once per way out of its `try`), each before
 /// the bodies of the classes it makes.
+/// The special method a `for` loop (or a comprehension) runs on what it iterates.
+fn iteration_protocol(is_async: bool) -> &'static str {
+    if is_async { "__aiter__" } else { "__iter__" }
+}
+
 fn class_bodies_run_by<'m>(ir: &'m ModuleIr, f: &'m IrFunction) -> Vec<&'m IrFunction> {
     let mut out: Vec<&IrFunction> = Vec::new();
     let mut made: FxHashSet<FunctionId> = FxHashSet::default();
@@ -5334,8 +5339,13 @@ impl<'a> Extractor<'a> {
             InstKind::MakeIter {
                 iterable, is_async, ..
             } if self.f.var_name(*iterable) != Some(".0") => {
-                self.iteration(bb, *iterable, *is_async, span)
+                self.protocol_call(bb, *iterable, iteration_protocol(*is_async), span)
             }
+            InstKind::EnterWith {
+                mgr,
+                is_async: false,
+                ..
+            } => self.protocol_call(bb, *mgr, "__enter__", span),
             _ => {}
         }
     }
@@ -5451,7 +5461,7 @@ impl<'a> Extractor<'a> {
 
     /// The comprehension or generator expression `child` created here iterates `iterable`
     /// (its outermost one) at once, as its first clause does (`__iter__`, or `__aiter__` for an
-    /// `async for`): [`Self::iteration`]. A later `async for` clause does not change how the
+    /// `async for`): [`Self::protocol_call`]. A later `async for` clause does not change how the
     /// first one starts.
     fn child_iteration(&mut self, bb: BlockId, child: FunctionId, iterable: VarId, span: Span) {
         let first_is_async = self
@@ -5466,22 +5476,23 @@ impl<'a> Extractor<'a> {
                 _ => None,
             });
         if let Some(is_async) = first_is_async {
-            self.iteration(bb, iterable, is_async, span);
+            self.protocol_call(bb, iterable, iteration_protocol(is_async), span);
         }
     }
 
-    /// Iterating `iterable` (a `for` loop, a comprehension, a consuming call such as `list(...)`)
-    /// runs `__iter__` of its class, `__aiter__` for an `async for`: the catalog's entry for it
-    /// is a call at `span` (`for row in session.query(User):` runs the query). Project classes'
-    /// `__iter__` are not followed.
-    fn iteration(&mut self, bb: BlockId, iterable: VarId, is_async: bool, span: Span) {
-        let Some(Val::Inst(class)) = self.val(iterable) else {
+    /// The special method `protocol` of the class of `value`, run by the statement at `span`
+    /// (`__iter__`, `__aiter__` when a `for` loop, a comprehension, or a consuming call such as
+    /// `list(...)` iterates it; `__enter__` when a `with` enters it): the catalog's entry for
+    /// it is a call at `span` (`for row in session.query(User):` runs the query,
+    /// `with fsspec.open(path):` opens the file). Project classes' special methods are not
+    /// followed.
+    fn protocol_call(&mut self, bb: BlockId, value: VarId, protocol: &str, span: Span) {
+        let Some(Val::Inst(class)) = self.val(value) else {
             return;
         };
         if class.starts_with("builtins.") || self.cx.project.is_project_class(class) {
             return;
         }
-        let protocol = if is_async { "__aiter__" } else { "__iter__" };
         let symbol = format!("{class}.{protocol}");
         if self.cx.catalog(&symbol).is_some() {
             self.external_call(bb, symbol, Passed::NOTHING, false, span);
@@ -6787,7 +6798,7 @@ impl<'a> Extractor<'a> {
                 );
                 // `list(query)` iterates the query as a `for` loop does.
                 for iterable in crate::consumption::iterated_args(symbol, call.args) {
-                    self.iteration(bb, iterable, false, call.span);
+                    self.protocol_call(bb, iterable, iteration_protocol(false), call.span);
                 }
                 self.note_returned_realloc(symbol, call);
                 // A project class without a project `__init__` (a dataclass, a pydantic model),
