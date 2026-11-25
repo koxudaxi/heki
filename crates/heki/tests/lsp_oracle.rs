@@ -725,6 +725,16 @@ const FACTORY_DB: &str = "import sqlite3\nfrom pathlib import Path\n\nDB_PATH = 
 const FACTORY_DB_MEMORY: &str = "import sqlite3\nfrom pathlib import Path\n\nDB_PATH = Path(__file__).parent / \"app.db\"\n\n\ndef connect() -> sqlite3.Connection:\n    return sqlite3.connect(\":memory:\")\n";
 const FACTORY_DB_UNKNOWN_PATH: &str = "import os\nimport sqlite3\n\nDB_PATH = os.environ[\"DB\"]\n\n\ndef connect() -> sqlite3.Connection:\n    return sqlite3.connect(DB_PATH)\n";
 const FACTORY_USE: &str = "from pkg.factory_db import connect\n\n\nasync def serve():\n    return connect().execute(\"SELECT 1\")\n";
+// Functions values hold, defined in one module and called in others: the closure a factory
+// returns (`ReturnFact::ty`), a named tuple's field (`ClassDecl::init_fields`), and a
+// `staticmethod(partial(...))` class attribute (`NamedAttr::body_partial`).
+const HELD_DEFS: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n";
+const HELD_DEFS_QUIET_FACTORY: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    return rest\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n";
+const HELD_DEFS_PLAIN_VIEW: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View:\n    def __init__(self, run: Callable[[], None]) -> None:\n        self.run = run\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n";
+const HELD_DEFS_QUIET_PARTIAL: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(rest))\n";
+const HELD_FACTORY: &str = "from pkg.held_defs import make_waiter\n\n\nasync def through_factory() -> None:\n    make_waiter()()\n";
+const HELD_FIELD: &str = "from pkg.held_defs import View, nap\n\n\nasync def through_field() -> None:\n    View(nap).run()\n";
+const HELD_PARTIAL: &str = "from pkg.held_defs import Holder\n\n\nasync def through_partial() -> None:\n    Holder().run()\n";
 const ROWS_USE: &str = "from pkg.rows_db import authors, book\n\n\ndef each():\n    for r in authors():\n        book(r[0])\n";
 // The third module binds the base's method to another function: the call may run that
 // function instead. The base's class body binds it to another function on every path: the call
@@ -1207,6 +1217,10 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/rows_use.py", ROWS_USE),
         ("pkg/factory_db.py", FACTORY_DB),
         ("pkg/factory_use.py", FACTORY_USE),
+        ("pkg/held_defs.py", HELD_DEFS),
+        ("pkg/held_factory.py", HELD_FACTORY),
+        ("pkg/held_field.py", HELD_FIELD),
+        ("pkg/held_partial.py", HELD_PARTIAL),
         ("pkg/st_client.py", ST_CLIENT),
         ("pkg/st_use.py", ST_USE),
         ("pkg/st_rebind.py", ST_REBIND),
@@ -1542,6 +1556,55 @@ fn steps_returned_types() -> Vec<Step> {
         )
         .present(EXACT)
         .absent(HEURISTIC),
+    ]
+}
+
+/// The function a value holds, decided in the module defining it: a factory returning a function
+/// that does not wait, a class that is no named tuple (whose attribute holds what a parameter
+/// declares), and a partial class attribute of a function that does not wait each take the wait
+/// away from their callers in other modules, and the definitions written back bring it back.
+fn steps_held_functions() -> Vec<Step> {
+    const FACTORY: &[(&str, &str)] = &[("pkg/held_factory.py", "EFF101")];
+    const FIELD: &[(&str, &str)] = &[("pkg/held_field.py", "EFF101 [heuristic]")];
+    const PARTIAL: &[(&str, &str)] = &[("pkg/held_partial.py", "EFF101")];
+    const ALL: &[(&str, &str)] = &[
+        ("pkg/held_factory.py", "EFF101"),
+        ("pkg/held_field.py", "EFF101 [heuristic]"),
+        ("pkg/held_partial.py", "EFF101"),
+    ];
+    vec![
+        Step::new(
+            "the factory returns a function that does not wait",
+            vec![save("pkg/held_defs.py", HELD_DEFS_QUIET_FACTORY)],
+        )
+        .absent(FACTORY)
+        .present(&[
+            ("pkg/held_field.py", "EFF101 [heuristic]"),
+            ("pkg/held_partial.py", "EFF101"),
+        ]),
+        Step::new(
+            "the view is a plain class",
+            vec![save("pkg/held_defs.py", HELD_DEFS_PLAIN_VIEW)],
+        )
+        .absent(FIELD)
+        .present(&[
+            ("pkg/held_factory.py", "EFF101"),
+            ("pkg/held_partial.py", "EFF101"),
+        ]),
+        Step::new(
+            "the partial holds a function that does not wait",
+            vec![save("pkg/held_defs.py", HELD_DEFS_QUIET_PARTIAL)],
+        )
+        .absent(PARTIAL)
+        .present(&[
+            ("pkg/held_factory.py", "EFF101"),
+            ("pkg/held_field.py", "EFF101 [heuristic]"),
+        ]),
+        Step::new(
+            "every definition waits again",
+            vec![save("pkg/held_defs.py", HELD_DEFS)],
+        )
+        .present(ALL),
     ]
 }
 
@@ -6239,6 +6302,7 @@ sessions!(editing, Session::start, {
     exact_effects: steps_exact_effects,
     returned_rows: steps_returned_rows,
     returned_types: steps_returned_types,
+    held_functions: steps_held_functions,
     store_types: steps_store_types,
     unused_suppressions: steps_unused_suppressions,
     helper_witnesses: steps_helper_witnesses,

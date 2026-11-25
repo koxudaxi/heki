@@ -9495,6 +9495,10 @@ impl<'a> TypeCtx<'a> {
             if family {
                 classes.extend(self.project.subclasses_of(class));
             }
+            // Past the limit the call has too many targets to bind (`alias_call_targets`).
+            if classes.len() > DISPATCH_CLASS_LIMIT {
+                return false;
+            }
             classes.iter().any(|c| {
                 self.project
                     .class_aliases(c, method)

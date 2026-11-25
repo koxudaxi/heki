@@ -515,10 +515,10 @@ fn typed_candidates<'f>(
             (Some(t), Some(_)) if t.obj().is_some_and(|o| specializable(&o.class)) => {
                 Some(Returned::Narrower(t.clone()))
             }
-            (None, Some(values)) => may_return_named(f, values).then_some(Returned::Named),
+            (None, Some(values)) => may_return_named(decls, f, values).then_some(Returned::Named),
             (Some(t), Some(values))
                 if t.obj().is_some_and(|o| names_no_class(&o.class))
-                    && may_return_named(f, values) =>
+                    && may_return_named(decls, f, values) =>
             {
                 Some(Returned::Named)
             }
@@ -546,24 +546,31 @@ fn names_no_class(class: &str) -> bool {
 }
 
 /// Whether every value `f` returns may be a named object, by what makes it: a `def` or `lambda`
-/// of `f` (not a class), or a name it reads from its module or a scope enclosing it. Only such
-/// functions are inferred for a [`Returned::Named`] fact.
-fn may_return_named(f: &IrFunction, values: &[VarId]) -> bool {
+/// of `f`, a name its module binds to a definition, an import, or an alias, or a name a scope
+/// enclosing it binds. Only such functions are inferred for a [`Returned::Named`] fact.
+fn may_return_named(decls: &ModuleDecls, f: &IrFunction, values: &[VarId]) -> bool {
     let shape = FnShape::new(f);
-    values.iter().all(|v| {
-        matches!(
-            shape.inst(shape.copy_root(*v)).map(|i| &i.kind),
+    let named = |name: &str| {
+        decls.functions.contains_key(name)
+            || decls.classes.contains_key(name)
+            || decls.imports.contains_key(name)
+            || decls.aliases.contains_key(name)
+            || decls.alias_paths.contains_key(name)
+    };
+    values
+        .iter()
+        .all(|v| match shape.inst(shape.copy_root(*v)).map(|i| &i.kind) {
+            Some(InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. }) => {
+                named(name)
+            }
             Some(
-                InstKind::LoadGlobal { .. }
-                    | InstKind::LoadName { .. }
-                    | InstKind::LoadDeref { .. }
-                    | InstKind::MakeClosure {
-                        func_id: Some(_),
-                        ..
-                    }
-            )
-        )
-    })
+                InstKind::LoadDeref { .. }
+                | InstKind::MakeClosure {
+                    func_id: Some(_), ..
+                },
+            ) => true,
+            _ => false,
+        })
 }
 
 /// The value of every `return` of `f`, when calling it runs its body and gives what it returns

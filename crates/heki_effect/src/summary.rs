@@ -2715,6 +2715,14 @@ impl<'a> Extractor<'a> {
         }
     }
 
+    /// Whether calling `var`, a bound method (`m = obj.method`), passes keywords the call does
+    /// not show: those of a `functools.partial` class attribute ([`Call::unseen_keywords`]).
+    fn calls_unseen_keywords(&self, var: VarId) -> bool {
+        self.bound_method(var).is_some_and(|(recv, method)| {
+            self.cx.calls_partial_with_keywords(self.val(recv), &method)
+        })
+    }
+
     /// What `recv.method(...)` calls ([`TypeCtx::resolve_method_of`]).
     fn method_callee(&self, recv: VarId, method: &str) -> Callee {
         self.cx
@@ -4949,7 +4957,8 @@ impl<'a> Extractor<'a> {
                     recv_is_self,
                     constructs,
                     per_item: None,
-                    unseen_keywords: self.cx.calls_partial_with_keywords(self.val(*recv), method),
+                    unseen_keywords: matches!(callee, Callee::Project(..))
+                        && self.cx.calls_partial_with_keywords(self.val(*recv), method),
                     span,
                 };
                 self.call_inst((bb, index), method, callee, &call);
@@ -5012,7 +5021,7 @@ impl<'a> Extractor<'a> {
                         recv_is_self,
                         constructs: self.class_called(partial.callable),
                         per_item: None,
-                        unseen_keywords: false,
+                        unseen_keywords: self.calls_unseen_keywords(partial.callable),
                         span,
                     };
                     self.call_inst((bb, index), callee, target, &call);
@@ -5043,7 +5052,7 @@ impl<'a> Extractor<'a> {
                         recv_is_self,
                         constructs: None,
                         per_item: None,
-                        unseen_keywords: false,
+                        unseen_keywords: self.calls_unseen_keywords(held),
                         span,
                     };
                     self.call_inst((bb, index), &method, target, &call);
@@ -7129,7 +7138,7 @@ impl<'a> Extractor<'a> {
             recv_is_self,
             constructs: None,
             per_item: items.as_ref(),
-            unseen_keywords: false,
+            unseen_keywords: self.calls_unseen_keywords(target),
             span: call.span,
         };
         let per_item = per_item.map(|p| {
