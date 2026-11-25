@@ -181,6 +181,15 @@ pub(crate) fn annotation_facts(cx: &TypeCtx<'_>) -> BTreeMap<String, AnnotationF
 }
 
 impl AnnotationReads {
+    /// What the catalog says `by` reads: a reader of the functions' annotations reads them, one
+    /// of the fields only leaves them unread.
+    fn of_catalog(read: AnnotationsRead, by: &str) -> Self {
+        match read {
+            AnnotationsRead::Functions => Self::Read(by.into()),
+            AnnotationsRead::Fields => Self::Unread,
+        }
+    }
+
     /// What reads the annotations when both `self` and `other` may: a known reader first.
     fn or(self, other: Self) -> Self {
         match (self, other) {
@@ -227,24 +236,18 @@ fn decorator_reads(cx: &TypeCtx<'_>, text: &str) -> AnnotationReads {
         return AnnotationReads::Unread;
     }
     let symbol = cx.module.decorator_symbol(text);
-    match symbol
-        .as_deref()
-        .and_then(|s| cx.kb.decorator_reads_annotations(s))
-    {
-        Some(AnnotationsRead::Functions) => {
-            AnnotationReads::Read(symbol.unwrap_or_default().into())
-        }
-        Some(AnnotationsRead::Fields) => AnnotationReads::Unread,
-        None => AnnotationReads::Unknown(symbol.unwrap_or_else(|| text.to_owned()).into()),
-    }
+    let read = (symbol.as_deref()).and_then(|s| cx.kb.decorator_reads_annotations(s));
+    let by = symbol.unwrap_or_else(|| text.to_owned());
+    read.map_or(AnnotationReads::Unknown(by.as_str().into()), |r| {
+        AnnotationReads::of_catalog(r, &by)
+    })
 }
 
 /// What the base `base` outside the project reads of the methods of a class deriving from it:
 /// a class of the standard library none, unless the catalog lists it.
 fn base_reads(cx: &TypeCtx<'_>, base: &str) -> AnnotationReads {
     match cx.kb.base_reads_annotations(base) {
-        Some(AnnotationsRead::Functions) => AnnotationReads::Read(base.into()),
-        Some(AnnotationsRead::Fields) => AnnotationReads::Unread,
+        Some(read) => AnnotationReads::of_catalog(read, base),
         None if is_unknown_base(base) => AnnotationReads::Unknown(base.into()),
         None => {
             let module = base.rsplit_once('.').map_or(base, |(m, _)| m);

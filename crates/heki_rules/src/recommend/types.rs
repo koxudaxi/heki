@@ -27,6 +27,7 @@ use heki_effect::{
     LiteralAnnotation, ModuleDecls, OffsetMap, ParamAnnotation, ProjectDecls, Restated,
 };
 use heki_ir::InstKind;
+use heki_semantic::ScopeId;
 use heki_soundness::imports::{NewImport, import_edit};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -321,6 +322,8 @@ struct Candidate {
     param: u8,
     name: String,
     lit: LiteralAnnotation,
+    /// The function scope the parameter binds in.
+    scope: Option<ScopeId>,
 }
 
 /// Why a premise is not established for a candidate.
@@ -539,6 +542,7 @@ fn groups(cx: &Cx<'_>, current: &RuleSelection) -> Found {
         let parsed = cx.files.get(path.as_path());
         let rel = parsed.map_or("", |p| p.rel.as_str());
         let generated = parsed.is_some_and(|p| says_generated(&p.source));
+        let parameters = parsed.map(|p| p.semantic.parameters());
         for (qualname, facts) in &tables.annotation_facts {
             for (i, p) in facts.params.iter().enumerate().take(64) {
                 let ParamAnnotation::Literal(lit) = p else {
@@ -563,6 +567,7 @@ fn groups(cx: &Cx<'_>, current: &RuleSelection) -> Found {
                         param,
                         name,
                         lit: (**lit).clone(),
+                        scope: (parameters.as_ref()).and_then(|ps| ps.function_at(lit.span.start)),
                     });
                 }
             }
@@ -768,21 +773,40 @@ fn local_premises(
             None,
         );
     }
-    if let Some(module) = cx.module(&c.key) {
-        let future = cx
-            .files
-            .get(c.path.as_path())
-            .is_some_and(|f| f.semantic.has_future_annotations);
-        if let Naming::Taken(other) = type_name(&module, future, &c.lit, c.lit.kind) {
-            push(
-                "A name for the type",
-                false,
-                format!("`{}` names {other} here", simple_name(c.lit.kind)),
-                None,
-            );
-        }
+    if let Naming::Taken(other) = naming(cx, c, cx.module(&c.key).as_deref()) {
+        push(
+            "A name for the type",
+            false,
+            format!("`{}` names {other} here", simple_name(c.lit.kind)),
+            None,
+        );
     }
     out
+}
+
+/// Premise 13 for the candidate `c` in its module's declarations `module` ([`type_name`]).
+fn naming(cx: &Cx<'_>, c: &Candidate, module: Option<&ModuleDecls>) -> Naming {
+    let parsed = cx.files.get(c.path.as_path());
+    let future = parsed.is_some_and(|f| f.semantic.has_future_annotations);
+    let binder = |name: &str| annotation_binder(cx, c, name);
+    module.map_or(Naming::Taken("nothing heki knows".to_owned()), |m| {
+        type_name(m, future, &c.lit, c.lit.kind, &binder)
+    })
+}
+
+/// The scope between the candidate's `def` and its module that binds `name` where the def's
+/// annotations read it, by its name ([`heki_semantic::SemanticModel::annotation_binder`]); one
+/// heki does not know when it finds no function scope for the parameter.
+fn annotation_binder(cx: &Cx<'_>, c: &Candidate, name: &str) -> Option<String> {
+    let file = cx.files.get(c.path.as_path()).zip(c.scope);
+    file.map_or(
+        Some("a scope heki does not know".to_owned()),
+        |(p, scope)| {
+            p.semantic
+                .annotation_binder(scope, name)
+                .map(|s| s.name.clone())
+        },
+    )
 }
 
 /// The class `key` is a method of, by its fully qualified name.
@@ -803,11 +827,13 @@ fn callees_take_it(
     candidates: &[Candidate],
 ) -> (Vec<usize>, Vec<Unmet>, Vec<Related>) {
     let (mut joined, mut open, mut related) = (Vec::new(), Vec::new(), Vec::new());
-    let Some(file) = cx.index.files.get(&c.path) else {
-        return (joined, open, related);
-    };
+    let sites = cx
+        .index
+        .files
+        .get(&c.path)
+        .map_or(&[][..], |f| &f.call_sites[..]);
     let bit = 1u64 << c.param;
-    for site in file.call_sites.iter().filter(|s| s.caller == c.key) {
+    for site in sites.iter().filter(|s| s.caller == c.key) {
         for bc in site.project_callees() {
             for (k, arg) in bc.params.iter().enumerate().take(64) {
                 if arg.may_params & bit == 0 {
@@ -829,32 +855,20 @@ fn callees_take_it(
                     .facts(&bc.callee)
                     .and_then(|f| f.params.get(usize::from(k)))
                     .unwrap_or(&ParamAnnotation::Any);
-                let takes = match annotation {
-                    ParamAnnotation::Any => true,
-                    ParamAnnotation::Admits(kinds) => kinds & c.lit.kind.bit() != 0,
-                    ParamAnnotation::Literal(l) if l.kind == c.lit.kind => {
-                        match at.get(&(&bc.callee, k)) {
-                            Some(&j) => {
-                                joined.push(j);
-                                true
-                            }
-                            None => false,
-                        }
-                    }
-                    ParamAnnotation::Literal(_) | ParamAnnotation::Other => false,
-                };
-                if !takes {
+                let candidate = at.get(&(&bc.callee, k)).copied();
+                if !takes_readonly(annotation, c.lit.kind, candidate, &mut joined) {
                     let name = cx.param_name(&bc.callee, k).unwrap_or_default();
-                    let is_candidate = at.contains_key(&(&bc.callee, k));
+                    let unsuggested = if candidate.is_some() {
+                        ""
+                    } else {
+                        ", which is not suggested"
+                    };
                     let why = match annotation {
-                        ParamAnnotation::Literal(l) if !is_candidate => format!(
-                            "`{}` takes it as `{name}: {}`, which is not suggested",
+                        ParamAnnotation::Literal(l) => format!(
+                            "`{}` takes it as `{name}: {}`{unsuggested}",
                             bc.callee.fqn(),
                             l.text
                         ),
-                        ParamAnnotation::Literal(l) => {
-                            format!("`{}` takes it as `{name}: {}`", bc.callee.fqn(), l.text)
-                        }
                         _ => format!(
                             "`{}` takes it as `{name}` with an annotation the read-only type does not satisfy",
                             bc.callee.fqn()
@@ -872,6 +886,25 @@ fn callees_take_it(
     }
     let _ = candidates;
     (joined, open, related)
+}
+
+/// Whether a parameter annotated `annotation` takes the read-only type of a candidate of
+/// `kind`: unannotated or `Any`, an abstract type that admits it, or the literal container of
+/// a candidate of the same kind (`candidate`), which joins the group (`joined`).
+fn takes_readonly(
+    annotation: &ParamAnnotation,
+    kind: ContainerKind,
+    candidate: Option<usize>,
+    joined: &mut Vec<usize>,
+) -> bool {
+    match annotation {
+        ParamAnnotation::Any => true,
+        ParamAnnotation::Admits(kinds) => kinds & kind.bit() != 0,
+        ParamAnnotation::Literal(l) if l.kind == kind => {
+            candidate.inspect(|&j| joined.push(j)).is_some()
+        }
+        ParamAnnotation::Literal(_) | ParamAnnotation::Other => false,
+    }
 }
 
 /// Premise 8, "Whole family", for a method: the same parameter of every definition of its
@@ -939,20 +972,8 @@ fn whole_family(
         let annotation = member_facts
             .and_then(|f| f.params.get(usize::from(c.param)))
             .unwrap_or(&ParamAnnotation::Any);
-        let fits = match annotation {
-            ParamAnnotation::Any => true,
-            ParamAnnotation::Admits(kinds) => kinds & c.lit.kind.bit() != 0,
-            ParamAnnotation::Literal(l) if l.kind == c.lit.kind => match at.get(&(member, c.param))
-            {
-                Some(&j) => {
-                    joined.push(j);
-                    true
-                }
-                None => false,
-            },
-            ParamAnnotation::Literal(_) | ParamAnnotation::Other => false,
-        };
-        if !fits {
+        let candidate = at.get(&(member, c.param)).copied();
+        if !takes_readonly(annotation, c.lit.kind, candidate, &mut joined) {
             open.push(unmet(
                 false,
                 format!(
@@ -1044,10 +1065,9 @@ impl<'a> Calls<'a> {
     /// The calls of `key` binding its parameter `param`, and those passing an attribute there.
     fn leverage(&self, key: &FuncKey, param: u8) -> (usize, usize) {
         let mut out = (0, 0);
-        for (site, b) in self.by_callee.get(key).into_iter().flatten() {
-            let Some(arg) = site.project_callees()[*b].params.get(usize::from(param)) else {
-                continue;
-            };
+        let bound = (self.by_callee.get(key).into_iter().flatten())
+            .filter_map(|(site, b)| site.project_callees()[*b].params.get(usize::from(param)));
+        for arg in bound {
             out.0 += 1;
             out.1 += usize::from(arg.self_attr.is_some() || arg.typed_field.is_some());
         }
@@ -1078,12 +1098,7 @@ fn group(
     for c in &members {
         let module = cx.module(&c.key);
         let parsed = cx.files.get(c.path.as_path());
-        let future = parsed.is_some_and(|f| f.semantic.has_future_annotations);
-        let naming = module
-            .as_deref()
-            .map_or(Naming::Taken("nothing heki knows".to_owned()), |m| {
-                type_name(m, future, &c.lit, c.lit.kind)
-            });
+        let naming = naming(cx, c, module.as_deref());
         let name = naming.name(c.lit.kind);
         let head_at = (c.lit.head.start - c.lit.span.start) as usize;
         let head_end = (c.lit.head.end - c.lit.span.start) as usize;
@@ -1364,12 +1379,15 @@ impl Naming {
 /// Premise 13, "A name for the type" (B.4 of the design): an existing binding of the read-only
 /// type in the module is reused (one under `if TYPE_CHECKING:` too when the module's
 /// annotations are not evaluated at run time); otherwise the edit imports it from
-/// `collections.abc`, unless the name is bound to something else there.
+/// `collections.abc`, unless the name is bound to something else there. `binder` names the
+/// scope short of the module that binds a name where the annotation reads it (a class body for
+/// a method): no name such a scope binds is written.
 fn type_name(
     decls: &ModuleDecls,
     future_annotations: bool,
     lit: &LiteralAnnotation,
     kind: ContainerKind,
+    binder: &dyn Fn(&str) -> Option<String>,
 ) -> Naming {
     let simple = simple_name(kind);
     let targets: [&str; 2] = match kind {
@@ -1380,8 +1398,9 @@ fn type_name(
     let head = &lit.text
         [(lit.head.start - lit.span.start) as usize..(lit.head.end - lit.span.start) as usize];
     if let Some((prefix, _)) = head.rsplit_once('.')
-        && (decls.imports.get(prefix).map(String::as_str) == Some("typing")
-            || decls.aliases.get(prefix).map(String::as_str) == Some("typing"))
+        && (decls.aliases.get(prefix).or(decls.imports.get(prefix))).map(String::as_str)
+            == Some("typing")
+        && binder(prefix).is_none()
     {
         let name = if kind == ContainerKind::Set {
             "AbstractSet"
@@ -1393,7 +1412,7 @@ fn type_name(
     let bound_in = |table: &BTreeMap<String, String>| {
         let mut names: Vec<&String> = table
             .iter()
-            .filter(|(_, fqn)| targets.contains(&fqn.as_str()))
+            .filter(|(name, fqn)| targets.contains(&fqn.as_str()) && binder(name).is_none())
             .map(|(name, _)| name)
             .collect();
         names.sort_by_key(|n| (n.as_str() != simple, n.len(), (*n).clone()));
@@ -1404,6 +1423,9 @@ fn type_name(
     }
     if future_annotations && let Some(name) = bound_in(&decls.type_checking_imports) {
         return Naming::Bound(name);
+    }
+    if let Some(scope) = binder(simple) {
+        return Naming::Taken(format!("the binding in `{scope}`"));
     }
     if let Some(other) = decls
         .imports
@@ -1467,10 +1489,9 @@ fn reader_sites(cx: &Cx<'_>) -> ReaderSites {
     let mut total = 0;
     let mut parsed: Vec<&&crate::project::ParsedFile> = cx.files.values().collect();
     parsed.sort_by(|a, b| a.path.cmp(&b.path));
-    for p in parsed {
-        let Some(decls) = cx.index.module_decls(&p.module_name) else {
-            continue;
-        };
+    let with_decls =
+        (parsed.into_iter()).filter_map(|p| Some((p, cx.index.module_decls(&p.module_name)?)));
+    for (p, decls) in with_decls {
         let mut sites = 0;
         for f in &p.ir.functions {
             if heki_effect::code_kind::is_test_code(&f.qualname, &p.rel) {
@@ -1878,9 +1899,7 @@ impl Trial {
             })
             .collect();
         let changed = format!("the file's reports were checked {MAX_CHECKS} times");
-        for g in gone {
-            withhold(groups, g, "trial-limit", &changed);
-        }
+        withhold_all(groups, &gone, Phase::Exact, "trial-limit", &changed);
     }
 
     /// The offsets of the text whose summary the index holds for the file at `path`, when it
@@ -2089,10 +2108,10 @@ fn attribute_facts(
             .map(|w| format!("`{w}`"))
             .collect::<Vec<_>>()
             .join(", ");
-        let changed = match &change.function {
-            Some(f) => format!("the facts of `{f}` would change: {what}"),
-            None => format!("the module's facts would change: {what}"),
-        };
+        let whose = (change.function.as_ref()).map_or("the module's facts".to_owned(), |f| {
+            format!("the facts of `{f}`")
+        });
+        let changed = format!("{whose} would change: {what}");
         withhold(groups, g, "fact-would-change", &changed);
     }
 }
@@ -2244,10 +2263,7 @@ fn numbers_aside(text: &str) -> String {
 fn edits_of(groups: &[Pending], set: &[usize], path: &Path) -> (Vec<(Span, String)>, Restated) {
     let mut edits = Vec::new();
     let mut restated = Restated::default();
-    for &g in set {
-        let Some(e) = groups[g].files.get(path) else {
-            continue;
-        };
+    for e in set.iter().filter_map(|&g| groups[g].files.get(path)) {
         edits.extend(e.edits.iter().cloned());
         for (qualname, params) in &e.params {
             *restated.params.entry(qualname.clone()).or_default() |= params;

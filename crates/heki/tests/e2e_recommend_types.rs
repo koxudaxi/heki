@@ -699,3 +699,355 @@ fn a_heuristic_group_changing_a_fact_leaves_the_exact_one_of_its_function() {
         )])
     );
 }
+
+#[test]
+fn a_name_bound_where_the_annotation_is_read_is_not_written() {
+    let p = Project::new("recommend_types_scopes");
+    p.write("app/__init__.py", "")
+        .write(
+            "app/bound.py",
+            "from collections.abc import Sequence\n\n\n\
+             class Shadows:\n    Sequence = int\n\n    \
+             def has(self, rows: list[int]) -> bool:\n        return 1 in rows\n\n\n\
+             class Hides:\n    Sequence = int\n\n    class Nested:\n        \
+             def has(self, rows: list[int]) -> bool:\n            return 1 in rows\n",
+        )
+        .write(
+            "app/plain.py",
+            "class Outer:\n    class Inner:\n        Sequence = int\n\n        \
+             def has(self, rows: list[int]) -> bool:\n            return 1 in rows\n\n\n\
+             def make():\n    Sequence = int\n\n    \
+             def has(rows: list[int]) -> bool:\n        return 1 in rows\n\n    return has\n",
+        );
+    let (report, _) = recommend(&p, &["--all"]);
+    let found = groups(&report);
+    let open = |id: &str| {
+        let g = found.get(id).unwrap_or_else(|| panic!("{id}: {found:#?}"));
+        assert_eq!(g["certainty"], "heuristic", "{id}: {g:#}");
+        let causes: Vec<&str> = (g["open"].as_array().unwrap().iter())
+            .filter(|o| o["premise"] == "A name for the type")
+            .map(|o| o["cause"].as_str().unwrap())
+            .collect();
+        assert_eq!(causes.len(), 1, "{id}: {g:#}");
+        causes[0].to_owned()
+    };
+    // The class body a method's annotations are read in binds the name the module imports.
+    assert_eq!(
+        open("app.bound:Shadows.has:rows"),
+        "`Sequence` names the binding in `Shadows` here"
+    );
+    // A nested class's own binding hides the import the edit would add; a function's binding
+    // is read by the functions it defines.
+    assert_eq!(
+        open("app.plain:Outer.Inner.has:rows"),
+        "`Sequence` names the binding in `Inner` here"
+    );
+    assert_eq!(
+        open("app.plain:make.<locals>.has:rows"),
+        "`Sequence` names the binding in `make` here"
+    );
+    // The binding of a class around the method's class is not seen there: the module's import
+    // still names the type.
+    let nested = &found["app.bound:Hides.Nested.has:rows"];
+    assert_eq!(nested["certainty"], "exact", "{nested:#}");
+    assert_eq!(nested["items"][0]["proposed"], "Sequence[int]");
+    assert_eq!(nested["edits"].as_array().unwrap().len(), 1, "{nested:#}");
+}
+
+#[test]
+fn a_report_the_added_import_makes_withholds_its_group_in_every_file() {
+    let p = Project::new("recommend_types_contract");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.import-boundaries]]\nname = \"pure-core\"\n\
+         importers = [\"app.core\"]\nallowed-imports = [\"<project>\", \"typing\"]\n",
+    )
+    .write("app/__init__.py", "")
+    .write(
+        "app/core.py",
+        "from app import b\n\n\ndef outer(rows: list[int]) -> bool:\n    return b.inner(rows)\n",
+    )
+    .write(
+        "app/b.py",
+        "def inner(rows: list[int]) -> bool:\n    return 1 in rows\n\n\n\
+         def alone(rows: list[int]) -> bool:\n    return 3 in rows\n",
+    );
+    let (report, _) = recommend(&p, &["--all"]);
+    let (exact, _) = kept_and_withheld(&report);
+    // The contract allows `typing` but not `collections.abc`: the import the edit adds to
+    // `core.py` is reported, which withholds the group in `b.py` too; `b.py` is checked again
+    // with the summary of `core.py` as it is.
+    assert_eq!(exact, ["app.b:alone:rows"], "{report:#}");
+    assert_eq!(
+        withheld(&report),
+        BTreeMap::from([(
+            "app.b:inner:rows".to_owned(),
+            "`IMP201` at line 1 would be reported".to_owned()
+        )])
+    );
+}
+
+const SHAPES: &str = r#"import functools
+import typing as t
+
+import lib
+import pydantic
+
+from app import gen
+
+
+def untyped(rows):
+    return 1 in rows
+
+
+def outer_any(rows: list[int]) -> bool:
+    return untyped(rows)
+
+
+def takes_iter(rows: t.Iterable[int]) -> bool:
+    return 1 in rows
+
+
+def outer_iter(rows: list[int]) -> bool:
+    return takes_iter(rows)
+
+
+def outer_gen(rows: list[int]) -> bool:
+    return gen.gen(rows)
+
+
+def iface(rows: list[int]) -> bool:
+    raise NotImplementedError
+
+
+def c1(rows: list[int]) -> bool:
+    return c2(rows)
+
+
+def c2(rows: list[int]) -> bool:
+    return c3(rows)
+
+
+def c3(rows: list[int]) -> bool:
+    return 1 in rows
+
+
+def tags(names: t.Set[str]) -> bool:
+    return "a" in names
+
+
+if lib.FLAG:
+    def twice(rows: list[int]) -> bool:
+        return 1 in rows
+else:
+    def twice(rows: list[int]) -> bool:
+        return 2 in rows
+
+
+class Base:
+    def has(self, rows: list[int]) -> bool:
+        return 1 in rows
+
+
+class Renamed(Base):
+    def has(self, items: list[int]) -> bool:
+        return 2 in items
+
+
+class Box:
+    def __init__(self, rows: list[int]) -> None:
+        self.n = len(rows)
+
+
+class Meta(type):
+    pass
+
+
+class Made(metaclass=Meta):
+    def has(self, rows: list[int]) -> bool:
+        return 1 in rows
+
+
+@functools.total_ordering
+class Ordered:
+    def has(self, rows: list[int]) -> bool:
+        return 1 in rows
+
+
+class Session(lib.Client):
+    def has(self, rows: list[int]) -> bool:
+        return 1 in rows
+
+
+class Model(pydantic.BaseModel):
+    def has(self, rows: list[int]) -> bool:
+        return 1 in rows
+
+
+def describe(f):
+    return f.__annotations__
+"#;
+
+#[test]
+fn each_way_a_premise_stays_open_names_its_cause() {
+    let p = project("recommend_types_shapes");
+    p.write("app/shapes.py", SHAPES)
+        .write(
+            "app/tc.py",
+            "from __future__ import annotations\n\nfrom typing import TYPE_CHECKING\n\n\
+             if TYPE_CHECKING:\n    from collections.abc import Sequence\n\n\n\
+             def has(rows: list[int]) -> bool:\n    return 1 in rows\n",
+        )
+        .write(
+            "app/own.py",
+            "class Sequence:\n    pass\n\n\ndef has(rows: list[int]) -> bool:\n    return 1 in rows\n",
+        )
+        .write("app/starred.py", "from app.exported import *\n")
+        .write(
+            "app/exported.py",
+            "def has(rows: list[int]) -> bool:\n    return 1 in rows\n",
+        )
+        .write(
+            "app/a_get.py",
+            "def inner_get(table: dict[str, int]) -> int:\n    return table.get(\"a\", 0)\n",
+        )
+        .write(
+            "app/z_call.py",
+            "from app import a_get\n\n\ndef outer_get(table: dict[str, int]) -> int:\n    \
+             return a_get.inner_get(table)\n",
+        );
+    let (report, _) = recommend(&p, &["--all"]);
+    let found = groups(&report);
+    let causes = |id: &str| -> Vec<String> {
+        let g = found.get(id).unwrap_or_else(|| panic!("{id}: {found:#?}"));
+        (g["open"].as_array().unwrap().iter())
+            .map(|o| {
+                format!(
+                    "{}: {}",
+                    o["premise"].as_str().unwrap(),
+                    o["cause"].as_str().unwrap()
+                )
+            })
+            .collect()
+    };
+    for id in ["outer_any", "outer_iter", "Ordered.has"] {
+        let key = format!("app.shapes:{id}:rows");
+        let g = found.get(&key).unwrap_or_else(|| {
+            let all: Vec<String> = (found.iter())
+                .map(|(k, g)| format!("{k} {} {:?}", g["certainty"], causes(k)))
+                .collect();
+            panic!("{key}: {all:#?}")
+        });
+        assert_eq!(g["certainty"], "exact", "{id}: {g:#}");
+    }
+    assert_eq!(
+        found["app.shapes:c1:rows"]["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        found["app.shapes:tags:names"]["items"][0]["proposed"],
+        "t.AbstractSet[str]"
+    );
+    let tc = &found["app.tc:has:rows"];
+    assert_eq!(tc["certainty"], "exact", "{tc:#}");
+    assert_eq!(tc["edits"].as_array().unwrap().len(), 1, "{tc:#}");
+    assert!(!found.contains_key("app.shapes:iface:rows"));
+    for (id, cause) in [
+        (
+            "app.shapes:outer_gen:rows",
+            "Callees take it: `app.gen.gen` takes it as `rows: list[int]`, which is not suggested",
+        ),
+        (
+            "app.shapes:twice:rows",
+            "Whole family: the name is defined more than once",
+        ),
+        (
+            "app.shapes:Base.has:rows",
+            "Whole family: the parameter is `items` in `app.shapes.Renamed.has`",
+        ),
+        (
+            "app.shapes:Made.has:rows",
+            "Annotations stay unread: `app.shapes.Meta` may read the annotations at run time",
+        ),
+        (
+            "app.shapes:Session.has:rows",
+            "Annotations stay unread: `lib.Client` may read the annotations at run time",
+        ),
+        (
+            "app.shapes:Model.has:rows",
+            "Whole family: `pydantic.BaseModel`, a base outside the project, may declare `has`",
+        ),
+        (
+            "app.exported:has:rows",
+            "A name for the type: `from app.exported import *` would bind `Sequence` too",
+        ),
+    ] {
+        let all = causes(id);
+        assert!(all.iter().any(|c| c == cause), "{id}: {all:#?}");
+    }
+    // A module binding the name, a constructor, and a callee in a file before its caller's
+    // change their facts with the edit.
+    let withheld = withheld(&report);
+    for id in [
+        "app.own:has:rows",
+        "app.shapes:Box.__init__:rows",
+        "app.a_get:inner_get:table",
+    ] {
+        assert!(withheld.contains_key(id), "{id}: {withheld:#?}");
+    }
+    assert_eq!(
+        report["suggestions"]["reader_sites"]["sites"], 1,
+        "{report:#}"
+    );
+}
+
+#[test]
+fn a_file_analyzed_four_times_in_a_phase_withholds_the_groups_it_has_left() {
+    let p = Project::new("recommend_types_analyses");
+    p.write("app/__init__.py", "");
+    // Group `fi` runs from `ai.py` through the later files to `h.py`, and only its function in
+    // `ai.py` changes a fact: each round withholds one group, and the files after it, which
+    // hold that group too, are analyzed again in the next.
+    let next = |j: usize| {
+        if j == 5 {
+            "h".to_owned()
+        } else {
+            format!("a{}", j + 1)
+        }
+    };
+    for j in 1..=5 {
+        let mut source = format!("from app import {}\n", next(j));
+        for i in 1..=j {
+            let call = format!("{}.f{i}(rows)", next(j));
+            let body = if i == j {
+                format!("rows.index(0) > 0 and {call}")
+            } else {
+                call
+            };
+            source.push_str(&format!(
+                "\n\ndef f{i}(rows: list[int]) -> bool:\n    return {body}\n"
+            ));
+        }
+        p.write(&format!("app/a{j}.py"), &source);
+    }
+    let leaves: Vec<String> = (1..=5)
+        .map(|i| format!("def f{i}(rows: list[int]) -> bool:\n    return 1 in rows\n"))
+        .collect();
+    p.write("app/h.py", &leaves.join("\n\n"));
+    let (report, _) = recommend(&p, &["--all"]);
+    let (exact, withheld) = kept_and_withheld(&report);
+    assert!(exact.is_empty(), "{exact:?}");
+    assert_eq!(
+        withheld,
+        BTreeMap::from([
+            (
+                "fact-would-change".to_owned(),
+                (1..=4).map(|i| format!("app.a{i}:f{i}:rows")).collect()
+            ),
+            ("trial-limit".to_owned(), vec!["app.a5:f5:rows".to_owned()]),
+        ])
+    );
+}

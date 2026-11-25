@@ -1403,7 +1403,7 @@ fn apply_edge(
     };
     transfer(index, target, local, &edge, &lead, rewrite);
     target.join_removes_kept(facts.removes_kept());
-    if !index.skips_typed_writes
+    if index.typed_writes == crate::TypedWrites::Propagated
         && (!facts.typed_field_write_sites.is_empty() || !facts.mutated_param_paths.is_empty())
     {
         // The functions the chains gain at this call: the callee, and the one iterating it.

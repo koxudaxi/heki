@@ -2674,7 +2674,7 @@ pub struct ProjectIndex {
     /// Propagation leaves typed writes where they are made: callers get neither the write sites
     /// of their callees, nor their write facts, nor `IndirectHelper` sites. Set when no
     /// enabled rule reads them; every function keeps its own.
-    pub(crate) skips_typed_writes: bool,
+    pub(crate) typed_writes: TypedWrites,
     /// What the project callers bind to the parameters queue waits ask about, from the local
     /// facts of every file (computed before propagation).
     pub(crate) param_capacities: capacity::ParamCapacities,
@@ -2797,8 +2797,9 @@ impl IndexFiles {
 
 /// Whether propagation carries typed writes (`EffectSummary::typed_field_write_sites` and
 /// `typed_field_writes`) from callees to callers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TypedWrites {
+    #[default]
     Propagated,
     /// No enabled rule reads propagated typed writes: each function keeps its own only.
     Local,
@@ -2944,7 +2945,7 @@ impl ProjectIndex {
 
     /// Whether callers got the typed writes of their callees ([`TypedWrites`]).
     pub fn propagates_typed_writes(&self) -> bool {
-        !self.skips_typed_writes
+        self.typed_writes == TypedWrites::Propagated
     }
 
     /// The opt-in facts the summaries carry.
@@ -2969,7 +2970,7 @@ impl ProjectIndex {
         files.sort_by(|a, b| module_precedence(&a.path).cmp(&module_precedence(&b.path)));
         let mut index = Self {
             contracts,
-            skips_typed_writes: typed_writes == TypedWrites::Local,
+            typed_writes,
             opt_in,
             ..Self::default()
         };
@@ -2992,7 +2993,7 @@ impl ProjectIndex {
         let Self {
             mut files,
             contracts,
-            skips_typed_writes,
+            typed_writes,
             opt_in,
             reverse_call_graph,
             func_files,
@@ -3006,11 +3007,7 @@ impl ProjectIndex {
         IndexFiles {
             files,
             contracts,
-            typed_writes: if skips_typed_writes {
-                TypedWrites::Local
-            } else {
-                TypedWrites::Propagated
-            },
+            typed_writes,
             opt_in,
         }
     }

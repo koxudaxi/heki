@@ -159,6 +159,55 @@ pub struct SemanticModel {
     pub star_imports: Vec<StarImport>,
 }
 
+/// The function scopes of a module by where the names of their parameters end, sorted
+/// ([`SemanticModel::parameters`]).
+pub struct Parameters(Vec<(u32, ScopeId)>);
+
+impl Parameters {
+    /// The function scope of the parameter an annotation starting at `at` belongs to: the
+    /// parameter whose name ends last before it (`rows` of `rows: list[int]`).
+    pub fn function_at(&self, at: u32) -> Option<ScopeId> {
+        let i = self.0.partition_point(|(end, _)| *end <= at);
+        Some(self.0.get(i.checked_sub(1)?)?.1)
+    }
+}
+
+impl SemanticModel {
+    fn scope(&self, id: ScopeId) -> Option<&Scope> {
+        self.scopes.get(id.0 as usize).filter(|s| s.id == id)
+    }
+
+    pub fn parameters(&self) -> Parameters {
+        let mut ends: Vec<(u32, ScopeId)> = (self.scopes.iter())
+            .flat_map(|s| {
+                (s.bindings.iter())
+                    .filter(|b| b.is_parameter)
+                    .map(|b| (b.span.end, s.id))
+            })
+            .collect();
+        ends.sort_unstable_by_key(|(end, _)| *end);
+        Parameters(ends)
+    }
+
+    /// The scope short of the module that binds `name` where the annotations of the `def` of
+    /// the function scope `function` read it. They are evaluated in the block running the
+    /// statement, past its PEP 695 type-parameter scope: a class body's names are seen there
+    /// (and by the PEP 649 annotation scope of a class), those of the scopes around that block
+    /// as from any nested scope, which skips class bodies.
+    pub fn annotation_binder(&self, function: ScopeId, name: &str) -> Option<&Scope> {
+        let block = self.scope(function)?.parent.and_then(|p| self.scope(p));
+        let mut sees_class = true;
+        std::iter::successors(block, |s| s.parent.and_then(|p| self.scope(p)))
+            .take_while(|s| s.kind != ScopeKind::Module)
+            .filter(|s| {
+                let seen = s.kind != ScopeKind::Class || sees_class;
+                sees_class &= s.kind == ScopeKind::TypeParameters;
+                seen
+            })
+            .find(|s| s.bindings.iter().any(|b| b.name == name))
+    }
+}
+
 struct ScopeBuilder {
     id: ScopeId,
     parent: Option<ScopeId>,
