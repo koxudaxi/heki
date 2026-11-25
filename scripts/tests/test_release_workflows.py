@@ -401,3 +401,67 @@ def test_a_second_run_updates_the_branch_and_the_pull_request(
     assert ["pr", "edit", "42"] == next(call for call in calls if call[:2] == ["pr", "edit"])[:3]
     assert not any("/repos/o/r/labels" in call for call in calls if "--method" in call)
     assert calls[-1][:4] == ["api", "--method", "POST", "/repos/o/r/issues/42/labels"]
+
+
+@pytest.mark.parametrize(
+    ("prerelease", "date_flag"),
+    [("false", True), ("true", False)],
+)
+def test_the_docs_a_release_deploys_show_the_release_tag(
+    checkout: Path, prerelease: str, date_flag: bool
+) -> None:
+    """The docs job writes the release the way the build jobs do, with the script the Release
+    Sync pull request runs, so the pre-commit `rev:` lines of the deployed pages are the tag."""
+    docs = load("docs.yml")["jobs"]["build"]
+    write = step(
+        docs, "Write the release into the manifests and the pre-commit examples"
+    )
+    assert write["if"] == "github.event_name == 'release'"
+    names = [s.get("name") for s in docs["steps"]]
+    regenerate = step(docs, "Regenerate llms.txt from the release's pages")
+    assert regenerate["if"] == "github.event_name == 'release'"
+    assert regenerate["run"] == "python scripts/build_llms_txt.py"
+    assert (
+        names.index(write["name"])
+        < names.index(regenerate["name"])
+        < names.index("llms.txt is up to date")
+    )
+    assert names.index(write["name"]) < [s.get("run") for s in docs["steps"]].index(
+        "cargo build --release -p heki"
+    )
+    scripts = checkout / "scripts"
+    scripts.mkdir()
+    for name in ("set_release_versions.py",):
+        (scripts / name).write_text(
+            (ROOT / "scripts" / name).read_text(encoding="utf-8")
+        )
+    env = {
+        **os.environ,
+        "TAG": "v0.1.2",
+        "PUBLISHED_AT": "2026-11-25T23:59:59Z",
+        "PRERELEASE": prerelease,
+        "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}",
+    }
+    fake_python = checkout / "bin"
+    fake_python.mkdir()
+    (fake_python / "python").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    (fake_python / "python").chmod(0o755)
+    env["PATH"] = f"{fake_python}{os.pathsep}{env['PATH']}"
+    result = run_step(write["run"], env, cwd=checkout)
+    assert result.returncode == 0, result.stderr
+    for page in ("README.md", "docs/adoption.md"):
+        assert re.findall(
+            r"rev: (v\S+)", (checkout / page).read_text(encoding="utf-8")
+        ) == ["v0.1.2"]
+    changelog = (checkout / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert ("2026-11-25" in changelog) is date_flag
+
+
+def test_a_docs_release_tag_without_a_version_fails() -> None:
+    docs = load("docs.yml")["jobs"]["build"]
+    write = step(
+        docs, "Write the release into the manifests and the pre-commit examples"
+    )
+    result = run_step(write["run"], {**os.environ, "TAG": "v"})
+    assert result.returncode == 1
+    assert "The release tag `v` names no version." in result.stdout
