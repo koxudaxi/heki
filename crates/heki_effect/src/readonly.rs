@@ -381,11 +381,11 @@ impl ContainerKind {
         }
     }
 
-    /// The methods of the read-only type of a list, dict, or set (`Sequence`, `Mapping`,
-    /// `AbstractSet`): a value annotated with that type has only these (none for the other kinds).
+    /// The methods of the read-only type of a container of this kind (`Sequence` for the
+    /// sequences, `Mapping`, `AbstractSet`): a value annotated with that type has only these.
     pub fn read_only_methods(self) -> &'static [&'static str] {
         match self {
-            Self::List => &[
+            Self::List | Self::Bytearray | Self::Deque => &[
                 "index",
                 "count",
                 "__getitem__",
@@ -422,7 +422,6 @@ impl ContainerKind {
                 "__sub__",
                 "__xor__",
             ],
-            Self::Bytearray | Self::Deque => &[],
         }
     }
 
