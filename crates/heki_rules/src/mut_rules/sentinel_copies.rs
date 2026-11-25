@@ -4,16 +4,17 @@
 //!
 //! The deep copy is in a checked file; the sentinel, the class holding it, and the tests may be
 //! anywhere in the project. They come from the declarations ([`ProjectDecls::held_sentinels`],
-//! [`ProjectDecls::deep_copy_of`]) and the summaries' local facts (`sentinel_tests`,
+//! [`ProjectDecls::copy_of`]) and the summaries' local facts (`sentinel_tests`,
 //! `deep_copies`), never another file's IR.
 
 use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
 use heki_diagnostics::{Certainty, Diagnostic};
 use heki_effect::{
-    DeepCopy, DeepCopySite, FuncKey, HeldSentinel, ProjectDecls, ProjectIndex, SentinelTest,
+    CopyMade, DeepCopySite, FuncKey, HeldSentinel, ProjectDecls, ProjectIndex, SentinelTest,
 };
 use heki_ir::walk::{Answer, Budget, Closure, Join};
+use heki_kb::CopyDepth;
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -167,8 +168,8 @@ impl<'c, 't> Facts<'c, 't> {
 
     fn find_candidates(&mut self, copied: &str) -> Vec<Candidate> {
         let decls = self.decls();
-        let deep = decls.deep_copy_of(copied, self.cx.kb);
-        if deep == DeepCopy::Hooked {
+        let deep = decls.copy_of(copied, CopyDepth::Deep, self.cx.kb);
+        if deep == CopyMade::Hooked {
             return Vec::new();
         }
         // The object is an instance of the classes along its class's MRO, and may be one of a
@@ -186,7 +187,7 @@ impl<'c, 't> Facts<'c, 't> {
                 };
                 let exact = surely
                     && held.stored
-                    && deep == DeepCopy::Attributes
+                    && deep == CopyMade::Attributes
                     && tested.exact
                     && self.plain(copied, &held.attr);
                 out.push(Candidate {

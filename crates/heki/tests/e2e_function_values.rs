@@ -153,8 +153,14 @@ class Holder:
 /// attribute.
 const FIELD_CALLS: &str = r#"from __future__ import annotations
 
+import copy
+
 from pkg.defs import BY_NAME, QUIET, SPECS, VIEW, Child, Holder, Spec, View
 from pkg.model import Field, noop, require
+
+
+def copied_plainly(field: Field) -> bool:
+    return copy.copy(Spec("a", require)).when(field)  # writes
 
 
 def by_position(field: Field) -> bool:
@@ -267,6 +273,14 @@ class Swapped:
         object.__setattr__(self, "when", when)
 
 
+@dataclass(frozen=True)
+class Reset:
+    when: Callable[[Field], bool]
+
+    def __copy__(self) -> Reset:
+        return Reset(noop)
+
+
 @dataclass_transform(frozen_default=True)
 def record(cls: Any) -> Any:
     return cls
@@ -288,11 +302,20 @@ def grow(when: Any) -> None:
 /// not the one a generated constructor makes, the call stays unresolved.
 const OPEN_FIELD_CALLS: &str = r#"from __future__ import annotations
 
+import copy
 import dataclasses
 from typing import Any
 
-from pkg.defs import GROWN, Loose, Posted, Recorded, Spec, SubView, Swapped
+from pkg.defs import GROWN, Loose, Posted, Recorded, Reset, Spec, SubView, Swapped
 from pkg.model import Field, noop, require
+
+
+def copied_by_a_hook(field: Field) -> bool:
+    return copy.copy(Reset(require)).when(field)  # unresolved
+
+
+def deep_copied_past_a_shallow_hook(field: Field) -> bool:
+    return copy.deepcopy(Reset(require)).when(field)  # writes
 
 
 def not_frozen(field: Field) -> bool:
@@ -714,7 +737,7 @@ def copies_through_a_partial(field: Field) -> Field:
 
 /// A class a field or a partial class attribute holds is constructed by a call through it: the
 /// object the call returns is new, and writing it is a write of a fresh object, as for the class
-/// called directly.
+/// called directly. The holder (a module global included) is not the constructor's `self`.
 #[test]
 fn a_held_class_constructs_a_new_object() {
     check_marks(
@@ -739,15 +762,24 @@ class Factories(NamedTuple):
 
 class Kit:
     make = staticmethod(partial(Fresh))
+
+
+FACTORIES = Factories(Fresh)
 "#,
         r#"from __future__ import annotations
 
-from pkg.defs import Factories, Fresh, Kit
+from pkg.defs import FACTORIES, Factories, Fresh, Kit
 from pkg.model import Field
 
 
 def through_a_field() -> Field:
     made = Factories(Fresh).make()
+    made.required = True
+    return made
+
+
+def through_a_field_of_a_global() -> Field:
+    made = FACTORIES.make()
     made.required = True
     return made
 

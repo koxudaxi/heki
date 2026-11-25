@@ -570,8 +570,10 @@ reader of types sees them: a local, a closure cell, a global or an attribute eve
 which binds such instances (also under an annotation of the class, `ProjectDecls::narrower`), the
 items of a container (`TABLE: tuple[Spec, ...] = (Spec(run=a), Spec(run=b))` gives one of `a` and
 `b`, `None` adding nothing), and a copy of the instance alone (`copy.copy`, `dataclasses.replace`
-given no other value). A copy given other values, `typing.Self` of a method's result, and a call
-of a class object that may be a subclass give an instance whose fields hold their declared types.
+given no other value; `copy.copy` and `copy.deepcopy` only where no copy hook of the class decides
+the copy, `ProjectDecls::copy_of`: a `__copy__` may return an instance holding anything). A copy
+given other values or made by a hook, `typing.Self` of a method's result, and a call of a class
+object that may be a subclass give an instance whose fields hold their declared types.
 Reading a field gives what it holds (`TypeCtx::field_held`, for typing and for the call targets
 of `obj.field(...)`, which binds no receiver and constructs a class the field holds, as a
 partial class attribute of a class does) when the instance holds what the construction gave
@@ -1561,7 +1563,7 @@ which module imports which.
    `stores_on_instance` reads the stored value).
 4. **Deep copies** (`EffectSummary::deep_copies`): a call that resolves to `copy.deepcopy` with
    one positional argument and no keyword, of an object whose project classes heki knows.
-   `ProjectDecls::deep_copy_of` says what the copy protocol does with a value of a class: a copy
+   `ProjectDecls::copy_of` says what the copy protocol does with a value of a class: a copy
    hook along its MRO (`__deepcopy__`, `__reduce__`, `__reduce_ex__`, `__getstate__`,
    `__setstate__`) or a `copyreg` registration of the class (`ModuleDecls::copy_registrations`,
    joined into a project index whose changes are class keys) decides it (no report); with none,
