@@ -10,8 +10,13 @@
 //! the function's blocks (kills at allocations, unions at joins and exception edges) and answers
 //! each question with a [`NewArg`]: whether the variable holds a new object (or a parameter) that
 //! nothing kept so far, under conditions on the callees, which propagation resolves.
+//!
+//! A returned value may also be an element of a parameter (an item, `get`, an iteration step of
+//! it) on some paths: the function returns a new object at the calls binding such a parameter to
+//! a value with no elements, where those paths raise or never reach their `return`
+//! (`elements_of` of [`ReturnsNew::New`]).
 
-use crate::{FuncKey, NewArg, NewCond, NewKind};
+use crate::{FuncKey, NewArg, NewCond, NewFrom, NewKind, ReturnsNew};
 use heki_ir::walk::{Answer, Budget, Closure, Def, Facts, FnShape, Join, Or, Sparse, fixpoint};
 use heki_ir::{InstKind, VarId};
 use rustc_hash::FxHashMap;
@@ -35,13 +40,16 @@ struct Alloc {
     pos: Pos,
     dst: VarId,
     kind: NewKind,
-    returns: Vec<FuncKey>,
+    returns: Vec<NewFrom>,
 }
 
 /// What the extractor records for one function.
 #[derive(Default)]
 pub(crate) struct Recorder {
     allocs: Vec<Alloc>,
+    /// The results of calls that hand back the object they are handed (a project function
+    /// returning its parameter), by the argument's variable: the same object.
+    handed_back: FxHashMap<VarId, VarId>,
     escapes: Vec<(Pos, VarId, Escape)>,
     /// The points asked about, by query id.
     queries: Vec<(Pos, VarId)>,
@@ -84,6 +92,10 @@ struct Roots<'f> {
     may: FxHashMap<VarId, u64>,
     /// Variables every input of which is an allocation (`may` is exact for them).
     all: FxHashMap<VarId, bool>,
+    /// Returned variables every input of which is an allocation or an element of a parameter,
+    /// and some an element: the parameters those are elements of. One without an allocation
+    /// (absent from `may`) returns nothing at a call binding them to values without elements.
+    elements_of: FxHashMap<VarId, u64>,
     may_params: &'f FxHashMap<VarId, u64>,
     /// `(i, None)` entries: the variable is parameter `i` itself on every path.
     param_of: &'f dyn Fn(VarId) -> Option<u8>,
@@ -106,7 +118,7 @@ enum Action {
 }
 
 impl Recorder {
-    pub(crate) fn alloc(&mut self, pos: Pos, dst: VarId, kind: NewKind, returns: Vec<FuncKey>) {
+    pub(crate) fn alloc(&mut self, pos: Pos, dst: VarId, kind: NewKind, returns: Vec<NewFrom>) {
         if self.allocs.len() < 64 {
             self.allocs.push(Alloc {
                 pos,
@@ -115,6 +127,11 @@ impl Recorder {
                 returns,
             });
         }
+    }
+
+    /// `dst` holds the object `arg` holds: the result of a call returning its argument.
+    pub(crate) fn handed_back(&mut self, dst: VarId, arg: VarId) {
+        self.handed_back.insert(dst, arg);
     }
 
     pub(crate) fn escape(&mut self, pos: Pos, var: VarId, how: Escape) {
@@ -128,19 +145,21 @@ impl Recorder {
     }
 
     /// Answer every query, and the returns of the function of `shape` (`returns`: whether the
-    /// function's result is a new object at every `return` with a value).
+    /// function's result is a new object at every `return` with a value). `element_of` gives the
+    /// parameters a value is an element of by its definition (`0`: none).
     pub(crate) fn resolve(
         self,
         shape: &FnShape<'_>,
         may_params: &FxHashMap<VarId, u64>,
         param_of: &dyn Fn(VarId) -> Option<u8>,
+        element_of: &dyn Fn(VarId) -> u64,
         callee_of: &dyn Fn(u32, u16) -> FuncKey,
         returns: bool,
-    ) -> (Vec<NewArg>, Option<NewArg>) {
+    ) -> (Vec<NewArg>, ReturnsNew) {
         // Without an allocation, only parameters can be asked about, and nothing is returned
         // new.
         if self.queries.is_empty() && (self.allocs.is_empty() || !returns) {
-            return (Vec::new(), None);
+            return (Vec::new(), ReturnsNew::No);
         }
         let f = shape.f;
         let returned: Vec<(Pos, VarId)> = if returns {
@@ -160,14 +179,24 @@ impl Recorder {
             .chain(returned.iter().map(|(_, v)| *v))
             .chain(self.escapes.iter().map(|(_, v, _)| *v));
         let budget = Budget::of_function("construction::Recorder", f);
+        let returned_vars: Vec<VarId> = returned.iter().map(|(_, v)| *v).collect();
+        let found = self.roots(
+            shape,
+            &budget,
+            asked,
+            (&returned_vars, element_of),
+            may_params,
+            param_of,
+        );
         // Past the budget, no object is known to be new, as past the allocations recorded.
-        let Answer::Known(roots) = self.roots(shape, &budget, asked, may_params, param_of) else {
-            return (vec![NewArg::Old; self.queries.len()], None);
+        let Answer::Known(roots) = found else {
+            return (vec![NewArg::Old; self.queries.len()], ReturnsNew::No);
         };
         let trackable = |v: VarId| roots.may.contains_key(&v) || param_of(v).is_some();
-        let any_return_new = !returned.is_empty() && returned.iter().all(|(_, v)| trackable(*v));
+        let any_return_new = !returned.is_empty()
+            && (returned.iter()).all(|(_, v)| trackable(*v) || roots.elements_of.contains_key(v));
         if !self.queries.iter().any(|(_, v)| trackable(*v)) && !any_return_new {
-            return (vec![NewArg::Old; self.queries.len()], None);
+            return (vec![NewArg::Old; self.queries.len()], ReturnsNew::No);
         }
         // Hand-over ids, one per callee and parameter: the answers name only those, so the
         // calls of one helper share a hand-over.
@@ -290,7 +319,7 @@ impl Recorder {
         };
         // Past the budget, no object is known to be new, as past the roots' walk.
         let Answer::Known(block_in) = fixpoint(&budget, spec, transfer) else {
-            return (vec![NewArg::Old; self.queries.len()], None);
+            return (vec![NewArg::Old; self.queries.len()], ReturnsNew::No);
         };
         // Answer the queries with the state before each one (a block the entry does not reach
         // keeps nothing).
@@ -308,48 +337,65 @@ impl Recorder {
             );
             for (_, _, action) in list {
                 if let Action::Query(i) = action {
-                    let var = match self.queries.get(*i) {
-                        Some((_, v)) => *v,
-                        None => returned[*i - self.queries.len()].1,
+                    let (var, of_return) = match self.queries.get(*i) {
+                        Some((_, v)) => (*v, false),
+                        None => (returned[*i - self.queries.len()].1, true),
                     };
-                    answers[*i] = self.answer(&roots, &state, &handed_keys, var);
+                    answers[*i] = self.answer(&roots, &state, &handed_keys, var, of_return);
                 } else {
                     apply(&mut state, action);
                 }
             }
         }
         let tail = answers.split_off(self.queries.len());
-        let returns_new = (!tail.is_empty())
-            .then(|| {
-                let mut kind = NewKind::Own;
-                let mut cond = NewCond::default();
-                for a in tail {
-                    let NewArg::New { kind: k, cond: c } = a else {
-                        return None;
-                    };
-                    kind = kind.min(k);
-                    cond = cond.and(&c);
+        let returns_new = || {
+            let mut kind = NewKind::Own;
+            let mut cond = NewCond::default();
+            let mut any = false;
+            for (v, a) in returned_vars.iter().zip(tail) {
+                // Only elements of parameters: nothing is returned there at such a call.
+                if !roots.may.contains_key(v) && roots.elements_of.contains_key(v) {
+                    continue;
                 }
-                Some(NewArg::New { kind, cond })
-            })
-            .flatten();
-        (answers, returns_new)
+                let NewArg::New { kind: k, cond: c } = a else {
+                    return ReturnsNew::No;
+                };
+                kind = kind.min(k);
+                cond = cond.and(&c);
+                any = true;
+            }
+            let elements_of = (returned_vars.iter())
+                .filter_map(|v| roots.elements_of.get(v))
+                .fold(0, |mask, m| mask | m);
+            if !any {
+                return ReturnsNew::No;
+            }
+            ReturnsNew::New {
+                kind,
+                cond,
+                elements_of,
+            }
+        };
+        (answers, returns_new())
     }
 
     /// The allocation roots each of `asked` may hold, through copies and phis: `may`, the roots
     /// of every value a value reaches through their inputs, and `all`, whether every value on the
-    /// way holds allocations only. Open past the budget.
+    /// way holds allocations only; for the `returned` values, also `elements_of`, by the
+    /// parameters `element_of` says a value is an element of. Open past the budget.
     fn roots<'f>(
         &self,
         shape: &FnShape<'_>,
         budget: &Budget,
         asked: impl Iterator<Item = VarId>,
+        (returned, element_of): (&[VarId], &dyn Fn(VarId) -> u64),
         may_params: &'f FxHashMap<VarId, u64>,
         param_of: &'f dyn Fn(VarId) -> Option<u8>,
     ) -> Answer<Roots<'f>> {
         let mut roots = Roots {
             may: FxHashMap::default(),
             all: FxHashMap::default(),
+            elements_of: FxHashMap::default(),
             may_params,
             param_of,
         };
@@ -361,15 +407,29 @@ impl Recorder {
             return Answer::Known(roots);
         }
         let f = shape.f;
-        // A copy's source, a phi's inputs other than itself.
+        // A local of a function read where nothing bound it: reading it raises
+        // `UnboundLocalError`, so it holds no object (in a module or class body the read falls
+        // back to the globals).
+        let unbound = |x: VarId| {
+            !f.is_module_body
+                && !f.is_class_body
+                && matches!(
+                    shape.inst(x).map(|i| &i.kind),
+                    Some(InstKind::LoadName { .. })
+                )
+        };
+        // A copy's source, the argument a call hands back, a phi's inputs other than itself that
+        // may hold an object.
         let inputs = |v: VarId, out: &mut Vec<VarId>| match shape.def(v) {
             Def::Inst(b, i) => {
                 if let InstKind::Copy { src, .. } = f.block(b).insts[i as usize].kind {
                     out.push(src);
                 }
+                out.extend(self.handed_back.get(&v));
             }
             Def::Phi(b, i) => out.extend(
-                (f.block(b).phis[i as usize].incoming.iter().map(|(_, x)| *x)).filter(|x| *x != v),
+                (f.block(b).phis[i as usize].incoming.iter().map(|(_, x)| *x))
+                    .filter(|x| *x != v && !unbound(*x)),
             ),
             Def::Param | Def::None => {}
         };
@@ -396,20 +456,52 @@ impl Recorder {
                 roots.all.insert(v, all);
             }
         }
+        // A returned value some inputs of which are elements of parameters, the others
+        // allocations.
+        let elements: Closure<VarId, Or> = Closure::new();
+        let elements_of = |v: VarId| {
+            let of = |u: VarId| Or(element_of(u));
+            elements.ask(budget, v, of, inputs).map(|m| m.0)
+        };
+        let lacking_either: Closure<VarId, bool> = Closure::new();
+        // A value on the way that holds neither an allocation nor an element.
+        let neither = |u: VarId| {
+            let holds = |a: Answer<u64>| matches!(a, Answer::Known(b) if b != 0);
+            !holds(elements_of(u)) && !holds(may(u))
+        };
+        for &v in returned {
+            if roots.all.get(&v).is_some_and(|all| *all) {
+                continue;
+            }
+            let mixed = elements_of(v).and_then(|mask| {
+                let lacks = lacking_either.ask(budget, v, neither, inputs);
+                lacks.map(|lacks| (mask != 0 && !*lacks).then_some(mask))
+            });
+            // Past the budget, the value is known to be no element of a parameter.
+            if let Some(mask) = mixed.open_means(None) {
+                roots.elements_of.insert(v, mask);
+            }
+        }
         Answer::Known(roots)
     }
 
     /// Whether `var` holds, at a point with escape state `state`, a new object or a parameter
-    /// that nothing kept, and under which conditions.
+    /// that nothing kept, and under which conditions. A returned value (`of_return`) may also
+    /// be an element of a parameter on the paths without an allocation
+    /// ([`Roots::elements_of`]).
     fn answer(
         &self,
         roots: &Roots<'_>,
         state: &State,
         handed_keys: &[(FuncKey, u8)],
         var: VarId,
+        of_return: bool,
     ) -> NewArg {
         let (a, p) = roots.masks(var);
-        let new = a != 0 && p == 0 && roots.all.get(&var).copied().unwrap_or(false);
+        let new = a != 0
+            && p == 0
+            && (roots.all.get(&var).copied().unwrap_or(false)
+                || of_return && roots.elements_of.contains_key(&var));
         let param = if a == 0 { (roots.param_of)(var) } else { None };
         if (!new && param.is_none()) || state.allocs & a != 0 || state.params & p != 0 {
             return NewArg::Old;
