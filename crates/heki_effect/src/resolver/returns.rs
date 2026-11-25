@@ -521,7 +521,7 @@ fn typed_candidates<'f>(
 /// and each `return` gives a value.
 fn returned_values(decls: &ModuleDecls, f: &IrFunction) -> Option<Vec<VarId>> {
     if !matches!(f.kind, FunctionKind::Sync | FunctionKind::Async)
-        || is_generator_function(f)
+        || is_generator_function(f, decls)
         || !keeps_body_result(f, decls)
     {
         return None;

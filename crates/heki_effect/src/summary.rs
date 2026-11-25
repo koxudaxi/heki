@@ -1181,7 +1181,7 @@ impl<'a> Extractor<'a> {
         };
         let summary = EffectSummary {
             is_async: matches!(f.kind, FunctionKind::Async | FunctionKind::AsyncGenerator),
-            is_generator: is_generator_function(f),
+            is_generator: is_generator_function(f, cx.module),
             is_cached_property: decorated_as(cx.module, f, &["cached_property"]),
             kept: opt_in
                 .kept_values
@@ -1204,6 +1204,7 @@ impl<'a> Extractor<'a> {
             is_lru_cache: decorated_as(cx.module, f, &["lru_cache", "cache"]),
             owner_class_qualname: f.owner_class_qualname.clone(),
             decorators: f.decorators.clone(),
+            decorator_may_replace: !keeps_returned_value(&f.decorators, cx.module),
             // `eval`, `exec`, `locals()`, frame introspection (Assumption A1): code heki cannot
             // follow runs here, or reads and changes this frame's state.
             unknown_calls: !f.a1_hazards.is_empty(),
@@ -1306,13 +1307,8 @@ impl<'a> Extractor<'a> {
         };
         if ex.summary.is_lru_cache {
             let module = ex.cx.module;
-            ex.summary.cached_result = readonly::cached_result(
-                f,
-                &ex.defs,
-                &ex.live,
-                |t| module.resolve_dotted(t, false),
-                class_of,
-            );
+            ex.summary.cached_result =
+                readonly::cached_result(f, module, &ex.defs, &ex.live, class_of);
         }
         let returned = readonly::returned_values(
             shape,
@@ -4325,7 +4321,7 @@ impl<'a> Extractor<'a> {
                 _ => None,
             })
             .collect();
-        if returned.is_empty() || !keeps_returned_value(&f.decorators) {
+        if returned.is_empty() || self.summary.decorator_may_replace {
             return;
         }
         let callees = self.callees_by_result();
@@ -4524,7 +4520,7 @@ impl<'a> Extractor<'a> {
                 Some(Callee::External(s)) if inspecting_builtin(s, true)
             )
         };
-        fresh::fresh_return(shape, &self.live, source_of, inspects)
+        fresh::fresh_return(shape, &self.summary, &self.live, source_of, inspects)
     }
 
     /// Answer the construction queries of the visited function (`construction`): the
@@ -4540,7 +4536,7 @@ impl<'a> Extractor<'a> {
         // Calling a generator or an `async def` returns a generator or a coroutine.
         let returns = self.f.kind == FunctionKind::Sync
             && !self.f.is_module_body
-            && keeps_returned_value(&self.f.decorators);
+            && !self.summary.decorator_may_replace;
         let sites = &self.sites;
         // Hand-overs are to project callees of the function's own call sites.
         let callee_of = |site: u32, callee: u16| {

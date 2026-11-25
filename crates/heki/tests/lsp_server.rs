@@ -473,6 +473,41 @@ fn lsp_code_actions_for_rewrites_plain_diagnostics_and_other_ranges() {
     lsp.stop(true);
 }
 
+/// The unsafe `MUT118` fix of a Python 3.15 target is a quick fix that is not preferred.
+#[test]
+fn lsp_offers_the_unsafe_sentinel_fix_as_a_quick_fix() {
+    let p = Project::new("lsp_unsafe_fix");
+    let text = "import copy\nfrom dataclasses import dataclass\n\nMISSING = object()\n\n\n@dataclass\nclass Field:\n    default: object = MISSING\n\n\ndef given(item: Field) -> bool:\n    return item.default is not MISSING\n\n\ndef isolated(item: Field) -> Field:\n    return copy.deepcopy(item)\n";
+    p.write("a.py", text).write(
+        "heki.toml",
+        "target-version = \"py315\"\n\n[lint]\nextend-select = [\"MUT118\"]\n",
+    );
+    let a = uri(&p.dir.join("a.py"));
+    let mut lsp = Lsp::start(&p.dir, &["server", "--stdio"]);
+    lsp.request(
+        "initialize",
+        json!({"processId": null, "rootUri": uri(&p.dir), "capabilities": {}}),
+    );
+    lsp.notify("initialized", json!({}));
+    lsp.ready();
+    lsp.open(&a, text);
+    let diags = lsp.diagnostics(&a, |d| !d.is_empty());
+    assert_eq!(codes(&diags), vec!["MUT118"]);
+    let actions = lsp.code_actions(&a, &diags[0]["range"], &diags);
+    assert_eq!(actions.len(), 2, "{actions:#?}");
+    assert_eq!(actions[0]["title"], "Apply the unsafe MUT118 fix");
+    assert_eq!(actions[0]["kind"], "quickfix");
+    assert_eq!(actions[0]["isPreferred"], false);
+    assert_eq!(
+        actions[0]["edit"]["changes"][&a][0],
+        json!({
+            "range": {"start": {"line": 3, "character": 10}, "end": {"line": 3, "character": 18}},
+            "newText": "sentinel(\"MISSING\")"
+        })
+    );
+    lsp.stop(true);
+}
+
 #[test]
 fn lsp_reports_an_invalid_configuration() {
     let p = Project::new("lsp_bad_config");
