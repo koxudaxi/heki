@@ -870,7 +870,7 @@ pub const READONLY_PARAMETER: &[&Premise] = &[
     },
     &Premise {
         name: "Annotations stay unread",
-        states: "every decorator is in the decorator table, which leaves annotations unread; the class has no metaclass but type or abc.ABCMeta and no base outside the project but one of the standard library or one the catalog lists as reading only fields; the function is used only as the callee of calls (T1)",
+        states: "every decorator is in the decorator table, which leaves annotations unread (a dataclass without a docstring reads its constructor's signature); the class has no metaclass but type or abc.ABCMeta and no base outside the project but one of the standard library or one the catalog lists as reading only fields; the function is used only as the callee of calls (T1)",
         decided_in: &[
             "heki_effect::only_read::annotation_facts",
             "heki_effect::FileSummary::reference_sites",
@@ -878,7 +878,7 @@ pub const READONLY_PARAMETER: &[&Premise] = &[
     },
     &Premise {
         name: "No fact lost",
-        states: "the file analyzed again with the groups' edits gives the same local facts and the same reports, every rule selected",
+        states: "the file analyzed again with the groups' edits gives the same local facts and the same reports, every rule selected, and so do the modules an import-boundaries contract walking imports judges; a heuristic group's reports are not compared",
         decided_in: &[
             "crate::recommend::types::trial_all",
             "heki_effect::FileSummary::edit_changes",
@@ -891,7 +891,7 @@ pub const READONLY_PARAMETER: &[&Premise] = &[
     },
     &Premise {
         name: "A name for the type",
-        states: "the module binds the read-only type under a name, or the name the edit imports it as is free there; no name is written that a scope the annotation is read in before the module (a method's class body, an enclosing function) or a star import of the module binds",
+        states: "the module binds the read-only type under a name before the annotation is evaluated (an import above the def, anywhere with postponed annotations), or the name the edit imports it as is free there; no name is written that a scope the annotation is read in before the module (a method's class body, an enclosing function) or a star import of the module binds",
         decided_in: &[
             "crate::recommend::types::type_name",
             "crate::recommend::types::annotation_binder",

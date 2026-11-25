@@ -3407,12 +3407,18 @@ reads. What a suggestion states:
 - **Name bound once**, **Callees take it**, **Whole family** (no `Protocol` member, no
   `@overload`, a body that does something, the whole override family in the group), **Not
   replaced**, **Annotations stay unread** (every decorator in heki's table, no class machinery
-  or base the catalog does not know, no use of the function as a value), **A name for the type**.
+  or base the catalog does not know, no use of the function as a value, no `dataclass` without
+  a docstring for a constructor: it writes one from the constructor's signature), **A name for
+  the type** (an import of the module is reused when it runs before the annotation is evaluated:
+  above the `def`, or anywhere with postponed annotations).
 - **No fact lost**: the annotation trial. Each file of the groups is analyzed again with their
   edits applied in memory, as the JSON prints them; a group whose edits change the facts of a
   function they edit or the file's reports, every rule selected, is withheld, and `withheld` says
   what changed (`trial-limit`: heki stopped trying the file, after four analyses with other edits
-  or two checks of its reports).
+  or two checks of its reports). With an `import-boundaries` contract that walks imports, the
+  reports of the modules it judges are checked too: an import an edit adds may be reached from
+  them. A heuristic group is tried by its facts only, so this premise is never established for
+  one.
 - **A file to edit**: no generated file (a leading comment with `generated` or `DO NOT EDIT`),
   no function a stub declares; these, and test code, are counted under `left_out`.
 
@@ -3444,7 +3450,7 @@ changes meaning.
 | `contracts` | each block the configuration block declares, the first 3 of each kind (`--all`: every one): its kind, its targets (or the packages and modules of its scopes), the candidates it stands for, its entry, confidence, evidence, what the trial reported for its candidates, the class patterns tried with what the pattern trial reported and whether the block names them, and caveats |
 | `contracts_not_shown` | per kind, the blocks past the first 3 and the candidates they stand for |
 | `contract_blockers` | the sites of accesses heki cannot tie to a class that keep blocks at `unresolved = "ignore"`: how many, the first 5 (`--all`: 50) with the rule, path, line, function, the report as `heki check` writes it, and the candidates and blocks each holds back, and whether the list is cut |
-| `suggestions` | the standard types the code already keeps (ADR-023): per kind, the exact and heuristic groups; the type checker the project configures (`found`, `config`, or `null`); the groups, the exact ones by rank, the first 50 (`--all`: every one, the heuristic ones after them), each with its `id` (kind, module, qualified name, parameter; no line), `certainty`, `message`, `items` (path, line, column, the byte span of the annotation's head, qualified name, parameter, the annotation now and as proposed), byte-span `edits` with a path each (applied together), `premises` and whether each is established, the `open` ones with their cause and place, `related` places, `guards`, `leverage` (the calls binding it, and those passing an attribute), and `labels` (`public`, `list[str]`, `family`); `truncated`; the groups the annotation trial withheld, by `reason` (`fact-would-change`, `report-would-change`, `trial-limit`), with what changed for the first 50; the parameters left out as test code, in generated files, or declared by a stub; per premise, the parameters it leaves out and those it keeps heuristic; and where the project reads annotations at run time (`reader_sites`) |
+| `suggestions` | the standard types the code already keeps (ADR-023): per kind, the exact and heuristic groups; the type checker the project configures (`found`, `config`, or `null`); the groups, the exact ones by rank, the first 50 (`--all`: every one, the heuristic ones after them), each with its `id` (kind, module, qualified name, parameter; no line), `certainty`, `message`, `items` (path, line, column, the byte span of the annotation's head, qualified name, parameter, the annotation now and as proposed), byte-span `edits` with a path each (applied together; spans are offsets in the file's text as UTF-8, the file's own bytes unless a PEP 263 declaration names Latin-1), `premises` and whether each is established, the `open` ones with their cause and place, `related` places, `guards`, `leverage` (the calls binding it, and those passing an attribute), and `labels` (`public`, `list[str]`, `family`); `truncated`; the groups the annotation trial withheld, by `reason` (`fact-would-change`, `report-would-change`, `trial-limit`), with what changed for the first 50; the parameters left out as test code, in generated files, or declared by a stub; per premise, the parameters it leaves out and those it keeps heuristic; and where the project reads annotations at run time (`reader_sites`) |
 | `rejected_contracts` | the candidates a run reported for, each alone, with the run and its reports |
 | `contracts_not_tried` | per kind, the candidates past the trial's places (32 of each kind, the configuration's own `write-owners` contracts taking `write-owners` places), which no trial declared |
 | `unmatched_entries` | each entry of "Contract entries that match nothing": the contracts' kind, the key, the entry, the contracts holding it (a name, or `#` and its position), what it names none of, the existing names like it, and `named_at_run_time` when its class family gets attributes named at run time (only with `unmatched-contract-entries = "error"`) |

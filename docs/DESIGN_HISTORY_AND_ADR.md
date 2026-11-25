@@ -797,11 +797,12 @@ first, then a convention the code follows, then a contract.
      the added import). It then builds the index once with those files summarized again and
      compares the edited files' reports with every rule selected by rule, certainty, severity,
      function, target,
-     places, and message (numbers aside: rules print lines). A difference withholds the groups
-     with an edit in the function it names (the file's groups when none has one) and names the
-     fact or report that changed; a withheld group leaves every file, and a file whose edits
+     places, message (numbers aside: rules print lines), and the sites it counts. A difference
+     withholds the groups with an edit in the function it names (the file's groups when none
+     has one) and names the fact or report that changed; a withheld group leaves every file, and a file whose edits
      changed is analyzed again, at most four times, its reports checked at most twice. The
-     heuristic groups come last, on top of the exact ones kept, by their facts only. The trial
+     heuristic groups come last, on top of the exact ones kept, by their facts only, so their
+     "No fact lost" is never established. The trial
      keeps no summary or parse of its own, so its peak stays near the discovery run's: the index
      holds one summary per file and stays taken apart (local facts only) while files are
      analyzed, a file it holds edited is summarized again as it is when compared, and the edited
@@ -811,7 +812,14 @@ first, then a convention the code follows, then a contract.
      union of the read-only and mutable bits (`MUT110`'s test of a callee), which a mutable head
      turned read-only keeps, so when no edited file's local facts differ, no other file's
      summary does (ADR-017); an added import a star import of the module would bind elsewhere
-     leaves the group heuristic. The corpus gate applies every exact suggestion to a copy of
+     leaves the group heuristic. The added import is the one fact another file's reports read
+     besides those: an `import-boundaries` contract walking imports (`reach`) judges what its
+     importers reach, so, as the language server re-checks them when a module's imports change,
+     the trial checks the files of the modules such a contract judges, edited or not, with the
+     exact groups that add an import. A report that changes there withholds the groups adding
+     an import to a file of its import chain (every one it was checked with when none does),
+     and a file's check stands only for the groups it was checked with: its own and, for such
+     a file, those adding an import. The corpus gate applies every exact suggestion to a copy of
      each package and compares `heki check` with every rule selected by its code, before and
      after: the reports must be equal. A suggestion therefore never removes or demotes a report,
      and never creates a report of its own guard. *Rejected*: the verification run in the

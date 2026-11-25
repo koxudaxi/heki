@@ -51,11 +51,12 @@ impl OffsetMap {
             let start = text.len();
             text.push_str(replacement);
             from = from.max(span.end as usize);
+            // The source copied after the text resumes at `from`, past every span replaced.
             placed.push(Placed {
                 start: offset(start),
                 end: offset(text.len()),
                 original: span.start,
-                shift: i64::from(span.end) - text.len() as i64,
+                shift: from as i64 - text.len() as i64,
             });
         }
         text.push_str(&source[from..]);
@@ -753,12 +754,15 @@ impl ModuleImports {
         bound: &BTreeSet<String>,
     ) -> Self {
         let gone: Vec<bool> = self.sites.iter().map(&dropped).collect();
-        // Site `k` of the edited file is site `k - (sites dropped before it)` of the original.
-        let before = |k: u32| {
-            let k = k as usize;
-            let dropped = gone.iter().take(k).filter(|g| **g).count();
-            u32::try_from(k - dropped).unwrap_or(u32::MAX)
-        };
+        // Site `k` of the edited file is site `k - (sites dropped before it)` of the original;
+        // `k` may be the number of sites (`code_before`).
+        let kept_before: Vec<u32> = std::iter::once(0)
+            .chain(gone.iter().scan(0, |kept, g| {
+                *kept += u32::from(!*g);
+                Some(*kept)
+            }))
+            .collect();
+        let before = |k: u32| kept_before.get(k as usize).copied().unwrap_or(u32::MAX);
         let sites: Vec<_> = (self.sites.iter().zip(&gone))
             .filter(|(_, g)| !**g)
             .map(|(s, _)| s.clone())
@@ -869,6 +873,15 @@ mod tests {
             [0, 0, 0, 22, 22, 26]
         );
         assert!(map.in_edit(4) && !map.in_edit(9) && !map.in_edit(39));
+        // An edit inside the span of the one before: the source after both resumes past the
+        // outer span, at its original offset.
+        let nested = [
+            (Span { start: 1, end: 4 }, "X".to_owned()),
+            (Span { start: 2, end: 3 }, "Y".to_owned()),
+        ];
+        let (nested_text, nested_map) = OffsetMap::apply("abcdef", &nested);
+        assert_eq!(nested_text, "aXYef");
+        assert_eq!([0, 3, 4].map(|o| nested_map.original(o)), [0, 4, 5]);
         let now = every(&[(1, 2), (3, 4)], 30);
         let then = every(&[(3, 4), (1, 2)], 43);
         assert!(same(&now, &then, &map));

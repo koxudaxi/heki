@@ -751,3 +751,32 @@ fn a_live_old_value_of_the_accumulator_disproves_exclusive_access() {
         }
     );
 }
+
+#[test]
+fn an_import_after_a_last_line_without_a_line_break_starts_a_line() {
+    let import = crate::imports::NewImport {
+        module: "collections.abc",
+        is_from: true,
+        statement: "from collections.abc import Sequence",
+    };
+    let edited = |src: &str| {
+        let ir = ir_of(src);
+        let (span, text) = crate::imports::import_edit(src, ir.function(ir.module_fn), &import);
+        let mut out = src.to_owned();
+        out.replace_range(span.start as usize..span.end as usize, &text);
+        out
+    };
+    assert_eq!(
+        edited("# comment"),
+        "# comment\nfrom collections.abc import Sequence\n\n"
+    );
+    assert_eq!(
+        edited("import os"),
+        "import os\nfrom collections.abc import Sequence\n"
+    );
+    // A line break already ends the source: no blank line is added.
+    assert_eq!(
+        edited("# comment\n"),
+        "# comment\nfrom collections.abc import Sequence\n\n"
+    );
+}

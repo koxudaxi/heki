@@ -52,6 +52,18 @@ pub struct NewImport<'a> {
 /// The edit inserting `import` (an insertion, or the replacement of the blank lines that follow
 /// it).
 pub fn import_edit(source: &str, module_fn: &IrFunction, import: &NewImport<'_>) -> (Span, String) {
+    let (span, text) = placed_import(source, module_fn, import);
+    // Every place is the start of a line but the end of a source whose last line has no line
+    // break: there the import starts a line of its own.
+    let at = span.start as usize;
+    if at == source.len() && !source.is_empty() && !source.ends_with(['\n', '\r']) {
+        return (span, format!("{}{text}", heki_ast::line_break(source)));
+    }
+    (span, text)
+}
+
+/// [`import_edit`]'s place and text, at the start of a line or at the end of the source.
+fn placed_import(source: &str, module_fn: &IrFunction, import: &NewImport<'_>) -> (Span, String) {
     let br = heki_ast::line_break(source);
     let (docstring_end, region_end) = import_region(source, module_fn);
     let floor = magic_comments_end(source);

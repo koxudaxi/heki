@@ -27,7 +27,7 @@ use heki_effect::{
     LiteralAnnotation, ModuleDecls, OffsetMap, ParamAnnotation, ProjectDecls, Restated,
 };
 use heki_ir::InstKind;
-use heki_semantic::ScopeId;
+use heki_semantic::{ScopeId, ScopeKind};
 use heki_soundness::imports::{NewImport, import_edit};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -42,20 +42,30 @@ pub const READONLY_PARAMETER_KIND: &str = "readonly-parameter";
 /// The methods whose overrides the type checkers do not compare with the base's.
 const CONSTRUCTORS: &[&str] = &["__init__", "__new__", "__init_subclass__", "__post_init__"];
 
-/// The configuration of a type checker in a project: the table of a `pyproject.toml`, or its
-/// own file (assumption T3).
-const TYPE_CHECKERS: &[(&str, &str, &str)] = &[
-    ("ty", "pyproject.toml", "[tool.ty"),
-    ("ty", "ty.toml", ""),
-    ("mypy", "pyproject.toml", "[tool.mypy"),
-    ("mypy", "mypy.ini", ""),
-    ("mypy", ".mypy.ini", ""),
-    ("mypy", "setup.cfg", "[mypy"),
-    ("pyright", "pyproject.toml", "[tool.pyright"),
-    ("pyright", "pyrightconfig.json", ""),
-    ("pyrefly", "pyproject.toml", "[tool.pyrefly"),
-    ("pyrefly", "pyrefly.toml", ""),
+/// The configuration of a type checker in a project: its table under `tool` in a
+/// `pyproject.toml`, its section of an INI file, or its own file (assumption T3).
+const TYPE_CHECKERS: &[(&str, &str, Configured)] = &[
+    ("ty", "pyproject.toml", Configured::Table("ty")),
+    ("ty", "ty.toml", Configured::File),
+    ("mypy", "pyproject.toml", Configured::Table("mypy")),
+    ("mypy", "mypy.ini", Configured::File),
+    ("mypy", ".mypy.ini", Configured::File),
+    ("mypy", "setup.cfg", Configured::Section("mypy")),
+    ("pyright", "pyproject.toml", Configured::Table("pyright")),
+    ("pyright", "pyrightconfig.json", Configured::File),
+    ("pyrefly", "pyproject.toml", Configured::Table("pyrefly")),
+    ("pyrefly", "pyrefly.toml", Configured::File),
 ];
+
+/// What in a file configures a type checker.
+enum Configured {
+    /// The file.
+    File,
+    /// The table `tool.<name>` (its subtables too).
+    Table(&'static str),
+    /// The INI section `[<name>]`.
+    Section(&'static str),
+}
 
 /// Whether a suggestion's claim and edit are established.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, JsonSchema)]
@@ -143,7 +153,8 @@ pub struct Item {
     pub path: String,
     pub line: u32,
     pub column: u32,
-    /// The byte span of the annotation's head, the text the edit replaces.
+    /// The byte span of the annotation's head, the text the edit replaces: offsets in the
+    /// file's text as UTF-8, the file's own bytes unless a PEP 263 declaration names Latin-1.
     pub span: [u32; 2],
     pub qualname: String,
     /// The parameter.
@@ -156,6 +167,7 @@ pub struct Item {
 #[schemars(deny_unknown_fields)]
 pub struct Edit {
     pub path: String,
+    /// Offsets in the file's text as UTF-8, as the items' spans.
     pub span: [u32; 2],
     pub replacement: String,
 }
@@ -164,6 +176,8 @@ pub struct Edit {
 #[schemars(deny_unknown_fields)]
 pub struct PremiseState {
     pub name: String,
+    /// A heuristic group's `No fact lost` never is: the trial compares its facts, not its
+    /// reports.
     pub established: bool,
 }
 
@@ -414,7 +428,7 @@ pub fn suggest(
         found.reader_sites = reader_sites(&cx);
         found
     };
-    trial_all(indexed, &mut found, reports)?;
+    trial_all(indexed, &mut found, current, reports)?;
     Ok(found.finish())
 }
 
@@ -422,7 +436,8 @@ pub fn suggest(
 struct Found {
     groups: Vec<Pending>,
     left_out: LeftOut,
-    /// Per premise: (not listed, heuristic) parameters.
+    /// Per premise: (not listed, heuristic) parameters; the heuristic ones are counted from
+    /// the groups the trial keeps ([`Found::finish`]).
     by_premise: BTreeMap<usize, (usize, usize)>,
     type_checker: TypeChecker,
     reader_sites: ReaderSites,
@@ -457,6 +472,7 @@ impl Found {
     fn finish(self) -> Suggestions {
         let mut kept: Vec<Pending> = Vec::new();
         let mut withheld = self.withheld;
+        let mut by_premise = self.by_premise;
         for p in self.groups {
             match p.withheld {
                 Some((reason, changed)) => {
@@ -465,7 +481,15 @@ impl Found {
                         changed,
                     })
                 }
-                None => kept.push(p),
+                None => {
+                    let open: BTreeSet<usize> = (p.group.open.iter())
+                        .map(|o| premise_index(premise(&o.premise)))
+                        .collect();
+                    for i in open {
+                        by_premise.entry(i).or_default().1 += p.group.items.len();
+                    }
+                    kept.push(p);
+                }
             }
         }
         kept.sort_by(|a, b| {
@@ -501,7 +525,7 @@ impl Found {
                 })
                 .collect(),
             left_out: self.left_out,
-            by_premise: (self.by_premise.into_iter())
+            by_premise: (by_premise.into_iter())
                 .map(|(i, (not_listed, heuristic))| PremiseCount {
                     premise: names(i),
                     not_listed,
@@ -597,7 +621,7 @@ fn groups(cx: &Cx<'_>, current: &RuleSelection) -> Found {
     for (i, c) in candidates.iter().enumerate() {
         unmet[i].extend(claim(c));
         unmet[i].extend(local_premises(cx, c, &values));
-        let (edges, open, rel) = callees_take_it(cx, c, &at);
+        let (edges, open, rel) = callees_take_it(cx, c, &at, &calls);
         for j in edges {
             union.join(i, j);
         }
@@ -625,13 +649,6 @@ fn groups(cx: &Cx<'_>, current: &RuleSelection) -> Found {
         if let Some(u) = first_drop {
             by_premise.entry(premise_index(u.premise)).or_default().0 += items.len();
             continue;
-        }
-        let mut open_premises: FxHashSet<usize> = FxHashSet::default();
-        for u in items.iter().flat_map(|&i| &unmet[i]) {
-            open_premises.insert(premise_index(u.premise));
-        }
-        for p in &open_premises {
-            by_premise.entry(*p).or_default().1 += items.len();
         }
         pending.push(group(
             cx,
@@ -788,10 +805,23 @@ fn local_premises(
 
 /// Premise 13 for the candidate `c` in its module's declarations `module` ([`type_name`]).
 fn naming(cx: &Cx<'_>, c: &Candidate<'_>, module: Option<&ModuleDecls>) -> Naming {
-    let future = c.file.semantic.has_future_annotations;
+    let semantic = &c.file.semantic;
+    let future = semantic.has_future_annotations;
     let binder = |name: &str| annotation_binder(cx, c, name);
+    let module_scope = (semantic.scopes.iter())
+        .find(|s| s.kind == ScopeKind::Module)
+        .map(|s| s.id);
+    // Without postponed annotations the `def` evaluates its annotations where it runs: a name
+    // an import of the module binds is bound there only when every such import is above it.
+    let bound_above = |name: &str| {
+        future
+            || (semantic.imports.iter())
+                .filter(|i| Some(i.scope) == module_scope && !i.in_type_checking)
+                .filter(|i| i.bound_name == name)
+                .all(|i| i.span.end <= c.lit.span.start)
+    };
     module.map_or(Naming::Taken("nothing heki knows".to_owned()), |m| {
-        type_name(m, future, &c.lit, c.lit.kind, &binder)
+        type_name(m, future, &c.lit, c.lit.kind, &binder, &bound_above)
     })
 }
 
@@ -841,15 +871,11 @@ fn callees_take_it(
     cx: &Cx<'_>,
     c: &Candidate<'_>,
     at: &FxHashMap<(&FuncKey, u8), usize>,
+    calls: &Calls<'_>,
 ) -> (Vec<usize>, Vec<Unmet>, Vec<Related>) {
     let (mut joined, mut open, mut related) = (Vec::new(), Vec::new(), Vec::new());
-    let sites = cx
-        .index
-        .files
-        .get(&c.path)
-        .map_or(&[][..], |f| &f.call_sites[..]);
     let bit = 1u64 << c.param;
-    for site in sites.iter().filter(|s| s.caller == c.key) {
+    for site in calls.made_by(&c.key) {
         for bc in site.project_callees() {
             for (k, arg) in bc.params.iter().enumerate().take(64) {
                 if arg.may_params & bit == 0 {
@@ -1056,22 +1082,34 @@ fn value_uses(cx: &Cx<'_>) -> FxHashMap<FuncKey, (PathBuf, u32)> {
     out
 }
 
-/// The project calls binding each function's parameters, for the ranking.
+/// The project's call sites by the function making them, and the calls binding each
+/// function's parameters, for the ranking.
 struct Calls<'a> {
+    by_caller: FxHashMap<&'a FuncKey, Vec<&'a CallSite>>,
     by_callee: FxHashMap<&'a FuncKey, Vec<(&'a CallSite, usize)>>,
 }
 
 impl<'a> Calls<'a> {
     fn of(index: &'a heki_effect::ProjectIndex) -> Self {
+        let mut by_caller: FxHashMap<&FuncKey, Vec<&CallSite>> = FxHashMap::default();
         let mut by_callee: FxHashMap<&FuncKey, Vec<(&CallSite, usize)>> = FxHashMap::default();
         for file in index.files.values() {
             for site in &file.call_sites {
+                by_caller.entry(&site.caller).or_default().push(site);
                 for (b, bc) in site.project_callees().iter().enumerate() {
                     by_callee.entry(&bc.callee).or_default().push((site, b));
                 }
             }
         }
-        Self { by_callee }
+        Self {
+            by_caller,
+            by_callee,
+        }
+    }
+
+    /// The call sites of the function `key`, in their file's order.
+    fn made_by(&self, key: &FuncKey) -> &[&'a CallSite] {
+        self.by_caller.get(key).map_or(&[], Vec::as_slice)
     }
 
     /// The calls of `key` binding its parameter `param`, and those passing an attribute there.
@@ -1376,17 +1414,20 @@ impl Naming {
 }
 
 /// Premise 13, "A name for the type" (B.4 of the design): an existing binding of the read-only
-/// type in the module is reused (one under `if TYPE_CHECKING:` too when the module's
-/// annotations are not evaluated at run time); otherwise the edit imports it from
-/// `collections.abc`, unless the name is bound to something else there. `binder` names what
-/// binds a name where the annotation reads it besides the module's own bindings (a class body
-/// for a method, a star import): no name it binds is written.
+/// type in the module is reused when it is made before the annotation is evaluated (an import
+/// above the `def`; one under `if TYPE_CHECKING:` or below it too when the module's annotations
+/// are not evaluated at run time); otherwise the edit imports it from `collections.abc`,
+/// unless the module binds the name already (below the `def`, or to something else). `binder` names what binds a name where
+/// the annotation reads it besides the module's own bindings (a class body for a method, a star
+/// import): no name it binds is written. `bound_above` tells whether the module's imports of a
+/// name bind it before the annotation is evaluated.
 fn type_name(
     decls: &ModuleDecls,
     future_annotations: bool,
     lit: &LiteralAnnotation,
     kind: ContainerKind,
     binder: &dyn Fn(&str) -> Option<String>,
+    bound_above: &dyn Fn(&str) -> bool,
 ) -> Naming {
     let simple = simple_name(kind);
     let targets: [&str; 2] = match kind {
@@ -1408,23 +1449,30 @@ fn type_name(
         };
         return Naming::Bound(format!("{prefix}.{name}"));
     }
-    let bound_in = |table: &BTreeMap<String, String>| {
+    let bound_in = |table: &BTreeMap<String, String>, usable: &dyn Fn(&str) -> bool| {
         let mut names: Vec<&String> = table
             .iter()
             .filter(|(name, fqn)| targets.contains(&fqn.as_str()) && binder(name).is_none())
+            .filter(|(name, _)| usable(name))
             .map(|(name, _)| name)
             .collect();
         names.sort_by_key(|n| (n.as_str() != simple, n.len(), (*n).clone()));
         names.first().map(|n| (*n).clone())
     };
-    if let Some(name) = bound_in(&decls.imports) {
+    if let Some(name) = bound_in(&decls.imports, bound_above) {
         return Naming::Bound(name);
     }
-    if future_annotations && let Some(name) = bound_in(&decls.type_checking_imports) {
+    if future_annotations && let Some(name) = bound_in(&decls.type_checking_imports, &|_| true) {
         return Naming::Bound(name);
     }
     if let Some(binding) = binder(simple) {
         return Naming::Taken(binding);
+    }
+    // An edit imports only a name the module does not bind: one bound below the `def` too.
+    if let Some(other) = decls.imports.get(simple)
+        && !bound_above(simple)
+    {
+        return Naming::Taken(format!("`{other}` from an import below the `def`"));
     }
     if let Some(other) = decls
         .imports
@@ -1466,12 +1514,21 @@ fn says_generated(source: &str) -> bool {
 
 /// The type checker configured in the project at `root`, if any (assumption T3).
 fn type_checker(root: &Path, shown: &dyn Fn(&Path) -> String) -> TypeChecker {
-    for (name, file, table) in TYPE_CHECKERS {
+    for (name, file, configured) in TYPE_CHECKERS {
         let path = root.join(file);
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        if table.is_empty() || text.lines().any(|l| l.trim_start().starts_with(table)) {
+        let found = match configured {
+            Configured::File => true,
+            Configured::Table(key) => (toml::from_str::<toml::Table>(&text).ok())
+                .is_some_and(|t| t.get("tool").and_then(|tool| tool.get(*key)).is_some()),
+            Configured::Section(section) => {
+                let header = format!("[{section}]");
+                text.lines().any(|l| l.trim() == header)
+            }
+        };
+        if found {
             return TypeChecker {
                 found: Some((*name).to_owned()),
                 config: Some(shown(&path)),
@@ -1597,8 +1654,26 @@ struct TrialFile {
     /// The groups whose edits the summary the index holds for the file applies, with the map of
     /// its offsets (`None`: the summary of the file as it is).
     indexed: Option<(Vec<usize>, OffsetMap)>,
-    /// The groups whose edits its reports were checked with.
-    checked: Option<Vec<usize>>,
+    /// What its reports were last checked with.
+    checked: Option<CheckedWith>,
+    /// An `import-boundaries` contract walking imports judges its module: its reports read the
+    /// imports of every module the walks reach, which the imports the groups add change.
+    walker: bool,
+}
+
+/// The edits a file's reports are checked with: its own groups', and for a walker of imports
+/// the exact groups that add an import, in any file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CheckedWith {
+    own: Vec<usize>,
+    imports: Vec<usize>,
+}
+
+impl CheckedWith {
+    /// Nothing that differs from the discovery run.
+    fn is_none(&self) -> bool {
+        self.own.is_empty() && self.imports.is_empty()
+    }
 }
 
 /// The annotation trial's state. It keeps no summary or parse of its own. The index holds one
@@ -1629,11 +1704,15 @@ struct Trial {
 /// that changes are tried once more ([`MAX_CHECKS`]). Last the heuristic groups, on top of the
 /// exact ones kept, by their facts only. The other files need no analysis: when no edited file's
 /// local facts differ, neither do theirs (module docs of [`heki_effect::OffsetMap`]'s home).
+/// Their reports read one fact the edits restate, the imports added, through the contracts
+/// walking imports: the files those judge are checked too, with the exact groups that add an
+/// import ([`CheckedWith`]).
 /// `reports` are the discovery run's; the trial keeps those of its files. The discovery index is
 /// gone afterwards.
 fn trial_all(
     indexed: &mut Indexed,
     found: &mut Found,
+    current: &RuleSelection,
     mut reports: Vec<Diagnostic>,
 ) -> Result<(), RecommendError> {
     let mut by_file: BTreeMap<&Path, Vec<usize>> = BTreeMap::new();
@@ -1641,6 +1720,25 @@ fn trial_all(
         for path in p.files.keys() {
             by_file.entry(path).or_default().push(g);
         }
+    }
+    if by_file.is_empty() {
+        return Ok(());
+    }
+    // The files whose reports the added imports change, as the language server finds them.
+    let cfg = &indexed.project.env.cfg;
+    let adds_import =
+        (found.groups.iter()).any(|p| p.files.values().any(|e| !e.imports.is_empty()));
+    let walkers: FxHashSet<&Path> = if adds_import && crate::walks_imports(cfg, current) {
+        let modules =
+            (indexed.project.files.iter()).map(|f| (f.module_name.as_str(), f.path.as_path()));
+        crate::walking_importers(cfg, modules)?
+            .into_iter()
+            .collect()
+    } else {
+        FxHashSet::default()
+    };
+    for path in &walkers {
+        by_file.entry(path).or_default();
     }
     let files: Vec<TrialFile> = (by_file.into_iter())
         .filter_map(|(path, groups)| {
@@ -1654,12 +1752,11 @@ fn trial_all(
                 analyzed: None,
                 indexed: None,
                 checked: None,
+                walker: walkers.contains(path),
             })
         })
         .collect();
-    if files.is_empty() {
-        return Ok(());
-    }
+    drop(walkers);
     found.tried = true;
     let tried: FxHashSet<&Path> = files.iter().map(|f| f.path.as_path()).collect();
     reports.retain(|d| tried.contains(d.path.as_path()));
@@ -1680,6 +1777,13 @@ fn trial_all(
     }
     let passes = trial.passes();
     trial.settle(indexed, &local, &passes, groups, Phase::Heuristic);
+    // The heuristic groups are tried by their facts only: their reports are not compared.
+    let heuristic = (groups.iter_mut()).filter(|p| !Phase::Exact.withholds(p));
+    for state in heuristic.flat_map(|p| &mut p.group.premises) {
+        if state.name == premise("No fact lost").name {
+            state.established = false;
+        }
+    }
     Ok(())
 }
 
@@ -1695,6 +1799,26 @@ impl Trial {
                         || p.group.certainty == SuggestionCertainty::Exact)
             })
             .collect()
+    }
+
+    /// What the reports of `f` are checked with now ([`CheckedWith`]).
+    fn checked_with(groups: &[Pending], f: &TrialFile) -> CheckedWith {
+        let imports = if f.walker {
+            (0..groups.len())
+                .filter(|&g| {
+                    let p = &groups[g];
+                    p.withheld.is_none()
+                        && Phase::Exact.withholds(p)
+                        && p.files.values().any(|e| !e.imports.is_empty())
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        CheckedWith {
+            own: Self::tried(groups, f, Phase::Exact),
+            imports,
+        }
     }
 
     /// The project declarations as they are.
@@ -1821,9 +1945,11 @@ impl Trial {
         for _ in 0..MAX_CHECKS {
             let passes = self.passes();
             self.settle(indexed, &local, &passes, groups, Phase::Exact);
-            let to_check: Vec<(usize, Vec<usize>)> = (self.files.iter().enumerate())
-                .map(|(i, f)| (i, Self::tried(groups, f, Phase::Exact)))
-                .filter(|(i, set)| !set.is_empty() && self.files[*i].checked.as_ref() != Some(set))
+            let to_check: Vec<(usize, CheckedWith)> = (self.files.iter().enumerate())
+                .map(|(i, f)| (i, Self::checked_with(groups, f)))
+                .filter(|(i, with)| {
+                    !with.is_none() && self.files[*i].checked.as_ref() != Some(with)
+                })
                 .collect();
             if to_check.is_empty() {
                 break;
@@ -1847,11 +1973,11 @@ impl Trial {
                 })
                 .collect();
             let mut withheld = false;
-            for ((i, set), changed) in to_check.into_iter().zip(changed) {
+            for ((i, with), changed) in to_check.into_iter().zip(changed) {
                 let f = &mut self.files[i];
-                f.checked = Some(set.clone());
                 withheld |= !changed.is_empty();
-                attribute_reports(groups, &f.path, &set, &changed);
+                attribute_reports(groups, &f.path, &with, &changed);
+                f.checked = Some(with);
             }
             if !withheld {
                 break;
@@ -1862,7 +1988,8 @@ impl Trial {
     }
 
     /// Withhold the exact groups of the files whose edits changed after their last check, and
-    /// of every file a withheld group leaves: the files the exact groups link to one of them.
+    /// of every file a withheld group leaves: the files the exact groups link to one of them,
+    /// and those of the groups adding an import to a walker of imports.
     fn withhold_unchecked(&self, groups: &mut [Pending]) {
         let at: FxHashMap<&Path, usize> = (self.files.iter().enumerate())
             .map(|(i, f)| (f.path.as_path(), i))
@@ -1882,13 +2009,16 @@ impl Trial {
                 linked.join(pair[0], pair[1]);
             }
         }
-        let unchecked: FxHashSet<usize> = (self.files.iter().enumerate())
-            .filter(|(_, f)| {
-                let set = Self::tried(groups, f, Phase::Exact);
-                !set.is_empty() && f.checked.as_ref() != Some(&set)
-            })
-            .map(|(i, _)| i)
-            .collect();
+        let mut unchecked: FxHashSet<usize> = FxHashSet::default();
+        for (i, f) in self.files.iter().enumerate() {
+            let with = Self::checked_with(groups, f);
+            for j in with.imports.iter().flat_map(|&g| files_of(g)) {
+                linked.join(i, j);
+            }
+            if !with.is_none() && f.checked.as_ref() != Some(&with) {
+                unchecked.insert(i);
+            }
+        }
         let lost: FxHashSet<usize> = unchecked.into_iter().map(|i| linked.find(i)).collect();
         let gone: Vec<usize> = (exact.into_iter())
             .filter(|&g| {
@@ -1954,18 +2084,22 @@ impl Trial {
     }
 
     /// The reports of the files `to_check` with their edits (each the text its index summary
-    /// applies), checked with every rule the discovery run selects. The edited files stand in
-    /// for theirs, parsed in batches, and each file as it is is parsed again from its text
-    /// after.
+    /// applies; a walker of imports without edits as it is), checked with every rule the
+    /// discovery run selects. The edited files stand in for theirs, parsed in batches, and each
+    /// file as it is is parsed again from its text after.
     fn check(
         &self,
         indexed: &mut Indexed,
         groups: &[Pending],
-        to_check: &[(usize, Vec<usize>)],
+        to_check: &[(usize, CheckedWith)],
     ) -> Result<Vec<Diagnostic>, RecommendError> {
         // The text of each file as it is, by its place among the trial's files.
         let mut texts: Vec<(usize, String)> = Vec::new();
-        for batch in self.batches(to_check, |(i, _)| *i) {
+        let with_edits: Vec<(usize, &[usize])> = (to_check.iter())
+            .filter(|(_, with)| !with.own.is_empty())
+            .map(|(i, with)| (*i, with.own.as_slice()))
+            .collect();
+        for batch in self.batches(&with_edits, |(i, _)| *i) {
             let parsed: Vec<(usize, crate::project::ParsedFile)> = {
                 let shared: &Indexed = indexed;
                 (batch.par_iter())
@@ -1984,7 +2118,7 @@ impl Trial {
             }
         }
         let checked = {
-            let units: Vec<_> = (texts.iter())
+            let units: Vec<_> = (to_check.iter())
                 .map(|(i, _)| indexed.project.files[self.files[*i].at].unit())
                 .collect();
             indexed.diagnose_units(&units, false)
@@ -2116,34 +2250,57 @@ fn attribute_facts(
 }
 
 /// A report that differs between the discovery run and the trial: what the trial does with it
-/// (`would be reported`, `would no longer be reported`), its function, rule, and line in the
-/// original file.
+/// (`would be reported`, `would no longer be reported`), its function, rule, line in the
+/// original file, and the files of its places.
 struct ChangedReport {
     change: &'static str,
     qualname: String,
     rule: String,
     line: u32,
+    files: BTreeSet<PathBuf>,
 }
 
-/// Withhold the exact groups of the reports `changed` of the file `path` checked with the
-/// edits of `set`: those with an edit in the report's function, else the file's.
+/// Withhold the exact groups of the reports `changed` of the file `path` checked `with` edits:
+/// those with an edit in the report's function, and those adding an import to a file of its
+/// places (an import chain of a walker); else every group it was checked with.
 fn attribute_reports(
     groups: &mut [Pending],
     path: &Path,
-    set: &[usize],
+    with: &CheckedWith,
     changed: &[ChangedReport],
 ) {
+    let pool: BTreeSet<usize> = (with.own.iter().chain(&with.imports).copied())
+        .filter(|&g| Phase::Exact.withholds(&groups[g]))
+        .collect();
     for r in changed {
-        let function = BTreeSet::from([r.qualname.as_str()]);
+        let in_function = |g: usize| {
+            (groups[g].files.get(path)).is_some_and(|e| e.params.contains_key(&r.qualname))
+        };
+        let on_chain = |g: &usize| {
+            (r.files.iter()).any(|p| {
+                groups[*g]
+                    .files
+                    .get(p)
+                    .is_some_and(|e| !e.imports.is_empty())
+            })
+        };
+        let mut hit: BTreeSet<usize> = (with.own.iter().copied())
+            .filter(|&g| pool.contains(&g) && in_function(g))
+            .collect();
+        hit.extend(
+            with.imports
+                .iter()
+                .filter(|&g| pool.contains(g) && on_chain(g)),
+        );
         let text = format!("`{}` at line {} {}", r.rule, r.line, r.change);
-        for g in culprits(groups, path, set, Phase::Exact, Some(&function)) {
+        for &g in if hit.is_empty() { &pool } else { &hit } {
             withhold(groups, g, "report-would-change", &text);
         }
     }
 }
 
 /// The reports of a file that differ between the discovery run (`now`) and the trial (`then`),
-/// compared by rule, certainty, severity, function, target, places, and message: the places of
+/// compared by rule, certainty, severity, function, target, places, message, and sites: the places of
 /// an edited file at their offsets in the original (`maps`), the numbers of the messages aside
 /// (rules print lines). `lines` are the file's, as it is.
 fn changed_reports<'m>(
@@ -2179,6 +2336,10 @@ fn changed_reports<'m>(
                         qualname: d.qualname.clone(),
                         rule: d.rule_code.clone(),
                         line: lines.line_col(key.span.0).0,
+                        files: (std::iter::once(&key.path))
+                            .chain(key.related.iter().map(|(path, _, _)| path))
+                            .cloned()
+                            .collect(),
                     },
                 )),
             }
@@ -2200,6 +2361,8 @@ struct ReportKey {
     span: (u32, u32),
     message: String,
     related: Vec<(PathBuf, (u32, u32), String)>,
+    /// The violation sites it stands for, which a Ratchet baseline counts.
+    sites: u32,
 }
 
 impl ReportKey {
@@ -2226,6 +2389,7 @@ impl ReportKey {
                     )
                 })
                 .collect(),
+            sites: d.sites,
         }
     }
 }

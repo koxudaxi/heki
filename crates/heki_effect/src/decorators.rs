@@ -25,12 +25,22 @@ pub(crate) struct Decorator {
     /// A `functools` cache beside it still keeps the function's own results (`MUT114`): it
     /// returns the object it is handed, or calls it as defined.
     pub beside_cache: bool,
-    /// It reads no annotation of the function or class it decorates, nor of a class's methods
-    /// (`heki recommend`'s read-only parameters, assumption T1): a different annotation there
-    /// changes nothing it does.
-    pub leaves_annotations_unread: bool,
+    /// What it reads of the annotations of the function or class it decorates and of a class's
+    /// methods (`heki recommend`'s read-only parameters, assumption T1).
+    pub annotations: ReadsAnnotations,
     /// Called with arguments, it gives a decorator of the same row (`@dataclass(frozen=True)`).
     pub takes_arguments: bool,
+}
+
+/// What a decorator of the table reads of annotations: a different annotation elsewhere changes
+/// nothing it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadsAnnotations {
+    Nothing,
+    /// For a class without a docstring, the signature of the constructor `inspect.signature`
+    /// finds: the class's own `__new__` or `__init__` (`dataclass` writes the docstring
+    /// `C(rows: list[int])` from it).
+    ConstructorWithoutDocstring,
 }
 
 /// `typing.override` and `typing.final` only set an attribute on the object they are handed
@@ -45,7 +55,7 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         keeps_return: true,
         getter: false,
         beside_cache: true,
-        leaves_annotations_unread: true,
+        annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
     },
     Decorator {
@@ -55,7 +65,7 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         keeps_return: true,
         getter: false,
         beside_cache: true,
-        leaves_annotations_unread: true,
+        annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
     },
     Decorator {
@@ -65,7 +75,7 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         keeps_return: true,
         getter: false,
         beside_cache: false,
-        leaves_annotations_unread: true,
+        annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
     },
     Decorator {
@@ -75,7 +85,7 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         keeps_return: true,
         getter: false,
         beside_cache: true,
-        leaves_annotations_unread: true,
+        annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
     },
     Decorator {
@@ -85,7 +95,7 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         keeps_return: true,
         getter: false,
         beside_cache: true,
-        leaves_annotations_unread: true,
+        annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
     },
     Decorator {
@@ -95,7 +105,7 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         keeps_return: true,
         getter: true,
         beside_cache: false,
-        leaves_annotations_unread: true,
+        annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
     },
     Decorator {
@@ -105,12 +115,13 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         keeps_return: false,
         getter: true,
         beside_cache: false,
-        leaves_annotations_unread: true,
+        annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
     },
-    // Decorators that keep none of the premises above but read no annotation of what they
-    // decorate: `dataclass` reads only the class-body annotations (its fields), and a context
-    // manager decorator wraps the generator it is handed without looking at its signature.
+    // Decorators that keep none of the premises above and read no annotation of what they
+    // decorate but `dataclass`: the class-body annotations (its fields), and the constructor's
+    // for the docstring it writes; a context manager decorator wraps the generator it is
+    // handed without looking at its signature.
     Decorator {
         name: "dataclass",
         modules: Some(&["dataclasses"]),
@@ -118,7 +129,7 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         keeps_return: false,
         getter: false,
         beside_cache: false,
-        leaves_annotations_unread: true,
+        annotations: ReadsAnnotations::ConstructorWithoutDocstring,
         takes_arguments: true,
     },
     Decorator {
@@ -128,7 +139,7 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         keeps_return: false,
         getter: false,
         beside_cache: false,
-        leaves_annotations_unread: true,
+        annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
     },
     Decorator {
@@ -138,7 +149,7 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         keeps_return: false,
         getter: false,
         beside_cache: false,
-        leaves_annotations_unread: true,
+        annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
     },
     Decorator {
@@ -148,7 +159,7 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         keeps_return: false,
         getter: false,
         beside_cache: false,
-        leaves_annotations_unread: true,
+        annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
     },
     Decorator {
@@ -158,7 +169,7 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         keeps_return: false,
         getter: false,
         beside_cache: false,
-        leaves_annotations_unread: true,
+        annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
     },
 ];

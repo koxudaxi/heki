@@ -525,6 +525,7 @@
           "type": "string"
         },
         "span": {
+          "description": "Offsets in the file's text as UTF-8, as the items' spans.",
           "items": {
             "format": "uint32",
             "minimum": 0,
@@ -748,7 +749,7 @@
           "type": "string"
         },
         "span": {
-          "description": "The byte span of the annotation's head, the text the edit replaces.",
+          "description": "The byte span of the annotation's head, the text the edit replaces: offsets in the\nfile's text as UTF-8, the file's own bytes unless a PEP 263 declaration names Latin-1.",
           "items": {
             "format": "uint32",
             "minimum": 0,
@@ -1199,6 +1200,7 @@
       "additionalProperties": false,
       "properties": {
         "established": {
+          "description": "A heuristic group's `No fact lost` never is: the trial compares its facts, not its\nreports.",
           "type": "boolean"
         },
         "name": {
