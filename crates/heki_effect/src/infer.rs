@@ -2434,8 +2434,9 @@ impl<'e, 'a> Engine<'e, 'a> {
 
     /// The type the type expression in `var` names (`typing.cast`'s first argument): what its
     /// text names as an annotation (a string, `list[Model]`, `Model | None`, an alias), or else
-    /// a class object (`Exception`, a local bound to a class). A subscript whose text names
-    /// nothing (`list[kind]`) names no type, though it is an alias of its class.
+    /// a class object (`Exception`, a local bound to a class, an item of a tuple of classes). A
+    /// subscript of a builtin container class whose text names nothing (`list[kind]`) names no
+    /// type, though it is an alias of its class.
     fn type_form(&self, var: VarId) -> Option<Ty> {
         let cx = self.cx;
         let named = resolver::type_expression_text(self.shape, var)
@@ -2445,8 +2446,13 @@ impl<'e, 'a> Engine<'e, 'a> {
         if named.is_some() {
             return named;
         }
-        let subscript = self.shape.inst(self.shape.copy_root(var));
-        if subscript.is_some_and(|i| matches!(i.kind, InstKind::SubscriptLoad { .. })) {
+        let subscripted_class = match self.shape.inst(self.shape.copy_root(var)).map(|i| &i.kind) {
+            Some(InstKind::SubscriptLoad { obj, .. }) => {
+                matches!(self.fact(*obj), Fact::Known(Ty::Ref(class)) if crate::types::runtime_generic(&class))
+            }
+            _ => false,
+        };
+        if subscripted_class {
             return None;
         }
         match self.fact(var) {

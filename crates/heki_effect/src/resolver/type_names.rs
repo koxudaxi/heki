@@ -151,7 +151,9 @@ fn type_var_type(shape: &FnShape<'_>, decls: &ModuleDecls, value: VarId) -> Opti
 /// global a function loads), attributes of them, subscripts (`dict[str, Model]`), unions (`Model
 /// | None`), `None`, `...`, strings (forward references), and lists (`Callable[[Model], None]`).
 /// `None` for any other value (a local, a parameter, a call's result, a value of several paths)
-/// and past [`MAX_TYPE_EXPRESSION_PARTS`] parts.
+/// and past [`MAX_TYPE_EXPRESSION_PARTS`] parts, counted as the text writes them: a value read by
+/// two parts (`kind | kind`) is written twice, so a chain of such unions doubles its text with
+/// every link while it adds one value.
 pub(crate) fn type_expression_text(shape: &FnShape<'_>, var: VarId) -> Option<String> {
     let budget = Budget::unmetered("heki_effect::resolver::type_names::type_expression_text");
     let mut parts: Vec<VarId> = Vec::new();
@@ -179,8 +181,21 @@ pub(crate) fn type_expression_text(shape: &FnShape<'_>, var: VarId) -> Option<St
     // also one that several parts read (a name of the module body).
     parts.sort_unstable();
     let mut texts: FxHashMap<VarId, String> = FxHashMap::default();
+    let mut written: FxHashMap<VarId, usize> = FxHashMap::default();
+    let mut operands = Vec::new();
     for v in parts {
-        let text = TypePart::of(shape, v)?.text(&texts, v == var)?;
+        let part = TypePart::of(shape, v)?;
+        operands.clear();
+        part.operands(&mut operands);
+        let size = 1 + operands
+            .iter()
+            .map(|o| written.get(o).copied())
+            .sum::<Option<usize>>()?;
+        if size > MAX_TYPE_EXPRESSION_PARTS {
+            return None;
+        }
+        written.insert(v, size);
+        let text = part.text(&texts, v == var)?;
         texts.insert(v, text);
     }
     texts.remove(&var)
