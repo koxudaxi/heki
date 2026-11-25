@@ -147,6 +147,14 @@ try:
 finally:
     class Twice:
         import string
+try:
+    import tomllib
+except ModuleNotFoundError:
+    raise
+try:
+    import zipapp
+except Exception:
+    zipapp = None
 "#;
 
 /// An application package with every kind of import site, a cycle, a package whose `__path__`
@@ -215,6 +223,8 @@ fn import_sites_say_what_they_load_and_when_they_run() {
             "40 import body always -> -",
             "41 by_name body always -> - | json",
             "46 import body -> string",
+            "48 import body always -> tomllib",
+            "52 import body guarded always -> zipapp",
         ])
     );
     assert_eq!(
@@ -230,10 +240,11 @@ fn import_sites_say_what_they_load_and_when_they_run() {
     assert_eq!(util["imports"][5]["group"], "third-party");
     assert_eq!(util["imports"][20]["group"], "project");
     // What loading a module loads: its `body` imports that run on every path through it with
-    // no `ImportError` handler, with the parent packages of what they load, through the
-    // project's modules. Neither `yaml` (guarded), `winreg` (on one branch), `collections`
-    // (never runs), `csv` (in a function), `decimal` (in a class guarded around its statement),
-    // nor `string` (in a class body, where heki does not tell the paths) is one.
+    // no handler taking a failure of them, with the parent packages of what they load, through
+    // the project's modules. Neither `yaml` (guarded), `zipapp` (`except Exception` takes its
+    // failure), `winreg` (on one branch), `collections` (never runs), `csv` (in a function),
+    // `decimal` (in a class guarded around its statement), nor `string` (in a class body, where
+    // heki does not tell the paths) is one; the handler around `tomllib` raises its error again.
     let app_loads = (
         strings(&["app.helpers", "app.parse", "app.util"]),
         strings(&[
@@ -243,6 +254,7 @@ fn import_sites_say_what_they_load_and_when_they_run() {
             "os",
             "os.path",
             "shlex",
+            "tomllib",
             "typing",
         ]),
     );
@@ -309,7 +321,7 @@ app.cyc_a (app/cyc_a.py, package code)
     1:15  from-import of `cyc_b`: app.cyc_b (project)  [body, relative, unconditional]
   loads while it loads, at least:
     project modules: app, app.cyc_b, app.helpers, app.parse, app.util
-    other modules: fractions, importlib, json, os, os.path, shlex, typing
+    other modules: fractions, importlib, json, os, os.path, shlex, tomllib, typing
 
 app.cyc_b (app/cyc_b.py, package code)
   imports:
@@ -317,7 +329,7 @@ app.cyc_b (app/cyc_b.py, package code)
     2:8  import: app.parse (project)  [body, unconditional]
   loads while it loads, at least:
     project modules: app, app.cyc_a, app.helpers, app.parse, app.util
-    other modules: fractions, importlib, json, os, os.path, shlex, typing
+    other modules: fractions, importlib, json, os, os.path, shlex, tomllib, typing
 
 app.helpers (app/helpers.py, package code)
   imports: none

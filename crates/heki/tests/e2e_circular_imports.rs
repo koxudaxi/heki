@@ -380,6 +380,152 @@ fn a_handler_of_other_exceptions_leaves_the_report() {
     assert_eq!(reports(&p), ["pkg/b.py:2 [pkg.a.helper_a] pkg.a"]);
 }
 
+/// The name a partly loaded module lacks raises a plain `ImportError`: only a handler taking
+/// any import error, and whose body does not raise again, takes it. A handler of a missing
+/// module, one that raises again, and a `finally` body leave the report; a handler of the
+/// `try` around a nested one takes what the nested one passes on.
+#[test]
+fn only_a_handler_of_any_import_error_takes_the_failure() {
+    const A: &str = "from pkg.b import helper_b\n\n\ndef helper_a():\n    return 1\n";
+    let wrapped = |handler: &str| {
+        format!(
+            "def helper_b():\n    return 2\n\n\ntry:\n    from pkg.a import helper_a\n{handler}"
+        )
+    };
+    let nested = |inner: &str, outer: &str| {
+        format!(
+            "def helper_b():\n    return 2\n\n\ntry:\n    try:\n        from pkg.a import helper_a\n{inner}{outer}"
+        )
+    };
+    let reported = ["pkg/b.py:6 [pkg.a.helper_a] pkg.a"];
+    let nested_reported = ["pkg/b.py:7 [pkg.a.helper_a] pkg.a"];
+    let cases: &[(&str, String, &[&str])] = &[
+        (
+            "a handler of a missing module",
+            wrapped("except ModuleNotFoundError:\n    helper_a = None\n"),
+            &reported,
+        ),
+        (
+            "a tuple of a missing module and another class",
+            wrapped("except (ModuleNotFoundError, OSError):\n    helper_a = None\n"),
+            &reported,
+        ),
+        (
+            "an import error handler",
+            wrapped("except ImportError:\n    helper_a = None\n"),
+            &[],
+        ),
+        (
+            "a tuple holding the import error",
+            wrapped("except (OSError, ImportError):\n    helper_a = None\n"),
+            &[],
+        ),
+        (
+            "a handler that raises it again",
+            wrapped("except ImportError:\n    raise\n"),
+            &reported,
+        ),
+        (
+            "a handler that raises another error",
+            wrapped("except ImportError as e:\n    raise ImportError(\"no helper\") from e\n"),
+            &reported,
+        ),
+        (
+            "a handler that raises again on one branch only",
+            wrapped(
+                "except ImportError:\n    if helper_b():\n        raise\n    helper_a = None\n",
+            ),
+            &[],
+        ),
+        (
+            "a `finally` body",
+            wrapped("finally:\n    pass\n"),
+            &reported,
+        ),
+        (
+            "a clause that certainly matches hides the later ones",
+            wrapped("except ImportError:\n    raise\nexcept Exception:\n    helper_a = None\n"),
+            &reported,
+        ),
+        (
+            "the outer handler takes what the nested one passes on",
+            nested(
+                "    except ModuleNotFoundError:\n        helper_a = None\n",
+                "except ImportError:\n    helper_a = None\n",
+            ),
+            &[],
+        ),
+        (
+            "the outer handler takes what the nested one raises again",
+            nested(
+                "    except ImportError:\n        raise\n",
+                "except Exception:\n    helper_a = None\n",
+            ),
+            &[],
+        ),
+        (
+            "an outer handler of a missing module",
+            nested(
+                "    except OSError:\n        helper_a = None\n",
+                "except ModuleNotFoundError:\n    helper_a = None\n",
+            ),
+            &nested_reported,
+        ),
+    ];
+    for (why, b, expected) in cases {
+        let p = project(
+            "circular_imports_handled_failures",
+            &[("pkg/__init__.py", ""), ("pkg/a.py", A), ("pkg/b.py", b)],
+        );
+        assert_eq!(reports(&p), *expected, "{why}");
+    }
+}
+
+/// A module of a project package that the project lacks raises `ModuleNotFoundError`, and a
+/// relative import climbing past its top-level package a plain `ImportError`: a handler taking
+/// what the import raises lets the module body go on to the import that fails, and without one
+/// the module stops there.
+#[test]
+fn a_missing_module_a_handler_takes_lets_the_run_go_on() {
+    const A: &str = "from pkg.b import helper_b\n\n\ndef helper_a():\n    return 1\n";
+    let b = |import: &str, handler: &str| {
+        format!(
+            "def helper_b():\n    return 2\n\n\ntry:\n    {import}\n{handler}from pkg.a import helper_a\n"
+        )
+    };
+    let reported = &["pkg/b.py:9 [pkg.a.helper_a] pkg.a"][..];
+    let missing = "from pkg._speedups import fast";
+    let past_the_top = "from ... import fast";
+    for (import, handler, expected) in [
+        (
+            missing,
+            "except ModuleNotFoundError:\n    fast = None\n",
+            reported,
+        ),
+        (missing, "finally:\n    pass\n", &[][..]),
+        (
+            past_the_top,
+            "except ImportError:\n    fast = None\n",
+            reported,
+        ),
+        (
+            past_the_top,
+            "except ModuleNotFoundError:\n    fast = None\n",
+            &[][..],
+        ),
+    ] {
+        let p = project(
+            "circular_imports_missing_handled",
+            &[
+                ("pkg/__init__.py", ""),
+                ("pkg/a.py", A),
+                ("pkg/b.py", &b(import, handler)),
+            ],
+        );
+        assert_eq!(reports(&p), expected, "{import} {handler}");
+    }
+}
+
 /// A function that loads a module of the cycle, called before a module of the cycle imports
 /// the cycle: importing `pkg.e` first loads `pkg.x` out of the order the imports show, which
 /// works, so only `pkg.m` imported first fails. Without the function's import the call loads

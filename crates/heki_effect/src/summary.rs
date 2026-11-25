@@ -939,6 +939,8 @@ struct Extractor<'a> {
     blind: Vec<BlindCall>,
     /// The calls importing a module by name, with [`OptInFacts::imports`].
     imports: Vec<ImportSite>,
+    /// The failures of the by-name imports the function's handlers take, built on first use.
+    import_handlers: OnceCell<crate::imports::ImportHandlers<'a, 'a>>,
     /// The project functions handed to a library call that calls them without awaiting what
     /// they return (`OptInTables::unawaited_handoffs`), with
     /// [`OptInFacts::unawaited_handoffs`].
@@ -1301,6 +1303,7 @@ impl<'a> Extractor<'a> {
             followed_callables: OnceCell::new(),
             blind: Vec::new(),
             imports: Vec::new(),
+            import_handlers: OnceCell::new(),
             unawaited: Vec::new(),
         };
         ex.ownership = contracts.is_some_and(|c| c.ownership());

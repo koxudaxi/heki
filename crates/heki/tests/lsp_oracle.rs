@@ -7423,8 +7423,10 @@ const FAILING_A: &str = "import pkg.b\n\n\ndef helper_a():\n    return 1\n";
 
 /// `IMP102` reads the imports and the order of the module bodies of every module: an edit of one
 /// module adds or removes the report in another. Binding the name before the import, a handler
-/// around the failing import, another module storing the name, and a function that may load the
-/// cycle called before the import each take the report away, and undoing them brings it back.
+/// of any import error around the failing import or around the import that leads to it,
+/// another module storing the name, and a function that may load the cycle called before the
+/// import each take the report away, and undoing them brings it back. A handler of a missing
+/// module takes nothing of it.
 #[test]
 fn lsp_diagnostics_equal_a_full_check_through_circular_imports() {
     let files = vec![
@@ -7462,8 +7464,37 @@ fn lsp_diagnostics_equal_a_full_check_through_circular_imports() {
         )
         .absent(&[("pkg/b.py", "IMP102")]),
         Step::new(
+            "the handler takes only a missing module",
+            vec![save(
+                "pkg/b.py",
+                "try:\n    from pkg.a import helper_a\nexcept ModuleNotFoundError:\n    helper_a = None\n",
+            )],
+        )
+        .present(&[("pkg/b.py", "IMP102")]),
+        Step::new(
             "the handler goes",
             vec![save("pkg/b.py", "from pkg.a import helper_a\n")],
+        )
+        .present(&[("pkg/b.py", "IMP102")]),
+        Step::new(
+            "the first module imports the other under a handler of a missing module",
+            vec![save(
+                "pkg/a.py",
+                "try:\n    import pkg.b\nexcept ModuleNotFoundError:\n    pass\n\n\ndef helper_a():\n    return 1\n",
+            )],
+        )
+        .present(&[("pkg/b.py", "IMP102")]),
+        Step::new(
+            "its handler takes any import error",
+            vec![save(
+                "pkg/a.py",
+                "try:\n    import pkg.b\nexcept ImportError:\n    pass\n\n\ndef helper_a():\n    return 1\n",
+            )],
+        )
+        .absent(&[("pkg/b.py", "IMP102")]),
+        Step::new(
+            "the first module imports the other plainly again",
+            vec![save("pkg/a.py", FAILING_A)],
         )
         .present(&[("pkg/b.py", "IMP102")]),
         Step::new(
@@ -7508,7 +7539,8 @@ const DEPENDENCIES_CONFIG: &str = "[project]\nname = \"pkg\"\ndependencies = [\"
 /// `IMP302` reads what the base module loads, and `IMP301` what the package modules load,
 /// through every module's imports: an edit of the package's `__init__` adds or removes the
 /// report in the module it loads, also through a module that is no package code, and a handler
-/// around that import takes it away. The declarations decide them: moving a distribution into
+/// around that import that takes the missing module takes it away, unless it raises it again.
+/// The declarations decide them: moving a distribution into
 /// the dependencies, or `module-distributions` naming another one, takes the report away, and
 /// dependencies the build backend computes take every report away.
 /// `IMP104` follows the module an import names, which a deleted file no longer is.
@@ -7541,6 +7573,30 @@ fn lsp_diagnostics_equal_a_full_check_through_dependencies_at_import_time() {
             vec![save(
                 "pkg/__init__.py",
                 "try:\n    from pkg import cache\nexcept ImportError:\n    cache = None\n",
+            )],
+        )
+        .absent(&[("pkg/cache.py", "IMP302")]),
+        Step::new(
+            "the handler takes only a missing module",
+            vec![save(
+                "pkg/__init__.py",
+                "try:\n    from pkg import cache\nexcept ModuleNotFoundError:\n    cache = None\n",
+            )],
+        )
+        .absent(&[("pkg/cache.py", "IMP302")]),
+        Step::new(
+            "the handler raises it again",
+            vec![save(
+                "pkg/__init__.py",
+                "try:\n    from pkg import cache\nexcept ModuleNotFoundError:\n    raise\n",
+            )],
+        )
+        .present(&[("pkg/cache.py", "IMP302")]),
+        Step::new(
+            "the handler gives a fallback again",
+            vec![save(
+                "pkg/__init__.py",
+                "try:\n    from pkg import cache\nexcept ModuleNotFoundError:\n    cache = None\n",
             )],
         )
         .absent(&[("pkg/cache.py", "IMP302")]),

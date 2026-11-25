@@ -2433,13 +2433,21 @@ an import itself.
   anchored at the module's own `__package__` or `__name__`, absolutely otherwise (a relative text
   anchored at a package the code spells included), per module for a by-name call given both
   kinds, a module some absolute text gives counting as named absolutely. Each site carries its
-  function (`<module>` for the module body and the class bodies it runs), whether an
-  `ImportError` handler takes its failure (around the import, or around the class statement
-  holding it), whether a handler may take it (`caught`: also `except Exception`, a bare
-  `except`, a type heki cannot tell is another builtin exception, a `with` block's exit or a
-  `finally` body; `environment::may_take_import_error`), whether it is lazy, and whether it runs
-  on every path to a normal return of its function, outside loops (never established in a class
-  body).
+  function (`<module>` for the module body and the class bodies it runs), the failure its
+  handlers take (`ImportSite::handled`, around the import, or around the class statement holding
+  it: none, a missing module, or any import error, `imports::ImportFailure`), whether it is
+  lazy, and whether it runs on every path to a normal return of its function, outside loops
+  (never established in a class body). A handler takes a failure when a path through it lets the
+  code after it run (`imports::ImportHandlers`): an `except` clause whose classes may match it
+  (bare, `ImportError` and its bases, `ModuleNotFoundError` for a missing module only, a name
+  heki cannot tell is another builtin exception class) and whose body, the blocks its first
+  block dominates, may leave them by a normal edge or return; the exit of a `with` block; or a
+  `finally` body that may leave without raising again. A clause that certainly matches hides the
+  later ones; what a clause or a `finally` body raises goes to the handler around it, as the
+  same failure for `raise` and as an exception of unknown class otherwise. Each handler of a
+  function, and each clause body, is walked once (unmetered: one step per block). A handler
+  taking a plain `ImportError` but passing a missing module on counts as taking any import
+  error, which keeps every rule's claim on the safe side.
 - **Body order** (`ModuleImports::bound_before`, `any_bound_before`, `code_before`): what the
   module body does between its sites, by the first site it happens before, so that the facts do
   not move with the code: each module global it may bind before a site (a store of the body; a
@@ -2451,8 +2459,8 @@ an import itself.
   model's guards); `function` in a function body; `lazy` for a lazy import (1.1) whose binding
   no read of the module body (or of a class body it runs) reaches, `body` when one may (the
   first such read loads the module there: the site is `unconditional` when a read only its
-  binding reaches runs on every path, and guarded when an `ImportError` handler takes every
-  such read). A read sees the bindings of its name (stores and star imports, which may bind any
+  binding reaches runs on every path, and its handled failure the narrowest of those around
+  such reads). A read sees the bindings of its name (stores and star imports, which may bind any
   name) that reach it through the module body's blocks, an exception edge passing on every
   binding of the block it leaves (`walk::Closure` per name and block, one budget of
   `Budget::STEPS_PER_UNIT` per IR unit of the module body); a read heki cannot place, in a class
@@ -2473,7 +2481,7 @@ an import itself.
   project has but an import may find elsewhere first (`ProjectDecls::holds_module`), or a name the
   code does not fix, is open. The lookups are declaration reads (`DeclKeys::modules`).
 - **Loads while it loads** (`ImportGraph::loads`): a module's `body` sites that run on every
-  path through the body (`unconditional`) and that no `ImportError` handler guards
+  path through the body (`unconditional`) and of which no handler takes a failure
   (`ImportSite::loads_while_its_module_loads`) load what they certainly load
   (`Target::certain`: the module, or the package of a `from` import) with its parent packages;
   a site on one branch (`if sys.platform == "win32": import winreg`), in a class body, or whose
@@ -2511,9 +2519,12 @@ an import itself.
   through the sites that may run while a module loads (`body`, or open). Each module of a group,
   and each package holding one outside the group whose import loads the group, is imported first
   in turn: its parent packages, then its body, run through their sites in order; a site that
-  imports whenever its module loads, where it is written, with no handler that may take an
-  `ImportError` (`ImportSite::always_imports_uncaught`), runs the body of each module it enters
-  that has not loaded yet before going on. A module of the group has not until the run enters
+  imports whenever its module loads, where it is written, with no handler that takes a plain
+  `ImportError` (`ImportSite::always_imports_leaving`), runs the body of each module it enters
+  that has not loaded yet before going on. A site of a module a project package lacks
+  (`Target::Missing`) stops the run unless a handler takes what it raises
+  (`Target::failure`: a missing module, or any import error for a relative import past the
+  top-level package). A module of the group has not until the run enters
   it; one outside the group has not when its load certainly loads a module of the group (a
   `walk::Closure` over those sites) and may reach the group through no import other than such
   hops (it cannot have run whole, nor be paused at an import leading to the entry), and changes
@@ -2531,8 +2542,8 @@ an import itself.
 - **Loads from the package** (`ImportGraph::loaded_from`, for `IMP301` and `IMP302`): one walk,
   breadth first from all the modules a rule judges at once (the package modules, or the base
   modules: the top-level package modules and the modules entry points name with their parent
-  packages), over the sites that import whenever their module loads with no handler that may
-  take an `ImportError` (`ImportSite::always_imports_uncaught`), into the modules
+  packages), over the sites that import whenever their module loads with no handler that takes
+  a missing module (`ImportSite::always_imports_leaving`), into the modules
   `ImportGraph::hops` enters except development code, which an installed package does not have.
   It keeps the hop into each module from the nearest one, so each module reached has a shortest
   chain from one start, and spends one step per module of one `Budget::of_graph` (owner

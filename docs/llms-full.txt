@@ -7239,10 +7239,14 @@ Its premises, each established or no report:
   cycle whenever it runs, and every way from its imports to the cycle is an import in a module
   body that heki names. Otherwise an import of a module outside the cycle that may load one of
   the cycle stops the run.
-- **No handler**: no handler takes the `ImportError` on the way: no `except` clause naming
-  `ImportError`, `Exception`, `BaseException`, a type heki cannot tell is another builtin
-  exception, or a bare `except`, and no `with` block or `finally` body around an import of the
-  chain or the statement.
+- **No handler**: no handler takes the `ImportError` on the way, a plain one: no `except` clause
+  naming `ImportError`, `Exception`, `BaseException`, a type heki cannot tell is another builtin
+  exception, or a bare `except`, whose body may end without raising, no `with` block, and no
+  `finally` body that may leave without raising it again, around an import of the chain or the
+  statement. `except ModuleNotFoundError:` does not take it (a subclass does not take its base),
+  a clause whose body raises on every path (`raise`) takes nothing, and a clause that certainly
+  matches hides the clauses after it. A handler taking the `ModuleNotFoundError` of a module a
+  project package lacks lets the module body go on past that import.
 - **Not a submodule**: the project has no module `M.name` (Python falls back to a submodule of
   that name once it is loaded), and `name` is not a dunder the import system sets
   (`__name__`, `__path__`).
@@ -7487,8 +7491,8 @@ Opt-in: a module of the package the project distributes imports test code, or a 
 Reports an import, in a module of the package the project distributes, of development code: test
 code beside the package, or a module outside the source roots of a src layout. The import runs: it
 is in the module body, a lazy import, or inside a function. An import under `TYPE_CHECKING` never
-runs, and an import a handler may take the `ImportError` of expects the module to be missing;
-neither is reported. One report is given per function and module imported, at its first import: the
+runs, and an import whose missing module a handler takes (`except ModuleNotFoundError:` with a
+fallback) expects the module to be missing; neither is reported. One report is given per function and module imported, at its first import: the
 names of one `from` statement are one import.
 
 heki finds it without configuration, from the project's layout and `pyproject.toml`:
@@ -7522,9 +7526,12 @@ Its premises, each established or no report:
   `from a import c`, the package `a`, which it loads in any case).
 - **Runs**: the import is in the module body, a lazy import, or in a function, not under
   `TYPE_CHECKING`.
-- **No handler**: no handler may take its `ImportError`: no `except` clause naming
-  `ImportError`, `Exception`, `BaseException`, a type heki cannot tell is another builtin
-  exception, or a bare `except`, and no `with` block or `finally` body around it.
+- **No handler**: no handler may take its `ModuleNotFoundError`, which an installation without
+  the module raises: no `except` clause naming `ModuleNotFoundError`, `ImportError`,
+  `Exception`, `BaseException`, a type heki cannot tell is another builtin exception, or a bare
+  `except`, whose body may end without raising, no `with` block around it, and no `finally` body
+  that may leave without raising the error again. A clause whose body raises on every path
+  (`raise`) takes nothing, and a clause that certainly matches hides the clauses after it.
 
 ## Why is this bad?
 An installed package usually holds only its own modules. Test helpers, `conftest.py`, and the
@@ -7616,9 +7623,13 @@ Its premises, each established or no report:
 - **Chain**: the reported import, and each import leading to it from that module, is in a module
   body (or a class body it runs, or a constant by-name import there), runs on every path through
   the body, is no lazy import, and loads the module shown, its parent packages first.
-- **No handler**: no handler may take the `ImportError` of any of them: no `except` clause naming
-  `ImportError`, `Exception`, `BaseException`, a type heki cannot tell is another builtin
-  exception, or a bare `except`, and no `with` block or `finally` body around one.
+- **No handler**: no handler may take the `ModuleNotFoundError` of any of them, which a module
+  that is not installed raises: no `except` clause naming `ModuleNotFoundError`, `ImportError`,
+  `Exception`, `BaseException`, a type heki cannot tell is another builtin exception, or a bare
+  `except`, whose body may end without raising, no `with` block around one, and no `finally`
+  body that may leave without raising the error again. A clause whose body raises on every path
+  (`raise`, `raise RuntimeError(...) from e`) takes nothing, and a clause that certainly matches
+  hides the clauses after it.
 - **Distribution**: the distributions that may provide the imported module are, when
   `[tool.heki.imports] module-distributions` names the module or a package holding it, the ones it
   lists; otherwise the ones the catalog lists for it (`PyYAML` provides `yaml`, `pytest` provides
@@ -7668,7 +7679,7 @@ def frozen(at: str):
 ```
 
 or declare `freezegun` in `[project] dependencies` (or in an extra, which [`IMP302`](https://heki.koxudaxi.dev/rules/optional-dependency-at-import-time/)
-then judges).
+then judges), or give the import a fallback under `except ModuleNotFoundError:`.
 
 ## Fix safety
 No automatic fix.
@@ -10404,9 +10415,13 @@ Its premises, each established or no report:
 - **Chain**: the reported import, and each import leading to it from that module, is in a module
   body (or a class body it runs, or a constant by-name import there), runs on every path through
   the body, is no lazy import, and loads the module shown, its parent packages first.
-- **No handler**: no handler may take the `ImportError` of any of them: no `except` clause naming
-  `ImportError`, `Exception`, `BaseException`, a type heki cannot tell is another builtin
-  exception, or a bare `except`, and no `with` block or `finally` body around one.
+- **No handler**: no handler may take the `ModuleNotFoundError` of any of them, which a module
+  that is not installed raises: no `except` clause naming `ModuleNotFoundError`, `ImportError`,
+  `Exception`, `BaseException`, a type heki cannot tell is another builtin exception, or a bare
+  `except`, whose body may end without raising, no `with` block around one, and no `finally`
+  body that may leave without raising the error again. A clause whose body raises on every path
+  (`raise`, `raise RuntimeError(...) from e`) takes nothing, and a clause that certainly matches
+  hides the clauses after it.
 - **Distribution**: the distributions that may provide the imported module are found as for
   [`IMP301`](https://heki.koxudaxi.dev/rules/development-dependency-at-import-time/), with its premise that the project holds no
   copy of the module. The project declares at least one of them, and each one it declares is in
