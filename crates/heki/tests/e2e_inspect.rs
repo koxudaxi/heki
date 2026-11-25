@@ -2297,6 +2297,26 @@ def unknown_method(xs: list[int]) -> list[int]:
     return xs.__mul__(2)
 
 
+def added_to_object(xs: list[int], box: Box) -> object:
+    return box + xs
+
+
+def compared_with_object(xs: list[int], box: Box) -> bool:
+    return box == xs
+
+
+def key_of_object(xs: list[int], box: Box) -> object:
+    return box[xs]
+
+
+def in_object(xs: list[int], box: Box) -> bool:
+    return xs in box
+
+
+def added_to_either(xs: list[int], box: Box | Reader) -> object:
+    return box + xs
+
+
 def stores_attribute(xs: list[int], box: Box) -> None:
     box.items = xs
 
@@ -2554,6 +2574,12 @@ fn parameters_only_read_by_the_function_and_every_call_they_are_handed_to() {
         ("deletes_key", &["xs"]),
         ("extends_in_place", &[]),
         ("unknown_method", &[]),
+        //    Nor handed to a special method of a project class's instance.
+        ("added_to_object", &[]),
+        ("compared_with_object", &[]),
+        ("key_of_object", &[]),
+        ("in_object", &[]),
+        ("added_to_either", &[]),
         // 2. Not kept: an attribute, a global, an item, a display, a closure, a lambda, a class
         //    body, a generator expression reading a copy, a yield, a return, a returned view or
         //    a result that may be an argument (`max(a, b)` returns one of them).

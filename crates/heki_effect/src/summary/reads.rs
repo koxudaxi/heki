@@ -156,14 +156,22 @@ impl<'a> Extractor<'a> {
                 ..
             } if *lhs == v => Handling::Open,
             InstKind::SubscriptDelete { obj, .. } if *obj == v => Handling::Open,
-            InstKind::BinOp { .. }
-            | InstKind::UnaryOp { .. }
-            | InstKind::Compare { .. }
+            // An operator, a comparison, or an item access with the object as the key runs a
+            // special method of the other operand's class, which gets the object.
+            InstKind::BinOp { lhs, rhs, .. } => self.operand_handling(bb, v, *lhs, *rhs),
+            InstKind::Compare { op, lhs, rhs, .. } => match op {
+                CompareOpKind::Is | CompareOpKind::IsNot => Handling::Reads,
+                CompareOpKind::In | CompareOpKind::NotIn if *rhs == v => Handling::Reads,
+                _ => self.operand_handling(bb, v, *lhs, *rhs),
+            },
+            InstKind::SubscriptLoad { obj, index, .. }
+            | InstKind::SubscriptDelete { obj, index, .. } => {
+                self.operand_handling(bb, v, *obj, *index)
+            }
+            InstKind::UnaryOp { .. }
             | InstKind::Convert { .. }
             | InstKind::Format { .. }
             | InstKind::BuildString { .. }
-            | InstKind::SubscriptLoad { .. }
-            | InstKind::SubscriptDelete { .. }
             | InstKind::MakeIter { .. }
             | InstKind::IterNext { .. }
             | InstKind::YieldFrom { .. }
@@ -195,6 +203,19 @@ impl<'a> Extractor<'a> {
             kind => CallOperands::of(kind, (bb, i)).map_or(Handling::Open, |call| {
                 self.call_handling(walks, k, v, &call)
             }),
+        }
+    }
+
+    /// An operation on `a` and `b`, one of them `v`: the other operand, when it may be an
+    /// instance of a project class, has its special method run with the object, which may keep
+    /// it; a builtin's only reads it.
+    fn operand_handling(&self, bb: BlockId, v: VarId, a: VarId, b: VarId) -> Handling {
+        let other = if a == v { b } else { a };
+        let project = |c: &String| self.cx.project.is_project_class(c);
+        match self.val_in(bb, other) {
+            Some(Val::Inst(c)) if project(c) => Handling::Open,
+            Some(Val::Union(cs)) if cs.iter().any(project) => Handling::Open,
+            _ => Handling::Reads,
         }
     }
 
