@@ -134,6 +134,14 @@ def model_get(model: Model) -> object:
     return model.__dict__.get("_origin")
 
 
+def previous_get(fields: list[Field]) -> None:
+    previous = None
+    for field in fields:
+        if previous is not None:
+            previous.__dict__.get("_origin")
+        previous = field
+
+
 def union_get(obj: Field | Memo) -> object:
     return obj.__dict__.get("_origin")
 
