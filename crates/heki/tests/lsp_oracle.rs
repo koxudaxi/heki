@@ -750,8 +750,10 @@ const EXACT_MADE_LOCAL: &str = "import time\n\n\ndef _define():\n    class Made:
 const EXACT_MADE_USE: &str =
     "from pkg import exact_made\n\n\nasync def serve():\n    exact_made.Made()\n";
 // The base's method gets decorators: `typing.final` returns the method it is handed, and a
-// decorator outside the ones heki knows may replace it.
+// decorator outside the ones heki knows may replace it, also one named `final` that another
+// library defines.
 const EXACT_BASE_FINAL: &str = "from typing import final\n\nimport requests\n\n\nclass Base:\n    @final\n    def fetch(self, url):\n        return requests.get(url)\n";
+const EXACT_BASE_OTHER_FINAL: &str = "from mylib import final\n\nimport requests\n\n\nclass Base:\n    @final\n    def fetch(self, url):\n        return requests.get(url)\n";
 const EXACT_BASE_TRACED: &str = "from typing import final\n\nimport requests\n\n\ndef traced(fn):\n    return fn\n\n\nclass Base:\n    @final\n    @traced\n    def fetch(self, url):\n        return requests.get(url)\n";
 
 // Store types (`ModuleDecls::global_types`, `ClassDecl::attr_stores`): an `async def` calls a
@@ -1529,6 +1531,18 @@ fn steps_exact_effects() -> Vec<Step> {
         .absent(&[("pkg/exact_use.py", "EFF101")]),
         Step::new(
             "only `typing.final` is left",
+            vec![save("pkg/exact_base.py", EXACT_BASE_FINAL)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF101")])
+        .absent(&[("pkg/exact_use.py", "EFF101 [heuristic]")]),
+        Step::new(
+            "`final` is imported from another library",
+            vec![save("pkg/exact_base.py", EXACT_BASE_OTHER_FINAL)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF101 [heuristic]")])
+        .absent(&[("pkg/exact_use.py", "EFF101")]),
+        Step::new(
+            "`final` is imported from `typing` again",
             vec![save("pkg/exact_base.py", EXACT_BASE_FINAL)],
         )
         .present(&[("pkg/exact_use.py", "EFF101")])

@@ -771,11 +771,11 @@ pub struct FunctionDecl {
     /// does what its definition says (see [`FunctionDecl::makes_no_coroutine`]).
     pub called_as_defined: bool,
     /// A property getter that reading the attribute on an instance runs: a method decorated
-    /// with `property` / `cached_property` (any decorator whose last dotted component is one of
-    /// them) whose every definition is such a getter. A property with a setter or deleter is
-    /// not one: `@x.setter def x(...)` is a second function with the getter's qualname, whose
-    /// facts share the getter's summary, so reading the property would pick up the setter's
-    /// writes.
+    /// with the builtin `property` or a `cached_property` (by the name of what the decorator is
+    /// bound to, `decorators::Decorator::getter`) whose every definition is such a getter. A
+    /// property with a setter or deleter is not one: `@x.setter def x(...)` is a second
+    /// function with the getter's qualname, whose facts share the getter's summary, so reading
+    /// the property would pick up the setter's writes.
     pub is_property: bool,
     /// Parameters (bit `i`: parameter `i < 64`) annotated with a read-only container type:
     /// `Sequence[...]`, `Mapping[...]`, or `ReadOnly[...]` after `Optional` / `| None` /
@@ -1280,30 +1280,31 @@ impl ModuleDecls {
     }
 
     /// Whether the decorator `text` of a function of this module is one of `names`
-    /// (`cached_property`, `lru_cache`, ...), known by what its head is bound to at module
-    /// scope: an import or a module alias names the imported symbol, so an alias counts by that
-    /// symbol's last name (`from functools import cached_property as cached`,
-    /// `cached = functools.cached_property`); a function or class the module
-    /// defines is its own decorator and none of `names` (an identity `def cache(fn)` caches
-    /// nothing); a head bound by neither (a builtin, a star import) counts by its spelling.
+    /// (`cached_property`, `lru_cache`, ...) by the last name of the symbol its head is bound
+    /// to ([`Self::decorator_symbol`]): an alias counts by that symbol's last name (`from
+    /// functools import cached_property as cached`, `cached = functools.cached_property`); an
+    /// object the module binds itself is none of `names` (an identity `def cache(fn)` caches
+    /// nothing).
     pub fn decorator_is(&self, text: &str, names: &[&str]) -> bool {
         self.decorator_symbol(text)
             .is_some_and(|s| names.contains(&s.rsplit('.').next().unwrap_or(&s)))
     }
 
-    /// The symbol the head of the decorator `text` names, through this module's imports and
-    /// aliases (`functools.cached_property` of `@cached_property` after `from functools import
-    /// cached_property`); `None` for a class or function the module defines; a name the module
-    /// neither imports nor defines as written.
+    /// The symbol the head of the decorator `text` is bound to at module scope: through this
+    /// module's imports and aliases (`typing.final` of `@final` after `from typing import
+    /// final`, of `@t.final` after `import typing as t`), and a builtin for a name no statement
+    /// of the module binds (`builtins.staticmethod`, also a name only a star import may bind);
+    /// `None` for an object the module binds itself (a class or function it defines, any other
+    /// store of the name).
     pub fn decorator_symbol(&self, text: &str) -> Option<String> {
         let (head, _) = decorator_parts(text);
         let first = head.split('.').next().unwrap_or(head);
         if self.imports.contains_key(first) || self.aliases.contains_key(first) {
             self.resolve_dotted(head, false)
-        } else if self.classes.contains_key(first) || self.functions.contains_key(first) {
+        } else if self.binds(first) {
             None
         } else {
-            Some(head.to_owned())
+            Some(format!("builtins.{head}"))
         }
     }
 
@@ -5804,7 +5805,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
         let getter = f.owner_class_qualname.is_some()
             && f.decorators
                 .iter()
-                .any(|d| decls.decorator_is(d, &decorators::names(|d| d.getter)));
+                .any(|d| decorators::is(d, &decls, |k| k.getter));
         *getters_only.entry(&f.qualname).or_insert(true) &= getter;
     }
     // The module scope's bindings are sorted by name.
@@ -6010,7 +6011,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
     for f in &input.ir.functions {
         if is_summarized_function(f)
             && f.owner_class_qualname.is_some()
-            && f.has_decorator(&decorators::names(|d| d.getter))
+            && (f.decorators.iter()).any(|d| decorators::is(d, &decls, |k| k.getter))
             && let Some(t) = f
                 .return_annotation
                 .as_deref()
@@ -6067,8 +6068,8 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
                     Some((u8::try_from(i).ok()?, fact))
                 })
                 .collect(),
-            is_generator: is_generator_function(f),
-            called_as_defined: is_called_as_defined(f),
+            is_generator: is_generator_function(f, &decls),
+            called_as_defined: is_called_as_defined(f, &decls),
             is_property: getters_only[f.qualname.as_str()],
             readonly_params,
             mutable_params,
@@ -6653,18 +6654,14 @@ fn external_defines(kb: &EffectiveEcosystemKb, base: &str, name: &str) -> bool {
 }
 
 /// [`FunctionDecl::returns_param_attr`] of one definition: a function (not a generator or a
-/// coroutine, decorated by nothing but `property` and the decorators that keep the call,
-/// [`decorators::Decorator::keeps_call`]) whose every `return` returns the same attribute of
-/// the same positional parameter, read directly or through local copies, and which stores or
-/// deletes no attribute of that name. A `cached_property` is none: a read after the first
-/// returns what the instance holds, which an assignment can replace.
+/// coroutine, decorated by nothing but the decorators that return what the body returns on
+/// every call, [`decorators::keeps_returned_value`]: `property` and those that keep the call)
+/// whose every `return` returns the same attribute of the same positional parameter, read
+/// directly or through local copies, and which stores or deletes no attribute of that name. A
+/// `cached_property` is none: a read after the first returns what the instance holds, which an
+/// assignment can replace.
 fn returned_param_attr(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, String)> {
-    let plain_decorators = f.decorators.iter().all(|d| {
-        let (head, _) = decorator_parts(d);
-        decorators::keeps(head.rsplit('.').next().unwrap_or(head), |d| d.keeps_call)
-            || decls.decorator_is(d, &["property"])
-    });
-    if f.kind != FunctionKind::Sync || !plain_decorators {
+    if f.kind != FunctionKind::Sync || !decorators::keeps_returned_value(&f.decorators, decls) {
         return None;
     }
     let defs: FxHashMap<VarId, &InstKind> = f
@@ -6734,7 +6731,7 @@ fn returned_import(
     decls: &ModuleDecls,
     import_targets: &FxHashMap<Span, String>,
 ) -> Option<Box<str>> {
-    if !matches!(f.kind, FunctionKind::Sync) || is_generator_function(f) {
+    if !matches!(f.kind, FunctionKind::Sync) || is_generator_function(f, decls) {
         return None;
     }
     if !keeps_body_result(f, decls) {
@@ -6772,7 +6769,7 @@ fn returned_import(
 /// `functools` cache, which hands out the object a call returned.
 fn keeps_body_result(f: &IrFunction, decls: &ModuleDecls) -> bool {
     f.decorators.iter().all(|d| {
-        decorators::keeps(decorators::last_name(d), |k| k.keeps_call)
+        decorators::is(d, decls, |k| k.keeps_call)
             || matches!(
                 decls.decorator_symbol(d).as_deref(),
                 Some("functools.cache" | "functools.lru_cache")
@@ -7889,24 +7886,25 @@ fn compares_false(
         })
 }
 
-/// Whether calling `f` returns a fresh (async) generator: a generator function whose every
-/// decorator keeps the call ([`is_called_as_defined`]; a `@contextmanager` generator returns a
-/// context manager, which runs the body at `with`). A
-/// generator expression is no generator function: its scope is never called, and its body
-/// counts where it is written, where it is almost always consumed (`sum(x for x in xs)`).
-pub(crate) fn is_generator_function(f: &IrFunction) -> bool {
+/// Whether calling `f`, a function of the module `decls` describes, returns a fresh (async)
+/// generator: a generator function whose every decorator keeps the call
+/// ([`is_called_as_defined`]; a `@contextmanager` generator returns a context manager, which
+/// runs the body at `with`). A generator expression is no generator function: its scope is
+/// never called, and its body counts where it is written, where it is almost always consumed
+/// (`sum(x for x in xs)`).
+pub(crate) fn is_generator_function(f: &IrFunction, decls: &ModuleDecls) -> bool {
     f.name != "<genexpr>"
         && matches!(
             f.kind,
             FunctionKind::Generator | FunctionKind::AsyncGenerator
         )
-        && is_called_as_defined(f)
+        && is_called_as_defined(f, decls)
 }
 
-/// Every decorator of `f` keeps calling it what its definition makes it
-/// ([`decorators::Decorator::keeps_call`]).
-fn is_called_as_defined(f: &IrFunction) -> bool {
-    decorators::all_keep(&f.decorators, |d| d.keeps_call)
+/// Every decorator of `f`, as the module `decls` describes binds it, keeps calling it what its
+/// definition makes it ([`decorators::Decorator::keeps_call`]).
+fn is_called_as_defined(f: &IrFunction, decls: &ModuleDecls) -> bool {
+    decorators::all_keep(&f.decorators, decls, |d| d.keeps_call)
 }
 
 /// The catalog symbol of a decorator of `f` that offloads the function it decorates

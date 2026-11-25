@@ -1,13 +1,18 @@
-//! What a decorator leaves of the function it decorates, by its last dotted name: the one table
-//! the premises about decorated functions read. Any decorator the table does not name may
-//! replace the function, so a premise it touches is open.
+//! What a decorator leaves of the function it decorates: the one table the premises about
+//! decorated functions read. A decorator is known by the object its head is bound to in the
+//! function's module ([`ModuleDecls::decorator_symbol`]), not by its spelling: a `final` the
+//! project defines, or one of another library, may replace the function. Any decorator the
+//! table does not name may replace the function, so a premise it touches is open.
+
+use crate::ModuleDecls;
 
 /// One decorator heki knows, and which premises about the function it keeps.
 pub(crate) struct Decorator {
     pub name: &'static str,
-    /// The modules that define it, for a reader that knows the decorator by the symbol its name
-    /// is bound to rather than by its spelling ([`defines`]).
-    pub modules: &'static [&'static str],
+    /// The modules that define it. `None` for `cached_property`, a getter by its name wherever
+    /// it is imported from: only the catalog's `[[cached_properties]]` make one an exact
+    /// claim's, and it keeps no other premise.
+    pub modules: Option<&'static [&'static str]>,
     /// Calling the function still runs its body as written: a generator function returns a
     /// generator, an `async def` a coroutine, a plain `def` what its body returns
     /// (`FunctionDecl::called_as_defined`).
@@ -29,7 +34,7 @@ const TYPING: &[&str] = &["typing", "typing_extensions"];
 pub(crate) const DECORATORS: &[Decorator] = &[
     Decorator {
         name: "staticmethod",
-        modules: &["builtins"],
+        modules: Some(&["builtins"]),
         keeps_call: true,
         keeps_return: true,
         getter: false,
@@ -37,7 +42,7 @@ pub(crate) const DECORATORS: &[Decorator] = &[
     },
     Decorator {
         name: "classmethod",
-        modules: &["builtins"],
+        modules: Some(&["builtins"]),
         keeps_call: true,
         keeps_return: true,
         getter: false,
@@ -45,7 +50,7 @@ pub(crate) const DECORATORS: &[Decorator] = &[
     },
     Decorator {
         name: "abstractmethod",
-        modules: &["abc"],
+        modules: Some(&["abc"]),
         keeps_call: true,
         keeps_return: true,
         getter: false,
@@ -53,7 +58,7 @@ pub(crate) const DECORATORS: &[Decorator] = &[
     },
     Decorator {
         name: "override",
-        modules: TYPING,
+        modules: Some(TYPING),
         keeps_call: true,
         keeps_return: true,
         getter: false,
@@ -61,7 +66,7 @@ pub(crate) const DECORATORS: &[Decorator] = &[
     },
     Decorator {
         name: "final",
-        modules: TYPING,
+        modules: Some(TYPING),
         keeps_call: true,
         keeps_return: true,
         getter: false,
@@ -69,7 +74,7 @@ pub(crate) const DECORATORS: &[Decorator] = &[
     },
     Decorator {
         name: "property",
-        modules: &["builtins"],
+        modules: Some(&["builtins"]),
         keeps_call: false,
         keeps_return: true,
         getter: true,
@@ -77,7 +82,7 @@ pub(crate) const DECORATORS: &[Decorator] = &[
     },
     Decorator {
         name: "cached_property",
-        modules: &["functools"],
+        modules: None,
         keeps_call: false,
         keeps_return: false,
         getter: true,
@@ -85,45 +90,39 @@ pub(crate) const DECORATORS: &[Decorator] = &[
     },
 ];
 
-/// The last dotted name of a decorator's head (`functools.cached_property` of
-/// `@functools.cached_property`, `lru_cache` of `@lru_cache(maxsize=8)`).
-pub(crate) fn last_name(decorator: &str) -> &str {
-    let base = decorator.split('(').next().unwrap_or(decorator).trim();
-    base.rsplit('.').next().unwrap_or(base)
-}
-
-/// The names of the decorators that have `keep`.
-pub(crate) fn names(keep: impl Fn(&Decorator) -> bool) -> Vec<&'static str> {
+/// The decorator of the table that `decorator` (its source text, on a function of the module
+/// `decls` describes) is: the one its head is bound to there, written without a call
+/// (`@final()` decorates with what calling `final` returns).
+fn entry(decorator: &str, decls: &ModuleDecls) -> Option<&'static Decorator> {
+    if decorator.contains('(') {
+        return None;
+    }
+    let symbol = decls.decorator_symbol(decorator)?;
+    let (module, name) = symbol.rsplit_once('.')?;
     DECORATORS
         .iter()
-        .filter(|d| keep(d))
-        .map(|d| d.name)
-        .collect()
+        .find(|d| d.name == name && d.modules.is_none_or(|m| m.contains(&module)))
 }
 
-/// Whether the decorator named `name` (a last dotted name) has `keep`.
-pub(crate) fn keeps(name: &str, keep: impl Fn(&Decorator) -> bool) -> bool {
-    DECORATORS.iter().any(|d| d.name == name && keep(d))
+/// Whether `decorator` (its source text, on a function of the module `decls` describes) is a
+/// decorator of the table that has `keep`.
+pub(crate) fn is(decorator: &str, decls: &ModuleDecls, keep: impl Fn(&Decorator) -> bool) -> bool {
+    entry(decorator, decls).is_some_and(keep)
 }
 
-/// Whether `symbol`, the dotted name a decorator's head is bound to (`typing.final`), is a
-/// decorator of the table, from one of the modules that define it, that has `keep`.
-pub(crate) fn defines(symbol: &str, keep: impl Fn(&Decorator) -> bool) -> bool {
-    symbol.rsplit_once('.').is_some_and(|(module, name)| {
-        DECORATORS
-            .iter()
-            .any(|d| d.name == name && d.modules.contains(&module) && keep(d))
-    })
-}
-
-/// Whether every decorator of `decorators` (their source text) has `keep`.
-pub(crate) fn all_keep(decorators: &[String], keep: impl Fn(&Decorator) -> bool) -> bool {
-    decorators.iter().all(|d| keeps(last_name(d), &keep))
+/// Whether every decorator of `decorators` (their source text, on a function of the module
+/// `decls` describes) has `keep`.
+pub(crate) fn all_keep(
+    decorators: &[String],
+    decls: &ModuleDecls,
+    keep: impl Fn(&Decorator) -> bool,
+) -> bool {
+    decorators.iter().all(|d| is(d, decls, &keep))
 }
 
 /// Whether calling a function decorated with `decorators` returns what its body returns: a
 /// decorator may hand out one cached object (`@lru_cache`, `@cached_property`), so only the
 /// decorators that call the body each time keep its result.
-pub(crate) fn keeps_returned_value(decorators: &[String]) -> bool {
-    all_keep(decorators, |d| d.keeps_return)
+pub(crate) fn keeps_returned_value(decorators: &[String], decls: &ModuleDecls) -> bool {
+    all_keep(decorators, decls, |d| d.keeps_return)
 }

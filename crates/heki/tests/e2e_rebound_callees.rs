@@ -832,6 +832,139 @@ fn final_and_override_return_what_they_decorate() {
     );
 }
 
+const WRAPPERS: &str = r#"import functools
+
+
+def final(fn):
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        return None
+
+    return run
+
+
+override = final
+property = final
+"#;
+
+const OWN_DECORATORS: &str = r#"import functools
+import time
+from typing import final as sealed
+
+
+def replace(fn):
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        return None
+
+    return run
+
+
+def final(fn):
+    return replace(fn)
+
+
+def override(fn):
+    return replace(fn)
+
+
+def staticmethod(fn):
+    return replace(fn)
+
+
+def property(fn):
+    return replace(fn)
+
+
+class Own:
+    @final
+    def fetch(self) -> None:
+        time.sleep(1)
+
+    @sealed
+    def fetch_sealed(self) -> None:
+        time.sleep(1)
+
+    @staticmethod
+    def pause() -> None:
+        time.sleep(1)
+
+    @property
+    def value(self) -> int:
+        time.sleep(1)
+        return 1
+
+    @override
+    @functools.cache
+    def rows(self, key: str) -> list[str]:
+        return [key]
+"#;
+
+const OTHER_DECORATORS: &str = r#"import time
+
+from pkg.wrappers import final, override, property
+
+
+class Base:
+    def renew(self) -> None:
+        return None
+
+
+class Other(Base):
+    @final
+    def fetch(self) -> None:
+        time.sleep(1)
+
+    @override
+    def renew(self) -> None:
+        time.sleep(1)
+
+    @property
+    def value(self) -> int:
+        time.sleep(1)
+        return 1
+"#;
+
+const SHADOWED_CALLS: &str = r#"from pkg.other import Other
+from pkg.own import Own
+
+
+async def own(o: Own) -> int:
+    o.fetch()  # EFF101 [heuristic] decorated
+    o.fetch_sealed()  # EFF101
+    Own.pause()  # EFF101 [heuristic] decorated
+    return o.value
+
+
+async def other(o: Other) -> int:
+    o.fetch()  # EFF101 [heuristic] decorated
+    o.renew()  # EFF101 [heuristic] decorated
+    return o.value
+
+
+def cached(o: Own) -> None:
+    o.rows("a").append("b")  # MUT114 not cached
+"#;
+
+/// A decorator is the object its name is bound to in the decorated function's module, not its
+/// spelling: a `final`, `override`, `staticmethod`, or `property` the module defines, or one
+/// imported from another module, may replace the function (here each returns a wrapper that
+/// runs nothing), so a call of it or a read of the attribute keeps none of the function's
+/// facts, and a cache below it keeps no result. `typing.final` imported under another name
+/// keeps them.
+#[test]
+fn a_decorator_is_known_by_what_its_name_is_bound_to() {
+    check_marks(
+        "shadowed_decorators",
+        &[
+            ("pkg/wrappers.py", WRAPPERS),
+            ("pkg/own.py", OWN_DECORATORS),
+            ("pkg/other.py", OTHER_DECORATORS),
+            ("pkg/app.py", SHADOWED_CALLS),
+        ],
+    );
+}
+
 const SETTINGS: &str = "PAUSE = 0\nQUIET = 0\n";
 
 const SETTINGS_PATCH: &str = "from pkg import settings\n\nsetattr(settings, \"PAUSE\", 5)\n";
