@@ -5,29 +5,85 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
-## [0.4.1] - Unreleased
+## [0.5.0] - Unreleased
+
+### Breaking changes
+
+- `MUT110` reads a parameter annotated `typing.AbstractSet` or `collections.abc.Set` as read-only,
+  as it reads `Sequence` and `Mapping` (#381): one handed to a helper that changes it in place is
+  reported, in every spelling the mapping takes (bare, quoted, through an import alias or the
+  module, inside `Optional`, `| None`, and `Annotated`). `typing.Set` stays the mutable builtin. The
+  same annotations make a frozen field or a `Final` attribute hold a container for `MUT108`, and a
+  view's property read-only for `MUT120`. The help of a `MUT110` report names `set(...)` among the
+  copies.
+- A function or method decorated with `typing.final` (also `typing_extensions.final`, or through
+  `import typing as t`) keeps its facts (#382): `final` only sets `__final__` and returns what it is
+  handed, so a call of the method runs its body as written, and a caller that `EFF101` reported as
+  heuristic is exact as it is without the decorator. `typing.override` and `typing.final` beside a
+  `functools` cache (`@override @functools.cache`) leave the cached result `MUT114` claims, as
+  `staticmethod` and `classmethod` did.
+- A name a module binds once to a type expression reads as that type wherever an annotation names
+  it, in its module or imported, also inside another annotation and as a member of a union (#394):
+  `Operation: TypeAlias = Added | Removed` (also the string of one), `type Operation = Added |
+  Removed` without type parameters, and an assignment of a subscript or a union without an
+  annotation (`Operations = list[Added]`). A call on a parameter annotated `Operation` runs
+  `Added`'s and `Removed`'s methods, as one annotated `Added | Removed` does, and a parameter
+  annotated with an alias of `Iterator[...]` is a single-pass iterator for `MUT106`. A name bound
+  twice, a variable annotated otherwise, an alias with type parameters, and a type variable inside
+  an alias's value give no class. A `TypeVar`'s bound may name an alias. Rules that follow receiver
+  classes, such as `EFF201`, `MUT201`, and `MUT203`, now report writes, reads, and calls through
+  such values that they did not report before.
+- `typing.cast` reads a subscripted or union type as the same text in a string (#363):
+  `cast(list[Model], x)`, `cast(dict[str, Model], x)`, and `cast(Model | None, x)` type the value as
+  `cast("list[Model]", x)` does, so a loop over `cast(list[Windows], hosts)` calls `Windows.run`
+  only. Rules that follow receiver classes, such as `EFF201`, `MUT201`, and `MUT203`, now report
+  writes, reads, and calls through such casts that they missed before.
+- Receivers whose class the language or the standard library fixes resolve (#395). The default
+  `EFF201` and the rules that follow calls through receiver classes now report writes and calls
+  through these values that they missed before:
+  - An instance's own namespace (`obj.__dict__`, `vars(obj)`) is a builtin `dict` wherever reading
+    it runs no code of the instance's classes. That includes a pydantic model, whose `__setattr__`
+    the catalog says stores on the instance. `obj.__dict__.get(KEY)`, `keys()`, `items()` and the
+    other dict methods are no longer calls heki cannot resolve. `pop`, `update`, `clear` and item
+    stores stay writes of the attribute they name. A class object's namespace (a read-only proxy)
+    has no class.
+  - The methods a `NamedTuple` class gets: `_replace` copies the instance, `_make` returns an
+    instance of the class it is called on, and `_asdict()` returns a dict. `_fields` is a tuple and
+    `_field_defaults` a dict.
+  - `ContextVar[T].get()` is a `T`, and `get(default)` may also be the default's class. `set`
+    returns a `Token`, whose `var` is the variable.
+  - Effect boundaries with `unresolved = "report"` report these calls no longer, and the rules that
+    follow calls see what they do.
+- A call of a function a value holds is followed when the value is a field of a `NamedTuple` or a
+  frozen dataclass, the result of a factory returning a function, or a class attribute bound to
+  `functools.partial` (#396). An instance holds in each field what the call constructing it passed
+  or the field's default, in the function constructing it, in a closure, a global, an attribute, and
+  over a module-level table of instances (one of the values its items hold); a dataclass that is not
+  frozen, one with a `__post_init__`, and a field a method stores through `object.__setattr__` keep
+  their declared types. A function whose annotation names no class (none, `Any`, `object`,
+  `Callable`) and every `return` of which gives a function it defines or names returns that
+  function. `partial(f, k=v)` read through the class, and `staticmethod(partial(f, k=v))`, call `f`
+  and give what it returns; the keywords it holds leave the call's binding open, and a plain
+  `partial` read on an instance stays unresolved, since Python 3.14 binds the instance to it. Rules
+  that follow call effects, such as `EFF101` and `EFF201`, now report existing code that reaches an
+  effect through such a call, for example a blocking call run through `View(nap).run()`. (#402)
+- A value that `typing.cast` or a project function returning its parameter hands back is the object
+  it was handed (#427): `fill(cast(list[int], items))`, `fill(same(items))`, and `cast(list[int],
+  store.items).append(x)` are reported as the plain value is (`MUT110`, `MUT108`, `MUT201`), `heki
+  inspect` no longer calls a function that changes its parameter through a cast pure or says it
+  stores no parameter, and `references = "calls"` sees a function handed on through a cast. A value
+  a call handed back is typed by that call, so `MUT110` also reports it handed to a helper annotated
+  with a mutable type, and changed in the function itself (`cast(list, items).append(1)`). `MUT204`
+  with `references = "calls"` now reports a guarded function passed through a cast and handed on.
 
 ### Added
 
-- A call of a function a value holds is followed when the value is a field of a `NamedTuple` or
-  a frozen dataclass, the result of a factory returning a function, or a class attribute bound to
-  `functools.partial` (#396). An instance holds in each field what the call constructing it
-  passed or the field's default, in the function constructing it, in a closure, a global, an
-  attribute, and over a module-level table of instances (one of the values its items hold); a
-  dataclass that is not frozen, one with a `__post_init__`, and a field a method stores through
-  `object.__setattr__` keep their declared types. A function whose annotation names no class
-  (none, `Any`, `object`, `Callable`) and every `return` of which gives a function it defines or
-  names returns that function. `partial(f, k=v)` read through the class, and
-  `staticmethod(partial(f, k=v))`, call `f` and give what it returns; the keywords it holds
-  leave the call's binding open, and a plain `partial` read on an instance stays unresolved,
-  since Python 3.14 binds the instance to it. (#402)
-- `heki check --unsafe-fixes`: with `--fix` or `--diff`, also apply the unsafe fixes, which
-  change what the program does in a way the rule's page states (#404). `--fix` alone never
-  applies them, and the language server offers them as quick fixes that are not preferred. The
-  first is `MUT118`'s: for a Python 3.15 target, a report in the file that binds the sentinel
-  replaces its `object()` with `sentinel("NAME")` (PEP 661), `NAME` being the name it is bound
-  to. The sentinel's type and repr change, and so does what `pickle` makes of an object holding
-  it.
+- `heki check --unsafe-fixes`: with `--fix` or `--diff`, also apply the unsafe fixes, which change
+  what the program does in a way the rule's page states (#404). `--fix` alone never applies them,
+  and the language server offers them as quick fixes that are not preferred. The first is
+  `MUT118`'s: for a Python 3.15 target, a report in the file that binds the sentinel replaces its
+  `object()` with `sentinel("NAME")` (PEP 661), `NAME` being the name it is bound to. The sentinel's
+  type and repr change, and so does what `pickle` makes of an object holding it.
 
 ### Changed
 
@@ -36,95 +92,75 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `\e` and `\xHH` escapes, times without seconds). A file that is not valid TOML is still an error
   (exit code 2); its message now names what is unclosed (for example "unclosed table, expected
   `]`"). (#386)
-- A name a module binds once to a type expression reads as that type wherever an annotation names
-  it, in its module or imported, also inside another annotation and as a member of a union
-  (#394): `Operation: TypeAlias = Added | Removed` (also the string of one), `type Operation =
-  Added | Removed` without type parameters, and an assignment of a subscript or a union without
-  an annotation (`Operations = list[Added]`). A call on a parameter annotated `Operation` runs
-  `Added`'s and `Removed`'s methods, as one annotated `Added | Removed` does, and a parameter
-  annotated with an alias of `Iterator[...]` is a single-pass iterator for `MUT106`. A name bound
-  twice, a variable annotated otherwise, an alias with type parameters, and a type variable
-  inside an alias's value give no class. A `TypeVar`'s bound may name an alias.
 - A builtin or `collections` container class subscripted with types and called is a call of the
-  class (#394): `frozenset[str]()`, `set[str]()`, `list[int]()`, `dict[str, int]()`, also through
-  a module-level name bound to one (`Names = frozenset[str]`). A subscript of a project generic
-  class or of a `typing` alias called stays unresolved.
-- `typing.cast` reads a subscripted or union type as the same text in a string (#363):
-  `cast(list[Model], x)`, `cast(dict[str, Model], x)`, and `cast(Model | None, x)` type the value
-  as `cast("list[Model]", x)` does, so a loop over `cast(list[Windows], hosts)` calls
-  `Windows.run` only.
-- The help of a `MUT118` report recommends `sentinel("NAME")` in place of `object()`: the
-  builtin for a Python 3.15 target, `typing_extensions.sentinel` (typing_extensions 4.16.0 or
-  later) below it (#404). It used to point at `typing_extensions.Sentinel`, which
-  `copy.deepcopy` rejects with `TypeError` in typing_extensions 4.14 and 4.15.
+  class (#394): `frozenset[str]()`, `set[str]()`, `list[int]()`, `dict[str, int]()`, also through a
+  module-level name bound to one (`Names = frozenset[str]`). A subscript of a project generic class
+  or of a `typing` alias called stays unresolved.
+- The help of a `MUT118` report recommends `sentinel("NAME")` in place of `object()`: the builtin
+  for a Python 3.15 target, `typing_extensions.sentinel` (typing_extensions 4.16.0 or later) below
+  it (#404). It used to point at `typing_extensions.Sentinel`, which `copy.deepcopy` rejects with
+  `TypeError` in typing_extensions 4.14 and 4.15.
 - `--include-size-dependent` applies only the fixes of the rules with a size-dependent rewrite
   (#404); it applied the fix of any rule that had one, which were the same rules until now.
-- The release script rewrites the `rev:` of the pre-commit examples in `README.md` and `docs/adoption.md` to the release tag, and the documentation build fails when it differs from the workspace version (#443). (#450).
-- A text run of `heki check` that shows reports which do not fail it (warnings, and heuristic reports, without `fail-on = "warning"`) ends with the note `heki recommend` prints for them (#439). (#450).
+- The release script rewrites the `rev:` of the pre-commit examples in `README.md` and
+  `docs/adoption.md` to the release tag, and the documentation build fails when it differs from the
+  workspace version (#443). (#450)
+- A text run of `heki check` that shows reports which do not fail it (warnings, and heuristic
+  reports, without `fail-on = "warning"`) ends with the note `heki recommend` prints for them
+  (#439). (#450)
 
 ### Fixed
 
-- `MUT110` reads a parameter annotated `typing.AbstractSet` or `collections.abc.Set` as read-only,
-  as it reads `Sequence` and `Mapping` (#381): one handed to a helper that changes it in place is
-  reported, in every spelling the mapping takes (bare, quoted, through an import alias or the
-  module, inside `Optional`, `| None`, and `Annotated`). `typing.Set` stays the mutable builtin.
-  The same annotations make a frozen field or a `Final` attribute hold a container for `MUT108`,
-  and a view's property read-only for `MUT120`. The help of a `MUT110` report names `set(...)`
-  among the copies.
-- A function or method decorated with `typing.final` (also `typing_extensions.final`, or through
-  `import typing as t`) keeps its facts (#382): `final` only sets `__final__` and returns what it
-  is handed, so a call of the method runs its body as written, and a caller that `EFF101`
-  reported as heuristic is exact as it is without the decorator. `typing.override` and
-  `typing.final` beside a `functools` cache (`@override @functools.cache`) leave the cached
-  result `MUT114` claims, as `staticmethod` and `classmethod` did.
-- A decorator heki knows keeps a function's facts only when its name is bound to that decorator
-  in the function's module (#382): a `final`, `override`, `staticmethod`, or `property` that the
-  project defines, or imports from another library, may replace the function, so a caller's
-  `EFF101` report that rested on it is heuristic, and a read of such a `property` is no getter
-  call. `from typing import final as sealed` still keeps them.
-- Receivers whose class the language or the standard library fixes resolve (#395):
-  - An instance's own namespace (`obj.__dict__`, `vars(obj)`) is a builtin `dict` wherever reading it runs no code of the instance's classes. That includes a pydantic model, whose `__setattr__` the catalog says stores on the instance. `obj.__dict__.get(KEY)`, `keys()`, `items()` and the other dict methods are no longer calls heki cannot resolve. `pop`, `update`, `clear` and item stores stay writes of the attribute they name. A class object's namespace (a read-only proxy) has no class.
-  - The methods a `NamedTuple` class gets: `_replace` copies the instance, `_make` returns an instance of the class it is called on, and `_asdict()` returns a dict. `_fields` is a tuple and `_field_defaults` a dict.
-  - `ContextVar[T].get()` is a `T`, and `get(default)` may also be the default's class. `set` returns a `Token`, whose `var` is the variable.
-  - Effect boundaries with `unresolved = "report"` report these calls no longer, and the rules that follow calls see what they do.
-- Catalog: the key `returns_held` says that a method returns the value its receiver holds (`ContextVar.get`, a future's `result()`). Standard library rows that type a value are checked on CPython 3.11 to 3.15 by `tests/sentinel/verify_stdlib_kb.py`.
+- A decorator heki knows keeps a function's facts only when its name is bound to that decorator in
+  the function's module (#382): a `final`, `override`, `staticmethod`, or `property` that the
+  project defines, or imports from another library, may replace the function, so a caller's `EFF101`
+  report that rested on it is heuristic, and a read of such a `property` is no getter call. `from
+  typing import final as sealed` still keeps them.
+- Catalog: the key `returns_held` says that a method returns the value its receiver holds
+  (`ContextVar.get`, a future's `result()`). Standard library rows that type a value are checked on
+  CPython 3.11 to 3.15 by `tests/sentinel/verify_stdlib_kb.py`.
 - A copy made by a helper that returns an element of an optional argument on some paths is a new
-  object at a call leaving that argument at a default without elements (`None`, a bool, a
-  number, an empty string or tuple) or passing such a constant (#397): `copy_tree(node)` of
-  `def copy_tree(node, replacements=None)`, returning `replacements.get(...)` or a copy, gives a
-  new object, so `write-owners` and effect boundaries with `fresh-objects = "allow"` take writes
-  on it as constructing it. A passed table, unpacked keywords, a dict default shared by every
-  call, or a passed list keep it unknown.
+  object at a call leaving that argument at a default without elements (`None`, a bool, a number, an
+  empty string or tuple) or passing such a constant (#397): `copy_tree(node)` of `def
+  copy_tree(node, replacements=None)`, returning `replacements.get(...)` or a copy, gives a new
+  object, so `write-owners` and effect boundaries with `fresh-objects = "allow"` take writes on it
+  as constructing it. A passed table, unpacked keywords, a dict default shared by every call, or a
+  passed list keep it unknown.
 - An effect boundary takes a write a reached function makes to its parameter as constructing the
   object when every call reaching the function hands it a new object nothing kept yet
-  (`set_flag(copy.copy(node))`), as the same write in the scope function already was (#397). A
-  call handing it the input, or any other object, is reported at that call; writes heki cannot
-  tie to a class (`unresolved = "report"`) are judged the same way.
-- A call of a helper that returns its parameter (`with_origin(field, kind)` returning `field`)
-  gives the object it hands it (#397): a field a pass builds and tags through such a helper stays
-  new for the writes after it, and the pass's input stays the input.
-- `IMP101` in a Ratchet baseline (#426): an entry records a group of modules that import each other and covers every group of its modules, whichever import closes the cycle the report shows and whichever function holds it. A group that lost modules or split is no longer a regression: a note says the entry can shrink to the groups there are now, and `--update-baseline` records them. A group with a module no entry holds, or one joining recorded groups, is a regression whose note names the groups it joins and the modules none of them holds; a renamed module is such a module. An entry matches no report (`report-unused-suppressions`) only when none of its modules is in a group. A run decides a group's entry only when it covers every file of the group; `--update-baseline` over part of the project keeps the other entries and records the groups it reports. An entry is reported as unused only when the rule runs on every file of its group.
-- Baseline file: an `IMP101` entry is now written without `path` and `qualname`. Entries written before, which name the file and function of the closing import, are read as the entry of their group and rewritten by the next `--update-baseline`. heki 0.4.0 and earlier cannot read the new entries: every heki that reads the baseline must be newer than 0.4.0 before a rewritten baseline is committed.
-- A value that `typing.cast` or a project function returning its parameter hands back is the
-  object it was handed (#427): `fill(cast(list[int], items))`, `fill(same(items))`, and
-  `cast(list[int], store.items).append(x)` are reported as the plain value is (`MUT110`,
-  `MUT108`, `MUT201`), `heki inspect` no longer calls a function that changes its parameter
-  through a cast pure or says it stores no parameter, and `references = "calls"` sees a function
-  handed on through a cast. A value a call handed back is typed by that call, so `MUT110` also
-  reports it handed to a helper annotated with a mutable type, and changed in the function itself
-  (`cast(list, items).append(1)`).
+  (`set_flag(copy.copy(node))`), as the same write in the scope function already was (#397). A call
+  handing it the input, or any other object, is reported at that call; writes heki cannot tie to a
+  class (`unresolved = "report"`) are judged the same way.
+- A call of a helper that returns its parameter (`with_origin(field, kind)` returning `field`) gives
+  the object it hands it (#397): a field a pass builds and tags through such a helper stays new for
+  the writes after it, and the pass's input stays the input.
+- `IMP101` in a Ratchet baseline (#426): an entry records a group of modules that import each other
+  and covers every group of its modules, whichever import closes the cycle the report shows and
+  whichever function holds it. A group that lost modules or split is no longer a regression: a note
+  says the entry can shrink to the groups there are now, and `--update-baseline` records them. A
+  group with a module no entry holds, or one joining recorded groups, is a regression whose note
+  names the groups it joins and the modules none of them holds; a renamed module is such a module.
+  An entry matches no report (`report-unused-suppressions`) only when none of its modules is in a
+  group. A run decides a group's entry only when it covers every file of the group;
+  `--update-baseline` over part of the project keeps the other entries and records the groups it
+  reports. An entry is reported as unused only when the rule runs on every file of its group.
+- Baseline file: an `IMP101` entry is now written without `path` and `qualname`. Entries written
+  before, which name the file and function of the closing import, are read as the entry of their
+  group and rewritten by the next `--update-baseline`. heki 0.4.0 and earlier cannot read the new
+  entries: every heki that reads the baseline must be newer than 0.4.0 before a rewritten baseline
+  is committed.
 - `IMP104`, `IMP301`, and `IMP302` no longer report an import whose `except ModuleNotFoundError:`
   gives a fallback (`try: import fastjson` / `except ModuleNotFoundError: fastjson = None`): a
-  module that is not installed raises `ModuleNotFoundError`, which the handler takes. `IMP102`
-  still reports such an import, since a name a partly loaded module lacks raises a plain
-  `ImportError`. An import site records the failure its handlers take (none, a missing module,
-  or any import error), and each rule asks for the failure it claims. A handler whose body
-  raises on every path (`raise`, `raise ... from e`) and a `finally` body now take nothing, and
-  an `except` clause that certainly matches hides the clauses after it. A handler taking the
-  `ModuleNotFoundError` of a module a project package lacks lets `IMP102` follow the module
-  body past that import. `heki inspect --imports` marks an import `guarded` when any handler
-  takes a failure of it (`except Exception:` and a bare `except` too), and leaves it out of what
-  a module loads at least. `IMP301`'s help names the fallback. (#440). (#451)
+  module that is not installed raises `ModuleNotFoundError`, which the handler takes. `IMP102` still
+  reports such an import, since a name a partly loaded module lacks raises a plain `ImportError`. An
+  import site records the failure its handlers take (none, a missing module, or any import error),
+  and each rule asks for the failure it claims. A handler whose body raises on every path (`raise`,
+  `raise ... from e`) and a `finally` body now take nothing, and an `except` clause that certainly
+  matches hides the clauses after it. A handler taking the `ModuleNotFoundError` of a module a
+  project package lacks lets `IMP102` follow the module body past that import. `heki inspect
+  --imports` marks an import `guarded` when any handler takes a failure of it (`except Exception:`
+  and a bare `except` too), and leaves it out of what a module loads at least. `IMP301`'s help names
+  the fallback. (#440). (#451)
 
 ## [0.4.0] - 2026-11-24
 
@@ -2328,7 +2364,7 @@ The first public preview.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
-[0.4.1]: https://github.com/koxudaxi/heki/compare/v0.4.0...HEAD
+[0.5.0]: https://github.com/koxudaxi/heki/compare/v0.4.0...HEAD
 [0.4.0]: https://github.com/koxudaxi/heki/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/koxudaxi/heki/compare/v0.2.7...v0.3.0
 [0.2.7]: https://github.com/koxudaxi/heki/compare/v0.2.6...v0.2.7
