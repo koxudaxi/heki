@@ -1948,7 +1948,7 @@ fn assumptions_lists_a1_hazards_as_text_and_json() {
     let (code, _, stderr) = p.heki(&["assumptions", "pkg/tour.py"]);
     assert_eq!(code, 2);
     assert!(
-        stderr.starts_with("error: pkg/heki.toml:2:1: the configuration file is not valid TOML: "),
+        stderr.starts_with("error: pkg/heki.toml:1:19: the configuration file is not valid TOML: "),
         "{stderr}"
     );
     p.write("pkg/heki.toml", "target-version = \"py311\"\n");

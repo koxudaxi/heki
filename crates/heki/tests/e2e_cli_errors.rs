@@ -156,7 +156,7 @@ fn configuration_errors_name_the_fix_and_the_section() {
         (
             "[tool.heki\n",
             &[
-                "error: pyproject.toml:4:11: the configuration file is not valid TOML: invalid table header; expected `.`, `]`",
+                "error: pyproject.toml:4:11: the configuration file is not valid TOML: unclosed table, expected `]`",
                 "  = help: heki reads its settings from this file: fix the TOML here, or name another file with `--config`",
                 &docs("configuration/#where-heki-finds-the-configuration"),
             ],
@@ -465,7 +465,7 @@ fn file_errors_say_what_to_do_with_the_file() {
         &p,
         &["check", "--baseline", "b.toml"],
         &[
-            "error: b.toml: invalid baseline: invalid array; expected `]`",
+            "error: b.toml: invalid baseline: unclosed array, expected `]`",
             rewrite,
         ],
     );
@@ -474,7 +474,7 @@ fn file_errors_say_what_to_do_with_the_file() {
         &p,
         &["check", "--baseline", "b.toml", "--update-baseline"],
         &[
-            "error: b.toml: invalid baseline: invalid array; expected `]`",
+            "error: b.toml: invalid baseline: unclosed array, expected `]`",
             rewrite,
         ],
     );
