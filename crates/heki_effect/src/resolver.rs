@@ -41,6 +41,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
+mod fields;
 mod package_paths;
 mod returns;
 mod sentinels;
@@ -48,6 +49,7 @@ pub(crate) mod stores;
 mod type_names;
 mod workspace;
 
+pub use fields::{FieldDefault, InitField, InitFields};
 pub use returns::{CallItems, NoItems, ReturnFact, ReturnedItems};
 pub use sentinels::object_sentinel_calls;
 pub(crate) use type_names::type_expression_text;
@@ -591,6 +593,11 @@ pub struct ClassDecl {
     /// instance fields ([`ProjectDecls::field_defaults`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataclass: Option<Dataclass>,
+    /// The fields the constructor a `NamedTuple` or a `@dataclass(frozen=True)` generates for
+    /// the class binds, its own in order ([`ProjectDecls::constructor_fields`]): what an
+    /// instance it makes holds in them. Boxed: few classes have one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_fields: Option<Box<InitFields>>,
     /// What the class's own body and methods store in its attributes (`attr = [...]` in the
     /// body, `self.attr = ...` in a method): `Some` when every store is a small display that
     /// none of them grows (`heki_ir::FnIndex::stored_display`), `None` when an attribute is
@@ -668,6 +675,11 @@ pub struct NamedAttr {
     /// paths.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub body_defined: bool,
+    /// The class body binds the attribute last, on every path, to a `functools.partial` object
+    /// of a name that holds keywords only (`copy = partial(copy_field, deep=False)`, also
+    /// wrapped in `staticmethod`): `body` is then `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_partial: Option<Box<PartialAttr>>,
     /// The class body annotates the attribute outside `ClassVar` and `InitVar`: a field, where
     /// a base the project does not define may build an `__init__` that stores the default.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -683,6 +695,21 @@ pub struct NamedAttr {
     pub held: BTreeSet<String>,
 }
 
+/// A `functools.partial` object a class body binds an attribute to ([`NamedAttr::body_partial`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartialAttr {
+    /// The name of the callable it holds, by the fqn its module gives it.
+    pub callable: String,
+    /// It holds keywords, whose values the calls through it do not see.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keywords: bool,
+    /// `staticmethod` wraps it: reading it on an instance gives the object itself. A plain
+    /// `functools.partial` read on an instance binds the instance from Python 3.14 on (a method
+    /// descriptor), and gives the object itself before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_static: bool,
+}
+
 /// What reading a class attribute finds when its class body binds it to module-level names
 /// ([`ProjectDecls::class_aliases`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -692,6 +719,8 @@ pub(crate) struct ClassAlias<'d> {
     /// On the other paths it holds what the class's own `def` of it makes: that function, by
     /// fqn.
     pub defined: Option<String>,
+    /// It holds this `functools.partial` object of a name instead (`names` is empty).
+    pub partial: Option<&'d PartialAttr>,
 }
 
 /// An `object()` sentinel an instance of a class may hold in an attribute
@@ -706,18 +735,19 @@ pub struct HeldSentinel {
     pub stored: bool,
 }
 
-/// What `copy.deepcopy` makes of a value of a class ([`ProjectDecls::deep_copy_of`]).
+/// What `copy.deepcopy` or `copy.copy` makes of a value of a class ([`ProjectDecls::copy_of`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeepCopy {
-    /// A new instance whose attributes hold deep copies of the original's (a new object for an
-    /// `object()` sentinel), for every class the value may be.
+pub enum CopyMade {
+    /// A new instance whose attributes hold the original's values, deep copies of them for
+    /// `copy.deepcopy` (a new object for an `object()` sentinel), for every class the value may
+    /// be.
     Attributes,
     /// A copy hook along the class's own MRO, or a `copyreg` registration of the class, makes
     /// the copy, and may keep any value.
     Hooked,
     /// Heki cannot tell for some class the value may be: a hook in a subclass or a mixin, a
     /// base outside the project the catalog does not describe, a metaclass, or a `__getattr__`
-    /// / `__getattribute__` that the copy asks for `__deepcopy__`.
+    /// / `__getattribute__` that the copy may ask for its hook.
     Open,
 }
 
@@ -972,7 +1002,8 @@ pub struct ModuleDecls {
     /// join of every store of the module (`stores::record`).
     pub global_types: BTreeMap<String, Ty>,
     /// Module globals bound once, by the module body, to a dict display whose keys are string
-    /// literals and some of whose values are functions or classes, that nothing changes in
+    /// literals and some of whose values are functions, classes, or instances whose fields hold
+    /// them, that nothing changes in
     /// place (`HANDLERS = {"create": create, "drop": drop}`): each key with its value's type
     /// (`None`: unknown), in order (`stores::record`). `HANDLERS["create"]` is that value
     /// ([`ProjectDecls::table`]).
@@ -2395,7 +2426,10 @@ impl ProjectDecls {
             for (qualname, class) in &m.classes {
                 let fqn = format!("{}.{qualname}", m.module_name);
                 for (attr, named) in &class.named_attrs {
-                    if (named.body.is_some() || !named.body_paths.is_empty()) && !named.annotated {
+                    let binds = named.body.is_some()
+                        || !named.body_paths.is_empty()
+                        || named.body_partial.is_some();
+                    if binds && !named.annotated {
                         alias_names.insert(attr.clone());
                     }
                 }
@@ -4141,7 +4175,7 @@ impl ProjectDecls {
             for h in held {
                 if self.is_project_class(&h)
                     && seen.insert(h.clone())
-                    && !self.copy_decided_by_class(&h)
+                    && !self.copy_decided_by_class(&h, CopyDepth::Deep)
                 {
                     out.push((h, attr.to_owned()));
                 }
@@ -4169,16 +4203,17 @@ impl ProjectDecls {
         })
     }
 
-    /// Whether something of the class `class` itself decides what `copy.deepcopy` makes of its
-    /// instances, in place of copying their attributes: a copy hook along its MRO
-    /// (`__deepcopy__`, `__reduce__`, `__reduce_ex__`, `__getstate__`, `__setstate__`), or a
-    /// `copyreg` registration of the class ([`Self::copy_registered`]). Either may keep any value.
-    pub fn copy_decided_by_class(&self, class: &str) -> bool {
+    /// Whether something of the class `class` itself decides what a copy of `depth` makes of
+    /// its instances, in place of copying their attributes: a copy hook along its MRO
+    /// ([`copy_hooks`]), or a `copyreg` registration of the class ([`Self::copy_registered`]).
+    /// Either may keep any value.
+    pub fn copy_decided_by_class(&self, class: &str, depth: CopyDepth) -> bool {
         let class = self.canonical(class);
+        let hooks = copy_hooks(depth);
         self.mro(&class).iter().any(|c| {
             self.read(|k| note(&mut k.class_facts, c));
             self.class(c)
-                .is_some_and(|d| COPY_HOOKS.iter().any(|h| d.members.contains(*h)))
+                .is_some_and(|d| hooks.iter().any(|h| d.members.contains(*h)))
         }) || self.copy_registered(&class)
     }
 
@@ -4193,32 +4228,34 @@ impl ProjectDecls {
         self.copy_registered.contains(class) || self.copy_registered.contains("*")
     }
 
-    /// What `copy.deepcopy` (without a `memo`) does with a value of the project class `class`,
-    /// an instance of it or, under R2, of a project subclass ([`DeepCopy`]). The copy protocol
-    /// looks for `__deepcopy__` on the instance (where `__getattr__` and `__getattribute__`
-    /// may answer), then for a `copyreg` registration of its exact class, then for
-    /// `__reduce_ex__` / `__reduce__`, whose default reads `__getstate__` and makes the copy
-    /// take the state through `__setstate__` when the class defines one; with none of them, the
-    /// copy is a new instance whose attributes are deep copies of the original's.
-    pub fn deep_copy_of(&self, class: &str, kb: &EffectiveEcosystemKb) -> DeepCopy {
+    /// What `copy.deepcopy` (`depth` deep, without a `memo`) or `copy.copy` (shallow) does with
+    /// a value of the project class `class`, an instance of it or, under R2, of a project
+    /// subclass ([`CopyMade`]). The copy protocol looks for `__deepcopy__` on the instance (where
+    /// `__getattr__` and `__getattribute__` may answer; `copy.copy` looks for `__copy__` on the
+    /// class), then for a `copyreg` registration of its exact class, then for `__reduce_ex__` /
+    /// `__reduce__`, whose default reads `__getstate__` and makes the copy take the state
+    /// through `__setstate__` when the class defines one; with none of them, the copy is a new
+    /// instance whose attributes are the original's values, or deep copies of them.
+    pub fn copy_of(&self, class: &str, depth: CopyDepth, kb: &EffectiveEcosystemKb) -> CopyMade {
         let class = self.canonical(class);
-        let hooked = |d: &ClassDecl| COPY_HOOKS.iter().any(|h| d.members.contains(*h));
+        let hooks = copy_hooks(depth);
+        let hooked = |d: &ClassDecl| hooks.iter().any(|h| d.members.contains(*h));
         // A base outside the project: one known to define none of the hooks, or one whose
-        // `__deepcopy__` the catalog describes as copying the attributes deeply (R3).
+        // copy hook the catalog describes as copying the attributes to this depth (R3).
         let known_base = |c: &str| {
             HOOKLESS_BASES.contains(&c)
                 || kb
-                    .lookup(&format!("{c}.__deepcopy__"))
-                    .is_some_and(|e| e.copy_sanitizer == Some(CopyDepth::Deep))
+                    .lookup(&format!("{c}.{}", hooks[0]))
+                    .is_some_and(|e| e.copy_sanitizer == Some(depth))
         };
-        if self.copy_decided_by_class(&class) {
-            return DeepCopy::Hooked;
+        if self.copy_decided_by_class(&class, depth) {
+            return CopyMade::Hooked;
         }
         let mro = self.mro(&class);
-        let mut answer = DeepCopy::Attributes;
+        let mut answer = CopyMade::Attributes;
         for c in &mro {
             if !self.is_project_class(c) && !known_base(c) {
-                answer = DeepCopy::Open;
+                answer = CopyMade::Open;
             }
         }
         for c in self.value_classes(&class) {
@@ -4235,7 +4272,7 @@ impl ProjectDecls {
                 || unknown_base
                 || c != class && self.copy_registered(&c)
             {
-                answer = DeepCopy::Open;
+                answer = CopyMade::Open;
             }
         }
         answer
@@ -4844,9 +4881,10 @@ impl ProjectDecls {
     /// Whether the inferred type `t` is narrower than the declared `declared`, so that a value
     /// keeps it: anything for a declaration of `Any` / `object`, an instance of a class that
     /// specializes the declared one ([`Self::specializes`]: `x: Base = Sub()`, `cur:
-    /// sqlite3.Cursor = conn.execute(...)` on a file), and for a declared class object, a class
-    /// named exactly or the class object of a subclass (`kind: type[Base] = Base`, `= Sub`, `=
-    /// type(sub)`).
+    /// sqlite3.Cursor = conn.execute(...)` on a file) or of the declared class with known
+    /// fields ([`Args::Fields`]: `spec: Spec = Spec(run=f)`), and for a declared class object, a
+    /// class named exactly or the class object of a subclass (`kind: type[Base] = Base`, `=
+    /// Sub`, `= type(sub)`).
     pub(crate) fn narrower(&self, t: &Ty, declared: &Ty, kb: &EffectiveEcosystemKb) -> bool {
         if let Ty::Class(d) = declared {
             return match t {
@@ -4858,8 +4896,13 @@ impl ProjectDecls {
         declared.obj().is_some_and(|d| {
             of_any_class(&d.class)
                 || (is_any_callable(&d.class) && t.obj().is_none())
-                || t.obj()
-                    .is_some_and(|i| self.specializes(&i.class, &d.class, kb))
+                || t.obj().is_some_and(|i| {
+                    self.specializes(&i.class, &d.class, kb)
+                        // An instance of the class whose fields hold known objects.
+                        || i.class == d.class
+                            && matches!(i.args, Args::Fields(_))
+                            && matches!(d.args, Args::None)
+                })
         })
     }
 
@@ -4893,6 +4936,8 @@ impl ProjectDecls {
         };
         let args = match (&i.args, &d.args) {
             (Args::Items(a), Args::Items(b)) => Args::Items(Box::new(slot(a, b))),
+            // A display of known length declared as a tuple of any length.
+            (Args::Tuple(_), Args::Items(b)) => Args::Items(Box::new(slot(&i.args.item(), b))),
             (Args::Map(ka, va), Args::Map(kb, vb)) => {
                 Args::Map(Box::new(slot(ka, kb)), Box::new(slot(va, vb)))
             }
@@ -5180,6 +5225,7 @@ impl ProjectDecls {
             ClassAlias {
                 names,
                 defined: None,
+                partial: None,
             } if names.len() == 1 => names.first().copied(),
             _ => None,
         }
@@ -5223,9 +5269,11 @@ impl ProjectDecls {
                     .map(|(name, is_static)| (name.as_str(), *is_static))
                     .collect(),
             };
-            let alias = (!names.is_empty()).then(|| ClassAlias {
+            let partial = named.body_partial.as_deref();
+            let alias = (!names.is_empty() || partial.is_some()).then(|| ClassAlias {
                 names,
                 defined: named.body_defined.then(|| format!("{c}.{attr}")),
+                partial,
             })?;
             let stored =
                 self.attr_store(&c, decl, attr).is_some() || self.stores_any_attr(&c, decl);
@@ -6170,6 +6218,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
     decls.file_constants = file_constants(input, &decls);
     decls.object_sentinels = sentinels::object_sentinels(input, &decls);
     sentinels::named_attrs(input, &mut decls);
+    fields::init_fields(input, &mut decls);
     decls.copy_registrations = sentinels::copy_registrations(input, &decls);
     returns::record_return_facts(input, &mut decls, kb);
     decls
@@ -6388,7 +6437,8 @@ fn ty_classes(ty: &Ty, out: &mut Vec<String>) {
     for obj in ty.members() {
         out.push(obj.class.clone());
         let items: Vec<&Elem> = match &obj.args {
-            Args::None => Vec::new(),
+            // The named objects a field holds are no classes of instances.
+            Args::None | Args::Fields(_) => Vec::new(),
             Args::Items(e) | Args::Result(e) => vec![e.as_ref()],
             Args::Map(k, v) => vec![k.as_ref(), v.as_ref()],
             Args::Tuple(es) => es.iter().collect(),
@@ -6401,15 +6451,22 @@ fn ty_classes(ty: &Ty, out: &mut Vec<String>) {
     }
 }
 
-/// The methods that decide what `copy.deepcopy` makes of an instance in place of copying its
-/// attributes ([`ProjectDecls::deep_copy_of`]).
-const COPY_HOOKS: [&str; 5] = [
-    "__deepcopy__",
-    "__reduce__",
-    "__reduce_ex__",
-    "__getstate__",
-    "__setstate__",
-];
+/// The methods that decide what a copy of `depth` makes of an instance in place of copying its
+/// attributes ([`ProjectDecls::copy_of`]): `__deepcopy__` for `copy.deepcopy`, `__copy__` for
+/// `copy.copy`, and the methods of pickling both fall back to.
+fn copy_hooks(depth: CopyDepth) -> [&'static str; 5] {
+    let own = match depth {
+        CopyDepth::Deep => "__deepcopy__",
+        CopyDepth::Shallow => "__copy__",
+    };
+    [
+        own,
+        "__reduce__",
+        "__reduce_ex__",
+        "__getstate__",
+        "__setstate__",
+    ]
+}
 
 /// The bases outside the project known to define none of the [`COPY_HOOKS`], `__getattr__`, or
 /// `__getattribute__`, and no metaclass other than `type` / `abc.ABCMeta`.
@@ -9226,6 +9283,36 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
+    /// Resolve `recv.method(...)` where `ty` is the type of `recv` with its arguments: an
+    /// instance holding a named object in its field `method` ([`crate::types::Args::Fields`],
+    /// [`ProjectDecls::field_holds_given`]) calls that object, binding no receiver; anything
+    /// else is resolved by its value ([`Self::resolve_method`]).
+    pub(crate) fn resolve_method_of(
+        &self,
+        recv: Option<&Val>,
+        ty: Option<&Ty>,
+        method: &str,
+    ) -> Callee {
+        if let Some(held) = ty.and_then(|t| self.field_held(t, method)) {
+            return match held {
+                Elem::Of(t) => self.resolve_call(t.val().as_ref()),
+                Elem::Empty | Elem::Unknown => Callee::Unresolved,
+            };
+        }
+        self.resolve_method(recv, method)
+    }
+
+    /// What the instance of type `ty` holds in its field `attr`, when it holds what the call
+    /// constructing it bound: the one reading of [`crate::types::Args::Fields`], for typing and
+    /// for call targets.
+    pub(crate) fn field_held<'t>(&self, ty: &'t Ty, attr: &str) -> Option<&'t Elem> {
+        let o = ty.obj()?;
+        let held = o.args.field(attr)?;
+        self.project
+            .field_holds_given(&o.class, attr)
+            .then_some(held)
+    }
+
     /// Resolve `recv.method(...)`.
     pub fn resolve_method(&self, recv: Option<&Val>, method: &str) -> Callee {
         if let Some(Val::OneOf(fqns)) = recv {
@@ -9296,21 +9383,7 @@ impl<'a> TypeCtx<'a> {
     /// unresolved when the targets bind differently; too many past [`DISPATCH_CLASS_LIMIT`]
     /// classes.
     fn alias_call_targets(&self, recv: Recv<'_>, method: &str) -> Option<Callee> {
-        let (class, on_instance, family) = match recv {
-            Recv::Ref(class) if self.project.is_project_class(class) => (class, false, false),
-            Recv::Class(class) => (class, false, true),
-            Recv::Inst(class) => (class, true, true),
-            Recv::Ref(_) | Recv::Super(_) => return None,
-        };
-        // Every method call asks, and the receiver's class may have thousands of subclasses:
-        // they are listed only for a name some class body binds.
-        if !self.project.binds_alias(method) {
-            return None;
-        }
-        let mut classes = vec![self.project.canonical(class)];
-        if family {
-            classes.extend(self.project.subclasses_of(class));
-        }
+        let (classes, on_instance) = self.alias_classes(recv, method)?;
         // As for the implementations of a method (`instance_targets_complete`). Past the limit,
         // the first class binding the name to a name decides, not what each one binds.
         if classes.len() > DISPATCH_CLASS_LIMIT {
@@ -9329,6 +9402,8 @@ impl<'a> TypeCtx<'a> {
             .iter()
             .any(|alias| alias.as_ref().is_none_or(|a| a.defined.is_some()))
             .then(|| self.defined_method_targets(Some(recv), method));
+        let partials: Vec<&PartialAttr> =
+            found.iter().flatten().filter_map(|a| a.partial).collect();
         let names = found.into_iter().flatten().flat_map(|alias| alias.names);
         for (named, is_static) in names {
             let named = self.project.object_named(named);
@@ -9346,7 +9421,77 @@ impl<'a> TypeCtx<'a> {
                 Err(targets) => return Some(targets),
             }
         }
+        for partial in partials {
+            let callee = match self.partial_attr_callable(partial, on_instance) {
+                Some(callable) => match self.call_targets(Some(Recv::Ref(&callable))) {
+                    // The keywords it holds may decide what a library call does, which the
+                    // catalog reads from the arguments the call shows.
+                    Callee::External(_) if partial.keywords => Callee::Unresolved,
+                    callee => callee,
+                },
+                None => Callee::Unresolved,
+            };
+            match join_either(out, callee) {
+                Ok(joined) => out = Some(joined),
+                Err(targets) => return Some(targets),
+            }
+        }
         out
+    }
+
+    /// The classes whose bodies may bind `method` for a call on `recv`, and whether the call is
+    /// on an instance: a class object is exactly its class, an instance or `cls` also a project
+    /// subclass. `None` when no class body binds the name to a name, or `recv` is no class or
+    /// instance of one.
+    fn alias_classes(&self, recv: Recv<'_>, method: &str) -> Option<(Vec<String>, bool)> {
+        let (class, on_instance, family) = match recv {
+            Recv::Ref(class) if self.project.is_project_class(class) => (class, false, false),
+            Recv::Class(class) => (class, false, true),
+            Recv::Inst(class) => (class, true, true),
+            Recv::Ref(_) | Recv::Super(_) => return None,
+        };
+        // Every method call asks, and the receiver's class may have thousands of subclasses:
+        // they are listed only for a name some class body binds.
+        if !self.project.binds_alias(method) {
+            return None;
+        }
+        let mut classes = vec![self.project.canonical(class)];
+        if family {
+            classes.extend(self.project.subclasses_of(class));
+        }
+        Some((classes, on_instance))
+    }
+
+    /// The callable a call through the `functools.partial` object `partial` of a class
+    /// attribute calls, read on the class object or on an instance (`on_instance`), by its fqn:
+    /// the object calls it with the call's arguments and then the keywords it holds. `None` for
+    /// a plain partial read on an instance, which Python 3.14 binds to the instance as its first
+    /// argument and older versions do not.
+    fn partial_attr_callable(&self, partial: &PartialAttr, on_instance: bool) -> Option<String> {
+        (partial.is_static || !on_instance).then(|| self.project.object_named(&partial.callable))
+    }
+
+    /// Whether `recv.method(...)` calls a `functools.partial` object of a class attribute that
+    /// holds keywords ([`PartialAttr::keywords`]) on some class `recv` may be: the call passes
+    /// the callable keywords it does not show, which may bind any parameter.
+    pub(crate) fn calls_partial_with_keywords(&self, recv: Option<&Val>, method: &str) -> bool {
+        let holds_keywords = |recv: Recv<'_>| {
+            // Past the limit the call has too many targets to bind (`alias_call_targets`).
+            self.alias_classes(recv, method)
+                .filter(|(classes, _)| classes.len() <= DISPATCH_CLASS_LIMIT)
+                .is_some_and(|(classes, _)| {
+                    classes.iter().any(|c| {
+                        self.project
+                            .class_aliases(c, method)
+                            .and_then(|a| a.partial)
+                            .is_some_and(|p| p.keywords)
+                    })
+                })
+        };
+        match self.dispatch_classes(recv) {
+            Some(classes) => classes.iter().any(|c| holds_keywords(Recv::Inst(c))),
+            None => recv.and_then(Val::recv).is_some_and(holds_keywords),
+        }
     }
 
     /// What reading `attr` on an instance of `class` gives when the class body defining it binds
@@ -9376,6 +9521,14 @@ impl<'a> TypeCtx<'a> {
     /// function outside `staticmethod`, which the read binds to the instance (`Some(None)`, a
     /// bound method); `None` for no such attribute.
     fn exact_instance_alias(&self, class: &str, attr: &str) -> Option<Option<Ty>> {
+        if let Some(partial) = self
+            .project
+            .class_aliases(class, attr)
+            .and_then(|a| a.partial)
+        {
+            let callable = self.partial_attr_callable(partial, true);
+            return Some(callable.map(|c| Ty::Partial(Box::new(self.named(&c)))));
+        }
         let (named, is_static) = self.project.class_alias(class, attr)?;
         let named = self.project.object_named(named);
         let binds = !is_static

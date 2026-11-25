@@ -308,6 +308,15 @@ Missed findings close as heki learns more:
   adds to its items when heki types it (`append(x)` with `x: Field`, `extend` or `+=` of a list
   of known items, `d[k] = v` with `v` of a known class), and leaves its items untyped otherwise.
   A change of an item it holds (`d[k].append(x)`) is not seen.
+- A function a value holds is known where the code that makes the value shows it: a field of a
+  `NamedTuple` or a frozen dataclass whose generated constructor the code calls (also through a
+  table of such instances bound once), the function a factory returns when every `return` gives
+  one, and a class attribute bound to `functools.partial` of a function, read through the class
+  or wrapped in `staticmethod`. A call through a field of a dataclass that is not frozen, one with
+  a `__post_init__`, or a class a `dataclass_transform` decorator builds, through a value handed
+  in as a parameter (a view or a callback a caller passes), through a plain `partial` attribute
+  read on an instance (Python 3.14 binds the instance to it, older versions do not), and through
+  a `partial` holding a positional argument is a call heki cannot resolve.
 - The type of a module global or an instance attribute joins every store of it through a
   receiver whose type heki knows: `self`, an instance of the class (a parameter `obj: Helper`,
   `cls()` in a class method, one the storing module keeps in its own attribute or global, as

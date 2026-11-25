@@ -553,6 +553,39 @@ of its body (inferred as a child scope reading the function's cells), and a `fun
 object as a call of its callable with the arguments the object holds first (`partial.rs`, shared
 with the call targets).
 
+An instance of a `typing.NamedTuple` class, or of a `@dataclass(frozen=True)` that leaves `init`
+on, holds in each field what the call constructing it bound there, for as long as it lives: a
+store raises (`AttributeError` on a named tuple, `FrozenInstanceError` on a frozen dataclass).
+The class's generated constructor takes its fields in order (`ClassDecl::init_fields`,
+`ProjectDecls::constructor_fields`: a dataclass's dataclass bases first, a field it declares again
+keeping the base's place, the keyword-only ones after the others), unless the class defines
+`__init__`, `__new__`, `__post_init__`, `__setattr__`, `__getattr__`, or `__getattribute__`, an
+`InitVar`, or a field specifier heki does not read, has a metaclass heki does not know, or a base
+that is no such class or plain base. Calling exactly such a class (a name, not `cls`, which may be
+a subclass) binds each argument to the field of its position or keyword and an omitted field to
+its default; a call that unpacks `*` or `**`, passes too many positions, names no field, or
+leaves a field without a default unbound binds none. The instance's type keeps the fields that
+hold a named object (a function, a class, a lambda) or `None` (`types::Args::Fields`), and every
+reader of types sees them: a local, a closure cell, a global or an attribute every store of
+which binds such instances (also under an annotation of the class, `ProjectDecls::narrower`), the
+items of a container (`TABLE: tuple[Spec, ...] = (Spec(run=a), Spec(run=b))` gives one of `a` and
+`b`, `None` adding nothing), and a copy of the instance alone (`copy.copy`, `dataclasses.replace`
+given no other value; `copy.copy` and `copy.deepcopy` only where no copy hook of the class decides
+the copy, `ProjectDecls::copy_of`: a `__copy__` may return an instance holding anything). A copy
+given other values or made by a hook, `typing.Self` of a method's result, and a call of a class
+object that may be a subclass give an instance whose fields hold their declared types.
+Reading a field gives what it holds (`TypeCtx::field_held`, for typing and for the call targets
+of `obj.field(...)`, which binds no receiver and constructs a class the field holds, as a
+partial class attribute of a class does) when the instance holds what the construction gave
+(`ProjectDecls::field_holds_given`): along the MRO, every class binding the name binds it as a
+field of its own to a default that is no descriptor (none, `None`, a literal, a display, a
+default factory, a project function or class; any default of a named tuple's field, which is one
+of its items), no code of the project stores the attribute on an instance of a class along the MRO
+(`object.__setattr__(self, "run", f)` in a method) or attributes heki cannot name there, no module
+binds it on the class, and reading it runs no hook. A dataclass that is not frozen holds what any
+code holding an instance stores, through receivers heki may not type, and so does not keep its
+fields.
+
 A scope nested in a function (a comprehension or generator expression with a scope of its own, a
 lambda, a nested function or class) reads the function's variables through their closure cells.
 A cell holds every value the function binds to the variable, its parameter's and each
@@ -653,6 +686,18 @@ be (the class and its project subclasses, at most `DISPATCH_CLASS_LIMIT`); a cla
 finding the name as anything else leaves the call unresolved, and so do objects that bind a
 receiver differently. A call of a class bound so constructs it (`self.factory(...)`).
 
+A class-body name bound last, on every path, to a `functools.partial` object of such a name that
+holds keywords only (`copy = staticmethod(partial(copy_field, deep=False))`,
+`NamedAttr::body_partial`), under the same conditions, is that object, which calls the name with
+the call's arguments first and gives what it returns. Read through the class object, or wrapped
+in `staticmethod`, a call through it calls the name (constructs a class it names); a plain
+`partial` read on an instance is a method descriptor from Python 3.14 on, which binds the
+instance as its first argument, and older versions bind nothing, so such a call is unresolved.
+The keywords it holds are values the call does not show: its binding of the callable's
+parameters may pass any of them, so no parameter takes its default there
+(`Call::unseen_keywords`), and a library callable, whose catalog cases the arguments a call shows
+select, leaves the call unresolved. A partial holding a positional argument is not followed.
+
 A module-level function or class that the module body binds again, to named objects only, holds
 in the same way what binds it last (`ModuleDecls::aliases`), or one of the objects the bindings
 that may be last bind (`ModuleDecls::alias_paths`): a call through the name, in the module, from
@@ -676,7 +721,8 @@ A value bound to one of several named objects (a branch `f = a if c else b`, the
 table) is one of them (`Ty::OneOf`, at most `MAX_NAMED`, eight): a call runs every one, which must
 bind a receiver alike. A module global bound once, by the module body outside a loop, to a dict
 display with string-literal keys and no `**` entry, some value of which is a function, a class,
-or a partial object, and that no code changes in place (through its name or a module object,
+a partial object, or an instance whose fields hold such objects (`types::Args::Fields`), and
+that no code changes in place (through its name or a module object,
 the module's own included) or rebinds, is a table (`ModuleDecls::tables`, at most 256
 entries): reading it with a key a string constant gives (`HANDLERS["create"]`,
 `HANDLERS[KEY]`, in its module, imported, or through the module) gives that entry's value, a
@@ -711,7 +757,12 @@ decided in at most eight passes, each from the facts of the pass before. Its typ
 when they agree on one narrower than the annotation (`ProjectDecls::narrower`: a catalog class of
 the annotated library class, `sqlite3.connect(file)` of `-> sqlite3.Connection`, or a subclass
 of the annotated class): `FunctionDecl::declared_return` gives it in the annotation's place, for
-typing, `result_of`, and the globals and attributes of pass 2. A module constant the module
+typing, `result_of`, and the globals and attributes of pass 2. A function whose annotation names
+no class (none, `Any`, `object`, `Callable`) returns the named object every returned value is,
+or one of them (`Ty::OneOf`): a `def` or `lambda` it makes (`make_requirer()` returning the
+`requirer` it defines, whose cells a call away from it binds to nothing), or a function or class
+a name binds; a `return` of anything else, `None` included, gives no fact. Only the functions
+every value of which a definition, a module-level name, or a cell gives are inferred for it. A module constant the module
 body binds once, outside a loop, to a value that names a file (`ModuleDecls::file_constants`,
 `names_a_file`) names it where a function or another module reads it
 (`TypeCtx::names_file_constant`), unless another module rebinds it.
@@ -1519,7 +1570,7 @@ which module imports which.
    `stores_on_instance` reads the stored value).
 4. **Deep copies** (`EffectSummary::deep_copies`): a call that resolves to `copy.deepcopy` with
    one positional argument and no keyword, of an object whose project classes heki knows.
-   `ProjectDecls::deep_copy_of` says what the copy protocol does with a value of a class: a copy
+   `ProjectDecls::copy_of` says what the copy protocol does with a value of a class: a copy
    hook along its MRO (`__deepcopy__`, `__reduce__`, `__reduce_ex__`, `__getstate__`,
    `__setstate__`) or a `copyreg` registration of the class (`ModuleDecls::copy_registrations`,
    joined into a project index whose changes are class keys) decides it (no report); with none,

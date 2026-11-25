@@ -1,10 +1,10 @@
 //! The `object()` sentinels of a module, the attributes its classes bind to one, and the classes
 //! it registers with `copyreg`: what `copy.deepcopy` does to an instance holding a sentinel
-//! ([`super::ProjectDecls::held_sentinels`], [`super::ProjectDecls::deep_copy_of`]).
+//! ([`super::ProjectDecls::held_sentinels`], [`super::ProjectDecls::copy_of`]).
 
 use super::{
-    ModuleDecls, NamedAttr, dataclass_decorator, decorator_parts, is_summarized_function,
-    qualifiers, split_top_level,
+    ModuleDecls, NamedAttr, PartialAttr, dataclass_decorator, decorator_parts,
+    is_summarized_function, qualifiers, split_top_level,
 };
 use crate::ModuleInput;
 
@@ -110,7 +110,7 @@ fn object_call(shape: &FnShape<'_>, value: VarId) -> Option<Span> {
 /// or an attribute of such a name (`sentinels.MISSING`). Whether it is a sentinel is for its own
 /// module to say. A class or function the module binds again (`stores`) is none: what the name
 /// holds depends on when it is read.
-fn named_value(
+pub(super) fn named_value(
     shape: &FnShape<'_>,
     value: VarId,
     decls: &ModuleDecls,
@@ -210,6 +210,7 @@ impl NamedAttr {
             self.body_paths = other.body_paths;
             self.body_defined = other.body_defined;
         }
+        self.body_partial = self.body_partial.take().or(other.body_partial);
         self.annotated |= other.annotated;
         self.validates_default |= other.validates_default;
         self.held.extend(other.held);
@@ -375,7 +376,26 @@ fn class_body_names(
                         None => (named_value(&shape, value, decls, stores), true, false),
                     },
                 };
-                let Some(named) = named else { continue };
+                let Some(named) = named else {
+                    // `copy = staticmethod(partial(copy_field, deep=False))`.
+                    let (wrapped, is_static) =
+                        match static_method_of(&shape, value, staticmethod_trusted) {
+                            Some(wrapped) => (wrapped, true),
+                            None => (value, false),
+                        };
+                    let Some(partial) = partial_of(&shape, wrapped, decls, stores, is_static)
+                    else {
+                        continue;
+                    };
+                    let attr = NamedAttr {
+                        body_partial: Some(Box::new(partial)),
+                        annotated: field,
+                        validates_default,
+                        ..NamedAttr::default()
+                    };
+                    found.push((body.qualname.clone(), name.to_owned(), attr));
+                    continue;
+                };
                 let held = if field && init && generated_init {
                     BTreeSet::from([named.clone()])
                 } else {
@@ -464,9 +484,56 @@ fn static_method_of(shape: &FnShape<'_>, value: VarId, trusted: bool) -> Option<
     }
 }
 
+/// The `functools.partial` object `value` holds, when a call of `functools.partial` (by an
+/// import of it, or through `functools`) makes it of a name ([`named_value`]) and keywords only
+/// (no positional argument after the callable, no `*` or `**` unpacking): a call through it
+/// passes its own arguments first, as a call of the name would.
+fn partial_of(
+    shape: &FnShape<'_>,
+    value: VarId,
+    decls: &ModuleDecls,
+    stores: &GlobalStores<'_>,
+    is_static: bool,
+) -> Option<PartialAttr> {
+    let (partial, args, kwargs) = match shape.inst(shape.copy_root(value)).map(|i| &i.kind) {
+        Some(InstKind::Call {
+            callee_var: Some(callee),
+            args,
+            kwargs,
+            star_from: None,
+            ..
+        }) => (named_value(shape, *callee, decls, stores)?, args, kwargs),
+        // `functools.partial(...)` through the module.
+        Some(InstKind::MethodCall {
+            recv,
+            method,
+            args,
+            kwargs,
+            star_from: None,
+            ..
+        }) => {
+            let module = match shape.inst(shape.copy_root(*recv)).map(|i| &i.kind) {
+                Some(InstKind::LoadGlobal { name, .. }) => decls.fixed_import(name)?,
+                _ => return None,
+            };
+            (format!("{module}.{method}"), args, kwargs)
+        }
+        _ => return None,
+    };
+    let [callable] = args[..] else {
+        return None;
+    };
+    (partial == "functools.partial" && kwargs.iter().all(|(k, _)| k.is_some())).then_some(())?;
+    Some(PartialAttr {
+        callable: named_value(shape, callable, decls, stores)?,
+        keywords: !kwargs.is_empty(),
+        is_static,
+    })
+}
+
 /// `(default, init)` of a field specifier `value` holds (`dataclasses.field(default=NAME)`):
 /// the default's value, and whether `init` is left on.
-fn field_default(
+pub(super) fn field_default(
     shape: &FnShape<'_>,
     value: VarId,
     resolve: &impl Fn(&str) -> Option<String>,
@@ -490,7 +557,7 @@ fn field_default(
 
 /// Whether the arguments of a `@dataclass(...)` decorator leave `init` on: no `init=` other than
 /// `True`.
-fn init_left_on(args: &str) -> bool {
+pub(super) fn init_left_on(args: &str) -> bool {
     split_top_level(args, ',')
         .iter()
         .all(|arg| match arg.split_once('=') {
