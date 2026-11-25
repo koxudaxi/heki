@@ -2057,6 +2057,13 @@ mod tests {
             effects: Some(Vec::new()),
             ..ArgCase::default()
         };
+        let wnohang = |arg: u8| ArgCase {
+            arg: Some(arg),
+            param: Some("options".into()),
+            flag: s(&["os.WNOHANG"]),
+            effects: Some(Vec::new()),
+            ..ArgCase::default()
+        };
         let mut rows = vec![
             (
                 s(&[
@@ -2247,26 +2254,8 @@ mod tests {
             (s(&["glob.glob"]), entry(&[BlockingFs])),
             (
                 s(&[
-                    "os.execl",
-                    "os.execle",
-                    "os.execlp",
-                    "os.execlpe",
-                    "os.execv",
-                    "os.execve",
-                    "os.execvp",
-                    "os.execvpe",
-                    "os.popen",
-                    "os.posix_spawn",
-                    "os.posix_spawnp",
-                    "os.spawnl",
-                    "os.spawnle",
-                    "os.spawnlp",
-                    "os.spawnlpe",
-                    "os.spawnv",
-                    "os.spawnve",
-                    "os.spawnvp",
-                    "os.spawnvpe",
                     "os.system",
+                    "os.wait",
                     "subprocess.getoutput",
                     "subprocess.getstatusoutput",
                 ]),
@@ -2280,6 +2269,40 @@ mod tests {
                     "signal.sigwaitinfo",
                 ]),
                 entry(&[BlockingSync]),
+            ),
+            (
+                s(&[
+                    "os.spawnl",
+                    "os.spawnle",
+                    "os.spawnlp",
+                    "os.spawnlpe",
+                    "os.spawnv",
+                    "os.spawnve",
+                    "os.spawnvp",
+                    "os.spawnvpe",
+                ]),
+                with_cases(
+                    vec![ArgCase {
+                        arg: Some(0),
+                        param: Some("mode".into()),
+                        flag: s(&["os.P_WAIT"]),
+                        effects: Some(vec![BlockingSubprocess]),
+                        ..ArgCase::default()
+                    }],
+                    entry(&[]),
+                ),
+            ),
+            (
+                s(&["os.waitpid", "os.wait4"]),
+                with_cases(vec![wnohang(1)], entry(&[BlockingSubprocess])),
+            ),
+            (
+                s(&["os.wait3"]),
+                with_cases(vec![wnohang(0)], entry(&[BlockingSubprocess])),
+            ),
+            (
+                s(&["os.waitid"]),
+                with_cases(vec![wnohang(2)], entry(&[BlockingSubprocess])),
             ),
             (
                 s(&["signal.sigtimedwait"]),

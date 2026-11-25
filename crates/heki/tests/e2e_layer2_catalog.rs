@@ -3918,28 +3918,20 @@ def f_os_system() -> None:
     os.system("ruff")
 
 
-def f_os_popen() -> str:
-    return os.popen("ls").read()
-
-
-def f_os_execv(argv: list[str]) -> None:
-    os.execv("/bin/ls", argv)
-
-
-def f_os_execvp(argv: list[str]) -> None:
-    os.execvp("ls", argv)
-
-
-def f_os_spawnl() -> int:
+def f_os_spawnl_wait() -> int:
     return os.spawnl(os.P_WAIT, "/bin/ls", "ls")
 
 
-def f_os_spawnvp(argv: list[str]) -> int:
+def f_os_spawnvp_wait(argv: list[str]) -> int:
     return os.spawnvp(os.P_WAIT, "ls", argv)
 
 
-def f_os_posix_spawn(argv: list[str]) -> int:
-    return os.posix_spawn("/bin/ls", argv, {})
+def f_os_waitpid(pid: int) -> object:
+    return os.waitpid(pid, 0)
+
+
+def f_os_wait() -> object:
+    return os.wait()
 
 
 def f_getoutput() -> str:
@@ -3954,6 +3946,38 @@ def f_run(argv: list[str]) -> object:
     return subprocess.run(argv)
 
 
+def g_os_execvpe(argv: list[str]) -> None:
+    os.execvpe("ls", argv, {})
+
+
+def g_os_execv(argv: list[str]) -> None:
+    os.execv("/bin/ls", argv)
+
+
+def g_os_spawnl_nowait() -> int:
+    return os.spawnl(os.P_NOWAIT, "/bin/ls", "ls")
+
+
+def g_os_spawnv_detach(argv: list[str]) -> int:
+    return os.spawnv(os.P_DETACH, "/bin/ls", argv)
+
+
+def g_os_posix_spawn(argv: list[str]) -> int:
+    return os.posix_spawn("/bin/ls", argv, {})
+
+
+def g_os_popen() -> object:
+    return os.popen("ls")
+
+
+def g_os_fork() -> int:
+    return os.fork()
+
+
+def g_waitpid_nohang(pid: int) -> object:
+    return os.waitpid(pid, os.WNOHANG)
+
+
 def g_popen_spawns_without_waiting(argv: list[str]) -> object:
     return subprocess.Popen(argv)
 
@@ -3963,24 +3987,42 @@ def g_polled(child: subprocess.Popen) -> object:
 "#;
 
 #[test]
-fn process_rows_cover_os_and_subprocess_starts() {
+fn only_calls_that_wait_for_a_child_block() {
     let found = probe_reports("cat_process_rows", PROCESS_ROWS);
     assert_eq!(
         reported(&found, "sub"),
         [
             "f_getoutput",
             "f_getstatusoutput",
-            "f_os_execv",
-            "f_os_execvp",
-            "f_os_popen",
-            "f_os_posix_spawn",
-            "f_os_spawnl",
-            "f_os_spawnvp",
+            "f_os_spawnl_wait",
+            "f_os_spawnvp_wait",
             "f_os_system",
+            "f_os_wait",
+            "f_os_waitpid",
             "f_run",
         ]
     );
     assert!(found.iter().all(|(b, _)| b == "sub"), "{found:?}");
+}
+
+#[test]
+fn replacing_or_starting_a_process_is_no_wait_on_the_event_loop() {
+    let found = check(
+        "cat_exec_async",
+        "app.py",
+        r#"import os
+
+
+async def tn_exec(argv):
+    os.execvpe("ls", argv, {})
+
+
+async def tp_system():
+    os.system("ruff")
+"#,
+        "EFF101",
+    );
+    assert_eq!(found, vec![d(9, "EFF101", "tp_system", "os.system")]);
 }
 
 const ENVIRONMENT_ROWS: &str = r#"import os
