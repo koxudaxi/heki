@@ -687,6 +687,22 @@ impl ContainerFamily {
             .map(|r| r.class)
     }
 
+    /// The read methods ([`crate::ReadKinds::methods`]) a standard-library class of the
+    /// families binds whose code changes the object: a `defaultdict`'s `__missing__`, which an
+    /// item read of a missing key runs, inserts the key.
+    const CHANGING_READS: &[(&str, &str)] = &[
+        ("collections.defaultdict", "__missing__"),
+        ("typing.DefaultDict", "__missing__"),
+    ];
+
+    /// The method of `methods` that `class` binds and whose code changes the object
+    /// ([`Self::CHANGING_READS`]).
+    pub fn changing_read(class: &str, methods: &[&str]) -> Option<&'static str> {
+        (Self::CHANGING_READS.iter())
+            .find(|(c, m)| *c == class && methods.contains(m))
+            .map(|(_, m)| *m)
+    }
+
     /// The builtin whose methods a method called on a value of `class` is read as: the builtin's
     /// own, its alias's, and its ABCs' (a `Mapping`'s `get` is a `dict`'s). A derived class may
     /// add or change methods (`Counter.update` adds counts), so it has none.

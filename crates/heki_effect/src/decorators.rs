@@ -9,9 +9,9 @@ use crate::ModuleDecls;
 /// One decorator heki knows, and which premises about the function it keeps.
 pub(crate) struct Decorator {
     pub name: &'static str,
-    /// The modules that define it. `None` for `cached_property`, a getter by its name wherever
-    /// it is imported from: only the catalog's `[[cached_properties]]` make one an exact
-    /// claim's, and it keeps no other premise.
+    /// The modules that define it. `None` for a `cached_property` of another module than
+    /// `functools`, a getter by its name wherever it is imported from: only the catalog's
+    /// `[[cached_properties]]` make one an exact claim's, and it keeps no other premise.
     pub modules: Option<&'static [&'static str]>,
     /// Calling the function still runs its body as written: a generator function returns a
     /// generator, an `async def` a coroutine, a plain `def` what its body returns
@@ -41,6 +41,9 @@ pub(crate) enum ReadsAnnotations {
     /// finds: the class's own `__new__` or `__init__` (`dataclass` writes the docstring
     /// `C(rows: list[int])` from it).
     ConstructorWithoutDocstring,
+    /// A decorator known by its name only (`modules: None`): heki does not know its definition,
+    /// which may read any, so only the catalog can say it reads none.
+    Unknown,
 }
 
 /// `typing.override` and `typing.final` only set an attribute on the object they are handed
@@ -110,12 +113,24 @@ pub(crate) const DECORATORS: &[Decorator] = &[
     },
     Decorator {
         name: "cached_property",
-        modules: None,
+        modules: Some(&["functools"]),
         keeps_call: false,
         keeps_return: false,
         getter: true,
         beside_cache: false,
         annotations: ReadsAnnotations::Nothing,
+        takes_arguments: false,
+    },
+    // A `cached_property` of another module (`werkzeug.utils`, the project's own) after the
+    // `functools` one, which [`of_symbol`] finds first.
+    Decorator {
+        name: "cached_property",
+        modules: None,
+        keeps_call: false,
+        keeps_return: false,
+        getter: true,
+        beside_cache: false,
+        annotations: ReadsAnnotations::Unknown,
         takes_arguments: false,
     },
     // Decorators that keep none of the premises above and read no annotation of what they

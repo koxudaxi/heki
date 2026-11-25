@@ -1111,8 +1111,10 @@ pub struct EffectSummary {
     /// display), captured by a nested function, yielded, returned, or handed to a call other than
     /// a project call whose targets are every implementation it can run, binding it to a
     /// parameter, not a constructor, a library call Layer 1 lists as reading that argument, or a
-    /// cast handing it back as itself (`ownership::handed_back`, whose result is the object);
-    /// and every project function it is handed to only reads it there. Inside a call cycle the
+    /// cast handing it back as itself (`ownership::handed_back`, whose result is the object), nor
+    /// to the special method of an operator's other operand that is not a builtin's; no item
+    /// read of a `defaultdict`, whose `__missing__` inserts the key; and every project function
+    /// it is handed to only reads it there. Inside a call cycle the
     /// greatest fixpoint. `0` while [`OptInFacts::only_read`] is off, and for a function heki does
     /// not model (a stub's, one with an A1 hazard).
     pub only_read_params: u64,

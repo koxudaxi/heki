@@ -12,12 +12,13 @@
 
 use crate::callgraph::bound_params;
 use crate::decorators::{self, ReadsAnnotations};
-use crate::readonly::ContainerKind;
+use crate::readonly::{ContainerFamily, ContainerKind};
 use crate::resolver::{TypeCtx, func_qualname, is_unknown_base, param_annotation};
 use crate::{BoundCallee, EffectSummary, ProjectDecls};
 use heki_ast::Span;
 use heki_ir::{ConstLiteral, InstKind, IrFunction, PatternShape};
 use heki_kb::{AnnotationsRead, EffectiveEcosystemKb};
+use heki_semantic::{ScopeId, SemanticModel};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -138,11 +139,13 @@ impl ReadKinds {
     /// An operand of an operator whose other operand is a builtin: besides the operand's own
     /// operator methods, what the builtin's runs of it. `xs += v` extends a list, as
     /// [`Self::UNPACKING`] does; `d |= v` looks `keys` up on `v` by name (`__getattr__` when the
-    /// class has none), then reads `keys()` and the items, or iterates `v` as pairs.
+    /// class has none), then reads `keys()` and the items, or iterates `v` as pairs; `"%s" % v`
+    /// converts `v` to text.
     pub const OPERAND: Self = Self(
         Self::OPERATORS.0
             | Self::UNPACKING.0
             | Self::ITEM.0
+            | Self::TEXT.0
             | Self::BY_NAME.0
             | Self::ANY_ATTRIBUTE.0
             | Self::KEYS,
@@ -365,18 +368,34 @@ const OPERATOR_METHODS: &[&str] = &[
 /// A project class whose code a read of a builtin container's object may run (R2): a class
 /// the object may be binds the method the read runs, or any member when a read has no list of
 /// the methods it runs ([`ReadKinds::ANY_METHOD`]), or a metaclass heki does not know creates
-/// it, which may install one.
+/// it, which may install one; or a project class inherits from a standard-library base a read
+/// method that changes the object (`defaultdict`'s `__missing__`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadOverride {
-    Binds { class: String, method: &'static str },
-    BindsAny { class: String, member: String },
-    Metaclass { class: String },
+    Binds {
+        class: String,
+        method: &'static str,
+    },
+    BindsAny {
+        class: String,
+        member: String,
+    },
+    Metaclass {
+        class: String,
+    },
+    Inherits {
+        class: String,
+        base: String,
+        method: &'static str,
+    },
 }
 
 /// The first project class, in [`ProjectDecls::implementers`]' order, whose code the reads
 /// `kinds` of an object of the builtin `kind` may run: one binding a method the reads run
-/// ([`ReadKinds::methods`]), one binding anything when a read may run any method, or one
-/// created by a metaclass heki does not know. `None` when every read is the builtin's own.
+/// ([`ReadKinds::methods`]), one whose MRO has a base outside the project binding one that
+/// changes the object ([`ContainerFamily::changing_read`]), one binding anything when a read
+/// may run any method, or one created by a metaclass heki does not know. `None` when every read
+/// is the builtin's own.
 pub fn read_override(
     decls: &ProjectDecls,
     kind: ContainerKind,
@@ -394,6 +413,15 @@ pub fn read_override(
             let d = decls.class_decl(&class)?;
             if let Some(method) = methods.iter().find(|m| d.members.contains(**m)) {
                 return Some(ReadOverride::Binds { class, method });
+            }
+            let inherited = (decls.mro_of(&class).into_iter())
+                .find_map(|base| Some((ContainerFamily::changing_read(&base, &methods)?, base)));
+            if let Some((method, base)) = inherited {
+                return Some(ReadOverride::Inherits {
+                    class,
+                    base,
+                    method,
+                });
             }
             match d.members.first().filter(|_| any) {
                 Some(member) => Some(ReadOverride::BindsAny {
@@ -463,8 +491,9 @@ pub struct LiteralAnnotation {
 /// for a method, its class's decorators, metaclass, and bases outside the project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AnnotationReads {
-    /// Nothing heki knows of: every decorator is in the decorator table, which leaves
-    /// annotations unread; the class has no metaclass but `type` or `abc.ABCMeta`, and no
+    /// Nothing heki knows of: every decorator is one the decorator table knows by its
+    /// definition, which leaves annotations unread, or one the catalog lists as reading only
+    /// fields; the class has no metaclass but `type` or `abc.ABCMeta`, and no
     /// base outside the project but one of the standard library or one the catalog lists as
     /// reading only fields.
     Unread,
@@ -475,10 +504,13 @@ pub enum AnnotationReads {
 }
 
 /// [`AnnotationFacts`] of every function of the module `cx` describes that has a parameter,
-/// by qualified name.
-pub(crate) fn annotation_facts(cx: &TypeCtx<'_>) -> BTreeMap<String, AnnotationFacts> {
+/// by qualified name. `semantic` is the module's scopes.
+pub(crate) fn annotation_facts(
+    cx: &TypeCtx<'_>,
+    semantic: &SemanticModel,
+) -> BTreeMap<String, AnnotationFacts> {
     let ir = cx.ir();
-    let resolve = |name: &str| cx.module.resolve_dotted(name, true);
+    let parameters = semantic.parameters();
     let mut out: BTreeMap<String, AnnotationFacts> = BTreeMap::new();
     for f in &ir.functions {
         if f.is_module_body || f.is_class_body || f.name.starts_with('<') || f.params.is_empty() {
@@ -489,7 +521,13 @@ pub(crate) fn annotation_facts(cx: &TypeCtx<'_>) -> BTreeMap<String, AnnotationF
             .params
             .iter()
             .filter(|p| !p.is_vararg && !p.is_kwarg)
-            .map(|p| param_annotation(p.annotation.as_deref(), p.annotation_span, &resolve))
+            .map(|p| {
+                let scope = p
+                    .annotation_span
+                    .and_then(|s| parameters.function_at(s.start));
+                let resolve = |name: &str| annotation_name(cx, semantic, scope, name);
+                param_annotation(p.annotation.as_deref(), p.annotation_span, &resolve)
+            })
             .collect();
         let facts = AnnotationFacts {
             params,
@@ -517,6 +555,23 @@ pub(crate) fn annotation_facts(cx: &TypeCtx<'_>) -> BTreeMap<String, AnnotationF
         }
     }
     out
+}
+
+/// What the name `name` (dotted) of an annotation of a parameter of the function scope `scope`
+/// resolves to: the module's binding, unless a function or class body around the `def` binds
+/// its head where the annotation is evaluated, which a type checker reads it as too; nothing
+/// without the scope.
+fn annotation_name(
+    cx: &TypeCtx<'_>,
+    semantic: &SemanticModel,
+    scope: Option<ScopeId>,
+    name: &str,
+) -> Option<String> {
+    let head = name.split('.').next().unwrap_or(name);
+    if semantic.annotation_binder(scope?, head).is_some() {
+        return None;
+    }
+    cx.module.resolve_dotted(name, true)
 }
 
 impl AnnotationReads {
@@ -595,7 +650,9 @@ fn has_docstring(body: &IrFunction) -> bool {
 /// What the decorator `text` (its source) reads of what it decorates, besides a constructor's
 /// signature ([`annotation_reads`]).
 fn decorator_reads(cx: &TypeCtx<'_>, text: &str) -> AnnotationReads {
-    if decorators::is(text, cx.module, |_| true) {
+    if decorators::is(text, cx.module, |d| {
+        d.annotations != ReadsAnnotations::Unknown
+    }) {
         return AnnotationReads::Unread;
     }
     let symbol = cx.module.decorator_symbol(text);

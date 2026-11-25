@@ -10,6 +10,8 @@ Checks (docs/ANALYSIS_AND_KB_SPEC.md section 4.1):
      receive: the API neither retains it nor hands it to code that could.
   3. Every `return_exact_type` API satisfies `type(result) is expected_type`, also for adversarial
      inputs (subclass instances, dunders returning subclasses).
+  4. Every argument a witness shows another object's dunder keeps (`sum`'s start handed to an
+     item's `__radd__`, the arguments of `min` / `max` compared with each other) is `escaped`.
 Supporting checks:
   - every symbol resolves on this interpreter;
   - every API returning a fresh mutable container does not alias its argument;
@@ -219,27 +221,6 @@ def _dict_items(fn: Callable[..., Any]) -> None:
     assert list(view) == [("a", 5), ("b", 2)]
 
 
-def _sum(fn: Callable[..., Any]) -> None:
-    start = [1]
-    got = fn([], start)
-    start.append(2)
-    assert got == [1, 2], "sum returns its start itself for an empty iterable"
-
-
-def _min(fn: Callable[..., Any]) -> None:
-    a, b = [0], [1]
-    got = fn(a, b)
-    a.append(5)
-    assert got == [0, 5], "min of several arguments returns one of them itself"
-
-
-def _max(fn: Callable[..., Any]) -> None:
-    a, b = [1], [0]
-    got = fn(a, b)
-    a.append(5)
-    assert got == [1, 5], "max of several arguments returns one of them itself"
-
-
 # symbol -> (argument positions the scenario shows are retained, scenario)
 RETAINED_SCENARIOS: dict[str, tuple[set[int], Callable[[Callable[..., Any]], None]]] = {
     "builtins.iter": ({0}, _iter),
@@ -254,10 +235,6 @@ RETAINED_SCENARIOS: dict[str, tuple[set[int], Callable[[Callable[..., Any]], Non
     "builtins.dict.values": ({0}, _dict_values),
     "builtins.dict.items": ({0}, _dict_items),
     "builtins.dict.pop": ({2}, _dict_pop),
-    "builtins.sum": ({1}, _sum),
-    # Variadic: the one declared effect covers every argument.
-    "builtins.min": ({0}, _min),
-    "builtins.max": ({0}, _max),
 }
 
 # --------------------------------------------------------------------------- read-only arguments
@@ -363,6 +340,43 @@ COPY_RECEIVERS: dict[str, Callable[[], Any]] = {
     "builtins.list.copy": lambda: ListSub2([Keeper()]),
     "builtins.set.copy": lambda: SetSub2({Keeper()}),
     "builtins.dict.copy": lambda: DictSub2({Keeper(): 0}),
+}
+
+# --------------------------------------------------------------------------- escaped arguments
+# An argument the call hands to another object's dunder may be kept by that object, so it is
+# neither `read_only` nor `retained_in_return` (kept by the result only). Each witness keeps the
+# subject alive past the call, the result dropped.
+
+
+class RightAdder:
+    """An item `sum` adds its start to: `__radd__` receives the start."""
+
+    def __radd__(self, other: object) -> int:
+        KEPT.append(other)
+        return 0
+
+
+class Ordered:
+    """An operand whose `__lt__` and `__gt__` receive the other operand and say no."""
+
+    def __lt__(self, other: object) -> bool:
+        KEPT.append(other)
+        return False
+
+    def __gt__(self, other: object) -> bool:
+        KEPT.append(other)
+        return False
+
+
+# symbol -> {position: case}; a case gets the subject and returns the call's arguments. The
+# subject has no order of its own, so a comparison it is the left operand of falls to the
+# reflected method of `Ordered`.
+ESCAPE_WITNESSES: dict[str, dict[int, Callable[[Any], tuple[Any, ...]]]] = {
+    "builtins.sum": {1: lambda s: ([RightAdder()], s)},
+    # `Ordered() < s`, then `s < Ordered()` running `Ordered.__gt__`.
+    "builtins.min": {0: lambda s: (s, Ordered()), 1: lambda s: (Ordered(), s)},
+    # `Ordered() > s`, then `s > Ordered()` running `Ordered.__lt__`.
+    "builtins.max": {0: lambda s: (s, Ordered()), 1: lambda s: (Ordered(), s)},
 }
 
 # --------------------------------------------------------------------------- check 3 cases
@@ -494,6 +508,7 @@ def check_tables_match_kb(kb: dict[str, dict[str, Any]]) -> list[str]:
     tables = [
         RETAINED_SCENARIOS,
         READ_ONLY_CASES,
+        ESCAPE_WITNESSES,
         COPY_RECEIVERS,
         EXACT_TYPE_CASES,
         FRESH_CONTAINER_CASES,
@@ -577,6 +592,42 @@ def check_read_only(kb: dict[str, dict[str, Any]]) -> list[str]:
             try:
                 if not _dies_after(call):
                     problems.append(f"{symbol}: the read_only argument {pos} outlives the call")
+            except Exception as exc:  # noqa: BLE001 - report every failure kind
+                problems.append(f"{symbol}: argument {pos}: {type(exc).__name__}: {exc}")
+    return problems
+
+
+def _kept_after(case: Callable[[Any], tuple[Any, ...]], fn: Callable[..., Any]) -> bool:
+    """Whether the subject outlives the call `case` builds, its result dropped."""
+    subject = Subject()
+    ref = weakref.ref(subject)
+    args = case(subject)
+    fn(*args)
+    del subject, args
+    gc.collect()
+    kept = ref() is not None
+    KEPT.clear()
+    return kept
+
+
+def check_escape_witnesses(kb: dict[str, dict[str, Any]]) -> list[str]:
+    problems = []
+    for symbol, cases in ESCAPE_WITNESSES.items():
+        if symbol not in kb:
+            continue
+        effects = kb[symbol]["param_effects"]
+        fn = resolve(symbol)
+        for pos, case in sorted(cases.items()):
+            # Variadic: the last declared effect covers the remaining arguments.
+            effect = effects[min(pos, len(effects) - 1)]
+            if effect != "escaped":
+                problems.append(f"{symbol}: argument {pos} is `{effect}`, but a witness keeps it")
+            try:
+                if not _kept_after(case, fn):
+                    problems.append(
+                        f"{symbol}: the witness no longer keeps argument {pos}; the KB comment is "
+                        "stale and the effect may be reconsidered"
+                    )
             except Exception as exc:  # noqa: BLE001 - report every failure kind
                 problems.append(f"{symbol}: argument {pos}: {type(exc).__name__}: {exc}")
     return problems
@@ -673,6 +724,7 @@ def main() -> int:
     live = {s: raw for s, raw in kb.items() if _resolves(s)}
     report.check("retained-in-return", check_retained(live))
     report.check("read-only-arguments-are-not-kept", check_read_only(live))
+    report.check("escaped-arguments-have-witnesses", check_escape_witnesses(live))
     report.check("return-exact-type", check_exact_types(live))
     report.check("fresh-containers-do-not-alias", check_fresh_containers(live))
     report.check("non-exact-witnesses", check_non_exact_witnesses(live))

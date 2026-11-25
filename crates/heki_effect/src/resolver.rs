@@ -8806,6 +8806,16 @@ pub(crate) fn is_unbound_name(fqn: &str) -> bool {
 }
 
 impl Val {
+    /// The classes the value may be an instance of: the one of `Inst`, those of `Union`, none for
+    /// any other value.
+    pub(crate) fn instance_classes(&self) -> &[String] {
+        match self {
+            Self::Inst(c) => std::slice::from_ref(c),
+            Self::Union(cs) => cs,
+            _ => &[],
+        }
+    }
+
     /// The project class the value is the class object of: a class named exactly, or one that
     /// may be a subclass (`cls`). Calling it constructs that class.
     pub(crate) fn class_object<'v>(&'v self, project: &ProjectDecls) -> Option<&'v str> {

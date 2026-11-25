@@ -1503,6 +1503,126 @@ fn a_project_subclass_that_binds_a_read_leaves_out_the_functions_running_it() {
         ]
     );
     assert!(causes.is_empty(), "{causes:?}");
+    // A class deriving from `defaultdict` inherits its `__missing__`, which inserts the key an
+    // item read misses: the item reads, here and in the callee, leave the parameter out.
+    let (kept, causes) = own_reads(
+        "recommend_types_defaultdict_subclass",
+        "from collections import defaultdict\n\n\nclass Tally(defaultdict):\n    pass\n",
+    );
+    assert_eq!(kept, ["got", "shown", "member", "equal", "outer_in"]);
+    assert_eq!(
+        causes,
+        [(
+            "`app.sub.Tally` inherits `__missing__` from `collections.defaultdict`, which a read \
+             of it runs and which changes it"
+                .to_owned(),
+            2
+        )]
+    );
+}
+
+/// Item reads of a `defaultdict` and of a `Counter`, and a `%` format.
+const KNOWN_CLASS_READS: &str = r#"from collections import Counter, defaultdict
+
+
+def missing(p: defaultdict[str, int]) -> int:
+    return p["missing"]
+
+
+def counted(p: Counter[str]) -> int:
+    return p["missing"]
+
+
+def percent(rows: list[int]) -> str:
+    return "%s" % rows
+"#;
+
+#[test]
+fn a_defaultdict_item_read_changes_it_and_a_percent_format_converts_to_text() {
+    let p = Project::new("recommend_types_known_class_reads");
+    p.write("app/__init__.py", "")
+        .write("app/reads.py", KNOWN_CLASS_READS);
+    // A missing key read inserts it into a `defaultdict`; a `Counter` returns 0.
+    assert!(reads_of(&p, "app.reads.missing").is_empty());
+    let strs = |names: &[&str]| -> Vec<String> { names.iter().map(|n| (*n).to_owned()).collect() };
+    assert_eq!(
+        reads_of(&p, "app.reads.counted")["p"],
+        strs(&["item access"])
+    );
+    assert!(reads_of(&p, "app.reads.percent")["rows"].contains(&"conversion to text".to_owned()));
+}
+
+/// Parameters annotated with a name a scope around the `def` binds: a class of the enclosing
+/// function, and a class attribute the class body binds before the method.
+const SHADOWED_HEADS: &str = r#"def outer() -> bool:
+    class list:
+        def __class_getitem__(cls, item):
+            return cls
+
+    def inner(p: list[int]) -> bool:
+        return 1 in p
+
+    return inner(list())
+
+
+class Store:
+    class dict:
+        pass
+
+    def method(self, m: dict[str, int]) -> bool:
+        return "a" in m
+
+
+def plain(p: list[int]) -> bool:
+    return 1 in p
+"#;
+
+#[test]
+fn an_annotation_names_what_a_scope_around_the_def_binds() {
+    let p = Project::new("recommend_types_shadowed_heads");
+    p.write("app/__init__.py", "")
+        .write("app/reads.py", SHADOWED_HEADS);
+    let (report, _) = recommend(&p, &["--all"]);
+    let found = groups(&report);
+    let ids: Vec<&String> = found.keys().collect();
+    assert_eq!(ids, ["app.reads:plain:p"], "{report:#}");
+    assert!(withheld(&report).is_empty(), "{report:#}");
+}
+
+/// A function decorated with a `cached_property` of the project, and one with `functools`'.
+const CACHED_PROPERTIES: &str = r#"import functools
+
+from app.deco import cached_property
+
+
+@cached_property
+def total(rows: list[int]) -> bool:
+    return 1 in rows
+
+
+@functools.cached_property
+def known(rows: list[int]) -> bool:
+    return 1 in rows
+"#;
+
+#[test]
+fn only_the_functools_cached_property_is_known_to_leave_annotations_unread() {
+    let p = Project::new("recommend_types_cached_properties");
+    p.write("app/__init__.py", "")
+        .write(
+            "app/deco.py",
+            "def cached_property(func):\n    return func\n",
+        )
+        .write("app/reads.py", CACHED_PROPERTIES);
+    let (report, _) = recommend(&p, &["--all"]);
+    let found = groups(&report);
+    assert_eq!(found["app.reads:known:rows"]["certainty"], "exact");
+    let total = found["app.reads:total:rows"];
+    assert_eq!(total["certainty"], "heuristic");
+    assert_eq!(
+        total["open"][0]["cause"],
+        "`app.deco.cached_property` may read the annotations at run time"
+    );
 }
 
 /// What a project with `classes` (`app/sub.py`) suggests for the functions of `reads`

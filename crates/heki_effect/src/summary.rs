@@ -151,7 +151,7 @@ fn extract_module(
         .map(func_qualname)
         .collect();
     if opt_in.suggestions {
-        let facts = crate::only_read::annotation_facts(&cx);
+        let facts = crate::only_read::annotation_facts(&cx, input.semantic);
         if !facts.is_empty() {
             file.opt_in_tables_mut().annotation_facts = facts;
         }

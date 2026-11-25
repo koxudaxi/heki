@@ -745,6 +745,17 @@ fn claim(cx: &Cx<'_>, c: &Candidate<'_>) -> Vec<Unmet> {
             "The builtin's own reads",
             &format!("a metaclass heki does not know creates `{class}`"),
         )],
+        Some(ReadOverride::Inherits {
+            class,
+            base,
+            method,
+        }) => vec![unmet(
+            "The builtin's own reads",
+            &format!(
+                "`{class}` inherits `{method}` from `{base}`, which a read of it runs and which \
+                 changes it"
+            ),
+        )],
         None => Vec::new(),
     }
 }

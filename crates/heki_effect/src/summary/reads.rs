@@ -5,7 +5,7 @@
 //! `MUT110` judgment); these walks find what else may keep it, change it through a value that
 //! may be it, or hand it to code heki does not follow.
 
-use super::{Extractor, Position, ProjectCall};
+use super::{Built, Extractor, Position, ProjectCall};
 use crate::order_flow::ORDER_FREE_BUILTINS;
 use crate::ownership;
 use crate::readonly::{
@@ -174,15 +174,21 @@ impl<'a> Extractor<'a> {
             {
                 Handling::Reads(ReadKinds::TARGET_UNPACKING)
             }
-            InstKind::SubscriptLoad { obj, index, .. }
-            | InstKind::SubscriptDelete { obj, index, .. } => {
-                // A key is hashed and compared, an index converted (`__index__`).
-                let read = match *obj == v {
-                    true => ReadKinds::ITEM,
-                    false => ReadKinds::COMPARISON | ReadKinds::OPERATORS,
-                };
-                self.operand_handling(bb, v, *obj, *index, read)
+            InstKind::SubscriptLoad { obj, .. } if *obj == v && self.item_read_changes(bb, v) => {
+                Handling::Open
             }
+            // A key is hashed and compared, an index converted (`__index__`).
+            InstKind::SubscriptLoad { obj, index, .. } if *obj == v => {
+                self.key_handling(bb, *index)
+            }
+            InstKind::SubscriptLoad { obj, index, .. }
+            | InstKind::SubscriptDelete { obj, index, .. } => self.operand_handling(
+                bb,
+                v,
+                *obj,
+                *index,
+                ReadKinds::COMPARISON | ReadKinds::OPERATORS,
+            ),
             InstKind::UnaryOp { op, .. } => Handling::Reads(match op {
                 UnaryOpKind::Not => ReadKinds::SIZE,
                 _ => ReadKinds::OPERATORS,
@@ -232,9 +238,9 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// An operation on `a` and `b`, one of them `v`: the other operand, when it may be an
-    /// instance of a project class, has its special method run with the object, which may keep
-    /// it; a builtin's only reads it.
+    /// An operation on `a` and `b`, one of them `v`: the other operand's special method is run
+    /// with the object (`other == p` runs `type(other).__eq__(other, p)` first), and may keep or
+    /// change it, unless the operand only runs a builtin's ([`Self::builtin_operand`]).
     fn operand_handling(
         &self,
         bb: BlockId,
@@ -244,12 +250,54 @@ impl<'a> Extractor<'a> {
         read: ReadKinds,
     ) -> Handling {
         let other = if a == v { b } else { a };
-        let project = |c: &String| self.cx.project.is_project_class(c);
-        match self.val_in(bb, other) {
-            Some(Val::Inst(c)) if project(c) => Handling::Open,
-            Some(Val::Union(cs)) if cs.iter().any(project) => Handling::Open,
-            _ => Handling::Reads(read),
+        match self.builtin_operand(bb, other) {
+            true => Handling::Reads(read),
+            false => Handling::Open,
         }
+    }
+
+    /// Whether the operand `other` of an operation on the object at `bb` runs a builtin's special
+    /// methods, which only read the object: it is built here as a builtin value of its exact
+    /// class, or each class it may be is a builtin class no project class derives from (R2). A
+    /// value of unknown class, of `object`, or of a library class may run code that keeps it.
+    fn builtin_operand(&self, bb: BlockId, other: VarId) -> bool {
+        if self.built(self.shape.copy_root(other)) != Built::Unknown {
+            return true;
+        }
+        let builtin = |c: &String| {
+            c.starts_with("builtins.")
+                && c != "builtins.object"
+                && self.cx.project.value_classes(c).is_empty()
+        };
+        let classes = self.instance_classes(bb, other);
+        !classes.is_empty() && classes.iter().all(builtin)
+    }
+
+    /// The classes `v` may be an instance of at `bb` ([`Val::instance_classes`]).
+    fn instance_classes(&self, bb: BlockId, v: VarId) -> &[String] {
+        self.val_in(bb, v).map_or(&[], Val::instance_classes)
+    }
+
+    /// The key `index` of an item read of the object: the key's own methods (`__hash__`,
+    /// `__eq__`, `__index__`) get the key and the keys the object holds, not the object; a key
+    /// that may be an instance of a project class leaves it open.
+    fn key_handling(&self, bb: BlockId, index: VarId) -> Handling {
+        let project = |c: &String| self.cx.project.is_project_class(c);
+        match self.instance_classes(bb, index).iter().any(project) {
+            true => Handling::Open,
+            false => Handling::Reads(ReadKinds::ITEM),
+        }
+    }
+
+    /// Whether an item read of `v` may change the object: a class it may be has a base binding
+    /// a read of an item that changes it ([`ContainerFamily::changing_read`]: a `defaultdict`'s
+    /// `__missing__` inserts the key).
+    fn item_read_changes(&self, bb: BlockId, v: VarId) -> bool {
+        let item: Vec<&str> = ReadKinds::ITEM.methods().collect();
+        (self.instance_classes(bb, v).iter()).any(|class| {
+            (self.cx.project.mro_of(class).iter())
+                .any(|base| ContainerFamily::changing_read(base, &item).is_some())
+        })
     }
 
     /// Whether the generator expression `child` reads `v` as the function's parameter `k`
