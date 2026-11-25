@@ -1458,6 +1458,7 @@ impl ModuleDecls {
                 [_, "..."] => Args::items(elem(0)),
                 _ => Args::Tuple((0..args.len()).map(elem).collect()),
             },
+            Some(Generic::Held) => Args::result(elem(0)),
         };
         Some(Ty::container(&class, args))
     }
