@@ -6857,11 +6857,17 @@ fn decl_same_object(
         InstKind::Copy { src, .. } => Some(*src),
         InstKind::Call {
             callee_var: Some(c),
+            args,
+            star_from,
             ..
-        } => ownership::handed_back(imported(c)?, kind),
-        InstKind::MethodCall { recv, method, .. } => {
-            ownership::handed_back(&format!("{}.{method}", imported(recv)?), kind)
-        }
+        } => ownership::handed_back(imported(c)?, args, *star_from),
+        InstKind::MethodCall {
+            recv,
+            method,
+            args,
+            star_from,
+            ..
+        } => ownership::handed_back(&format!("{}.{method}", imported(recv)?), args, *star_from),
         _ => None,
     }
 }

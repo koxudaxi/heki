@@ -1561,7 +1561,18 @@ impl<'a> Extractor<'a> {
                     } => self
                         .has_in_place_operator(*lhs, *op)
                         .then_some((*dst, *lhs)),
-                    kind @ (InstKind::Call { dst, .. } | InstKind::MethodCall { dst, .. }) => {
+                    kind @ (InstKind::Call {
+                        dst,
+                        args,
+                        star_from,
+                        ..
+                    }
+                    | InstKind::MethodCall {
+                        dst,
+                        args,
+                        star_from,
+                        ..
+                    }) => {
                         let symbol = match self.callee_of(kind) {
                             Callee::External(symbol) => symbol,
                             _ => String::new(),
@@ -1570,7 +1581,7 @@ impl<'a> Extractor<'a> {
                             Some((dst, holder, None)) => Some((dst, holder)),
                             _ => None,
                         };
-                        let call = ownership::handed_back(&symbol, kind)
+                        let call = ownership::handed_back(&symbol, args, *star_from)
                             .map(|v| (*dst, v))
                             .or_else(returned);
                         handed_back.extend(call.map(|(dst, _)| dst));
