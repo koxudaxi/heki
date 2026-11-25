@@ -557,6 +557,18 @@ def tags_the_input(field: Field) -> Field:
     return tagged
 
 
+def tags_the_input_by_keyword(field: Field) -> Field:
+    tagged = with_origin(kind="tag", field=field)
+    record_scope(tagged, "scope")
+    return tagged
+
+
+def through_a_keyword(parser: Builder) -> Field:
+    field = with_origin(kind="tag", field=parser.build_field("x"))
+    record_scope(field, "scope")
+    return field
+
+
 def keeps_while_tagging(parser: Builder) -> Field:
     field = with_kept_origin(parser.build_field("x"), "tag")
     record_scope(field, "scope")
@@ -596,11 +608,13 @@ fn an_object_a_helper_hands_back_is_the_one_it_was_handed() {
     let q = |func: &str, target: &str| (func.to_owned(), target.to_owned());
     // A field the parser builds (a constructor call in the one implementation of the protocol's
     // method), handed through a helper returning it, is written while nothing holds it.
-    // Reported: the input handed through; a helper keeping it, or returning a shared field on
-    // another path; the field held by the model before the write.
+    // Reported: the input handed through, by position or by keyword; a helper keeping it, or
+    // returning a shared field on another path; the field held by the model before the write.
     let mut expected = vec![
         q("tags_the_input", "Field.origin"),
         q("tags_the_input", "Field.alias_scope"),
+        q("tags_the_input_by_keyword", "Field.origin"),
+        q("tags_the_input_by_keyword", "Field.alias_scope"),
         q("keeps_while_tagging", "Field.origin"),
         q("keeps_while_tagging", "Field.alias_scope"),
         q("may_take_the_shared_one", "Field.alias_scope"),

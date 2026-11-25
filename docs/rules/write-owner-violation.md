@@ -99,7 +99,10 @@ is the receiver's class); a copy (`copy.copy`, `copy.deepcopy`, `dataclasses.rep
 wrapped function returns, and `typing.cast` names the class of its value, its type read as
 an annotation (`cast(list[Model], x)` as `cast("list[Model]", x)`): a cast to a subclass narrows
 a value known as its base, and a cast to `Any` or to a base class keeps the class the value is
-known to have, as an annotated local does. A variable rebound in a loop
+known to have, as an annotated local does. A cast hands back the object it is given, and so does
+a project function returning its parameter on every path (`def same(x): return x`, also
+`return cast(T, x)`): `cast(list[int], store.items).append(x)` and `same(store.items).append(x)`
+change `store.items`, as an alias does. A variable rebound in a loop
 (`node = node.parent`) or assigned on some paths only (a walrus inside `and` / `or`) has the
 classes of the values reaching it; a value of two or three classes (`Model | Node`, from an
 annotation or from different assignments) is each of them, and an `isinstance` check narrows it

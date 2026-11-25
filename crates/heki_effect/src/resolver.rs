@@ -15,6 +15,7 @@
 
 use crate::capacity::CapacityOf;
 use crate::decorators;
+use crate::ownership;
 use crate::types::{Added, Args, Elem, Generic, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
@@ -832,15 +833,12 @@ pub struct FunctionDecl {
     /// The return annotation of the getter of a property (`@property` / `cached_property`,
     /// with or without a setter): the type reading the attribute gives.
     pub property_type: Option<Ty>,
-    /// `(i, attr)` when every `return` of every definition returns attribute `attr` of
-    /// parameter `i` as itself (`return self.items`, [`returned_param_part`]): calling the
-    /// function, or reading the property, gives that object of the argument.
+    /// `(i, None)` when every `return` of every definition returns parameter `i` as itself
+    /// (`return x`, `return cast(list[int], x)`), `(i, Some(attr))` when each returns attribute
+    /// `attr` of it (`return self.items`) ([`returned_param`]): calling the function, or reading
+    /// the property, gives the argument, or that object of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub returns_param_attr: Option<(u8, String)>,
-    /// `i` when every `return` of every definition returns parameter `i` itself (`return field`,
-    /// [`returned_param_part`]): calling the function gives the object the call hands it there.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub returns_param: Option<u8>,
+    pub returns_param: Option<(u8, Option<String>)>,
     /// The fqn an import binds when every `return` of every definition returns what that import
     /// binds, a module or an object of one ([`returned_import`]): an import in the function
     /// (`from pkg import ops` then `return ops`, which breaks an import cycle) or one of the
@@ -1853,8 +1851,8 @@ pub struct DeclKeys {
     pub subclasses: BTreeSet<String>,
     /// Attribute names looked up among the project's property getter names.
     pub property_names: BTreeSet<String>,
-    /// Names looked up among the names of the project functions returning an attribute of a
-    /// parameter (`FunctionDecl::returns_param_attr`).
+    /// Names looked up among the names of the project functions returning a parameter or an
+    /// attribute of one (`FunctionDecl::returns_param`).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub returning_names: BTreeSet<String>,
     /// Attribute names looked up among the names class bodies bind to a module-level name
@@ -2038,9 +2036,9 @@ pub struct ProjectDecls {
     /// Names of the property getters (`FunctionDecl::is_property`) of every class: an
     /// attribute read with another name runs no getter, without walking any class hierarchy.
     property_names: FxHashSet<String>,
-    /// Names of the functions, methods, and getters returning an attribute of a parameter
-    /// (`FunctionDecl::returns_param_attr`): a call or a read with another name hands out no
-    /// such attribute, without resolving it.
+    /// Names of the functions, methods, and getters returning a parameter or an attribute of
+    /// one (`FunctionDecl::returns_param`): a call or a read with another name hands out no
+    /// such object, without resolving it.
     returning_names: FxHashSet<String>,
     /// Names class bodies bind to a module-level name outside a field
     /// (`ClassDecl::named_attrs`): an attribute with another name is no class alias
@@ -2451,7 +2449,7 @@ impl ProjectDecls {
                 if f.reads_as_property() {
                     property_names.insert(name.clone().into_owned());
                 }
-                if f.returns_param_attr.is_some() {
+                if f.returns_param.is_some() {
                     returning_names.insert(name.into_owned());
                 }
             }
@@ -5502,10 +5500,10 @@ impl ProjectDecls {
         self.definitions(&class, name, false, false, |_| true).pop()
     }
 
-    /// Whether a project function named `name` (its last name) may return an attribute of a
-    /// parameter (`FunctionDecl::returns_param_attr`): no call or read with another name hands
-    /// one out.
-    pub(crate) fn may_return_param_attr(&self, name: &str) -> bool {
+    /// Whether a project function named `name` (its last name) may return a parameter or an
+    /// attribute of one (`FunctionDecl::returns_param`): no call or read with another name
+    /// hands one out.
+    pub(crate) fn may_return_param(&self, name: &str) -> bool {
         self.read(|k| note(&mut k.returning_names, name));
         self.returning_names.contains(name)
     }
@@ -6076,7 +6074,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
         *slot = (*slot).max(t);
     }
     // Definitions sharing a qualname (a property's setter, conditional definitions) must agree.
-    let mut returned_parts: FxHashMap<&str, Option<(u8, Option<String>)>> = FxHashMap::default();
+    let mut returned_params: FxHashMap<&str, Option<(u8, Option<String>)>> = FxHashMap::default();
     let mut returned_imports: FxHashMap<&str, Option<Box<str>>> = FxHashMap::default();
     let import_targets: FxHashMap<Span, String> = semantic
         .imports
@@ -6090,8 +6088,8 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
         .iter()
         .filter(|f| is_summarized_function(f))
     {
-        let returned = returned_param_part(f, &decls);
-        returned_parts
+        let returned = returned_param(f, &decls);
+        returned_params
             .entry(&f.qualname)
             .and_modify(|r| {
                 if *r != returned {
@@ -6180,12 +6178,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
             offloaded_by: None,
             is_abstract: crate::is_abstract_method(&f.decorators),
             property_type: getter_types.get(f.qualname.as_str()).cloned(),
-            returns_param_attr: (returned_parts[f.qualname.as_str()].clone())
-                .and_then(|(param, attr)| Some((param, attr?))),
-            returns_param: match &returned_parts[f.qualname.as_str()] {
-                Some((param, None)) => Some(*param),
-                _ => None,
-            },
+            returns_param: returned_params[f.qualname.as_str()].clone(),
             returned_import: returned_imports[f.qualname.as_str()].clone(),
             returns: None,
             state_of_self: false,
@@ -6770,15 +6763,15 @@ fn external_defines(kb: &EffectiveEcosystemKb, base: &str, name: &str) -> bool {
     special || builtin_method || kb.lookup(&format!("{base}.{name}")).is_some()
 }
 
-/// [`FunctionDecl::returns_param_attr`] (`Some(attr)`) and [`FunctionDecl::returns_param`]
-/// (`None`) of one definition: a function (not a generator or a coroutine, decorated by nothing
-/// but the decorators that return what the body returns on every call,
-/// [`decorators::keeps_returned_value`]: `property` and those that keep the call) whose every
-/// `return` returns the same positional parameter, or the same attribute of it, read directly
-/// or through local copies, and which stores or deletes no attribute of that name. A
+/// [`FunctionDecl::returns_param`] of one definition: a function (not a generator or a
+/// coroutine, decorated by nothing but the decorators that return what the body returns on
+/// every call, [`decorators::keeps_returned_value`]: `property` and those that keep the call)
+/// whose every `return` returns the same positional parameter, or the same attribute of it, read
+/// directly or through what hands a value back as itself (local copies, `typing.cast`,
+/// [`ownership::handed_back`]), and which stores or deletes no attribute of that name. A
 /// `cached_property` is none: a read after the first returns what the instance holds, which an
 /// assignment can replace.
-fn returned_param_part(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Option<String>)> {
+fn returned_param(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Option<String>)> {
     if f.kind != FunctionKind::Sync || !decorators::keeps_returned_value(&f.decorators, decls) {
         return None;
     }
@@ -6788,20 +6781,23 @@ fn returned_param_part(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Optio
         .flat_map(|b| &b.insts)
         .filter_map(|i| Some((i.kind.dst()?, &i.kind)))
         .collect();
-    // The variable each copy copies in the end, found once per variable: returns of copies of
-    // one value share the walk. Copies of an SSA variable form a tree, so the walk ends.
+    // The variable each value is handed back from in the end, found once per variable: returns
+    // of one value share the walk. Copies in dead code can close a cycle, where the walk ends.
     let mut roots: FxHashMap<VarId, VarId> = FxHashMap::default();
-    let mut copied_from = |var: VarId| {
+    let mut handed_back_from = |var: VarId| {
         let mut walked = Vec::new();
         let mut cur = var;
         let root = loop {
             if let Some(&root) = roots.get(&cur) {
                 break root;
             }
-            match defs.get(&cur) {
-                Some(InstKind::Copy { src, .. }) => {
+            match defs
+                .get(&cur)
+                .and_then(|kind| decl_same_object(kind, &defs, decls))
+            {
+                Some(src) if walked.len() <= defs.len() => {
                     walked.push(cur);
-                    cur = *src;
+                    cur = src;
                 }
                 _ => break cur,
             }
@@ -6811,33 +6807,69 @@ fn returned_param_part(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Optio
         }
         root
     };
+    let param_of = |var: VarId| {
+        let i = f
+            .params
+            .iter()
+            .position(|p| p.var == var && !p.is_vararg && !p.is_kwarg && !p.kw_only)?;
+        u8::try_from(i).ok()
+    };
     let mut returned = None;
     for bb in &f.blocks {
         let Terminator::Return(value) = &bb.terminator else {
             continue;
         };
-        let value = copied_from((*value)?);
-        let (holder, attr) = match defs.get(&value) {
-            Some(InstKind::AttrLoad { obj, attr, .. }) => (copied_from(*obj), Some(attr)),
-            _ => (value, None),
+        let root = handed_back_from((*value)?);
+        let this = match defs.get(&root) {
+            Some(InstKind::AttrLoad { obj, attr, .. }) => {
+                (param_of(handed_back_from(*obj))?, Some(attr.clone()))
+            }
+            _ => (param_of(root)?, None),
         };
-        let param = f
-            .params
-            .iter()
-            .position(|p| p.var == holder && !p.is_vararg && !p.is_kwarg && !p.kw_only)?;
-        let this = (u8::try_from(param).ok()?, attr.cloned());
         if returned.get_or_insert_with(|| this.clone()) != &this {
             return None;
         }
     }
     // A function storing or deleting the attribute (`items = self.items; self.items = [];
     // return items`) may return what the attribute held before: no longer the attribute.
-    let stores_it = |attr: &str| {
+    let stores = |attr: &str| {
         f.blocks.iter().flat_map(|b| &b.insts).any(|i| {
             matches!(&i.kind, InstKind::AttrStore { attr: a, .. } | InstKind::AttrDelete { attr: a, .. } if a == attr)
         })
     };
-    returned.filter(|(_, attr)| attr.as_deref().is_none_or(|a| !stores_it(a)))
+    returned.filter(|(_, attr)| attr.as_deref().is_none_or(|a| !stores(a)))
+}
+
+/// The value whose object the instruction `kind` of a function of the module `decls` describes
+/// gives as itself, as the declarations see it: a copy, or a call [`ownership::handed_back`]
+/// knows whose callee is an import of the module nothing rebinds (`cast(...)` after
+/// `from typing import cast`, `t.cast(...)` after `import typing as t`).
+fn decl_same_object(
+    kind: &InstKind,
+    defs: &FxHashMap<VarId, &InstKind>,
+    decls: &ModuleDecls,
+) -> Option<VarId> {
+    let imported = |var: &VarId| match defs.get(var) {
+        Some(InstKind::LoadGlobal { name, .. }) => decls.fixed_import(name),
+        _ => None,
+    };
+    match kind {
+        InstKind::Copy { src, .. } => Some(*src),
+        InstKind::Call {
+            callee_var: Some(c),
+            args,
+            star_from,
+            ..
+        } => ownership::handed_back(imported(c)?, args, *star_from),
+        InstKind::MethodCall {
+            recv,
+            method,
+            args,
+            star_from,
+            ..
+        } => ownership::handed_back(&format!("{}.{method}", imported(recv)?), args, *star_from),
+        _ => None,
+    }
 }
 
 /// [`ModuleDecls::unknown_globals`]: the globals the module stores or deletes (`stores`) that are

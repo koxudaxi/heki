@@ -1008,6 +1008,12 @@ pub struct EffectSummary {
     /// or a type test: the changes `MUT110` names. A local fact, never propagated.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub param_inplace_sites: BTreeMap<u8, BTreeSet<Span>>,
+    /// The `param_inplace_sites` of parameters annotated read-only
+    /// (`FunctionDecl::readonly_params`) where the changed value is one a call handed back as
+    /// itself (`cast(list, items).append(1)`): typed by that call, it is no type checker's
+    /// report (`MUT110`). A local fact, never propagated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retyped_param_changes: Option<Box<BTreeMap<u8, BTreeSet<Span>>>>,
     /// `param index -> slots`: the containers held in these slots of the argument itself
     /// (`p.a`, `p["k"]`) are changed in place (`p.a.append(...)`, `p["k"][i] = v`), also through
     /// local copies and calls. Rebinding a slot, `setattr`, and `__dict__` writes do not count,
@@ -1673,6 +1679,7 @@ impl EffectSummary {
             }
         }
         out.param_inplace_sites.clear();
+        out.retyped_param_changes = None;
         for w in &mut out.capacity_waits {
             w.hop.span = Span { start: 0, end: 0 };
         }
@@ -1737,6 +1744,7 @@ impl EffectSummary {
                 (!propagated.is_empty()).then(|| Arc::new(propagated))
             }),
             param_inplace_sites: BTreeMap::new(),
+            retyped_param_changes: None,
             iterations: s.iterations.as_ref().and_then(|f| f.propagated()),
             unresolved_write_sites: BTreeSet::new(),
             unresolved_access_sites: BTreeSet::new(),
@@ -1998,6 +2006,11 @@ pub struct ArgOrigin {
     pub implementers: Option<Implementers>,
     /// Caller parameters the argument may be, as itself (through copies and phis).
     pub may_params: u64,
+    /// The argument is a value a call handed back as itself (`typing.cast(T, p)`, a project
+    /// function returning its parameter): a type checker types it by that call, so it reports
+    /// no mismatch of the original's annotation at this call.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retyped: bool,
     /// The argument is an instance the caller constructs (`Model(...)`), or an attribute of one.
     pub fresh: bool,
     /// Where the argument comes from among the objects that existed before the call (`MUT208`;

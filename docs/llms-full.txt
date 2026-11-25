@@ -6808,8 +6808,9 @@ attribute, an item, or a global, returned, yielded, raised, or held by a display
 (`[decide]`, `{"a": decide}`), also through an import alias (`from pkg.core import decide as
 chosen`), a module alias (`run = core.decide`), or a module attribute (`core.decide`). A use that
 only names a class is no reference: an argument of `isinstance`, `issubclass`, another builtin that
-only inspects its arguments (`print`, `getattr`, `type`), `super`, `typing.cast`, `typing.TypeVar`,
-`typing.NewType`, or `contextlib.suppress`; an `except` clause, a class's bases and keywords, a
+only inspects its arguments (`print`, `getattr`, `type`), `super`, `typing.TypeVar`,
+`typing.NewType`, or `contextlib.suppress`, and the type a `typing.cast` names (the value it hands
+back is the value itself: `register(cast(Callable[[int], int], decide))` hands `decide` on); an `except` clause, a class's bases and keywords, a
 function's defaults and annotations; a subscript (`Optional[Rule]`), a comparison (`f is decide`), a
 receiver (`Rule.of(...)`), and a module binding another name to it. A callable a builtin calls once
 per item (`sorted(xs, key=decide)`, `map(decide, xs)`) is a call already, and so is the
@@ -10704,8 +10705,10 @@ Handing a `Sequence` / `Mapping` / `AbstractSet` / `ReadOnly` parameter, as itse
 Checks functions that hand a parameter annotated as a read-only container to code that changes
 it in place: a parameter annotated `Sequence[...]`, `Mapping[...]`, `AbstractSet[...]`
 (`typing.AbstractSet` or `collections.abc.Set`, not `typing.Set`, which is `set`), or
-`ReadOnly[...]` (also inside `Optional`, `| None`, `Annotated`, and quotes), passed as itself or
-through a local alias (`alias = items`) to a function that changes its argument in place
+`ReadOnly[...]` (also inside `Optional`, `| None`, `Annotated`, and quotes), passed as itself,
+through a local alias (`alias = items`), or through a call that hands it back as itself
+(`typing.cast(list[int], items)`, a project function returning its parameter on every path) to
+a function that changes its argument in place
 (`items.sort()`, `items.append(...)`, `table[key] = ...`, `tags.add(...)`), itself or through
 further helpers, any number of calls deep.
 
@@ -10717,13 +10720,16 @@ created and never iterated changes nothing.
 It does not report:
 
 - a change in the function itself (`items.append(1)`, `alias = items; alias.append(1)`): type
-  checkers report it on the read-only type;
+  checkers report it on the read-only type. A change through a value a call hands back as
+  itself is reported, at the change: `cast(list, items).append(1)` and
+  `same(items).append(1)` hide the read-only type from the type checker;
 - a container inside the argument (`values["a"].append(1)` with
   `values: Mapping[str, list[int]]`): only the argument itself counts;
 - a call that hands over a copy (`helper(list(items))`, `helper(dict(table))`,
   `helper(set(tags))`);
 - a helper parameter annotated with a mutable type (`list[int]`, `dict[str, int]`,
-  `set[int]`, `MutableSequence[int]`, `deque[int]`, ...): the type checker reports the argument;
+  `set[int]`, `MutableSequence[int]`, `deque[int]`, ...): the type checker reports the argument,
+  unless a call handed it back (`fill(cast(list[int], items))`), which the type checker accepts;
 - a helper parameter annotated read-only: that helper is checked in turn (its own handing over is
   reported, a change in its own body is a type error); a change reached only through such a
   helper, or through one whose parameter is annotated with a mutable type, further down the
@@ -10734,15 +10740,20 @@ It does not report:
 
 A report states that the function hands its parameter annotated `Sequence`, `Mapping`,
 `AbstractSet`, or `ReadOnly`, as itself, to a function, and that whenever the named line runs
-during that call, it changes the caller's object in place. It does not say that every call
+during that call, it changes the caller's object in place. A report at a change in the function
+itself states that the line changes the object bound to the parameter in place, through a value a
+call handed back as itself. It does not say that every call
 reaches the line: the change often sits under a test of the argument's type
 (`if isinstance(values, list):`), and the claim is anchored there.
 
 Its premises:
 
 - **Read-only parameter**: the parameter's annotation. Established.
-- **Passed as itself**: on every path to the call, the argument is the parameter or a local
-  alias of it, not a copy or another value. Established.
+- **Passed as itself**: on every path to the call (or to the change in the function itself),
+  the value is the parameter, a local alias of it, or what a call hands back of it as itself:
+  `typing.cast`, or a call binding only project functions that return that parameter on every
+  path. Not a copy or another value. Established. A function returning another call's result
+  (`return same(x)`) is open, and its call hands nothing back.
 - **Changed at the line**: the named line changes in place the object bound to the parameter of
   the function it is in, on every path to the line, a builtin container there (`list`, `dict`,
   `set`, `bytearray`, `deque`, ... by annotation, construction, or an `isinstance` test), and
@@ -12510,7 +12521,10 @@ is the receiver's class); a copy (`copy.copy`, `copy.deepcopy`, `dataclasses.rep
 wrapped function returns, and `typing.cast` names the class of its value, its type read as
 an annotation (`cast(list[Model], x)` as `cast("list[Model]", x)`): a cast to a subclass narrows
 a value known as its base, and a cast to `Any` or to a base class keeps the class the value is
-known to have, as an annotated local does. A variable rebound in a loop
+known to have, as an annotated local does. A cast hands back the object it is given, and so does
+a project function returning its parameter on every path (`def same(x): return x`, also
+`return cast(T, x)`): `cast(list[int], store.items).append(x)` and `same(store.items).append(x)`
+change `store.items`, as an alias does. A variable rebound in a loop
 (`node = node.parent`) or assigned on some paths only (a walrus inside `and` / `or`) has the
 classes of the values reaching it; a value of two or three classes (`Model | Node`, from an
 annotation or from different assignments) is each of them, and an `isinstance` check narrows it
