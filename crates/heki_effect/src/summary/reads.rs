@@ -363,7 +363,7 @@ impl<'a> Extractor<'a> {
         let offset = self.library_offset(call);
         let invoked = |j: usize| {
             u8::try_from(j).map_or(ReadKinds::ALL, |j| {
-                ReadKinds::of_library_call(self.cx.kb, symbol, Some(j))
+                ReadKinds::of_library_call(self.cx.kb, symbol, j)
             })
         };
         let mut held = None;
@@ -391,7 +391,7 @@ impl<'a> Extractor<'a> {
     /// The receiver of a call of the library method `symbol`: a method of a builtin container,
     /// of its `typing` alias, or of its ABCs (read as the builtin's) that does not change it
     /// either reads it or gives a view of it; any other method is what Layer 1 lists for its
-    /// first parameter.
+    /// first parameter, read in every kind.
     fn receiver_handling(&self, symbol: &str, dst: VarId) -> Handling {
         let container_method = symbol
             .rsplit_once('.')
@@ -405,9 +405,7 @@ impl<'a> Extractor<'a> {
             Some(m) if result_detached_from_container(m) => {
                 Handling::Reads(ReadKinds::of_method(m, true))
             }
-            _ => self.layer1(symbol, 0, dst, || {
-                ReadKinds::of_library_call(self.cx.kb, symbol, None)
-            }),
+            _ => self.layer1(symbol, 0, dst, || ReadKinds::ALL),
         }
     }
 

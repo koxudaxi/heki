@@ -543,38 +543,127 @@ impl ContainerFamily {
     pub const TABLE: &[Self] = {
         use ContainerKind::{Dict, List, Set};
         use FamilyRole::{Builtin, Derived, Mutable, ReadOnly};
-        const fn row(
-            class: &'static str,
-            kind: ContainerKind,
-            role: FamilyRole,
-        ) -> ContainerFamily {
-            ContainerFamily { class, kind, role }
-        }
         &[
-            row("builtins.list", List, Builtin),
-            row("builtins.dict", Dict, Builtin),
-            row("builtins.set", Set, Builtin),
-            row("typing.List", List, Builtin),
-            row("typing.Dict", Dict, Builtin),
-            row("typing.Set", Set, Builtin),
-            row("collections.OrderedDict", Dict, Derived),
-            row("collections.defaultdict", Dict, Derived),
-            row("collections.Counter", Dict, Derived),
-            row("typing.OrderedDict", Dict, Derived),
-            row("typing.DefaultDict", Dict, Derived),
-            row("typing.Counter", Dict, Derived),
-            row("typing.Sequence", List, ReadOnly),
-            row("typing.Mapping", Dict, ReadOnly),
-            row("typing.AbstractSet", Set, ReadOnly),
-            row("collections.abc.Sequence", List, ReadOnly),
-            row("collections.abc.Mapping", Dict, ReadOnly),
-            row("collections.abc.Set", Set, ReadOnly),
-            row("typing.MutableSequence", List, Mutable),
-            row("typing.MutableMapping", Dict, Mutable),
-            row("typing.MutableSet", Set, Mutable),
-            row("collections.abc.MutableSequence", List, Mutable),
-            row("collections.abc.MutableMapping", Dict, Mutable),
-            row("collections.abc.MutableSet", Set, Mutable),
+            ContainerFamily {
+                class: "builtins.list",
+                kind: List,
+                role: Builtin,
+            },
+            ContainerFamily {
+                class: "builtins.dict",
+                kind: Dict,
+                role: Builtin,
+            },
+            ContainerFamily {
+                class: "builtins.set",
+                kind: Set,
+                role: Builtin,
+            },
+            ContainerFamily {
+                class: "typing.List",
+                kind: List,
+                role: Builtin,
+            },
+            ContainerFamily {
+                class: "typing.Dict",
+                kind: Dict,
+                role: Builtin,
+            },
+            ContainerFamily {
+                class: "typing.Set",
+                kind: Set,
+                role: Builtin,
+            },
+            ContainerFamily {
+                class: "collections.OrderedDict",
+                kind: Dict,
+                role: Derived,
+            },
+            ContainerFamily {
+                class: "collections.defaultdict",
+                kind: Dict,
+                role: Derived,
+            },
+            ContainerFamily {
+                class: "collections.Counter",
+                kind: Dict,
+                role: Derived,
+            },
+            ContainerFamily {
+                class: "typing.OrderedDict",
+                kind: Dict,
+                role: Derived,
+            },
+            ContainerFamily {
+                class: "typing.DefaultDict",
+                kind: Dict,
+                role: Derived,
+            },
+            ContainerFamily {
+                class: "typing.Counter",
+                kind: Dict,
+                role: Derived,
+            },
+            ContainerFamily {
+                class: "typing.Sequence",
+                kind: List,
+                role: ReadOnly,
+            },
+            ContainerFamily {
+                class: "typing.Mapping",
+                kind: Dict,
+                role: ReadOnly,
+            },
+            ContainerFamily {
+                class: "typing.AbstractSet",
+                kind: Set,
+                role: ReadOnly,
+            },
+            ContainerFamily {
+                class: "collections.abc.Sequence",
+                kind: List,
+                role: ReadOnly,
+            },
+            ContainerFamily {
+                class: "collections.abc.Mapping",
+                kind: Dict,
+                role: ReadOnly,
+            },
+            ContainerFamily {
+                class: "collections.abc.Set",
+                kind: Set,
+                role: ReadOnly,
+            },
+            ContainerFamily {
+                class: "typing.MutableSequence",
+                kind: List,
+                role: Mutable,
+            },
+            ContainerFamily {
+                class: "typing.MutableMapping",
+                kind: Dict,
+                role: Mutable,
+            },
+            ContainerFamily {
+                class: "typing.MutableSet",
+                kind: Set,
+                role: Mutable,
+            },
+            ContainerFamily {
+                class: "collections.abc.MutableSequence",
+                kind: List,
+                role: Mutable,
+            },
+            ContainerFamily {
+                class: "collections.abc.MutableMapping",
+                kind: Dict,
+                role: Mutable,
+            },
+            ContainerFamily {
+                class: "collections.abc.MutableSet",
+                kind: Set,
+                role: Mutable,
+            },
         ]
     };
 

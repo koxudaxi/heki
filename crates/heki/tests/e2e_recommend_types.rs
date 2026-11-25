@@ -1322,6 +1322,42 @@ fn a_read_only_abc_method_reads_as_the_builtins() {
     );
 }
 
+/// Reads that name no kind: a method the builtin does not have, and a library call with no
+/// `[[invokes]]` entry; and `**` into a project function.
+const UNLISTED_READS: &str = r#"from collections.abc import Mapping, Sequence
+
+
+def finds(rows: Sequence[int]) -> int:
+    return rows.find(0)
+
+
+def to_bytes(rows: Sequence[int]) -> bytes:
+    return bytes(rows)
+
+
+def target(a: int = 0, **rest: int) -> int:
+    return a
+
+
+def unpacks(table: Mapping[str, int]) -> int:
+    return target(**table)
+"#;
+
+#[test]
+fn a_read_no_kind_names_reads_every_kind_and_a_mapping_unpack_reads_items() {
+    let p = Project::new("recommend_types_unlisted_reads");
+    p.write("app/__init__.py", "")
+        .write("app/reads.py", UNLISTED_READS);
+    let every = reads_of(&p, "app.reads.finds")["rows"].len();
+    assert!(every > 20, "{every}");
+    assert_eq!(reads_of(&p, "app.reads.to_bytes")["rows"].len(), every);
+    let strs = |names: &[&str]| -> Vec<String> { names.iter().map(|n| (*n).to_owned()).collect() };
+    assert_eq!(
+        reads_of(&p, "app.reads.unpacks")["table"],
+        strs(&["item access", "iteration", "a method by name", "keys"])
+    );
+}
+
 /// Reads of a `dict` parameter, here and in an unannotated callee.
 const DICT_READS: &str = r#"def item(m: dict[str, int]) -> int:
     return m["a"]

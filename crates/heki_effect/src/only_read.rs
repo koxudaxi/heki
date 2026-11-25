@@ -225,20 +225,12 @@ impl ReadKinds {
     }
 
     /// The kinds of read of an argument the library call `symbol` only reads: what its
-    /// `[[invokes]]` entry names for the argument at `position` (`None`: the receiver), every
-    /// kind without an entry.
-    pub(crate) fn of_library_call(
-        kb: &EffectiveEcosystemKb,
-        symbol: &str,
-        position: Option<u8>,
-    ) -> Self {
+    /// `[[invokes]]` entry names for the argument at `position`, every kind without an entry.
+    pub(crate) fn of_library_call(kb: &EffectiveEcosystemKb, symbol: &str, position: u8) -> Self {
         let Some(entry) = kb.invoked(symbol) else {
             return Self::ALL;
         };
-        let named = (entry.values.iter()).filter(|v| match position {
-            Some(j) => v.names(Some(j), None),
-            None => v.receiver,
-        });
+        let named = (entry.values.iter()).filter(|v| v.names(Some(position), None));
         // `"*"` (an attribute the call is handed the name of) and calling the value are no kind:
         // every one.
         let mut kinds = Self::NONE;
