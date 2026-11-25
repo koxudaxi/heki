@@ -2269,13 +2269,13 @@ impl<'a, 'c> Rules<'a, 'c> {
             }
             InstKind::Call {
                 callee_var, callee, ..
-            } if outer => match cx
-                .builtin_callee(*callee_var, callee)
-                .and_then(|n| cx.kb.lookup(&format!("builtins.{n}")))
-            {
-                Some(e) if e.param_effects.iter().all(reads_only) => None,
-                _ => Some(format!("`{callee}(...)` may have side effects")),
-            },
+            } if outer => {
+                let reads = cx
+                    .builtin_callee(*callee_var, callee)
+                    .and_then(|n| cx.kb.lookup(&format!("builtins.{n}")))
+                    .is_some_and(|e| e.param_effects.iter().all(reads_only));
+                (!reads).then(|| format!("`{callee}(...)` may have side effects"))
+            }
             // Even a builtin may raise for its argument (`int("x")`, `range(0.5)`) or run user
             // code through it (`map(repr, objs)`), which hoisting would do although the loop
             // runs zero times.

@@ -600,7 +600,7 @@ def top():
 
 fn reanalyze(index: &mut ProjectIndex, rel: &str, src: &str) -> IncrementalUpdate {
     let b = build(rel, src);
-    index.reanalyze_module(&input(&b), &kb())
+    index.reanalyze_module(&input(&b), &kb(), None)
 }
 
 /// The import graph changes with a file's import sites, not with where they are written: an
@@ -1452,6 +1452,31 @@ fn non_converged_sccs_are_marked_unknown() {
     }
 }
 
+/// A cycle of `n` functions handing their list on: none changes or keeps it, so the greatest
+/// fixpoint establishes that each only reads it, until the cycle passes its iteration budget.
+#[test]
+fn a_cycle_past_its_iteration_budget_establishes_no_only_read_parameter() {
+    let mut src = String::new();
+    for i in 0..24 {
+        src.push_str(&format!(
+            "def f{i}(xs: list[int], n: int) -> int:\n    return f{}(xs, n - 1) if n else xs[0]\n\n",
+            (i + 1) % 24
+        ));
+    }
+    let mut index = project(&[("ring.py", &src)]);
+    for i in 0..24 {
+        let s = summary(&index, "ring", &format!("f{i}"));
+        assert_eq!(s.only_read_containers(), 1, "f{i}");
+    }
+    let all: FxHashSet<FuncKey> = index.all_functions().collect();
+    crate::callgraph::reset_to_local(&mut index, &all);
+    crate::callgraph::propagate_with_budget(&mut index, &all, 1);
+    for i in 0..24 {
+        let s = summary(&index, "ring", &format!("f{i}"));
+        assert_eq!(s.only_read_params, 0, "f{i}");
+    }
+}
+
 #[test]
 fn callers_left_without_a_defining_file_are_skipped() {
     // Two `.py` files share one module name: `b_alt.py` defines `b.caller`, and the call edges
@@ -1657,7 +1682,7 @@ fn py_implementation_takes_precedence_over_sibling_pyi_stub() {
         semantic: &stub_sem,
         ir: &stub_ir,
     };
-    let (_upd, decls_changed) = index.reanalyze_module_cached(&stub_input, &kb, &mut decls);
+    let (_upd, decls_changed) = index.reanalyze_module_cached(&stub_input, &kb, None, &mut decls);
     assert!(decls_changed.is_empty());
     assert_eq!(
         index.file_of(&key("pkg.util", "helper")),

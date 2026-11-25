@@ -1013,6 +1013,7 @@ impl Project {
             &inputs,
             &self.unread,
             &self.env.kb,
+            Some(&self.env.soundness_kb),
             facts.contracts,
             facts.typed_writes,
             facts.opt_in,

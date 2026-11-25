@@ -149,6 +149,19 @@ pub fn render_text(r: &InspectReport) -> String {
         None => "what it keeps is not computed (needs an ownership contract)".to_owned(),
     };
     let _ = writeln!(out, "retains   {stored}; {kept}");
+    let reads = &r.only_reads;
+    if !reads.containers.is_empty() {
+        let others: Vec<&str> = (reads.containers.iter())
+            .filter(|p| !reads.params.contains(p))
+            .map(String::as_str)
+            .collect();
+        let only = match (reads.params.is_empty(), others.is_empty()) {
+            (true, _) => format!("none of {}", others.join(", ")),
+            (false, true) => reads.params.join(", "),
+            (false, false) => format!("{} (not {})", reads.params.join(", "), others.join(", ")),
+        };
+        let _ = writeln!(out, "only reads {only}");
+    }
     let ret = &r.returns;
     let origins = match &ret.origins {
         None => "a constant or a value of unknown origin".to_owned(),

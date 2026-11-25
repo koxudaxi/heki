@@ -903,6 +903,21 @@ EffectSummary(f) = {
     unmet_invalidation:       Set<UnmetWrite>,             // target writes, own or passed up by private
                                                            // helpers, some normal path leaves unannounced
     retains_params:           Bitset,                      // parameters the function keeps (stores, returns)
+    only_read_params:         Bitset,                      // OptInFacts::only_read (heki inspect, the language
+                                                           // server): no value that may be parameter i's object,
+                                                           // or a view of it, is stored, captured, yielded,
+                                                           // returned, or handed to a call other than a project
+                                                           // call binding it to a parameter that only reads it,
+                                                           // a Layer 1 argument read_only / retained_in_return,
+                                                           // or a cast handing it back (ownership::handed_back);
+                                                           // greatest fixpoint in a call cycle, 0 past its pass
+                                                           // limit; changes of the object itself are
+                                                           // mutated_param_paths' (only_read_mask joins them)
+    container_params:         Option<Box<ContainerParams>>,// parameters annotated list / dict / set (or a typing
+                                                           // or mutable abstract form): whether the read-only
+                                                           // type allows every own use (abstract_use) and the
+                                                           // name is bound once but `if p is None: p = []`
+                                                           // (bound_once); local
     returns_new:              bool,                        // returns an object it constructs, nothing else
                                                            // holding it (fresh-objects); with the
                                                            // parameters some returns give an element of
@@ -2738,7 +2753,9 @@ No advisory `effects` field at all: an entry has only `symbol`, `return_exact_ty
 `self`), and `verified_max_python`. Entries whose `verified_max_python` is older than the target
 version become `Unknown` when the knowledge base is projected at start-up. `#[serde(
 deny_unknown_fields)]` rejects a Layer 2 field written into a Layer 1 file and the other way
-round; `tests/sentinel/verify_soundness_kb.py` checks every claim on real CPython.
+round; `tests/sentinel/verify_soundness_kb.py` checks every claim on real CPython. The Advisory
+lane reads `read_only` and `retained_in_return` too, for the arguments a library call only reads
+(`EffectSummary::only_read_params`); it adds no fact to Layer 1.
 
 ### 4.2 Layer 2 (`kb/ecosystem/*.toml`: public standard-library APIs and major packages)
 The single place for every execution-effect origin. An entry has `symbol`, `effects`

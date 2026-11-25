@@ -381,6 +381,50 @@ impl ContainerKind {
         }
     }
 
+    /// The methods of the read-only type of a container of this kind (`Sequence` for the
+    /// sequences, `Mapping`, `AbstractSet`): a value annotated with that type has only these.
+    pub fn read_only_methods(self) -> &'static [&'static str] {
+        match self {
+            Self::List | Self::Bytearray | Self::Deque => &[
+                "index",
+                "count",
+                "__getitem__",
+                "__len__",
+                "__contains__",
+                "__iter__",
+                "__reversed__",
+            ],
+            Self::Dict => &[
+                "get",
+                "keys",
+                "items",
+                "values",
+                "__getitem__",
+                "__len__",
+                "__contains__",
+                "__iter__",
+                "__eq__",
+                "__ne__",
+            ],
+            Self::Set => &[
+                "isdisjoint",
+                "__contains__",
+                "__len__",
+                "__iter__",
+                "__le__",
+                "__lt__",
+                "__ge__",
+                "__gt__",
+                "__eq__",
+                "__ne__",
+                "__and__",
+                "__or__",
+                "__sub__",
+                "__xor__",
+            ],
+        }
+    }
+
     /// Whether the changing method `method` returns a value the call is for (`pop`), not
     /// `None`.
     pub fn returns_value(method: &str) -> bool {

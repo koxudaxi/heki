@@ -194,7 +194,9 @@ first, then a convention the code follows, then a contract.
   or Layer 2 packages, with a cache keyed by `effective_kb_digest` and `env_packages_digest`),
   projected once at start-up.
 - **Status**: Layers 1 and 2 are implemented; Layer 3 and its cache are planned. Until then,
-  functions outside the checked files that Layer 2 does not list have no known effects.
+  functions outside the checked files that Layer 2 does not list have no known effects. The
+  Advisory lane reads Layer 1's `read_only` and `retained_in_return` entries for the parameters
+  a function only reads; Layer 1 still holds no effect.
 
 <a id="adr-006"></a>
 ### ADR-006: Embedded Datalog (`ascent`) is rejected in favor of a dedicated engine

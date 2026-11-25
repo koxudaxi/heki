@@ -340,6 +340,7 @@ pub struct InspectReport {
     pub effects: Vec<EffectInfo>,
     pub changes: Changes,
     pub retains: Retains,
+    pub only_reads: OnlyReads,
     pub returns: Returns,
     pub callers: CallersInfo,
     pub reports: Vec<Report>,
@@ -489,6 +490,23 @@ pub struct Retains {
     pub stored: Vec<String>,
     pub kept: Option<Vec<String>>,
     pub kept_needs: Option<&'static str>,
+}
+
+/// The parameters annotated with a mutable container (`list`, `dict`, `set`, their `typing`
+/// forms, `MutableSequence`, `MutableMapping`, `MutableSet`), and what the function does with
+/// them (`heki_effect::ContainerParams`).
+#[derive(Debug, Clone, Serialize)]
+pub struct OnlyReads {
+    pub containers: Vec<String>,
+    /// Those the function only reads: it and every function it hands one to neither change it
+    /// in place nor keep it (store, capture, yield, or return it), and every call it is handed
+    /// to resolves to such a function or to a library call Layer 1 lists as reading it.
+    pub params: Vec<String>,
+    /// Those whose every use in the function's own body the read-only type (`Sequence`,
+    /// `Mapping`, `AbstractSet`) allows.
+    pub read_only_uses: Vec<String>,
+    /// Those whose name the function binds once (`if p is None: p = []` aside).
+    pub bound_once: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -798,6 +816,17 @@ impl<'a, 'i> Inspector<'a, 'i> {
                 .then(|| param_names(summary.retains_params, &params)),
             kept_needs: (!inputs.ownership).then_some(OWNERSHIP_NEEDS),
         };
+        let containers = summary
+            .container_params
+            .as_deref()
+            .cloned()
+            .unwrap_or_default();
+        let only_reads = OnlyReads {
+            containers: param_names(containers.annotated, &params),
+            params: param_names(summary.only_read_containers(), &params),
+            read_only_uses: param_names(containers.abstract_use, &params),
+            bound_once: param_names(containers.bound_once, &params),
+        };
         let returns = returns(b, summary, &params);
         let callers = callers(b, key, query);
         let reports = reports(b, key, path, query, &callers);
@@ -817,6 +846,7 @@ impl<'a, 'i> Inspector<'a, 'i> {
             effects,
             changes,
             retains,
+            only_reads,
             returns,
             callers: callers.info,
             reports,

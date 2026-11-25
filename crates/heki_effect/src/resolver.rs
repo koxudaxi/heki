@@ -16,6 +16,7 @@
 use crate::capacity::CapacityOf;
 use crate::decorators;
 use crate::ownership;
+use crate::readonly::ContainerKind;
 use crate::types::{Added, Args, Elem, Generic, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
@@ -26,8 +27,8 @@ use heki_ir::{
     InstKind, IrFunction, LastBindings, ModuleIr, SmallDisplay, Terminator, VarId,
 };
 use heki_kb::{
-    ArgFact, CopyDepth, EcosystemEntry, EffectiveEcosystemKb, ExecEffectKind, FieldItems,
-    LiteralValue,
+    ArgFact, CopyDepth, EcosystemEntry, EffectiveEcosystemKb, EffectiveSoundnessKb, ExecEffectKind,
+    FieldItems, LiteralValue,
 };
 use heki_semantic::{ClassInfo, ModuleImport, ScopeKind, SemanticModel, StarImport, mangling};
 use rayon::prelude::*;
@@ -1725,20 +1726,82 @@ pub(crate) fn param_access(
     text: &str,
     resolve: &impl Fn(&str) -> Option<String>,
 ) -> Option<ParamAccess> {
-    const MUTABLE_NAMES: &[&str] = &[
-        "List",
-        "Dict",
-        "Set",
-        "DefaultDict",
-        "OrderedDict",
-        "Counter",
-        "Deque",
-        "MutableSequence",
-        "MutableMapping",
-        "MutableSet",
-        "deque",
-        "defaultdict",
-    ];
+    match annotated_head(text, resolve)? {
+        AnnotatedHead::ReadOnly => Some(ParamAccess::ReadOnly),
+        AnnotatedHead::Resolved(fqn) if READONLY_TYPES.contains(&fqn.as_str()) => {
+            Some(ParamAccess::ReadOnly)
+        }
+        AnnotatedHead::Resolved(fqn) => MUTABLE_TYPES
+            .contains(&fqn.as_str())
+            .then_some(ParamAccess::Mutable),
+        AnnotatedHead::Unresolved(last) => MUTABLE_NAMES
+            .contains(&last)
+            .then_some(ParamAccess::Mutable),
+    }
+}
+
+/// The builtin list, dict, or set a parameter annotation names, among the mutable container
+/// types of [`param_access`]: `list`, `dict`, `set`, their `typing` aliases, and the mutable
+/// abstract types (`MutableSequence`, `MutableMapping`, `MutableSet`), whose read-only types are
+/// `Sequence`, `Mapping`, and `AbstractSet`. `None` for every other annotation.
+pub(crate) fn mutable_container(
+    text: &str,
+    resolve: &impl Fn(&str) -> Option<String>,
+) -> Option<ContainerKind> {
+    let name = match annotated_head(text, resolve)? {
+        AnnotatedHead::ReadOnly => return None,
+        AnnotatedHead::Resolved(fqn) => match fqn.as_str() {
+            "builtins.list" | "typing.List" => "list",
+            "builtins.dict" | "typing.Dict" => "dict",
+            "builtins.set" | "typing.Set" => "set",
+            "typing.MutableSequence" | "collections.abc.MutableSequence" => "MutableSequence",
+            "typing.MutableMapping" | "collections.abc.MutableMapping" => "MutableMapping",
+            "typing.MutableSet" | "collections.abc.MutableSet" => "MutableSet",
+            _ => return None,
+        },
+        AnnotatedHead::Unresolved(last) if MUTABLE_NAMES.contains(&last) => last,
+        AnnotatedHead::Unresolved(_) => return None,
+    };
+    match name {
+        "list" | "List" | "MutableSequence" => Some(ContainerKind::List),
+        "dict" | "Dict" | "MutableMapping" => Some(ContainerKind::Dict),
+        "set" | "Set" | "MutableSet" => Some(ContainerKind::Set),
+        _ => None,
+    }
+}
+
+/// The names [`param_access`] reads as mutable containers when they do not resolve.
+const MUTABLE_NAMES: &[&str] = &[
+    "List",
+    "Dict",
+    "Set",
+    "DefaultDict",
+    "OrderedDict",
+    "Counter",
+    "Deque",
+    "MutableSequence",
+    "MutableMapping",
+    "MutableSet",
+    "deque",
+    "defaultdict",
+];
+
+/// The type a parameter annotation names, as [`param_access`] reads it.
+enum AnnotatedHead<'t> {
+    /// `ReadOnly[...]`.
+    ReadOnly,
+    /// The resolved name of the type.
+    Resolved(String),
+    /// The last component of a name that does not resolve.
+    Unresolved(&'t str),
+}
+
+/// The type the annotation `text` names after `Optional[T]`, `T | None`, `Union[T, None]`,
+/// `Annotated[T, ...]`, and quotes; `None` for a union of several types.
+fn annotated_head<'t>(
+    text: &'t str,
+    resolve: &impl Fn(&str) -> Option<String>,
+) -> Option<AnnotatedHead<'t>> {
     let mut t = text;
     loop {
         let u = unquote(t);
@@ -1751,9 +1814,7 @@ pub(crate) fn param_access(
         let (head, args) = head_and_args(u);
         let Some(fqn) = resolve(head) else {
             let last = head.rsplit('.').next().unwrap_or(head);
-            return MUTABLE_NAMES
-                .contains(&last)
-                .then_some(ParamAccess::Mutable);
+            return Some(AnnotatedHead::Unresolved(last));
         };
         let wrapper = fqn
             .strip_prefix("typing.")
@@ -1765,13 +1826,8 @@ pub(crate) fn param_access(
                 members.retain(|p| *p != "None");
                 t = single(&members)?;
             }
-            (Some("ReadOnly"), _) => return Some(ParamAccess::ReadOnly),
-            _ if READONLY_TYPES.contains(&fqn.as_str()) => return Some(ParamAccess::ReadOnly),
-            _ => {
-                return MUTABLE_TYPES
-                    .contains(&fqn.as_str())
-                    .then_some(ParamAccess::Mutable);
-            }
+            (Some("ReadOnly"), _) => return Some(AnnotatedHead::ReadOnly),
+            _ => return Some(AnnotatedHead::Resolved(fqn)),
         }
     }
 }
@@ -8800,6 +8856,9 @@ pub struct TypeCtx<'a> {
     pub project: &'a ProjectDecls,
     pub module: &'a ModuleDecls,
     pub kb: &'a EffectiveEcosystemKb,
+    /// Layer 1, which lists the library calls that only read an argument
+    /// (`EffectSummary::only_read_params`); `None` reads none as only reading.
+    pub layer1: Option<&'a EffectiveSoundnessKb>,
     module_name: String,
     ir: &'a ModuleIr,
     /// `Import` instruction span -> bound fqn (relative imports resolved).
@@ -8907,6 +8966,7 @@ impl<'a> TypeCtx<'a> {
             project,
             module: project.module(&input.module_name).unwrap_or(&EMPTY_DECLS),
             kb,
+            layer1: None,
             module_name: input.module_name.clone(),
             ir: input.ir,
             import_by_span,
@@ -8916,6 +8976,11 @@ impl<'a> TypeCtx<'a> {
             taken: RefCell::default(),
             store_reads: None,
         }
+    }
+
+    /// The context reading `layer1` for the library calls that only read an argument.
+    pub fn with_layer1(self, layer1: Option<&'a EffectiveSoundnessKb>) -> Self {
+        Self { layer1, ..self }
     }
 
     /// The module's bindings ([`heki_ir::ModuleBindings`]).

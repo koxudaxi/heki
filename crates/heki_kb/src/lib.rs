@@ -95,7 +95,8 @@ impl Explain for KbError {
     }
 }
 
-/// Layer 1 parameter effect (Soundness lane ONLY — no advisory I/O effects).
+/// Layer 1 parameter effect (no advisory I/O effects): the Soundness lane's specification, which
+/// the Advisory lane also reads for the arguments a call only reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SoundnessParamEffect {
@@ -1470,6 +1471,13 @@ mod tests {
         ("builtins.str", None, &[ReadOnly]),
         ("builtins.bytes", None, &[ReadOnly]),
         ("builtins.range", None, &[ReadOnly]),
+        ("builtins.sorted", None, &[ReadOnly]),
+        ("builtins.any", None, &[ReadOnly]),
+        ("builtins.all", None, &[ReadOnly]),
+        ("builtins.frozenset", None, &[ReadOnly]),
+        ("builtins.sum", None, &[ReadOnly, RetainedInReturn]),
+        ("builtins.min", None, &[RetainedInReturn]),
+        ("builtins.max", None, &[RetainedInReturn]),
         ("builtins.list", Some("list"), &[ReadOnly]),
         ("builtins.set", Some("set"), &[ReadOnly]),
         ("builtins.dict", Some("dict"), &[ReadOnly]),
@@ -1517,7 +1525,7 @@ mod tests {
             assert_eq!(kb.lookup(symbol), Some(&expected), "{symbol}");
         }
         assert_eq!(kb.entries.len(), LAYER1_REQUIRED.len());
-        assert_eq!(kb.lookup("builtins.sorted"), None);
+        assert_eq!(kb.lookup("builtins.print"), None);
         assert_eq!(kb.digest.len(), 64);
     }
 

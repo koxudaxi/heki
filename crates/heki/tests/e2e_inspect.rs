@@ -2231,3 +2231,792 @@ fn class_attribute_writes_name_how_they_write() {
         assert_eq!(kinds, [kind], "{symbol}");
     }
 }
+
+// =========================================================== parameters a function only reads
+
+/// Premises 1 to 3 of a parameter annotated with a mutable container: the function, and every
+/// function it hands the object to, neither changes it nor keeps it, and every call it is handed
+/// to resolves to such a function or to a library call Layer 1 lists as reading it.
+const ONLY_READ: &str = r#"from typing import Protocol
+
+STORE = []
+
+
+class Box:
+    def __init__(self, items: list[int]) -> None:
+        self.items = items
+
+    def total(self, xs: list[int]) -> int:
+        return self.size(xs)
+
+    def size(self, xs):
+        return len(xs)
+
+
+class Reader(Protocol):
+    def read(self, xs: list[int]) -> int: ...
+
+
+def appends(xs: list[int]) -> None:
+    xs.append(1)
+
+
+def appends_to_alias(xs: list[int]) -> None:
+    ys = xs
+    ys.append(1)
+
+
+def appends_before_aliasing(xs: list[int]) -> int:
+    xs.append(1)
+    ys = xs
+    return len(ys)
+
+
+def appends_to_join(xs: list[int], flag: bool) -> None:
+    ys = xs if flag else []
+    ys.append(1)
+
+
+def stores_item(xs: list[int]) -> None:
+    xs[0] = 1
+
+
+def deletes_item(xs: list[int]) -> None:
+    del xs[0]
+
+
+def deletes_key(xs: list[int], table: dict) -> None:
+    del table[xs]
+
+
+def extends_in_place(xs: list[int]) -> None:
+    xs += [1]
+
+
+def unknown_method(xs: list[int]) -> list[int]:
+    return xs.__mul__(2)
+
+
+def added_to_object(xs: list[int], box: Box) -> object:
+    return box + xs
+
+
+def compared_with_object(xs: list[int], box: Box) -> bool:
+    return box == xs
+
+
+def key_of_object(xs: list[int], box: Box) -> object:
+    return box[xs]
+
+
+def in_object(xs: list[int], box: Box) -> bool:
+    return xs in box
+
+
+def added_to_either(xs: list[int], box: Box | Reader) -> object:
+    return box + xs
+
+
+def stores_attribute(xs: list[int], box: Box) -> None:
+    box.items = xs
+
+
+def stores_global(xs: list[int]) -> None:
+    global STORE
+    STORE = xs
+
+
+def stores_value(xs: list[int], table: dict) -> None:
+    table["k"] = xs
+
+
+def in_display(xs: list[int]) -> int:
+    return len([xs])
+
+
+def in_dict(xs: list[int]) -> int:
+    return len({"k": xs})
+
+
+def unpacked(xs: list[int], d: dict[str, int]) -> int:
+    return len([*xs]) + len({**d}) + len(dict(**d))
+
+
+def captures(xs: list[int]):
+    def inner():
+        return len(xs)
+
+    return inner
+
+
+def captures_in_lambda(xs: list[int], keys: list[int]) -> list[int]:
+    return sorted(keys, key=lambda k: xs.index(k))
+
+
+def captures_in_class(xs: list[int]):
+    class Holder:
+        items = xs
+
+    return Holder
+
+
+def tests_in_genexp(xs: list[int], keys: list[int]) -> bool:
+    return any(k in xs for k in keys)
+
+
+def genexp_of_alias(xs: list[int], keys: list[int]) -> bool:
+    ys = xs
+    return any(k in ys for k in keys)
+
+
+def yields(xs: list[int]):
+    yield xs
+
+
+def yields_from(xs: list[int]):
+    yield from xs
+
+
+def returns(xs: list[int]) -> list[int]:
+    return xs
+
+
+def returns_view(d: dict[str, int]):
+    return d.keys()
+
+
+def returns_max(xs: list[int]) -> int:
+    return max(xs)
+
+
+def reads(xs: list[int], d: dict[str, int], s: set[int]) -> int:
+    n = len(xs) + sum(xs) + min(d.values()) + max(*xs)
+    if xs and 1 in s and "k" in d:
+        n += xs[0] + d["k"] + xs.count(1) + d.get("k", 0)
+    for i, x in enumerate(xs):
+        n += i + x
+    acc = []
+    acc.extend(xs)
+    return n + sorted(s)[0] + len(frozenset(s)) + any(xs) + all(d) + len(acc)
+
+
+def calls_unresolved(xs: list[int], g) -> None:
+    g(xs)
+
+
+def prints(xs: list[int]) -> None:
+    print(xs)
+
+
+def calls_itself(xs: list[int]) -> None:
+    xs()
+
+
+def keyword_to_library(xs: list[int]) -> int:
+    return len(dict(items=xs))
+
+
+def after_unpacking(xs: list[int], ys: list[int]) -> int:
+    return max(*ys, xs)
+
+
+def removed_from(xs: list[int], other: list[list[int]]) -> None:
+    other.remove(xs)
+
+
+def constructs(xs: list[int]) -> Box:
+    return Box(xs)
+
+
+def variadic(*args):
+    return len(args)
+
+
+def to_variadic(xs: list[int]) -> int:
+    return variadic(xs)
+
+
+def unpacked_to_variadic(xs: list[int]) -> int:
+    return variadic(*xs)
+
+
+def after_unpacking_to_variadic(xs: list[int], ys: list[int]) -> int:
+    return variadic(*ys, xs)
+
+
+def reader(ys):
+    return len(ys)
+
+
+def keeper(ys):
+    STORE.append(ys)
+
+
+def to_reader(xs: list[int]) -> int:
+    return reader(xs)
+
+
+def to_reader_by_keyword(xs: list[int]) -> int:
+    return reader(ys=xs)
+
+
+def to_keeper(xs: list[int]) -> None:
+    keeper(xs)
+
+
+def to_changer(xs: list[int]) -> None:
+    appends(xs)
+
+
+def view_to_reader(xs: list[int]) -> int:
+    return reader(enumerate(xs))
+
+
+def through_method(xs: list[int], box: Box) -> int:
+    return box.total(xs)
+
+
+def through_protocol(xs: list[int], r: Reader) -> int:
+    return r.read(xs)
+
+
+def iterates_generator(xs: list[int]) -> int:
+    n = 0
+    for x in yields_from(xs):
+        n += x
+    return n
+
+
+def returns_generator(xs: list[int]):
+    return yields_from(xs)
+
+
+async def counts(ys):
+    return len(ys)
+
+
+async def awaits(xs: list[int]) -> int:
+    return await counts(xs)
+
+
+async def creates_coroutine(xs: list[int]):
+    return counts(xs)
+
+
+def ping(xs: list[int], n: int) -> int:
+    return pong(xs, n - 1) if n else len(xs)
+
+
+def pong(xs: list[int], n: int) -> int:
+    return ping(xs, n)
+
+
+def tick(xs: list[int], n: int) -> int:
+    return tock(xs, n - 1) if n else len(xs)
+
+
+def tock(xs: list[int], n: int) -> int:
+    if n == 3:
+        xs.append(n)
+    return tick(xs, n)
+
+
+def evaluates(xs: list[int]) -> None:
+    eval("xs")
+
+
+if STORE:
+    def twice(xs: list[int]) -> int:
+        return len(xs)
+else:
+    def twice(xs: list[int]) -> int:
+        xs.append(1)
+        return 0
+"#;
+
+/// `(only_reads.params, read_only_uses, bound_once)` of each function of `module`, by name.
+fn only_reads(p: &Project, module: &str, names: &[&str]) -> Vec<(String, [Vec<String>; 3])> {
+    let symbols: String = names.iter().map(|n| format!("{module}.{n}\n")).collect();
+    let (code, reports) = inspect_each_json(p, &symbols, &[]);
+    assert_eq!(code, 0, "{reports:#?}");
+    reports
+        .iter()
+        .map(|r| {
+            let o = &r["only_reads"];
+            let facts = [
+                strings(&o["params"]),
+                strings(&o["read_only_uses"]),
+                strings(&o["bound_once"]),
+            ];
+            (
+                r["function"]["qualname"].as_str().unwrap().to_owned(),
+                facts,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn parameters_only_read_by_the_function_and_every_call_they_are_handed_to() {
+    let p = Project::new("inspect_only_read");
+    p.write("m.py", ONLY_READ)
+        .write("typed.pyi", "def declared(xs: list[int]) -> int: ...\n");
+    // Each function with the parameters it only reads.
+    let cases: &[(&str, &[&str])] = &[
+        // 1. No change: by the name, an alias, a value that may be it, an item store or
+        //    deletion, an augmented assignment, a method no table lists as reading.
+        ("appends", &[]),
+        ("appends_to_alias", &[]),
+        ("appends_before_aliasing", &[]),
+        ("appends_to_join", &[]),
+        ("stores_item", &[]),
+        ("deletes_item", &[]),
+        ("deletes_key", &["xs"]),
+        ("extends_in_place", &[]),
+        ("unknown_method", &[]),
+        //    Nor handed to a special method of a project class's instance.
+        ("added_to_object", &[]),
+        ("compared_with_object", &[]),
+        ("key_of_object", &[]),
+        ("in_object", &[]),
+        ("added_to_either", &[]),
+        // 2. Not kept: an attribute, a global, an item, a display, a closure, a lambda, a class
+        //    body, a generator expression reading a copy, a yield, a return, a returned view or
+        //    a result that may be an argument (`max(a, b)` returns one of them).
+        ("stores_attribute", &[]),
+        ("stores_global", &[]),
+        ("stores_value", &[]),
+        ("in_display", &[]),
+        ("in_dict", &[]),
+        ("unpacked", &["xs", "d"]),
+        ("captures", &[]),
+        ("captures_in_lambda", &["keys"]),
+        ("captures_in_class", &[]),
+        ("tests_in_genexp", &["xs", "keys"]),
+        ("genexp_of_alias", &["keys"]),
+        ("yields", &[]),
+        ("yields_from", &["xs"]),
+        ("returns", &[]),
+        ("returns_view", &[]),
+        ("returns_max", &[]),
+        // 3. Every call resolves and only reads: Layer 1's reading builtins, the reading methods
+        //    of the builtin containers, and project functions that only read it, by position or
+        //    keyword, in a call cycle (the greatest fixpoint), through a method, a generator
+        //    iterated here, an awaited coroutine; not an unresolved call, a library call Layer 1
+        //    does not list as reading, the value itself called, a keyword or a position past `*`
+        //    of a library call, a constructor, a variadic parameter, a view handed on, a
+        //    protocol, a callee keeping or changing it, a generator or coroutine returned.
+        ("reads", &["xs", "d", "s"]),
+        ("calls_unresolved", &[]),
+        ("prints", &[]),
+        ("calls_itself", &[]),
+        ("keyword_to_library", &[]),
+        ("after_unpacking", &["ys"]),
+        ("removed_from", &[]),
+        ("constructs", &[]),
+        ("to_variadic", &[]),
+        ("unpacked_to_variadic", &["xs"]),
+        ("after_unpacking_to_variadic", &["ys"]),
+        ("to_reader", &["xs"]),
+        ("to_reader_by_keyword", &["xs"]),
+        ("to_keeper", &[]),
+        ("to_changer", &[]),
+        ("view_to_reader", &[]),
+        ("through_method", &["xs"]),
+        ("through_protocol", &[]),
+        ("iterates_generator", &["xs"]),
+        ("returns_generator", &[]),
+        ("awaits", &["xs"]),
+        ("creates_coroutine", &[]),
+        ("ping", &["xs"]),
+        ("pong", &["xs"]),
+        ("tick", &[]),
+        ("tock", &[]),
+        // A body heki does not model, and a name defined twice whose definitions differ.
+        ("evaluates", &[]),
+        ("twice", &[]),
+    ];
+    let names: Vec<&str> = cases.iter().map(|(n, _)| *n).collect();
+    let found = only_reads(&p, "m", &names);
+    for ((name, expected), (qualname, [params, ..])) in cases.iter().zip(&found) {
+        assert_eq!(qualname, name);
+        assert_eq!(params, expected, "{name}");
+    }
+    // A parameter the function only reads is never one `MUT110`'s judgment sees changed.
+    let r = report(&p, "m.to_changer");
+    assert_eq!(r["changes"]["params"][0]["param"], "xs");
+    // The containers a function annotates, the established ones among them, in the text form.
+    let containers = |symbol: &str| strings(&report(&p, symbol)["only_reads"]["containers"]);
+    assert_eq!(containers("m.reads"), ["xs", "d", "s"]);
+    assert_eq!(containers("m.evaluates"), ["xs"]);
+    assert_eq!(containers("typed.declared"), ["xs"]);
+    assert!(strings(&report(&p, "typed.declared")["only_reads"]["params"]).is_empty());
+    assert!(containers("m.Box.size").is_empty());
+    let text = |symbol: &str| {
+        let (code, out, err) = p.heki(&["inspect", symbol]);
+        assert_eq!(code, 0, "{err}");
+        out.lines()
+            .find(|l| l.starts_with("only reads"))
+            .map(str::to_owned)
+    };
+    assert_eq!(text("m.reads").as_deref(), Some("only reads xs, d, s"));
+    assert_eq!(
+        text("m.captures_in_lambda").as_deref(),
+        Some("only reads keys (not xs)")
+    );
+    assert_eq!(text("m.appends").as_deref(), Some("only reads none of xs"));
+    assert_eq!(text("m.Box.size"), None);
+}
+
+/// The local part of premises 5 and 6: every use of the parameter is one its read-only type
+/// allows, a value derived from it is only iterated, unpacked, tested, measured, or handed to a
+/// call Layer 1 lists as reading it (a set: in no order), and its name is bound once.
+const READ_ONLY_USES: &str = r#"from collections.abc import MutableMapping, MutableSequence, MutableSet
+from typing import List, ReadOnly, Sequence
+
+
+def reader(ys):
+    return len(ys)
+
+
+def abstract(xs: list[int], d: dict[str, int], s: set[int], t: set[int], table: dict) -> int:
+    first, *rest = xs
+    n = xs[0] + len(xs) + xs.count(1) + xs.index(1) + len(xs[1:]) + d.get("k", 0)
+    n += len(d.keys()) + len({**d}) + len([*xs]) + max(*xs) + len(table[xs])
+    if xs == [1] or xs is None or 1 in xs or not xs:
+        n += 1
+    if s <= t and s.isdisjoint({1}):
+        n += len(s | t) + sorted(s & t)[0] + len(s - {1})
+    for x in xs:
+        n += x
+    acc: list[int] = []
+    acc += xs
+    print(f"{xs}")
+    del first
+    n += len(dict(**d)) + any(x > 0 for x in xs)
+    return n + reader(xs) + reader(ys=xs) + sum(xs)
+
+
+def joined(xs: list[int] | None) -> int:
+    ys = xs or []
+    n = 0
+    for y in ys:
+        n += y
+    a, b = ys
+    if ys and 1 in ys and ys is not None:
+        n += len(ys)
+    return n + len(sorted(ys[1:]))
+
+
+def copies(xs: list[int]) -> int:
+    return len(xs.copy())
+
+
+def adds(xs: list[int]) -> int:
+    return len(xs + [1])
+
+
+def ors(xs: list[int]) -> int:
+    return len(xs | [1])
+
+
+def orders(xs: list[int], ys: list[int]) -> bool:
+    return xs < ys
+
+
+def negates(xs: list[int]) -> int:
+    return -xs
+
+
+def calls_it(xs: list[int]) -> None:
+    xs()
+
+
+def returns(xs: list[int]) -> list[int]:
+    return xs
+
+
+def yields(xs: list[int]):
+    yield xs
+
+
+def captures(xs: list[int], keys: list[int]) -> bool:
+    return any(k in xs for k in keys)
+
+
+def in_dict(xs: list[int]) -> int:
+    return len({"k": xs})
+
+
+def list_as_mapping(xs: list[int]) -> int:
+    return len({**xs})
+
+
+def keyword_to_library(xs: list[int]) -> int:
+    return len(dict(items=xs))
+
+
+def to_unresolved(xs: list[int], g) -> None:
+    g(xs)
+
+
+def prints(xs: list[int]) -> None:
+    print(xs)
+
+
+def item_of_join(xs: list[int] | None) -> int:
+    ys = xs or []
+    return ys[0]
+
+
+def join_compared(xs: list[int] | None, ys: list[int]) -> bool:
+    return (xs or []) == ys
+
+
+def join_formatted(xs: list[int] | None) -> str:
+    return f"{xs or []}"
+
+
+def join_to_reader(xs: list[int] | None) -> int:
+    return reader(xs or [])
+
+
+def join_method(xs: list[int] | None) -> int:
+    return (xs or []).count(1)
+
+
+def join_mapping(d: dict[str, int] | None) -> int:
+    return len({**(d or {})})
+
+
+def iterates_set(s: set[int]) -> list[int]:
+    return [x for x in s]
+
+
+def unpacks_set(s: set[int]) -> int:
+    a, b = s
+    return a
+
+
+def lists_set(s: set[int]) -> list[int]:
+    return list(s)
+
+
+def stars_set(s: set[int]) -> int:
+    return max(*s)
+
+
+def extends_with_set(s: set[int]) -> list[int]:
+    acc = []
+    acc += s
+    return acc
+
+
+def yields_from_set(s: set[int]):
+    yield from s
+
+
+def genexp_over_set(s: set[int]) -> bool:
+    return any(x > 0 for x in s)
+
+
+def default_list(xs: list[int] | None = None) -> int:
+    if xs is None:
+        xs = []
+    return xs.index(1)
+
+
+def default_dict(d: dict[str, int] | None = None) -> int:
+    if d is None:
+        d = {}
+    return len(d)
+
+
+def default_set(s: set[int] | None = None) -> int:
+    if None is s:
+        s = set()
+    return len(s)
+
+
+def default_then_copies(xs: list[int] | None = None) -> int:
+    if xs is None:
+        xs = []
+    return len(xs.copy())
+
+
+MISSING: list[int] = []
+
+
+def default_after_sentinel(xs: list[int] = MISSING) -> int:
+    if xs is MISSING:
+        xs = []
+    return len(xs)
+
+
+def default_after_equality(xs: list[int] | None = None) -> int:
+    if xs == None:
+        xs = []
+    return len(xs)
+
+
+def default_after_not(xs: list[int] | None = None) -> int:
+    if not xs:
+        xs = []
+    return len(xs)
+
+
+def rebinds(xs: list[int]) -> int:
+    xs = [1]
+    return len(xs)
+
+
+def rebinds_to_other(xs: list[int], ys: list[int]) -> int:
+    xs = ys
+    return len(xs)
+
+
+def rebinds_to_sum(xs: list[int] | None, ys: list[int]) -> int:
+    if xs is None:
+        xs = ys + ys
+    return len(xs)
+
+
+def default_of_other_kind(xs: list[int] | None = None) -> int:
+    if xs is None:
+        xs = set()
+    return len(xs)
+
+
+def loops_over_name(xs: list[int]) -> int:
+    for xs in [[1]]:
+        pass
+    return 0
+
+
+def deletes_name(xs: list[int]) -> None:
+    del xs
+
+
+def spellings(a: MutableSequence[int], b: MutableMapping[str, int], c: MutableSet[int], d: List[int], e: "Dict[str, int]", f: "Unknown", g: ReadOnly[list[int]], h: Sequence[int], i: "Deque[int]", *args: list[int]) -> int:
+    return 0
+"#;
+
+fn strs(names: &[&str]) -> Vec<String> {
+    names.iter().map(|n| (*n).to_owned()).collect()
+}
+
+#[test]
+fn uses_the_read_only_type_allows_and_names_bound_once() {
+    let p = Project::new("inspect_read_only_uses");
+    p.write("m.py", READ_ONLY_USES);
+    // Each function with the parameters whose uses the read-only type allows and those whose
+    // name is bound once.
+    let all = |names: &[&'static str]| names.to_vec();
+    let cases: Vec<(&str, Vec<&str>, Vec<&str>)> = vec![
+        (
+            "abstract",
+            all(&["xs", "d", "s", "t", "table"]),
+            all(&["xs", "d", "s", "t", "table"]),
+        ),
+        ("joined", all(&["xs"]), all(&["xs"])),
+        ("copies", vec![], all(&["xs"])),
+        ("adds", vec![], all(&["xs"])),
+        ("ors", vec![], all(&["xs"])),
+        ("orders", vec![], all(&["xs", "ys"])),
+        ("negates", vec![], all(&["xs"])),
+        ("calls_it", vec![], all(&["xs"])),
+        ("returns", vec![], all(&["xs"])),
+        ("yields", vec![], all(&["xs"])),
+        ("captures", vec!["keys"], all(&["xs", "keys"])),
+        ("in_dict", vec![], all(&["xs"])),
+        ("list_as_mapping", vec![], all(&["xs"])),
+        ("keyword_to_library", vec![], all(&["xs"])),
+        ("to_unresolved", vec![], all(&["xs"])),
+        ("prints", vec![], all(&["xs"])),
+        ("item_of_join", vec![], all(&["xs"])),
+        ("join_compared", vec!["ys"], all(&["xs", "ys"])),
+        ("join_formatted", vec![], all(&["xs"])),
+        ("join_to_reader", vec![], all(&["xs"])),
+        ("join_method", vec![], all(&["xs"])),
+        ("join_mapping", vec![], all(&["d"])),
+        ("iterates_set", vec![], all(&["s"])),
+        ("unpacks_set", vec![], all(&["s"])),
+        ("lists_set", vec![], all(&["s"])),
+        ("stars_set", vec![], all(&["s"])),
+        ("extends_with_set", vec![], all(&["s"])),
+        ("yields_from_set", vec![], all(&["s"])),
+        ("genexp_over_set", vec![], all(&["s"])),
+        ("default_list", all(&["xs"]), all(&["xs"])),
+        ("default_dict", all(&["d"]), all(&["d"])),
+        ("default_set", all(&["s"]), all(&["s"])),
+        ("default_then_copies", vec![], all(&["xs"])),
+        ("default_after_sentinel", all(&["xs"]), vec![]),
+        ("default_after_equality", all(&["xs"]), vec![]),
+        ("default_after_not", all(&["xs"]), vec![]),
+        ("rebinds", all(&["xs"]), vec![]),
+        ("rebinds_to_other", all(&["xs", "ys"]), vec!["ys"]),
+        ("rebinds_to_sum", vec!["xs"], vec!["ys"]),
+        ("default_of_other_kind", all(&["xs"]), vec![]),
+        ("loops_over_name", all(&["xs"]), vec![]),
+        ("deletes_name", all(&["xs"]), vec![]),
+    ];
+    let names: Vec<&str> = cases.iter().map(|(n, ..)| *n).collect();
+    let found = only_reads(&p, "m", &names);
+    for ((name, uses, once), (qualname, [_, ro, bound])) in cases.iter().zip(&found) {
+        assert_eq!(qualname, name);
+        assert_eq!((ro, bound), (&strs(uses), &strs(once)), "{name}");
+    }
+    // `list`, `dict`, `set`, their `typing` forms and the mutable abstract containers, also
+    // unresolved, are containers; `ReadOnly`, a read-only type, an unknown name, and a variadic
+    // parameter are not.
+    let r = report(&p, "m.spellings");
+    assert_eq!(
+        strings(&r["only_reads"]["containers"]),
+        ["a", "b", "c", "d", "e"]
+    );
+}
+
+/// A value `typing.cast` hands back is the parameter's object itself
+/// (`ownership::handed_back`): its uses are the parameter's.
+const READS_THROUGH_CAST: &str = r#"import typing
+from typing import cast
+
+
+def measures(xs: list[int]) -> int:
+    ys = cast(list[int], xs)
+    return len(ys) + ys[0]
+
+
+def measures_by_module(xs: list[int]) -> int:
+    return len(typing.cast(list[int], xs))
+
+
+def appends(xs: list[int]) -> None:
+    ys = cast(list[int], xs)
+    ys.append(1)
+
+
+def returns(xs: list[int]) -> list[int]:
+    return cast(list[int], xs)
+"#;
+
+#[test]
+fn a_value_a_cast_hands_back_is_read_as_the_parameter() {
+    let p = Project::new("inspect_reads_through_cast");
+    p.write("m.py", READS_THROUGH_CAST);
+    // Each function with the parameters it only reads and those whose uses the read-only type
+    // allows.
+    let cases: &[(&str, &[&str])] = &[
+        ("measures", &["xs"]),
+        ("measures_by_module", &["xs"]),
+        ("appends", &[]),
+        ("returns", &[]),
+    ];
+    let names: Vec<&str> = cases.iter().map(|(n, _)| *n).collect();
+    let found = only_reads(&p, "m", &names);
+    for ((name, expected), (qualname, [params, uses, once])) in cases.iter().zip(&found) {
+        assert_eq!(qualname, name);
+        assert_eq!((params, uses), (&strs(expected), &strs(expected)), "{name}");
+        assert_eq!(once, &strs(&["xs"]), "{name}");
+    }
+}

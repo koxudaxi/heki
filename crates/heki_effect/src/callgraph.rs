@@ -231,6 +231,8 @@ pub(crate) fn propagate_with_budget(
             for &i in &scc {
                 if let Some(mut s) = index.summary(&nodes[i]).cloned() {
                     s.unknown_calls = true;
+                    // Past the pass limit nothing the cycle reads is established.
+                    s.only_read_params = 0;
                     store(index, &nodes[i], s);
                 }
             }
@@ -353,6 +355,10 @@ fn recompute(
         // `MUT106`: the call consumes what every function it may run consumes.
         let mut consumed: Option<u64> = None;
         for bc in site.project_callees() {
+            if index.opt_in.only_read {
+                s.only_read_params &=
+                    !crate::only_read::not_only_read_through(index.summary(&bc.callee), bc);
+            }
             let Some(callee) = index.summary(&bc.callee) else {
                 consumed = Some(0);
                 continue;
