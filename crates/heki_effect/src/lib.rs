@@ -2751,6 +2751,50 @@ pub fn analyze_project_for(
     ProjectIndex::build_for(files, contracts, typed_writes, opt_in)
 }
 
+/// A project index taken apart ([`ProjectIndex::into_files`]): its files' local summaries, with
+/// their final facts reset to the local ones, and what they were summarized with; no call graph
+/// and nothing propagation derived. A summary replaced here drops the one it replaces, and
+/// [`Self::build`] propagates once.
+pub struct IndexFiles {
+    pub files: FxHashMap<PathBuf, FileSummary>,
+    contracts: Option<Arc<dyn Contracts>>,
+    typed_writes: TypedWrites,
+    opt_in: OptInFacts,
+}
+
+impl IndexFiles {
+    /// The local summary of `input`, a module of these files edited or as it is, against the
+    /// project declarations `decls`, with the facts these files are summarized with: what the
+    /// module's own functions do, before propagation ([`FileSummary::local_functions`]).
+    pub fn summarize(
+        &self,
+        input: &ModuleInput<'_>,
+        kb: &EffectiveEcosystemKb,
+        soundness: Option<&EffectiveSoundnessKb>,
+        decls: &DeclPasses,
+    ) -> FileSummary {
+        let own = resolver::own_module_decls(input, kb, decls);
+        summary::summarize_module(
+            input,
+            decls.completed(),
+            kb,
+            soundness,
+            own,
+            false,
+            self.contracts.as_deref(),
+            self.opt_in,
+        )
+    }
+
+    /// The index of these files, built as [`ProjectIndex::build_for`] builds one (one
+    /// propagation), in the order the project's files are summarized in.
+    pub fn build(self) -> ProjectIndex {
+        let mut files: Vec<FileSummary> = self.files.into_values().collect();
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        ProjectIndex::build_for(files, self.contracts, self.typed_writes, self.opt_in)
+    }
+}
+
 /// Whether propagation carries typed writes (`EffectSummary::typed_field_write_sites` and
 /// `typed_field_writes`) from callees to callers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2941,30 +2985,34 @@ impl ProjectIndex {
         index
     }
 
-    /// The index of the same files with `replaced` in place of the files at their paths, built
-    /// again from the local summaries as [`Self::build_for`] builds one (one propagation), and
-    /// the summaries it replaced.
-    pub fn with_files_replaced(self, replaced: Vec<FileSummary>) -> (Self, Vec<FileSummary>) {
+    /// The index's file summaries with their final facts reset to the local ones, the call
+    /// graph and what propagation derived dropped, to build the index again with some of them
+    /// replaced ([`IndexFiles`]).
+    pub fn into_files(self) -> IndexFiles {
         let Self {
             mut files,
             contracts,
             skips_typed_writes,
             opt_in,
-            ..
+            reverse_call_graph,
+            func_files,
+            param_capacities,
         } = self;
-        let old = (replaced.into_iter())
-            .filter_map(|f| files.insert(f.path.clone(), f))
-            .collect();
-        let mut files: Vec<FileSummary> = files.into_values().collect();
-        // The order the project's files are summarized in.
-        files.sort_by(|a, b| a.path.cmp(&b.path));
-        let typed_writes = if skips_typed_writes {
-            TypedWrites::Local
-        } else {
-            TypedWrites::Propagated
-        };
-        let index = Self::build_for(files, contracts, typed_writes, opt_in);
-        (index, old)
+        // What propagation derived goes before a rebuild derives it again: never two at once.
+        drop((reverse_call_graph, func_files, param_capacities));
+        for file in files.values_mut() {
+            file.reset_final_facts();
+        }
+        IndexFiles {
+            files,
+            contracts,
+            typed_writes: if skips_typed_writes {
+                TypedWrites::Local
+            } else {
+                TypedWrites::Propagated
+            },
+            opt_in,
+        }
     }
 
     /// Whether every implementation the call at `site` (in `path`) can run has run `e`
@@ -3113,8 +3161,9 @@ impl ProjectIndex {
     }
 
     /// Every module's declarations in [`module_precedence`] order (a later file sharing a
-    /// module name replaces the earlier ones).
-    fn preferred_decls(&self) -> Vec<Arc<ModuleDecls>> {
+    /// module name replaces the earlier ones), from which [`DeclPasses::new`] and
+    /// [`ProjectDecls::new`] build the project's.
+    pub fn preferred_decls(&self) -> Vec<Arc<ModuleDecls>> {
         let mut files: Vec<&FileSummary> = self.files.values().collect();
         files.sort_by(|a, b| module_precedence(&a.path).cmp(&module_precedence(&b.path)));
         files.into_iter().map(|f| Arc::clone(&f.decls)).collect()
@@ -3157,30 +3206,6 @@ impl ProjectIndex {
             self.opt_in,
         );
         self.update_file(file)
-    }
-
-    /// The local summary of `input`, an edited version of an indexed module, against the
-    /// cached project declarations `decls`, leaving the index and `decls` as they are: what the
-    /// module's own functions would do after the edit, before propagation
-    /// ([`FileSummary::local_functions`]).
-    pub fn summarize_edit(
-        &self,
-        input: &ModuleInput<'_>,
-        kb: &EffectiveEcosystemKb,
-        soundness: Option<&EffectiveSoundnessKb>,
-        decls: &DeclPasses,
-    ) -> FileSummary {
-        let own = resolver::own_module_decls(input, kb, decls);
-        summary::summarize_module(
-            input,
-            decls.completed(),
-            kb,
-            soundness,
-            own,
-            false,
-            self.contracts.as_deref(),
-            self.opt_in,
-        )
     }
 
     /// [`Self::reanalyze_module`] against cached project declarations (both passes, kept up

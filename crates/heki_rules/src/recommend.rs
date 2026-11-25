@@ -321,8 +321,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     drop(tests);
     // The annotation trial builds its index from the discovery index's files: the discovery
     // index is gone afterwards.
-    let suggestions = types::suggest(&mut discovery, &current, &diags, shown)?;
-    drop(diags);
+    let suggestions = types::suggest(&mut discovery, &current, diags, shown)?;
     if suggestions.tried {
         runs.push(Run {
             label: RunLabel::AnnotationTrial,

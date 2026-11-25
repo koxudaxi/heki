@@ -385,7 +385,7 @@ impl Cx<'_> {
 pub fn suggest(
     indexed: &mut Indexed,
     current: &RuleSelection,
-    reports: &[Diagnostic],
+    reports: Vec<Diagnostic>,
     shown: &dyn Fn(&Path) -> String,
 ) -> Result<Suggestions, RecommendError> {
     let mut found = {
@@ -1542,6 +1542,11 @@ const MAX_ANALYSES: u8 = 4;
 /// edits change again loses its exact groups.
 const MAX_CHECKS: usize = 2;
 
+/// The files the trial parses at once, edited or as they are, hold at most this share of the
+/// project's source (one file when that is larger): a batch's source bytes are at most the
+/// project's divided by this.
+const BATCH_SHARE: usize = 32;
+
 /// The groups a phase of the trial tries and withholds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -1556,27 +1561,19 @@ impl Phase {
     }
 }
 
-/// What analyzing a file with a set of edits gave.
-enum Analysis {
-    /// Its local facts are those of the file now: the summary, and the offsets of the edited
-    /// text in the original.
-    Same(Box<heki_effect::FileSummary>, OffsetMap),
-    Changed(Vec<FactChange>),
-}
-
 /// A file with edits of some group.
 struct TrialFile {
     path: PathBuf,
     /// Its place in the project's files.
     at: usize,
+    /// Its source bytes, for the batches.
+    bytes: usize,
     /// The groups with edits in it.
     groups: Vec<usize>,
     /// Analyses in this phase.
     analyses: u8,
-    /// The groups whose edits the last analysis applied, and its summary when its facts were
-    /// the same (the exact phase).
+    /// The groups whose edits the last analysis applied, when it found the facts the same.
     analyzed: Option<Vec<usize>>,
-    same: Option<(Box<heki_effect::FileSummary>, OffsetMap)>,
     /// The groups whose edits the summary the index holds for the file applies, with the map of
     /// its offsets (`None`: the summary of the file as it is).
     indexed: Option<(Vec<usize>, OffsetMap)>,
@@ -1584,35 +1581,40 @@ struct TrialFile {
     checked: Option<Vec<usize>>,
 }
 
-/// The annotation trial's state.
+/// The annotation trial's state. It keeps no summary or parse of its own. The index holds one
+/// summary per file, of the edits its reports are checked with, and stays taken apart (local
+/// facts only) while files are analyzed; a file the index holds edited is summarized again as it
+/// is when an analysis compares with it.
 struct Trial {
     files: Vec<TrialFile>,
-    /// The project declarations as they are, which every edited file is analyzed against.
-    passes: DeclPasses,
-    /// The summaries of the files as they are, of those the index holds edited.
-    originals: FxHashMap<PathBuf, heki_effect::FileSummary>,
+    /// The declarations of the modules as they are, which every edited file is analyzed
+    /// against ([`DeclPasses::new`], built for each phase and dropped before the index is).
+    decls: Vec<std::sync::Arc<ModuleDecls>>,
+    /// The most source bytes of a batch ([`BATCH_SHARE`]).
+    batch_bytes: usize,
 }
 
 /// Premise 11, "No fact lost": the files of the groups analyzed again with the groups' edits
 /// applied as the JSON prints them, and compared with the analysis as it is.
 ///
 /// First the exact groups. Each file is analyzed with every exact group's edits (the files in
-/// parallel, the index untouched), and its local facts are compared with the index's
-/// ([`heki_effect::FileSummary::edit_changes`]); a difference withholds the groups with an edit
-/// in a function it names (the file's when none has one), a withheld group leaves every file,
-/// and a file whose edits changed is analyzed again, at most [`MAX_ANALYSES`] times. Then the
-/// index is built once from the files' summaries, the edited ones in place, and the edited files
-/// are checked with every rule the discovery run selects: a report that differs from the
-/// discovery run's withholds the groups with an edit in its function (the file's when none has
-/// one), and the files whose edits that changes are tried once more ([`MAX_CHECKS`]). Last the
-/// heuristic groups, on top of the exact ones kept, by their facts only. The other files need
-/// no analysis: when no edited file's local facts differ, neither do theirs (module docs of
-/// [`heki_effect::OffsetMap`]'s home). `reports` are the discovery run's. The discovery index
-/// is gone afterwards.
+/// parallel, against the index's local summaries), and its local facts are compared with those
+/// of the file as it is ([`heki_effect::FileSummary::edit_changes`]); a difference withholds the
+/// groups with an edit in a function it names (the file's when none has one), a withheld group
+/// leaves every file, and a file whose edits changed is analyzed again, at most
+/// [`MAX_ANALYSES`] times. Then the index is built once from the files' summaries, the edited
+/// files summarized again in place of theirs, and the edited files are checked with every rule
+/// the discovery run selects: a report that differs from the discovery run's withholds the
+/// groups with an edit in its function (the file's when none has one), and the files whose edits
+/// that changes are tried once more ([`MAX_CHECKS`]). Last the heuristic groups, on top of the
+/// exact ones kept, by their facts only. The other files need no analysis: when no edited file's
+/// local facts differ, neither do theirs (module docs of [`heki_effect::OffsetMap`]'s home).
+/// `reports` are the discovery run's; the trial keeps those of its files. The discovery index is
+/// gone afterwards.
 fn trial_all(
     indexed: &mut Indexed,
     found: &mut Found,
-    reports: &[Diagnostic],
+    mut reports: Vec<Diagnostic>,
 ) -> Result<(), RecommendError> {
     let mut by_file: BTreeMap<&Path, Vec<usize>> = BTreeMap::new();
     for (g, p) in found.groups.iter().enumerate() {
@@ -1626,10 +1628,10 @@ fn trial_all(
             Some(TrialFile {
                 path: path.to_path_buf(),
                 at,
+                bytes: indexed.project.files[at].source.len(),
                 groups,
                 analyses: 0,
                 analyzed: None,
-                same: None,
                 indexed: None,
                 checked: None,
             })
@@ -1639,24 +1641,26 @@ fn trial_all(
         return Ok(());
     }
     found.tried = true;
+    let tried: FxHashSet<&Path> = files.iter().map(|f| f.path.as_path()).collect();
+    reports.retain(|d| tried.contains(d.path.as_path()));
+    let source: usize = (indexed.project.files.iter()).map(|f| f.source.len()).sum();
     let mut trial = Trial {
         files,
-        passes: indexed.index.decl_passes(),
-        originals: FxHashMap::default(),
+        decls: indexed.index.preferred_decls(),
+        batch_bytes: source / BATCH_SHARE,
     };
+    let local = std::mem::take(&mut indexed.index).into_files();
     let groups = &mut found.groups;
-    trial.settle(indexed, groups, Phase::Exact);
-    let checked = trial.check_reports(indexed, groups, reports);
+    let checked = trial.check_reports(indexed, local, groups, &reports);
+    drop(reports);
+    let local = checked?;
     for f in &mut trial.files {
         f.analyses = 0;
         f.analyzed = None;
-        f.same = None;
     }
-    if checked.is_ok() {
-        trial.settle(indexed, groups, Phase::Heuristic);
-    }
-    indexed.index = heki_effect::ProjectIndex::default();
-    checked
+    let passes = trial.passes();
+    trial.settle(indexed, &local, &passes, groups, Phase::Heuristic);
+    Ok(())
 }
 
 impl Trial {
@@ -1673,24 +1677,45 @@ impl Trial {
             .collect()
     }
 
-    /// The summary of the file at `path` as it is.
-    fn original<'i>(
-        &'i self,
-        indexed: &'i Indexed,
-        path: &Path,
-    ) -> Option<&'i heki_effect::FileSummary> {
-        (self.originals.get(path)).or_else(|| indexed.index.files.get(path))
+    /// The project declarations as they are.
+    fn passes(&self) -> DeclPasses {
+        DeclPasses::new(self.decls.iter().cloned())
+    }
+
+    /// `todo`, items of the trial's files, in runs of consecutive items whose files' source
+    /// bytes add up to at most [`Self::batch_bytes`], each run at least one item.
+    fn batches<'t, T>(&self, todo: &'t [T], file: impl Fn(&T) -> usize) -> Vec<&'t [T]> {
+        let mut out = Vec::new();
+        let (mut start, mut bytes) = (0, 0);
+        for (i, item) in todo.iter().enumerate() {
+            let size = self.files[file(item)].bytes;
+            if i > start && bytes + size > self.batch_bytes {
+                out.push(&todo[start..i]);
+                (start, bytes) = (i, 0);
+            }
+            bytes += size;
+        }
+        if start < todo.len() {
+            out.push(&todo[start..]);
+        }
+        out
     }
 
     /// Analyze each file with the edits `phase` tries until their facts are those of the files
     /// as they are, withholding the groups of the differences.
-    fn settle(&mut self, indexed: &Indexed, groups: &mut [Pending], phase: Phase) {
+    fn settle(
+        &mut self,
+        indexed: &Indexed,
+        local: &heki_effect::IndexFiles,
+        passes: &DeclPasses,
+        groups: &mut [Pending],
+        phase: Phase,
+    ) {
         loop {
             let mut todo: Vec<(usize, Vec<usize>)> = Vec::new();
             for (i, f) in self.files.iter_mut().enumerate() {
                 let set = Self::tried(groups, f, phase);
                 if !set.iter().any(|&g| phase.withholds(&groups[g])) {
-                    f.same = None;
                     continue;
                 }
                 if f.analyzed.as_ref() != Some(&set) {
@@ -1706,13 +1731,14 @@ impl Trial {
             for (_, set) in &spent {
                 withhold_all(groups, set, phase, "trial-limit", &changed);
             }
-            let outcomes: Vec<Analysis> = {
+            let outcomes: Vec<Vec<FactChange>> = {
                 let (this, shared): (&Self, &[Pending]) = (self, groups);
-                (todo.par_iter())
-                    .map(|(i, set)| this.analyze(indexed, shared, &this.files[*i], set, phase))
-                    .collect()
+                let analyze = |(i, set): &(usize, Vec<usize>)| {
+                    this.analyze(indexed, (local, passes), shared, &this.files[*i], set)
+                };
+                todo.par_iter().map(analyze).collect()
             };
-            for ((i, set), outcome) in todo.into_iter().zip(outcomes) {
+            for ((i, set), changes) in todo.into_iter().zip(outcomes) {
                 let f = &mut self.files[i];
                 f.analyses += 1;
                 // Another file withheld a group of the set this round: the set is tried anew.
@@ -1720,65 +1746,61 @@ impl Trial {
                     f.analyzed = None;
                     continue;
                 }
-                f.analyzed = Some(set.clone());
-                f.same = None;
-                match outcome {
-                    Analysis::Same(summary, map) => f.same = Some((summary, map)),
-                    Analysis::Changed(changes) => {
-                        attribute_facts(groups, &f.path, &set, phase, &changes);
-                    }
+                if changes.is_empty() {
+                    f.analyzed = Some(set);
+                } else {
+                    f.analyzed = None;
+                    attribute_facts(groups, &f.path, &set, phase, &changes);
                 }
             }
         }
     }
 
-    /// The file `f` analyzed with the edits of the groups `set`.
+    /// The local facts of the file `f` analyzed with the edits of the groups `set` that differ
+    /// from those of the file as it is.
     fn analyze(
         &self,
         indexed: &Indexed,
+        (local, passes): (&heki_effect::IndexFiles, &DeclPasses),
         groups: &[Pending],
         f: &TrialFile,
         set: &[usize],
-        phase: Phase,
-    ) -> Analysis {
-        let original = (self.original(indexed, &f.path)).expect("every project file is indexed");
+    ) -> Vec<FactChange> {
         let (edits, restated) = edits_of(groups, set, &f.path);
-        let env = &indexed.project.env;
         // An edited file that does not parse has none of the facts of its functions.
         let (edited, map) = (edited_file(indexed, f.at, &edits))
-            .map(|(parsed, map)| {
-                let input = parsed.input();
-                let kb = (&env.kb, Some(&env.soundness_kb));
-                (
-                    indexed
-                        .index
-                        .summarize_edit(&input, kb.0, kb.1, &self.passes),
-                    map,
-                )
-            })
+            .map(|(parsed, map)| (summarize(indexed, (local, passes), &parsed), map))
             .unwrap_or_default();
-        let changes = original.edit_changes(&edited, &restated, &map);
-        match (changes.is_empty(), phase) {
-            (true, Phase::Exact) => Analysis::Same(Box::new(edited), map),
-            (true, Phase::Heuristic) => Analysis::Same(Box::default(), map),
-            (false, _) => Analysis::Changed(changes),
-        }
+        let as_is;
+        let original = match &f.indexed {
+            None => local.files.get(&f.path),
+            Some(_) => {
+                as_is = summarize(indexed, (local, passes), &indexed.project.files[f.at]);
+                Some(&as_is)
+            }
+        };
+        let original = original.expect("every project file is indexed");
+        original.edit_changes(&edited, &restated, &map)
     }
 
-    /// The reports of the exact groups' files: the index built with their summaries, each file
-    /// checked with its edits, at most [`MAX_CHECKS`] times; then the files whose edits changed
-    /// after their last check lose their exact groups.
+    /// The reports of the exact groups' files: the index built from `local` with their
+    /// summaries, each file checked with its edits, at most [`MAX_CHECKS`] times; then the files
+    /// whose edits changed after their last check lose their exact groups. The index's local
+    /// summaries are given back.
     fn check_reports(
         &mut self,
         indexed: &mut Indexed,
+        mut local: heki_effect::IndexFiles,
         groups: &mut [Pending],
         reports: &[Diagnostic],
-    ) -> Result<(), RecommendError> {
+    ) -> Result<heki_effect::IndexFiles, RecommendError> {
         let mut discovery: FxHashMap<&Path, Vec<&Diagnostic>> = FxHashMap::default();
         for d in reports {
             discovery.entry(d.path.as_path()).or_default().push(d);
         }
-        for round in 1..=MAX_CHECKS {
+        for _ in 0..MAX_CHECKS {
+            let passes = self.passes();
+            self.settle(indexed, &local, &passes, groups, Phase::Exact);
             let to_check: Vec<(usize, Vec<usize>)> = (self.files.iter().enumerate())
                 .map(|(i, f)| (i, Self::tried(groups, f, Phase::Exact)))
                 .filter(|(i, set)| !set.is_empty() && self.files[*i].checked.as_ref() != Some(set))
@@ -1786,8 +1808,12 @@ impl Trial {
             if to_check.is_empty() {
                 break;
             }
-            self.index_edits(indexed, groups);
-            let after = self.check(indexed, groups, &to_check)?;
+            self.index_edits(indexed, (&mut local, &passes), groups);
+            drop(passes);
+            indexed.index = local.build();
+            let after = self.check(indexed, groups, &to_check);
+            local = std::mem::take(&mut indexed.index).into_files();
+            let after = after?;
             let changed: Vec<Vec<ChangedReport>> = (to_check.iter())
                 .map(|(i, _)| {
                     let f = &self.files[*i];
@@ -1807,13 +1833,12 @@ impl Trial {
                 withheld |= !changed.is_empty();
                 attribute_reports(groups, &f.path, &set, &changed);
             }
-            if !withheld || round == MAX_CHECKS {
+            if !withheld {
                 break;
             }
-            self.settle(indexed, groups, Phase::Exact);
         }
         self.withhold_unchecked(groups);
-        Ok(())
+        Ok(local)
     }
 
     /// Withhold the exact groups of the files whose edits changed after their last check, and
@@ -1865,75 +1890,132 @@ impl Trial {
         f.indexed.as_ref().map(|(_, map)| map)
     }
 
-    /// Build the index again with, for each file, the summary its exact groups' edits give
-    /// (that of the file as it is when none is left), where it holds another one.
-    fn index_edits(&mut self, indexed: &mut Indexed, groups: &[Pending]) {
-        let mut replaced = Vec::new();
-        for f in &mut self.files {
-            let set = Self::tried(groups, f, Phase::Exact);
-            let now = f.indexed.as_ref().map(|(s, _)| s);
-            if set.is_empty() {
-                if now.is_some() {
-                    f.indexed = None;
-                    replaced.extend(self.originals.get(&f.path).cloned());
+    /// Put in `local`, for each file, the summary its exact groups' edits give (that of the file
+    /// as it is when none is left), where it holds another one. The summaries replaced go
+    /// first.
+    fn index_edits(
+        &mut self,
+        indexed: &Indexed,
+        (local, passes): (&mut heki_effect::IndexFiles, &DeclPasses),
+        groups: &[Pending],
+    ) {
+        let todo: Vec<(usize, Vec<usize>)> = (self.files.iter().enumerate())
+            .map(|(i, f)| (i, Self::tried(groups, f, Phase::Exact)))
+            .filter(|(i, set)| {
+                let now = self.files[*i].indexed.as_ref().map(|(s, _)| s);
+                if set.is_empty() {
+                    now.is_some()
+                } else {
+                    now != Some(set)
                 }
-                continue;
-            }
-            if now == Some(&set) {
-                continue;
-            }
-            if let Some((summary, map)) = f.same.take() {
-                replaced.push(*summary);
-                f.indexed = Some((set, map));
-            }
+            })
+            .collect();
+        for (i, _) in &todo {
+            local.files.remove(&self.files[*i].path);
         }
-        if replaced.is_empty() {
-            return;
-        }
-        let index = std::mem::take(&mut indexed.index);
-        let (index, old) = index.with_files_replaced(replaced);
-        indexed.index = index;
-        for o in old {
-            self.originals.entry(o.path.clone()).or_insert(o);
+        let summaries: Vec<(heki_effect::FileSummary, Option<OffsetMap>)> = {
+            let shared: &heki_effect::IndexFiles = local;
+            (todo.par_iter())
+                .map(|(i, set)| {
+                    let f = &self.files[*i];
+                    if set.is_empty() {
+                        let as_is = &indexed.project.files[f.at];
+                        return (summarize(indexed, (shared, passes), as_is), None);
+                    }
+                    let (edits, _) = edits_of(groups, set, &f.path);
+                    let (edited, map) = (edited_file(indexed, f.at, &edits))
+                        .expect("an edit that does not parse changes the file's facts");
+                    (summarize(indexed, (shared, passes), &edited), Some(map))
+                })
+                .collect()
+        };
+        for ((i, set), (summary, map)) in todo.into_iter().zip(summaries) {
+            local.files.insert(summary.path.clone(), summary);
+            self.files[i].indexed = map.map(|m| (set, m));
         }
     }
 
     /// The reports of the files `to_check` with their edits (each the text its index summary
-    /// applies), checked with every rule the discovery run selects.
+    /// applies), checked with every rule the discovery run selects. The edited files stand in
+    /// for theirs, parsed in batches, and each file as it is is parsed again from its text
+    /// after.
     fn check(
         &self,
         indexed: &mut Indexed,
         groups: &[Pending],
         to_check: &[(usize, Vec<usize>)],
     ) -> Result<Vec<Diagnostic>, RecommendError> {
-        let mut parsed: Vec<(usize, crate::project::ParsedFile)> = {
-            let shared: &Indexed = indexed;
-            (to_check.par_iter())
-                .filter_map(|(i, set)| {
-                    let f = &self.files[*i];
-                    let (edits, _) = edits_of(groups, set, &f.path);
-                    let (parsed, _) = edited_file(shared, f.at, &edits).ok()?;
-                    Some((f.at, parsed))
-                })
-                .collect()
-        };
-        // The edited files stand in for theirs: their text and suppression comments.
-        for (at, p) in &mut parsed {
-            std::mem::swap(&mut indexed.project.files[*at], p);
+        // The text of each file as it is, by its place among the trial's files.
+        let mut texts: Vec<(usize, String)> = Vec::new();
+        for batch in self.batches(to_check, |(i, _)| *i) {
+            let parsed: Vec<(usize, crate::project::ParsedFile)> = {
+                let shared: &Indexed = indexed;
+                (batch.par_iter())
+                    .filter_map(|(i, set)| {
+                        let f = &self.files[*i];
+                        let (edits, _) = edits_of(groups, set, &f.path);
+                        let (parsed, _) = edited_file(shared, f.at, &edits).ok()?;
+                        Some((*i, parsed))
+                    })
+                    .collect()
+            };
+            // Their text and suppression comments are checked.
+            for (i, p) in parsed {
+                let as_is = std::mem::replace(&mut indexed.project.files[self.files[i].at], p);
+                texts.push((i, as_is.source));
+            }
         }
         let checked = {
-            let units: Vec<_> = (parsed.iter())
-                .map(|(at, _)| indexed.project.files[*at].unit())
+            let units: Vec<_> = (texts.iter())
+                .map(|(i, _)| indexed.project.files[self.files[*i].at].unit())
                 .collect();
             indexed.diagnose_units(&units, false)
         };
-        for (at, p) in &mut parsed {
-            std::mem::swap(&mut indexed.project.files[*at], p);
+        let edited: Vec<usize> = texts.iter().map(|(i, _)| *i).collect();
+        let mut texts = texts.into_iter();
+        for batch in self.batches(&edited, |i| *i) {
+            let shared: &Indexed = indexed;
+            let env = &shared.project.env;
+            let parsed: Vec<(usize, crate::project::ParsedFile)> = (texts.by_ref())
+                .take(batch.len())
+                .collect::<Vec<_>>()
+                .into_par_iter()
+                .map(|(i, text)| {
+                    let at = self.files[i].at;
+                    let path = &shared.project.files[at].path;
+                    let parsed = parse_source(path, &env.root, text, &env.layout, env.runtime);
+                    (at, parsed.expect("the file parsed before"))
+                })
+                .collect();
+            for (at, p) in parsed {
+                indexed.project.files[at] = p;
+            }
         }
         let (mut after, withheld) = checked?;
         after.extend(withheld);
         Ok(after)
     }
+}
+
+/// The ecosystem and Soundness knowledge bases of the project.
+fn kb(
+    indexed: &Indexed,
+) -> (
+    &heki_kb::EffectiveEcosystemKb,
+    Option<&heki_kb::EffectiveSoundnessKb>,
+) {
+    let env = &indexed.project.env;
+    (&env.kb, Some(&env.soundness_kb))
+}
+
+/// The local summary of `file` against the project declarations as they are (`passes`).
+fn summarize(
+    indexed: &Indexed,
+    (local, passes): (&heki_effect::IndexFiles, &DeclPasses),
+    file: &crate::project::ParsedFile,
+) -> heki_effect::FileSummary {
+    let (kb, soundness) = kb(indexed);
+    local.summarize(&file.input(), kb, soundness, passes)
 }
 
 /// Withhold the groups of `set` that `phase` withholds for `reason`.

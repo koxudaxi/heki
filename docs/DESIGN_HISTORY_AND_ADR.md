@@ -783,13 +783,19 @@ first, then a convention the code follows, then a contract.
      Cutoff compares them: its functions' summaries, call sites, declarations, and opt-in tables,
      the places the edit moved at their offsets in the original file, apart from what restates
      the edit (the annotations' own facts, the changed parameters' read-only and mutable bits,
-     the added import). It then builds the index once with those files and compares the edited
-     files' reports with every rule selected by rule, certainty, severity, function, target,
+     the added import). It then builds the index once with those files summarized again and
+     compares the edited files' reports with every rule selected by rule, certainty, severity,
+     function, target,
      places, and message (numbers aside: rules print lines). A difference withholds the groups
      with an edit in the function it names (the file's groups when none has one) and names the
      fact or report that changed; a withheld group leaves every file, and a file whose edits
      changed is analyzed again, at most four times, its reports checked at most twice. The
-     heuristic groups come last, on top of the exact ones kept, by their facts only. The other
+     heuristic groups come last, on top of the exact ones kept, by their facts only. The trial
+     keeps no summary or parse of its own, so its peak stays near the discovery run's: the index
+     holds one summary per file and stays taken apart (local facts only) while files are
+     analyzed, a file it holds edited is summarized again as it is when compared, and the edited
+     files are parsed in batches of a thirty-second of the source and stand in for theirs, which
+     are parsed again from their text after the check. The other
      files need no analysis: of an edited function's annotation another file reads only the
      union of the read-only and mutable bits (`MUT110`'s test of a callee), which a mutable head
      turned read-only keeps, so when no edited file's local facts differ, no other file's

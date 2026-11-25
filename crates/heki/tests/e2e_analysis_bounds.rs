@@ -6321,6 +6321,39 @@ fn the_annotation_trial_of_two_hundred_groups_in_a_file_analyzes_it_a_few_times(
     assert_eq!(withheld, [(&json!("fact-would-change"), &json!(10))]);
 }
 
+/// Sixty-four files of one size, each with a group, one of them changing a fact: the annotation
+/// trial parses the edited files in batches of a thirty-second of the source, about two files,
+/// and checks every file once with its edits.
+#[test]
+fn the_annotation_trial_parses_sixty_four_edited_files_in_batches() {
+    let files = 64;
+    let p = Project::new("bounds_recommend_annotation_batches");
+    for i in 0..files {
+        // A `Mapping`'s `get` is not one heki knows to only read, as a `dict`'s is.
+        let (head, last) = if i == 40 {
+            ("table: dict[str, int]) -> int", "table.get(\"a\", 0)")
+        } else {
+            ("rows: list[int]) -> bool", "1 in rows")
+        };
+        let body: Vec<String> = (0..21).map(|j| format!("    v{j} = {j}")).collect();
+        p.write(
+            &format!("m{i:02}.py"),
+            &format!("def g({head}:\n{}\n    return {last}\n", body.join("\n")),
+        );
+    }
+    let report = recommend(&p);
+    let section = &report["suggestions"];
+    assert_eq!(
+        section["counts"][0]["exact"],
+        json!(files - 1),
+        "{section:#}"
+    );
+    let withheld: Vec<(&Value, &Value)> = (section["withheld"].as_array().unwrap().iter())
+        .map(|w| (&w["reason"], &w["groups"]))
+        .collect();
+    assert_eq!(withheld, [(&json!("fact-would-change"), &json!(1))]);
+}
+
 /// Thousands of directories, each holding a module that a top-level file imports by a name
 /// below it: each directory is a source-root candidate, and the trial tries the first eight.
 #[test]
