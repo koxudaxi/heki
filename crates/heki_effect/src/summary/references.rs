@@ -30,8 +30,8 @@ impl Extractor<'_> {
         let flow = HandedValues::of(
             (self.f, self.cx.ir()),
             |at| self.callees.get(&at).is_some_and(names_only),
-            |at, args| match self.callees.get(&at)? {
-                Callee::External(symbol) => ownership::handed_back(symbol, args),
+            |at, call| match self.callees.get(&at)? {
+                Callee::External(symbol) => ownership::handed_back(symbol, call),
                 _ => None,
             },
             &self.handed,
@@ -183,7 +183,7 @@ impl HandedValues {
     fn of(
         (f, ir): (&IrFunction, &ModuleIr),
         names_only_at: impl Fn(Position) -> bool,
-        handed_back_at: impl Fn(Position, &[VarId]) -> Option<VarId>,
+        handed_back_at: impl Fn(Position, &InstKind) -> Option<VarId>,
         handed: &FxHashSet<(VarId, VarId)>,
         reads: bool,
     ) -> Self {
@@ -248,7 +248,7 @@ impl HandedValues {
                             flow.add(*recv, span, Usage::Reads);
                         }
                         let passed = args.iter().chain(kwargs.iter().map(|(_, v)| v));
-                        let handed_back = handed_back_at(at, args);
+                        let handed_back = handed_back_at(at, &inst.kind);
                         if let Some(v) = handed_back {
                             flow.from.entry(*dst).or_default().push(v);
                         }

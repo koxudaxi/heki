@@ -269,7 +269,10 @@ Missed findings close as heki learns more:
   what it returns changes the attribute's object.
 - `vars(obj)` (the builtin, not a name shadowing it) is `obj.__dict__`: an entry stored, deleted,
   set by a container method, or updated in place (`vars(obj) |= other`, also on
-  `obj.__dict__`) through either is a write of the attribute it names.
+  `obj.__dict__`) through either is a write of the attribute it names. Where reading it runs no
+  code of the instance's classes, the namespace is a builtin `dict`, so its methods resolve
+  (`obj.__dict__.get(KEY)` is no call heki cannot resolve); a class object's namespace is a
+  read-only proxy and has no class.
 - A write-owners contract sees a container change through what a method or a property returns
   when it returns the attribute itself on every `return` (`node.members().append(x)` with
   `return self.items`) and every class the object may be runs it. A `cached_property` hands out
@@ -294,8 +297,10 @@ Missed findings close as heki learns more:
 - A write in an unannotated helper is still found where a caller passes it an object of a known
   class. A read is not.
 - Not typed: values declared `Any` or `types.ModuleType`, generics substituted through
-  unbounded `TypeVar`s (a bounded or constrained one gives its bound or constraints), and calls
-  of `type[C]` attributes.
+  unbounded `TypeVar`s (a bounded or constrained one gives its bound or constraints), names a
+  module binds to a type expression more than once or with type parameters (a type alias bound
+  once names its value), calls of a subscripted class other than a builtin or `collections`
+  container (`Box[int]()`), and calls of `type[C]` attributes.
 - A module-level table of functions (`HANDLERS = {"create": create}`) gives the value of a key
   a string constant gives, and one of its values for any other key, only while no code changes
   it in place; a change through a call it is handed to (`register(HANDLERS)`) is not seen.
@@ -303,6 +308,15 @@ Missed findings close as heki learns more:
   adds to its items when heki types it (`append(x)` with `x: Field`, `extend` or `+=` of a list
   of known items, `d[k] = v` with `v` of a known class), and leaves its items untyped otherwise.
   A change of an item it holds (`d[k].append(x)`) is not seen.
+- A function a value holds is known where the code that makes the value shows it: a field of a
+  `NamedTuple` or a frozen dataclass whose generated constructor the code calls (also through a
+  table of such instances bound once), the function a factory returns when every `return` gives
+  one, and a class attribute bound to `functools.partial` of a function, read through the class
+  or wrapped in `staticmethod`. A call through a field of a dataclass that is not frozen, one with
+  a `__post_init__`, or a class a `dataclass_transform` decorator builds, through a value handed
+  in as a parameter (a view or a callback a caller passes), through a plain `partial` attribute
+  read on an instance (Python 3.14 binds the instance to it, older versions do not), and through
+  a `partial` holding a positional argument is a call heki cannot resolve.
 - The type of a module global or an instance attribute joins every store of it through a
   receiver whose type heki knows: `self`, an instance of the class (a parameter `obj: Helper`,
   `cls()` in a class method, one the storing module keeps in its own attribute or global, as

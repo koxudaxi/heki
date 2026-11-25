@@ -227,14 +227,26 @@ const NEW_OBJECT_CALLS: &[&str] = &[
 /// `typing.cast(T, value)` returns `value`.
 pub(crate) const CASTS: &[&str] = &["typing.cast", "typing_extensions.cast"];
 
-/// The argument a call of the library function `symbol` hands back as itself: the value of
-/// `typing.cast(T, value)`, a type annotation in call form that returns its value unchanged at
-/// run time. Every reader of "which object is this value" (the alias facts of changes and
-/// retention, [`source`], the references a function hands on) takes it from here; a project
-/// function returning its parameter on every path is the declarations' answer
+/// The argument the call instruction `call` of the library function `symbol` hands back as
+/// itself: the value of `typing.cast(T, value)`, a type annotation in call form that returns its
+/// value unchanged at run time. Every reader of "which object is this value" (the alias facts of
+/// changes and retention, [`source`], the references a function hands on) takes it from here; a
+/// project function returning its parameter on every path is the declarations' answer
 /// ([`crate::FunctionDecl::returns_param`]).
-pub(crate) fn handed_back(symbol: &str, args: &[VarId]) -> Option<VarId> {
-    CASTS.contains(&symbol).then(|| args.get(1).copied())?
+pub(crate) fn handed_back(symbol: &str, call: &InstKind) -> Option<VarId> {
+    const VALUE: usize = 1;
+    let (InstKind::Call {
+        args, star_from, ..
+    }
+    | InstKind::MethodCall {
+        args, star_from, ..
+    }) = call
+    else {
+        return None;
+    };
+    // `cast(T, *values)` hands back what the unpacking binds to the value, not the iterable.
+    let bound = star_from.is_none_or(|s| usize::from(s) > VALUE);
+    (CASTS.contains(&symbol) && bound).then(|| args.get(VALUE).copied())?
 }
 
 /// What the instruction `kind` of `f` makes of the object its result holds. A call's resolution
@@ -307,7 +319,7 @@ pub fn source<'i>(
             {
                 return Source::New;
             }
-            if let Some(value) = handed_back(symbol, args) {
+            if let Some(value) = handed_back(symbol, kind) {
                 return Source::Same(value);
             }
             // `getattr(*spec)` names neither its object nor its default: unknown.

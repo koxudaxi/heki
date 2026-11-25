@@ -30,7 +30,7 @@ pub(crate) fn run(args: &RecommendArgs) -> Result<ExitCode> {
     )?;
     warn_files_not_analyzed(&paths, &project, OutputFormat::Full);
     let baseline = match baseline_path(&args.analysis, &project.env) {
-        Some(path) => Some(RatchetBaseline::load(&path)?),
+        Some(path) => Some(RatchetBaseline::load(&path, heki_rules::reports_groups)?),
         None => None,
     };
     let errors = shown_errors(&project.errors);

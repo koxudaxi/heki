@@ -10,9 +10,10 @@
 //! locks `EFF109` follows, the values class statements pass as bases, the bindings the deque
 //! rewrite's candidates check, the star imports a name is bound through, many or nested deep,
 //! the sizes of a thousand lists each extending the next or of one list extending many deep
-//! chains, the walks over the import graph (`heki inspect --imports`), and the tests of their
+//! chains, the walks over the import graph (`heki inspect --imports`), the tests of their
 //! arguments that helpers hand on to their callers, through a long chain of helpers, for many
-//! parameters, or from many implementations of one call.
+//! parameters, or from many implementations of one call, and the type expressions aliases and
+//! casts spell.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -2734,6 +2735,81 @@ fn initializers_handing_self_down_a_helper_chain_reach_each_helper_at_most_twice
         .map(|d| (&d["qualname"], &d["target"]))
         .collect();
     assert_eq!(found, [(&json!("build"), &json!("build:Node.optional"))]);
+}
+
+/// A boundary's scopes handing a new object down a chain of a thousand public helpers, the last
+/// writing its parameter, one of them handing the input down the chain too; and taking a copy
+/// from a helper with a thousand returns of elements of its optional table, called without the
+/// table. What the calls hand each helper is walked once along the chain, and the elements once
+/// per return. The write of the input stays reported, at the call handing it over.
+#[test]
+fn new_objects_handed_down_a_helper_chain_are_judged_in_one_walk() {
+    let module = |size: usize| {
+        let mut lines = vec![
+            "import copy".to_owned(),
+            String::new(),
+            String::new(),
+            "class Node:".to_owned(),
+            "    def __init__(self) -> None:".to_owned(),
+            "        self.flag = False".to_owned(),
+        ];
+        for h in 0..size {
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("def h{h}(a: Node) -> None:"),
+                format!("    h{}(a)", h + 1),
+            ]);
+        }
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def h{size}(a: Node) -> None:"),
+            "    a.flag = True".to_owned(),
+            String::new(),
+            String::new(),
+            "def pick(node: Node, table: dict[int, Node] | None = None, k: int = 0) -> Node:"
+                .to_owned(),
+        ]);
+        for r in 0..size {
+            lines.extend([
+                format!("    if table and k == {r}:"),
+                format!("        return table[{r}]"),
+            ]);
+        }
+        lines.extend([
+            "    return copy.copy(node)".to_owned(),
+            String::new(),
+            String::new(),
+            "def build(node: Node) -> Node:".to_owned(),
+            "    copied = copy.copy(node)".to_owned(),
+            "    h0(copied)".to_owned(),
+            "    picked = pick(node)".to_owned(),
+            "    picked.flag = True".to_owned(),
+            "    return copied".to_owned(),
+            String::new(),
+            String::new(),
+            "def mixed(node: Node) -> None:".to_owned(),
+            "    h0(copy.copy(node))".to_owned(),
+            "    h0(node)".to_owned(),
+        ]);
+        lines.join("\n") + "\n"
+    };
+    let found = check_linear(1_000, |size| {
+        let p = Project::new(&format!("bounds_handed_new_{size}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"build\"\nscopes = [\"m.build\", \"m.mixed\"]\nwrite-universe = [\"Node.*\"]\n",
+        )
+        .write("m.py", &module(size));
+        p
+    });
+    let found: Vec<(&Value, &Value)> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF201")
+        .map(|d| (&d["qualname"], &d["target"]))
+        .collect();
+    assert_eq!(found, [(&json!("mixed"), &json!("build:Node.flag"))]);
 }
 
 /// A chain of forty helpers, each calling the one below twice: once with its own parameters and
@@ -7310,4 +7386,54 @@ fn a_fact_needing_more_tests_than_the_bound_is_not_kept() {
     let waits = |certainty: &str| vec![("waits".to_owned(), certainty.to_owned())];
     assert_eq!(certainty(4), waits("exact"));
     assert_eq!(certainty(5), waits("heuristic"));
+}
+
+/// `aliases` type aliases of a subscript and a union each, one alias of a union wider than the
+/// bound of parts, and a function casting a value to a subscript `aliases` times and once to a
+/// union doubling its text in each of `DOUBLINGS` links: each type expression is spelled once,
+/// the wide and the doubling union only up to their bound of parts. The wide union has a fixed
+/// width: a chain of operators as long as `aliases` overflows the 1 MiB main thread stack of a
+/// debug build on Windows. The doubling union has few enough links that its values (two a link)
+/// stay within the bound, so only the parts its text writes stop it: without that bound, its
+/// text would grow to 2^`DOUBLINGS` parts.
+fn type_expressions(aliases: usize) -> String {
+    const WIDE: usize = 70;
+    const DOUBLINGS: usize = 29;
+    let mut out = vec![
+        "from typing import TypeAlias, cast".to_owned(),
+        String::new(),
+        String::new(),
+        "class C:".to_owned(),
+        "    pass".to_owned(),
+        String::new(),
+        String::new(),
+    ];
+    for i in 0..aliases {
+        out.push(format!(
+            "A{i}: TypeAlias = dict[str, list[tuple[C, int]]] | None"
+        ));
+    }
+    out.push(format!("Wide = {}", vec!["C"; WIDE].join(" | ")));
+    out.extend([
+        String::new(),
+        String::new(),
+        "def casts(value: object) -> None:".to_owned(),
+    ]);
+    for i in 0..aliases {
+        out.push(format!("    c{i} = cast(dict[str, list[C]], value)"));
+    }
+    out.push("    kind = C".to_owned());
+    out.extend((0..DOUBLINGS).map(|_| "    kind = kind | kind".to_owned()));
+    out.push("    cast(kind, value).run()".to_owned());
+    out.join("\n") + "\n"
+}
+
+#[test]
+fn type_expressions_are_spelled_once_each() {
+    let found = check_linear(800, |aliases| {
+        let p = Project::new(&format!("bounds_type_expressions_{aliases}"));
+        p.write("m.py", &type_expressions(aliases));
+        p
+    });
+    assert_eq!(found, Vec::<Value>::new());
 }

@@ -323,6 +323,10 @@ def own_change_of_another_parameter(items: Sequence[int], other: list[int]) -> N
     cast(list, other).append(1)
 
 
+def own_change_of_an_unpacked_item(items: Sequence[list[int]]) -> None:
+    cast(list, *items).append(1)
+
+
 if sys.version_info >= (3, 13):
     def own_change_defined_twice(items: Sequence[int]) -> None:
         cast(list, items).append(2)
@@ -340,12 +344,14 @@ else:
         .into_iter()
         .filter(|(_, code, _)| code == "MUT110")
         .collect();
-    // `cast(Any, items)` keeps `Sequence`, and heki does not read a subscripted type in a cast
-    // yet: the value is no builtin container there, and the change stays open.
+    // `cast(Any, items)` keeps `Sequence`: the value is no builtin container there, and the
+    // change stays open. A subscripted cast type is read as an annotation. `cast(list, *items)`
+    // hands back an item of `items`, not `items`.
     let expected: BTreeSet<(String, String, String)> = [
         "to_annotated_cast",
         "to_annotated_pass_through",
         "own_change_cast",
+        "own_change_cast_subscripted",
         "own_change_module_alias_cast",
         "own_change_returns_a_cast",
         "own_change_pass_through",
