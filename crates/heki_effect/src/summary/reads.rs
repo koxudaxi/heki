@@ -1,17 +1,19 @@
-//! The local part of [`crate::EffectSummary::only_read_params`] and
-//! [`crate::ContainerParams`]: walks over the uses of the values a parameter's object may be.
+//! The local part of [`crate::EffectSummary::only_read_params`], of
+//! [`crate::EffectSummary::read_kinds`], and of [`crate::ContainerParams`]: walks over the uses
+//! of the values a parameter's object may be.
 //! A change of the object itself is [`crate::EffectSummary::mutated_param_paths`]' (the
 //! `MUT110` judgment); these walks find what else may keep it, change it through a value that
 //! may be it, or hand it to code heki does not follow.
 
-use super::{Extractor, Position, ProjectCall};
-use crate::ContainerParams;
+use super::{Built, Extractor, Position, ProjectCall};
 use crate::order_flow::ORDER_FREE_BUILTINS;
 use crate::ownership;
 use crate::readonly::{
-    ContainerKind, container_mutator, result_detached_from_container, returns_container_view,
+    ContainerFamily, ContainerKind, container_mutator, result_detached_from_container,
+    returns_container_view,
 };
 use crate::resolver::{Callee, Val, func_qualname, mutable_container};
+use crate::{ContainerParams, ReadKinds};
 use heki_ir::walk::{Answer, Budget, Def, FnShape, Use, Visit, reach};
 use heki_ir::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, DictEntry, FunctionId, InstKind, Terminator,
@@ -22,40 +24,32 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
-/// The classes whose methods are those of a builtin list, dict, or set: the builtins, their
-/// `typing` aliases, and the abstract containers.
-const CONTAINER_CLASSES: &[&str] = &[
-    "builtins.list",
-    "builtins.dict",
-    "builtins.set",
-    "typing.List",
-    "typing.Dict",
-    "typing.Set",
-    "typing.MutableSequence",
-    "typing.MutableMapping",
-    "typing.MutableSet",
-    "collections.abc.MutableSequence",
-    "collections.abc.MutableMapping",
-    "collections.abc.MutableSet",
-];
-
-/// What one use of a value does with the object the value may be.
+/// What one use of a value does with the object the value may be, with the kinds of read it
+/// makes of it.
 enum Handling {
     /// Only reads it: a test, an item read, an iteration, a call Layer 1 lists as reading it.
-    Reads,
+    Reads(ReadKinds),
     /// The value it defines holds the object too: a copy, a phi, a view of it (an iterator, a
     /// `dict` view, a generator over it).
-    Holds(VarId),
+    Holds(VarId, ReadKinds),
     /// Hands it to project callees, each binding it to a parameter: their facts decide, when
     /// propagation joins them. A generator or a coroutine the call creates holds it too.
-    Bound(Option<VarId>),
+    Bound(Option<VarId>, ReadKinds),
     /// Anything else: the object may be changed, kept, or handed to code heki does not follow.
     Open,
 }
 
-/// The project calls of the function by position, and the budget of the walks over its values.
+impl Handling {
+    fn holds(w: VarId) -> Self {
+        Self::Holds(w, ReadKinds::NONE)
+    }
+}
+
+/// The project calls of the function by position, what the shape tests of its patterns read of
+/// their subjects, and the budget of the walks over its values.
 struct Walks<'x> {
     calls_at: FxHashMap<Position, &'x ProjectCall>,
+    patterns: FxHashMap<VarId, ReadKinds>,
     budget: Budget,
 }
 
@@ -65,8 +59,13 @@ impl<'a> Extractor<'a> {
     /// a body too large to model) establish nothing.
     pub(super) fn only_read_facts(&mut self) {
         let f = self.f;
+        let mut patterns: FxHashMap<VarId, ReadKinds> = FxHashMap::default();
+        for &(subject, shape) in &f.pattern_subjects {
+            *patterns.entry(subject).or_default() |= ReadKinds::of_pattern(shape);
+        }
         let walks = Walks {
             calls_at: self.project_calls.iter().map(|c| (c.at, c)).collect(),
+            patterns,
             budget: Budget::of_function("summary::only_read", f),
         };
         if crate::is_stub(self.path) || !f.a1_hazards.is_empty() {
@@ -87,8 +86,9 @@ impl<'a> Extractor<'a> {
         let mut only = u64::MAX;
         for (k, mut seeds) in starts {
             seeds.sort_unstable();
-            if !self.only_read_from(&walks, k, seeds) {
-                only &= !(1u64 << k);
+            match self.only_read_from(&walks, k, seeds) {
+                Some(kinds) => self.summary.add_read_kinds(k, kinds),
+                None => only &= !(1u64 << k),
             }
         }
         let containers = self.container_params(&walks, true);
@@ -96,20 +96,31 @@ impl<'a> Extractor<'a> {
         self.summary.container_params = containers;
     }
 
-    /// Whether no use of `seeds` (the values that may be the object of position `k`), or of
-    /// the values holding it, leaves the object open; open past the walk budget.
-    fn only_read_from(&self, walks: &Walks<'_>, k: u8, seeds: Vec<VarId>) -> bool {
+    /// The kinds of read the uses of `seeds` (the values that may be the object of position
+    /// `k`), and of the values holding it, make of the object; `None` when one leaves it open,
+    /// and past the walk budget.
+    fn only_read_from(&self, walks: &Walks<'_>, k: u8, seeds: Vec<VarId>) -> Option<ReadKinds> {
         let open = Cell::new(false);
+        let kinds = Cell::new(ReadKinds::NONE);
         let found = reach(
             &walks.budget,
             seeds,
             |v, next| {
+                let tested = walks.patterns.get(&v).copied().unwrap_or_default();
+                kinds.set(kinds.get() | tested);
                 for &u in self.shape.readers(v) {
-                    match self.handling(walks, k, v, u) {
-                        Handling::Reads | Handling::Bound(None) => {}
-                        Handling::Holds(w) | Handling::Bound(Some(w)) => next.push(w),
-                        Handling::Open => open.set(true),
-                    }
+                    let (held, read) = match self.handling(walks, k, v, u) {
+                        Handling::Reads(read) | Handling::Bound(None, read) => (None, read),
+                        Handling::Holds(w, read) | Handling::Bound(Some(w), read) => {
+                            (Some(w), read)
+                        }
+                        Handling::Open => {
+                            open.set(true);
+                            continue;
+                        }
+                    };
+                    kinds.set(kinds.get() | read);
+                    next.extend(held);
                 }
             },
             |_| match open.get() {
@@ -117,16 +128,18 @@ impl<'a> Extractor<'a> {
                 false => Visit::Expand,
             },
         );
-        !open.get() && matches!(found, Answer::Known(None))
+        (!open.get() && matches!(found, Answer::Known(None))).then(|| kinds.get())
     }
 
     /// What the use `u` of `v`, a value that may be the object of position `k`, does with it.
     fn handling(&self, walks: &Walks<'_>, k: u8, v: VarId, u: Use) -> Handling {
         let (bb, i) = match u {
-            Use::Phi(bb, i) => return Handling::Holds(self.f.block(bb).phis[i as usize].dst),
+            Use::Phi(bb, i) => return Handling::holds(self.f.block(bb).phis[i as usize].dst),
             Use::Terminator(bb) => {
                 return match self.f.block(bb).terminator {
-                    Terminator::Branch { cond, .. } if cond == v => Handling::Reads,
+                    Terminator::Branch { cond, .. } if cond == v => {
+                        Handling::Reads(ReadKinds::SIZE)
+                    }
                     _ => Handling::Open,
                 };
             }
@@ -135,9 +148,9 @@ impl<'a> Extractor<'a> {
         let inst = &self.f.block(bb).insts[i];
         match &inst.kind {
             InstKind::Copy { dst, .. } if self.f.var_name(*dst) == Some(UNPACKED) => {
-                Handling::Reads
+                Handling::Reads(ReadKinds::UNPACKING)
             }
-            InstKind::Copy { dst, .. } => Handling::Holds(*dst),
+            InstKind::Copy { dst, .. } => Handling::holds(*dst),
             InstKind::BinOp {
                 lhs,
                 in_place: true,
@@ -146,24 +159,49 @@ impl<'a> Extractor<'a> {
             InstKind::SubscriptDelete { obj, .. } if *obj == v => Handling::Open,
             // An operator, a comparison, or an item access with the object as the key runs a
             // special method of the other operand's class, which gets the object.
-            InstKind::BinOp { lhs, rhs, .. } => self.operand_handling(bb, v, *lhs, *rhs),
+            InstKind::BinOp { lhs, rhs, .. } => {
+                self.operand_handling(bb, v, *lhs, *rhs, ReadKinds::OPERAND)
+            }
             InstKind::Compare { op, lhs, rhs, .. } => match op {
-                CompareOpKind::Is | CompareOpKind::IsNot => Handling::Reads,
-                CompareOpKind::In | CompareOpKind::NotIn if *rhs == v => Handling::Reads,
-                _ => self.operand_handling(bb, v, *lhs, *rhs),
+                CompareOpKind::Is | CompareOpKind::IsNot => Handling::Reads(ReadKinds::NONE),
+                CompareOpKind::In | CompareOpKind::NotIn if *rhs == v => {
+                    Handling::Reads(ReadKinds::MEMBERSHIP)
+                }
+                _ => self.operand_handling(bb, v, *lhs, *rhs, ReadKinds::COMPARISON),
             },
             InstKind::SubscriptLoad { obj, index, .. }
-            | InstKind::SubscriptDelete { obj, index, .. } => {
-                self.operand_handling(bb, v, *obj, *index)
+                if *obj == v && crate::consumption::is_unpacking(self.shape, *index, inst.span) =>
+            {
+                Handling::Reads(ReadKinds::TARGET_UNPACKING)
             }
-            InstKind::UnaryOp { .. }
-            | InstKind::Convert { .. }
-            | InstKind::Format { .. }
-            | InstKind::BuildString { .. }
-            | InstKind::MakeIter { .. }
-            | InstKind::IterNext { .. }
-            | InstKind::YieldFrom { .. }
-            | InstKind::Delete { .. } => Handling::Reads,
+            InstKind::SubscriptLoad { obj, .. } if *obj == v && self.item_read_changes(bb, v) => {
+                Handling::Open
+            }
+            // A key is hashed and compared, an index converted (`__index__`).
+            InstKind::SubscriptLoad { obj, index, .. } if *obj == v => {
+                self.key_handling(bb, *index)
+            }
+            InstKind::SubscriptLoad { obj, index, .. }
+            | InstKind::SubscriptDelete { obj, index, .. } => self.operand_handling(
+                bb,
+                v,
+                *obj,
+                *index,
+                ReadKinds::COMPARISON | ReadKinds::OPERATORS,
+            ),
+            InstKind::UnaryOp { op, .. } => Handling::Reads(match op {
+                UnaryOpKind::Not => ReadKinds::SIZE,
+                _ => ReadKinds::OPERATORS,
+            }),
+            InstKind::Convert { .. } | InstKind::Format { .. } | InstKind::BuildString { .. } => {
+                Handling::Reads(ReadKinds::TEXT)
+            }
+            InstKind::MakeIter { .. } | InstKind::YieldFrom { .. } => {
+                Handling::Reads(ReadKinds::ITERATION)
+            }
+            // An iterator over the object, or a view of it, steps through the builtin's own
+            // storage; a `del` of a name reads nothing.
+            InstKind::IterNext { .. } | InstKind::Delete { .. } => Handling::Reads(ReadKinds::NONE),
             // `{**p}` reads the mapping's items into a new dict.
             InstKind::DictLiteral { entries, .. } => {
                 let held = entries.iter().any(
@@ -171,21 +209,27 @@ impl<'a> Extractor<'a> {
                 );
                 match held {
                     true => Handling::Open,
-                    false => Handling::Reads,
+                    false => Handling::Reads(ReadKinds::MAPPING_UNPACK),
                 }
             }
-            // A generator expression holds an iterator over its outermost iterable, and the
-            // values it captures, which its body reads where it runs.
+            // A generator expression holds an iterator over its outermost iterable, which it
+            // makes where it is created, and the values it captures, which its body reads where
+            // it runs.
             InstKind::MakeGenExpr {
                 dst,
                 func_id,
                 captured,
+                outer_iter,
                 ..
             } => {
                 if captured.contains(&v) && !self.child_reads_parameter(k, v, *func_id) {
                     return Handling::Open;
                 }
-                Handling::Holds(*dst)
+                let read = match *outer_iter == v {
+                    true => ReadKinds::ITERATION,
+                    false => ReadKinds::NONE,
+                };
+                Handling::Holds(*dst, read)
             }
             InstKind::Call { callee_var, .. } if *callee_var == Some(v) => Handling::Open,
             kind => CallOperands::of(kind, (bb, i)).map_or(Handling::Open, |call| {
@@ -194,17 +238,66 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// An operation on `a` and `b`, one of them `v`: the other operand, when it may be an
-    /// instance of a project class, has its special method run with the object, which may keep
-    /// it; a builtin's only reads it.
-    fn operand_handling(&self, bb: BlockId, v: VarId, a: VarId, b: VarId) -> Handling {
+    /// An operation on `a` and `b`, one of them `v`: the other operand's special method is run
+    /// with the object (`other == p` runs `type(other).__eq__(other, p)` first), and may keep or
+    /// change it, unless the operand only runs a builtin's ([`Self::builtin_operand`]).
+    fn operand_handling(
+        &self,
+        bb: BlockId,
+        v: VarId,
+        a: VarId,
+        b: VarId,
+        read: ReadKinds,
+    ) -> Handling {
         let other = if a == v { b } else { a };
-        let project = |c: &String| self.cx.project.is_project_class(c);
-        match self.val_in(bb, other) {
-            Some(Val::Inst(c)) if project(c) => Handling::Open,
-            Some(Val::Union(cs)) if cs.iter().any(project) => Handling::Open,
-            _ => Handling::Reads,
+        match self.builtin_operand(bb, other) {
+            true => Handling::Reads(read),
+            false => Handling::Open,
         }
+    }
+
+    /// Whether the operand `other` of an operation on the object at `bb` runs a builtin's special
+    /// methods, which only read the object: it is built here as a builtin value of its exact
+    /// class, or each class it may be is a builtin class no project class derives from (R2). A
+    /// value of unknown class, of `object`, or of a library class may run code that keeps it.
+    fn builtin_operand(&self, bb: BlockId, other: VarId) -> bool {
+        if self.built(self.shape.copy_root(other)) != Built::Unknown {
+            return true;
+        }
+        let builtin = |c: &String| {
+            c.starts_with("builtins.")
+                && c != "builtins.object"
+                && self.cx.project.value_classes(c).is_empty()
+        };
+        let classes = self.instance_classes(bb, other);
+        !classes.is_empty() && classes.iter().all(builtin)
+    }
+
+    /// The classes `v` may be an instance of at `bb` ([`Val::instance_classes`]).
+    fn instance_classes(&self, bb: BlockId, v: VarId) -> &[String] {
+        self.val_in(bb, v).map_or(&[], Val::instance_classes)
+    }
+
+    /// The key `index` of an item read of the object: the key's own methods (`__hash__`,
+    /// `__eq__`, `__index__`) get the key and the keys the object holds, not the object; a key
+    /// that may be an instance of a project class leaves it open.
+    fn key_handling(&self, bb: BlockId, index: VarId) -> Handling {
+        let project = |c: &String| self.cx.project.is_project_class(c);
+        match self.instance_classes(bb, index).iter().any(project) {
+            true => Handling::Open,
+            false => Handling::Reads(ReadKinds::ITEM),
+        }
+    }
+
+    /// Whether an item read of `v` may change the object: a class it may be has a base binding
+    /// a read of an item that changes it ([`ContainerFamily::changing_read`]: a `defaultdict`'s
+    /// `__missing__` inserts the key).
+    fn item_read_changes(&self, bb: BlockId, v: VarId) -> bool {
+        let item: Vec<&str> = ReadKinds::ITEM.methods().collect();
+        (self.instance_classes(bb, v).iter()).any(|class| {
+            (self.cx.project.mro_of(class).iter())
+                .any(|base| ContainerFamily::changing_read(base, &item).is_some())
+        })
     }
 
     /// Whether the generator expression `child` reads `v` as the function's parameter `k`
@@ -244,7 +337,7 @@ impl<'a> Extractor<'a> {
         call: &CallOperands<'_>,
     ) -> Handling {
         if self.hands_back(v, call) {
-            return Handling::Holds(call.dst);
+            return Handling::holds(call.dst);
         }
         match self.callees.get(&call.at) {
             Some(Callee::Project(keys, _)) => self.project_handling(walks, k, v, call, keys),
@@ -296,12 +389,24 @@ impl<'a> Extractor<'a> {
                 .function_decl(key)
                 .is_some_and(|d| d.is_generator || d.is_async && !self.sites[site.site].is_awaited)
         });
-        Handling::Bound(creates.then_some(call.dst))
+        // The callees' kinds of read join where propagation joins their facts; what the call
+        // reads itself is what it unpacks.
+        let unpacked = places
+            .iter()
+            .fold(ReadKinds::NONE, |read, p| read | p.unpacking());
+        Handling::Bound(creates.then_some(call.dst), unpacked)
     }
 
     /// What Layer 1 lists the library call `symbol` as doing with its argument at `position`
-    /// (with no entry, it may keep or change it), for the result `dst` of the call.
-    fn layer1(&self, symbol: &str, position: usize, dst: VarId) -> Handling {
+    /// (with no entry, it may keep or change it), for the result `dst` of the call; `read` gives
+    /// the kinds of read of an argument it reads.
+    fn layer1(
+        &self,
+        symbol: &str,
+        position: usize,
+        dst: VarId,
+        read: impl FnOnce() -> ReadKinds,
+    ) -> Handling {
         let effect = (self.cx.layer1)
             .and_then(|kb| kb.lookup(symbol))
             .and_then(|e| {
@@ -310,8 +415,8 @@ impl<'a> Extractor<'a> {
                     .or_else(|| e.param_effects.last())
             });
         match effect {
-            Some(SoundnessParamEffect::ReadOnly) => Handling::Reads,
-            Some(SoundnessParamEffect::RetainedInReturn) => Handling::Holds(dst),
+            Some(SoundnessParamEffect::ReadOnly) => Handling::Reads(read()),
+            Some(SoundnessParamEffect::RetainedInReturn) => Handling::Holds(dst, read()),
             _ => Handling::Open,
         }
     }
@@ -320,36 +425,50 @@ impl<'a> Extractor<'a> {
     /// argument, or for the receiver of a builtin container's method, what the method does.
     fn library_handling(&self, v: VarId, call: &CallOperands<'_>, symbol: &str) -> Handling {
         let offset = self.library_offset(call);
+        let invoked = |j: usize| {
+            u8::try_from(j).map_or(ReadKinds::ALL, |j| {
+                ReadKinds::of_library_call(self.cx.kb, symbol, j)
+            })
+        };
         let mut held = None;
+        let mut kinds = ReadKinds::NONE;
         for place in call.places(self.shape, v) {
             let handling = match place {
                 Place::Receiver => self.receiver_handling(symbol, call.dst),
-                Place::Position(j) => self.layer1(symbol, j + offset, call.dst),
-                Place::Unpacked | Place::Mapping => Handling::Reads,
+                Place::Position(j) => self.layer1(symbol, j + offset, call.dst, || invoked(j)),
+                Place::Unpacked | Place::Mapping => Handling::Reads(place.unpacking()),
                 Place::AfterUnpacking | Place::Keyword => Handling::Open,
             };
             match handling {
                 Handling::Open => return Handling::Open,
-                Handling::Holds(w) => held = Some(w),
-                _ => {}
+                Handling::Holds(w, read) => {
+                    held = Some(w);
+                    kinds |= read;
+                }
+                Handling::Reads(read) | Handling::Bound(_, read) => kinds |= read,
             }
         }
-        held.map_or(Handling::Reads, Handling::Holds)
+        held.map_or(Handling::Reads(kinds), |w| Handling::Holds(w, kinds))
     }
 
-    /// The receiver of a call of the library method `symbol`: a builtin container's method that
-    /// does not change it either reads it or gives a view of it; any other method is what Layer
-    /// 1 lists for its first parameter.
+    /// The receiver of a call of the library method `symbol`: a method of a builtin container,
+    /// of its `typing` alias, or of its ABCs (read as the builtin's) that does not change it
+    /// either reads it or gives a view of it; any other method is what Layer 1 lists for its
+    /// first parameter, read in every kind.
     fn receiver_handling(&self, symbol: &str, dst: VarId) -> Handling {
         let container_method = symbol
             .rsplit_once('.')
-            .filter(|(class, _)| CONTAINER_CLASSES.contains(class))
+            .filter(|(class, _)| ContainerFamily::read_as_builtin(class).is_some())
             .map(|(_, method)| method);
         match container_method {
             Some(m) if container_mutator(m) => Handling::Open,
-            Some(m) if returns_container_view(m) => Handling::Holds(dst),
-            Some(m) if result_detached_from_container(m) => Handling::Reads,
-            _ => self.layer1(symbol, 0, dst),
+            Some(m) if returns_container_view(m) => {
+                Handling::Holds(dst, ReadKinds::of_method(m, true))
+            }
+            Some(m) if result_detached_from_container(m) => {
+                Handling::Reads(ReadKinds::of_method(m, true))
+            }
+            _ => self.layer1(symbol, 0, dst, || ReadKinds::ALL),
         }
     }
 
@@ -659,7 +778,10 @@ impl<'a> Extractor<'a> {
             (Place::Mapping, _) => !derived && kind == ContainerKind::Dict,
             (Place::Position(j), Some(Callee::External(symbol))) => {
                 (!sets || ORDER_FREE_BUILTINS.contains(&symbol.as_str()))
-                    && !matches!(self.layer1(symbol, j + offset, call.dst), Handling::Open)
+                    && !matches!(
+                        self.layer1(symbol, j + offset, call.dst, || ReadKinds::NONE),
+                        Handling::Open
+                    )
             }
             (Place::Position(_) | Place::Keyword, Some(Callee::Project(..))) => !derived && project,
             _ => false,
@@ -702,6 +824,18 @@ enum Place {
     Keyword,
     /// Unpacked with `**`: the call takes the mapping's items.
     Mapping,
+}
+
+impl Place {
+    /// What the call reads of a value it unpacks here ([`ReadKinds::UNPACKING`],
+    /// [`ReadKinds::MAPPING_UNPACK`]); none where it hands the value over whole.
+    fn unpacking(self) -> ReadKinds {
+        match self {
+            Self::Unpacked => ReadKinds::UNPACKING,
+            Self::Mapping => ReadKinds::MAPPING_UNPACK,
+            _ => ReadKinds::NONE,
+        }
+    }
 }
 
 /// The operands of a `Call` or `MethodCall` instruction at `at`, other than the value it calls.

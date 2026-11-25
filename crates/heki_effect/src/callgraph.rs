@@ -356,8 +356,11 @@ fn recompute(
         let mut consumed: Option<u64> = None;
         for bc in site.project_callees() {
             if index.opt_in.only_read {
-                s.only_read_params &=
-                    !crate::only_read::not_only_read_through(index.summary(&bc.callee), bc);
+                let callee = index.summary(&bc.callee);
+                s.only_read_params &= !crate::only_read::not_only_read_through(callee, bc);
+                if let Some(callee) = callee {
+                    crate::only_read::read_kinds_through(&mut s, callee, bc);
+                }
             }
             let Some(callee) = index.summary(&bc.callee) else {
                 consumed = Some(0);

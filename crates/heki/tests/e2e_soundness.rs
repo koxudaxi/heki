@@ -1333,6 +1333,35 @@ const COUNTEREXAMPLES: &[Expect] = &[
             ),
         )],
     ),
+    // An item's `__radd__` gets `sum`'s start; `min` and `max` hand each argument to another's
+    // `__lt__` or `__gt__`.
+    (
+        "cx_kept_by_sum_start",
+        &[(
+            "OPT101",
+            V::Blocked(
+                "Unique(acc): it may be shared: stored in a container, attribute, or global",
+            ),
+        )],
+    ),
+    (
+        "cx_compared_by_min",
+        &[(
+            "OPT101",
+            V::Blocked(
+                "Unique(acc): it may be shared: stored in a container, attribute, or global",
+            ),
+        )],
+    ),
+    (
+        "cx_compared_by_max",
+        &[(
+            "OPT101",
+            V::Blocked(
+                "Unique(acc): it may be shared: stored in a container, attribute, or global",
+            ),
+        )],
+    ),
     ("cx_function_kept_by_map", &[]),
     (
         "cx_map_over_ints",
@@ -1493,7 +1522,7 @@ fn counterexamples_found_in_m8_stay_unrewritten() {
     let (_, _, stderr) = p.check(&["--select", "OPT", "--fix", "--include-size-dependent"]);
     assert!(stderr.contains("Fixed 0 issue(s)"), "{stderr}");
     assert_eq!(p.read("cases.py"), original);
-    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 42/42"));
+    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 45/45"));
 }
 
 // ======================================================================== module-level facts

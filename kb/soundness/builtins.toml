@@ -105,9 +105,11 @@ param_effects = ["read_only"]
 verified_max_python = { major = 3, minor = 15 }
 
 # --- Reads of an iterable ---
-# `sorted`, `any`, `all`, and `frozenset` take one positional argument. `sum` returns its
-# `start` itself when the iterable is empty. `min` / `max` with two or more positional
-# arguments return one of them, so every position is retained.
+# `sorted`, `any`, `all`, and `frozenset` take one positional argument. `sum` adds its `start`
+# to each item, whose `__radd__` receives it and may keep it: `start` is `escaped`. `min` /
+# `max` with two or more positional arguments compare each with the one found so far, whose
+# `__lt__` / `__gt__` (or the reflected method of the other) receives it: every position is
+# `escaped`.
 
 [[entries]]
 symbol = "builtins.sorted"
@@ -131,17 +133,17 @@ verified_max_python = { major = 3, minor = 15 }
 
 [[entries]]
 symbol = "builtins.sum"
-param_effects = ["read_only", "retained_in_return"]
+param_effects = ["read_only", "escaped"]
 verified_max_python = { major = 3, minor = 15 }
 
 [[entries]]
 symbol = "builtins.min"
-param_effects = ["retained_in_return"]
+param_effects = ["escaped"]
 verified_max_python = { major = 3, minor = 15 }
 
 [[entries]]
 symbol = "builtins.max"
-param_effects = ["retained_in_return"]
+param_effects = ["escaped"]
 verified_max_python = { major = 3, minor = 15 }
 
 # --- Fresh containers ---

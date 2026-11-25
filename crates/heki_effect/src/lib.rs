@@ -46,6 +46,7 @@ pub mod one_at_a_time;
 mod only_read;
 pub use only_read::{
     AnnotationFacts, AnnotationReads, ContainerParams, LiteralAnnotation, ParamAnnotation,
+    ReadKinds, ReadOverride, read_override,
 };
 pub mod order_flow;
 pub mod ownership;
@@ -80,7 +81,8 @@ pub use ownership::{LocalOrigins, Origins, ResultOf, ReturnOrigins};
 pub use query::{CallerSite, Callers, CallsByCaller, ChangeChain, HandedChange, ParamChange};
 pub use readonly::container_mutator;
 pub use readonly::{
-    CacheDecorator, CachedResult, ContainerKind, ProtectedReturn, ReturnStep, Shared,
+    CacheDecorator, CachedResult, ContainerFamily, ContainerKind, FamilyRole, ProtectedReturn,
+    ReturnStep, Shared,
 };
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
@@ -1109,8 +1111,10 @@ pub struct EffectSummary {
     /// display), captured by a nested function, yielded, returned, or handed to a call other than
     /// a project call whose targets are every implementation it can run, binding it to a
     /// parameter, not a constructor, a library call Layer 1 lists as reading that argument, or a
-    /// cast handing it back as itself (`ownership::handed_back`, whose result is the object);
-    /// and every project function it is handed to only reads it there. Inside a call cycle the
+    /// cast handing it back as itself (`ownership::handed_back`, whose result is the object), nor
+    /// to the special method of an operator's other operand that is not a builtin's; no item
+    /// read of a `defaultdict`, whose `__missing__` inserts the key; and every project function
+    /// it is handed to only reads it there. Inside a call cycle the
     /// greatest fixpoint. `0` while [`OptInFacts::only_read`] is off, and for a function heki does
     /// not model (a stub's, one with an A1 hazard).
     pub only_read_params: u64,
@@ -1119,6 +1123,13 @@ pub struct EffectSummary {
     /// for a function without one, and while [`OptInFacts::only_read`] is off. A local fact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_params: Option<Box<ContainerParams>>,
+    /// The kinds of read that reach the object of each position ([`ReadKinds`]): the
+    /// function's own reads of a value that may be it or a view of it, joined with those of
+    /// every project function it hands the object to, as [`Self::only_read_params`] is (a
+    /// position outside it may have fewer). A position without one is absent. `None` without
+    /// any, and while [`OptInFacts::only_read`] is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_kinds: Option<Box<BTreeMap<u8, ReadKinds>>>,
     /// The function returns a new object that nothing else holds (`fresh-objects`).
     pub returns_new: ReturnsNew,
     /// `MUT112`: what the object the function returns may be, path by path: a new one, state
@@ -2880,8 +2891,9 @@ pub struct OptInFacts {
     pub fresh_returns: bool,
     /// [`OptInTables::imports`].
     pub imports: bool,
-    /// [`EffectSummary::only_read_params`] and [`EffectSummary::container_params`], which
-    /// `heki inspect` shows and the language server keeps current.
+    /// [`EffectSummary::only_read_params`], [`EffectSummary::read_kinds`], and
+    /// [`EffectSummary::container_params`], which `heki inspect` shows and the language server
+    /// keeps current.
     pub only_read: bool,
     /// What `heki recommend`'s read-only annotations read besides [`Self::only_read`]:
     /// [`OptInTables::annotation_facts`], and the references handing a project function on

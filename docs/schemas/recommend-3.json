@@ -160,6 +160,24 @@
       ],
       "type": "object"
     },
+    "CauseCount": {
+      "additionalProperties": false,
+      "properties": {
+        "cause": {
+          "type": "string"
+        },
+        "not_listed": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cause",
+        "not_listed"
+      ],
+      "type": "object"
+    },
     "CauseRow": {
       "additionalProperties": false,
       "description": "The reports that leave one premise or condition open for one cause.",
@@ -1173,6 +1191,13 @@
     "PremiseCount": {
       "additionalProperties": false,
       "properties": {
+        "causes": {
+          "description": "The parameters not listed because of it by cause, the most first: the first 10 causes.",
+          "items": {
+            "$ref": "#/$defs/CauseCount"
+          },
+          "type": "array"
+        },
         "heuristic": {
           "description": "The parameters in heuristic groups that leave it open.",
           "format": "uint",
@@ -1192,7 +1217,8 @@
       "required": [
         "premise",
         "not_listed",
-        "heuristic"
+        "heuristic",
+        "causes"
       ],
       "type": "object"
     },

@@ -418,6 +418,70 @@ def old_compared_by_remove(items):
     return len(acc)
 
 
+class KeepsAdded:
+    def __radd__(self, other):
+        CALLS.append(other)
+        return 0
+
+
+def cx_kept_by_sum_start(items):
+    acc = []
+    sum([KeepsAdded()], acc)
+    for v in items:
+        acc = acc + [v]
+    return len(acc)
+
+
+def old_kept_by_sum_start(items):
+    acc = []
+    sum([KeepsAdded()], acc)
+    for v in items:
+        acc.append(v)
+    return len(acc)
+
+
+class KeepsCompared:
+    def __lt__(self, other):
+        CALLS.append(other)
+        return False
+
+    def __gt__(self, other):
+        CALLS.append(other)
+        return False
+
+
+def cx_compared_by_min(items):
+    acc = []
+    min(acc, KeepsCompared())
+    for v in items:
+        acc = acc + [v]
+    return len(acc)
+
+
+def old_compared_by_min(items):
+    acc = []
+    min(acc, KeepsCompared())
+    for v in items:
+        acc.append(v)
+    return len(acc)
+
+
+def cx_compared_by_max(items):
+    acc = []
+    max(KeepsCompared(), acc)
+    for v in items:
+        acc = acc + [v]
+    return len(acc)
+
+
+def old_compared_by_max(items):
+    acc = []
+    max(KeepsCompared(), acc)
+    for v in items:
+        acc.append(v)
+    return len(acc)
+
+
 def cx_function_kept_by_map(items):
     acc = []
     m = map(acc, items)
@@ -946,6 +1010,9 @@ def main() -> int:
         (cx_slice_of_empty, old_slice_of_empty, lambda f: f(5)),
         (cx_kept_by_pop_default, old_kept_by_pop_default, lambda f: f([1, 2])),
         (cx_compared_by_remove, old_compared_by_remove, lambda f: f([1, 2])),
+        (cx_kept_by_sum_start, old_kept_by_sum_start, lambda f: f([1, 2])),
+        (cx_compared_by_min, old_compared_by_min, lambda f: f([1, 2])),
+        (cx_compared_by_max, old_compared_by_max, lambda f: f([1, 2])),
         (cx_function_kept_by_map, old_function_kept_by_map, lambda f: f([1, 2])),
         (cx_map_over_ints, old_map_over_ints, lambda f: f(2)),
         (cx_generator_over_ints, old_generator_over_ints, lambda f: f(2)),

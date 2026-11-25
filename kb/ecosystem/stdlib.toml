@@ -2406,8 +2406,10 @@ type = "contextvars.ContextVar"
 # --- What a call runs of the values it is handed (`[[invokes]]`) ---
 # Each entry lists every argument the call runs code of: the special methods it runs on the
 # argument's class (on the metaclass for a class object; "*" for any attribute, read by a name the
-# call is handed), on the classes of the argument's items, and whether it calls the argument. An
-# argument an entry does not list runs nothing there. A `lazy` call returns an iterator that runs
+# call is handed), on the classes of the argument's items, and whether it calls the argument. A
+# method the call looks up by name (`keys`) comes with `__getattribute__`, and with `__getattr__`,
+# which runs when the class has no such method. An argument an entry does not list runs nothing
+# there. A `lazy` call returns an iterator that runs
 # the same code again while it is iterated. A key a dict or set looks up is compared with the keys it
 # holds only on a hash collision, which an entry leaves out; the keys of a builtin dict or set it is
 # handed come with their stored hashes. Under R3 a call of these runs code of the project only
@@ -2568,7 +2570,7 @@ values = [
 [[invokes]]
 symbol = "builtins.sorted"
 values = [
-    { arg = 0, methods = ["__iter__", "__next__", "__getitem__"], item_methods = ["__lt__", "__gt__"] },
+    { arg = 0, methods = ["__iter__", "__next__", "__getitem__", "__len__", "__length_hint__"], item_methods = ["__lt__", "__gt__"] },
     { param = "key", calls = true },
 ]
 
@@ -2620,7 +2622,7 @@ values = [{ arg = 0, methods = ["__iter__", "__next__", "__getitem__"], item_met
 [[invokes]]
 symbol = "builtins.dict"
 values = [
-    { arg = 0, methods = ["__iter__", "__next__", "__getitem__", "keys"], item_methods = ["__hash__", "__eq__", "__iter__", "__next__", "__getitem__"] },
+    { arg = 0, methods = ["__iter__", "__next__", "__getitem__", "keys", "__getattribute__", "__getattr__"], item_methods = ["__hash__", "__eq__", "__iter__", "__next__", "__getitem__"] },
     { param = "*", methods = [] },
 ]
 
@@ -2687,7 +2689,7 @@ values = [{ arg = 0, methods = ["__hash__", "__eq__"] }]
 [[invokes]]
 symbol = "builtins.dict.update"
 values = [
-    { arg = 0, methods = ["__iter__", "__next__", "__getitem__", "keys"], item_methods = ["__hash__", "__eq__", "__iter__", "__next__", "__getitem__"] },
+    { arg = 0, methods = ["__iter__", "__next__", "__getitem__", "keys", "__getattribute__", "__getattr__"], item_methods = ["__hash__", "__eq__", "__iter__", "__next__", "__getitem__"] },
     { param = "*", methods = ["__hash__", "__eq__"] },
 ]
 
@@ -2862,7 +2864,7 @@ values = [{ receiver = true, calls = true }]
 
 [[invokes]]
 symbol = "collections.defaultdict"
-values = [{ arg = 0, calls = true }, { arg = 1, methods = ["__iter__", "__next__", "__getitem__", "keys"], item_methods = ["__hash__", "__eq__"] }]
+values = [{ arg = 0, calls = true }, { arg = 1, methods = ["__iter__", "__next__", "__getitem__", "keys", "__getattribute__", "__getattr__"], item_methods = ["__hash__", "__eq__"] }]
 
 [[invokes]]
 symbol = "types.MappingProxyType"

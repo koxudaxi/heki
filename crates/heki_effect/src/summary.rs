@@ -151,7 +151,7 @@ fn extract_module(
         .map(func_qualname)
         .collect();
     if opt_in.suggestions {
-        let facts = crate::only_read::annotation_facts(&cx);
+        let facts = crate::only_read::annotation_facts(&cx, input.semantic);
         if !facts.is_empty() {
             file.opt_in_tables_mut().annotation_facts = facts;
         }
@@ -375,6 +375,7 @@ where
 /// execution effects and the project attributes it writes and reads.
 fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary, func: &FuncKey) {
     into.only_read_params &= body.only_read_params;
+    into.join_read_kinds(&body);
     for e in &body.direct_exec_effects {
         let had = into.direct_exec_effects.contains(e);
         let occ = body.exec_guards.get(e).cloned().unwrap_or_default();
@@ -483,6 +484,7 @@ fn rebase_origin_nodes(summary: &mut EffectSummary, sites: &mut [CallSite], offs
 fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary, func: &FuncKey) {
     // A must-fact: only read where both definitions only read it.
     into.only_read_params &= other.only_read_params;
+    into.join_read_kinds(&other);
     merge_container_params(
         &mut into.container_params,
         other.container_params.as_deref(),

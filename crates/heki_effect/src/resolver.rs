@@ -17,7 +17,7 @@ use crate::capacity::CapacityOf;
 use crate::decorators;
 use crate::only_read::{LiteralAnnotation, ParamAnnotation};
 use crate::ownership;
-use crate::readonly::ContainerKind;
+use crate::readonly::{ContainerFamily, ContainerKind, FamilyRole};
 use crate::types::{Added, Args, Elem, Generic, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
@@ -1691,41 +1691,9 @@ pub enum ParamAccess {
     Mutable,
 }
 
-/// Read-only container types (`ParamAccess::ReadOnly`): the abstract sequence, mapping, and set
-/// (`typing.AbstractSet` is `collections.abc.Set`; `typing.Set` is the builtin `set`).
-const READONLY_TYPES: &[&str] = &[
-    "typing.Sequence",
-    "typing.Mapping",
-    "typing.AbstractSet",
-    "collections.abc.Sequence",
-    "collections.abc.Mapping",
-    "collections.abc.Set",
-];
-
-/// Mutable container types (`ParamAccess::Mutable`).
-const MUTABLE_TYPES: &[&str] = &[
-    "builtins.list",
-    "builtins.dict",
-    "builtins.set",
-    "builtins.bytearray",
-    "typing.List",
-    "typing.Dict",
-    "typing.Set",
-    "typing.DefaultDict",
-    "typing.OrderedDict",
-    "typing.Counter",
-    "typing.Deque",
-    "typing.MutableSequence",
-    "typing.MutableMapping",
-    "typing.MutableSet",
-    "collections.abc.MutableSequence",
-    "collections.abc.MutableMapping",
-    "collections.abc.MutableSet",
-    "collections.deque",
-    "collections.defaultdict",
-    "collections.OrderedDict",
-    "collections.Counter",
-];
+/// The mutable container types outside the families of `list`, `dict`, and `set`
+/// ([`ContainerFamily`]), which [`param_access`] reads as mutable too.
+const OTHER_MUTABLE_TYPES: &[&str] = &["builtins.bytearray", "typing.Deque", "collections.deque"];
 
 /// The access the parameter annotation `text` promises, after `Optional[T]`, `T | None`,
 /// `Union[T, None]`, `Annotated[T, ...]`, and quotes; `None` for any other type (`Iterable`,
@@ -1737,12 +1705,13 @@ pub(crate) fn param_access(
 ) -> Option<ParamAccess> {
     match annotated_head(text, resolve)? {
         AnnotatedHead::ReadOnly => Some(ParamAccess::ReadOnly),
-        AnnotatedHead::Resolved(fqn) if READONLY_TYPES.contains(&fqn.as_str()) => {
-            Some(ParamAccess::ReadOnly)
-        }
-        AnnotatedHead::Resolved(fqn) => MUTABLE_TYPES
-            .contains(&fqn.as_str())
-            .then_some(ParamAccess::Mutable),
+        // The read-only ABCs (`typing.AbstractSet` is `collections.abc.Set`; `typing.Set` is
+        // the builtin `set`), and every other class of the families.
+        AnnotatedHead::Resolved(fqn) => match ContainerFamily::role_of(&fqn) {
+            Some(FamilyRole::ReadOnly) => Some(ParamAccess::ReadOnly),
+            Some(_) => Some(ParamAccess::Mutable),
+            None => (OTHER_MUTABLE_TYPES.contains(&fqn.as_str())).then_some(ParamAccess::Mutable),
+        },
         AnnotatedHead::Unresolved(last) => MUTABLE_NAMES
             .contains(&last)
             .then_some(ParamAccess::Mutable),
@@ -1759,15 +1728,11 @@ pub(crate) fn mutable_container(
 ) -> Option<ContainerKind> {
     let name = match annotated_head(text, resolve)? {
         AnnotatedHead::ReadOnly => return None,
-        AnnotatedHead::Resolved(fqn) => match fqn.as_str() {
-            "builtins.list" | "typing.List" => "list",
-            "builtins.dict" | "typing.Dict" => "dict",
-            "builtins.set" | "typing.Set" => "set",
-            "typing.MutableSequence" | "collections.abc.MutableSequence" => "MutableSequence",
-            "typing.MutableMapping" | "collections.abc.MutableMapping" => "MutableMapping",
-            "typing.MutableSet" | "collections.abc.MutableSet" => "MutableSet",
-            _ => return None,
-        },
+        AnnotatedHead::Resolved(fqn) => {
+            return ContainerFamily::of(&fqn)
+                .filter(|r| matches!(r.role, FamilyRole::Builtin | FamilyRole::Mutable))
+                .map(|r| r.kind);
+        }
         AnnotatedHead::Unresolved(last) if MUTABLE_NAMES.contains(&last) => last,
         AnnotatedHead::Unresolved(_) => return None,
     };
@@ -4155,6 +4120,23 @@ impl ProjectDecls {
             }
         }
         out
+    }
+
+    /// The project classes whose bodies may supply a method of a value of the builtin container
+    /// `class` (`builtins.dict`, or its `typing` alias) under R2: [`Self::value_classes`] of the
+    /// builtin, its alias, and each standard-library class deriving from it
+    /// ([`FamilyRole::Derived`]: `class R(OrderedDict)` is a `dict`), each once. None for
+    /// another class.
+    pub fn implementers(&self, class: &str) -> Vec<String> {
+        let builtin = ContainerFamily::of(class).filter(|r| r.role == FamilyRole::Builtin);
+        let lineage = builtin.into_iter().flat_map(|r| {
+            ContainerFamily::classes(r.kind, &[FamilyRole::Builtin, FamilyRole::Derived])
+        });
+        let mut seen = FxHashSet::default();
+        lineage
+            .flat_map(|c| self.value_classes(c))
+            .filter(|c| seen.insert(c.clone()))
+            .collect()
     }
 
     /// What reading `attr` on a value of the class `class` may run besides finding it, over
@@ -8824,6 +8806,16 @@ pub(crate) fn is_unbound_name(fqn: &str) -> bool {
 }
 
 impl Val {
+    /// The classes the value may be an instance of: the one of `Inst`, those of `Union`, none for
+    /// any other value.
+    pub(crate) fn instance_classes(&self) -> &[String] {
+        match self {
+            Self::Inst(c) => std::slice::from_ref(c),
+            Self::Union(cs) => cs,
+            _ => &[],
+        }
+    }
+
     /// The project class the value is the class object of: a class named exactly, or one that
     /// may be a subclass (`cls`). Calling it constructs that class.
     pub(crate) fn class_object<'v>(&'v self, project: &ProjectDecls) -> Option<&'v str> {

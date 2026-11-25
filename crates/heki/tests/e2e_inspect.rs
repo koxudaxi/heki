@@ -2317,6 +2317,26 @@ def added_to_either(xs: list[int], box: Box | Reader) -> object:
     return box + xs
 
 
+def compared_with_unknown(xs: list[int], other) -> bool:
+    return other == xs
+
+
+def compared_with_object_typed(xs: list[int], other: object) -> bool:
+    return other == xs
+
+
+def compared_with_list(xs: list[int], other: list[int]) -> bool:
+    return other == xs
+
+
+def compared_with_class(xs: list[int]) -> bool:
+    return Box == xs
+
+
+def keyed_by_object(xs: list[int], box: Box) -> object:
+    return xs[box]
+
+
 def stores_attribute(xs: list[int], box: Box) -> None:
     box.items = xs
 
@@ -2390,7 +2410,7 @@ def returns_max(xs: list[int]) -> int:
 
 
 def reads(xs: list[int], d: dict[str, int], s: set[int]) -> int:
-    n = len(xs) + sum(xs) + min(d.values()) + max(*xs)
+    n = len(xs) + sum(xs) + sorted(d.values())[0] + max(*xs)
     if xs and 1 in s and "k" in d:
         n += xs[0] + d["k"] + xs.count(1) + d.get("k", 0)
     for i, x in enumerate(xs):
@@ -2418,6 +2438,14 @@ def keyword_to_library(xs: list[int]) -> int:
 
 def after_unpacking(xs: list[int], ys: list[int]) -> int:
     return max(*ys, xs)
+
+
+def start_of_sum(xs: list[int], items: list[list[int]]) -> int:
+    return len(sum(items, xs))
+
+
+def compared_by_min(xs: list[int], ys: list[int]) -> int:
+    return len(min(xs, ys))
 
 
 def removed_from(xs: list[int], other: list[list[int]]) -> None:
@@ -2580,6 +2608,15 @@ fn parameters_only_read_by_the_function_and_every_call_they_are_handed_to() {
         ("key_of_object", &[]),
         ("in_object", &[]),
         ("added_to_either", &[]),
+        //    Nor compared with a value that may run code of the project: one of unknown class or
+        //    of `object`; a `list` runs the builtin's comparison.
+        ("compared_with_unknown", &[]),
+        ("compared_with_object_typed", &[]),
+        ("compared_with_list", &["xs", "other"]),
+        //    A class object's comparison is its metaclass's; a key of a project class may run its
+        //    code.
+        ("compared_with_class", &[]),
+        ("keyed_by_object", &[]),
         // 2. Not kept: an attribute, a global, an item, a display, a closure, a lambda, a class
         //    body, a generator expression reading a copy, a yield, a return, a returned view or
         //    a result that may be an argument (`max(a, b)` returns one of them).
@@ -2612,6 +2649,10 @@ fn parameters_only_read_by_the_function_and_every_call_they_are_handed_to() {
         ("calls_itself", &[]),
         ("keyword_to_library", &[]),
         ("after_unpacking", &["ys"]),
+        //    An item's `__radd__` gets `sum`'s start, the other argument's `__lt__` an argument
+        //    of `min`: escaped.
+        ("start_of_sum", &["items"]),
+        ("compared_by_min", &[]),
         ("removed_from", &[]),
         ("constructs", &[]),
         ("to_variadic", &[]),

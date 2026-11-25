@@ -245,8 +245,10 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     rules that read an unknown size as data-sized report the loop (`range(3)`).
   - `NaturalLoop.len_caps` (`LenCap`) records `while len(x) < N` caps up to 4096
     (`LEN_CAP_MAX`); `LoopCarriedInfo.updates` lists the real updates of a loop-carried value.
-  - `IrFunction.starred` marks starred display elements, `ModuleIr.class_bases` the bases a
-    class statement passes, `ModuleIr.statement_uses` the values a statement uses without an
+  - `IrFunction.starred` marks starred display elements, `IrFunction.pattern_subjects` the
+    subjects of sequence and mapping patterns (their shape tests read the subject's length, and a
+    mapping's `get`, behind an opaque branch), `ModuleIr.class_bases` the bases a class statement
+    passes, `ModuleIr.statement_uses` the values a statement uses without an
     instruction reading them (a decorator, a function's or lambda's default, a class statement's
     keyword, the class of a class pattern, the types of an `except` clause, the cause of
     `raise ... from`, each with its expression's span), `ModuleIr.annotations` the spans of the
@@ -2753,9 +2755,14 @@ No advisory `effects` field at all: an entry has only `symbol`, `return_exact_ty
 `self`), and `verified_max_python`. Entries whose `verified_max_python` is older than the target
 version become `Unknown` when the knowledge base is projected at start-up. `#[serde(
 deny_unknown_fields)]` rejects a Layer 2 field written into a Layer 1 file and the other way
-round; `tests/sentinel/verify_soundness_kb.py` checks every claim on real CPython. The Advisory
-lane reads `read_only` and `retained_in_return` too, for the arguments a library call only reads
-(`EffectSummary::only_read_params`); it adds no fact to Layer 1.
+round; `tests/sentinel/verify_soundness_kb.py` checks every claim on real CPython. An argument
+the call hands to another object's dunder is `escaped`: an element's `__eq__` for `list.remove`,
+an item's `__radd__` for the `start` of `sum`, the argument found so far's `__lt__` / `__gt__`
+(or the reflected method) for `min` / `max`, which may keep it. Neither `read_only` nor
+`retained_in_return` (kept by the result only) holds then, and the sentinel keeps a witness of
+each such argument. The Advisory lane reads `read_only` and `retained_in_return` too, for the
+arguments a library call only reads (`EffectSummary::only_read_params`); it adds no fact to
+Layer 1.
 
 ### 4.2 Layer 2 (`kb/ecosystem/*.toml`: public standard-library APIs and major packages)
 The single place for every execution-effect origin. An entry has `symbol`, `effects`

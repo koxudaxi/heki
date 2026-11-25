@@ -507,6 +507,10 @@ pub struct OnlyReads {
     pub read_only_uses: Vec<String>,
     /// Those whose name the function binds once (`if p is None: p = []` aside).
     pub bound_once: Vec<String>,
+    /// By parameter the function only reads, annotated or not, the kinds of read that reach its
+    /// object here and in the functions it is handed to (`heki_effect::ReadKinds`): `item
+    /// access`, `iteration`, ..., then the methods called by name.
+    pub reads: BTreeMap<String, Vec<&'static str>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -826,6 +830,11 @@ impl<'a, 'i> Inspector<'a, 'i> {
             params: param_names(summary.only_read_containers(), &params),
             read_only_uses: param_names(containers.abstract_use, &params),
             bound_once: param_names(containers.bound_once, &params),
+            reads: (0..64u8)
+                .filter(|i| summary.only_read_mask() & (1u64 << i) != 0)
+                .map(|i| (param_name(i, &params), summary.read_kinds_of(i).names()))
+                .filter(|(_, kinds)| !kinds.is_empty())
+                .collect(),
         };
         let returns = returns(b, summary, &params);
         let callers = callers(b, key, query);

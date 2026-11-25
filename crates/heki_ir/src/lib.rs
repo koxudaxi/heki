@@ -730,6 +730,16 @@ pub struct Inst {
 /// ([`IrFunction::is_unpacked`]).
 pub const UNPACKED: &str = ".unpacked";
 
+/// The shape a pattern of a `match` statement tests its subject for
+/// ([`IrFunction::pattern_subjects`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PatternShape {
+    /// `case [a, b]`, `case []`.
+    Sequence,
+    /// `case {"k": v}`.
+    Mapping,
+}
+
 /// The name an inlined comprehension (PEP 709) gives its iteration variable `name` in the
 /// enclosing frame, apart from the frame's own `name`: when a scope nested in the comprehension
 /// reads it, the frame keeps it as a cell ([`IrFunction::captured_vars`]) and the values bound
@@ -818,6 +828,11 @@ pub struct IrFunction {
     /// `f(*xs)` passes the elements of `xs`, not `xs`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub starred: Vec<(VarId, u32)>,
+    /// The subjects of the sequence and mapping patterns (PEP 634), with the shape each tests:
+    /// the test reads the subject (its length, and a mapping's `get`), which the opaque branch
+    /// that models it does not show.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pattern_subjects: Vec<(VarId, PatternShape)>,
     /// The text each f-string starts with (`heki_ast::fstring_head`): the `dst` of the string
     /// it builds and `ALTER TABLE ` of `f"ALTER TABLE {name}"`, in the order of the variables.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

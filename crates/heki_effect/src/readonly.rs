@@ -514,6 +514,205 @@ pub fn returns_container_view(method: &str) -> bool {
     )
 }
 
+/// What a class of a container family is to the family's builtin ([`ContainerFamily`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FamilyRole {
+    /// The builtin itself, or its `typing` alias (`list`, `typing.List`).
+    Builtin,
+    /// A standard-library class deriving from the builtin (`collections.OrderedDict` is a
+    /// `dict`): under R2 a value of the builtin may be one, or an instance of a project class
+    /// deriving from one.
+    Derived,
+    /// The read-only ABC of the family (`Sequence`, `Mapping`, `collections.abc.Set`, and the
+    /// `typing` spellings).
+    ReadOnly,
+    /// The mutable ABC of the family (`MutableSequence`, `MutableMapping`, `MutableSet`).
+    Mutable,
+}
+
+/// One class of the container families of `list`, `dict`, and `set`, by the fqn an annotation
+/// or a base resolves to: the one table the readers of these classes share.
+#[derive(Debug, Clone, Copy)]
+pub struct ContainerFamily {
+    pub class: &'static str,
+    pub kind: ContainerKind,
+    pub role: FamilyRole,
+}
+
+impl ContainerFamily {
+    pub const TABLE: &[Self] = {
+        use ContainerKind::{Dict, List, Set};
+        use FamilyRole::{Builtin, Derived, Mutable, ReadOnly};
+        &[
+            ContainerFamily {
+                class: "builtins.list",
+                kind: List,
+                role: Builtin,
+            },
+            ContainerFamily {
+                class: "builtins.dict",
+                kind: Dict,
+                role: Builtin,
+            },
+            ContainerFamily {
+                class: "builtins.set",
+                kind: Set,
+                role: Builtin,
+            },
+            ContainerFamily {
+                class: "typing.List",
+                kind: List,
+                role: Builtin,
+            },
+            ContainerFamily {
+                class: "typing.Dict",
+                kind: Dict,
+                role: Builtin,
+            },
+            ContainerFamily {
+                class: "typing.Set",
+                kind: Set,
+                role: Builtin,
+            },
+            ContainerFamily {
+                class: "collections.OrderedDict",
+                kind: Dict,
+                role: Derived,
+            },
+            ContainerFamily {
+                class: "collections.defaultdict",
+                kind: Dict,
+                role: Derived,
+            },
+            ContainerFamily {
+                class: "collections.Counter",
+                kind: Dict,
+                role: Derived,
+            },
+            ContainerFamily {
+                class: "typing.OrderedDict",
+                kind: Dict,
+                role: Derived,
+            },
+            ContainerFamily {
+                class: "typing.DefaultDict",
+                kind: Dict,
+                role: Derived,
+            },
+            ContainerFamily {
+                class: "typing.Counter",
+                kind: Dict,
+                role: Derived,
+            },
+            ContainerFamily {
+                class: "typing.Sequence",
+                kind: List,
+                role: ReadOnly,
+            },
+            ContainerFamily {
+                class: "typing.Mapping",
+                kind: Dict,
+                role: ReadOnly,
+            },
+            ContainerFamily {
+                class: "typing.AbstractSet",
+                kind: Set,
+                role: ReadOnly,
+            },
+            ContainerFamily {
+                class: "collections.abc.Sequence",
+                kind: List,
+                role: ReadOnly,
+            },
+            ContainerFamily {
+                class: "collections.abc.Mapping",
+                kind: Dict,
+                role: ReadOnly,
+            },
+            ContainerFamily {
+                class: "collections.abc.Set",
+                kind: Set,
+                role: ReadOnly,
+            },
+            ContainerFamily {
+                class: "typing.MutableSequence",
+                kind: List,
+                role: Mutable,
+            },
+            ContainerFamily {
+                class: "typing.MutableMapping",
+                kind: Dict,
+                role: Mutable,
+            },
+            ContainerFamily {
+                class: "typing.MutableSet",
+                kind: Set,
+                role: Mutable,
+            },
+            ContainerFamily {
+                class: "collections.abc.MutableSequence",
+                kind: List,
+                role: Mutable,
+            },
+            ContainerFamily {
+                class: "collections.abc.MutableMapping",
+                kind: Dict,
+                role: Mutable,
+            },
+            ContainerFamily {
+                class: "collections.abc.MutableSet",
+                kind: Set,
+                role: Mutable,
+            },
+        ]
+    };
+
+    /// The row of the resolved class `class`.
+    pub fn of(class: &str) -> Option<&'static Self> {
+        Self::TABLE.iter().find(|r| r.class == class)
+    }
+
+    /// The role of `class` in its family, if it has one.
+    pub fn role_of(class: &str) -> Option<FamilyRole> {
+        Self::of(class).map(|r| r.role)
+    }
+
+    /// The classes of `kind`'s family with one of `roles`.
+    pub fn classes(
+        kind: ContainerKind,
+        roles: &'static [FamilyRole],
+    ) -> impl Iterator<Item = &'static str> {
+        (Self::TABLE.iter())
+            .filter(move |r| r.kind == kind && roles.contains(&r.role))
+            .map(|r| r.class)
+    }
+
+    /// The read methods ([`crate::ReadKinds::methods`]) a standard-library class of the
+    /// families binds whose code changes the object: a `defaultdict`'s `__missing__`, which an
+    /// item read of a missing key runs, inserts the key.
+    const CHANGING_READS: &[(&str, &str)] = &[
+        ("collections.defaultdict", "__missing__"),
+        ("typing.DefaultDict", "__missing__"),
+    ];
+
+    /// The method of `methods` that `class` binds and whose code changes the object
+    /// ([`Self::CHANGING_READS`]).
+    pub fn changing_read(class: &str, methods: &[&str]) -> Option<&'static str> {
+        (Self::CHANGING_READS.iter())
+            .find(|(c, m)| *c == class && methods.contains(m))
+            .map(|(_, m)| *m)
+    }
+
+    /// The builtin whose methods a method called on a value of `class` is read as: the builtin's
+    /// own, its alias's, and its ABCs' (a `Mapping`'s `get` is a `dict`'s). A derived class may
+    /// add or change methods (`Counter.update` adds counts), so it has none.
+    pub fn read_as_builtin(class: &str) -> Option<ContainerKind> {
+        Self::of(class)
+            .filter(|r| r.role != FamilyRole::Derived)
+            .map(|r| r.kind)
+    }
+}
+
 /// A function whose results a `functools` cache keeps and hands to every later call with the
 /// same arguments (`MUT114`'s producer): decorated with `functools.cache`, or with
 /// `functools.lru_cache` whose `maxsize` is left out, `None`, or a literal number above 0,

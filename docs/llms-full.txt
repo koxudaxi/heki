@@ -3400,17 +3400,40 @@ reads. What a suggestion states:
 
 - **Only read here**, **Does not leave**, **Every call resolves and only reads**: the claim, from
   the facts `MUT110` reads, so the suggestion and its guard cannot disagree. When one is open,
-  nothing is listed.
+  nothing is listed. A method called on a parameter annotated `Sequence`, `Mapping`, or
+  `AbstractSet` reads as the same method of the builtin. An operator or a comparison can hand the
+  object to the other operand's special method (`other == p` may run `other.__eq__(p)`, and which
+  side Python tries first depends on the classes): only a builtin's keeps nothing, so the other operand is a value built in the function or of a
+  builtin class no project class derives from. An item read of a `defaultdict` changes it.
+- **The builtin's own reads**: the claim's last part (R2). A value of `dict` may be an instance of a
+  project class deriving from `dict`, or from a standard-library class that derives from it
+  (`OrderedDict`, `defaultdict`, `Counter`). The function's reads of the object, and those of the
+  functions it hands it to, run that class's code if the class binds the method they run: item
+  access (with `__missing__`), iteration (with the length hint `[*v]`, `f(*v)`, and `xs += v` take;
+  `a, b = v` iterates too), size and truth, membership, comparison, conversion to text, operators,
+  `keys()` and the items for `**v`, the length `case []` and `case {"k": v}` test and the `get` of
+  the latter, the methods called by name (and `__getattribute__` for those), and what the catalog's
+  `[[invokes]]` entry of a library call reading it names. A read with no such list (a library call
+  without an entry, such as `bytes(v)`, or a method the builtin lacks) may run any member of the
+  class. Such a class, or one a metaclass heki does not know creates, leaves the parameter out,
+  counted by cause: `class Cache(dict)` with its own `__contains__` leaves out `k in m` on a `dict`
+  parameter, not `m.get(k)`. So does a class deriving from `defaultdict` for an item read: the
+  `__missing__` it inherits inserts the key. A class outside the project is taken to run what the
+  builtin runs.
 - **Literal container annotation**: a builtin `list`, `dict`, or `set`, or its `typing` form,
   after `Optional`, `| None`, and quotes; not `Annotated[...]`, a `Mutable*` ABC, or an alias.
+  Its names are the module's: a name a function or class body around the `def` binds (`class
+  list` in the enclosing function, a method `set` above it in the class) names that binding.
 - **Abstract use**: every use exists on the read-only type; a set gives no iteration order.
 - **Name bound once**, **Callees take it**, **Whole family** (no `Protocol` member, no
   `@overload`, a body that does something, the whole override family in the group), **Not
-  replaced**, **Annotations stay unread** (every decorator in heki's table, no class machinery
-  or base the catalog does not know, no use of the function as a value, no `dataclass` without
-  a docstring for a constructor: it writes one from the constructor's signature), **A name for
-  the type** (an import of the module is reused when it runs before the annotation is evaluated:
-  above the `def`, or anywhere with postponed annotations).
+  replaced**, **Annotations stay unread** (every decorator in heki's table, of a `cached_property`
+  the `functools` one only, no class machinery or base the catalog does not know, no use of the
+  function as a value, no `dataclass` without a docstring for a constructor: it writes one from
+  the constructor's signature), **A name for the type** (an import of the module is reused when
+  it runs before the annotation is evaluated: above the `def`, or anywhere under `from __future__
+  import annotations`; on a Python 3.14 target, whose annotations are deferred without it, an
+  import below the `def` still leaves the premise open).
 - **No fact lost**: the annotation trial. Each file of the groups is analyzed again with their
   edits applied in memory, as the JSON prints them; a group whose edits change the facts of a
   function they edit or the file's reports, every rule selected, is withheld, and `withheld` says
@@ -3450,7 +3473,7 @@ changes meaning.
 | `contracts` | each block the configuration block declares, the first 3 of each kind (`--all`: every one): its kind, its targets (or the packages and modules of its scopes), the candidates it stands for, its entry, confidence, evidence, what the trial reported for its candidates, the class patterns tried with what the pattern trial reported and whether the block names them, and caveats |
 | `contracts_not_shown` | per kind, the blocks past the first 3 and the candidates they stand for |
 | `contract_blockers` | the sites of accesses heki cannot tie to a class that keep blocks at `unresolved = "ignore"`: how many, the first 5 (`--all`: 50) with the rule, path, line, function, the report as `heki check` writes it, and the candidates and blocks each holds back, and whether the list is cut |
-| `suggestions` | the standard types the code already keeps (ADR-023): per kind, the exact and heuristic groups; the type checker the project configures (`found`, `config`, or `null`); the groups, the exact ones by rank, the first 50 (`--all`: every one, the heuristic ones after them), each with its `id` (kind, module, qualified name, parameter; no line), `certainty`, `message`, `items` (path, line, column, the byte span of the annotation's head, qualified name, parameter, the annotation now and as proposed), byte-span `edits` with a path each (applied together; spans are offsets in the file's text as UTF-8, the file's own bytes unless a PEP 263 declaration names Latin-1), `premises` and whether each is established, the `open` ones with their cause and place, `related` places, `guards`, `leverage` (the calls binding it, and those passing an attribute), and `labels` (`public`, `list[str]`, `family`); `truncated`; the groups the annotation trial withheld, by `reason` (`fact-would-change`, `report-would-change`, `trial-limit`), with what changed for the first 50; the parameters left out as test code, in generated files, or declared by a stub; per premise, the parameters it leaves out and those it keeps heuristic; and where the project reads annotations at run time (`reader_sites`) |
+| `suggestions` | the standard types the code already keeps (ADR-023): per kind, the exact and heuristic groups; the type checker the project configures (`found`, `config`, or `null`); the groups, the exact ones by rank, the first 50 (`--all`: every one, the heuristic ones after them), each with its `id` (kind, module, qualified name, parameter; no line), `certainty`, `message`, `items` (path, line, column, the byte span of the annotation's head, qualified name, parameter, the annotation now and as proposed), byte-span `edits` with a path each (applied together; spans are offsets in the file's text as UTF-8, the file's own bytes unless a PEP 263 declaration names Latin-1), `premises` and whether each is established, the `open` ones with their cause and place, `related` places, `guards`, `leverage` (the calls binding it, and those passing an attribute), and `labels` (`public`, `list[str]`, `family`); `truncated`; the groups the annotation trial withheld, by `reason` (`fact-would-change`, `report-would-change`, `trial-limit`), with what changed for the first 50; the parameters left out as test code, in generated files, or declared by a stub; per premise, the parameters it leaves out, the first 10 causes of those, and those it keeps heuristic; and where the project reads annotations at run time (`reader_sites`) |
 | `rejected_contracts` | the candidates a run reported for, each alone, with the run and its reports |
 | `contracts_not_tried` | per kind, the candidates past the trial's places (32 of each kind, the configuration's own `write-owners` contracts taking `write-owners` places), which no trial declared |
 | `unmatched_entries` | each entry of "Contract entries that match nothing": the contracts' kind, the key, the entry, the contracts holding it (a name, or `#` and its position), what it names none of, the existing names like it, and `named_at_run_time` when its class family gets attributes named at run time (only with `unmatched-contract-entries = "error"`) |
@@ -5088,7 +5111,7 @@ $ printf '%s\n' app.users.load_user 'app.orders.*' | heki inspect - --output-for
 | `effects` | the network, database, file, subprocess, sleep, and lock waits it reaches, and the clients and queries it creates, each with the shortest call chain |
 | `changes` | the parameters, `self` attributes, other objects' attributes, module globals, and closure cells it changes, directly or through calls, with the call chain to the change |
 | `retains` | the parameters it stores where they outlive the call |
-| `only_reads` | its parameters annotated with a mutable container (`list`, `dict`, `set`), those it and every function it hands them to only read (no change, no store, every call resolved), those whose uses the read-only type (`Sequence`, `Mapping`, `AbstractSet`) allows, and those whose name it binds once |
+| `only_reads` | its parameters annotated with a mutable container (`list`, `dict`, `set`), those it and every function it hands them to only read (no change, no store, every call resolved), those whose uses the read-only type (`Sequence`, `Mapping`, `AbstractSet`) allows, those whose name it binds once, and, by parameter it only reads, the kinds of read that reach the object here and in the functions it is handed to (`reads`). These are the function's facts: `heki recommend` also checks that no project subclass of the argument's class changes it in one of those reads, so a parameter listed here is no proof that every override only reads |
 | `returns` | whether its result is a new object, a parameter, or state that outlives the call |
 | `purity` | `pure`, `impure` with the reasons, or `unknown` with the reasons; whatever the verdict, the functions below it whose calls heki cannot resolve, nearest first, each with the call chain to it; and what the verdict assumes |
 | `callers` | who calls it, whether in a loop; with `--callers`, transitively |

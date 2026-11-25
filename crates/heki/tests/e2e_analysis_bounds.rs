@@ -6366,15 +6366,15 @@ fn the_trial_of_library_names_without_an_entry_tries_a_bounded_number() {
 #[test]
 fn the_annotation_trial_of_two_hundred_groups_in_a_file_analyzes_it_a_few_times() {
     let groups = 200;
-    let mut lines = Vec::new();
+    let mut lines = vec![
+        "def helper(rows) -> int:".to_owned(),
+        "    return 1".to_owned(),
+    ];
     for i in 0..groups {
         lines.extend([String::new(), String::new()]);
-        // A `Mapping`'s `get` is not one heki knows to only read, as a `dict`'s is.
+        // A slice of a `Sequence` is a value heki cannot tell, handed to a call.
         let (head, last) = if i % 20 == 0 {
-            (
-                "table: dict[str, int]) -> int",
-                "table.get(\"a\", 0)".to_owned(),
-            )
+            ("rows: list[int]) -> int", "helper(rows[1:])".to_owned())
         } else {
             ("rows: list[int]) -> bool", format!("{i} in rows"))
         };
@@ -6405,16 +6405,19 @@ fn the_annotation_trial_parses_sixty_four_edited_files_in_batches() {
     let files = 64;
     let p = Project::new("bounds_recommend_annotation_batches");
     for i in 0..files {
-        // A `Mapping`'s `get` is not one heki knows to only read, as a `dict`'s is.
+        // A slice of a `Sequence` is a value heki cannot tell, handed to a call.
         let (head, last) = if i == 40 {
-            ("table: dict[str, int]) -> int", "table.get(\"a\", 0)")
+            ("rows: list[int]) -> int", "helper(rows[1:])")
         } else {
             ("rows: list[int]) -> bool", "1 in rows")
         };
         let body: Vec<String> = (0..21).map(|j| format!("    v{j} = {j}")).collect();
         p.write(
             &format!("m{i:02}.py"),
-            &format!("def g({head}:\n{}\n    return {last}\n", body.join("\n")),
+            &format!(
+                "def helper(rows) -> int:\n    return 1\n\n\ndef g({head}:\n{}\n    return {last}\n",
+                body.join("\n")
+            ),
         );
     }
     let report = recommend(&p);
@@ -7605,6 +7608,60 @@ fn a_fact_needing_more_tests_than_the_bound_is_not_kept() {
     let waits = |certainty: &str| vec![("waits".to_owned(), certainty.to_owned())];
     assert_eq!(certainty(4), waits("exact"));
     assert_eq!(certainty(5), waits("heuristic"));
+}
+
+/// The kinds of read of a parameter join over the call graph as the parameters it only reads
+/// do: a set of bits that only grows, inside the propagation's pass limit. A call cycle of
+/// functions each reading its list one way and handing it to the next, and a chain of two
+/// thousand hand-offs ending in an item read, give the first function every kind of the cycle
+/// and the item read.
+#[test]
+fn the_kinds_of_read_join_through_cycles_and_long_chains_once() {
+    let reads = ["xs[0]", "len(xs)", "0 in xs", "f\"{xs}\"", "xs.index(0)"];
+    let cycle = 64;
+    let mut lines = Vec::new();
+    for i in 0..cycle {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def c{i}(xs: list[int], n: int):"),
+            format!("    {}", reads[i % reads.len()]),
+            format!("    return c{}(xs, n - 1) if n else 0", (i + 1) % cycle),
+        ]);
+    }
+    let chain = 2_000;
+    for i in 0..chain {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def h{i}(xs: list[int]):"),
+            format!("    return h{}(xs)", i + 1),
+        ]);
+    }
+    lines.extend([
+        String::new(),
+        String::new(),
+        format!("def h{chain}(xs: list[int]):"),
+        "    return xs[0]".to_owned(),
+    ]);
+    let p = Project::new("bounds_read_kinds_join");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let c0 = inspect(&p, &["m.c0"]);
+    assert_eq!(
+        c0["only_reads"]["reads"]["xs"],
+        json!([
+            "item access",
+            "size and truth",
+            "membership",
+            "conversion to text",
+            "a method by name",
+            "index"
+        ]),
+        "{:#}",
+        c0["only_reads"]
+    );
+    let h0 = inspect(&p, &["m.h0"]);
+    assert_eq!(h0["only_reads"]["reads"]["xs"], json!(["item access"]));
 }
 
 /// `aliases` type aliases of a subscript and a union each, one alias of a union wider than the

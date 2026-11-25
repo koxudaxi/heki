@@ -240,6 +240,7 @@ fn release_spare_capacity(f: &mut IrFunction) {
     f.var_names.shrink_to_fit();
     f.captured_vars.shrink_to_fit();
     f.starred.shrink_to_fit();
+    f.pattern_subjects.shrink_to_fit();
     f.str_heads.shrink_to_fit();
     for bb in &mut f.blocks {
         bb.insts.shrink_to_fit();
@@ -475,6 +476,7 @@ impl<'a> ModuleLowerer<'a> {
             var_names: Vec::new(),
             captured_vars: Vec::new(),
             starred: Vec::new(),
+            pattern_subjects: Vec::new(),
             str_heads: Vec::new(),
             blocks: Vec::new(),
             loops: Vec::new(),
@@ -778,6 +780,8 @@ struct FnBuilder<'m, 'a> {
     a1_hazards: Vec<A1Hazard>,
     /// `*x` operands of displays and calls (`IrFunction::starred`).
     starred: Vec<(VarId, u32)>,
+    /// `IrFunction::pattern_subjects`.
+    pattern_subjects: Vec<(VarId, crate::PatternShape)>,
     /// The class bases of the function (`ModuleIr::class_bases`).
     class_bases: Vec<(VarId, u32)>,
     /// `IrFunction::str_heads`.
@@ -879,6 +883,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             finished_hints: Vec::new(),
             a1_hazards: Vec::new(),
             starred: Vec::new(),
+            pattern_subjects: Vec::new(),
             class_bases: Vec::new(),
             str_heads: Vec::new(),
             statement_uses: Vec::new(),
@@ -2767,6 +2772,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 self.branch_on_test(cond, fail, span);
             }
             Pattern::MatchSequence(ms) => {
+                (self.pattern_subjects).push((subject, crate::PatternShape::Sequence));
                 self.structural_test(fail, span);
                 let star = ms
                     .patterns
@@ -2790,6 +2796,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 }
             }
             Pattern::MatchMapping(mm) => {
+                (self.pattern_subjects).push((subject, crate::PatternShape::Mapping));
                 self.structural_test(fail, span);
                 for (key, sub) in mm.keys.iter().zip(&mm.patterns) {
                     let index = self.lower_expr(key);
@@ -4186,6 +4193,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             var_names: self.var_names,
             captured_vars,
             starred: self.starred,
+            pattern_subjects: self.pattern_subjects,
             str_heads: self.str_heads,
             blocks: self.blocks,
             loops: self.finished_loops,
