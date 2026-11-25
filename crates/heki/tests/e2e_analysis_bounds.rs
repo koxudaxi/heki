@@ -10,10 +10,10 @@
 //! locks `EFF109` follows, the values class statements pass as bases, the bindings the deque
 //! rewrite's candidates check, the star imports a name is bound through, many or nested deep,
 //! the sizes of a thousand lists each extending the next or of one list extending many deep
-//! chains, the walks over the import graph (`heki inspect --imports`), the tests of their
-//! arguments that helpers hand on to their callers, through a long chain of helpers, for many
-//! parameters, or from many implementations of one call, and the type expressions aliases and
-//! casts spell.
+//! chains, the walks over the import graph (`heki inspect --imports`), the ends of the handler
+//! bodies around imports, the tests of their arguments that helpers hand on to their callers,
+//! through a long chain of helpers, for many parameters, or from many implementations of one
+//! call, and the type expressions aliases and casts spell.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -6613,6 +6613,30 @@ fn a_long_chain_of_imports_is_walked_once() {
     let head = &report["modules"][0]["loads"];
     assert_eq!(head["project"].as_array().unwrap().len(), modules);
     assert_eq!(head["external"], json!(["json"]));
+}
+
+/// A module body of `try` statements that each import a module and then raise, so that each
+/// `except ImportError` clause leads on to the rest of the module: the ends of the clause bodies
+/// are found from one sweep of the module, not by a walk of the rest of it per clause.
+#[test]
+fn import_handlers_leading_on_to_the_rest_of_the_module_are_ended_once() {
+    let n = 2_000;
+    let shape = |n: usize| {
+        let p = Project::new("bounds_import_handlers");
+        let body: String = (0..n)
+            .map(|i| {
+                format!(
+                    "try:\n    import optional_{i}\n    raise RuntimeError\nexcept ImportError:\n    pass\n"
+                )
+            })
+            .collect();
+        p.write("m.py", &body);
+        p
+    };
+    let report = past_budgets(n, &[], shape, |p| imports_counted(p, "m"));
+    let imports = report["modules"][0]["imports"].as_array().unwrap();
+    assert_eq!(imports.len(), n);
+    assert!(imports.iter().all(|s| s["guarded"] == true), "{report:#}");
 }
 
 /// Every module of a long chain asked at once: each walks the rest of the chain, so the walks

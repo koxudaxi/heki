@@ -5,8 +5,8 @@
 
 use super::statements::{Text, Walk};
 use super::{Call, Extractor, Passed};
-use crate::environment::{self, absolute_module_name};
-use crate::imports::{ImportForm, ImportSite, Named, Spelling, Timing};
+use crate::environment::absolute_module_name;
+use crate::imports::{ImportForm, ImportHandlers, ImportSite, Named, Spelling, Timing};
 use crate::resolver;
 use heki_ir::walk::Answer;
 use heki_ir::{BlockId, InstKind, LastBindings, VarId};
@@ -76,12 +76,9 @@ impl Extractor<'_> {
             } else {
                 Timing::Function
             }),
-            guarded: environment::guarded_against_import_errors(self.f, bb),
-            caught: environment::may_take_import_error(
-                self.f,
-                bb,
-                &self.cx.ir().constants.shadowed,
-            ),
+            handled: (self.import_handlers)
+                .get_or_init(|| ImportHandlers::new(self.shape, &self.cx.ir().constants.shadowed))
+                .taken_at(bb),
             unconditional,
             lazy: false,
         });

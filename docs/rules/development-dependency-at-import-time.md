@@ -42,9 +42,13 @@ Its premises, each established or no report:
 - **Chain**: the reported import, and each import leading to it from that module, is in a module
   body (or a class body it runs, or a constant by-name import there), runs on every path through
   the body, is no lazy import, and loads the module shown, its parent packages first.
-- **No handler**: no handler may take the `ImportError` of any of them: no `except` clause naming
-  `ImportError`, `Exception`, `BaseException`, a type heki cannot tell is another builtin
-  exception, or a bare `except`, and no `with` block or `finally` body around one.
+- **No handler**: no handler may take the `ModuleNotFoundError` of any of them, which a module
+  that is not installed raises: no `except` clause naming `ModuleNotFoundError`, `ImportError`,
+  `Exception`, `BaseException`, a type heki cannot tell is another builtin exception, or a bare
+  `except`, whose body may end without raising, no `with` block around one, and no `finally`
+  body that may leave without raising the error again. A clause whose body raises on every path
+  (`raise`, `raise RuntimeError(...) from e`) takes nothing, and a clause that certainly matches
+  hides the clauses after it.
 - **Distribution**: the distributions that may provide the imported module are, when
   `[tool.heki.imports] module-distributions` names the module or a package holding it, the ones it
   lists; otherwise the ones the catalog lists for it (`PyYAML` provides `yaml`, `pytest` provides
@@ -94,7 +98,7 @@ def frozen(at: str):
 ```
 
 or declare `freezegun` in `[project] dependencies` (or in an extra, which [`IMP302`](optional-dependency-at-import-time.md)
-then judges).
+then judges), or give the import a fallback under `except ModuleNotFoundError:`.
 
 ## Fix safety
 No automatic fix.

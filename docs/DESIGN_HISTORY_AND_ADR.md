@@ -666,9 +666,14 @@ that need no configuration, the import contracts of other tools, and heki's own 
      field heki does not support is named once in a note. From Ruff's bans heki reports only
      what Ruff cannot see.
   5. Import facts have one home, `heki_effect::imports`: which module each import site loads,
-     its timing class (`body`, `lazy`, `function`, `type-checking`), and whether an
-     `ImportError` handler takes its failure. The choice between a submodule and an attribute
-     lives in `ProjectDecls` and serves name resolution too. No rule resolves an import itself.
+     its timing class (`body`, `lazy`, `function`, `type-checking`), and the failure its
+     handlers take, one ordered fact: none, a missing module (`ModuleNotFoundError`), or any
+     import error (`ImportError`, `Exception`, a bare `except`). Each rule asks for the failure
+     it claims: `IMP102` for any import error, since a name a partly loaded module lacks raises
+     a plain `ImportError`; `IMP104`, `IMP301`, `IMP302`, and the walk of what a module loads
+     for them, for a missing module; the sets of what a module loads at least count an import
+     only when no handler takes either. The choice between a submodule and an attribute lives
+     in `ProjectDecls` and serves name resolution too. No rule resolves an import itself.
   6. The facts are local and IR-free, in `FileSummary`, and take part in Early Cutoff. The
      import graph is built per check and not kept in `ProjectIndex`.
   7. A report states where an import is written, its timing class, and the module it loads; it

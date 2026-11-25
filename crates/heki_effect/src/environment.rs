@@ -10,7 +10,6 @@ use heki_ast::Span;
 use heki_ir::{BlockId, InstKind, IrFunction, Terminator};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 
 /// What an [`ExternalAccess`] does with its name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -126,37 +125,7 @@ pub(crate) fn guarded_against_import_errors(f: &IrFunction, bb: BlockId) -> bool
 /// enclosing handler takes it (also after a `finally` body). Any other shape of handler (the
 /// exit of a `with` block, which may suppress the exception) is not followed.
 fn catches_import_error(f: &IrFunction, handler: BlockId) -> bool {
-    handlers_take(f, Some(handler), false, |types| {
-        types.iter().any(|t| names_import_error(t))
-    })
-}
-
-/// Whether an exception handler may take an `ImportError` raised in block `bb` of `f`, so that
-/// the code after it runs on: an `except` clause that may take it, or a handler of another
-/// shape (the exit of a `with` block, which may suppress it, or a `finally` body). Only clauses
-/// whose types all pass it on ([`passes_import_error_on`]) hand it to the enclosing handler.
-/// `shadowed` are the builtins the module may rebind.
-pub(crate) fn may_take_import_error(
-    f: &IrFunction,
-    bb: BlockId,
-    shadowed: &BTreeSet<String>,
-) -> bool {
-    handlers_take(f, f.block(bb).exc_target, true, |types| {
-        // A bare `except:` has no types.
-        types.is_empty() || !types.iter().all(|t| passes_import_error_on(t, shadowed))
-    })
-}
-
-/// Whether the handlers from `handler` on take an exception: the `except` clauses each handler
-/// tests in turn, by their types' source texts (`takes`), and, when none does and the handler
-/// raises the exception again, the enclosing handler (also after a `finally` body). A handler
-/// of any other shape answers `other_shape`.
-fn handlers_take(
-    f: &IrFunction,
-    mut handler: Option<BlockId>,
-    other_shape: bool,
-    takes: impl Fn(&[String]) -> bool,
-) -> bool {
+    let mut handler = Some(handler);
     let mut seen: FxHashSet<BlockId> = FxHashSet::default();
     while let Some(start) = handler.filter(|b| seen.insert(*b)) {
         let mut clause = f.block(start);
@@ -170,42 +139,20 @@ fn handlers_take(
                     let Some(InstKind::CatchException { exc_types, .. }) =
                         f.block(*then_bb).insts.first().map(|i| &i.kind)
                     else {
-                        return other_shape;
+                        return false;
                     };
-                    if takes(exc_types) {
+                    if exc_types.iter().any(|t| names_import_error(t)) {
                         return true;
                     }
                     clause = f.block(*else_bb);
                 }
                 // No clause took it: it is raised to the enclosing handler.
                 Terminator::Raise(None) => break clause.exc_target,
-                _ => return other_shape,
+                _ => return false,
             }
         };
     }
     false
-}
-
-/// Whether an `except` clause whose types are the source text `types` passes an `ImportError`
-/// on: every type it names is a builtin exception class other than `ImportError` and its bases
-/// (`KeyError`, `(OSError, ModuleNotFoundError)`: a subclass does not take its base), which
-/// the module does not rebind. A name heki cannot tell is such a class may take it.
-fn passes_import_error_on(types: &str, shadowed: &BTreeSet<String>) -> bool {
-    let types = types.trim();
-    let types = (types.strip_prefix('(').and_then(|t| t.strip_suffix(')'))).unwrap_or(types);
-    (types.split(',').map(str::trim).filter(|t| !t.is_empty())).all(|t| {
-        let (name, qualified) = match t.strip_prefix("builtins.") {
-            Some(name) => (name, true),
-            None => (t, false),
-        };
-        let exception_class = ["Error", "Exit", "Interrupt", "Iteration", "Warning"]
-            .iter()
-            .any(|end| name.ends_with(end));
-        heki_ir::is_builtin_name(name)
-            && exception_class
-            && name != "ImportError"
-            && (qualified || !shadowed.contains(name))
-    })
 }
 
 /// Whether the source text of an `except` clause's types names `ImportError` or
@@ -222,8 +169,7 @@ fn names_import_error(types: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{absolute_module_name, names_import_error, passes_import_error_on};
-    use std::collections::BTreeSet;
+    use super::{absolute_module_name, names_import_error};
 
     #[test]
     fn module_names_passed_to_importlib() {
@@ -268,29 +214,6 @@ mod tests {
             ("", false),
         ] {
             assert_eq!(names_import_error(types), named, "{types}");
-        }
-    }
-
-    #[test]
-    fn except_clauses_passing_an_import_error_on() {
-        let shadowed: BTreeSet<String> = ["KeyError".to_owned()].into();
-        for (types, passes) in [
-            ("OSError", true),
-            ("ModuleNotFoundError", true),
-            ("(KeyError, ModuleNotFoundError)", false),
-            ("(ValueError, builtins.KeyError)", true),
-            ("(\n    OSError,\n    StopIteration,\n)", true),
-            ("SystemExit", true),
-            ("ImportError", false),
-            ("Exception", false),
-            ("BaseException", false),
-            ("(OSError, ImportError)", false),
-            ("ExceptionGroup", false),
-            ("MyError", false),
-            ("errors.TimeoutError", false),
-            ("int", false),
-        ] {
-            assert_eq!(passes_import_error_on(types, &shadowed), passes, "{types}");
         }
     }
 }
