@@ -8,7 +8,7 @@ opaque_packages = [
     "pathlib", "shutil", "sqlite3", "urllib", "http", "logging", "copy", "functools",
     "itertools", "collections", "threading", "multiprocessing", "concurrent", "dataclasses",
     "queue", "contextlib", "importlib", "platform", "sys", "sysconfig", "html", "json",
-    "pprint", "atexit", "signal", "weakref", "typing", "contextvars",
+    "pprint", "atexit", "signal", "weakref", "typing", "contextvars", "tempfile", "glob", "ftplib",
 ]
 
 # --- Sleep ---
@@ -200,6 +200,840 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pathlib.Path.resolve"
 effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+# --- File system, by module (EFF105, opt-in; `blocking-fs` boundaries) ---
+# What reads or changes a path, a directory, or file metadata. The working directory and the
+# home directory are not the disk: see the environment reads.
+
+[[entries]]
+symbol = "os.open"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.replace"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.rename"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.renames"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.remove"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.unlink"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.rmdir"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.removedirs"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.mkdir"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.makedirs"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.link"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.symlink"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.readlink"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.chmod"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.chown"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.lchown"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.lstat"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.access"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.truncate"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.utime"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.statvfs"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.mkfifo"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.mknod"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.getxattr"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.setxattr"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.listxattr"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.removexattr"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.fsync"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.fdatasync"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.path.getsize"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.path.getmtime"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.path.getatime"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.path.getctime"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.path.islink"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.path.ismount"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.path.lexists"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.path.samefile"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.path.isjunction"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.mkdir"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.touch"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.unlink"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.rmdir"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.rename"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.replace"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.symlink_to"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.hardlink_to"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.readlink"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.chmod"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.lchmod"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.lstat"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.owner"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.group"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.samefile"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.is_symlink"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.is_mount"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.is_socket"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.is_fifo"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.is_block_device"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.is_char_device"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.is_junction"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.copy"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.copy_into"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.move"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.move_into"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+# `Path.iterdir` lists the directory when it is called on 3.13 and later (earlier versions
+# list while the result is iterated), so the wait is on the call. `Path.glob`, `Path.rglob`,
+# `Path.walk`, `glob.iglob` and `os.walk` are generators: they read the directories while the
+# result is iterated (the class of the result is named after the call).
+
+[[entries]]
+symbol = "pathlib.Path.iterdir"
+effects = ["blocking_fs"]
+items = "entries"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.glob"
+return_type = "pathlib.Path.glob()"
+items = "entries"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.glob().__iter__"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.rglob"
+return_type = "pathlib.Path.rglob()"
+items = "entries"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.rglob().__iter__"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.walk"
+return_type = "pathlib.Path.walk()"
+items = "entries"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.walk().__iter__"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "glob.iglob"
+return_type = "glob.iglob()"
+items = "entries"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "glob.iglob().__iter__"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "glob.glob"
+effects = ["blocking_fs"]
+items = "entries"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "shutil.move"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "shutil.copyfile"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "shutil.copymode"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "shutil.copystat"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "shutil.disk_usage"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "shutil.chown"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "shutil.make_archive"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "shutil.unpack_archive"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+# `mktemp` only picks a name, but tests that the name is free.
+
+[[entries]]
+symbol = "tempfile.mkdtemp"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "tempfile.mkstemp"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "tempfile.mktemp"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "tempfile.TemporaryFile"
+effects = ["blocking_fs"]
+exit_suppresses = false
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "tempfile.NamedTemporaryFile"
+effects = ["blocking_fs"]
+exit_suppresses = false
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "tempfile.TemporaryDirectory"
+effects = ["blocking_fs"]
+exit_suppresses = false
+opaque_to_layer3 = true
+
+# --- Processes by module (`blocking-subprocess`) ---
+# These start a process and wait for it to end (`Popen` itself is not one: see above).
+
+[[entries]]
+symbol = "os.system"
+effects = ["blocking_subprocess"]
+opaque_to_layer3 = true
+
+# Only a call that waits for a child blocks. `os.exec*` replaces the process, `os.posix_spawn*`,
+# `os.fork` and `os.popen` start one (reading the pipe of `popen` is a file read), and `os.spawn*`
+# waits only with `P_WAIT`.
+
+[[entries]]
+symbol = "os.spawnl"
+cases = [
+    { arg = 0, param = "mode", flag = ["os.P_WAIT"], effects = ["blocking_subprocess"] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.spawnle"
+cases = [
+    { arg = 0, param = "mode", flag = ["os.P_WAIT"], effects = ["blocking_subprocess"] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.spawnlp"
+cases = [
+    { arg = 0, param = "mode", flag = ["os.P_WAIT"], effects = ["blocking_subprocess"] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.spawnlpe"
+cases = [
+    { arg = 0, param = "mode", flag = ["os.P_WAIT"], effects = ["blocking_subprocess"] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.spawnv"
+cases = [
+    { arg = 0, param = "mode", flag = ["os.P_WAIT"], effects = ["blocking_subprocess"] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.spawnve"
+cases = [
+    { arg = 0, param = "mode", flag = ["os.P_WAIT"], effects = ["blocking_subprocess"] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.spawnvp"
+cases = [
+    { arg = 0, param = "mode", flag = ["os.P_WAIT"], effects = ["blocking_subprocess"] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.spawnvpe"
+cases = [
+    { arg = 0, param = "mode", flag = ["os.P_WAIT"], effects = ["blocking_subprocess"] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.wait"
+effects = ["blocking_subprocess"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.waitpid"
+effects = ["blocking_subprocess"]
+cases = [
+    { arg = 1, param = "options", flag = ["os.WNOHANG"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.wait3"
+effects = ["blocking_subprocess"]
+cases = [
+    { arg = 0, param = "options", flag = ["os.WNOHANG"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.wait4"
+effects = ["blocking_subprocess"]
+cases = [
+    { arg = 1, param = "options", flag = ["os.WNOHANG"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.waitid"
+effects = ["blocking_subprocess"]
+cases = [
+    { arg = 2, param = "options", flag = ["os.WNOHANG"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "subprocess.getoutput"
+effects = ["blocking_subprocess"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "subprocess.getstatusoutput"
+effects = ["blocking_subprocess"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "signal.sigwait"
+effects = ["blocking_sync"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "signal.sigwaitinfo"
+effects = ["blocking_sync"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "signal.sigtimedwait"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 1, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "signal.pause"
+effects = ["blocking_sync"]
+opaque_to_layer3 = true
+
+# --- FTP ---
+# `ftplib.FTP()` opens no more than the client object here; each command waits for the
+# server. Given a host, the constructor connects (and `user` logs in), so a call with a host
+# waits too. A new client per call in a loop is a new connection. `FTP.mlsd` is a generator: it
+# talks to the server while its result is iterated.
+
+[[entries]]
+symbol = "ftplib.FTP"
+effects = ["unpooled_client_alloc"]
+cases = [
+    { arg = 0, param = "host", nonempty = true, effects = ["blocking_net", "unpooled_client_alloc"] },
+]
+exit_suppresses = false
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.connect"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.login"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.retrbinary"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.retrlines"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.storbinary"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.storlines"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.nlst"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.dir"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.mlsd"
+return_type = "ftplib.FTP.mlsd()"
+items = "entries"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.mlsd().__iter__"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.cwd"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.mkd"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.rmd"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.delete"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.rename"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.size"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.sendcmd"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.voidcmd"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.pwd"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.quit"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP.abort"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS"
+effects = ["unpooled_client_alloc"]
+cases = [
+    { arg = 0, param = "host", nonempty = true, effects = ["blocking_net", "unpooled_client_alloc"] },
+]
+exit_suppresses = false
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.connect"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.login"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.retrbinary"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.retrlines"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.storbinary"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.storlines"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.nlst"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.dir"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.mlsd"
+return_type = "ftplib.FTP_TLS.mlsd()"
+items = "entries"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.mlsd().__iter__"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.cwd"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.mkd"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.rmd"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.delete"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.rename"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.size"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.sendcmd"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.voidcmd"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.pwd"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.quit"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "ftplib.FTP_TLS.abort"
+effects = ["blocking_net"]
 opaque_to_layer3 = true
 
 # --- Name resolution ---
@@ -1451,6 +2285,58 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sysconfig.get_config_var"
+environment = "call"
+opaque_to_layer3 = true
+
+# The working directory and the home directory are read from the process, not the disk.
+
+[[entries]]
+symbol = "os.getcwd"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.getcwdb"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.path.abspath"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.path.relpath"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.path.expanduser"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.path.expandvars"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.cwd"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.home"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.absolute"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.expanduser"
 environment = "call"
 opaque_to_layer3 = true
 
