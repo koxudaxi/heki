@@ -22,9 +22,9 @@ use heki_effect::resolver::NoItems;
 use heki_effect::with_paths;
 use heki_effect::{
     AccessKind, BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget,
-    Construction, EffectSummary, EntryKey, ExternalAccess, Facts, FuncKey, HopGap, MustGap,
-    PerItem, Runner, SiteEffect, SiteMust, TypeCtx, TypedFieldWriteSite, Unresolved, WriteKind,
-    anchors_call_site, boundary_reports_in, initializes_own_self,
+    Construction, Delivery, EffectSummary, EntryKey, ExternalAccess, Facts, FuncKey, HopGap,
+    MustGap, PerItem, Runner, SiteEffect, SiteMust, TypeCtx, TypedFieldWriteSite, Unresolved,
+    WriteKind, anchors_call_site, boundary_reports_in, initializes_own_self,
 };
 use heki_env::EffectBoundaryRule;
 pub(crate) use heki_ir::ItemOrigins;
@@ -1376,26 +1376,41 @@ fn call_hops(
 /// passing it ([`Reach::passed_keys`]).
 type PassedKeys = FxHashMap<(usize, u8), Vec<(Option<String>, Vec<CallHop>)>>;
 
-/// How [`Reach::passed_keys`] first reached a `(node, parameter, key)`.
+/// How a walk along the followed calls first reached a `(node, parameter, value)`: a key
+/// [`Reach::passed_keys`] tracks, or an object that is not new ([`Reach::handed_objects`],
+/// value `0`).
 #[derive(Clone, Copy)]
-enum KeyStep {
-    /// A parameter of the scope function, whose key is open.
+enum RouteStep {
+    /// A parameter of the scope function, whose key is open or whose object is the caller's.
     ScopeParam,
-    /// The followed call (by index) passes the key.
+    /// The followed call (by index) passes the key, or hands an object that is not new.
     Passed(usize),
     /// The followed call (by index) hands on the parameter of the state above, its caller's.
     HandedOn((usize, u8, usize), usize),
 }
 
-/// A call the search followed: from node `from` to node `to`, at `span` of `from`'s function
-/// in `path`, through `via` (as in [`call_hops`]).
+/// What the followed calls into a node hand one of its parameters, for the writes its function
+/// makes to the object bound there (`Construction::Param`, [`Reach::param_routes`]).
+#[derive(Debug, Clone)]
+enum Handed {
+    /// Every one hands it a new object that nothing kept before the call: the writes construct
+    /// it.
+    New,
+    /// The route to the node through its parents hands it another object.
+    Other,
+    /// Another route does, with its hops.
+    OtherBy(Vec<CallHop>),
+}
+
+/// A call the search followed: from node `from` to node `to`, at `site` of `from`'s function
+/// in `path`, running the callee's facts `delivery` (through its `via`, as in [`call_hops`]).
 struct Followed<'a> {
     from: usize,
     to: usize,
     bc: &'a BoundCallee,
     path: &'a Path,
-    span: Span,
-    via: Option<&'a FuncKey>,
+    site: &'a CallSite,
+    delivery: Delivery<'a>,
 }
 
 /// Hops from the scope function down to node `i`.
@@ -1504,6 +1519,10 @@ struct Reach<'a> {
     /// by node and parameter: their keys are the ones the followed calls pass
     /// ([`Self::passed_keys`]).
     keyed_writes: Vec<(usize, u8, TypedFieldWriteSite)>,
+    /// With `fresh-objects = "allow"`, what the followed calls hand the parameters whose objects
+    /// the reached functions write, by node, parameter, and whether the write changes a container
+    /// in place ([`Self::param_routes`]).
+    param_routes: FxHashMap<(usize, u8, bool), Handed>,
     /// By `read-targets` index.
     reads: BTreeMap<usize, Found>,
     /// By the `call-targets` indices a call matches ([`called_targets`]).
@@ -1546,6 +1565,7 @@ impl<'a> Reach<'a> {
             exec: BTreeMap::new(),
             writes: BTreeMap::new(),
             keyed_writes: Vec::new(),
+            param_routes: FxHashMap::default(),
             reads: BTreeMap::new(),
             calls: BTreeMap::new(),
             environment: None,
@@ -1554,6 +1574,8 @@ impl<'a> Reach<'a> {
         };
         let mut index_of = NodeIndex::default();
         index_of.plain.insert((start.clone(), start_facts), 0);
+        // By node: whether it runs its function's body.
+        let mut bodies: Vec<bool> = Vec::new();
         let mut i = 0;
         while i < reach.nodes.len() {
             let (func, facts) = (reach.nodes[i].0.clone(), reach.nodes[i].1);
@@ -1568,11 +1590,9 @@ impl<'a> Reach<'a> {
             } else {
                 Facts::Result
             };
+            bodies.push(runs_body);
             let own: &[(&'a Path, &'a CallSite)] = sites.get(&func).map_or(&[], Vec::as_slice);
             let held = reach.initialized_by(cx, i);
-            if b.checks_writes() && runs_body {
-                reach.collect_writes(cx, sites, b, i, &func, own);
-            }
             if b.reads_targets && runs_body {
                 reach.collect_reads(cx, b, i, &func);
             }
@@ -1580,7 +1600,7 @@ impl<'a> Reach<'a> {
                 reach.collect_external(cx, b, i, &func);
             }
             if b.report_unresolved && runs_body {
-                reach.collect_unjudged(cx, b, i, &func);
+                reach.collect_unjudged(cx, i, &func);
             }
             for &(path, site) in own {
                 let hop = |caller: &FuncKey, callee: String| CallHop {
@@ -1627,8 +1647,8 @@ impl<'a> Reach<'a> {
                                 to: j,
                                 bc,
                                 path,
-                                span: site.span,
-                                via: d.via,
+                                site,
+                                delivery: d,
                             });
                         }
                     }
@@ -1644,6 +1664,21 @@ impl<'a> Reach<'a> {
                 }
             }
             i += 1;
+        }
+        // The writes, once every followed call into each node is known: a write to the object a
+        // parameter holds constructs it when every one of them hands it a new object.
+        if b.allow_fresh {
+            reach.param_routes = reach.param_routes(cx, &bodies);
+        }
+        for (i, _) in bodies.iter().enumerate().filter(|(_, body)| **body) {
+            let func = reach.nodes[i].0.clone();
+            if b.checks_writes() {
+                let own = sites.get(&func).map_or(&[][..], Vec::as_slice);
+                reach.collect_writes(cx, sites, b, i, &func, own);
+            }
+            if b.report_unresolved {
+                reach.collect_unjudged_writes(cx, b, i, &func);
+            }
         }
         reach.judge_keyed_writes(cx, b);
         reach
@@ -1773,6 +1808,11 @@ impl<'a> Reach<'a> {
             .into_iter()
             .flat_map(|s| &s.typed_field_write_sites);
         for w in writes {
+            let route = match self.handed(i, &w.construction) {
+                Some(Handed::New) => continue,
+                Some(Handed::OtherBy(route)) => Some(route.clone()),
+                Some(Handed::Other) | None => None,
+            };
             let extra = match (w.via_chain.as_slice(), w.kind) {
                 // A copy of a callee's item write with the key a call passes stands for routes
                 // the search follows itself, through allowed callees too.
@@ -1805,11 +1845,156 @@ impl<'a> Reach<'a> {
                 _ => continue,
             };
             self.judge_write(cx, b, i, w, &|nodes| {
-                let mut chain = chain_to(nodes, i);
+                let mut chain = route.clone().unwrap_or_else(|| chain_to(nodes, i));
                 chain.extend(extra.iter().cloned());
                 chain
             });
         }
+    }
+
+    /// What the followed calls into node `i` hand the parameter whose object a write of its
+    /// function constructs when it is new (`Construction::Param`; `None` for any other write, or
+    /// with `fresh-objects = "report"`).
+    fn handed(&self, i: usize, construction: &Construction) -> Option<&Handed> {
+        match construction {
+            Construction::Param { param, own, .. } => self.param_routes.get(&(i, *param, *own)),
+            _ => None,
+        }
+    }
+
+    /// [`Handed`] for every parameter whose object the function of a node running its body
+    /// (`bodies`) writes, a write constructing it when it is new (`Construction::Param`).
+    fn param_routes(
+        &self,
+        cx: &CheckContext<'_>,
+        bodies: &[bool],
+    ) -> FxHashMap<(usize, u8, bool), Handed> {
+        let mut wanted: [Vec<(usize, u8)>; 2] = [Vec::new(), Vec::new()];
+        for (i, (func, _, _)) in self.nodes.iter().enumerate() {
+            let Some(s) = cx.index.summary(func).filter(|_| bodies[i]) else {
+                continue;
+            };
+            let typed = s.typed_field_write_sites.iter().map(|w| &w.construction);
+            let unresolved = s.unresolved_write_sites.iter().map(|w| &w.construction);
+            for construction in typed.chain(unresolved) {
+                if let Construction::Param { param, own, .. } = construction {
+                    wanted[usize::from(*own)].push((i, *param));
+                }
+            }
+        }
+        let mut out = FxHashMap::default();
+        for (own, mut wanted) in [false, true].into_iter().zip(wanted) {
+            wanted.sort_unstable();
+            wanted.dedup();
+            for ((i, p), handed) in self.handed_objects(cx, &wanted, own) {
+                out.insert((i, p, own), handed);
+            }
+        }
+        out
+    }
+
+    /// [`Handed`] for each `(node, parameter)` of `wanted` (`own`: the writes change a container
+    /// in place, which a shallow copy shares with its original): whether each followed call
+    /// hands it a new object nothing kept, as summary propagation decides it for the writes a
+    /// callee hands its callers ([`heki_effect::ProjectIndex::construction_at_call`]), or the
+    /// parameter of its caller, which the calls into the caller hand in turn, up to the scope
+    /// function, whose parameters hold the caller's objects.
+    fn handed_objects(
+        &self,
+        cx: &CheckContext<'_>,
+        wanted: &[(usize, u8)],
+        own: bool,
+    ) -> Vec<((usize, u8), Handed)> {
+        if wanted.is_empty() {
+            return Vec::new();
+        }
+        let mut into: Vec<Vec<usize>> = vec![Vec::new(); self.nodes.len()];
+        let mut out_of: Vec<Vec<usize>> = vec![Vec::new(); self.nodes.len()];
+        for (e, edge) in self.edges.iter().enumerate() {
+            into[edge.to].push(e);
+            out_of[edge.from].push(e);
+        }
+        let construction = |e: usize, p: u8| {
+            let edge = &self.edges[e];
+            let call = (edge.site, edge.bc, &edge.delivery);
+            cx.index.construction_at_call(call, p, own)
+        };
+        let hands_on = |e: usize, p: u8| match construction(e, p) {
+            Construction::Param { param, .. } => Some(param),
+            _ => None,
+        };
+        // The parameters a call hands on to one of `wanted` as its caller's own.
+        let budget = Budget::unmetered("eff_rules::Reach::handed_objects");
+        let mut handing: FxHashSet<(usize, u8)> = FxHashSet::default();
+        let handed_up = |(j, p): (usize, u8), out: &mut Vec<(usize, u8)>| {
+            for &e in &into[j] {
+                out.extend(hands_on(e, p).map(|q| (self.edges[e].from, q)));
+            }
+        };
+        // The budget is unmetered, so neither walk is open; open, it would have found less.
+        let _ = walk::reach(&budget, wanted.iter().copied(), handed_up, |state| {
+            handing.insert(state);
+            walk::Visit::<()>::Expand
+        })
+        .open_means(None);
+        let mut handing: Vec<(usize, u8)> = handing.into_iter().collect();
+        handing.sort_unstable();
+        // Where an object that is not new comes in: at a parameter of the scope function, or
+        // through a call handing one; then down the calls handing it on, breadth first,
+        // keeping how each `(node, parameter)` was first reached.
+        let mut from: FxHashMap<(usize, u8, usize), RouteStep> = FxHashMap::default();
+        let mut at: FxHashMap<usize, Vec<u8>> = FxHashMap::default();
+        for &(j, p) in &handing {
+            at.entry(j).or_default().push(p);
+            if j == 0 {
+                from.entry((j, p, 0)).or_insert(RouteStep::ScopeParam);
+            }
+            for &e in &into[j] {
+                if construction(e, p) == Construction::No {
+                    from.entry((j, p, 0)).or_insert(RouteStep::Passed(e));
+                }
+            }
+        }
+        let mut starts: Vec<(usize, u8, usize)> = from.keys().copied().collect();
+        starts.sort_unstable();
+        let mut down = |(j, q, _): (usize, u8, usize), out: &mut Vec<(usize, u8, usize)>| {
+            for &e in &out_of[j] {
+                let to = self.edges[e].to;
+                for &r in at.get(&to).into_iter().flatten() {
+                    if hands_on(e, r) == Some(q) {
+                        from.entry((to, r, 0))
+                            .or_insert(RouteStep::HandedOn((j, q, 0), e));
+                        out.push((to, r, 0));
+                    }
+                }
+            }
+        };
+        let _ =
+            walk::reach_breadth_first(&budget, starts, &mut down, |_| walk::Visit::<()>::Expand)
+                .open_means(None);
+        // The route through the parents first, as every other report of the node takes it.
+        let parents_hand_other = |(mut j, mut p): (usize, u8)| loop {
+            let Some(&e) = into[j].first().filter(|_| j != 0) else {
+                return true;
+            };
+            match construction(e, p) {
+                Construction::Param { param, .. } => (j, p) = (self.edges[e].from, param),
+                Construction::Yes => return false,
+                _ => return true,
+            }
+        };
+        (wanted.iter())
+            .map(|&(i, p)| {
+                let handed = if !from.contains_key(&(i, p, 0)) {
+                    Handed::New
+                } else if parents_hand_other((i, p)) {
+                    Handed::Other
+                } else {
+                    Handed::OtherBy(self.route_of(&from, (i, p, 0)))
+                };
+                ((i, p), handed)
+            })
+            .collect()
     }
 
     /// Record the write `w` of node `i` under each bucket the boundary `b` forbids it by,
@@ -1923,10 +2108,10 @@ impl<'a> Reach<'a> {
         // keeping how each `(node, parameter, key)` was first reached.
         let mut keys: Vec<Option<String>> = vec![None];
         let mut key_ids: FxHashMap<String, usize> = FxHashMap::default();
-        let mut from: FxHashMap<(usize, u8, usize), KeyStep> = FxHashMap::default();
+        let mut from: FxHashMap<(usize, u8, usize), RouteStep> = FxHashMap::default();
         for &(j, p) in &handing {
             if j == 0 {
-                from.entry((j, p, 0)).or_insert(KeyStep::ScopeParam);
+                from.entry((j, p, 0)).or_insert(RouteStep::ScopeParam);
             }
             for &e in &into[j] {
                 let key = match self.edges[e].bc.passed_key(p) {
@@ -1937,7 +2122,7 @@ impl<'a> Reach<'a> {
                     (None, EntryKey::Param(_)) => continue,
                     (None, _) => 0,
                 };
-                from.entry((j, p, key)).or_insert(KeyStep::Passed(e));
+                from.entry((j, p, key)).or_insert(RouteStep::Passed(e));
             }
         }
         let mut starts: Vec<(usize, u8, usize)> = from.keys().copied().collect();
@@ -1952,7 +2137,7 @@ impl<'a> Reach<'a> {
                         && handing.contains(&(edge.to, r))
                     {
                         from.entry(state)
-                            .or_insert(KeyStep::HandedOn((j, p, key), e));
+                            .or_insert(RouteStep::HandedOn((j, p, key), e));
                         out.push(state);
                     }
                 }
@@ -1970,7 +2155,7 @@ impl<'a> Reach<'a> {
             .into_iter()
             .filter(|(j, p, _)| wanted.contains(&(*j, *p)))
         {
-            let chain = self.key_route(&from, (j, p, key));
+            let chain = self.route_of(&from, (j, p, key));
             out.entry((j, p))
                 .or_default()
                 .push((keys[key].clone(), chain));
@@ -1978,21 +2163,22 @@ impl<'a> Reach<'a> {
         out
     }
 
-    /// The hops of the route [`Self::passed_keys`] first reached `state` by.
-    fn key_route(
+    /// The hops of the route a walk along the followed calls first reached `state` by
+    /// ([`RouteStep`]).
+    fn route_of(
         &self,
-        from: &FxHashMap<(usize, u8, usize), KeyStep>,
+        from: &FxHashMap<(usize, u8, usize), RouteStep>,
         mut state: (usize, u8, usize),
     ) -> Vec<CallHop> {
         let mut calls = Vec::new();
         let top = loop {
             match from[&state] {
-                KeyStep::ScopeParam => break 0,
-                KeyStep::Passed(e) => {
+                RouteStep::ScopeParam => break 0,
+                RouteStep::Passed(e) => {
                     calls.push(e);
                     break self.edges[e].from;
                 }
-                KeyStep::HandedOn(above, e) => {
+                RouteStep::HandedOn(above, e) => {
                     calls.push(e);
                     state = above;
                 }
@@ -2003,7 +2189,8 @@ impl<'a> Reach<'a> {
             let edge = &self.edges[e];
             let caller = &self.nodes[edge.from].0;
             let callee = &self.nodes[edge.to].0;
-            chain.extend(call_hops(caller, (edge.path, edge.span), edge.via, callee));
+            let at = (edge.path, edge.site.span);
+            chain.extend(call_hops(caller, at, edge.delivery.via, callee));
         }
         chain
     }
@@ -2034,19 +2221,11 @@ impl<'a> Reach<'a> {
         }
     }
 
-    /// What the boundary cannot judge in node `i`'s own body (`unresolved = "report"`): the
-    /// calls heki resolves to no function (the blind spots of `heki recommend`), a body it does
-    /// not model or that only a stub declares (`EffectSummary::unknown_calls` without such a
-    /// call, as `heki inspect`'s `purity.unknown_reach` lists it), and the writes it cannot tie
-    /// to a class of an attribute `write-targets` or `write-universe` names
-    /// (`EffectSummary::unresolved_write_sites`, as `MUT205` reads them).
-    fn collect_unjudged(
-        &mut self,
-        cx: &CheckContext<'_>,
-        b: &Boundary<'_>,
-        i: usize,
-        func: &FuncKey,
-    ) {
+    /// The calls the boundary cannot judge in node `i`'s own body (`unresolved = "report"`):
+    /// those heki resolves to no function (the blind spots of `heki recommend`), and a body it
+    /// does not model or that only a stub declares (`EffectSummary::unknown_calls` without such
+    /// a call, as `heki inspect`'s `purity.unknown_reach` lists it).
+    fn collect_unjudged(&mut self, cx: &CheckContext<'_>, i: usize, func: &FuncKey) {
         // The node runs its body: the function has a summary, kept with its file.
         let path = cx.index.file_of(func).expect("summarized");
         let summary = cx.index.summary(func);
@@ -2100,8 +2279,25 @@ impl<'a> Reach<'a> {
                 },
             );
         }
-        let writes = summary.into_iter().flat_map(|s| &s.unresolved_write_sites);
+    }
+
+    /// The writes the boundary cannot judge in node `i`'s own body (`unresolved = "report"`):
+    /// those heki cannot tie to a class, of an attribute `write-targets` or `write-universe`
+    /// names (`EffectSummary::unresolved_write_sites`, as `MUT205` reads them).
+    fn collect_unjudged_writes(
+        &mut self,
+        cx: &CheckContext<'_>,
+        b: &Boundary<'_>,
+        i: usize,
+        func: &FuncKey,
+    ) {
+        let writes = (cx.index.summary(func).into_iter()).flat_map(|s| &s.unresolved_write_sites);
         for w in writes {
+            let route = match self.handed(i, &w.construction) {
+                Some(Handed::New) => continue,
+                Some(Handed::OtherBy(route)) => Some(route.clone()),
+                Some(Handed::Other) | None => None,
+            };
             if b.allow_fresh && w.construction == Construction::Yes {
                 continue;
             }
@@ -2133,7 +2329,10 @@ impl<'a> Reach<'a> {
                 &mut self.unjudged,
                 Unjudged::Writes(attr),
                 (func.fqn(), w.span),
-                || (chain_to(nodes, i), w.span, w.kind.describe()),
+                || {
+                    let chain = route.unwrap_or_else(|| chain_to(nodes, i));
+                    (chain, w.span, w.kind.describe())
+                },
             );
         }
     }

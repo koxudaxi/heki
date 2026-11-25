@@ -13,11 +13,9 @@
 //! attribute (a bound method holds its object) may be held elsewhere. The calls' own facts come
 //! from propagation, which resolves the functions a local fact names.
 
-use crate::decorators::keeps_returned_value;
 use crate::ownership::Live;
 use crate::readonly::{ContainerKind, result_detached_from_container, returns_container_view};
-use crate::resolver::is_generator_function;
-use crate::{Callee, FuncKey, Val};
+use crate::{Callee, EffectSummary, FuncKey, Val};
 use heki_ir::walk::{Budget, Def, FnShape, Use, Visit, reach};
 use heki_ir::{BlockId, BuiltinKind, FunctionKind, InstKind, Terminator, VarId};
 use heki_kb::EffectiveEcosystemKb;
@@ -219,11 +217,12 @@ fn is_init(k: &FuncKey) -> bool {
 }
 
 /// The function's local [`FreshReturn`], when every value it returns is a new builtin container
-/// that nothing in it may keep. `source_of` is [`source`] of the instruction defining a value,
-/// and `inspects(block, index)` says whether the call there only inspects its arguments and
-/// returns nothing that holds them.
+/// that nothing in it may keep. `facts` is the summary of its own facts so far, `source_of` is
+/// [`source`] of the instruction defining a value, and `inspects(block, index)` says whether
+/// the call there only inspects its arguments and returns nothing that holds them.
 pub(crate) fn fresh_return<'k>(
     shape: &FnShape<'_>,
+    facts: &EffectSummary,
     live: &Live,
     source_of: impl Fn(VarId) -> Option<Source<'k>>,
     inspects: impl Fn(BlockId, u32) -> bool,
@@ -232,8 +231,8 @@ pub(crate) fn fresh_return<'k>(
     if f.kind != FunctionKind::Sync
         || f.is_module_body
         || f.is_class_body
-        || is_generator_function(f)
-        || !keeps_returned_value(&f.decorators)
+        || facts.is_generator
+        || facts.decorator_may_replace
         || !f.a1_hazards.is_empty()
     {
         return None;

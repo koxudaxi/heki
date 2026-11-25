@@ -182,7 +182,7 @@ pub const NOT_RUN_AT_THE_CALL: OpenCause = OpenCause {
 pub const DECORATED: OpenCause = OpenCause {
     id: "decorated",
     premise: &EVERY_IMPLEMENTATION,
-    states: "a decorator of a target may not run its body on every call (only `staticmethod`, `classmethod`, `property`, `abstractmethod`, and `override` are known to)",
+    states: "a decorator of a target may not run its body on every call (only `staticmethod`, `classmethod`, `property`, `abstractmethod`, `override`, and `final` of the builtins, `abc`, `typing`, and `typing_extensions` are known to)",
     closer: Closer::None,
 };
 
@@ -331,14 +331,17 @@ pub const NOT_THE_CATALOG_CALL: OpenCause = OpenCause {
 
 pub const READ_ONLY_PARAMETER: Premise = Premise {
     name: "Read-only parameter",
-    states: "the parameter is annotated `Sequence`, `Mapping`, or `ReadOnly`",
+    states: "the parameter is annotated `Sequence`, `Mapping`, `AbstractSet`, or `ReadOnly`",
     decided_in: &["heki_effect::resolver::param_access"],
 };
 
 pub const PASSED_AS_ITSELF: Premise = Premise {
     name: "Passed as itself",
-    states: "on every path to the call, the argument is the parameter or a local alias of it",
-    decided_in: &["heki_effect::summary::merge_phi"],
+    states: "on every path to the call or the change, the value is the parameter, a local alias of it, or what a call hands back of it as itself (`typing.cast`, a project function returning its parameter on every path)",
+    decided_in: &[
+        "heki_effect::summary::merge_phi",
+        "heki_effect::summary::Extractor::build_same_objects",
+    ],
 };
 
 pub const CHANGED_AT_THE_LINE: Premise = Premise {

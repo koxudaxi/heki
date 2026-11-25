@@ -871,14 +871,34 @@ def gen_mut110(sc):
     ns = sc.ns
     mapping = sc.chance(0.3)
     sc.frozen = sc.chance(0.3)
-    sc.imports("from collections.abc import Sequence, Mapping")
-    sc.imports("from typing import Optional")
+    abstract_set = not mapping and sc.chance(0.25)
+    abc_import = "from collections.abc import Sequence, Mapping" + (", Set" if abstract_set else "")
+    typing_import = "from typing import " + ("AbstractSet, Optional" if abstract_set else "Optional")
+    copy, empty = ("set", "set()") if abstract_set else ("list", "[]")
+    sc.imports(abc_import)
+    sc.imports(typing_import)
     if mapping:
         annotation = sc.pick(["Mapping[str, int]", "Optional[Mapping[str, int]]", '"Mapping[str, int]"'])
         change = sc.pick(
             ['xs["k"] = n', 'xs.update({"k": n})', 'xs.pop("b", None)', 'xs.setdefault("z", n)', "xs.clear()"]
         )
         guard = "isinstance(xs, dict)"
+    elif abstract_set:
+        annotation = sc.pick(
+            ["AbstractSet[int]", "Set[int]", "Optional[Set[int]]", '"AbstractSet[int]"', "Set[int] | None"]
+        )
+        change = sc.pick(
+            [
+                "xs.add(n)",
+                "xs.discard(1)",
+                "xs.update({n})",
+                "xs |= {n}",
+                "xs -= {1}",
+                "xs.clear()",
+                "xs.difference_update({1})",
+            ]
+        )
+        guard = "isinstance(xs, set)"
     else:
         annotation = sc.pick(
             ["Sequence[int]", "Optional[Sequence[int]]", '"Sequence[int]"', "Sequence[int] | None"]
@@ -908,26 +928,25 @@ def gen_mut110(sc):
         sc.imports(_common_import(sc), helper=in_helper)
         sc.imports("import contextlib", helper=in_helper)
         # CPython before 3.14 evaluates parameter annotations when the function is defined.
-        sc.imports("from collections.abc import Sequence, Mapping", helper=in_helper)
-        sc.imports("from typing import Optional", helper=in_helper)
+        sc.imports(abc_import, helper=in_helper)
+        sc.imports(typing_import, helper=in_helper)
         body = []
         for _ in range(sc.noise(1)):
             body += sc.prelude()
         if sc.chance(0.15):
-            body += [sc.pick(["xs = list(xs)", "xs = dict(xs) if isinstance(xs, dict) else list(xs)"])]
+            body += [sc.pick([f"xs = {copy}(xs)", f"xs = dict(xs) if isinstance(xs, dict) else {copy}(xs)"])]
         elif sc.chance(0.15):
-            body += block("if flag:", ["xs = list(xs) if not isinstance(xs, dict) else dict(xs)"])
+            body += block("if flag:", [f"xs = {copy}(xs) if not isinstance(xs, dict) else dict(xs)"])
         if level + 1 < depth:
             nxt = sc.ref(names[level + 1], in_helper, sides[level + 1])
             inner = [f"{nxt}(xs, {CONTROLS})"]
             if sc.chance(0.2):
-                inner.append(f"{nxt}([] if not isinstance(xs, dict) else {{}}, {CONTROLS})")
+                inner.append(f"{nxt}({empty} if not isinstance(xs, dict) else {{}}, {CONTROLS})")
         else:
             inner = last
         body += sc.wrap(inner)
-        param = sc.pick(
-            ["xs", "xs", "xs", "xs: list[int]" if not mapping else "xs: dict[str, int]", f"xs: {annotation}"]
-        )
+        mutable = "xs: dict[str, int]" if mapping else f"xs: {copy}[int]"
+        param = sc.pick(["xs", "xs", "xs", mutable, f"xs: {annotation}"])
         generator = level + 1 == depth and sc.chance(0.1)
         if generator:
             body += ["yield n"]
@@ -939,7 +958,7 @@ def gen_mut110(sc):
             "values",
             "values",
             "alias",
-            "list(values) if values is not None else []",
+            f"{copy}(values) if values is not None else {empty}",
             "alias if flag else values",
         ]
     )
@@ -961,6 +980,10 @@ def gen_mut110(sc):
             value = {"$dict": [["b", 2], ["a", 1]]} if k % 4 else None
             if sc.frozen and k % 3 == 2:
                 value = {"$obj": [f"{sc.common}:FrozenDict_{ns}", [{"$dict": [["b", 2]]}], {}]}
+        elif abstract_set:
+            value = {"$set": [3, 1, 2]} if k % 5 else {"$frozenset": [3, 1, 2]}
+            if sc.frozen and k % 3 == 2:
+                value = {"$obj": [f"{sc.common}:FrozenSet_{ns}", [{"$set": [3, 1, 2]}], {}]}
         else:
             value = [3, 1, 2] if k % 5 else {"$tuple": [3, 1, 2]}
             if sc.frozen and k % 3 == 2:

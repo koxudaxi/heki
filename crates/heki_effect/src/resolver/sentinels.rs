@@ -1,43 +1,70 @@
 //! The `object()` sentinels of a module, the attributes its classes bind to one, and the classes
 //! it registers with `copyreg`: what `copy.deepcopy` does to an instance holding a sentinel
-//! ([`super::ProjectDecls::held_sentinels`], [`super::ProjectDecls::deep_copy_of`]).
+//! ([`super::ProjectDecls::held_sentinels`], [`super::ProjectDecls::copy_of`]).
 
 use super::{
-    ModuleDecls, NamedAttr, dataclass_decorator, decorator_parts, is_summarized_function,
-    qualifiers, split_top_level,
+    ModuleDecls, NamedAttr, PartialAttr, dataclass_decorator, decorator_parts,
+    is_summarized_function, qualifiers, split_top_level,
 };
 use crate::ModuleInput;
 
 use crate::types::MAX_NAMED;
+use heki_ast::Span;
 use heki_ir::walk::FnShape;
-use heki_ir::{BlockId, FunctionId, GlobalStores, InstKind, IrFunction, LastBindings, VarId};
+use heki_ir::{
+    BlockId, FunctionId, GlobalStores, InstKind, IrFunction, LastBindings, ModuleIr, VarId,
+};
 use heki_semantic::{NameResolution, ScopeKind};
 use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
 
 /// [`ModuleDecls::object_sentinels`]: the module body's names stored once, outside a loop, from a
-/// call of the builtin `object` with no argument (through copies).
+/// call of the builtin `object` with no argument (through copies). Only such an object is one
+/// that `copy.deepcopy` replaces: a PEP 661 `sentinel(...)`, like any other value, is none.
 pub(super) fn object_sentinels(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     if input.ir.constants.dynamic || input.ir.has_star_import || !builtin_object(input, decls) {
         return out;
     }
     let module_stores = GlobalStores::of(&input.ir.functions);
-    for f in input.ir.functions.iter().filter(|f| f.is_module_body) {
+    object_calls(input.ir, |name, _| {
+        if module_stores.once(name) && !decls.imports.contains_key(name) {
+            out.insert(name.to_owned());
+        }
+    });
+    out
+}
+
+/// The `object()` calls the module body stores in globals outside a loop, by name, that a call
+/// of the builtin `sentinel` (PEP 661) can replace: none when the module binds a global named
+/// `sentinel`, which such a call would read instead. The module's
+/// [`ModuleDecls::object_sentinels`] are among the names.
+pub fn object_sentinel_calls(ir: &ModuleIr) -> FxHashMap<String, Span> {
+    let mut out = FxHashMap::default();
+    if !GlobalStores::of(&ir.functions).binds("sentinel") {
+        object_calls(ir, |name, call| {
+            out.insert(name.to_owned(), call);
+        });
+    }
+    out
+}
+
+/// Each store, outside a loop of the module body, of the result of a call `object()` in a global:
+/// the name and the call (through copies). Whether `object` is the builtin is for the caller.
+fn object_calls(ir: &ModuleIr, mut each: impl FnMut(&str, Span)) {
+    for f in ir.functions.iter().filter(|f| f.is_module_body) {
         let shape = FnShape::new(f);
         for b in f.blocks.iter().filter(|b| shape.loop_depth(b.id) == 0) {
             for inst in &b.insts {
                 let InstKind::StoreGlobal { name, value } = &inst.kind else {
                     continue;
                 };
-                let once = module_stores.once(name) && !decls.imports.contains_key(name);
-                if once && calls_object(&shape, *value) {
-                    out.insert(name.clone());
+                if let Some(call) = object_call(&shape, *value) {
+                    each(name, call);
                 }
             }
         }
     }
-    out
 }
 
 /// Whether the module reads `object` as the builtin: its module scope reads it so, and the module
@@ -57,25 +84,25 @@ fn builtin_object(input: &ModuleInput<'_>, decls: &ModuleDecls) -> bool {
         && !decls.unknown_globals.contains("object")
 }
 
-/// Whether `value` is the result of `object()`: a call, with no argument, of the global name
-/// `object` (the caller has established that it is the builtin).
-fn calls_object(shape: &FnShape<'_>, value: VarId) -> bool {
-    let Some(InstKind::Call {
+/// The call `object()` whose result `value` is: a call, with no argument, of the global name
+/// `object`.
+fn object_call(shape: &FnShape<'_>, value: VarId) -> Option<Span> {
+    let call = shape.inst(shape.copy_root(value))?;
+    let InstKind::Call {
         callee_var: Some(callee),
         args,
         kwargs,
         star_from: None,
         ..
-    }) = shape.inst(shape.copy_root(value)).map(|i| &i.kind)
+    } = &call.kind
     else {
-        return false;
+        return None;
     };
-    args.is_empty()
-        && kwargs.is_empty()
-        && matches!(
-            shape.inst(shape.copy_root(*callee)).map(|i| &i.kind),
-            Some(InstKind::LoadGlobal { name, .. }) if name == "object"
-        )
+    let of_object = matches!(
+        shape.inst(shape.copy_root(*callee)).map(|i| &i.kind),
+        Some(InstKind::LoadGlobal { name, .. }) if name == "object"
+    );
+    (args.is_empty() && kwargs.is_empty() && of_object).then_some(call.span)
 }
 
 /// The fqn of the module-level name that may be an `object()` sentinel which `value` holds: one
@@ -83,7 +110,7 @@ fn calls_object(shape: &FnShape<'_>, value: VarId) -> bool {
 /// or an attribute of such a name (`sentinels.MISSING`). Whether it is a sentinel is for its own
 /// module to say. A class or function the module binds again (`stores`) is none: what the name
 /// holds depends on when it is read.
-fn named_value(
+pub(super) fn named_value(
     shape: &FnShape<'_>,
     value: VarId,
     decls: &ModuleDecls,
@@ -183,6 +210,7 @@ impl NamedAttr {
             self.body_paths = other.body_paths;
             self.body_defined = other.body_defined;
         }
+        self.body_partial = self.body_partial.take().or(other.body_partial);
         self.annotated |= other.annotated;
         self.validates_default |= other.validates_default;
         self.held.extend(other.held);
@@ -348,7 +376,26 @@ fn class_body_names(
                         None => (named_value(&shape, value, decls, stores), true, false),
                     },
                 };
-                let Some(named) = named else { continue };
+                let Some(named) = named else {
+                    // `copy = staticmethod(partial(copy_field, deep=False))`.
+                    let (wrapped, is_static) =
+                        match static_method_of(&shape, value, staticmethod_trusted) {
+                            Some(wrapped) => (wrapped, true),
+                            None => (value, false),
+                        };
+                    let Some(partial) = partial_of(&shape, wrapped, decls, stores, is_static)
+                    else {
+                        continue;
+                    };
+                    let attr = NamedAttr {
+                        body_partial: Some(Box::new(partial)),
+                        annotated: field,
+                        validates_default,
+                        ..NamedAttr::default()
+                    };
+                    found.push((body.qualname.clone(), name.to_owned(), attr));
+                    continue;
+                };
                 let held = if field && init && generated_init {
                     BTreeSet::from([named.clone()])
                 } else {
@@ -437,9 +484,56 @@ fn static_method_of(shape: &FnShape<'_>, value: VarId, trusted: bool) -> Option<
     }
 }
 
+/// The `functools.partial` object `value` holds, when a call of `functools.partial` (by an
+/// import of it, or through `functools`) makes it of a name ([`named_value`]) and keywords only
+/// (no positional argument after the callable, no `*` or `**` unpacking): a call through it
+/// passes its own arguments first, as a call of the name would.
+fn partial_of(
+    shape: &FnShape<'_>,
+    value: VarId,
+    decls: &ModuleDecls,
+    stores: &GlobalStores<'_>,
+    is_static: bool,
+) -> Option<PartialAttr> {
+    let (partial, args, kwargs) = match shape.inst(shape.copy_root(value)).map(|i| &i.kind) {
+        Some(InstKind::Call {
+            callee_var: Some(callee),
+            args,
+            kwargs,
+            star_from: None,
+            ..
+        }) => (named_value(shape, *callee, decls, stores)?, args, kwargs),
+        // `functools.partial(...)` through the module.
+        Some(InstKind::MethodCall {
+            recv,
+            method,
+            args,
+            kwargs,
+            star_from: None,
+            ..
+        }) => {
+            let module = match shape.inst(shape.copy_root(*recv)).map(|i| &i.kind) {
+                Some(InstKind::LoadGlobal { name, .. }) => decls.fixed_import(name)?,
+                _ => return None,
+            };
+            (format!("{module}.{method}"), args, kwargs)
+        }
+        _ => return None,
+    };
+    let [callable] = args[..] else {
+        return None;
+    };
+    (partial == "functools.partial" && kwargs.iter().all(|(k, _)| k.is_some())).then_some(())?;
+    Some(PartialAttr {
+        callable: named_value(shape, callable, decls, stores)?,
+        keywords: !kwargs.is_empty(),
+        is_static,
+    })
+}
+
 /// `(default, init)` of a field specifier `value` holds (`dataclasses.field(default=NAME)`):
 /// the default's value, and whether `init` is left on.
-fn field_default(
+pub(super) fn field_default(
     shape: &FnShape<'_>,
     value: VarId,
     resolve: &impl Fn(&str) -> Option<String>,
@@ -463,7 +557,7 @@ fn field_default(
 
 /// Whether the arguments of a `@dataclass(...)` decorator leave `init` on: no `init=` other than
 /// `True`.
-fn init_left_on(args: &str) -> bool {
+pub(super) fn init_left_on(args: &str) -> bool {
     split_top_level(args, ',')
         .iter()
         .all(|arg| match arg.split_once('=') {

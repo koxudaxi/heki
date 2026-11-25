@@ -10,6 +10,7 @@ must prove.
 $ heki check --diff                              # preview (exit code 1 when something would change)
 $ heki check --fix                               # apply safe, unconditional fixes
 $ heki check --fix --include-size-dependent      # also the proven-safe size-dependent rewrites
+$ heki check --fix --unsafe-fixes                # also the unsafe fixes
 ```
 
 - A fix comes with a report: `--fix` applies only the fixes of the reports shown. A report whose
@@ -28,6 +29,10 @@ $ heki check --fix --include-size-dependent      # also the proven-safe size-dep
   rewrites in every function (with `--diff`, it shows them), also over a loop whose trip count
   the data does not decide. After the fixes, the run lists their reports it could not rewrite, each with the obligation that
   blocks it.
+- An unsafe fix may change what the program does, and applies only with `--unsafe-fixes`. One
+  rule has one: a [`MUT118`](rules/sentinel-lost-in-deepcopy.md) report for a Python 3.15
+  target replaces the `object()` sentinel with `sentinel("NAME")`, whose type, repr, and
+  pickling differ ([Fix safety](rules/sentinel-lost-in-deepcopy.md#fix-safety)).
 - `--diff` takes the same flags as `--fix` and writes nothing.
 - With `--touched`, or files given as paths, `--fix` and `--diff` rewrite only those files. A
   shown report in another file (one whose call chain reaches a touched file) keeps its fix, and

@@ -212,6 +212,12 @@ first, then a convention the code follows, then a contract.
   observes the set's iteration order (`SetOrderUnobserved`): growing a set in place and copying
   it into a new one can order the same elements differently, and the order of an `int` set is the
   same in every run.
+- **Amended after 0.4.0**: a fix may also be unsafe (`RuleMeta::unsafe_fix`): one that changes
+  what the program does in a way the rule's page states, applied only with `--unsafe-fixes`
+  (Ruff's flag) and offered by the language server as a quick fix that is not preferred. The
+  first is `MUT118`'s: an `object()` sentinel becomes `sentinel("NAME")` (PEP 661) for a Python
+  3.15 target, which copies keep, while its type, repr, and pickling change. *Rejected*: applying
+  it with `--include-size-dependent`, whose fixes keep what the program does.
 
 <a id="adr-008"></a>
 ### ADR-008: Advisory precision (staging, boundary aggregation, offload wrapper propagation, sync-over-async relaxation, `EFF104` rejected)
@@ -681,9 +687,14 @@ first, then a convention the code follows, then a contract.
      field heki does not support is named once in a note. From Ruff's bans heki reports only
      what Ruff cannot see.
   5. Import facts have one home, `heki_effect::imports`: which module each import site loads,
-     its timing class (`body`, `lazy`, `function`, `type-checking`), and whether an
-     `ImportError` handler takes its failure. The choice between a submodule and an attribute
-     lives in `ProjectDecls` and serves name resolution too. No rule resolves an import itself.
+     its timing class (`body`, `lazy`, `function`, `type-checking`), and the failure its
+     handlers take, one ordered fact: none, a missing module (`ModuleNotFoundError`), or any
+     import error (`ImportError`, `Exception`, a bare `except`). Each rule asks for the failure
+     it claims: `IMP102` for any import error, since a name a partly loaded module lacks raises
+     a plain `ImportError`; `IMP104`, `IMP301`, `IMP302`, and the walk of what a module loads
+     for them, for a missing module; the sets of what a module loads at least count an import
+     only when no handler takes either. The choice between a submodule and an attribute lives
+     in `ProjectDecls` and serves name resolution too. No rule resolves an import itself.
   6. The facts are local and IR-free, in `FileSummary`, and take part in Early Cutoff. The
      import graph is built per check and not kept in `ProjectIndex`.
   7. A report states where an import is written, its timing class, and the module it loads; it

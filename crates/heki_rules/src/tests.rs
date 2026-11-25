@@ -84,6 +84,7 @@ fn check_with(files: &[(&str, &str)], config: &HekiConfig, select: &[&str]) -> V
             root: Path::new("."),
             modules: &ModuleLayout::default(),
         },
+        runtime: RuntimeProfile::from(PythonVersion::PY315),
     };
     check_project(&units, config, &kb, &index, &selection, &extras).unwrap()
 }
@@ -484,6 +485,7 @@ fn mut201_glob_writers_and_bad_targets() {
             root: Path::new("."),
             modules: &ModuleLayout::default(),
         },
+        runtime: RuntimeProfile::from(PythonVersion::PY315),
             }
         ),
         Err(RuleConfigError::InvalidTarget { section: "write-owners", target: t }) if t == "nodot"
@@ -953,6 +955,7 @@ fn check_against(checked: &[Built], indexed: &[Built], select: &[&str]) -> Vec<D
             root: Path::new("."),
             modules: &ModuleLayout::default(),
         },
+        runtime: RuntimeProfile::from(PythonVersion::PY315),
     };
     check_project(&units, &config, &kb, &index, &selection, &extras).unwrap()
 }

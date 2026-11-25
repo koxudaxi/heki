@@ -218,7 +218,7 @@ fn a_text_run_says_how_many_heuristic_rules_and_reports_it_left_off() {
         &["--select", "MUT201"],
     ] {
         let (_, _, stderr) = p.heki(&[&["check"][..], args].concat());
-        assert!(!stderr.contains("heuristic"), "{args:?}: {stderr}");
+        assert!(!stderr.contains("; enable them with"), "{args:?}: {stderr}");
     }
     // Machine-readable formats print no note.
     for format in ["json", "github", "sarif"] {
