@@ -815,6 +815,81 @@ pub const UNNAMED: Premise = Premise {
 };
 
 /// Every premise of the table, once.
+/// The premises of a `readonly-parameter` suggestion of `heki recommend`
+/// ([`crate::recommend::types`]), in order: the claim is the first three ("the function only
+/// reads the container bound to the parameter, and so does every function it hands it to"),
+/// the rest are the edit's. A suggestion is no report, so these rows are not in [`ALL`].
+pub const READONLY_PARAMETER: &[&Premise] = &[
+    &Premise {
+        name: "Only read here",
+        states: "the function changes neither the parameter nor a local alias of it in place: no mutator method, item store or deletion, augmented assignment, or bound mutator",
+        decided_in: &["heki_effect::EffectSummary::mutated_param_paths"],
+    },
+    &Premise {
+        name: "Does not leave",
+        states: "the object is not stored (an attribute, an item, a global, a closure cell, a display), captured by a nested function, yielded, or returned",
+        decided_in: &["heki_effect::EffectSummary::only_read_params"],
+    },
+    &Premise {
+        name: "Every call resolves and only reads",
+        states: "each call it is handed to resolves to project functions whose parameter only reads it in every implementation, or to a library call Layer 1 lists as only reading that argument",
+        decided_in: &["heki_effect::EffectSummary::only_read_params"],
+    },
+    &Premise {
+        name: "Literal container annotation",
+        states: "the annotation is a builtin list, dict, or set, or its typing form, after Optional, | None, and quotes; not Annotated[...], a Mutable* ABC, or an alias",
+        decided_in: &["heki_effect::resolver::param_annotation"],
+    },
+    &Premise {
+        name: "Abstract use",
+        states: "every use of the parameter exists on the read-only type, and a value derived from it is only iterated, unpacked, tested, measured, or handed to a call that only reads it; a set gives no iteration order",
+        decided_in: &["heki_effect::ContainerParams::abstract_use"],
+    },
+    &Premise {
+        name: "Name bound once",
+        states: "the parameter name is not bound again, except `if p is None: p = <a new container of its kind>`",
+        decided_in: &["heki_effect::ContainerParams::bound_once"],
+    },
+    &Premise {
+        name: "Callees take it",
+        states: "every project parameter it is handed to is unannotated, Any, object, or an abstract type the read-only type is, or is in the same group",
+        decided_in: &["crate::recommend::types::callees_take_it"],
+    },
+    &Premise {
+        name: "Whole family",
+        states: "not a Protocol member, no @overload, one definition with a body that does something; the same parameter of every definition of its override family is in the group, and every base of their classes is a project class or object",
+        decided_in: &["crate::recommend::types::whole_family"],
+    },
+    &Premise {
+        name: "Not replaced",
+        states: "nothing rebinds the function or replaces its code (R1)",
+        decided_in: &["heki_effect::ProjectDecls::call_rebound"],
+    },
+    &Premise {
+        name: "Annotations stay unread",
+        states: "every decorator is in the decorator table, which leaves annotations unread; the class has no metaclass but type or abc.ABCMeta and no base outside the project but one of the standard library or one the catalog lists as reading only fields; the function is used only as the callee of calls (T1)",
+        decided_in: &[
+            "heki_effect::only_read::annotation_facts",
+            "heki_effect::FileSummary::reference_sites",
+        ],
+    },
+    &Premise {
+        name: "No fact lost",
+        states: "the file analyzed again with the group's edits gives the same reports, every rule selected, and the same facts of its functions",
+        decided_in: &["crate::recommend::types::trial"],
+    },
+    &Premise {
+        name: "A file to edit",
+        states: "the file does not say it is generated (a leading comment with generated or DO NOT EDIT), and no stub declares the function",
+        decided_in: &["crate::recommend::types::file_to_edit"],
+    },
+    &Premise {
+        name: "A name for the type",
+        states: "the module binds the read-only type under a name, or the name the edit imports it as is free there",
+        decided_in: &["crate::recommend::types::type_name"],
+    },
+];
+
 pub const ALL: &[&Premise] = &[
     &EVERY_RETURN,
     &EVERY_IMPLEMENTATION,

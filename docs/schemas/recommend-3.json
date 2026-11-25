@@ -515,6 +515,33 @@
       ],
       "type": "object"
     },
+    "Edit": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "replacement": {
+          "type": "string"
+        },
+        "span": {
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        }
+      },
+      "required": [
+        "path",
+        "span",
+        "replacement"
+      ],
+      "type": "object"
+    },
     "Evidence": {
       "additionalProperties": false,
       "description": "What a candidate rests on, from the discovery run.",
@@ -549,6 +576,128 @@
       ],
       "type": "object"
     },
+    "Group": {
+      "additionalProperties": false,
+      "description": "One group: edits valid only together, applied whole or not at all.",
+      "properties": {
+        "certainty": {
+          "$ref": "#/$defs/SuggestionCertainty"
+        },
+        "edits": {
+          "description": "Byte-span edits, each with its file, applied together.",
+          "items": {
+            "$ref": "#/$defs/Edit"
+          },
+          "type": "array"
+        },
+        "guards": {
+          "description": "What reports a later change of the type it writes.",
+          "items": {
+            "$ref": "#/$defs/Guard"
+          },
+          "type": "array"
+        },
+        "id": {
+          "description": "Kind, module, qualified name, and target of its first item: no line number, as a\nbaseline key.",
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/Item"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "labels": {
+          "description": "`public` (no underscore along the dotted name), `list[str]` (a `Sequence[str]` also\nadmits a plain `str`), `family` (an override family is in the group).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "leverage": {
+          "$ref": "#/$defs/Leverage"
+        },
+        "message": {
+          "type": "string"
+        },
+        "open": {
+          "description": "The premises left open, each with its cause and place.",
+          "items": {
+            "$ref": "#/$defs/OpenPremise"
+          },
+          "type": "array"
+        },
+        "premises": {
+          "description": "The premises of the claim and the edit, each established or not.",
+          "items": {
+            "$ref": "#/$defs/PremiseState"
+          },
+          "type": "array"
+        },
+        "related": {
+          "items": {
+            "$ref": "#/$defs/Related"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "certainty",
+        "message",
+        "items",
+        "edits",
+        "premises",
+        "open",
+        "related",
+        "guards",
+        "leverage",
+        "labels"
+      ],
+      "type": "object"
+    },
+    "Guard": {
+      "additionalProperties": false,
+      "properties": {
+        "by": {
+          "description": "`type-checker` or `heki`.",
+          "type": "string"
+        },
+        "catches": {
+          "type": "string"
+        },
+        "certainty": {
+          "description": "The rule's certainty, for heki.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rule": {
+          "description": "The rule, for heki.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runs": {
+          "description": "Whether the configuration runs the rule, for heki.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "by",
+        "catches"
+      ],
+      "type": "object"
+    },
     "ImportAt": {
       "additionalProperties": false,
       "properties": {
@@ -569,6 +718,84 @@
         "path",
         "line",
         "name"
+      ],
+      "type": "object"
+    },
+    "Item": {
+      "additionalProperties": false,
+      "description": "One annotation a group changes.",
+      "properties": {
+        "column": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "current": {
+          "type": "string"
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "proposed": {
+          "type": "string"
+        },
+        "qualname": {
+          "type": "string"
+        },
+        "span": {
+          "description": "The byte span of the annotation's head, the text the edit replaces.",
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "target": {
+          "description": "The parameter.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "column",
+        "span",
+        "qualname",
+        "target",
+        "current",
+        "proposed"
+      ],
+      "type": "object"
+    },
+    "KindCount": {
+      "additionalProperties": false,
+      "properties": {
+        "exact": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "heuristic": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "exact",
+        "heuristic"
       ],
       "type": "object"
     },
@@ -598,6 +825,56 @@
         "python_files",
         "files",
         "truncated"
+      ],
+      "type": "object"
+    },
+    "LeftOut2": {
+      "additionalProperties": false,
+      "description": "Parameters with a literal container annotation that no group holds, without a premise of\ntheir own: test code, generated files, and functions a stub declares.",
+      "properties": {
+        "generated_files": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stubs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "test_code": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "test_code",
+        "generated_files",
+        "stubs"
+      ],
+      "type": "object"
+    },
+    "Leverage": {
+      "additionalProperties": false,
+      "description": "What ranks a group: the calls of its functions.",
+      "properties": {
+        "call_sites": {
+          "description": "The project calls of the group's functions binding the parameter.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state_arguments": {
+          "description": "Those passing state that outlives the call there (an attribute).",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "call_sites",
+        "state_arguments"
       ],
       "type": "object"
     },
@@ -713,6 +990,32 @@
         "condition"
       ],
       "type": "string"
+    },
+    "OpenPremise": {
+      "additionalProperties": false,
+      "properties": {
+        "cause": {
+          "type": "string"
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "premise": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "premise",
+        "cause",
+        "path",
+        "line"
+      ],
+      "type": "object"
     },
     "OpenPremises": {
       "additionalProperties": false,
@@ -866,6 +1169,48 @@
       ],
       "type": "object"
     },
+    "PremiseCount": {
+      "additionalProperties": false,
+      "properties": {
+        "heuristic": {
+          "description": "The parameters in heuristic groups that leave it open.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "not_listed": {
+          "description": "The parameters whose group is not listed because of it (its first premise that is not\nestablished; for the claim's, nothing is listed).",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "premise": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "premise",
+        "not_listed",
+        "heuristic"
+      ],
+      "type": "object"
+    },
+    "PremiseState": {
+      "additionalProperties": false,
+      "properties": {
+        "established": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "established"
+      ],
+      "type": "object"
+    },
     "PublishedMeasurement": {
       "additionalProperties": false,
       "description": "A measurement as published: the classes of the sampled reports, and the shares derived\nfrom them.",
@@ -952,6 +1297,50 @@
       ],
       "type": "object"
     },
+    "ReaderFile": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "sites": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "sites"
+      ],
+      "type": "object"
+    },
+    "ReaderSites": {
+      "additionalProperties": false,
+      "properties": {
+        "files": {
+          "description": "The files, by sites, the first 50.",
+          "items": {
+            "$ref": "#/$defs/ReaderFile"
+          },
+          "type": "array"
+        },
+        "sites": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "sites",
+        "files",
+        "truncated"
+      ],
+      "type": "object"
+    },
     "RejectedContract": {
       "additionalProperties": false,
       "description": "A candidate a run with it declared reported for.",
@@ -982,6 +1371,28 @@
         "entry",
         "run",
         "trial"
+      ],
+      "type": "object"
+    },
+    "Related": {
+      "additionalProperties": false,
+      "properties": {
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "message"
       ],
       "type": "object"
     },
@@ -1249,6 +1660,11 @@
           "type": "string"
         },
         {
+          "const": "annotation-trial",
+          "description": "The files of the suggestions analyzed again with their edits applied, every rule\nselected (the annotation trial).",
+          "type": "string"
+        },
+        {
           "const": "contract-trial",
           "description": "The configuration with every contract candidate declared, the contract rules selected.",
           "type": "string"
@@ -1264,6 +1680,66 @@
           "type": "string"
         }
       ]
+    },
+    "Section": {
+      "additionalProperties": false,
+      "description": "The `suggestions` object: the standard types the code already keeps.",
+      "properties": {
+        "by_premise": {
+          "description": "Per premise, the parameters it leaves out and those it keeps heuristic.",
+          "items": {
+            "$ref": "#/$defs/PremiseCount"
+          },
+          "type": "array"
+        },
+        "counts": {
+          "description": "The groups per kind, after the annotation trial.",
+          "items": {
+            "$ref": "#/$defs/KindCount"
+          },
+          "type": "array"
+        },
+        "groups": {
+          "description": "The exact groups by rank, the first 50 (`--all`: every one, and the heuristic groups\nafter them).",
+          "items": {
+            "$ref": "#/$defs/Group"
+          },
+          "type": "array"
+        },
+        "left_out": {
+          "$ref": "#/$defs/LeftOut2",
+          "description": "The parameters no group holds, by why."
+        },
+        "reader_sites": {
+          "$ref": "#/$defs/ReaderSites",
+          "description": "Where the project reads annotations at run time (`get_type_hints`, `inspect.signature`,\n`__annotations__`) outside test code: a function such code finds by scanning a module or\na class is not known to heki (assumption T1)."
+        },
+        "truncated": {
+          "description": "Whether `groups` holds fewer than there are.",
+          "type": "boolean"
+        },
+        "type_checker": {
+          "$ref": "#/$defs/TypeChecker"
+        },
+        "withheld": {
+          "description": "The groups the annotation trial withheld, by what changed.",
+          "items": {
+            "$ref": "#/$defs/Withheld"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "counts",
+        "type_checker",
+        "groups",
+        "truncated",
+        "withheld",
+        "left_out",
+        "by_premise",
+        "reader_sites"
+      ],
+      "type": "object"
     },
     "Site": {
       "additionalProperties": false,
@@ -1332,6 +1808,21 @@
         "reason"
       ],
       "type": "object"
+    },
+    "SuggestionCertainty": {
+      "description": "Whether a suggestion's claim and edit are established.",
+      "oneOf": [
+        {
+          "const": "exact",
+          "description": "Every premise is established.",
+          "type": "string"
+        },
+        {
+          "const": "heuristic",
+          "description": "The claim is established; a premise of the edit is open, or a label holds it back.",
+          "type": "string"
+        }
+      ]
     },
     "SymbolCalls": {
       "additionalProperties": false,
@@ -1575,6 +2066,27 @@
       ],
       "type": "object"
     },
+    "TypeChecker": {
+      "additionalProperties": false,
+      "description": "The type checker heki found configured (assumption T3: half of each guard is the type\nchecker's).",
+      "properties": {
+        "config": {
+          "description": "The file configuring it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "found": {
+          "description": "`ty`, `mypy`, `pyright`, or `pyrefly`; `null` when the project configures none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "UnmatchedEntry": {
       "additionalProperties": false,
       "description": "A contract entry that matches nothing in the analyzed files, with every contract of its kind\nholding the same text under the same key.",
@@ -1695,6 +2207,49 @@
         "examples"
       ],
       "type": "object"
+    },
+    "Withheld": {
+      "additionalProperties": false,
+      "properties": {
+        "first": {
+          "description": "The first 50 groups, each with what changed.",
+          "items": {
+            "$ref": "#/$defs/WithheldGroup"
+          },
+          "type": "array"
+        },
+        "groups": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "description": "`report-would-change`, `fact-would-change`, or `edit-does-not-parse`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason",
+        "groups",
+        "first"
+      ],
+      "type": "object"
+    },
+    "WithheldGroup": {
+      "additionalProperties": false,
+      "properties": {
+        "changed": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "changed"
+      ],
+      "type": "object"
     }
   },
   "$id": "https://heki.koxudaxi.dev/schemas/recommend-3.json",
@@ -1804,6 +2359,10 @@
       },
       "type": "array"
     },
+    "suggestions": {
+      "$ref": "#/$defs/Section",
+      "description": "The standard types the code already keeps: annotation edits, each group a claim with\npremises (ADR-023)."
+    },
     "table_prefix": {
       "description": "The table the configuration's keys are under in that file: `tool.heki` in a\n`pyproject.toml`, empty for a file that holds them at its top level (`heki.toml`).",
       "type": "string"
@@ -1839,6 +2398,7 @@
     "contracts",
     "contracts_not_shown",
     "contract_blockers",
+    "suggestions",
     "rejected_contracts",
     "contracts_not_tried",
     "unmatched_entries",

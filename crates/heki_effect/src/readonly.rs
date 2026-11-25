@@ -321,6 +321,17 @@ impl ContainerKind {
         Self::EVERY.into_iter().find(|k| k.class() == class)
     }
 
+    /// One bit per kind, for sets of kinds.
+    pub fn bit(self) -> u8 {
+        match self {
+            Self::List => 1,
+            Self::Dict => 2,
+            Self::Set => 4,
+            Self::Bytearray => 8,
+            Self::Deque => 16,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::List => "list",

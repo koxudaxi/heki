@@ -42,7 +42,9 @@ pub mod iterations;
 pub mod locks;
 pub mod one_at_a_time;
 mod only_read;
-pub use only_read::ContainerParams;
+pub use only_read::{
+    AnnotationFacts, AnnotationReads, ContainerParams, LiteralAnnotation, ParamAnnotation,
+};
 pub mod order_flow;
 pub mod ownership;
 mod partial;
@@ -2476,6 +2478,10 @@ pub struct OptInTables {
     /// [`FileSummary::imports`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imports: Option<Box<imports::ModuleImports>>,
+    /// By qualified name, what a read-only annotation of the parameters of each function with
+    /// one needs besides its summary ([`OptInFacts::suggestions`]; [`AnnotationFacts`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub annotation_facts: BTreeMap<String, AnnotationFacts>,
 }
 
 /// A project function handed to a library call that calls it as a plain function and never
@@ -2790,6 +2796,10 @@ pub struct OptInFacts {
     /// [`EffectSummary::only_read_params`] and [`EffectSummary::container_params`], which
     /// `heki inspect` shows and the language server keeps current.
     pub only_read: bool,
+    /// What `heki recommend`'s read-only annotations read besides [`Self::only_read`]:
+    /// [`OptInTables::annotation_facts`], and the references handing a project function on
+    /// ([`FileSummary::reference_sites`]), its uses as a value.
+    pub suggestions: bool,
 }
 
 impl OptInFacts {
@@ -2810,6 +2820,7 @@ impl OptInFacts {
         fresh_returns: true,
         imports: true,
         only_read: true,
+        suggestions: false,
     };
 
     /// Whether the call sites carry [`CallSite::complete`] and [`CallSite::on_every_return`].
@@ -3118,6 +3129,30 @@ impl ProjectIndex {
             self.opt_in,
         );
         self.update_file(file)
+    }
+
+    /// The local summary of `input`, an edited version of an indexed module, against the
+    /// cached project declarations `decls`, leaving the index and `decls` as they are: what the
+    /// module's own functions would do after the edit, before propagation
+    /// ([`FileSummary::local_functions`]).
+    pub fn summarize_edit(
+        &self,
+        input: &ModuleInput<'_>,
+        kb: &EffectiveEcosystemKb,
+        soundness: Option<&EffectiveSoundnessKb>,
+        decls: &DeclPasses,
+    ) -> FileSummary {
+        let own = resolver::own_module_decls(input, kb, decls);
+        summary::summarize_module(
+            input,
+            decls.completed(),
+            kb,
+            soundness,
+            own,
+            false,
+            self.contracts.as_deref(),
+            self.opt_in,
+        )
     }
 
     /// [`Self::reanalyze_module`] against cached project declarations (both passes, kept up

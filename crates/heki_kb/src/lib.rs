@@ -8,7 +8,7 @@
 //!   `offloads_blocking_arg`, `excluded` (logging), `copy_sanitizer` (MUT202), and
 //!   `opaque_to_layer3 = true` (preventing Layer 3 from descending into stdlib/Layer 2), and the
 //!   tables beside the entries: `[[invokes]]`, `[[cached_properties]]`, `[[calls_unawaited]]`
-//!   (EFF115), and `[[declared_fields]]`.
+//!   (EFF115), `[[declared_fields]]`, and `[[annotation_readers]]`.
 //!
 //! The built-in TOML files under `kb/` are embedded with `include_str!`; every struct they
 //! deserialize into uses `#[serde(deny_unknown_fields)]`, so an advisory field written into
@@ -988,6 +988,37 @@ pub struct DeclaredFields {
     pub versions: String,
 }
 
+/// Library code that reads annotations at run time (`[[annotation_readers]]`): what an edit of
+/// an annotation changes the behaviour of. The `decorators` read the annotations of the function
+/// or class they decorate, the `bases` those of the classes deriving from them (fields and
+/// method signatures), and the `functions` those of the object passed first (`get_type_hints`
+/// and the like): `heki recommend` suggests no annotation they read, and says where a project
+/// calls the functions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnnotationReaders {
+    #[serde(default)]
+    pub bases: Vec<String>,
+    #[serde(default)]
+    pub decorators: Vec<String>,
+    #[serde(default)]
+    pub functions: Vec<String>,
+    pub reads: AnnotationsRead,
+    /// The versions whose source the row was checked against.
+    pub versions: String,
+}
+
+/// Which annotations a row of [`AnnotationReaders`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnotationsRead {
+    /// Those of functions: the decorated function, the methods of the classes deriving from a
+    /// base or built by a decorator, the function passed to a function.
+    Functions,
+    /// Only the class-body annotations of the classes (their fields), none of their methods'.
+    Fields,
+}
+
 /// How a value holding the fields of a class holds each field's name ([`DeclaredFields`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1052,6 +1083,8 @@ struct EcosystemKbFile {
     calls_unawaited: Vec<UnawaitedCall>,
     #[serde(default)]
     declared_fields: Vec<DeclaredFields>,
+    #[serde(default)]
+    annotation_readers: Vec<AnnotationReaders>,
 }
 
 fn parse_ecosystem_file(file: &'static str, text: &str) -> Result<EcosystemKbFile, KbError> {
@@ -1079,6 +1112,8 @@ pub struct EffectiveEcosystemKb {
     pub calls_unawaited: BTreeMap<String, UnawaitedCall>,
     /// Where libraries keep the fields a class declares ([`DeclaredFields`]).
     pub declared_fields: Vec<DeclaredFields>,
+    /// The library code that reads annotations at run time ([`AnnotationReaders`]).
+    pub annotation_readers: Vec<AnnotationReaders>,
     /// `Class.attribute` -> the class of what reading it on an instance gives
     /// ([`AttributeType`]), the built-in rows and the users' `attribute-type`.
     pub attributes: BTreeMap<String, String>,
@@ -1145,6 +1180,7 @@ impl EffectiveEcosystemKb {
             cached_properties: BTreeMap::new(),
             calls_unawaited: BTreeMap::new(),
             declared_fields: Vec::new(),
+            annotation_readers: Vec::new(),
             attributes: BTreeMap::new(),
             distributions: Vec::new(),
             provides: Vec::new(),
@@ -1166,6 +1202,7 @@ impl EffectiveEcosystemKb {
         let mut cached_properties = BTreeMap::new();
         let mut calls_unawaited = BTreeMap::new();
         let mut declared_fields = Vec::new();
+        let mut annotation_readers = Vec::new();
         let mut attributes = BTreeMap::new();
         let mut distributions = Vec::new();
         let mut provides = Vec::new();
@@ -1190,6 +1227,7 @@ impl EffectiveEcosystemKb {
                     .map(|c| (c.symbol.clone(), c)),
             );
             declared_fields.extend(parsed.declared_fields);
+            annotation_readers.extend(parsed.annotation_readers);
         }
         opaque_packages.sort();
         opaque_packages.dedup();
@@ -1213,11 +1251,12 @@ impl EffectiveEcosystemKb {
         let caches = serde_json::to_string(&cached_properties).unwrap_or_default();
         let unawaited = serde_json::to_string(&calls_unawaited).unwrap_or_default();
         let fields = serde_json::to_string(&declared_fields).unwrap_or_default();
+        let readers = serde_json::to_string(&annotation_readers).unwrap_or_default();
         let read = serde_json::to_string(&attributes).unwrap_or_default();
         let provided = serde_json::to_string(&provides).unwrap_or_default();
         kb.digest = blake3::hash(
             format!(
-                "{}|{listed}|{caches}|{unawaited}|{fields}|{read}|{provided}",
+                "{}|{listed}|{caches}|{unawaited}|{fields}|{readers}|{read}|{provided}",
                 kb.digest
             )
             .as_bytes(),
@@ -1228,6 +1267,7 @@ impl EffectiveEcosystemKb {
         kb.cached_properties = cached_properties;
         kb.calls_unawaited = calls_unawaited;
         kb.declared_fields = declared_fields;
+        kb.annotation_readers = annotation_readers;
         kb.attributes = attributes;
         kb.distributions = distributions;
         kb.provides = provides;
@@ -1283,6 +1323,36 @@ impl EffectiveEcosystemKb {
     /// fields they declare ([`DeclaredFields`]).
     pub fn is_fields_base(&self, class: &str) -> bool {
         (self.declared_fields.iter()).any(|row| row.bases.iter().any(|b| b == class))
+    }
+
+    /// What the library class `class` reads of the annotations of the classes deriving from it
+    /// at run time, when the catalog lists it ([`AnnotationReaders`]).
+    pub fn base_reads_annotations(&self, class: &str) -> Option<AnnotationsRead> {
+        self.annotations_read(|row| row.bases.iter().any(|b| b == class))
+    }
+
+    /// What the library decorator `decorator` reads of the annotations of the function or class
+    /// it decorates at run time, when the catalog lists it ([`AnnotationReaders`]).
+    pub fn decorator_reads_annotations(&self, decorator: &str) -> Option<AnnotationsRead> {
+        self.annotations_read(|row| row.decorators.iter().any(|d| d == decorator))
+    }
+
+    /// Whether the library function `symbol` reads the annotations of what it is passed
+    /// ([`AnnotationReaders`]).
+    pub fn reads_passed_annotations(&self, symbol: &str) -> bool {
+        (self.annotation_readers.iter()).any(|row| row.functions.iter().any(|f| f == symbol))
+    }
+
+    fn annotations_read(
+        &self,
+        lists: impl Fn(&AnnotationReaders) -> bool,
+    ) -> Option<AnnotationsRead> {
+        let mut rows = self.annotation_readers.iter().filter(|row| lists(row));
+        // A row reading functions' annotations reads more than one reading fields only.
+        rows.clone()
+            .find(|row| row.reads == AnnotationsRead::Functions)
+            .or_else(|| rows.next())
+            .map(|row| row.reads)
     }
 
     /// How the attribute `attr` of the classes deriving from the library class `base` holds
@@ -5039,6 +5109,29 @@ mod tests {
             attributes != row.attributes.is_empty()
                 && (attributes || !row.functions.is_empty())
                 && !row.versions.is_empty()
+        }));
+        // Annotation readers: validation and dependency injection read a function's
+        // annotations, a model's metaclass and `dataclass` only its fields.
+        let functions = Some(AnnotationsRead::Functions);
+        let fields = Some(AnnotationsRead::Fields);
+        assert_eq!(
+            kb.decorator_reads_annotations("pydantic.validate_call"),
+            functions
+        );
+        assert_eq!(
+            kb.decorator_reads_annotations("dataclasses.dataclass"),
+            fields
+        );
+        assert_eq!(kb.decorator_reads_annotations("attrs.define"), fields);
+        assert_eq!(kb.decorator_reads_annotations("functools.lru_cache"), None);
+        assert_eq!(kb.base_reads_annotations("pydantic.BaseModel"), fields);
+        assert_eq!(kb.base_reads_annotations("builtins.object"), None);
+        assert!(kb.reads_passed_annotations("typing.get_type_hints"));
+        assert!(kb.reads_passed_annotations("fastapi.Depends"));
+        assert!(!kb.reads_passed_annotations("builtins.map"));
+        assert!(kb.annotation_readers.iter().all(|row| {
+            let lists = [&row.bases, &row.decorators, &row.functions];
+            lists.iter().any(|l| !l.is_empty()) && !row.versions.is_empty()
         }));
         let empty = EffectiveEcosystemKb::materialize(
             kb.entries.values().cloned().collect(),

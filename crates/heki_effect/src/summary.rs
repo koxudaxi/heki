@@ -149,6 +149,12 @@ fn extract_module(
         .filter(|f| !f.is_class_body && !is_overload(f))
         .map(func_qualname)
         .collect();
+    if opt_in.suggestions {
+        let facts = crate::only_read::annotation_facts(&cx);
+        if !facts.is_empty() {
+            file.opt_in_tables_mut().annotation_facts = facts;
+        }
+    }
     let mut cell_aliases = CellAliases::default();
     let mut imported_by_name: Vec<ImportSite> = Vec::new();
     for f in &input.ir.functions {
@@ -1310,7 +1316,7 @@ impl<'a> Extractor<'a> {
             key_facts: OnceCell::new(),
             self_changes: Vec::new(),
             builtin_methods: FxHashMap::default(),
-            references: contracts.is_some_and(|c| c.references()),
+            references: opt_in.suggestions || contracts.is_some_and(|c| c.references()),
             handed: FxHashSet::default(),
             external: Vec::new(),
             kept_points: Vec::new(),

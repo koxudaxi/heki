@@ -14,7 +14,7 @@
 //! eight `OPT` patterns and builds their minimal byte-span [`TextEdit`]s.
 
 mod edits;
-mod imports;
+pub mod imports;
 mod interpreter;
 mod liveness;
 mod obligations;

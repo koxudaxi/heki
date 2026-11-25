@@ -15,6 +15,7 @@
 
 use crate::capacity::CapacityOf;
 use crate::decorators;
+use crate::only_read::{LiteralAnnotation, ParamAnnotation};
 use crate::readonly::ContainerKind;
 use crate::types::{Added, Args, Elem, Generic, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
@@ -1811,7 +1812,24 @@ fn annotated_head<'t>(
     text: &'t str,
     resolve: &impl Fn(&str) -> Option<String>,
 ) -> Option<AnnotatedHead<'t>> {
+    Some(head_of(text, resolve)?.named)
+}
+
+/// The type an annotation names ([`head_of`]) and where it is written.
+struct Head<'t> {
+    named: AnnotatedHead<'t>,
+    /// The head as written, a slice of the annotation (`list` of `Optional["list[int]"]`).
+    head: &'t str,
+    /// The type arguments as written (`int`), `None` without a subscript.
+    args: Option<&'t str>,
+    /// The way to the head went through `Annotated[...]`.
+    annotated: bool,
+}
+
+/// [`annotated_head`], with where the head is written.
+fn head_of<'t>(text: &'t str, resolve: &impl Fn(&str) -> Option<String>) -> Option<Head<'t>> {
     let mut t = text;
+    let mut annotated = false;
     loop {
         let u = unquote(t);
         let mut parts = split_top_level(u, '|');
@@ -1821,24 +1839,101 @@ fn annotated_head<'t>(
             continue;
         }
         let (head, args) = head_and_args(u);
+        let found = |named| {
+            Some(Head {
+                named,
+                head,
+                args,
+                annotated,
+            })
+        };
         let Some(fqn) = resolve(head) else {
             let last = head.rsplit('.').next().unwrap_or(head);
-            return Some(AnnotatedHead::Unresolved(last));
+            return found(AnnotatedHead::Unresolved(last));
         };
         let wrapper = fqn
             .strip_prefix("typing.")
             .or_else(|| fqn.strip_prefix("typing_extensions."));
         match (wrapper, args) {
-            (Some("Optional" | "Annotated"), Some(inner)) => t = first_arg(inner),
+            (Some("Optional"), Some(inner)) => t = first_arg(inner),
+            (Some("Annotated"), Some(inner)) => {
+                annotated = true;
+                t = first_arg(inner);
+            }
             (Some("Union"), Some(inner)) => {
                 let mut members = split_top_level(inner, ',');
                 members.retain(|p| *p != "None");
                 t = single(&members)?;
             }
-            (Some("ReadOnly"), _) => return Some(AnnotatedHead::ReadOnly),
-            _ => return Some(AnnotatedHead::Resolved(fqn)),
+            (Some("ReadOnly"), _) => return found(AnnotatedHead::ReadOnly),
+            _ => return found(AnnotatedHead::Resolved(fqn)),
         }
     }
+}
+
+/// What the parameter annotation `text` says to a read-only annotation of the parameter
+/// ([`ParamAnnotation`]); `span` is where `text` is in the source. A literal container is a
+/// resolved `list`, `dict`, or `set`, or its `typing` form, after `Optional`, `| None`, and
+/// quotes: not one written through `Annotated[...]` (its metadata is there for a reader), a
+/// `Mutable*` ABC (the author stated mutability), or an alias.
+pub(crate) fn param_annotation(
+    text: Option<&str>,
+    span: Option<Span>,
+    resolve: &impl Fn(&str) -> Option<String>,
+) -> ParamAnnotation {
+    let (Some(text), Some(span)) = (text, span) else {
+        return ParamAnnotation::Any;
+    };
+    let Some(found) = head_of(text, resolve) else {
+        return ParamAnnotation::Other;
+    };
+    let AnnotatedHead::Resolved(fqn) = found.named else {
+        return ParamAnnotation::Other;
+    };
+    if found.annotated {
+        return ParamAnnotation::Other;
+    }
+    let (list, dict, set) = (
+        ContainerKind::List.bit(),
+        ContainerKind::Dict.bit(),
+        ContainerKind::Set.bit(),
+    );
+    let kind = match fqn.as_str() {
+        "builtins.list" | "typing.List" => ContainerKind::List,
+        "builtins.dict" | "typing.Dict" => ContainerKind::Dict,
+        "builtins.set" | "typing.Set" => ContainerKind::Set,
+        "typing.Any" | "typing_extensions.Any" | "builtins.object" => return ParamAnnotation::Any,
+        abc => {
+            let name = abc
+                .strip_prefix("typing.")
+                .or_else(|| abc.strip_prefix("collections.abc."));
+            return match name {
+                Some("Iterable" | "Collection" | "Container" | "Sized") => {
+                    ParamAnnotation::Admits(list | dict | set)
+                }
+                Some("Sequence" | "Reversible") => ParamAnnotation::Admits(list),
+                Some("Mapping") => ParamAnnotation::Admits(dict),
+                Some("AbstractSet") => ParamAnnotation::Admits(set),
+                Some("Set") if abc.starts_with("collections.abc.") => ParamAnnotation::Admits(set),
+                _ => ParamAnnotation::Other,
+            };
+        }
+    };
+    let offset = |part: &str| {
+        let at = part.as_ptr() as usize - text.as_ptr() as usize;
+        span.start + u32::try_from(at).expect("an annotation is shorter than 4 GiB")
+    };
+    let start = offset(found.head);
+    ParamAnnotation::Literal(Box::new(LiteralAnnotation {
+        kind,
+        text: text.into(),
+        span,
+        head: Span {
+            start,
+            end: start + u32::try_from(found.head.len()).expect("a short head"),
+        },
+        str_items: kind == ContainerKind::List && found.args.map(str::trim) == Some("str"),
+    }))
 }
 
 /// The only element of `parts`.
@@ -3702,6 +3797,17 @@ impl ProjectDecls {
             Symbol::Class(c) => Some(c),
             _ => None,
         }
+    }
+
+    /// The declaration of the project class `fqn`.
+    pub fn class_decl(&self, fqn: &str) -> Option<&ClassDecl> {
+        self.class(&self.canonical(fqn))
+    }
+
+    /// The method resolution order of `class` ([`Self::mro`]): `class` first, then its bases,
+    /// each external one standing for itself.
+    pub fn mro_of(&self, class: &str) -> Vec<String> {
+        self.mro(class)
     }
 
     pub fn is_project_class(&self, fqn: &str) -> bool {

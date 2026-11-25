@@ -2804,6 +2804,19 @@ be under R2 finds the same one first along its MRO, a decorated project class co
 that binds it), and `stores::key_name` reads a key a loop takes from them as an attribute the
 class declares (section 2.1). Each row names the versions it was checked against.
 
+`[[annotation_readers]]` (`heki_kb::AnnotationReaders`) lists library code that reads
+annotations at run time, for `heki recommend`'s suggestions (ADR-023, assumption T1): the
+`decorators` read those of the function or class they decorate, the `bases` those of the classes
+deriving from them, and the `functions` those of what they are passed (`typing.get_type_hints`,
+`inspect.signature`, `fastapi.Depends`). `reads = "functions"` reads the annotations of
+functions (the decorated one, a class's methods, the one passed), and `reads = "fields"` only a
+class's class-body annotations (a dataclass, an attrs class, a pydantic model). A read-only
+annotation of a parameter is suggested for no function a `functions` row reads, and its notes
+count where the project calls the listed functions. A base of the standard library reads no
+method's annotations unless a row says so; any other library base, and any decorator outside the
+decorator table (`heki_effect::decorators`, whose column `leaves_annotations_unread` says which
+of its rows read none), leaves the suggestion heuristic.
+
 The entries follow the public API of each package, with three conventions:
 - An async API is `async_safe` and carries no blocking effect: it is often called without a
   direct `await` (`async with`, `asyncio.gather`, `asyncio.wait_for`), where the `is_awaited`

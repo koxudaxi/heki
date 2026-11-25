@@ -136,6 +136,9 @@ pub struct ParamInfo {
     pub is_kwarg: bool,
     /// PEP 484 annotation text (Advisory lane ONLY; `heki_soundness` MUST ignore this).
     pub annotation: Option<String>,
+    /// Where `annotation` is in the source: its text is the source there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation_span: Option<Span>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -826,6 +829,10 @@ pub struct IrFunction {
     pub span: Span,
     pub is_module_body: bool,
     pub is_class_body: bool,
+    /// A `def` whose body states nothing of its own: a docstring, `pass`, `...`, and at most
+    /// one `raise NotImplementedError` (an interface method a subclass fills in).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stub_body: bool,
     /// A generator expression, or a comprehension before 3.12, receives its outermost iterable
     /// as `.0` from the function creating it: that function and the iterable there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
