@@ -327,10 +327,11 @@ const FIELD_READER: &str = "from pkg.field_keys import FieldKeys\nfrom pkg.model
 const KEY_OTHER_FIRST: &str = "from typing import ClassVar\n\nfrom pkg.key_class import Keys\n\n\nclass OtherKey:\n    KEY: ClassVar[str] = \"other\"\n\n\nclass OtherFirstKeys(OtherKey, Keys):\n    pass\n";
 const FRESH_OPS: &str = "from pkg.model import Registry\n\nKEPT = []\n\n\ndef _fill(r: Registry):\n    r.entries.append(1)\n";
 const FRESH_BUILD: &str = "from pkg.fresh_ops import _fill\nfrom pkg.model import Registry\n\n\ndef build():\n    r = Registry()\n    _fill(r)\n    return r\n";
-// A copy helper returning an element of an optional table or a copy, and a public helper
-// marking its parameter, in another module than the boundary's scope using both on copies.
-const COPY_OPS: &str = "import copy\n\nKEPT = []\n\n\nclass Ticket:\n    def __init__(self):\n        self.flag = False\n\n\ndef copy_or_reuse(t: Ticket, reuse: dict[int, Ticket] | None = None) -> Ticket:\n    if reuse and (hit := reuse.get(id(t))) is not None:\n        return hit\n    return copy.copy(t)\n\n\ndef mark(t: Ticket) -> None:\n    t.flag = True\n";
-const COPY_PASS: &str = "from pkg.copy_ops import Ticket, copy_or_reuse, mark\n\n\ndef run(t: Ticket) -> Ticket:\n    copied = copy_or_reuse(t)\n    copied.flag = True\n    mark(copied)\n    return copied\n";
+// A copy helper returning an element of an optional table or a copy, a public helper marking
+// its parameter, and one returning its parameter, in another module than the boundary's scope
+// using them on copies.
+const COPY_OPS: &str = "import copy\n\nKEPT = []\n\n\nclass Ticket:\n    def __init__(self):\n        self.flag = False\n\n\ndef copy_or_reuse(t: Ticket, reuse: dict[int, Ticket] | None = None) -> Ticket:\n    if reuse and (hit := reuse.get(id(t))) is not None:\n        return hit\n    return copy.copy(t)\n\n\ndef mark(t: Ticket) -> None:\n    t.flag = True\n\n\ndef stamp(t: Ticket) -> Ticket:\n    return t\n";
+const COPY_PASS: &str = "from pkg.copy_ops import Ticket, copy_or_reuse, mark, stamp\n\n\ndef run(t: Ticket) -> Ticket:\n    copied = stamp(copy_or_reuse(t))\n    copied.flag = True\n    mark(copied)\n    return copied\n";
 const STRICT_OPS: &str = "def _reset(r):\n    r.entries = []\n";
 // The strict reads and calls: helpers that type nothing read and call a guarded attribute and
 // method; a caller in another module binds their object to another class, then to the guarded
@@ -3067,7 +3068,8 @@ fn steps_small_displays() -> Vec<Step> {
 /// class or a subclass, and a `Final` one when a decorator in another module building its class
 /// becomes a `dataclass_transform` (a project-wide fact); whether a helper keeps the object its caller hands it is a summary fact
 /// of the helper, and so is whether a copy helper returns an element of an optional table only
-/// where the table defaults to a value without elements; whether a parameter is typed, and with which class, is a fact of
+/// where the table defaults to a value without elements; whether a helper returns its parameter
+/// is a declaration of its module; whether a parameter is typed, and with which class, is a fact of
 /// the callers the strict modes walk (`MUT205` writes, `MUT206` reads, `MUT207` calls), and
 /// whether that class defines a method a call target naming no class names is a declaration of
 /// the class's module.
@@ -3443,6 +3445,20 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
         .present(&[("pkg/copy_pass.py", "EFF201")]),
         Step::new(
             "the marking helper only marks the ticket again",
+            vec![save("pkg/copy_ops.py", COPY_OPS)],
+        )
+        .absent(&[("pkg/copy_pass.py", "EFF201")]),
+        Step::new(
+            "the stamping helper of another module returns a shared ticket instead of its argument",
+            vec![Action::Save(
+                "pkg/copy_ops.py",
+                format!("{COPY_OPS}\n\nSHARED = Ticket()\n")
+                    .replace("    return t\n", "    return SHARED\n"),
+            )],
+        )
+        .present(&[("pkg/copy_pass.py", "EFF201")]),
+        Step::new(
+            "the stamping helper returns its argument again",
             vec![save("pkg/copy_ops.py", COPY_OPS)],
         )
         .absent(&[("pkg/copy_pass.py", "EFF201")]),

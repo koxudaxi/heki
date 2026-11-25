@@ -6675,8 +6675,10 @@ impl<'a> Extractor<'a> {
                 let loops = self.loops_around(bb);
                 // `(callee, its index, what it is handed)` for `Self::hand_over`.
                 let mut handovers = Vec::new();
-                // What each callee returns at the call, for `Self::project_alloc`.
+                // What each callee returns at the call, and the argument it returns when it
+                // returns its parameter, for `Self::project_alloc`.
                 let mut returns = Vec::with_capacity(keys.len());
+                let mut handed_back = Vec::with_capacity(keys.len());
                 // What each callee running here is passed for the marked parameters, for
                 // `agreed_marks`, on each way the mappings the call unpacks may be built when
                 // there are several.
@@ -6820,6 +6822,13 @@ impl<'a> Extractor<'a> {
                         params.pop();
                     }
                     self.bind_captured(key, decl, &mut params);
+                    if self.ownership {
+                        // The argument the callee returns, when it returns its parameter itself.
+                        let back = decl.returns_param.filter(|_| !offloaded).and_then(|p| {
+                            (handed_args.iter()).find_map(|(slot, v)| (*slot == p).then_some(*v))
+                        });
+                        handed_back.push(back);
+                    }
                     if self.ownership && !offloaded {
                         handovers.push((decl, callees.len(), handed_args));
                     }
@@ -6868,7 +6877,7 @@ impl<'a> Extractor<'a> {
                     }
                 }
                 self.param_origins = buffer;
-                self.project_alloc(call, returns);
+                self.project_alloc(call, returns, &handed_back);
                 if !handed_state.is_empty() {
                     self.summary.shared_state_mut().handed.extend(handed_state);
                 }
@@ -7662,20 +7671,29 @@ impl<'a> Extractor<'a> {
     }
 
     /// The allocation of a project call, its callees bound (`returns`: each with the parameters
-    /// the call binds to values without elements): a constructor call allocates its object, and
-    /// a project function returning an instance of a project class a new object when every
-    /// candidate returns one.
-    fn project_alloc(&mut self, call: &Call<'_>, returns: Vec<NewFrom>) {
+    /// the call binds to values without elements): a constructor call allocates its object, a
+    /// call of functions that all return the same argument (`handed_back`, by callee) gives that
+    /// argument's object, and a project function returning an instance of a project class a new
+    /// object when every candidate returns one.
+    fn project_alloc(
+        &mut self,
+        call: &Call<'_>,
+        returns: Vec<NewFrom>,
+        handed_back: &[Option<VarId>],
+    ) {
         if !self.ownership {
             return;
         }
         let Some(dst) = call.dst.filter(|_| self.track && call.per_item.is_none()) else {
             return;
         };
+        let back = handed_back.first().copied().flatten();
         if let Some(class) = &call.constructs {
             if !self.cx.project.may_reuse_instances(class) {
                 self.rec.alloc(self.at(), dst, NewKind::Own, Vec::new());
             }
+        } else if let Some(arg) = back.filter(|_| handed_back.iter().all(|b| *b == back)) {
+            self.rec.handed_back(dst, arg);
         } else if self.may_be_new(dst) {
             self.rec.alloc(self.at(), dst, NewKind::Own, returns);
         }

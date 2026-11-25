@@ -835,6 +835,10 @@ pub struct FunctionDecl {
     /// function, or reading the property, gives that object of the argument.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returns_param_attr: Option<(u8, String)>,
+    /// `i` when every `return` of every definition returns parameter `i` itself (`return field`,
+    /// [`returned_param_part`]): calling the function gives the object the call hands it there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returns_param: Option<u8>,
     /// The fqn an import binds when every `return` of every definition returns what that import
     /// binds, a module or an object of one ([`returned_import`]): an import in the function
     /// (`from pkg import ops` then `return ops`, which breaks an import cycle) or one of the
@@ -6029,7 +6033,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
         *slot = (*slot).max(t);
     }
     // Definitions sharing a qualname (a property's setter, conditional definitions) must agree.
-    let mut returned_attrs: FxHashMap<&str, Option<(u8, String)>> = FxHashMap::default();
+    let mut returned_parts: FxHashMap<&str, Option<(u8, Option<String>)>> = FxHashMap::default();
     let mut returned_imports: FxHashMap<&str, Option<Box<str>>> = FxHashMap::default();
     let import_targets: FxHashMap<Span, String> = semantic
         .imports
@@ -6043,8 +6047,8 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
         .iter()
         .filter(|f| is_summarized_function(f))
     {
-        let returned = returned_param_attr(f, &decls);
-        returned_attrs
+        let returned = returned_param_part(f, &decls);
+        returned_parts
             .entry(&f.qualname)
             .and_modify(|r| {
                 if *r != returned {
@@ -6133,7 +6137,12 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
             offloaded_by: None,
             is_abstract: crate::is_abstract_method(&f.decorators),
             property_type: getter_types.get(f.qualname.as_str()).cloned(),
-            returns_param_attr: returned_attrs[f.qualname.as_str()].clone(),
+            returns_param_attr: (returned_parts[f.qualname.as_str()].clone())
+                .and_then(|(param, attr)| Some((param, attr?))),
+            returns_param: match &returned_parts[f.qualname.as_str()] {
+                Some((param, None)) => Some(*param),
+                _ => None,
+            },
             returned_import: returned_imports[f.qualname.as_str()].clone(),
             returns: None,
             state_of_self: false,
@@ -6711,13 +6720,14 @@ fn external_defines(kb: &EffectiveEcosystemKb, base: &str, name: &str) -> bool {
     special || builtin_method || kb.lookup(&format!("{base}.{name}")).is_some()
 }
 
-/// [`FunctionDecl::returns_param_attr`] of one definition: a function (not a generator or a
-/// coroutine, decorated by nothing but `staticmethod`, `classmethod`, `abstractmethod`,
-/// `override`, or `property`) whose every `return` returns the same attribute of the same
-/// positional parameter, read directly or through local copies, and which stores or deletes no
-/// attribute of that name. A `cached_property` is none: a read after the first returns what
-/// the instance holds, which an assignment can replace.
-fn returned_param_attr(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, String)> {
+/// [`FunctionDecl::returns_param_attr`] (`Some(attr)`) and [`FunctionDecl::returns_param`]
+/// (`None`) of one definition: a function (not a generator or a coroutine, decorated by nothing
+/// but `staticmethod`, `classmethod`, `abstractmethod`, `override`, or `property`) whose every
+/// `return` returns the same positional parameter, or the same attribute of it, read directly
+/// or through local copies, and which stores or deletes no attribute of that name. A
+/// `cached_property` is none: a read after the first returns what the instance holds, which an
+/// assignment can replace.
+fn returned_param_part(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Option<String>)> {
     let plain_decorators = f.decorators.iter().all(|d| {
         let (head, _) = decorator_parts(d);
         decorators::keeps(head.rsplit('.').next().unwrap_or(head), |d| d.keeps_call)
@@ -6760,26 +6770,28 @@ fn returned_param_attr(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Strin
         let Terminator::Return(value) = &bb.terminator else {
             continue;
         };
-        let Some(InstKind::AttrLoad { obj, attr, .. }) = defs.get(&copied_from((*value)?)) else {
-            return None;
+        let value = copied_from((*value)?);
+        let (holder, attr) = match defs.get(&value) {
+            Some(InstKind::AttrLoad { obj, attr, .. }) => (copied_from(*obj), Some(attr)),
+            _ => (value, None),
         };
-        let holder = copied_from(*obj);
         let param = f
             .params
             .iter()
             .position(|p| p.var == holder && !p.is_vararg && !p.is_kwarg && !p.kw_only)?;
-        let this = (u8::try_from(param).ok()?, attr.clone());
+        let this = (u8::try_from(param).ok()?, attr.cloned());
         if returned.get_or_insert_with(|| this.clone()) != &this {
             return None;
         }
     }
     // A function storing or deleting the attribute (`items = self.items; self.items = [];
     // return items`) may return what the attribute held before: no longer the attribute.
-    let (_, attr) = returned.as_ref()?;
-    let stores_it = f.blocks.iter().flat_map(|b| &b.insts).any(|i| {
-        matches!(&i.kind, InstKind::AttrStore { attr: a, .. } | InstKind::AttrDelete { attr: a, .. } if a == attr)
-    });
-    returned.filter(|_| !stores_it)
+    let stores_it = |attr: &str| {
+        f.blocks.iter().flat_map(|b| &b.insts).any(|i| {
+            matches!(&i.kind, InstKind::AttrStore { attr: a, .. } | InstKind::AttrDelete { attr: a, .. } if a == attr)
+        })
+    };
+    returned.filter(|(_, attr)| attr.as_deref().is_none_or(|a| !stores_it(a)))
 }
 
 /// [`ModuleDecls::unknown_globals`]: the globals the module stores or deletes (`stores`) that are

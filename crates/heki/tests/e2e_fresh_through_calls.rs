@@ -461,3 +461,152 @@ fn write_owners_take_the_result_of_a_call_leaving_the_table_out_as_new() {
     assert!(names.contains(&"copies_with_replacements"), "{found:#?}");
     assert!(names.contains(&"copies_with_a_memo_default"), "{found:#?}");
 }
+
+const BUILT_MODEL: &str = r#"from __future__ import annotations
+
+from typing import Protocol
+
+
+class Field:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.origin: str | None = None
+        self.alias_scope: str | None = None
+
+
+class Model:
+    def __init__(self) -> None:
+        self.fields: list[Field] = []
+
+
+SHARED = Field("shared")
+KEPT: list[Field] = []
+
+
+class Builder(Protocol):
+    def build_field(self, name: str) -> Field: ...
+
+
+class Parser:
+    def build_field(self, name: str) -> Field:
+        return Field(name)
+
+
+def with_origin(field: Field, kind: str) -> Field:
+    field.origin = kind
+    return field
+
+
+def with_kept_origin(field: Field, kind: str) -> Field:
+    KEPT.append(field)
+    field.origin = kind
+    return field
+
+
+def with_origin_or_shared(field: Field, kind: str) -> Field:
+    if kind:
+        return field
+    return SHARED
+
+
+def append_field(model: Model, field: Field) -> None:
+    model.fields.append(field)
+
+
+def record_scope(field: Field, scope: str) -> None:
+    field.alias_scope = scope
+"#;
+
+const BUILT_PASSES: &str = r#"from __future__ import annotations
+
+from pkg.model import (
+    Builder,
+    Field,
+    Model,
+    Parser,
+    append_field,
+    record_scope,
+    with_kept_origin,
+    with_origin,
+    with_origin_or_shared,
+)
+
+
+def through_the_protocol(parser: Builder) -> Field:
+    field = with_origin(parser.build_field("x"), "tag")
+    record_scope(field, "scope")
+    return field
+
+
+def through_the_class(parser: Parser) -> Field:
+    field = with_origin(parser.build_field("x"), "tag")
+    record_scope(field, "scope")
+    return field
+
+
+def records_before_appending(parser: Builder, model: Model) -> Field:
+    field = with_origin(parser.build_field("x"), "tag")
+    record_scope(field, "scope")
+    append_field(model, field)
+    return field
+
+
+def tags_the_input(field: Field) -> Field:
+    tagged = with_origin(field, "tag")
+    record_scope(tagged, "scope")
+    return tagged
+
+
+def keeps_while_tagging(parser: Builder) -> Field:
+    field = with_kept_origin(parser.build_field("x"), "tag")
+    record_scope(field, "scope")
+    return field
+
+
+def may_take_the_shared_one(parser: Builder) -> Field:
+    field = with_origin_or_shared(parser.build_field("x"), "tag")
+    record_scope(field, "scope")
+    return field
+
+
+def appends_before_recording(parser: Builder, model: Model) -> Field:
+    field = with_origin(parser.build_field("x"), "tag")
+    append_field(model, field)
+    record_scope(field, "scope")
+    return field
+"#;
+
+#[test]
+fn an_object_a_helper_hands_back_is_the_one_it_was_handed() {
+    let p = Project::new("fresh_through_calls_handed_back");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"no-field-writes\"\nscopes = [\"pkg.passes:*\"]\nwrite-universe = [\"Field.origin\", \"Field.alias_scope\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", BUILT_MODEL)
+    .write("pkg/passes.py", BUILT_PASSES);
+    let mut found: Vec<(String, String)> = reports(&diagnostics(&p))
+        .into_iter()
+        .map(|(q, _, m)| {
+            let target = m.split('`').nth(3).unwrap_or_default().to_owned();
+            (q, target)
+        })
+        .collect();
+    let q = |func: &str, target: &str| (func.to_owned(), target.to_owned());
+    // A field the parser builds (a constructor call in the one implementation of the protocol's
+    // method), handed through a helper returning it, is written while nothing holds it.
+    // Reported: the input handed through; a helper keeping it, or returning a shared field on
+    // another path; the field held by the model before the write.
+    let mut expected = vec![
+        q("tags_the_input", "Field.origin"),
+        q("tags_the_input", "Field.alias_scope"),
+        q("keeps_while_tagging", "Field.origin"),
+        q("keeps_while_tagging", "Field.alias_scope"),
+        q("may_take_the_shared_one", "Field.alias_scope"),
+        q("appends_before_recording", "Field.alias_scope"),
+    ];
+    expected.sort();
+    found.sort();
+    assert_eq!(found, expected);
+}

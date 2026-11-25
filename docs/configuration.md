@@ -409,7 +409,9 @@ iteration step of it) that the call leaves at a default without elements or pass
 constant: `None`, a bool, a number, or an empty string or tuple. `copy_tree(node)` of
 `def copy_tree(node, replacements=None)` returning `replacements[id(node)]` or a copy gives a new
 object; `copy_tree(node, table)` does not, nor does a call where the default is a dict display
-shared by every call (`memo={}`).
+shared by every call (`memo={}`). A call of a function every `return` of which returns one of its
+parameters (`def with_origin(field, kind): ...; return field`) gives the object it hands that
+parameter: a new one stays new, and the input stays the input.
 
 In an effect boundary, a write a reached function makes to the object one of its parameters
 holds constructs that object when every call reaching the function hands it a new object that

@@ -47,6 +47,9 @@ struct Alloc {
 #[derive(Default)]
 pub(crate) struct Recorder {
     allocs: Vec<Alloc>,
+    /// The results of calls that hand back the object they are handed (a project function
+    /// returning its parameter), by the argument's variable: the same object.
+    handed_back: FxHashMap<VarId, VarId>,
     escapes: Vec<(Pos, VarId, Escape)>,
     /// The points asked about, by query id.
     queries: Vec<(Pos, VarId)>,
@@ -124,6 +127,11 @@ impl Recorder {
                 returns,
             });
         }
+    }
+
+    /// `dst` holds the object `arg` holds: the result of a call returning its argument.
+    pub(crate) fn handed_back(&mut self, dst: VarId, arg: VarId) {
+        self.handed_back.insert(dst, arg);
     }
 
     pub(crate) fn escape(&mut self, pos: Pos, var: VarId, how: Escape) {
@@ -410,12 +418,14 @@ impl Recorder {
                     Some(InstKind::LoadName { .. })
                 )
         };
-        // A copy's source, a phi's inputs other than itself that may hold an object.
+        // A copy's source, the argument a call hands back, a phi's inputs other than itself that
+        // may hold an object.
         let inputs = |v: VarId, out: &mut Vec<VarId>| match shape.def(v) {
             Def::Inst(b, i) => {
                 if let InstKind::Copy { src, .. } = f.block(b).insts[i as usize].kind {
                     out.push(src);
                 }
+                out.extend(self.handed_back.get(&v));
             }
             Def::Phi(b, i) => out.extend(
                 (f.block(b).phis[i as usize].incoming.iter().map(|(_, x)| *x))
