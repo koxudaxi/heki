@@ -1771,8 +1771,12 @@ impl Block {
         }
     }
 
-    /// The entry with the kept patterns in place of the targets they stand for.
+    /// The entry with the kept patterns in place of the targets they stand for. A block without
+    /// patterns, an effect boundary among them, keeps its subjects: they are no classes.
     fn apply_patterns(&mut self) {
+        if self.patterns.is_empty() {
+            return;
+        }
         let mut subjects: Vec<String> = Vec::new();
         for (class, targets) in &self.classes {
             match self.patterns.iter().find(|p| p.kept && &p.class == class) {
