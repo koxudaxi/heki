@@ -26,7 +26,7 @@ opaque_packages = [
     "psycopg_pool", "psycopg2", "pymysql", "redis", "pymongo", "boto3", "botocore", "grpc",
     "pandas", "numpy", "pydantic", "anyio", "trio", "starlette", "fastapi", "asgiref", "asyncer",
     "channels", "asyncpg", "websockets", "yaml", "motor", "duckdb", "celery", "openai",
-    "anthropic", "google", "polars", "torch",
+    "anthropic", "google", "polars", "torch", "psutil", "fsspec",
 ]
 
 # --- Offloads blocking work (argument index of the offloaded callable) ---
@@ -681,6 +681,141 @@ opaque_to_layer3 = true
 symbol = "urllib3.connection_from_url"
 effects = ["unpooled_client_alloc"]
 return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+# A pool taken from a manager is a pool of that class, and a name through the submodule
+# (`urllib3.connectionpool`, `urllib3.poolmanager`) is another name.
+
+[[entries]]
+symbol = "urllib3.PoolManager.connection_from_host"
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.ProxyManager.connection_from_host"
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.PoolManager.connection_from_url"
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.ProxyManager.connection_from_url"
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.PoolManager.connection_from_context"
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.ProxyManager.connection_from_context"
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.PoolManager.connection_from_pool_key"
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.ProxyManager.connection_from_pool_key"
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.PoolManager.connection_from_pool_kwargs"
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.ProxyManager.connection_from_pool_kwargs"
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.proxy_from_url"
+effects = ["unpooled_client_alloc"]
+return_type = "urllib3.ProxyManager"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.connectionpool.connection_from_url"
+effects = ["unpooled_client_alloc"]
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.connectionpool.HTTPConnectionPool"
+effects = ["unpooled_client_alloc"]
+exit_suppresses = false
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.connectionpool.HTTPConnectionPool.request"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.connectionpool.HTTPConnectionPool.urlopen"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.connectionpool.HTTPSConnectionPool"
+effects = ["unpooled_client_alloc"]
+exit_suppresses = false
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.connectionpool.HTTPSConnectionPool.request"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.connectionpool.HTTPSConnectionPool.urlopen"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.poolmanager.PoolManager"
+effects = ["unpooled_client_alloc"]
+exit_suppresses = false
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.poolmanager.PoolManager.request"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.poolmanager.PoolManager.urlopen"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.poolmanager.ProxyManager"
+effects = ["unpooled_client_alloc"]
+exit_suppresses = false
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.poolmanager.ProxyManager.request"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.poolmanager.ProxyManager.urlopen"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.poolmanager.proxy_from_url"
+effects = ["unpooled_client_alloc"]
+return_type = "urllib3.ProxyManager"
 opaque_to_layer3 = true
 
 # --- AWS: boto3 ---
@@ -5737,6 +5872,501 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "yaml.safe_dump"
 writes_in_order = { arg = 0, param = "data", sorted_by = "sort_keys", sorted_by_default = true }
+opaque_to_layer3 = true
+
+# --- Processes and system state: psutil ---
+# Every query reads the operating system (`/proc`, system calls).
+
+[[entries]]
+symbol = "psutil.Process"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.children"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.parent"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.parents"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.memory_info"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.memory_full_info"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.memory_percent"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.cpu_times"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.num_threads"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.num_fds"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.open_files"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.connections"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.net_connections"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.name"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.exe"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.cmdline"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.status"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.username"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.create_time"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.cwd"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.environ"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.threads"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.io_counters"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.nice"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.terminate"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.kill"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.suspend"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.resume"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.is_running"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.as_dict"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.ppid"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.Process.wait"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 0, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.pids"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.pid_exists"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.virtual_memory"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.swap_memory"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.disk_usage"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.disk_partitions"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.disk_io_counters"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.net_io_counters"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.net_connections"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.net_if_addrs"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.net_if_stats"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.boot_time"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.users"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.cpu_times"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.cpu_count"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.cpu_stats"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.sensors_temperatures"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.sensors_battery"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.process_iter"
+return_type = "psutil.process_iter()"
+items = "entries"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.process_iter().__iter__"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psutil.wait_procs"
+effects = ["blocking_sync"]
+opaque_to_layer3 = true
+
+# --- fsspec ---
+# A file system reads local disks or object stores; either waits on the call.
+
+[[entries]]
+symbol = "fsspec.open"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.open_files"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.open_local"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.filesystem"
+return_type = "fsspec.AbstractFileSystem"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.cat"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.cat_file"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.cat_ranges"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.open"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.ls"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.info"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.exists"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.isfile"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.isdir"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.find"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.glob"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.walk"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.du"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.size"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.get"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.get_file"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.put"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.put_file"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.download"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.upload"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.rm"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.rm_file"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.rmdir"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.mkdir"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.makedirs"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.mv"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.move"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.cp"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.copy"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.cp_file"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.touch"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.read_text"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.write_text"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.pipe"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.pipe_file"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.head"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.tail"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.created"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.modified"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "fsspec.AbstractFileSystem.checksum"
+effects = ["blocking_fs"]
 opaque_to_layer3 = true
 
 # --- Data: pandas I/O ---

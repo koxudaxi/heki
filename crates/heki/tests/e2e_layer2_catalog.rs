@@ -3657,3 +3657,656 @@ fn llm_requests_block_through_the_synchronous_clients_attributes() {
         ]
     );
 }
+
+/// A project with one effect boundary per effect, over every function of `pkg.probe`.
+const PROBE_BOUNDARIES: &str = r#"[tool.heki.lint]
+select = ["EFF201"]
+
+[[tool.heki.effect-boundaries]]
+name = "fs"
+scopes = ["pkg.probe:*"]
+forbid = ["blocking-fs"]
+
+[[tool.heki.effect-boundaries]]
+name = "sub"
+scopes = ["pkg.probe:*"]
+forbid = ["blocking-subprocess"]
+
+[[tool.heki.effect-boundaries]]
+name = "env"
+scopes = ["pkg.probe:*"]
+forbid = ["reads-environment"]
+
+[[tool.heki.effect-boundaries]]
+name = "net"
+scopes = ["pkg.probe:*"]
+forbid = ["blocking-net"]
+
+[[tool.heki.effect-boundaries]]
+name = "sync"
+scopes = ["pkg.probe:*"]
+forbid = ["blocking-sync"]
+"#;
+
+/// `(boundary, function)` of every `EFF201` report of the module `source` at `pkg/probe.py`.
+fn probe_reports(name: &str, source: &str) -> Vec<(String, String)> {
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        &format!("[project]\nname = \"catalog\"\nversion = \"0\"\n\n{PROBE_BOUNDARIES}"),
+    );
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/probe.py", source);
+    let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let mut found: Vec<(String, String)> = diags
+        .iter()
+        .map(|d| {
+            let message = d["message"].as_str().unwrap();
+            let boundary = ["fs", "sub", "env", "net", "sync"]
+                .into_iter()
+                .find(|b| message.contains(&format!("`{b}`")))
+                .unwrap_or_else(|| panic!("no boundary in {d:#}"));
+            (
+                boundary.to_owned(),
+                d["qualname"]
+                    .as_str()
+                    .unwrap()
+                    .rsplit('.')
+                    .next()
+                    .unwrap()
+                    .to_owned(),
+            )
+        })
+        .collect();
+    found.sort();
+    found.dedup();
+    found
+}
+
+fn reported(found: &[(String, String)], boundary: &str) -> Vec<String> {
+    found
+        .iter()
+        .filter(|(b, _)| b == boundary)
+        .map(|(_, f)| f.clone())
+        .collect()
+}
+
+const FILE_SYSTEM_ROWS: &str = r#"import glob
+import os
+import os.path
+import shutil
+import tempfile
+from pathlib import Path
+
+
+def f_path_iterdir(p: Path) -> list[Path]:
+    return list(p.iterdir())
+
+
+def f_path_glob(p: Path) -> list[Path]:
+    return list(p.glob("*.json"))
+
+
+def f_path_rglob(p: Path) -> list[Path]:
+    return [q for q in p.rglob("*.json")]
+
+
+def f_path_mkdir(p: Path) -> None:
+    p.mkdir(parents=True)
+
+
+def f_path_touch(p: Path) -> None:
+    p.touch()
+
+
+def f_path_unlink(p: Path) -> None:
+    p.unlink()
+
+
+def f_path_rename(p: Path, q: Path) -> Path:
+    return p.rename(q)
+
+
+def f_path_replace(p: Path, q: Path) -> Path:
+    return p.replace(q)
+
+
+def f_path_symlink_to(p: Path, q: Path) -> None:
+    p.symlink_to(q)
+
+
+def f_path_readlink(p: Path) -> Path:
+    return p.readlink()
+
+
+def f_path_is_symlink(p: Path) -> bool:
+    return p.is_symlink()
+
+
+def f_os_replace(a: str, b: str) -> None:
+    os.replace(a, b)
+
+
+def f_os_open(p: str) -> int:
+    return os.open(p, os.O_RDONLY)
+
+
+def f_os_remove(p: str) -> None:
+    os.remove(p)
+
+
+def f_os_makedirs(p: str) -> None:
+    os.makedirs(p, exist_ok=True)
+
+
+def f_os_chmod(p: str) -> None:
+    os.chmod(p, 0o600)
+
+
+def f_os_symlink(a: str, b: str) -> None:
+    os.symlink(a, b)
+
+
+def f_os_lstat(p: str) -> object:
+    return os.lstat(p)
+
+
+def f_getsize(p: str) -> int:
+    return os.path.getsize(p)
+
+
+def f_getmtime(p: str) -> float:
+    return os.path.getmtime(p)
+
+
+def f_islink(p: str) -> bool:
+    return os.path.islink(p)
+
+
+def f_shutil_move(a: str, b: str) -> object:
+    return shutil.move(a, b)
+
+
+def f_shutil_copyfile(a: str, b: str) -> object:
+    return shutil.copyfile(a, b)
+
+
+def f_shutil_disk_usage(p: str) -> object:
+    return shutil.disk_usage(p)
+
+
+def f_shutil_make_archive(p: str, root: str) -> str:
+    return shutil.make_archive(p, "zip", root)
+
+
+def f_tempfile_mkdtemp() -> str:
+    return tempfile.mkdtemp()
+
+
+def f_tempfile_mkstemp() -> object:
+    return tempfile.mkstemp()
+
+
+def f_tempfile_named() -> None:
+    with tempfile.NamedTemporaryFile() as f:
+        f.write(b"x")
+
+
+def f_tempfile_directory() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        print(d)
+
+
+def f_glob_glob() -> list[str]:
+    return glob.glob("*.py")
+
+
+def f_glob_iglob() -> list[str]:
+    return list(glob.iglob("*.py"))
+
+
+def g_path_pure(p: Path) -> Path:
+    return p / "a" / "b"
+
+
+def g_path_name(p: Path) -> str:
+    return p.with_suffix(".txt").name
+
+
+def g_path_not_iterated(p: Path) -> object:
+    return p.glob("*.json")
+
+
+def g_path_as_posix(p: Path) -> str:
+    return p.as_posix()
+
+
+def g_os_path_join(a: str, b: str) -> str:
+    return os.path.join(os.path.dirname(a), b)
+
+
+def g_os_path_split(p: str) -> tuple[str, str]:
+    return os.path.splitext(os.path.basename(p))
+
+
+def g_shutil_copyfileobj(src, dst) -> None:
+    shutil.copyfileobj(src, dst)
+"#;
+
+#[test]
+fn file_system_rows_cover_the_modules_not_call_by_call() {
+    let found = probe_reports("cat_fs_rows", FILE_SYSTEM_ROWS);
+    let fs = reported(&found, "fs");
+    let expected: Vec<String> = FILE_SYSTEM_ROWS
+        .lines()
+        .filter_map(|l| l.strip_prefix("def f_"))
+        .map(|l| format!("f_{}", l.split('(').next().unwrap()))
+        .collect();
+    let mut sorted = expected.clone();
+    sorted.sort();
+    assert_eq!(fs, sorted);
+    assert!(found.iter().all(|(b, _)| b == "fs"), "{found:?}");
+}
+
+const PROCESS_ROWS: &str = r#"import os
+import subprocess
+
+
+def f_os_system() -> None:
+    os.system("ruff")
+
+
+def f_os_popen() -> str:
+    return os.popen("ls").read()
+
+
+def f_os_execv(argv: list[str]) -> None:
+    os.execv("/bin/ls", argv)
+
+
+def f_os_execvp(argv: list[str]) -> None:
+    os.execvp("ls", argv)
+
+
+def f_os_spawnl() -> int:
+    return os.spawnl(os.P_WAIT, "/bin/ls", "ls")
+
+
+def f_os_spawnvp(argv: list[str]) -> int:
+    return os.spawnvp(os.P_WAIT, "ls", argv)
+
+
+def f_os_posix_spawn(argv: list[str]) -> int:
+    return os.posix_spawn("/bin/ls", argv, {})
+
+
+def f_getoutput() -> str:
+    return subprocess.getoutput("ls")
+
+
+def f_getstatusoutput() -> object:
+    return subprocess.getstatusoutput("ls")
+
+
+def f_run(argv: list[str]) -> object:
+    return subprocess.run(argv)
+
+
+def g_popen_spawns_without_waiting(argv: list[str]) -> object:
+    return subprocess.Popen(argv)
+
+
+def g_polled(child: subprocess.Popen) -> object:
+    return child.poll()
+"#;
+
+#[test]
+fn process_rows_cover_os_and_subprocess_starts() {
+    let found = probe_reports("cat_process_rows", PROCESS_ROWS);
+    assert_eq!(
+        reported(&found, "sub"),
+        [
+            "f_getoutput",
+            "f_getstatusoutput",
+            "f_os_execv",
+            "f_os_execvp",
+            "f_os_popen",
+            "f_os_posix_spawn",
+            "f_os_spawnl",
+            "f_os_spawnvp",
+            "f_os_system",
+            "f_run",
+        ]
+    );
+    assert!(found.iter().all(|(b, _)| b == "sub"), "{found:?}");
+}
+
+const ENVIRONMENT_ROWS: &str = r#"import os
+import os.path
+from pathlib import Path
+
+
+def f_path_cwd() -> Path:
+    return Path.cwd()
+
+
+def f_path_home() -> Path:
+    return Path.home()
+
+
+def f_path_absolute(p: Path) -> Path:
+    return p.absolute()
+
+
+def f_path_expanduser(p: Path) -> Path:
+    return p.expanduser()
+
+
+def f_os_getcwd() -> str:
+    return os.getcwd()
+
+
+def f_os_getcwdb() -> bytes:
+    return os.getcwdb()
+
+
+def f_os_path_abspath(p: str) -> str:
+    return os.path.abspath(p)
+
+
+def f_os_path_relpath(p: str) -> str:
+    return os.path.relpath(p)
+
+
+def f_os_path_expanduser(p: str) -> str:
+    return os.path.expanduser(p)
+
+
+def f_os_path_expandvars(p: str) -> str:
+    return os.path.expandvars(p)
+
+
+def g_normpath(p: str) -> str:
+    return os.path.normpath(p)
+
+
+def g_path_parent(p: Path) -> Path:
+    return p.parent
+"#;
+
+#[test]
+fn the_working_directory_and_the_home_are_environment_reads_not_file_system() {
+    let found = probe_reports("cat_environment_rows", ENVIRONMENT_ROWS);
+    assert_eq!(
+        reported(&found, "env"),
+        [
+            "f_os_getcwd",
+            "f_os_getcwdb",
+            "f_os_path_abspath",
+            "f_os_path_expanduser",
+            "f_os_path_expandvars",
+            "f_os_path_relpath",
+            "f_path_absolute",
+            "f_path_cwd",
+            "f_path_expanduser",
+            "f_path_home",
+        ]
+    );
+    assert!(found.iter().all(|(b, _)| b == "env"), "{found:?}");
+}
+
+const MORE_BLOCKING: &str = r#"import ftplib
+import signal
+
+import fsspec
+import psutil
+
+
+def f_sigwait() -> int:
+    return signal.sigwait({signal.SIGUSR1})
+
+
+def g_sigtimedwait_at_once() -> object:
+    return signal.sigtimedwait({signal.SIGUSR1}, 0)
+
+
+def f_ftp(ftp: ftplib.FTP) -> list[str]:
+    return ftp.nlst()
+
+
+def f_ftp_login(host: str) -> None:
+    ftplib.FTP_TLS(host).login()
+
+
+def f_psutil_children(pid: int) -> object:
+    return psutil.Process(pid).children()
+
+
+def f_psutil_memory() -> object:
+    return psutil.virtual_memory()
+
+
+def f_psutil_iter() -> list[object]:
+    return [p for p in psutil.process_iter()]
+
+
+def f_fsspec_open(path: str) -> object:
+    return fsspec.open(path)
+
+
+def f_fsspec_cat(path: str) -> bytes:
+    return fsspec.filesystem("s3").cat(path)
+
+
+def f_fsspec_ls(fs: fsspec.AbstractFileSystem, path: str) -> list[object]:
+    return fs.ls(path)
+
+
+def g_psutil_wait_at_once(p: psutil.Process) -> object:
+    return p.wait(0)
+"#;
+
+#[test]
+fn signal_ftplib_psutil_and_fsspec_have_rows() {
+    let found = probe_reports("cat_more_blocking", MORE_BLOCKING);
+    assert_eq!(reported(&found, "sync"), ["f_sigwait"]);
+    assert_eq!(reported(&found, "net"), ["f_ftp", "f_ftp_login"]);
+    assert_eq!(
+        reported(&found, "fs"),
+        [
+            "f_fsspec_cat",
+            "f_fsspec_ls",
+            "f_fsspec_open",
+            "f_psutil_children",
+            "f_psutil_iter",
+            "f_psutil_memory",
+        ]
+    );
+    assert!(found.iter().all(|(_, f)| !f.starts_with("g_")), "{found:?}");
+}
+
+const CATALOG_IN_ASYNC: &str = r#"import ftplib
+import glob
+import os
+import shutil
+import signal
+import subprocess
+import tempfile
+from pathlib import Path
+
+import fsspec
+import psutil
+
+
+async def tp_fs(p: Path, a: str, b: str):
+    p.mkdir()
+    list(p.iterdir())
+    os.replace(a, b)
+    shutil.move(a, b)
+    tempfile.mkdtemp()
+    glob.glob("*")
+
+
+async def tp_process():
+    os.system("ruff")
+    subprocess.getoutput("ls")
+
+
+async def tp_waits(pid: int, ftp: ftplib.FTP):
+    signal.sigwait({signal.SIGUSR1})
+    psutil.Process(pid).children()
+    fsspec.open("s3://bucket/key")
+    ftp.nlst()
+
+
+async def tn_environment(p: str):
+    os.getcwd()
+    os.path.abspath(p)
+    Path.cwd()
+    Path.home()
+
+
+async def tn_pure(p: Path):
+    p.with_suffix(".txt")
+    os.path.join("a", "b")
+"#;
+
+#[test]
+fn the_new_rows_block_the_event_loop() {
+    let found: Vec<(u64, String, String)> = check(
+        "cat_async_rows",
+        "app.py",
+        CATALOG_IN_ASYNC,
+        "EFF101,EFF105",
+    )
+    .into_iter()
+    .map(|(l, r, q, t)| (l, format!("{r} {q}"), t))
+    .collect();
+    let by_function = |name: &str| -> Vec<&str> {
+        found
+            .iter()
+            .filter(|(_, rq, _)| rq.ends_with(name))
+            .map(|(_, _, t)| t.as_str())
+            .collect()
+    };
+    assert_eq!(
+        by_function("tp_fs"),
+        [
+            "pathlib.Path.mkdir",
+            "pathlib.Path.iterdir().__iter__",
+            "os.replace",
+            "shutil.move",
+            "tempfile.mkdtemp",
+            "glob.glob",
+        ]
+    );
+    assert_eq!(
+        by_function("tp_process"),
+        ["os.system", "subprocess.getoutput"]
+    );
+    assert_eq!(
+        by_function("tp_waits"),
+        [
+            "signal.sigwait",
+            "psutil.Process",
+            "psutil.Process.children",
+            "fsspec.open",
+            "ftplib.FTP.nlst"
+        ]
+    );
+    assert!(by_function("tn_environment").is_empty(), "{found:?}");
+    assert!(by_function("tn_pure").is_empty(), "{found:?}");
+}
+
+const URLLIB3_POOLS: &str = r#"import urllib3
+from urllib3 import PoolManager, ProxyManager
+from urllib3.connectionpool import HTTPConnectionPool, connection_from_url
+
+
+def via_pm(pm: urllib3.PoolManager, url):
+    return pm.connection_from_host("example.org").urlopen("GET", url).data
+
+
+def via_pm_url(pm: PoolManager, url):
+    return pm.connection_from_url(url).request("GET", url).data
+
+
+def via_pm_context(pm: PoolManager, url, context):
+    return pm.connection_from_context(context).urlopen("GET", url)
+
+
+def via_pm_kwargs(pm: PoolManager, url):
+    return pm.connection_from_pool_kwargs({"host": "h"}).request("GET", url)
+
+
+def via_proxy(pm: ProxyManager, url):
+    return pm.connection_from_host("example.org").urlopen("GET", url)
+
+
+def pool2(url):
+    return urllib3.connectionpool.connection_from_url(url).request("GET", url).data
+
+
+def pool3(url):
+    return connection_from_url(url).request("GET", url).data
+
+
+def pool4(url):
+    return HTTPConnectionPool("h").urlopen("GET", url)
+
+
+def pool_listed(url):
+    return urllib3.connection_from_url(url).request("GET", url)
+
+
+def proxy(url):
+    return urllib3.proxy_from_url("http://proxy").request("GET", url)
+
+
+def pure(pm: PoolManager):
+    return pm.connection_from_host("example.org")
+
+
+async def tp_pools(pm: PoolManager, url):
+    pm.connection_from_host("example.org").urlopen("GET", url)
+    urllib3.connectionpool.connection_from_url(url).request("GET", url)
+"#;
+
+#[test]
+fn a_pool_taken_from_a_urllib3_manager_makes_network_calls() {
+    let found = probe_reports(
+        "cat_urllib3_pools",
+        &URLLIB3_POOLS.replace("\n\nasync def tp_pools", "\n\ndef tp_pools"),
+    );
+    assert_eq!(
+        reported(&found, "net"),
+        [
+            "pool2",
+            "pool3",
+            "pool4",
+            "pool_listed",
+            "proxy",
+            "tp_pools",
+            "via_pm",
+            "via_pm_context",
+            "via_pm_kwargs",
+            "via_pm_url",
+            "via_proxy",
+        ]
+    );
+    let in_async = check("cat_urllib3_pools_async", "app.py", URLLIB3_POOLS, "EFF101");
+    let targets: Vec<(&str, &str)> = in_async
+        .iter()
+        .filter(|(_, _, q, _)| q == "tp_pools")
+        .map(|(_, r, _, t)| (r.as_str(), t.as_str()))
+        .collect();
+    assert_eq!(
+        targets,
+        [
+            ("EFF101", "urllib3.HTTPConnectionPool.urlopen"),
+            ("EFF101", "urllib3.HTTPConnectionPool.request"),
+        ]
+    );
+}
