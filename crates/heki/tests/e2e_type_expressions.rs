@@ -331,6 +331,23 @@ def casts_to_an_item_of_classes(field: Field, host: Base) -> None:
     cast(classes[0], host).run(field)
 
 
+def casts_to_a_union_of_one_class(field: Field, host: Base) -> None:
+    kind = Windows
+    kind = kind | kind
+    cast(kind, host).run(field)
+
+
+def casts_to_a_union_past_the_bound(field: Field, host: Base) -> None:
+    kind = Windows
+    kind = kind | kind
+    kind = kind | kind
+    kind = kind | kind
+    kind = kind | kind
+    kind = kind | kind
+    kind = kind | kind
+    cast(kind, host).run(field)  # writes
+
+
 def keeps_the_declared_items(field: Field, hosts: list[Base]) -> None:
     for host in hosts:
         host.run(field)  # writes
