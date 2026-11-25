@@ -322,7 +322,7 @@ fn to_u32(n: usize) -> u32 {
 
 /// The span of `setting` in the configuration `text`.
 fn locate_setting(text: &str, layout: ConfigLayout, setting: &Setting) -> Option<Range<usize>> {
-    let doc = toml_edit::ImDocument::parse(text).ok()?;
+    let doc = toml_edit::Document::parse(text).ok()?;
     let root = settings_root(doc.as_table(), layout)?;
     let mut tables = vec![root];
     for part in setting.table.split('.').filter(|p| !p.is_empty()) {

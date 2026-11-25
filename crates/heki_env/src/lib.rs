@@ -698,7 +698,7 @@ impl ConfigLayout {
     /// unknown key, a `[tool.heki]` table outside a `pyproject.toml`, and a setting at the top
     /// level of a `pyproject.toml` are errors.
     pub fn parse(self, path: &Path, text: &str) -> Result<HekiConfig, ConfigError> {
-        let doc = toml_edit::ImDocument::parse(text).map_err(|e| ConfigError::Syntax {
+        let doc = toml_edit::Document::parse(text).map_err(|e| ConfigError::Syntax {
             path: path.to_path_buf(),
             position: e.span().map(|s| problem::line_column(text, s.start)),
             message: e.message().trim().replace('\n', "; "),
