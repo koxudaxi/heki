@@ -346,7 +346,7 @@ wheel, so there is no compile and no Rust toolchain:
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.4.0
+    rev: v0.5.0
     hooks:
       - id: heki
 ```
