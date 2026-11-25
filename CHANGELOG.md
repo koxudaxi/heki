@@ -9,7 +9,7 @@ release can change rules, configuration keys, diagnostics, and output formats.
 
 ### Breaking changes
 
-- The catalog now covers the file system, process, and network calls of the standard library by module (#434, #445, #466). (#470), so code that called them without a report now gets one.
+- The catalog now covers the file system, process, and network calls of the standard library by module (#434, #445, #466, #470), so code that called them without a report now gets one.
   - `blocking-fs` (and `EFF105`) cover the rest of `os` and `os.path` (`open`, `replace`, `rename`, `remove`, `mkdir`, `makedirs`, `chmod`, `symlink`, `lstat`, `getsize`, `getmtime`, `islink` and similar), `pathlib.Path` (`iterdir`, `glob`, `rglob`, `walk`, `mkdir`, `touch`, `unlink`, `rename`, `replace`, `symlink_to`, `readlink`, `is_symlink` and similar), `shutil` (`move`, `copyfile`, `disk_usage`, archives), `tempfile` (`mkdtemp`, `mkstemp`, `NamedTemporaryFile`, `TemporaryDirectory` and similar), and `glob`.
   - `blocking-subprocess` (and `EFF101`) cover the calls that wait for a child: `os.system`, `os.wait`, `os.waitpid`, `os.wait3`, `os.wait4`, `os.waitid` (not with `WNOHANG`), `os.spawn*` with `os.P_WAIT`, `subprocess.getoutput`, and `subprocess.getstatusoutput`. Calls that only start or replace a process (`os.exec*`, `os.spawn*` with another mode, `os.posix_spawn*`, `os.popen`, `subprocess.Popen`) are not blocking. `signal.sigwait`, `sigwaitinfo`, `sigtimedwait`, and `pause` are `blocking-sync`.
   - `ftplib.FTP` and `FTP_TLS` are a client allocation for `EFF102` and their commands are `blocking-net`. `psutil` queries and `fsspec` file system calls are `blocking-fs`.
