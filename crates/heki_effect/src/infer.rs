@@ -2384,10 +2384,8 @@ impl<'e, 'a> Engine<'e, 'a> {
             return None;
         };
         let cx = self.cx;
-        let Callee::External(symbol) = cx.project.method_targets(&o.class, method, false, cx.kb)
-        else {
-            return None;
-        };
+        // The held classes are library classes, so the method is the catalog's `Class.method`.
+        let symbol = format!("{}.{method}", cx.project.canonical(&o.class));
         let returns = cx.catalog(&symbol)?.returns_held?;
         let Some(at) = returns.default.map(usize::from) else {
             return Some((**held).clone());
