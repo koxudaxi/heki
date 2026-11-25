@@ -521,6 +521,7 @@ impl Workspace {
             &project.inputs(),
             &project.unread,
             &project.env.kb,
+            Some(&project.env.soundness_kb),
             contracts.as_deref(),
             opt_in,
         );
@@ -1056,9 +1057,12 @@ impl Workspace {
         &mut self,
         parsed: &ParsedFile,
     ) -> (heki_effect::IncrementalUpdate, DeclKeys, bool, bool) {
-        let out =
-            self.index
-                .reanalyze_module_cached(&parsed.input(), &self.env.kb, &mut self.decls);
+        let out = self.index.reanalyze_module_cached(
+            &parsed.input(),
+            &self.env.kb,
+            Some(&self.env.soundness_kb),
+            &mut self.decls,
+        );
         let places = self
             .index
             .files

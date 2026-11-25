@@ -95,7 +95,8 @@ impl Explain for KbError {
     }
 }
 
-/// Layer 1 parameter effect (Soundness lane ONLY — no advisory I/O effects).
+/// Layer 1 parameter effect (no advisory I/O effects): the Soundness lane's specification, which
+/// the Advisory lane also reads for the arguments a call only reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SoundnessParamEffect {

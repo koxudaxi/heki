@@ -219,6 +219,27 @@ def _dict_items(fn: Callable[..., Any]) -> None:
     assert list(view) == [("a", 5), ("b", 2)]
 
 
+def _sum(fn: Callable[..., Any]) -> None:
+    start = [1]
+    got = fn([], start)
+    start.append(2)
+    assert got == [1, 2], "sum returns its start itself for an empty iterable"
+
+
+def _min(fn: Callable[..., Any]) -> None:
+    a, b = [0], [1]
+    got = fn(a, b)
+    a.append(5)
+    assert got == [0, 5], "min of several arguments returns one of them itself"
+
+
+def _max(fn: Callable[..., Any]) -> None:
+    a, b = [1], [0]
+    got = fn(a, b)
+    a.append(5)
+    assert got == [1, 5], "max of several arguments returns one of them itself"
+
+
 # symbol -> (argument positions the scenario shows are retained, scenario)
 RETAINED_SCENARIOS: dict[str, tuple[set[int], Callable[[Callable[..., Any]], None]]] = {
     "builtins.iter": ({0}, _iter),
@@ -233,6 +254,10 @@ RETAINED_SCENARIOS: dict[str, tuple[set[int], Callable[[Callable[..., Any]], Non
     "builtins.dict.values": ({0}, _dict_values),
     "builtins.dict.items": ({0}, _dict_items),
     "builtins.dict.pop": ({2}, _dict_pop),
+    "builtins.sum": ({1}, _sum),
+    # Variadic: the one declared effect covers every argument.
+    "builtins.min": ({0}, _min),
+    "builtins.max": ({0}, _max),
 }
 
 # --------------------------------------------------------------------------- read-only arguments
@@ -284,6 +309,13 @@ class Subject:
         return 0
 
 
+class Adder:
+    """A `start` for `sum` that adds anything and keeps none of it."""
+
+    def __add__(self, other: object) -> "Adder":
+        return self
+
+
 class ListSub2(list):
     pass
 
@@ -301,8 +333,25 @@ class DictSub2(dict):
 READ_ONLY_CASES: dict[str, dict[int, Callable[[Any], tuple[Any, ...]]]] = {
     **{
         f"builtins.{name}": {0: lambda s: (s,)}
-        for name in ("len", "bool", "int", "float", "str", "bytes", "range", "list", "set", "tuple", "dict")
+        for name in (
+            "len",
+            "bool",
+            "int",
+            "float",
+            "str",
+            "bytes",
+            "range",
+            "list",
+            "set",
+            "tuple",
+            "dict",
+            "sorted",
+            "any",
+            "all",
+            "frozenset",
+        )
     },
+    "builtins.sum": {0: lambda s: (s, Adder())},
     "builtins.list.extend": {1: lambda s: ([Keeper()], s)},
     "builtins.list.insert": {1: lambda s: ([Keeper()], s, Keeper())},
     "builtins.list.pop": {1: lambda s: ([Keeper(), Keeper()], s)},

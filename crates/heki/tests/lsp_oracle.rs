@@ -1270,6 +1270,9 @@ struct Step {
     /// The edit changes a fact callers read, though no diagnostic shows it: the server
     /// re-analyzes a caller's file (the opposite of `cutoff`).
     propagates: bool,
+    /// `(function, parameters)`: the container parameters `heki inspect` says the function
+    /// only reads after the step.
+    only_reads: Option<(&'static str, &'static [&'static str])>,
 }
 
 impl Step {
@@ -1281,6 +1284,7 @@ impl Step {
             absent: &[],
             cutoff: false,
             propagates: false,
+            only_reads: None,
         }
     }
 
@@ -1301,6 +1305,11 @@ impl Step {
 
     fn propagates(mut self) -> Self {
         self.propagates = true;
+        self
+    }
+
+    fn only_reads(mut self, function: &'static str, params: &'static [&'static str]) -> Self {
+        self.only_reads = Some((function, params));
         self
     }
 }
@@ -4885,6 +4894,62 @@ fn steps_blocking_chain() -> Vec<Step> {
     ]
 }
 
+const READS_LOW: &str = "def tally(values):\n    return len(values)\n";
+
+const READS_TOP: &str = "from pkg.reads.low import tally\n\n\ndef total(items: list[int]) -> int:\n    return tally(items)\n";
+
+/// The parameters a function only reads (`EffectSummary::only_read_params`), which no
+/// diagnostic shows: a callee in another file starts changing its parameter, or keeping it,
+/// and the caller's fact goes after the save, in the server's index (it re-analyzes the
+/// caller's file) and in `heki inspect` alike; an edit that keeps the fact stops at the file.
+fn steps_only_read() -> Vec<Step> {
+    let low = |body: &str| READS_LOW.replace("    return len(values)\n", body);
+    vec![
+        Step::new(
+            "a caller hands its list to a helper in another file that only reads it",
+            vec![
+                Action::Create("pkg/reads/__init__.py", String::new()),
+                Action::Create("pkg/reads/low.py", READS_LOW.to_owned()),
+                Action::Create("pkg/reads/top.py", READS_TOP.to_owned()),
+            ],
+        )
+        .only_reads("pkg.reads.top.total", &["items"]),
+        Step::new(
+            "the helper starts changing its parameter",
+            vec![save(
+                "pkg/reads/low.py",
+                &low("    values.append(0)\n    return len(values)\n"),
+            )],
+        )
+        .propagates()
+        .only_reads("pkg.reads.top.total", &[]),
+        Step::new(
+            "the helper only reads it again",
+            vec![save("pkg/reads/low.py", READS_LOW)],
+        )
+        .propagates()
+        .only_reads("pkg.reads.top.total", &["items"]),
+        Step::new(
+            "the helper starts putting its parameter in a list",
+            vec![save("pkg/reads/low.py", &low("    return len([values])\n"))],
+        )
+        .propagates()
+        .only_reads("pkg.reads.top.total", &[]),
+        Step::new(
+            "the helper stops putting it in a list",
+            vec![save("pkg/reads/low.py", READS_LOW)],
+        )
+        .propagates()
+        .only_reads("pkg.reads.top.total", &["items"]),
+        Step::new(
+            "a comment in the helper",
+            vec![save("pkg/reads/low.py", &format!("# counts\n{READS_LOW}"))],
+        )
+        .cutoff()
+        .only_reads("pkg.reads.top.total", &["items"]),
+    ]
+}
+
 /// Property getters: a cached property, a property `__hash__` reads, the setter or
 /// `__setattr__` a base class in another module gives a store, and a getter read from an
 /// `async def` in another file.
@@ -6132,6 +6197,25 @@ impl Session {
             .into_iter()
             .map(|d| format!("step `{}`: {d}", step.name))
             .collect();
+        if let Some((function, expected)) = step.only_reads {
+            let (code, json, err) = self
+                .p
+                .heki(&["inspect", function, "--output-format", "json"]);
+            assert_eq!(code, 0, "step `{}`: {err}", step.name);
+            let report: Value = serde_json::from_str(&json).unwrap();
+            let params: Vec<&str> = report["only_reads"]["params"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p.as_str().unwrap())
+                .collect();
+            if params != expected {
+                out.push(format!(
+                    "step `{}`: `heki inspect {function}` only reads {params:?}, not {expected:?}",
+                    step.name
+                ));
+            }
+        }
         if step.propagates && after["dependent_reanalyses"] == before["dependent_reanalyses"] {
             out.push(format!(
                 "step `{}`: no caller's file was re-analyzed: stats before {before}, after {after}",
@@ -6206,6 +6290,7 @@ sessions!(editing, Session::start, {
     guarded_effects: steps_guarded_effects,
     mut108: steps_mut108,
     mut110: steps_mut110,
+    only_read: steps_only_read,
     mut120: steps_mut120,
     aliases_and_getters: steps_aliases_and_getters,
     protocol_reads: steps_protocol_reads,

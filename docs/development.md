@@ -642,7 +642,7 @@ The workspace is split by responsibility (`crates/`):
 | `heki_ast` | the only crate that depends on the parser (`ruff_python_parser`, pinned) |
 | `heki_semantic` | scopes and bindings, checked against CPython's `symtable` |
 | `heki_ir` | SSA control-flow-graph IR with explicit exception edges and loop information |
-| `heki_kb` | the knowledge bases: Layer 1 (builtins semantics for the soundness lane) and Layer 2 (ecosystem effects) |
+| `heki_kb` | the knowledge bases: Layer 1 (builtins semantics for the soundness lane, which the advisory lane reads for the arguments a call only reads) and Layer 2 (ecosystem effects) |
 | `heki_env` | configuration loading and the runtime profile of the target Python version |
 | `heki_effect` | call graph, per-function effect summaries, incremental project index |
 | `heki_soundness` | the alias analysis and proof obligations behind `OPT` rewrites (never depends on `heki_effect`, never reads annotations) |

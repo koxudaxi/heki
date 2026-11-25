@@ -41,6 +41,8 @@ mod invokes;
 pub mod iterations;
 pub mod locks;
 pub mod one_at_a_time;
+mod only_read;
+pub use only_read::ContainerParams;
 pub mod order_flow;
 pub mod ownership;
 mod partial;
@@ -87,7 +89,7 @@ pub use summary::{BLOCKING_EFFECTS, offloaded_callable};
 
 use heki_ast::Span;
 use heki_ir::ModuleIr;
-use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
+use heki_kb::{EffectiveEcosystemKb, EffectiveSoundnessKb, ExecEffectKind};
 use heki_semantic::SemanticModel;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1063,6 +1065,23 @@ pub struct EffectSummary {
     /// follow, or to a project function that keeps them. Reading, writing, or passing a
     /// parameter to project functions that do not keep it keeps nothing (`fresh-objects`).
     pub retains_params: u64,
+    /// The positions (bit `i`: parameter `i`, then the captured values of
+    /// `FunctionDecl::captured_params`) whose object the function only reads, leaving changes of
+    /// the object itself to [`Self::mutated_param_paths`] ([`Self::only_read_mask`] joins the
+    /// two): no value that may be the object, or a view of it (an iterator, a `dict` view, a
+    /// generator over it), is stored (an attribute, an item, a global, a closure cell, a
+    /// display), captured by a nested function, yielded, returned, or handed to a call other than
+    /// a project call whose targets are every implementation it can run, binding it to a
+    /// parameter, not a constructor, or a library call Layer 1 lists as reading that argument;
+    /// and every project function it is handed to only reads it there. Inside a call cycle the
+    /// greatest fixpoint. `0` while [`OptInFacts::only_read`] is off, and for a function heki does
+    /// not model (a stub's, one with an A1 hazard).
+    pub only_read_params: u64,
+    /// The parameters annotated with a builtin list, dict, or set, or a mutable abstract
+    /// container, and what the function's own body does with them ([`ContainerParams`]); `None`
+    /// for a function without one, and while [`OptInFacts::only_read`] is off. A local fact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_params: Option<Box<ContainerParams>>,
     /// The function returns a new object that nothing else holds (`fresh-objects`).
     pub returns_new: ReturnsNew,
     /// `MUT112`: what the object the function returns may be, path by path: a new one, state
@@ -2688,6 +2707,7 @@ pub fn analyze_project_with(
         modules,
         &[],
         kb,
+        None,
         contracts,
         TypedWrites::Propagated,
         OptInFacts::ALL,
@@ -2700,11 +2720,20 @@ pub fn analyze_project_for(
     modules: &[ModuleInput<'_>],
     unread: &[UnreadModule],
     kb: &EffectiveEcosystemKb,
+    soundness: Option<&EffectiveSoundnessKb>,
     contracts: Option<Arc<dyn Contracts>>,
     typed_writes: TypedWrites,
     opt_in: OptInFacts,
 ) -> ProjectIndex {
-    let files = summarize(modules, unread, kb, false, contracts.as_deref(), opt_in);
+    let files = summarize(
+        modules,
+        unread,
+        kb,
+        soundness,
+        false,
+        contracts.as_deref(),
+        opt_in,
+    );
     ProjectIndex::build_for(files, contracts, typed_writes, opt_in)
 }
 
@@ -2752,6 +2781,9 @@ pub struct OptInFacts {
     pub fresh_returns: bool,
     /// [`OptInTables::imports`].
     pub imports: bool,
+    /// [`EffectSummary::only_read_params`] and [`EffectSummary::container_params`], which
+    /// `heki inspect` shows and the language server keeps current.
+    pub only_read: bool,
 }
 
 impl OptInFacts {
@@ -2771,6 +2803,7 @@ impl OptInFacts {
         unawaited_handoffs: true,
         fresh_returns: true,
         imports: true,
+        only_read: true,
     };
 
     /// Whether the call sites carry [`CallSite::complete`] and [`CallSite::on_every_return`].
@@ -2793,10 +2826,11 @@ pub fn summarize_project_with_reads(
     modules: &[ModuleInput<'_>],
     unread: &[UnreadModule],
     kb: &EffectiveEcosystemKb,
+    soundness: Option<&EffectiveSoundnessKb>,
     contracts: Option<&dyn Contracts>,
     opt_in: OptInFacts,
 ) -> Vec<FileSummary> {
-    summarize(modules, unread, kb, true, contracts, opt_in)
+    summarize(modules, unread, kb, soundness, true, contracts, opt_in)
 }
 
 /// The summaries of `modules`, then one per `unread` module.
@@ -2804,6 +2838,7 @@ fn summarize(
     modules: &[ModuleInput<'_>],
     unread: &[UnreadModule],
     kb: &EffectiveEcosystemKb,
+    soundness: Option<&EffectiveSoundnessKb>,
     track: bool,
     contracts: Option<&dyn Contracts>,
     opt_in: OptInFacts,
@@ -2819,7 +2854,9 @@ fn summarize(
         modules
             .iter()
             .zip(own)
-            .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts, opt_in))
+            .map(|(m, own)| {
+                summary::summarize_module(m, &decls, kb, soundness, own, track, contracts, opt_in)
+            })
             .collect()
     } else {
         // A module's local summary depends on it and the declarations only (indexed collect:
@@ -2827,7 +2864,9 @@ fn summarize(
         modules
             .par_iter()
             .zip(own)
-            .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts, opt_in))
+            .map(|(m, own)| {
+                summary::summarize_module(m, &decls, kb, soundness, own, track, contracts, opt_in)
+            })
             .collect()
     };
     files.extend(unread);
@@ -3051,6 +3090,7 @@ impl ProjectIndex {
         &mut self,
         input: &ModuleInput<'_>,
         kb: &EffectiveEcosystemKb,
+        soundness: Option<&EffectiveSoundnessKb>,
     ) -> IncrementalUpdate {
         let others: Vec<(PathBuf, Arc<ModuleDecls>)> = self
             .files
@@ -3065,6 +3105,7 @@ impl ProjectIndex {
             input,
             &decls,
             kb,
+            soundness,
             own,
             true,
             self.contracts.as_deref(),
@@ -3081,6 +3122,7 @@ impl ProjectIndex {
         &mut self,
         input: &ModuleInput<'_>,
         kb: &EffectiveEcosystemKb,
+        soundness: Option<&EffectiveSoundnessKb>,
         decls: &mut DeclPasses,
     ) -> (IncrementalUpdate, DeclKeys) {
         // Another file owns the module name: its declarations stay the module's.
@@ -3102,6 +3144,7 @@ impl ProjectIndex {
             input,
             decls.completed(),
             kb,
+            soundness,
             own,
             true,
             self.contracts.as_deref(),

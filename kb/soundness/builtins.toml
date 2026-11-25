@@ -2,6 +2,8 @@
 # Allowed keys per entry: symbol, return_exact_type, param_effects, verified_max_python
 # (enforced by `#[serde(deny_unknown_fields)]` in `heki_kb`).
 # Verified by `tests/sentinel/verify_soundness_kb.py` against CPython 3.12-3.15.
+# The Advisory lane reads `read_only` and `retained_in_return` too: the arguments a call only
+# reads, for the parameters a function only reads (`EffectSummary::only_read_params`).
 # Any entry with verified_max_python < target_python is auto-downgraded to Unknown.
 # `param_effects[i]` describes positional parameter i; for methods, index 0 is `self`.
 
@@ -100,6 +102,46 @@ verified_max_python = { major = 3, minor = 15 }
 [[entries]]
 symbol = "builtins.range"
 param_effects = ["read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+# --- Reads of an iterable ---
+# `sorted`, `any`, `all`, and `frozenset` take one positional argument. `sum` returns its
+# `start` itself when the iterable is empty. `min` / `max` with two or more positional
+# arguments return one of them, so every position is retained.
+
+[[entries]]
+symbol = "builtins.sorted"
+param_effects = ["read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.any"
+param_effects = ["read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.all"
+param_effects = ["read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.frozenset"
+param_effects = ["read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.sum"
+param_effects = ["read_only", "retained_in_return"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.min"
+param_effects = ["retained_in_return"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.max"
+param_effects = ["retained_in_return"]
 verified_max_python = { major = 3, minor = 15 }
 
 # --- Fresh containers ---

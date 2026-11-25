@@ -191,6 +191,7 @@ $ printf '%s\n' app.users.load_user 'app.orders.*' | heki inspect - --output-for
 | `effects` | the network, database, file, subprocess, sleep, and lock waits it reaches, and the clients and queries it creates, each with the shortest call chain |
 | `changes` | the parameters, `self` attributes, other objects' attributes, module globals, and closure cells it changes, directly or through calls, with the call chain to the change |
 | `retains` | the parameters it stores where they outlive the call |
+| `only_reads` | its parameters annotated with a mutable container (`list`, `dict`, `set`), those it and every function it hands them to only read (no change, no store, every call resolved), those whose uses the read-only type (`Sequence`, `Mapping`, `AbstractSet`) allows, and those whose name it binds once |
 | `returns` | whether its result is a new object, a parameter, or state that outlives the call |
 | `purity` | `pure`, `impure` with the reasons, or `unknown` with the reasons; whatever the verdict, the functions below it whose calls heki cannot resolve, nearest first, each with the call chain to it; and what the verdict assumes |
 | `callers` | who calls it, whether in a loop; with `--callers`, transitively |
@@ -225,8 +226,9 @@ $ printf '%s\n' app.users.load_user 'app.orders.*' | heki inspect - --output-for
   analyzed (the reports are still printed, with `complete: false`).
 
 To see what an edit changed in a function, inspect it before and after the edit and compare
-`effects`, `changes`, `retains`, and `returns`: a new entry is new behavior. Fact keys carry no line
-numbers, so a diff of the two JSON objects shows only what changed.
+`effects`, `changes`, `retains`, `only_reads`, and `returns`: a new entry is new behavior, and so
+is a parameter leaving `only_reads.params`. Fact keys carry no line numbers, so a diff of the two
+JSON objects shows only what changed.
 
 ## Ask a model: `heki check --generate-prompt` (experimental)
 

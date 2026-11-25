@@ -363,6 +363,10 @@ EffectSummary(f) = {
     unconditional_forwards:   Bitset,               // parameters passed on at calls that always run
     mutated_param_paths:      Map<ParamIdx, Set<AttrPath>>, // attributes / elements changed through parameter i
                                                     // ("[]": below its items, also through a shallow copy)
+    only_read_params:         Bitset,               // parameter i only read, by the function and every call it is
+                                                    // handed to (heki inspect and the language server only)
+    container_params:         Option<ContainerParams>, // parameters annotated list / dict / set: whether their
+                                                    // read-only type allows every own use, name bound once
     reads_self_attrs:         Set<AttrKeyPath>,     // reads of self.<attr> (constant dict keys included)
     mutates_self_attrs:       Set<AttrKeyPath>,     // reassignment or in-place change of self.<attr>
     invalidates_cached:       Set<AttrName>,        // del self.<prop>, self.__dict__.pop("<prop>", ...)
@@ -677,7 +681,7 @@ heki/
 │   ├── heki_lsp/               # incremental LSP server (tower-lsp): related call chains, code actions
 │   └── heki/                   # CLI (check / server [lsp] / rule [explain] / snapshot / assumptions)
 ├── kb/
-│   ├── soundness/              # Layer 1: native specifications for the Soundness lane only
+│   ├── soundness/              # Layer 1: native specifications for the Soundness lane (the Advisory lane reads which arguments a call only reads)
 │   └── ecosystem/              # Layer 2: effects, async safety, and offloading of the standard library and major packages
 ├── docs/                       # user guide (Zensical site), rules reference, llms.txt, internal design docs
 ├── scripts/                    # documentation generators (rules reference, CLI reference, llms.txt)

@@ -6513,6 +6513,65 @@ fn imports_counted(p: &Project, query: &str) -> (Value, StepsByOwner) {
     (serde_json::from_slice(&out).unwrap(), walk_steps(&path))
 }
 
+/// `heki inspect <query> --output-format json` of `p`, and the steps of its walks.
+fn inspect_counted(p: &Project, query: &str) -> (Value, StepsByOwner) {
+    let path = p.dir.join(".walk-steps.json");
+    let args = [
+        "inspect",
+        query,
+        "--output-format",
+        "json",
+        "--walk-steps",
+        path.to_str().unwrap(),
+        ".",
+    ];
+    let out = run(p, &args, &[0]);
+    (serde_json::from_slice(&out).unwrap(), walk_steps(&path))
+}
+
+/// A call cycle of `n` functions, each reading its list and handing it to the next, the last
+/// one appending to it when `changes`.
+fn list_cycle(n: usize, changes: bool) -> Project {
+    let mut lines = Vec::new();
+    for i in 0..n {
+        let change = if changes && i + 1 == n {
+            "    xs.append(n)\n"
+        } else {
+            ""
+        };
+        lines.push(format!(
+            "def f{i}(xs: list[int], n: int) -> int:\n{change}    return f{}(xs, n - 1) + xs[0] if n else len(xs)\n",
+            (i + 1) % n
+        ));
+    }
+    let p = Project::new(&format!("bounds_list_cycle_{n}_{changes}"));
+    p.write("m.py", &lines.join("\n\n"));
+    p
+}
+
+/// The parameters a function only reads inside a long call cycle are its greatest fixpoint:
+/// every member only reads the list until one changes it, and then none does. The walks over
+/// each member's values take steps linear in the cycle.
+#[test]
+fn a_long_call_cycle_only_reads_its_list_until_one_member_changes_it() {
+    let n = 2_000;
+    let reads = past_budgets(
+        n,
+        &[],
+        |n| list_cycle(n, false),
+        |p| inspect_counted(p, "m.f0"),
+    );
+    assert_eq!(reads["only_reads"]["params"], json!(["xs"]));
+    let changed = past_budgets(
+        n,
+        &[],
+        |n| list_cycle(n, true),
+        |p| inspect_counted(p, "m.f0"),
+    );
+    assert_eq!(changed["only_reads"]["params"], json!([]));
+    assert_eq!(changed["only_reads"]["containers"], json!(["xs"]));
+}
+
 /// The modules of package `c`, each importing the next while it loads, the last one `json`.
 fn import_chain(modules: usize) -> Project {
     let p = Project::new("bounds_import_chain");

@@ -565,16 +565,18 @@ pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
         imports: ["IMP101", "IMP102", "IMP104", "IMP301", "IMP302"]
             .iter()
             .any(|code| selection.is_enabled(code)),
+        only_read: false,
     }
 }
 
 /// [`opt_in_facts`] with the facts `heki inspect` reads besides the rules: the shared state
-/// functions change, and what they return (`returns.origins`). `heki check` computes them only
-/// for the rules it runs.
+/// functions change, what they return (`returns.origins`), and the parameters they only read
+/// (`only_reads`). `heki check` computes them only for the rules it runs.
 pub fn inspect_facts(selection: &RuleSelection) -> OptInFacts {
     OptInFacts {
         return_origins: true,
         shared_state: true,
+        only_read: true,
         ..opt_in_facts(selection)
     }
 }

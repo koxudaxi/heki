@@ -33,12 +33,12 @@ use crate::resolver::{
 };
 use crate::{
     Access, ArgBinding, ArgOrigin, ArgTargets, ArgValue, AttrKeyPath, BoundCallee, CallHop,
-    CallSite, CallTarget, CellChange, Construction, ContractClass, Contracts, Dispatch,
-    EffectSummary, EntryKey, FileSummary, FuncKey, GuardSubject, HandedState, Implementers, Items,
-    KeptFacts, ListedCache, ModuleInput, MustExec, NewArg, NewCond, NewKind, OnEveryReturn,
-    OptInFacts, PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SharedState,
-    SharedStateFacts, SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, UnawaitedHandoff,
-    Unresolved, UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
+    CallSite, CallTarget, CellChange, Construction, ContainerParams, ContractClass, Contracts,
+    Dispatch, EffectSummary, EntryKey, FileSummary, FuncKey, GuardSubject, HandedState,
+    Implementers, Items, KeptFacts, ListedCache, ModuleInput, MustExec, NewArg, NewCond, NewKind,
+    OnEveryReturn, OptInFacts, PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine,
+    SharedState, SharedStateFacts, SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite,
+    UnawaitedHandoff, Unresolved, UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, KeySet, Use};
@@ -47,7 +47,9 @@ use heki_ir::{
     FunctionId, FunctionKind, Inst, InstKind, IrFunction, ModuleIr, Must, NaturalLoop, PhiNode,
     Progress, Terminator, UnaryOpKind, VarId,
 };
-use heki_kb::{EffectiveEcosystemKb, EnvironmentAccess, ExecEffectKind, LiteralValue};
+use heki_kb::{
+    EffectiveEcosystemKb, EffectiveSoundnessKb, EnvironmentAccess, ExecEffectKind, LiteralValue,
+};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
 use std::cell::{OnceCell, RefCell};
@@ -57,6 +59,7 @@ use std::sync::Arc;
 
 mod imports;
 mod keywords;
+mod reads;
 mod references;
 mod sentinels;
 pub(crate) mod statements;
@@ -96,10 +99,12 @@ pub fn offloaded_callable(
 /// Summarize one module against the project declarations. `own` is the module's own completed
 /// declarations with what completing them read; with `track`, what the summary reads of
 /// `decls` is recorded too (`FileSummary::decl_reads`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn summarize_module(
     input: &ModuleInput<'_>,
     decls: &ProjectDecls,
     kb: &EffectiveEcosystemKb,
+    soundness: Option<&EffectiveSoundnessKb>,
     own: (Arc<ModuleDecls>, DeclKeys),
     track: bool,
     contracts: Option<&dyn Contracts>,
@@ -107,10 +112,10 @@ pub(crate) fn summarize_module(
 ) -> FileSummary {
     let (own_decls, completion_reads) = own;
     let (mut file, reads) = if track {
-        decls.record(|| extract_module(input, decls, kb, contracts, opt_in))
+        decls.record(|| extract_module(input, decls, kb, soundness, contracts, opt_in))
     } else {
         (
-            extract_module(input, decls, kb, contracts, opt_in),
+            extract_module(input, decls, kb, soundness, contracts, opt_in),
             DeclKeys::default(),
         )
     };
@@ -124,10 +129,11 @@ fn extract_module(
     input: &ModuleInput<'_>,
     decls: &ProjectDecls,
     kb: &EffectiveEcosystemKb,
+    soundness: Option<&EffectiveSoundnessKb>,
     contracts: Option<&dyn Contracts>,
     opt_in: OptInFacts,
 ) -> FileSummary {
-    let cx = TypeCtx::new(input, decls, kb);
+    let cx = TypeCtx::new(input, decls, kb).with_layer1(soundness);
     let mut file = FileSummary {
         path: input.path.clone(),
         module_name: input.module_name.clone(),
@@ -356,6 +362,7 @@ where
 /// Add the facts of a class body the function runs (`body`) to the function's own: its
 /// execution effects and the project attributes it writes and reads.
 fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary, func: &FuncKey) {
+    into.only_read_params &= body.only_read_params;
     for e in &body.direct_exec_effects {
         let had = into.direct_exec_effects.contains(e);
         let occ = body.exec_guards.get(e).cloned().unwrap_or_default();
@@ -380,6 +387,22 @@ fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary, func: &FuncK
     into.absorb_lock_facts(body.locks);
     into.absorb_exclusive_uses(body.exclusive.into_iter().flat_map(|uses| *uses));
     into.refresh_typed_field_writes(func);
+}
+
+/// [`ContainerParams`] of two definitions of one name: a parameter either annotates, whose uses
+/// both allow.
+fn merge_container_params(
+    into: &mut Option<Box<ContainerParams>>,
+    other: Option<&ContainerParams>,
+) {
+    let none = ContainerParams::default();
+    let (a, b) = (into.as_deref().unwrap_or(&none), other.unwrap_or(&none));
+    let merged = ContainerParams {
+        annotated: a.annotated | b.annotated,
+        abstract_use: a.abstract_use & b.abstract_use,
+        bound_once: a.bound_once & b.bound_once,
+    };
+    *into = (merged.annotated != 0).then(|| Box::new(merged));
 }
 
 /// Add the changes of shared state of another body of the function (`other`'s changed state,
@@ -446,6 +469,12 @@ fn rebase_origin_nodes(summary: &mut EffectSummary, sites: &mut [CallSite], offs
 }
 
 fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary, func: &FuncKey) {
+    // A must-fact: only read where both definitions only read it.
+    into.only_read_params &= other.only_read_params;
+    merge_container_params(
+        &mut into.container_params,
+        other.container_params.as_deref(),
+    );
     // `returns_self_attrs` holds for every definition: an attribute that either one reads for
     // more than its object is left out.
     let read_otherwise = |s: &EffectSummary| -> BTreeSet<String> {
@@ -2806,6 +2835,9 @@ impl<'a> Extractor<'a> {
         self.self_container_changes();
         self.lock_owner_tests();
         self.resolve_construction();
+        if self.opt_in.only_read {
+            self.only_read_facts();
+        }
         if self.opt_in.return_origins {
             self.returned_origins();
         }
