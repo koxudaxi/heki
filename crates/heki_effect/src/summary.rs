@@ -3226,12 +3226,16 @@ impl<'a> Extractor<'a> {
             .collect();
         let lives = live.iter().filter(|l| **l).count();
         specials.iter().enumerate().any(|(own, s)| {
+            // An object's `__dict__` holds the names of its attributes, strings: looking a key up
+            // in it compares the key with strings, whose comparison runs only the key's own
+            // methods (the key's operand).
+            let keyed = s.keyed && !self.dict_of.contains_key(&s.value);
             invokes::special_methods_run_project_code(
                 self.cx.project,
                 self.cx.kb,
                 &operands[own],
                 lives == usize::from(live[own]),
-                s,
+                &heki_ir::SpecialMethods { keyed, ..*s },
             )
         })
     }

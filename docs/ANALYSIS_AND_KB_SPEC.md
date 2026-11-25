@@ -778,8 +778,9 @@ class, and neither does a name bound twice or a variable annotated otherwise
 (`Declared: object = A | B`).
 
 The text of the type expression a value spells (`resolver::type_expression_text`: names of
-module-level objects, attributes of them, subscripts, unions, `None`, and strings) reads as the
-same text in an annotation does: the value of an alias, the bound of a type variable, and the
+module-level objects, attributes of them, subscripts, unions, `None`, and strings, up to 64 parts
+counted as the text writes them: `kind | kind` writes `kind` twice) reads as the same text in an
+annotation does: the value of an alias, the bound of a type variable, and the
 type `typing.cast` names (`cast(list[Windows], hosts)` as `cast("list[Windows]", hosts)`). A
 subscript naming anything else (`list[kind]` of a parameter `kind`) names no type. A builtin or
 `collections` container class subscripted with types is an alias of the class
@@ -1486,7 +1487,8 @@ which module imports which.
    class the operand may be under R2, the method found first along the MRO,
    `ProjectDecls::special_method_owner`, is `object`'s, a builtin type's, whose hash,
    comparison, and `repr()` run the items' own and whose dict or set lookups compare stored keys
-   under an equal hash, or a library class's called as a library call handed every operand,
+   under an equal hash (strings in an object's `__dict__`, which holds the names of its
+   attributes), or a library class's called as a library call handed every operand,
    R3; a value of an abstract class, a protocol, `object`, or no class heki knows establishes
    none); an attribute access that may run code of the project besides a getter heki resolves
    (`heki_effect::invokes::attribute_access_runs_project_code`: on a project class, a read that
