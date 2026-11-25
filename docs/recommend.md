@@ -389,9 +389,9 @@ reads. What a suggestion states:
 - **Only read here**, **Does not leave**, **Every call resolves and only reads**: the claim, from
   the facts `MUT110` reads, so the suggestion and its guard cannot disagree. When one is open,
   nothing is listed. A method called on a parameter annotated `Sequence`, `Mapping`, or
-  `AbstractSet` reads as the same method of the builtin. An operator or a comparison hands the
-  object to the other operand's special method (`other == p` runs `other.__eq__(p)` first): only
-  a builtin's keeps nothing, so the other operand is a value built in the function or of a
+  `AbstractSet` reads as the same method of the builtin. An operator or a comparison can hand the
+  object to the other operand's special method (`other == p` may run `other.__eq__(p)`, and which
+  side Python tries first depends on the classes): only a builtin's keeps nothing, so the other operand is a value built in the function or of a
   builtin class no project class derives from. An item read of a `defaultdict` changes it.
 - **The builtin's own reads**: the claim's last part (R2). A value of `dict` may be an instance of a
   project class deriving from `dict`, or from a standard-library class that derives from it
@@ -419,8 +419,9 @@ reads. What a suggestion states:
   the `functools` one only, no class machinery or base the catalog does not know, no use of the
   function as a value, no `dataclass` without a docstring for a constructor: it writes one from
   the constructor's signature), **A name for the type** (an import of the module is reused when
-  it runs before the annotation is evaluated: above the `def`, or anywhere with postponed
-  annotations).
+  it runs before the annotation is evaluated: above the `def`, or anywhere under `from __future__
+  import annotations`; on a Python 3.14 target, whose annotations are deferred without it, an
+  import below the `def` still leaves the premise open).
 - **No fact lost**: the annotation trial. Each file of the groups is analyzed again with their
   edits applied in memory, as the JSON prints them; a group whose edits change the facts of a
   function they edit or the file's reports, every rule selected, is withheld, and `withheld` says
