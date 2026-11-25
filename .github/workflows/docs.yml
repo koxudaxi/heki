@@ -81,6 +81,10 @@ jobs:
             date="${PUBLISHED_AT:0:10}"
           fi
           python scripts/set_release_versions.py "$version" ${date:+--changelog "$date"}
+      # llms-full.txt copies the adoption page, as the Release Sync pull request regenerates it.
+      - name: Regenerate llms.txt from the release's pages
+        if: github.event_name == 'release'
+        run: python scripts/build_llms_txt.py
       - run: cargo build --release -p heki
       - name: Generated pages are up to date (rules, CLI reference, experimental features)
         run: python scripts/build_docs.py --heki target/release/heki --check

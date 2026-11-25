@@ -417,9 +417,18 @@ def test_the_docs_a_release_deploys_show_the_release_tag(
         docs, "Write the release into the manifests and the pre-commit examples"
     )
     assert write["if"] == "github.event_name == 'release'"
-    assert [s.get("name") for s in docs["steps"]].index(write["name"]) < [
-        s.get("run") for s in docs["steps"]
-    ].index("cargo build --release -p heki")
+    names = [s.get("name") for s in docs["steps"]]
+    regenerate = step(docs, "Regenerate llms.txt from the release's pages")
+    assert regenerate["if"] == "github.event_name == 'release'"
+    assert regenerate["run"] == "python scripts/build_llms_txt.py"
+    assert (
+        names.index(write["name"])
+        < names.index(regenerate["name"])
+        < names.index("llms.txt is up to date")
+    )
+    assert names.index(write["name"]) < [s.get("run") for s in docs["steps"]].index(
+        "cargo build --release -p heki"
+    )
     scripts = checkout / "scripts"
     scripts.mkdir()
     for name in ("set_release_versions.py",):
