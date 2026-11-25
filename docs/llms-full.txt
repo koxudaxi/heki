@@ -5475,8 +5475,10 @@ $ python3 scripts/check_memory.py --heki target/release/heki
   `heki recommend`, an experimental command that runs several analyses and that no editor waits
   on: the owner set them to 100 MiB. Another machine reads a few hundred bytes more or less,
   from the length of the generated project's path. The `check`, `watch`, and `owners` budgets
-  were last set from main at d67c902a (56.65, 52.81, and 69.91 MiB on the runner), after the
-  0.2.5 catalog rows and the opt-in fact tables had left `check` 0.05 MiB under the old budget.
+  were last set from main at 410c17b2 (57.48, 55.73, and 70.79 MiB on the runner), after the
+  0.6.0 read-only parameter facts had left `watch` 0.07 MiB under the old budget. The release
+  build's budgets were set from the same commit (Linux 90.3, 102.4, and 106.3 MiB; macOS 75.4,
+  82.7, and 94.6 MiB).
 - A budget changes, down or up, only with the owner's decision. A change that would exceed one
   first finds what grew (below) and removes it where it lives; when the growth is the cost of
   facts a default rule needs, the measurements go to the owner.
