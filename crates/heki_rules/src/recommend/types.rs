@@ -7,7 +7,7 @@
 //! The kind `readonly-parameter`: a parameter annotated with a builtin `list`, `dict`, or `set`
 //! that the function, and every function it hands it to, only reads, annotated `Sequence`,
 //! `Mapping`, or `AbstractSet` instead. Its premises are
-//! [`crate::premises::READONLY_PARAMETER`]: when the claim (the first three) is open nothing is
+//! [`crate::premises::READONLY_PARAMETER`]: when the claim (the first four) is open nothing is
 //! listed; when it holds and a premise of the edit is open the group is heuristic, listed with
 //! `--all`; a group whose edits change heki's own reports or facts is withheld (the annotation
 //! trial).
