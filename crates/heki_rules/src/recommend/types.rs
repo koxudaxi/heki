@@ -23,15 +23,16 @@ use heki_ast::{LineIndex, Span};
 use heki_diagnostics::Diagnostic;
 use heki_effect::readonly::ContainerKind;
 use heki_effect::{
-    AnnotationFacts, AnnotationReads, CallSite, DeclPasses, EffectSummary, FuncKey,
-    LiteralAnnotation, ModuleDecls, ParamAnnotation, ProjectDecls,
+    AnnotationFacts, AnnotationReads, CallSite, DeclPasses, EffectSummary, FactChange, FuncKey,
+    LiteralAnnotation, ModuleDecls, OffsetMap, ParamAnnotation, ProjectDecls, Restated,
 };
 use heki_ir::InstKind;
 use heki_soundness::imports::{NewImport, import_edit};
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use schemars::JsonSchema;
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// The kind of [`suggest`]'s groups.
@@ -209,7 +210,8 @@ pub struct Leverage {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct Withheld {
-    /// `report-would-change`, `fact-would-change`, or `edit-does-not-parse`.
+    /// `fact-would-change`, `report-would-change`, or `trial-limit` (the trial stopped
+    /// analyzing the file: four analyses with other edits, or two checks of its reports).
     pub reason: String,
     pub groups: usize,
     /// The first 50 groups, each with what changed.
@@ -340,6 +342,8 @@ struct Cx<'a> {
     files: FxHashMap<&'a Path, &'a crate::project::ParsedFile>,
     shown: &'a dyn Fn(&Path) -> String,
     lines: std::cell::RefCell<FxHashMap<PathBuf, LineIndex>>,
+    /// The modules a project module imports with `*`.
+    star_imported: FxHashSet<String>,
 }
 
 impl Cx<'_> {
@@ -375,9 +379,9 @@ impl Cx<'_> {
 
 /// Every `readonly-parameter` group of the project `indexed` analyzed (the discovery run: every
 /// rule selected, the facts of [`crate::recommend_facts`]), ranked, after the annotation trial,
-/// which analyzes the files of the groups again in the index and leaves it as it was.
-/// `current` is the selection the guards' `runs` is relative to; `reports` are the discovery
-/// run's reports.
+/// which analyzes the files of the groups again and builds an index of its own from the
+/// discovery index's files: `indexed.index` is empty afterwards. `current` is the selection the
+/// guards' `runs` is relative to; `reports` are the discovery run's reports.
 pub fn suggest(
     indexed: &mut Indexed,
     current: &RuleSelection,
@@ -394,17 +398,16 @@ pub fn suggest(
                 .collect(),
             shown,
             lines: std::cell::RefCell::default(),
+            star_imported: (indexed.index.files.values())
+                .flat_map(|f| f.decls.star_imports.iter().flatten().cloned())
+                .collect(),
         };
         let mut found = groups(&cx, current);
         found.type_checker = type_checker(&indexed.project.env.root, shown);
         found.reader_sites = reader_sites(&cx);
         found
     };
-    let mut by_file: FxHashMap<&Path, Vec<Diagnostic>> = FxHashMap::default();
-    for d in reports {
-        by_file.entry(d.path.as_path()).or_default().push(d.clone());
-    }
-    trial_all(indexed, &mut found, &by_file)?;
+    trial_all(indexed, &mut found, reports)?;
     Ok(found.finish())
 }
 
@@ -420,16 +423,24 @@ struct Found {
     tried: bool,
 }
 
-/// The head edits of a file, each a span and its replacement.
-type Heads = Vec<(Span, String)>;
-
-/// A file's head edits and the import statements they need.
-type FileEdits = (Heads, Vec<String>);
+/// A group's edits in one file, as the JSON prints them, and what they restate.
+#[derive(Debug, Default)]
+struct FileEdits {
+    /// Each a span of the file and its replacement: the heads, and the imports where they go.
+    edits: Vec<(Span, String)>,
+    /// By function (qualified name), the parameters whose head an edit replaces.
+    params: BTreeMap<String, u64>,
+    /// The names the imports bind.
+    imports: Vec<String>,
+    /// The first names of the heads and of their replacements.
+    head_names: Vec<String>,
+    /// What the heads and their replacements name.
+    head_targets: Vec<String>,
+}
 
 /// A group, and per file the edits the trial applies.
 struct Pending {
     group: Group,
-    /// The file, its head edits, and the import statements it needs.
     files: BTreeMap<PathBuf, FileEdits>,
     rank: (std::cmp::Reverse<usize>, std::cmp::Reverse<usize>, usize),
     withheld: Option<(&'static str, String)>,
@@ -1099,11 +1110,32 @@ fn group(
             replacement: name.clone(),
         });
         let entry = files.entry(c.path.clone()).or_default();
-        entry.0.push((c.lit.head, name));
+        entry.edits.push((c.lit.head, name.clone()));
+        let head = &c.lit.text[head_at..head_end];
+        for text in [head, name.as_str()] {
+            let first = text.split('.').next().unwrap_or(text).trim().to_owned();
+            if !entry.head_names.contains(&first) {
+                entry.head_names.push(first);
+            }
+            let target = module.as_deref().and_then(|m| named_target(m, text));
+            let target = target.or_else(|| {
+                matches!(naming, Naming::Import { .. })
+                    .then(|| imported_target(c.lit.kind).to_owned())
+                    .filter(|_| text == name)
+            });
+            if let Some(target) = target
+                && !entry.head_targets.contains(&target)
+            {
+                entry.head_targets.push(target);
+            }
+        }
+        if let Some(bit) = 1u64.checked_shl(u32::from(c.param)) {
+            *entry.params.entry(c.key.qualname.clone()).or_default() |= bit;
+        }
         if let Naming::Import { statement } = &naming
-            && !entry.1.contains(statement)
+            && !entry.imports.contains(&name)
         {
-            entry.1.push(statement.clone());
+            entry.imports.push(name.clone());
             let placed = parsed.and_then(|p| {
                 let module_fn = p.ir.functions.iter().find(|f| f.is_module_body)?;
                 let import = NewImport {
@@ -1111,20 +1143,35 @@ fn group(
                     is_from: true,
                     statement,
                 };
-                import_edit(&p.source, module_fn, &import)
+                let (span, text) = import_edit(&p.source, module_fn, &import)?;
+                Some(as_insertion(&p.source, span, text))
             });
             match placed {
-                Some((span, text)) => edits.push(Edit {
-                    path: path.clone(),
-                    span: [span.start, span.end],
-                    replacement: text,
-                }),
+                Some((span, text)) => {
+                    entry.edits.push((span, text.clone()));
+                    edits.push(Edit {
+                        path: path.clone(),
+                        span: [span.start, span.end],
+                        replacement: text,
+                    });
+                }
                 None => open.push(OpenPremise {
                     premise: "A name for the type".to_owned(),
                     cause: format!("no place in the module's leading imports for `{statement}`"),
                     path: path.clone(),
                     line: 1,
                 }),
+            }
+            // Without an `__all__` that leaves it out, the name the import binds is bound in
+            // every module that imports this one with `*` too.
+            let exported = module.as_deref().is_none_or(|m| m.exports.is_none());
+            if exported && cx.star_imported.contains(&c.key.module) {
+                open.push(OpenPremise {
+                    premise: "A name for the type".to_owned(),
+                    cause: format!("`from {} import *` would bind `{name}` too", c.key.module),
+                    path: path.clone(),
+                    line: 1,
+                });
             }
         }
         let (calls_here, state) = calls.leverage(&c.key, c.param);
@@ -1250,6 +1297,42 @@ fn simple_name(kind: ContainerKind) -> &'static str {
         ContainerKind::Dict => "Mapping",
         ContainerKind::Set => "AbstractSet",
         _ => "Sequence",
+    }
+}
+
+/// The import edit `text` at `span`, which may replace the blank lines before the next
+/// statement, as an insertion at its start that gives the same file when it is applied alone
+/// (when the blank lines it replaces are a tail of `text`; else it keeps them): the imports of
+/// two groups then insert at one place, and their edits apply together.
+fn as_insertion(source: &str, span: Span, text: String) -> (Span, String) {
+    let replaced = &source[span.start as usize..span.end as usize];
+    let inserted = match text.strip_suffix(replaced) {
+        Some(head) => head.to_owned(),
+        None => text.trim_end().to_owned() + heki_ast::line_break(source),
+    };
+    let at = Span {
+        start: span.start,
+        end: span.start,
+    };
+    (at, inserted)
+}
+
+/// What a dotted name of an annotation names through the module's imports (`t.List` after
+/// `import typing as t`: `typing.List`).
+fn named_target(decls: &ModuleDecls, text: &str) -> Option<String> {
+    let (first, rest) = text
+        .split_once('.')
+        .map_or((text, None), |(f, r)| (f, Some(r)));
+    let base = (decls.imports.get(first)).or_else(|| decls.aliases.get(first))?;
+    Some(rest.map_or_else(|| base.clone(), |rest| format!("{base}.{rest}")))
+}
+
+/// What the import an edit adds binds the read-only type's name to.
+fn imported_target(kind: ContainerKind) -> &'static str {
+    match kind {
+        ContainerKind::Dict => "collections.abc.Mapping",
+        ContainerKind::Set => "collections.abc.Set",
+        _ => "collections.abc.Sequence",
     }
 }
 
@@ -1451,320 +1534,658 @@ impl Union {
     }
 }
 
-/// Premise 11, "No fact lost": the files of the groups analyzed again with the edits applied in
-/// memory and compared with the analysis as it is. First the facts, file by file, from each
-/// edited module's own summaries against the declarations as they are (equal local summaries
-/// propagate to equal ones): a file's groups are tried together, and alone when together they
-/// change a fact. Then the reports, for every file at once: the files of the groups left are
-/// re-analyzed with their edits in the index, as the language server re-analyzes a file after
-/// an edit, checked with every rule the discovery run selects, and restored; a group with an
-/// edit in a file whose reports change is withheld. `reports` are the discovery run's, by file.
+/// The most analyses of one file in a phase of the trial; then its groups of the phase left are
+/// withheld.
+const MAX_ANALYSES: u8 = 4;
+
+/// The most checks of the files' reports, each with an index built for it; then a file whose
+/// edits change again loses its exact groups.
+const MAX_CHECKS: usize = 2;
+
+/// The groups a phase of the trial tries and withholds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Exact,
+    /// On top of the exact groups kept, which it does not withhold.
+    Heuristic,
+}
+
+impl Phase {
+    fn withholds(self, p: &Pending) -> bool {
+        (p.group.certainty == SuggestionCertainty::Exact) == (self == Self::Exact)
+    }
+}
+
+/// What analyzing a file with a set of edits gave.
+enum Analysis {
+    /// Its local facts are those of the file now: the summary, and the offsets of the edited
+    /// text in the original.
+    Same(Box<heki_effect::FileSummary>, OffsetMap),
+    Changed(Vec<FactChange>),
+}
+
+/// A file with edits of some group.
+struct TrialFile {
+    path: PathBuf,
+    /// Its place in the project's files.
+    at: usize,
+    /// The groups with edits in it.
+    groups: Vec<usize>,
+    /// Analyses in this phase.
+    analyses: u8,
+    /// The groups whose edits the last analysis applied, and its summary when its facts were
+    /// the same (the exact phase).
+    analyzed: Option<Vec<usize>>,
+    same: Option<(Box<heki_effect::FileSummary>, OffsetMap)>,
+    /// The groups whose edits the summary the index holds for the file applies, with the map of
+    /// its offsets (`None`: the summary of the file as it is).
+    indexed: Option<(Vec<usize>, OffsetMap)>,
+    /// The groups whose edits its reports were checked with.
+    checked: Option<Vec<usize>>,
+}
+
+/// The annotation trial's state.
+struct Trial {
+    files: Vec<TrialFile>,
+    /// The project declarations as they are, which every edited file is analyzed against.
+    passes: DeclPasses,
+    /// The summaries of the files as they are, of those the index holds edited.
+    originals: FxHashMap<PathBuf, heki_effect::FileSummary>,
+}
+
+/// Premise 11, "No fact lost": the files of the groups analyzed again with the groups' edits
+/// applied as the JSON prints them, and compared with the analysis as it is.
+///
+/// First the exact groups. Each file is analyzed with every exact group's edits (the files in
+/// parallel, the index untouched), and its local facts are compared with the index's
+/// ([`heki_effect::FileSummary::edit_changes`]); a difference withholds the groups with an edit
+/// in a function it names (the file's when none has one), a withheld group leaves every file,
+/// and a file whose edits changed is analyzed again, at most [`MAX_ANALYSES`] times. Then the
+/// index is built once from the files' summaries, the edited ones in place, and the edited files
+/// are checked with every rule the discovery run selects: a report that differs from the
+/// discovery run's withholds the groups with an edit in its function (the file's when none has
+/// one), and the files whose edits that changes are tried once more ([`MAX_CHECKS`]). Last the
+/// heuristic groups, on top of the exact ones kept, by their facts only. The other files need
+/// no analysis: when no edited file's local facts differ, neither do theirs (module docs of
+/// [`heki_effect::OffsetMap`]'s home). `reports` are the discovery run's. The discovery index
+/// is gone afterwards.
 fn trial_all(
     indexed: &mut Indexed,
     found: &mut Found,
-    reports: &FxHashMap<&Path, Vec<Diagnostic>>,
+    reports: &[Diagnostic],
 ) -> Result<(), RecommendError> {
-    let mut by_file: BTreeMap<PathBuf, Vec<usize>> = BTreeMap::new();
+    let mut by_file: BTreeMap<&Path, Vec<usize>> = BTreeMap::new();
     for (g, p) in found.groups.iter().enumerate() {
         for path in p.files.keys() {
-            by_file.entry(path.clone()).or_default().push(g);
+            by_file.entry(path).or_default().push(g);
         }
     }
-    if by_file.is_empty() {
+    let files: Vec<TrialFile> = (by_file.into_iter())
+        .filter_map(|(path, groups)| {
+            let at = indexed.project.files.iter().position(|f| f.path == path)?;
+            Some(TrialFile {
+                path: path.to_path_buf(),
+                at,
+                groups,
+                analyses: 0,
+                analyzed: None,
+                same: None,
+                indexed: None,
+                checked: None,
+            })
+        })
+        .collect();
+    if files.is_empty() {
         return Ok(());
     }
     found.tried = true;
-    let mut passes = indexed.index.decl_passes();
-    for (path, groups) in &by_file {
-        let (heads, imports) = edits_in(&found.groups, groups, path);
-        let Some(changed) = facts_trial(indexed, &passes, path, &heads, &imports) else {
-            continue;
-        };
-        if groups.len() == 1 {
-            found.groups[groups[0]].withheld = Some(changed);
-            continue;
-        }
-        for &g in groups {
-            let (heads, imports) = edits_in(&found.groups, &[g], path);
-            if let Some(changed) = facts_trial(indexed, &passes, path, &heads, &imports) {
-                found.groups[g].withheld = Some(changed);
+    let mut trial = Trial {
+        files,
+        passes: indexed.index.decl_passes(),
+        originals: FxHashMap::default(),
+    };
+    let groups = &mut found.groups;
+    trial.settle(indexed, groups, Phase::Exact);
+    let checked = trial.check_reports(indexed, groups, reports);
+    for f in &mut trial.files {
+        f.analyses = 0;
+        f.analyzed = None;
+        f.same = None;
+    }
+    if checked.is_ok() {
+        trial.settle(indexed, groups, Phase::Heuristic);
+    }
+    indexed.index = heki_effect::ProjectIndex::default();
+    checked
+}
+
+impl Trial {
+    /// The groups whose edits `phase` applies to `f`: those not withheld, the exact ones and,
+    /// in the heuristic phase, the heuristic ones.
+    fn tried(groups: &[Pending], f: &TrialFile, phase: Phase) -> Vec<usize> {
+        (f.groups.iter().copied())
+            .filter(|&g| {
+                let p = &groups[g];
+                p.withheld.is_none()
+                    && (phase == Phase::Heuristic
+                        || p.group.certainty == SuggestionCertainty::Exact)
+            })
+            .collect()
+    }
+
+    /// The summary of the file at `path` as it is.
+    fn original<'i>(
+        &'i self,
+        indexed: &'i Indexed,
+        path: &Path,
+    ) -> Option<&'i heki_effect::FileSummary> {
+        (self.originals.get(path)).or_else(|| indexed.index.files.get(path))
+    }
+
+    /// Analyze each file with the edits `phase` tries until their facts are those of the files
+    /// as they are, withholding the groups of the differences.
+    fn settle(&mut self, indexed: &Indexed, groups: &mut [Pending], phase: Phase) {
+        loop {
+            let mut todo: Vec<(usize, Vec<usize>)> = Vec::new();
+            for (i, f) in self.files.iter_mut().enumerate() {
+                let set = Self::tried(groups, f, phase);
+                if !set.iter().any(|&g| phase.withholds(&groups[g])) {
+                    f.same = None;
+                    continue;
+                }
+                if f.analyzed.as_ref() != Some(&set) {
+                    todo.push((i, set));
+                }
+            }
+            if todo.is_empty() {
+                return;
+            }
+            let (todo, spent): (Vec<_>, Vec<_>) =
+                (todo.into_iter()).partition(|(i, _)| self.files[*i].analyses < MAX_ANALYSES);
+            let changed = format!("the file was analyzed {MAX_ANALYSES} times with other edits");
+            for (_, set) in &spent {
+                withhold_all(groups, set, phase, "trial-limit", &changed);
+            }
+            let outcomes: Vec<Analysis> = {
+                let (this, shared): (&Self, &[Pending]) = (self, groups);
+                (todo.par_iter())
+                    .map(|(i, set)| this.analyze(indexed, shared, &this.files[*i], set, phase))
+                    .collect()
+            };
+            for ((i, set), outcome) in todo.into_iter().zip(outcomes) {
+                let f = &mut self.files[i];
+                f.analyses += 1;
+                // Another file withheld a group of the set this round: the set is tried anew.
+                if Self::tried(groups, f, phase) != set {
+                    f.analyzed = None;
+                    continue;
+                }
+                f.analyzed = Some(set.clone());
+                f.same = None;
+                match outcome {
+                    Analysis::Same(summary, map) => f.same = Some((summary, map)),
+                    Analysis::Changed(changes) => {
+                        attribute_facts(groups, &f.path, &set, phase, &changes);
+                    }
+                }
             }
         }
     }
-    let mut edited: Vec<(usize, Heads, crate::project::ParsedFile)> = Vec::new();
-    for (path, groups) in &by_file {
-        let kept: Vec<usize> = (groups.iter().copied())
-            .filter(|&g| found.groups[g].withheld.is_none())
-            .collect();
-        let Some(at) = indexed.project.files.iter().position(|f| &f.path == path) else {
-            continue;
-        };
-        if kept.is_empty() {
-            continue;
-        }
-        let (heads, imports) = edits_in(&found.groups, &kept, path);
-        if let Ok(parsed) = edited_file(indexed, at, &heads, &imports) {
-            edited.push((at, sorted(heads), parsed));
-        }
-    }
-    if edited.is_empty() {
-        return Ok(());
-    }
-    {
-        let Indexed { project, index, .. } = &mut *indexed;
-        let env = &project.env;
-        for (_, _, parsed) in &edited {
-            index.reanalyze_module_cached(
-                &parsed.input(),
-                &env.kb,
-                Some(&env.soundness_kb),
-                &mut passes,
-            );
-        }
-    }
-    let units: Vec<_> = edited.iter().map(|(_, _, p)| p.unit()).collect();
-    let checked = indexed.diagnose_units(&units, false);
-    drop(units);
-    {
-        let Indexed { project, index, .. } = &mut *indexed;
-        let env = &project.env;
-        for (at, _, _) in &edited {
-            let input = project.files[*at].input();
-            index.reanalyze_module_cached(&input, &env.kb, Some(&env.soundness_kb), &mut passes);
-        }
-    }
-    let (mut after, withheld) = checked?;
-    after.extend(withheld);
-    let none = Vec::new();
-    for (at, heads, _) in &edited {
-        let path = indexed.project.files[*at].path.as_path();
-        let map = |offset: u32| original_offset(heads, offset);
-        let now: Vec<Diagnostic> = (reports.get(path).unwrap_or(&none).iter().cloned())
-            .map(|d| placed_in_original(d, path, &|o| o))
-            .collect();
-        let then: Vec<Diagnostic> = (after.iter().filter(|d| d.path == path).cloned())
-            .map(|d| placed_in_original(d, path, &map))
-            .collect();
-        let changed = match then.iter().find(|d| !now.contains(d)) {
-            Some(d) => Some(format!(
-                "`{}` at line {} would be reported",
-                d.rule_code, d.line
-            )),
-            None => (now.iter().find(|d| !then.contains(d))).map(|d| {
-                format!(
-                    "`{}` at line {} would no longer be reported",
-                    d.rule_code, d.line
+
+    /// The file `f` analyzed with the edits of the groups `set`.
+    fn analyze(
+        &self,
+        indexed: &Indexed,
+        groups: &[Pending],
+        f: &TrialFile,
+        set: &[usize],
+        phase: Phase,
+    ) -> Analysis {
+        let original = (self.original(indexed, &f.path)).expect("every project file is indexed");
+        let (edits, restated) = edits_of(groups, set, &f.path);
+        let env = &indexed.project.env;
+        // An edited file that does not parse has none of the facts of its functions.
+        let (edited, map) = (edited_file(indexed, f.at, &edits))
+            .map(|(parsed, map)| {
+                let input = parsed.input();
+                let kb = (&env.kb, Some(&env.soundness_kb));
+                (
+                    indexed
+                        .index
+                        .summarize_edit(&input, kb.0, kb.1, &self.passes),
+                    map,
                 )
-            }),
+            })
+            .unwrap_or_default();
+        let changes = original.edit_changes(&edited, &restated, &map);
+        match (changes.is_empty(), phase) {
+            (true, Phase::Exact) => Analysis::Same(Box::new(edited), map),
+            (true, Phase::Heuristic) => Analysis::Same(Box::default(), map),
+            (false, _) => Analysis::Changed(changes),
+        }
+    }
+
+    /// The reports of the exact groups' files: the index built with their summaries, each file
+    /// checked with its edits, at most [`MAX_CHECKS`] times; then the files whose edits changed
+    /// after their last check lose their exact groups.
+    fn check_reports(
+        &mut self,
+        indexed: &mut Indexed,
+        groups: &mut [Pending],
+        reports: &[Diagnostic],
+    ) -> Result<(), RecommendError> {
+        let mut discovery: FxHashMap<&Path, Vec<&Diagnostic>> = FxHashMap::default();
+        for d in reports {
+            discovery.entry(d.path.as_path()).or_default().push(d);
+        }
+        for round in 1..=MAX_CHECKS {
+            let to_check: Vec<(usize, Vec<usize>)> = (self.files.iter().enumerate())
+                .map(|(i, f)| (i, Self::tried(groups, f, Phase::Exact)))
+                .filter(|(i, set)| !set.is_empty() && self.files[*i].checked.as_ref() != Some(set))
+                .collect();
+            if to_check.is_empty() {
+                break;
+            }
+            self.index_edits(indexed, groups);
+            let after = self.check(indexed, groups, &to_check)?;
+            let changed: Vec<Vec<ChangedReport>> = (to_check.iter())
+                .map(|(i, _)| {
+                    let f = &self.files[*i];
+                    let now = discovery
+                        .get(f.path.as_path())
+                        .map_or(&[][..], Vec::as_slice);
+                    let then: Vec<&Diagnostic> =
+                        (after.iter()).filter(|d| d.path == f.path).collect();
+                    let lines = LineIndex::from_source(&indexed.project.files[f.at].source);
+                    changed_reports(now, &then, &|path| self.map_of(path), &lines)
+                })
+                .collect();
+            let mut withheld = false;
+            for ((i, set), changed) in to_check.into_iter().zip(changed) {
+                let f = &mut self.files[i];
+                f.checked = Some(set.clone());
+                withheld |= !changed.is_empty();
+                attribute_reports(groups, &f.path, &set, &changed);
+            }
+            if !withheld || round == MAX_CHECKS {
+                break;
+            }
+            self.settle(indexed, groups, Phase::Exact);
+        }
+        self.withhold_unchecked(groups);
+        Ok(())
+    }
+
+    /// Withhold the exact groups of the files whose edits changed after their last check, and
+    /// of every file a withheld group leaves: the files the exact groups link to one of them.
+    fn withhold_unchecked(&self, groups: &mut [Pending]) {
+        let at: FxHashMap<&Path, usize> = (self.files.iter().enumerate())
+            .map(|(i, f)| (f.path.as_path(), i))
+            .collect();
+        let exact: Vec<usize> = (0..groups.len())
+            .filter(|&g| groups[g].withheld.is_none() && Phase::Exact.withholds(&groups[g]))
+            .collect();
+        let files_of = |g: usize| -> Vec<usize> {
+            (groups[g].files.keys())
+                .filter_map(|p| at.get(p.as_path()).copied())
+                .collect()
         };
-        let Some(changed) = changed else {
+        let mut linked = Union::new(self.files.len());
+        for &g in &exact {
+            let files = files_of(g);
+            for pair in files.windows(2) {
+                linked.join(pair[0], pair[1]);
+            }
+        }
+        let unchecked: FxHashSet<usize> = (self.files.iter().enumerate())
+            .filter(|(_, f)| {
+                let set = Self::tried(groups, f, Phase::Exact);
+                !set.is_empty() && f.checked.as_ref() != Some(&set)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let lost: FxHashSet<usize> = unchecked.into_iter().map(|i| linked.find(i)).collect();
+        let gone: Vec<usize> = (exact.into_iter())
+            .filter(|&g| {
+                files_of(g)
+                    .into_iter()
+                    .any(|i| lost.contains(&linked.find(i)))
+            })
+            .collect();
+        let changed = format!("the file's reports were checked {MAX_CHECKS} times");
+        for g in gone {
+            withhold(groups, g, "trial-limit", &changed);
+        }
+    }
+
+    /// The offsets of the text whose summary the index holds for the file at `path`, when it
+    /// holds an edited one.
+    fn map_of(&self, path: &Path) -> Option<&OffsetMap> {
+        let f = self.files.iter().find(|f| f.path == path)?;
+        f.indexed.as_ref().map(|(_, map)| map)
+    }
+
+    /// Build the index again with, for each file, the summary its exact groups' edits give
+    /// (that of the file as it is when none is left), where it holds another one.
+    fn index_edits(&mut self, indexed: &mut Indexed, groups: &[Pending]) {
+        let mut replaced = Vec::new();
+        for f in &mut self.files {
+            let set = Self::tried(groups, f, Phase::Exact);
+            let now = f.indexed.as_ref().map(|(s, _)| s);
+            if set.is_empty() {
+                if now.is_some() {
+                    f.indexed = None;
+                    replaced.extend(self.originals.get(&f.path).cloned());
+                }
+                continue;
+            }
+            if now == Some(&set) {
+                continue;
+            }
+            if let Some((summary, map)) = f.same.take() {
+                replaced.push(*summary);
+                f.indexed = Some((set, map));
+            }
+        }
+        if replaced.is_empty() {
+            return;
+        }
+        let index = std::mem::take(&mut indexed.index);
+        let (index, old) = index.with_files_replaced(replaced);
+        indexed.index = index;
+        for o in old {
+            self.originals.entry(o.path.clone()).or_insert(o);
+        }
+    }
+
+    /// The reports of the files `to_check` with their edits (each the text its index summary
+    /// applies), checked with every rule the discovery run selects.
+    fn check(
+        &self,
+        indexed: &mut Indexed,
+        groups: &[Pending],
+        to_check: &[(usize, Vec<usize>)],
+    ) -> Result<Vec<Diagnostic>, RecommendError> {
+        let mut parsed: Vec<(usize, crate::project::ParsedFile)> = {
+            let shared: &Indexed = indexed;
+            (to_check.par_iter())
+                .filter_map(|(i, set)| {
+                    let f = &self.files[*i];
+                    let (edits, _) = edits_of(groups, set, &f.path);
+                    let (parsed, _) = edited_file(shared, f.at, &edits).ok()?;
+                    Some((f.at, parsed))
+                })
+                .collect()
+        };
+        // The edited files stand in for theirs: their text and suppression comments.
+        for (at, p) in &mut parsed {
+            std::mem::swap(&mut indexed.project.files[*at], p);
+        }
+        let checked = {
+            let units: Vec<_> = (parsed.iter())
+                .map(|(at, _)| indexed.project.files[*at].unit())
+                .collect();
+            indexed.diagnose_units(&units, false)
+        };
+        for (at, p) in &mut parsed {
+            std::mem::swap(&mut indexed.project.files[*at], p);
+        }
+        let (mut after, withheld) = checked?;
+        after.extend(withheld);
+        Ok(after)
+    }
+}
+
+/// Withhold the groups of `set` that `phase` withholds for `reason`.
+fn withhold_all(
+    groups: &mut [Pending],
+    set: &[usize],
+    phase: Phase,
+    reason: &'static str,
+    changed: &str,
+) {
+    for &g in set {
+        if phase.withholds(&groups[g]) {
+            withhold(groups, g, reason, changed);
+        }
+    }
+}
+
+/// Withhold the group `g` for `reason`, unless it is already.
+fn withhold(groups: &mut [Pending], g: usize, reason: &'static str, changed: &str) {
+    let group = &mut groups[g];
+    if group.withheld.is_none() {
+        group.withheld = Some((reason, changed.to_owned()));
+    }
+}
+
+/// The groups among `set` that `phase` withholds with an edit in `function` of the file
+/// `path` (in any function: `None`), the groups `phase` withholds of the set when none has.
+fn culprits(
+    groups: &[Pending],
+    path: &Path,
+    set: &[usize],
+    phase: Phase,
+    functions: Option<&BTreeSet<&str>>,
+) -> Vec<usize> {
+    let candidates: Vec<usize> = (set.iter().copied())
+        .filter(|&g| phase.withholds(&groups[g]))
+        .collect();
+    let hit: Vec<usize> = (candidates.iter().copied())
+        .filter(|&g| {
+            functions.is_some_and(|fs| {
+                (groups[g].files.get(path))
+                    .is_some_and(|e| e.params.keys().any(|q| fs.contains(q.as_str())))
+            })
+        })
+        .collect();
+    if hit.is_empty() { candidates } else { hit }
+}
+
+/// Withhold the groups of the fact changes `changes` of the file `path` analyzed with the
+/// edits of `set`: those with an edit in a function a change names, the file's when a change is
+/// the module's or no group has one.
+fn attribute_facts(
+    groups: &mut [Pending],
+    path: &Path,
+    set: &[usize],
+    phase: Phase,
+    changes: &[FactChange],
+) {
+    let module = changes.iter().any(|c| c.function.is_none());
+    let named: BTreeSet<&str> = changes
+        .iter()
+        .filter_map(|c| c.function.as_deref())
+        .collect();
+    let functions = (!module).then_some(&named);
+    for g in culprits(groups, path, set, phase, functions) {
+        let edited = |c: &&FactChange| {
+            (c.function.as_ref()).is_some_and(|q| groups[g].files[path].params.contains_key(q))
+        };
+        let change = changes.iter().find(edited).unwrap_or(&changes[0]);
+        let what = (change.what.iter())
+            .map(|w| format!("`{w}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let changed = match &change.function {
+            Some(f) => format!("the facts of `{f}` would change: {what}"),
+            None => format!("the module's facts would change: {what}"),
+        };
+        withhold(groups, g, "fact-would-change", &changed);
+    }
+}
+
+/// A report that differs between the discovery run and the trial: whether the trial has it,
+/// its function, rule, and line in the original file.
+struct ChangedReport {
+    added: bool,
+    qualname: String,
+    rule: String,
+    line: u32,
+}
+
+/// Withhold the exact groups of the reports `changed` of the file `path` checked with the
+/// edits of `set`: those with an edit in the report's function, else the file's.
+fn attribute_reports(
+    groups: &mut [Pending],
+    path: &Path,
+    set: &[usize],
+    changed: &[ChangedReport],
+) {
+    for r in changed {
+        let function = BTreeSet::from([r.qualname.as_str()]);
+        let what = if r.added {
+            "would be reported"
+        } else {
+            "would no longer be reported"
+        };
+        let text = format!("`{}` at line {} {what}", r.rule, r.line);
+        for g in culprits(groups, path, set, Phase::Exact, Some(&function)) {
+            withhold(groups, g, "report-would-change", &text);
+        }
+    }
+}
+
+/// The reports of a file that differ between the discovery run (`now`) and the trial (`then`),
+/// compared by rule, certainty, severity, function, target, places, and message: the places of
+/// an edited file at their offsets in the original (`maps`), the numbers of the messages aside
+/// (rules print lines). `lines` are the file's, as it is.
+fn changed_reports<'m>(
+    now: &[&Diagnostic],
+    then: &[&Diagnostic],
+    maps: &dyn Fn(&Path) -> Option<&'m OffsetMap>,
+    lines: &LineIndex,
+) -> Vec<ChangedReport> {
+    let none = |_: &Path| None;
+    let mut a: Vec<(ReportKey, &Diagnostic)> = (now.iter())
+        .map(|d| (ReportKey::of(d, &none), *d))
+        .collect();
+    let mut b: Vec<(ReportKey, &Diagnostic)> = (then.iter())
+        .map(|d| (ReportKey::of(d, maps), *d))
+        .collect();
+    a.sort_by(|x, y| x.0.cmp(&y.0));
+    b.sort_by(|x, y| x.0.cmp(&y.0));
+    let mut out = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() || j < b.len() {
+        let order = match (a.get(i), b.get(j)) {
+            (Some(x), Some(y)) => x.0.cmp(&y.0),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            _ => std::cmp::Ordering::Greater,
+        };
+        match order {
+            std::cmp::Ordering::Equal => (i, j) = (i + 1, j + 1),
+            std::cmp::Ordering::Less => {
+                let d = a[i].1;
+                out.push(ChangedReport {
+                    added: false,
+                    qualname: d.qualname.clone(),
+                    rule: d.rule_code.clone(),
+                    line: d.line,
+                });
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                let (key, d) = &b[j];
+                out.push(ChangedReport {
+                    added: true,
+                    qualname: d.qualname.clone(),
+                    rule: d.rule_code.clone(),
+                    line: lines.line_col(key.span.0).0,
+                });
+                j += 1;
+            }
+        }
+    }
+    out
+}
+
+/// What the trial compares of a report.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ReportKey {
+    path: PathBuf,
+    qualname: String,
+    rule: String,
+    certainty: String,
+    severity: String,
+    target: String,
+    span: (u32, u32),
+    message: String,
+    related: Vec<(PathBuf, (u32, u32), String)>,
+}
+
+impl ReportKey {
+    fn of<'m>(d: &Diagnostic, maps: &dyn Fn(&Path) -> Option<&'m OffsetMap>) -> Self {
+        let place = |path: &Path, s: Span| match maps(path) {
+            Some(map) => (map.original(s.start), map.original(s.end)),
+            None => (s.start, s.end),
+        };
+        Self {
+            path: d.path.clone(),
+            qualname: d.qualname.clone(),
+            rule: d.rule_code.clone(),
+            certainty: format!("{:?}", d.certainty),
+            severity: format!("{:?}", d.severity),
+            target: d.target.clone(),
+            span: place(&d.path, d.span),
+            message: numbers_aside(&d.message),
+            related: (d.related.iter())
+                .map(|r| {
+                    (
+                        r.path.clone(),
+                        place(&r.path, r.span),
+                        numbers_aside(&r.message),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+/// `text` with each run of digits one `#`.
+fn numbers_aside(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut digits = false;
+    for c in text.chars() {
+        let digit = c.is_ascii_digit();
+        if !digit {
+            out.push(c);
+        } else if !digits {
+            out.push('#');
+        }
+        digits = digit;
+    }
+    out
+}
+
+/// The edits of the groups `set` in the file `path`, and what they restate.
+fn edits_of(groups: &[Pending], set: &[usize], path: &Path) -> (Vec<(Span, String)>, Restated) {
+    let mut edits = Vec::new();
+    let mut restated = Restated::default();
+    for &g in set {
+        let Some(e) = groups[g].files.get(path) else {
             continue;
         };
-        for &g in &by_file[path] {
-            let group = &mut found.groups[g];
-            if group.withheld.is_none() {
-                group.withheld = Some(("report-would-change", changed.clone()));
-            }
+        edits.extend(e.edits.iter().cloned());
+        for (qualname, params) in &e.params {
+            *restated.params.entry(qualname.clone()).or_default() |= params;
         }
+        restated.imports.extend(e.imports.iter().cloned());
+        restated.head_names.extend(e.head_names.iter().cloned());
+        restated.head_targets.extend(e.head_targets.iter().cloned());
     }
-    Ok(())
+    (edits, restated)
 }
 
-/// The head edits and the import statements of the groups `gs` in the file `path`.
-fn edits_in(groups: &[Pending], gs: &[usize], path: &Path) -> (Vec<(Span, String)>, Vec<String>) {
-    let mut heads = Vec::new();
-    let mut imports: Vec<String> = Vec::new();
-    for &g in gs {
-        let (h, i) = &groups[g].files[path];
-        heads.extend(h.iter().cloned());
-        for s in i {
-            if !imports.contains(s) {
-                imports.push(s.clone());
-            }
-        }
-    }
-    (heads, imports)
-}
-
-fn sorted(mut heads: Vec<(Span, String)>) -> Vec<(Span, String)> {
-    heads.sort_by_key(|(span, _)| span.start);
-    heads
-}
-
-/// The project's file at `at` with the head edits `heads` and the import statements `imports`
-/// applied, parsed.
-///
-/// The imports go at the end of the file, not where the edit puts them: a report's message may
-/// name a line (`at line 12`), and an import above would move every line below it. Placed
-/// there, a module-level import binds the name for the annotations as at the top.
+/// The project's file at `at` with `edits` applied, parsed, and the map of its offsets.
 fn edited_file(
     indexed: &Indexed,
     at: usize,
-    heads: &[(Span, String)],
-    imports: &[String],
-) -> Result<crate::project::ParsedFile, crate::project::FileError> {
+    edits: &[(Span, String)],
+) -> Result<(crate::project::ParsedFile, OffsetMap), crate::project::FileError> {
     let original = &indexed.project.files[at];
-    let mut edited = String::with_capacity(original.source.len() + 64);
-    let mut from = 0usize;
-    for (span, text) in &sorted(heads.to_vec()) {
-        edited.push_str(&original.source[from..span.start as usize]);
-        edited.push_str(text);
-        from = span.end as usize;
-    }
-    edited.push_str(&original.source[from..]);
-    let br = heki_ast::line_break(&original.source);
-    if !edited.is_empty() && !edited.ends_with(['\n', '\r']) {
-        edited.push_str(br);
-    }
-    for statement in imports {
-        edited.push_str(statement);
-        edited.push_str(br);
-    }
+    let (text, map) = OffsetMap::apply(&original.source, edits);
     let env = &indexed.project.env;
-    parse_source(&original.path, &env.root, edited, &env.layout, env.runtime)
-}
-
-/// The facts part of the trial of one file: `None` when the edited module's own summaries
-/// equal those of the module now, else the reason and what changed.
-fn facts_trial(
-    indexed: &Indexed,
-    passes: &DeclPasses,
-    path: &Path,
-    heads: &[(Span, String)],
-    imports: &[String],
-) -> Option<(&'static str, String)> {
-    let at = indexed.project.files.iter().position(|f| f.path == path)?;
-    let Ok(parsed) = edited_file(indexed, at, heads, imports) else {
-        return Some((
-            "edit-does-not-parse",
-            "the edited file does not parse".to_owned(),
-        ));
-    };
-    let env = &indexed.project.env;
-    let edited =
-        (indexed.index).summarize_edit(&parsed.input(), &env.kb, Some(&env.soundness_kb), passes);
-    let now = indexed.index.files.get(path).map(|f| &f.local_functions);
-    let heads = sorted(heads.to_vec());
-    let map = |offset: u32| original_offset(&heads, offset);
-    changed_facts(now, &edited.local_functions, &map).map(|c| ("fact-would-change", c))
-}
-
-/// What differs between the local summaries `now` and `edited` of a file's functions, as
-/// Early Cutoff compares them, apart from the field that restates the parameters'
-/// annotations (`container_params`): the first function and the fields that differ. The spans
-/// some facts keep are compared at their places in the original file (`map`).
-fn changed_facts(
-    now: Option<&FxHashMap<FuncKey, std::sync::Arc<EffectSummary>>>,
-    edited: &FxHashMap<FuncKey, std::sync::Arc<EffectSummary>>,
-    map: &dyn Fn(u32) -> u32,
-) -> Option<String> {
-    let comparable = |s: &EffectSummary, map: &dyn Fn(u32) -> u32| {
-        let mut s = s.without_locations();
-        s.container_params = None;
-        let mut value = serde_json::to_value(&s).unwrap_or_default();
-        map_spans(&mut value, map);
-        value
-    };
-    let empty = FxHashMap::default();
-    let now = now.unwrap_or(&empty);
-    let mut keys: Vec<&FuncKey> = now.keys().chain(edited.keys()).collect();
-    keys.sort();
-    keys.dedup();
-    for key in keys {
-        let a = now.get(key).map(|s| comparable(s, &|o| o));
-        let b = edited.get(key).map(|s| comparable(s, map));
-        if a == b {
-            continue;
-        }
-        let fields = match (&a, &b) {
-            (Some(serde_json::Value::Object(a)), Some(serde_json::Value::Object(b))) => {
-                let mut names: Vec<&String> = (a.keys().chain(b.keys()))
-                    .filter(|k| a.get(*k) != b.get(*k))
-                    .collect();
-                names.sort();
-                names.dedup();
-                names
-                    .iter()
-                    .map(|n| format!("`{n}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            }
-            _ => "its summary".to_owned(),
-        };
-        return Some(format!(
-            "the facts of `{}` would change: {fields}",
-            key.qualname
-        ));
-    }
-    None
-}
-
-/// `value` with every span in it (an object of `start` and `end` alone) mapped through `map`.
-fn map_spans(value: &mut serde_json::Value, map: &dyn Fn(u32) -> u32) {
-    match value {
-        serde_json::Value::Object(o) => {
-            let span = o.len() == 2
-                && ["start", "end"]
-                    .iter()
-                    .all(|k| o.get(*k).is_some_and(serde_json::Value::is_u64));
-            if span {
-                for k in ["start", "end"] {
-                    let at = o[k]
-                        .as_u64()
-                        .and_then(|v| u32::try_from(v).ok())
-                        .unwrap_or(0);
-                    o[k] = map(at).into();
-                }
-                return;
-            }
-            o.values_mut().for_each(|v| map_spans(v, map));
-        }
-        serde_json::Value::Array(a) => a.iter_mut().for_each(|v| map_spans(v, map)),
-        _ => {}
-    }
-}
-
-/// The offset in the original file of `offset` in the file with `heads` applied (sorted): a
-/// position inside a replaced head is the head's start.
-fn original_offset(heads: &[(Span, String)], offset: u32) -> u32 {
-    let mut delta: i64 = 0;
-    for (span, text) in heads {
-        let start = i64::from(span.start) + delta;
-        let end = start + text.len() as i64;
-        let at = i64::from(offset);
-        if at < start {
-            break;
-        }
-        if at < end {
-            return span.start;
-        }
-        delta += text.len() as i64 - i64::from(span.end - span.start);
-    }
-    u32::try_from(i64::from(offset) - delta).unwrap_or(0)
-}
-
-/// `d` with its places in `path` at their offsets in the original file (`map`), and no columns:
-/// an edit before a place on its line moves the column, and the span says the rest. The lines
-/// do not move: the heads hold no line break, and the imports come last.
-fn placed_in_original(mut d: Diagnostic, path: &Path, map: &dyn Fn(u32) -> u32) -> Diagnostic {
-    // The discovery run records what keeps its heuristic reports heuristic; the trial does not.
-    d.open_records.clear();
-    let span = |s: Span| Span {
-        start: map(s.start),
-        end: map(s.end),
-    };
-    if d.path == path {
-        d.span = span(d.span);
-        d.column = 0;
-        for edit in d.fix.iter_mut().flatten() {
-            edit.span = span(edit.span);
-        }
-    }
-    for r in &mut d.related {
-        if r.path == path {
-            r.span = span(r.span);
-            r.column = 0;
-        }
-    }
-    d
+    let parsed = parse_source(&original.path, &env.root, text, &env.layout, env.runtime)?;
+    Ok((parsed, map))
 }

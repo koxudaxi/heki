@@ -479,3 +479,223 @@ fn applied_suggestions_give_their_guard_nothing_to_report() {
     );
     assert!(mut_110(&p).is_empty());
 }
+
+/// The exact groups by id, and the withheld ones by reason.
+fn kept_and_withheld(report: &Value) -> (Vec<String>, BTreeMap<String, Vec<String>>) {
+    let exact = (groups(report).into_iter())
+        .filter(|(_, g)| g["certainty"] == "exact")
+        .map(|(id, _)| id)
+        .collect();
+    let withheld = (report["suggestions"]["withheld"].as_array().unwrap().iter())
+        .map(|w| {
+            let ids = (w["first"].as_array().unwrap().iter())
+                .map(|g| {
+                    g["id"]
+                        .as_str()
+                        .unwrap()
+                        .trim_start_matches("readonly-parameter:")
+                })
+                .map(str::to_owned)
+                .collect();
+            (w["reason"].as_str().unwrap().to_owned(), ids)
+        })
+        .collect();
+    (exact, withheld)
+}
+
+#[test]
+fn one_group_changing_a_fact_withholds_it_alone_of_thirty_in_a_file() {
+    // The imports of two groups, `Sequence` and `Mapping`, go above the blank lines.
+    let mut source = "\n\n\n\n".to_owned();
+    for i in 0..29 {
+        source.push_str(&format!(
+            "def f{i}(rows: list[int]) -> bool:\n    return {i} in rows\n\n\n"
+        ));
+    }
+    // A `Mapping`'s `get` is not one heki knows to only read, as a `dict`'s is.
+    source.push_str("def lookup(table: dict[str, int]) -> int:\n    return table.get(\"a\", 0)\n");
+    let p = Project::new("recommend_types_thirty");
+    p.write("app/__init__.py", "").write("app/many.py", &source);
+    let (report, _) = recommend(&p, &["--all"]);
+    let (exact, withheld) = kept_and_withheld(&report);
+    assert_eq!(exact.len(), 29, "{report:#}");
+    assert!(
+        exact.iter().all(|id| id.starts_with("app.many:f")),
+        "{exact:?}"
+    );
+    assert_eq!(
+        withheld,
+        BTreeMap::from([(
+            "fact-would-change".to_owned(),
+            vec!["app.many:lookup:table".to_owned()]
+        )])
+    );
+    let first = &groups(&report)["app.many:f0:rows"]["edits"][0];
+    assert_eq!(
+        (&first["span"], &first["replacement"]),
+        (
+            &serde_json::json!([0, 0]),
+            &"from collections.abc import Sequence\n".into()
+        )
+    );
+}
+
+#[test]
+fn a_report_whose_chain_passes_another_edited_file_stays() {
+    let p = Project::new("recommend_types_chain");
+    p.write("app/__init__.py", "")
+        .write(
+            "app/b.py",
+            "import time\n\n\ndef other(rows: list[int]) -> bool:\n    return 1 in rows\n\n\n\
+             def helper() -> None:\n    time.sleep(1)\n",
+        )
+        .write(
+            "app/a.py",
+            "from app import b\n\n\ndef mine(rows: list[int]) -> bool:\n    return 2 in rows\n\n\n\
+             async def handler() -> None:\n    b.helper()\n",
+        );
+    let (_, out, _) = p.heki(&["check", "--select", "EFF101", "--output-format", "json"]);
+    let reports: Vec<Value> = serde_json::from_str(&out).unwrap();
+    // The report in `a.py` shows the call in `b.py`, which the edit of `b.py` moves.
+    assert!(
+        reports.iter().any(|r| {
+            r["path"] == "app/a.py"
+                && (r["related"].as_array().unwrap().iter()).any(|l| l["path"] == "app/b.py")
+        }),
+        "{reports:#?}"
+    );
+    let (report, _) = recommend(&p, &["--all"]);
+    let (exact, withheld) = kept_and_withheld(&report);
+    assert_eq!(exact, ["app.a:mine:rows", "app.b:other:rows"], "{report:#}");
+    assert!(withheld.is_empty(), "{withheld:?}");
+}
+
+#[test]
+fn an_import_above_reports_moves_their_lines_and_suppressions_with_them() {
+    let p = Project::new("recommend_types_lines");
+    p.write("app/__init__.py", "").write(
+        "app/core.py",
+        r#""""Iterators."""
+
+
+def keep(rows: list[int]) -> bool:
+    return 1 in rows
+
+
+def consumed(items):
+    it = iter(items)
+    first = list(it)
+    return first, list(it)
+
+
+def hidden(items):
+    it = iter(items)
+    first = list(it)
+    return first, list(it)  # heki: ignore[MUT106]
+"#,
+    );
+    let (_, out, _) = p.heki(&["check", "--select", "MUT106", "--output-format", "json"]);
+    let reports: Vec<Value> = serde_json::from_str(&out).unwrap();
+    // One report printing a line, and one suppressed.
+    assert_eq!(reports.len(), 1, "{reports:#?}");
+    assert!(
+        reports[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("already consumed at line 10"),
+        "{reports:#?}"
+    );
+    let (report, _) = recommend(&p, &["--all"]);
+    let (exact, withheld) = kept_and_withheld(&report);
+    assert_eq!(exact, ["app.core:keep:rows"], "{report:#}");
+    assert!(withheld.is_empty(), "{withheld:?}");
+    // The import goes above every report.
+    let keep = groups(&report)["app.core:keep:rows"];
+    assert_eq!(
+        keep["edits"][0]["replacement"],
+        "\nfrom collections.abc import Sequence\n"
+    );
+}
+
+#[test]
+fn a_bare_dict_head_imports_the_name_the_function_then_reads() {
+    let p = Project::new("recommend_types_bare");
+    p.write("app/__init__.py", "").write(
+        "app/core.py",
+        "def has(m: dict) -> bool:\n    return \"a\" in m\n",
+    );
+    let (report, _) = recommend(&p, &["--all"]);
+    let (exact, withheld) = kept_and_withheld(&report);
+    assert_eq!(exact, ["app.core:has:m"], "{report:#}");
+    assert!(withheld.is_empty(), "{withheld:?}");
+    let edits: Vec<&str> = (groups(&report)["app.core:has:m"]["edits"]
+        .as_array()
+        .unwrap())
+    .iter()
+    .map(|e| e["replacement"].as_str().unwrap())
+    .collect();
+    assert_eq!(
+        edits,
+        ["from collections.abc import Mapping\n\n\n", "Mapping"]
+    );
+}
+
+#[test]
+fn a_group_over_two_files_is_kept_or_withheld_in_both() {
+    let p = Project::new("recommend_types_two_files");
+    p.write("app/__init__.py", "")
+        .write(
+            "app/a.py",
+            "from app import b\n\n\ndef outer(rows: list[int]) -> bool:\n    return b.inner(rows)\n\n\n\
+             def outer_get(table: dict[str, int]) -> int:\n    return b.inner_get(table)\n\n\n\
+             def alone(rows: list[int]) -> bool:\n    return 3 in rows\n",
+        )
+        .write(
+            "app/b.py",
+            "def inner(rows: list[int]) -> bool:\n    return 1 in rows\n\n\n\
+             def inner_get(table: dict[str, int]) -> int:\n    return table.get(\"a\", 0)\n",
+        );
+    let (report, _) = recommend(&p, &["--all"]);
+    let (exact, withheld) = kept_and_withheld(&report);
+    assert_eq!(
+        exact,
+        ["app.a:alone:rows", "app.a:outer:rows"],
+        "{report:#}"
+    );
+    let outer = groups(&report)["app.a:outer:rows"];
+    let paths: Vec<&str> = (outer["edits"].as_array().unwrap().iter())
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    assert!(
+        paths.contains(&"app/a.py") && paths.contains(&"app/b.py"),
+        "{paths:?}"
+    );
+    // `inner_get`'s change withholds the group in `a.py` too.
+    assert_eq!(
+        withheld,
+        BTreeMap::from([(
+            "fact-would-change".to_owned(),
+            vec!["app.a:outer_get:table".to_owned()]
+        )])
+    );
+}
+
+#[test]
+fn a_heuristic_group_changing_a_fact_leaves_the_exact_one_of_its_function() {
+    let p = Project::new("recommend_types_phases");
+    p.write("app/__init__.py", "").write(
+        "app/core.py",
+        "def both(rows: list[int], names: list[str]) -> bool:\n    \
+         return 1 in rows and names.index(\"a\") > 0\n",
+    );
+    let (report, _) = recommend(&p, &["--all"]);
+    let (exact, withheld) = kept_and_withheld(&report);
+    assert_eq!(exact, ["app.core:both:rows"], "{report:#}");
+    assert_eq!(
+        withheld,
+        BTreeMap::from([(
+            "fact-would-change".to_owned(),
+            vec!["app.core:both:names".to_owned()]
+        )])
+    );
+}

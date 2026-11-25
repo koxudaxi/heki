@@ -875,8 +875,11 @@ pub const READONLY_PARAMETER: &[&Premise] = &[
     },
     &Premise {
         name: "No fact lost",
-        states: "the file analyzed again with the group's edits gives the same reports, every rule selected, and the same facts of its functions",
-        decided_in: &["crate::recommend::types::trial"],
+        states: "the file analyzed again with the groups' edits gives the same local facts and the same reports, every rule selected",
+        decided_in: &[
+            "crate::recommend::types::trial_all",
+            "heki_effect::FileSummary::edit_changes",
+        ],
     },
     &Premise {
         name: "A file to edit",

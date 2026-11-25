@@ -319,7 +319,8 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         .collect();
     let generated = contracts::generate(&discovery.index, &env.cfg, &declared, &current, &tests);
     drop(tests);
-    // The annotation trial analyzes files again in the discovery index, and leaves it as it was.
+    // The annotation trial builds its index from the discovery index's files: the discovery
+    // index is gone afterwards.
     let suggestions = types::suggest(&mut discovery, &current, &diags, shown)?;
     drop(diags);
     if suggestions.tried {

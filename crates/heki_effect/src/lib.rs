@@ -30,6 +30,8 @@ mod construction;
 pub mod consumption;
 mod contracts;
 pub(crate) mod decorators;
+mod edited;
+pub use edited::{FactChange, OffsetMap, Restated};
 mod environment;
 pub mod fresh;
 pub mod guards;
@@ -2937,6 +2939,32 @@ impl ProjectIndex {
         callgraph::propagate(&mut index, &all);
         callgraph::recompute_sync_driven(&mut index);
         index
+    }
+
+    /// The index of the same files with `replaced` in place of the files at their paths, built
+    /// again from the local summaries as [`Self::build_for`] builds one (one propagation), and
+    /// the summaries it replaced.
+    pub fn with_files_replaced(self, replaced: Vec<FileSummary>) -> (Self, Vec<FileSummary>) {
+        let Self {
+            mut files,
+            contracts,
+            skips_typed_writes,
+            opt_in,
+            ..
+        } = self;
+        let old = (replaced.into_iter())
+            .filter_map(|f| files.insert(f.path.clone(), f))
+            .collect();
+        let mut files: Vec<FileSummary> = files.into_values().collect();
+        // The order the project's files are summarized in.
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        let typed_writes = if skips_typed_writes {
+            TypedWrites::Local
+        } else {
+            TypedWrites::Propagated
+        };
+        let index = Self::build_for(files, contracts, typed_writes, opt_in);
+        (index, old)
     }
 
     /// Whether every implementation the call at `site` (in `path`) can run has run `e`

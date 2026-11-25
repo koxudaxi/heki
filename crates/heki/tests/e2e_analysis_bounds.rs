@@ -6284,6 +6284,43 @@ fn the_trial_of_library_names_without_an_entry_tries_a_bounded_number() {
     assert_eq!(blind["truncated"], json!(true));
 }
 
+/// A file of 5,000 lines with 200 groups, every twentieth changing a fact: the annotation trial
+/// analyzes the file with every group's edits, then without the ten it withholds, and checks its
+/// reports once, not once per group.
+#[test]
+fn the_annotation_trial_of_two_hundred_groups_in_a_file_analyzes_it_a_few_times() {
+    let groups = 200;
+    let mut lines = Vec::new();
+    for i in 0..groups {
+        lines.extend([String::new(), String::new()]);
+        // A `Mapping`'s `get` is not one heki knows to only read, as a `dict`'s is.
+        let (head, last) = if i % 20 == 0 {
+            (
+                "table: dict[str, int]) -> int",
+                "table.get(\"a\", 0)".to_owned(),
+            )
+        } else {
+            ("rows: list[int]) -> bool", format!("{i} in rows"))
+        };
+        lines.push(format!("def g{i}({head}:"));
+        lines.extend((0..21).map(|j| format!("    v{j} = {j}")));
+        lines.push(format!("    return {last}"));
+    }
+    let p = Project::new("bounds_recommend_annotation_trial");
+    p.write("app.py", &(lines.join("\n") + "\n"));
+    let report = recommend(&p);
+    let section = &report["suggestions"];
+    assert_eq!(
+        section["counts"][0]["exact"],
+        json!(groups - 10),
+        "{section:#}"
+    );
+    let withheld: Vec<(&Value, &Value)> = (section["withheld"].as_array().unwrap().iter())
+        .map(|w| (&w["reason"], &w["groups"]))
+        .collect();
+    assert_eq!(withheld, [(&json!("fact-would-change"), &json!(10))]);
+}
+
 /// Thousands of directories, each holding a module that a top-level file imports by a name
 /// below it: each directory is a source-root candidate, and the trial tries the first eight.
 #[test]

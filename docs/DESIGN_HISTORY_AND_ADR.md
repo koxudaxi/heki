@@ -504,7 +504,7 @@ first, then a convention the code follows, then a contract.
       oracle copies each suggested parameter's container at entry and compares it at exit, on
       the differential test suite and on datamodel-code-generator; and the mechanical checks run
       on every group: the result parses, it equals the original apart from annotations and the
-      added import, the annotation trial and the verification run find no change, and with
+      added import, the annotation trial and the corpus gate's verification run find no change, and with
       every exact suggestion applied `MUT110` reports nothing. A false claim found later is a
       premise defect, fixed as for a rule. A sample is enough here, where it is not for a rule,
       because the mechanical checks cover every group and a suggestion is read before it is
@@ -777,17 +777,31 @@ first, then a convention the code follows, then a contract.
   4. **The annotation trial and the verification run.** An annotation is also an input of heki's
      own analysis (R2): a `set` parameter widened to `Set` no longer has a set's iteration order,
      a slice of a `Sequence` is no longer known to copy, and a method call on a `Mapping` may
-     reach a project class that implements it. Before a group is shown, heki analyzes each of its
-     files again with the edits applied in memory, on the path the language server takes after
-     an edit, and compares the file's diagnostics with every rule selected and its functions'
-     summaries as Early Cutoff compares them, apart from the fields that restate the annotation.
-     Any difference withholds the group and names the report or fact that changed. The CLI then
-     verifies the whole set in one run over the project, as it verifies the block (ADR-020 rule
-     2): with every exact suggestion applied, the reports equal the reports now. A difference
-     there is a heki defect, printed in the notes; the tests and the corpus gate require none. A
-     suggestion therefore never removes or demotes a report, and never creates a report of its
-     own guard. *Rejected*: the verification run alone (it shows that a report changed, not
-     which group changed it).
+     reach a project class that implements it. Before a group is shown, heki analyzes each file
+     of the groups again with their edits applied as the JSON prints them (the heads, and the
+     import where the edit puts it), the files in parallel, and compares its local facts as Early
+     Cutoff compares them: its functions' summaries, call sites, declarations, and opt-in tables,
+     the places the edit moved at their offsets in the original file, apart from what restates
+     the edit (the annotations' own facts, the changed parameters' read-only and mutable bits,
+     the added import). It then builds the index once with those files and compares the edited
+     files' reports with every rule selected by rule, certainty, severity, function, target,
+     places, and message (numbers aside: rules print lines). A difference withholds the groups
+     with an edit in the function it names (the file's groups when none has one) and names the
+     fact or report that changed; a withheld group leaves every file, and a file whose edits
+     changed is analyzed again, at most four times, its reports checked at most twice. The
+     heuristic groups come last, on top of the exact ones kept, by their facts only. The other
+     files need no analysis: of an edited function's annotation another file reads only the
+     union of the read-only and mutable bits (`MUT110`'s test of a callee), which a mutable head
+     turned read-only keeps, so when no edited file's local facts differ, no other file's
+     summary does (ADR-017); an added import a star import of the module would bind elsewhere
+     leaves the group heuristic. The corpus gate applies every exact suggestion to a copy of
+     each package and compares `heki check` with every rule selected by its code, before and
+     after: the reports must be equal. A suggestion therefore never removes or demotes a report,
+     and never creates a report of its own guard. *Rejected*: the verification run in the
+     product (on the largest package it costs about as much as the rest of `recommend`, and
+     shows that a report changed, not which group changed it); an analysis per group (its cost
+     grows with the groups times the file); patching annotations in the IR (lowering and name
+     binding would not run).
   5. **Advice, not a report or a fix.** A suggestion has no rule code, severity, `select` entry,
      suppression comment, baseline entry, or exit code. `heki check` never prints one, and
      `heki check --fix` never applies one: ADR-007 and ADR-011 judge the rewrite of a diagnostic

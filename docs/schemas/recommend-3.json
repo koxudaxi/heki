@@ -2224,7 +2224,7 @@
           "type": "integer"
         },
         "reason": {
-          "description": "`report-would-change`, `fact-would-change`, or `edit-does-not-parse`.",
+          "description": "`fact-would-change`, `report-would-change`, or `trial-limit` (the trial stopped\nanalyzing the file: four analyses with other edits, or two checks of its reports).",
           "type": "string"
         }
       },
