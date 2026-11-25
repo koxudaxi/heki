@@ -1224,9 +1224,9 @@ call moves).
 runs the body of a plain function, of an `async def` only when it is awaited or driven (calling one
 only creates a coroutine), and never of a generator function (calling one only creates the
 generator; `FunctionDecl::is_generator`: no decorator other than `staticmethod` / `classmethod` /
-`abstractmethod` / `override`). The object a project call returns gets one more site, with the
-call's callees and bindings, wherever the calling function uses it, found by the shared iteration
-table (`consumption`):
+`abstractmethod` / `override` / `final`). The object a project call returns gets one more site,
+with the call's callees and bindings, wherever the calling function uses it, found by the shared
+iteration table (`consumption`):
 
 - `Iterate`: it is iterated there (a `for` loop, a comprehension: inlined from Python 3.12, a frame
   of its own receiving it before; unpacking; `yield from`; a consuming call such as `list(...)` or

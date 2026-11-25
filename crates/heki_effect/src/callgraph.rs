@@ -463,15 +463,16 @@ fn must_reads_through_self_calls(
                 .filter(|callee| {
                     let bound_to_self = callee.owner_class_qualname.is_some()
                         && !callee.decorators.iter().any(|d| {
+                            let head = d.split('(').next().unwrap_or(d).trim();
                             matches!(
-                                crate::decorators::last_name(d),
-                                "staticmethod" | "classmethod"
+                                head.rsplit('.').next(),
+                                Some("staticmethod" | "classmethod")
                             )
                         });
                     bound_to_self
                         && !in_scc(&bc.callee)
                         && runs_at_call(callee, site)
-                        && crate::decorators::keeps_returned_value(&callee.decorators)
+                        && !callee.decorator_may_replace
                 })
                 .map(EffectSummary::must_read_self_attrs);
             let reads: BTreeSet<AttrKeyPath> = reads.into_iter().flatten().cloned().collect();
@@ -724,7 +725,7 @@ fn site_steps(
                     }
                     continue;
                 }
-                if callee.is_some_and(|c| !crate::decorators::keeps_returned_value(&c.decorators))
+                if callee.is_some_and(|c| c.decorator_may_replace)
                     && steps.stops_at(MustGap::Decorated(key()))
                 {
                     return None;

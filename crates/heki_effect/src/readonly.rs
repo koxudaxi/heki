@@ -8,7 +8,7 @@
 //! producer itself. Its summary carries a [`ProtectedReturn`], propagated bottom-up over the call
 //! graph, so a wrapper needs no configuration of its own.
 
-use crate::{Callee, SharedChain};
+use crate::{Callee, ModuleDecls, SharedChain};
 use heki_ir::walk::{Budget, FnShape, Visit, reach};
 use heki_ir::{DictEntry, Inst, InstKind, IrFunction, PhiNode, Terminator, VarId};
 use heki_kb::{CopyDepth, EffectiveEcosystemKb};
@@ -545,19 +545,22 @@ impl CacheDecorator {
     }
 }
 
-/// The function's [`CachedResult`], when it is one. `resolve` names a dotted name through the
-/// module's imports and definitions, and `type_of` is the class of a value's inferred type.
+/// The function's [`CachedResult`], when it is one. `module` describes the function's module,
+/// and `type_of` is the class of a value's inferred type.
 pub(crate) fn cached_result<'t>(
     f: &IrFunction,
+    module: &ModuleDecls,
     defs: &FxHashMap<VarId, &Inst>,
     live: &crate::ownership::Live,
-    resolve: impl Fn(&str) -> Option<String>,
     type_of: impl Fn(VarId) -> Option<&'t str>,
 ) -> Option<CachedResult> {
-    if !matches!(f.kind, heki_ir::FunctionKind::Sync) || crate::resolver::is_generator_function(f) {
+    if !matches!(f.kind, heki_ir::FunctionKind::Sync)
+        || crate::resolver::is_generator_function(f, module)
+    {
         return None;
     }
-    let decorator = cache_decorator(&f.decorators, &resolve)?;
+    let decorator = cache_decorator(&f.decorators, module)?;
+    let resolve = |text: &str| module.resolve_dotted(text, false);
     let receiver = f.owner_class_qualname.is_some() && !f.has_decorator(&["staticmethod"]);
     if f.params.len() <= usize::from(receiver) {
         return None;
@@ -610,26 +613,20 @@ fn annotated_kind(text: &str, resolve: &impl Fn(&str) -> Option<String>) -> Opti
     }
 }
 
-/// The one `functools` cache among the decorators, when the others are only `staticmethod` /
-/// `classmethod` and the cache keeps results (no `maxsize` of the literal `0`).
-fn cache_decorator(
-    decorators: &[String],
-    resolve: &impl Fn(&str) -> Option<String>,
-) -> Option<CacheDecorator> {
+/// The one `functools` cache among the decorators of a function of `module`, when every other
+/// one keeps the cache's results ([`crate::decorators::Decorator::beside_cache`]) and the cache
+/// keeps results (no `maxsize` of the literal `0`).
+fn cache_decorator(decorators: &[String], module: &ModuleDecls) -> Option<CacheDecorator> {
     let mut found = None;
     for d in decorators {
-        let (head, args) = match d.split_once('(') {
-            Some((h, rest)) => (h.trim(), Some(rest.trim_end().strip_suffix(')')?)),
-            None => (d.trim(), None),
+        let args = match d.split_once('(') {
+            Some((_, rest)) => Some(rest.trim_end().strip_suffix(')')?),
+            None => None,
         };
-        let target = resolve(head);
-        let decorator = match target.as_deref() {
+        let decorator = match module.decorator_symbol(d).as_deref() {
             Some("functools.lru_cache") => CacheDecorator::LruCache,
             Some("functools.cache") if args.is_none() => CacheDecorator::Cache,
-            // The builtins, which no import or definition of the module rebinds.
-            None if args.is_none() && crate::decorators::keeps(head, |d| d.beside_cache) => {
-                continue;
-            }
+            _ if crate::decorators::is(d, module, |k| k.beside_cache) => continue,
             _ => return None,
         };
         // The cache keeps results when `maxsize` is left out (128), `None`, or a literal number
