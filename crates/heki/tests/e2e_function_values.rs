@@ -1073,3 +1073,61 @@ fn a_partial_class_attribute_is_followed_through_reads_and_subclasses() {
         PARTIAL_LIBRARY_CALLS,
     );
 }
+
+const GLOBAL_DEFS: &str = r#"from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TypeVar
+
+import mystery
+
+from pkg.model import Field, noop, require
+
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class Spec:
+    when: Callable[[Field], bool] | None = None
+
+
+class Builder:
+    def partial(self, f: Callable[[Field], bool]) -> Callable[[Field], bool]:
+        return f
+
+
+class Held:
+    run = Builder().partial(require)
+
+
+MIXED = {"b": mystery.make(), "a": Spec(when=require), "c": Spec(when=noop)}
+DECLARED: dict[str, T] = {"a": require}
+"#;
+
+const GLOBAL_CALLS: &str = r#"from __future__ import annotations
+
+from pkg.defs import DECLARED, MIXED, Held
+from pkg.model import Field
+
+
+def a_table_with_an_unknown_value_first(field: Field) -> bool:
+    spec = MIXED["a"]
+    return spec.when is not None and spec.when(field)  # writes
+
+
+def a_global_whose_declared_items_are_no_class(field: Field) -> bool:
+    return DECLARED["a"](field)  # writes
+
+
+def a_class_attribute_a_method_call_gives(field: Field) -> bool:
+    return Held.run(field)  # unresolved
+"#;
+
+/// A table keeps the entries it types when another value is of unknown type, a declaration
+/// whose items name no class takes the items of what is stored, and a class attribute bound
+/// by a method call (not by the module's own `functools` call) is no partial.
+#[test]
+fn a_global_and_a_class_attribute_keep_what_they_are_bound_to() {
+    check_marks("function_values_globals", GLOBAL_DEFS, GLOBAL_CALLS);
+}
