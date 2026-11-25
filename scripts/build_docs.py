@@ -145,6 +145,8 @@ def fix_label(rule: dict) -> str:
         return "Safe fix (`--fix`)"
     if rule["size_dependent_fix"]:
         return "Proven-safe suggestion (`--fix --include-size-dependent`)"
+    if rule["unsafe_fix"]:
+        return "Unsafe fix (`--fix --unsafe-fixes`)"
     return "No automatic fix"
 
 

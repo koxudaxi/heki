@@ -1175,6 +1175,7 @@ impl Indexed {
                 root: &env.root,
                 modules: &env.layout,
             },
+            runtime: env.runtime,
         };
         check_project(
             units,
