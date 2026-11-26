@@ -145,6 +145,16 @@ Put the contracts, `fail-on`, and the baseline path in `heki.toml`, and give tha
 (`CODEOWNERS`, or the host's rule for protected files). A change to a wall is then a reviewed
 change, and an agent cannot move a wall to make a report go away.
 
+```text
+# .github/CODEOWNERS
+/heki.toml           @your-org/maintainers
+/heki-baseline.toml  @your-org/maintainers
+```
+
+`fail-on = "warning"` makes every warning and heuristic report fail the run, not only the
+contracts' reports: record today's findings in the baseline first, so that only new ones fail.
+The [starter recipe](adoption.md#walls-for-a-team-or-a-coding-agent) has the whole file.
+
 ### A Stop hook for Claude Code
 
 A [Stop hook](https://code.claude.com/docs/en/hooks) runs when Claude Code is about to end its turn.

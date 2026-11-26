@@ -61,8 +61,10 @@ project without contracts or a baseline, ends with a line that points to it:
 $ heki recommend
 ```
 
-See [Configuration Advice](recommend.md). To adopt heki in a repository step by step, see
-[Adopting heki](adoption.md).
+See [Configuration Advice](recommend.md), and the
+[excerpt](index.md#try-it-in-5-minutes) of its report on a project where `heki check` finds
+nothing. To adopt heki in a repository, start from the
+[starter recipes](adoption.md#starter-recipes).
 
 ## Read a diagnostic
 

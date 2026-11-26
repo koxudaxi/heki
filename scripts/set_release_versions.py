@@ -17,8 +17,11 @@ CHANGELOG a binary embeds (`heki version --changelog`) has the section `main` ge
   with ``--locked`` accepts the lock file;
 - `uv.lock`: the version of the project itself, so that ``uv run`` under ``UV_LOCKED=1`` accepts
   the lock file;
-- `README.md` and `docs/adoption.md`: the ``rev:`` of the pre-commit example becomes the release
-  tag (`build_docs.py --check` fails when it differs from the workspace version's tag);
+- `README.md` and `docs/adoption.md`: the ``rev:`` of each pre-commit example of heki's hook
+  repositories becomes the release tag, and in `README.md`, `docs/index.md`, and
+  `docs/adoption.md` each ``heki==VERSION`` of a command (`uvx heki==0.6.0 check`) becomes the
+  version (`build_docs.py --check` fails when one differs from the workspace version, or when
+  another page pins ``heki==``);
 - with ``--changelog DATE``, `CHANGELOG.md`: the first ``## [VERSION] - Unreleased`` heading
   becomes ``## [VERSION] - DATE``, and the ``[VERSION]`` link, a compare that ends at ``HEAD``,
   ends at the release tag instead (a missing one compares the previous release with the tag, or
@@ -30,7 +33,8 @@ CHANGELOG a binary embeds (`heki version --changelog`) has the section `main` ge
 
 Each edit rewrites one value found by an exact pattern: a pattern that does not match exactly once
 stops the script before it writes any file, and so does a manifest that the edits leave with
-another version. A second run with the same version changes nothing.
+another version. The pins of the pages are rewritten wherever they are, and a page without one
+stops the script too. A second run with the same version changes nothing.
 """
 
 from __future__ import annotations
@@ -62,8 +66,17 @@ UNRELEASED_SECTION = re.compile(r"^## \[Unreleased\]", re.MULTILINE | re.IGNOREC
 LINK_DEFINITION = re.compile(r"^\[(?P<label>[^\]]+)\]: (?P<url>\S+)$", re.MULTILINE)
 
 PRECOMMIT_DOCS = ("README.md", "docs/adoption.md")
-"""The pages whose pre-commit example pins the hook repository's release tag."""
-PRECOMMIT_REV = re.compile(r"^ +rev: v(?P<value>[^\s]+)$", re.MULTILINE)
+"""The pages whose pre-commit examples pin the hook repository's release tag."""
+PRECOMMIT_REV = re.compile(
+    r"^ *- repo: https://github\.com/koxudaxi/heki(-pre-commit)?\n +rev: v(?P<value>\S+)$",
+    re.MULTILINE,
+)
+"""The ``rev:`` of a heki repository's entry: a page may show other hooks with their own tags."""
+
+PACKAGE_PIN_DOCS = ("README.md", "docs/index.md", "docs/adoption.md")
+"""The pages whose commands pin the release on PyPI (`uvx heki==0.6.0 check`)."""
+PACKAGE_PIN = re.compile(r"(?<![\w.-])heki==(?P<value>[0-9][0-9A-Za-z.+-]*[0-9A-Za-z])")
+"""A ``heki==`` requirement; the version ends with a letter or digit, not a sentence's period."""
 
 WORKSPACE_VERSION = "Cargo.toml `workspace.package.version`"
 
@@ -112,6 +125,15 @@ def replace_value(
         fail(f"{where}: expected one line matching `{pattern.pattern}`, found {len(matches)}")
     match = matches[0]
     return text[: match.start("value")] + value + text[match.end("value") :]
+
+
+def replace_every_value(text: str, pattern: re.Pattern[str], value: str, where: str) -> str:
+    """Replace the ``value`` group of every match of `pattern`, of which there must be one."""
+    if pattern.search(text) is None:
+        fail(f"{where}: expected a line matching `{pattern.pattern}`, found none")
+    return pattern.sub(
+        lambda m: text[m.start() : m.start("value")] + value + text[m.end("value") : m.end()], text
+    )
 
 
 def table_span(text: str, header: str, file: str) -> tuple[int, int]:
@@ -273,10 +295,22 @@ def dated_changelog(text: str, version: str, date: str, repository: str) -> str:
     return text
 
 
+def pinned_versions(
+    pattern: re.Pattern[str], pages: tuple[str, ...], root: Path = ROOT
+) -> dict[str, list[str]]:
+    """The versions `pattern` finds in each of `pages`, in order."""
+    texts = {name: (root / name).read_text(encoding="utf-8") for name in pages}
+    return {name: [m["value"] for m in pattern.finditer(text)] for name, text in texts.items()}
+
+
 def precommit_revs(root: Path = ROOT) -> dict[str, list[str]]:
     """The versions the pre-commit examples pin (the ``rev: v...`` lines), by page."""
-    pages = {name: (root / name).read_text(encoding="utf-8") for name in PRECOMMIT_DOCS}
-    return {name: [m["value"] for m in PRECOMMIT_REV.finditer(text)] for name, text in pages.items()}
+    return pinned_versions(PRECOMMIT_REV, PRECOMMIT_DOCS, root)
+
+
+def package_pins(root: Path = ROOT) -> dict[str, list[str]]:
+    """The versions the commands of the pages pin (``heki==...``), by page."""
+    return pinned_versions(PACKAGE_PIN, PACKAGE_PIN_DOCS, root)
 
 
 def release_files(root: Path, version: str, changelog_date: str | None) -> dict[Path, str]:
@@ -310,7 +344,12 @@ def release_files(root: Path, version: str, changelog_date: str | None) -> dict[
     )
     for name in PRECOMMIT_DOCS:
         page = (root / name).read_text(encoding="utf-8")
-        written[name] = replace_value(page, PRECOMMIT_REV, version, f"{name} pre-commit example")
+        written[name] = replace_every_value(
+            page, PRECOMMIT_REV, version, f"{name} pre-commit example"
+        )
+    for name in PACKAGE_PIN_DOCS:
+        page = written.get(name) or (root / name).read_text(encoding="utf-8")
+        written[name] = replace_every_value(page, PACKAGE_PIN, version, f"{name} `heki==` pin")
     if changelog_date is not None:
         repository = cargo["workspace"]["package"]["repository"].rstrip("/")
         changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
