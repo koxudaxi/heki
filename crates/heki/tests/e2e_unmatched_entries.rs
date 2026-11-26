@@ -818,7 +818,7 @@ allowed-writers = ["pkg.store:*"]
 
 /// Each kind of entry is judged by what its rule matches. Not reported: an attribute the class
 /// body declares, one a project base sets on `self`, a constant `__dict__` key the code writes
-/// or reads on an object of the class, a name written on an object heki cannot type, any name
+/// on an object of the class (a key it only reads is reported), a name written on an object heki cannot type, any name
 /// of a class that stores attributes named at run time, a glob attribute of a class that exists,
 /// a glob class in a module that exists, a function, a class, the functions a glob names inside
 /// a function that exists, a glob held by a glob, a call target with an argument list, a module
@@ -838,6 +838,7 @@ fn each_kind_of_entry_is_judged_by_what_its_rule_matches() {
     assert_eq!(
         lines(&stderr, "warning: "),
         [
+            "`targets` entry `pkg.model.Field._peeked` of write-owners `writes` names no attribute, method, or `__dict__` key of `pkg.model.Field` in the analyzed files",
             "`targets` entry `pkg.model.Field.extras[\"k\"]` of write-owners `writes` names no attribute, method, or `__dict__` key of `pkg.model.Field` in the analyzed files",
             "`targets` entry `pkg.model.Field.gone` of write-owners `writes` and `again` names no attribute, method, or `__dict__` key of `pkg.model.Field` in the analyzed files",
             "`targets` entry `pkg.models.Field.kind` of write-owners `writes` names no class in the analyzed files; `pkg.model.Field.kind` exists",
@@ -968,5 +969,49 @@ fn a_private_member_is_named_in_either_spelling() {
             "`allowed-callers` entry `pkg.base:Parser._Parser__walk` of call-owners `private` names no function or method in the analyzed files",
         ],
         "{stdout}{stderr}"
+    );
+}
+
+/// A `__dict__` key target the code only reads names nothing: a class declares no such key, so
+/// only a write of it (an item store, `setdefault`, construction) makes it exist. An
+/// attribute the class declares stays named by its declaration, also when only read through the
+/// namespace.
+#[test]
+fn a_dict_key_only_read_names_nothing() {
+    let p = Project::new("unmatched_read_only_key");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\
+         unmatched-contract-entries = \"error\"\n\n\
+         [[tool.heki.write-owners]]\nname = \"field-cache\"\n\
+         targets = [\"pkg.model.Field._cache\", \"pkg.model.Field._gone\", \
+         \"pkg.model.Field._stored\", \"pkg.model.Field._updated\", \"pkg.model.Field.kind\"]\n\
+         allowed-writers = [\"pkg.store:*\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/model.py",
+        "class Field:\n    def __init__(self) -> None:\n        self.kind = \"str\"\n",
+    )
+    .write(
+        "pkg/reader.py",
+        "from pkg.model import Field\n\nKEY = \"_cache\"\n\n\n\
+         def read(field: Field) -> object:\n    return field.__dict__.get(KEY)\n\n\n\
+         def read_item(field: Field) -> object:\n    return field.__dict__[\"_stored\"], field.__dict__[\"kind\"]\n",
+    )
+    .write(
+        "pkg/store.py",
+        "from pkg.model import Field\n\n\ndef write(field: Field) -> None:\n    \
+         field.__dict__[\"_stored\"] = 1\n    field.__dict__.setdefault(\"_updated\", 1)\n",
+    );
+    let (code, stdout, stderr) = p.heki(&["check"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert_eq!(
+        lines(&stderr, "error: "),
+        [
+            "`targets` entry `pkg.model.Field._cache` of write-owners `field-cache` names no attribute, method, or `__dict__` key of `pkg.model.Field` in the analyzed files",
+            "`targets` entry `pkg.model.Field._gone` of write-owners `field-cache` names no attribute, method, or `__dict__` key of `pkg.model.Field` in the analyzed files",
+        ],
+        "{stderr}"
     );
 }

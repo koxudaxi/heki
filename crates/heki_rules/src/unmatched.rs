@@ -22,7 +22,7 @@ use crate::{
     CheckContext, DottedPattern, RuleConfigError, def_spellings, has_glob_syntax, last_name,
     split_last_dot,
 };
-use heki_effect::{AccessKind, ContractClass, FuncKey, Unresolved};
+use heki_effect::{AccessKind, ContractClass, FuncKey, ReadKind, Unresolved};
 use heki_env::{HekiConfig, UnmatchedEntries};
 use rustc_hash::{FxHashMap, FxHashSet};
 use schemars::JsonSchema;
@@ -486,7 +486,10 @@ impl<'a> ProjectNames<'a> {
                 functions_within.entry(part).or_default().push(key);
             }
             let writes = (s.typed_field_write_sites.iter()).map(|w| (&w.class_qualname, &w.attr));
-            let reads = (s.typed_field_read_sites.iter()).map(|r| (&r.class_qualname, &r.attr));
+            // A key read through the namespace exists only where some code writes it.
+            let reads = (s.typed_field_read_sites.iter())
+                .filter(|r| r.kind != ReadKind::DictDirect)
+                .map(|r| (&r.class_qualname, &r.attr));
             for (class, attr) in writes.chain(reads) {
                 accessed.entry(class).or_default().insert(attr);
             }

@@ -1516,6 +1516,17 @@ impl Allowance {
             || self.targets.as_ref().is_some_and(|t| t.any(key))
     }
 
+    /// Whether the contract only narrows where it applies (`forbidden-*` without any `allowed-*`
+    /// or `exempt-methods`): it allows no function, so it judges no write outside the
+    /// forbidden ones.
+    pub(crate) fn only_forbids(&self) -> bool {
+        !self.forbidden.is_empty()
+            && self.allowed.is_empty()
+            && self.exempt_names.is_empty()
+            && self.exempt_patterns.is_empty()
+            && self.targets.is_none()
+    }
+
     /// Whether `exempt-methods` names `key`.
     pub(crate) fn exempts(&self, key: &FuncKey) -> bool {
         let name = key.qualname.rsplit('.').next().unwrap_or(&key.qualname);
@@ -2862,7 +2873,9 @@ impl OwnerRule<'_> {
 /// The `__dict__` keys the `write-owners` contracts name, by class (`unlisted-dict-keys`): a
 /// target names the keys its attribute pattern matches (an entry target its container) on every
 /// class of its family, whichever contract declares it. A key one contract guards is a listed
-/// key of the class for every other contract, whose own allowance does not cover it.
+/// key of the class for every other contract, whose own allowance does not cover it. A contract
+/// that only forbids writers (`forbidden-writers` without `allowed-writers`) judges no other
+/// writer, so it names no key.
 struct NamedDictKeys<'r> {
     /// The targets covering each class (fqn); empty when no contract reports unlisted keys.
     by_class: FxHashMap<&'r str, Vec<&'r ContractTarget>>,
@@ -2872,7 +2885,8 @@ impl<'r> NamedDictKeys<'r> {
     fn new(rules: &'r [OwnerRule<'_>]) -> Self {
         let mut by_class: FxHashMap<&str, Vec<&ContractTarget>> = FxHashMap::default();
         if rules.iter().any(|r| r.report_unlisted_keys) {
-            for target in rules.iter().flat_map(|r| &r.targets) {
+            let listing = rules.iter().filter(|r| !r.allowance.only_forbids());
+            for target in listing.flat_map(|r| &r.targets) {
                 for class in &target.classes {
                     by_class.entry(class).or_default().push(target);
                 }

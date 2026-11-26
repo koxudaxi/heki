@@ -425,7 +425,8 @@ namespace of an object of a class a target covers (`field.__dict__[KEY] = v`,
 class names the key, in this contract or in any other `write-owners` contract, so a new cache key
 needs a target first. A target names the keys its attribute pattern matches (`Field._*` names
 `_cache`), and an entry target names its container. A key another contract names is that
-contract's to guard: its writes are judged by that contract's allowance alone. The contract's
+contract's to guard: its writes are judged by that contract's allowance alone. A contract with only
+`forbidden-writers` allows no writer, so it names no key. The contract's
 allowance applies to an unlisted key as to a target write. A key a loop takes from a tuple,
 list, or set of string constants, or from a module's tuple of them, writes each of them, and so
 does the key of each pair a generator of them gives `update`. A key computed at run time has no
@@ -1142,8 +1143,8 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
 - A `Class.attr` entry needs a project class, and an attribute the class family has: a name its
   class body binds (a method, an annotation, an assignment), one its methods or its module set
   on its instances, one of a project base, an attribute or a constant `__dict__` key the code
-  writes or reads on an object typed with the class or a subclass, or one written on an object
-  heki cannot type. A key a loop takes from a tuple, list, or set of string constants
+  writes on an object typed with the class or a subclass (a `__dict__` key only read does not
+  exist), or one written on an object heki cannot type. A key a loop takes from a tuple, list, or set of string constants
   (`for key in ("_a", "_b")`), or from a module's tuple of them (`for key in RECORDS`), names
   each of them, a list or set only while no code changes it, and so does the key of each pair a
   generator of them gives `update` (`ns.update((key, v) for key in RECORDS)`). A module
