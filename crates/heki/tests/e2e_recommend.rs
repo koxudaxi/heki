@@ -181,6 +181,10 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
          \x20 - heki check does not fail on 1 report(s) shown now: warnings, and heuristic \
          reports, which can be wrong about the code and count as warnings; `fail-on = \
          \"warning\"` in the lint settings makes them fail it.\n\
+         \x20 - the contract candidates are invariants the code keeps today, not architectural \
+         intent: adopt only the boundaries you intend to keep, give each an actionable \
+         `message`; consider a CODEOWNERS-protected heki.toml, and put the legacy violations of \
+         a stricter wall in a Ratchet baseline, not in an `allowed-*` list.\n\
          \n\
          pyproject.toml: keys to add or change\n\
          \x20 [tool.heki.lint]\n\
@@ -295,7 +299,13 @@ fn the_json_object_names_the_project_and_its_run() {
     assert_eq!(
         (&report["notes"], &report["config"], &report["config_toml"]),
         (
-            &json!(exit_notes(1, 1)),
+            &json!(
+                [
+                    exit_notes(1, 1),
+                    vec![common::recommend_candidates_note(false)]
+                ]
+                .concat()
+            ),
             &json!({"lint": {"extend-select": ["EFF101"]},
                     "effect-boundaries": [{"name": "app.lists without blocking calls",
                                            "scopes": ["app.lists:*"], "forbid": ["blocking"]}]}),
@@ -319,6 +329,25 @@ fn the_json_object_names_the_project_and_its_run() {
         (&ignoring["config"], &ignoring["notes"]),
         (&json!({}), &json!(notes))
     );
+}
+
+/// With `fail-on = "warning"` set, the note on the contract candidates does not ask for it.
+#[test]
+fn the_candidates_note_does_not_ask_for_a_fail_on_that_is_set() {
+    let p = shop("recommend_candidates_note_fail_on");
+    p.write("heki.toml", "[lint]\nfail-on = \"warning\"\n");
+    let (_, report, _) = recommend_json(&p, &[]);
+    assert_eq!(
+        report["contracts"].as_array().map(Vec::len),
+        Some(1),
+        "{report:#}"
+    );
+    let notes = report["notes"].as_array().unwrap();
+    assert!(
+        notes.contains(&json!(common::recommend_candidates_note(false))),
+        "{notes:?}"
+    );
+    assert_eq!(notes.len(), 2, "{notes:?}");
 }
 
 #[test]

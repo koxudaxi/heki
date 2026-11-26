@@ -423,17 +423,14 @@ pub const CACHED_RESULT_NOT_ESTABLISHED: [&OpenCause; 3] = [
 
 pub const SAME_OBJECT: Premise = Premise {
     name: "Same object",
-    states: "the changed object is the cached call's result on every path, with no copy, and the call runs the cached function (R1)",
-    decided_in: &[
-        "heki_rules::mut_rules::Mut202Fn::must_results",
-        "heki_effect::resolver::ProjectDecls::call_rebound",
-    ],
+    states: "the changed object is the cached call's result on every path, with no copy",
+    decided_in: &["heki_rules::mut_rules::Mut202Fn::must_results"],
 };
 
 pub const NOT_THE_RESULT_ON_EVERY_PATH: OpenCause = OpenCause {
     id: "not-the-result-on-every-path",
     premise: &SAME_OBJECT,
-    states: "the changed object is not established to be the result of a direct call of the cached function on every path: another value on some path, a value derived from it (an item, an attribute, the contents of a copy), or a call that may run another object, as the project binds a name it goes through again (R1)",
+    states: "the changed object is not established to be the result of a direct call of the cached function on every path: another value on some path, a value derived from it (an item, an attribute, the contents of a copy), or a call that resolves to more than one function",
     closer: Closer::Code,
 };
 
@@ -1192,6 +1189,7 @@ pub fn of_rule(code: &str) -> &'static [&'static Premise] {
             &KEYED,
             &CONTAINER_KIND,
             &SAME_OBJECT,
+            &EVERY_IMPLEMENTATION,
             &CHANGED_IN_PLACE,
         ],
         "MUT119" => &[&NEW_OBJECT, &UNNAMED, &CHANGED_IN_PLACE],

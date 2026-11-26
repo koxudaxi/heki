@@ -981,7 +981,7 @@ class Helpers(unittest.TestCase):
 class PremiseTable(unittest.TestCase):
     table = {
         "EFF101": ["Every return", "Every implementation", "Waits"],
-        "MUT114": ["Cached", "Keyed", "Container kind", "Same object", "Changed in place"],
+        "MUT114": ["Cached", "Keyed", "Container kind", "Same object", "Every implementation", "Changed in place"],
     }
 
     def test_the_generator_strips_every_premise_of_the_table(self):
@@ -1000,7 +1000,7 @@ class PremiseTable(unittest.TestCase):
             premise = project.premise
             self.assertIn(premise["stripped"], [None, *self.table[premise["rule"]]])
             seen.add((premise["rule"], premise["stripped"]))
-        self.assertEqual(len(seen), 4 + 6)
+        self.assertEqual(len(seen), 4 + 7)
 
     def report(self, rule):
         return {"rule_code": rule, "certainty": "exact", "path": "app/s0.py", "line": 3, "related": []}

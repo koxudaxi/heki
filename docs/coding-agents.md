@@ -4,6 +4,8 @@ heki gives coding agents (Claude Code, Codex, Cursor, and similar) the checks it
 every diagnostic says what was proven, where the evidence is, and what blocks a fix. `heki
 inspect` says what one function does, so an agent does not read its callees to find out. The
 [Agent Skill](#agent-skill-experimental) teaches an agent the routine of this page after an edit.
+To make a project's architecture rules binding for agents, with CI, a Stop hook, and the skill,
+follow [the whole setup, end to end](#the-whole-setup-end-to-end).
 
 ## Analyze the project, not one file
 
@@ -155,6 +157,52 @@ change, and an agent cannot move a wall to make a report go away.
 contracts' reports: record today's findings in the baseline first, so that only new ones fail.
 The [starter recipe](adoption.md#walls-for-a-team-or-a-coding-agent) has the whole file.
 
+### Keep the walls thin
+
+Three layers carry the checks, and only the last one is written by hand:
+
+1. The default rules report the bugs that need no declaration.
+2. [`MUT103` snapshots](adoption.md#effect-snapshots-mut103) report a change of a public function's effects.
+3. A dedicated `heki.toml` holds the core boundaries the team wants enforced, and nothing else.
+
+A contract list nobody can review stops protecting anything. Declare a wall when breaking it is a
+decision for the maintainers, not when the code happens to keep it today.
+
+### Draft walls over legacy code
+
+`heki recommend` lists the contracts the code already keeps. They are invariants of today, not
+architectural intent, and an agent that copies every one of them, or every existing writer,
+caller, or import into an `allowed-*` list, writes today's debt into the architecture. Declare the
+wall the team wants, and record what already crosses it in a [Ratchet baseline](adoption.md#ratchet-baselines),
+so that the old violations can only shrink and a new one fails at once.
+
+1. The agent inspects the code with `heki recommend`, `heki inspect`, and `heki inspect
+   --imports`.
+2. It proposes a thin ideal wall in `heki.toml`, with `fail-on = "warning"` and a `message` that
+   says what to write instead. The old and undesired writers, readers, callers, and imports stay
+   out of `allowed-*`.
+3. The maintainer approves the change to `heki.toml`, which is protected by `CODEOWNERS`.
+4. The violations that exist today go to the baseline:
+   `heki check --baseline heki-baseline.toml --update-baseline`.
+
+The agent presents the change as a small diff: what each wall protects, why, and how many old
+violations enter the baseline. It never widens an `allowed-*` list, loosens `forbid`, grows the
+baseline, or adds a suppression without the maintainer's approval. The
+[Agent Skill](#agent-skill-experimental) carries this protocol in `references/contracts.md`, and
+`heki check --generate-prompt` repeats it in its guidance.
+
+### Review a contract change from an agent
+
+Before approving a pull request that adds or changes contracts:
+
+1. No `allowed-*` list holds a legacy workaround: every entry is a function or module that should
+   write, read, call, or import the target.
+2. Every `message` says what to write instead, so that an agent can act on it.
+3. `heki.toml`, the baseline, and the CI configuration are protected by `CODEOWNERS`.
+4. The baseline did not grow, and no new `# heki: ignore[...]` or `# noqa` hides a report: compare
+   the `heki check --report-suppressed <PATH>` file of the pull request with the base branch's
+   ([Auditing inline suppressions](adoption.md#auditing-inline-suppressions)).
+
 ### A Stop hook for Claude Code
 
 A [Stop hook](https://code.claude.com/docs/en/hooks) runs when Claude Code is about to end its turn.
@@ -177,7 +225,8 @@ printf '%s\n' "$report" >&2
 exit 2
 ```
 
-Register it in `.claude/settings.json`:
+Save it as `.claude/hooks/heki-stop.sh`, make it executable with `chmod +x .claude/hooks/heki-stop.sh`, and
+register it in `.claude/settings.json`:
 
 ```json
 {
@@ -189,6 +238,123 @@ Register it in `.claude/settings.json`:
 
 Run on a project with findings that are already known, it would block every turn: use
 `heki check --baseline heki-baseline.toml` in the script so that only new findings count.
+
+### The whole setup, end to end
+
+One pull request adds the walls, and every later pull request, from a person or an agent, runs
+against them. Replace `app` with your package.
+
+1. Put the walls in a `heki.toml` of their own, with `fail-on = "warning"` and the baseline path.
+   heki reads the first of `heki.toml`, `.heki.toml`, and `pyproject.toml` it finds and does not
+   merge them: a project that already has `[tool.heki]` in `pyproject.toml` must move every
+   setting into `heki.toml` (without the `tool.heki` prefix), or they stop applying:
+
+    ```toml
+    # heki.toml
+    baseline = "heki-baseline.toml"
+
+    [lint]
+    fail-on = "warning"   # contract reports are heuristic: let them fail the run
+
+    [[write-owners]]
+    name = "order-store"
+    targets = ["app.models.Order.items"]
+    allowed-writers = ["app.store.*"]
+    message = "change Order.items through app.store"
+    ```
+
+2. Record today's findings, the old crossings of the walls among them, so that only new ones
+   fail:
+
+    ```console
+    $ uvx heki check --update-baseline
+    ```
+
+3. Give the files that decide the checks an owner. Branch protection must require a review from
+   code owners for this to bind:
+
+    ```text
+    # .github/CODEOWNERS
+    /heki.toml           @your-org/maintainers
+    /heki-baseline.toml  @your-org/maintainers
+    /.github/workflows/  @your-org/maintainers
+    /.github/CODEOWNERS  @your-org/maintainers
+    /.claude/            @your-org/maintainers
+    /.agents/            @your-org/maintainers
+    /AGENTS.md           @your-org/maintainers
+    /CLAUDE.md           @your-org/maintainers
+    ```
+
+4. Run the checks on every pull request. The first step runs the walls with the baseline. The
+   second compares the pull request with its protected base branch: no inline suppression that
+   hides a report may be new ([Auditing inline suppressions](adoption.md#auditing-inline-suppressions)),
+   and no public function may have gained an effect
+   ([`MUT103` against the base](adoption.md#comparing-with-the-protected-base)):
+
+    ```yaml
+    # .github/workflows/heki.yml
+    name: heki
+    on: pull_request
+    permissions:
+      contents: read
+    jobs:
+      heki:
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/checkout@v7
+            with:
+              fetch-depth: 0   # the base branch is compared below
+          - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+          - name: Walls
+            run: uvx heki check
+          - name: Compare with the base branch
+            shell: bash
+            env:
+              BASE: ${{ github.base_ref }}
+              TARGET: py312   # your project's target version
+            run: |
+              git worktree add ../base "origin/$BASE"
+              keys() { jq -r '.suppressed[] | [.file, .function, .code, .target] | @tsv' "$1" | sort; }
+              uvx heki check --report-suppressed "$RUNNER_TEMP/head.json" > /dev/null || test "$?" -eq 1
+              (cd ../base && uvx heki check --report-suppressed "$RUNNER_TEMP/base.json" > /dev/null || test "$?" -eq 1)
+              new=$(diff <(keys "$RUNNER_TEMP/base.json") <(keys "$RUNNER_TEMP/head.json") | grep '^>' || true)
+              test -z "$new" || { echo "New inline suppressions:"; echo "$new"; exit 1; }
+              (cd ../base && uvx heki snapshot --config "$GITHUB_WORKSPACE/heki.toml" --target-version "$TARGET" > "$RUNNER_TEMP/base-summary.json")
+              uvx heki check --select MUT103 --fail-on warning --target-version "$TARGET" --snapshot "$RUNNER_TEMP/base-summary.json" \
+                --report-suppressed "$RUNNER_TEMP/mut103.json"
+              hidden=$(keys "$RUNNER_TEMP/mut103.json")
+              test -z "$hidden" || { echo "Effect changes hidden by inline suppressions:"; echo "$hidden"; exit 1; }
+    ```
+
+    The suppression audit runs the base branch with its own `heki.toml` and baseline, so the pull
+    request cannot change what it is compared with. The `MUT103` comparison needs the same
+    settings on both sides: the base snapshot is made with the pull request's `heki.toml`
+    (`--config`) and the same `--target-version` as the check, so a pull request that changes
+    the settings does not make unchanged code look different. The settings change itself is a
+    change to a protected file. `MUT103` is opt-in, so the first audit does not see a
+    `# heki: ignore[MUT103]`; the last run writes its own audit file, and any entry in it fails the
+    step, since the base compared with its own snapshot has no `MUT103` report to hide. `--report-suppressed` and `--snapshot` came after heki 0.7.0, so a pinned
+    `uvx heki==<version>` here needs a later release. The base checkout sits next to the project
+    (`../base`), not inside it, so that heki does not analyze it too.
+
+5. For Claude Code, add the [Stop hook](#a-stop-hook-for-claude-code) and register it in
+   `.claude/settings.json`: the agent then sees a failing report before it ends its turn, not
+   after CI. Its `heki check` reads the baseline `heki.toml` names, and it needs `heki` on the
+   path (`uv tool install heki`).
+
+6. Install the [skill](#install-the-skill) (experimental) and commit it, so that every clone has it, and put the
+   three lines of [Architecture rules with agents](#architecture-rules-with-agents) in `AGENTS.md`
+   or `CLAUDE.md`:
+
+    ```console
+    $ heki skill install --agent claude-code
+    $ heki skill install --agent codex
+    ```
+
+What each layer catches: the hook gives the agent the report at once, the first CI step fails a
+pull request that crosses a wall or adds a finding, and the comparison step fails one that hides
+a report instead of fixing it or gives a public function a new effect. A change to the walls, the
+baseline, the workflow, the hook, or the agent instructions is a change to a protected file, so a maintainer reads it.
 
 ## What a function does: `heki inspect` (experimental)
 
@@ -267,7 +433,7 @@ $ heki check --output-format-json-schema generate-prompt
 | Configuration | the project root, the configuration file, the target version, the source roots (with the packages of flat workspace members), the rule selection in effect (`select`, `extend-select`, `ignore`, `per-file-ignores`, `lint.heuristic`, `fail-on`), the baseline, and the declared contracts as TOML |
 | Rules that apply | each rule the run applies: its code, name, certainty, activation, and the first paragraph of its "What a report states" |
 | Diagnostics | the diagnostics of the run in the `concise` form (with a baseline, the reports it does not allow), up to 16 KiB of lines, with a note counting the rest, and the files heki could not analyze |
-| How to answer | fix at the root cause, do not suppress, check `heuristic` reports, rely on proven fixes only, how a contract is written, and what the answer holds |
+| How to answer | fix at the root cause, do not suppress, never weaken a contract or grow a baseline to pass, check `heuristic` reports, rely on proven fixes only, how a contract is written (a thin wall, old violations in a baseline), and what the answer holds |
 
 - A word after the option is the question: put the paths before it.
 - The prompt comes from the analysis `heki check` runs with the same options and configuration.
@@ -292,7 +458,8 @@ runs: `heki check --output-format json` on the project, the diagnostics the edit
 acting on them, and only the fixes heki proves safe. `heki inspect` and
 `heki check --generate-prompt` are for when a function or a diagnostic is in question. Its
 `SKILL.md` links this page, and its `references/` hold the output fields, what to do when a
-command does not behave as expected, and a playbook for adopting heki in a repository.
+command does not behave as expected, a playbook for adopting heki in a repository, and the
+protocol for drafting and changing contracts.
 
 The skill is experimental: its wording, when agents load it, and the install commands can change
 as the agents evolve.

@@ -1096,6 +1096,11 @@ pub struct ModuleDecls {
     /// and where an import names them ([`ProjectDecls::declared_ty`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub type_names: BTreeMap<String, Ty>,
+    /// The [`Self::type_names`] whose type may also be `None`, which their type leaves out
+    /// (`MaybeModel = Optional[Model]`, a `TypeVar` bound to `Model | None`): calling a
+    /// `Callable[..., MaybeModel]` gives no known class ([`Self::admits_none`]).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub nullable_type_names: BTreeSet<String>,
     /// The module globals the module stores or deletes (in its body, or in a function after
     /// `global name`) that are no runtime import, class, or function of it: its own objects,
     /// of a value heki may not know ([`Symbol::Unknown`]), never a builtin of the same name.
@@ -1520,8 +1525,42 @@ impl ModuleDecls {
                 _ => Args::Tuple((0..args.len()).map(elem).collect()),
             },
             Some(Generic::Held) => Args::result(elem(0)),
+            // `Callable[[A, B], T]`, `Callable[..., T]`: a result that may be `None` is no
+            // instance of a class, though the annotation reads `T | None` as `T`.
+            Some(Generic::Returns) => match args.as_slice() {
+                [_, result] if !self.admits_none(result) => {
+                    Args::returns(self.resolve_annotation_ty(result))
+                }
+                _ => Args::None,
+            },
         };
         Some(Ty::container(&class, args))
+    }
+
+    /// Whether the type the annotation `text` names may be `None`: `None`, a union with a member
+    /// that may be (`T | None`, `Optional[T]`, `Union[T, None]`), what the qualifiers
+    /// [`Self::resolve_annotation_ty`] looks through wrap, and a name of the module whose type
+    /// may be ([`Self::nullable_type_names`]; one an import names is
+    /// [`ProjectDecls::nullable_type_name`]).
+    pub(crate) fn admits_none(&self, text: &str) -> bool {
+        let t = unquote(text);
+        let parts = split_top_level(t, '|');
+        if parts.len() > 1 {
+            return parts.iter().any(|p| self.admits_none(p));
+        }
+        let Some((head, inner)) = subscript(t) else {
+            return t == "None" || self.nullable_type_names.contains(t);
+        };
+        match head.rsplit('.').next().unwrap_or(head) {
+            "Optional" => true,
+            "Union" => split_top_level(inner, ',')
+                .iter()
+                .any(|m| self.admits_none(m)),
+            "Annotated" | "Final" | "ClassVar" | "Required" | "NotRequired" | "ReadOnly" => {
+                self.admits_none(first_arg(inner))
+            }
+            _ => false,
+        }
     }
 
     /// The members of a union annotation other than `None`: one type, or instances of at most
@@ -5208,7 +5247,13 @@ impl ProjectDecls {
             {
                 return None;
             }
-            let args = o.args.map_elems(|t| self.declared_ty_with(t, names));
+            let args = match &o.args {
+                // A result of a type an import names that may also be `None`.
+                Args::Returns(r) if r.obj().is_some_and(|r| self.nullable_type_name(&r.class)) => {
+                    Args::None
+                }
+                args => args.map_elems(|t| self.declared_ty_with(t, names)),
+            };
             Some(crate::types::Obj { class, args })
         };
         let members = ty.members();
@@ -5246,6 +5291,14 @@ impl ProjectDecls {
         let named = self.named_through(fqn, Chase::Types);
         let (m, rest) = self.split_module(&named)?;
         m.type_names.get(rest)
+    }
+
+    /// Whether the type the project name `fqn` names ([`Self::type_name`]) may also be `None`
+    /// ([`ModuleDecls::nullable_type_names`]).
+    fn nullable_type_name(&self, fqn: &str) -> bool {
+        let named = self.named_through(fqn, Chase::Types);
+        self.split_module(&named)
+            .is_some_and(|(m, rest)| m.nullable_type_names.contains(rest))
     }
 
     /// The canonical class of the class object type `type[C]` ([`Ty::Class`]) for the name `C`
@@ -6855,8 +6908,9 @@ fn ty_classes(ty: &Ty, out: &mut Vec<String>) {
     for obj in ty.members() {
         out.push(obj.class.clone());
         let items: Vec<&Elem> = match &obj.args {
-            // The named objects a field holds are no classes of instances.
-            Args::None | Args::Fields(_) => Vec::new(),
+            // The named objects a field holds are no classes of instances, nor is what calling
+            // a callable gives.
+            Args::None | Args::Fields(_) | Args::Returns(_) => Vec::new(),
             Args::Items(e) | Args::Result(e) => vec![e.as_ref()],
             Args::Map(k, v) => vec![k.as_ref(), v.as_ref()],
             Args::Tuple(es) => es.iter().collect(),
@@ -9307,6 +9361,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     aliases: BTreeMap::new(),
     alias_paths: BTreeMap::new(),
     type_names: BTreeMap::new(),
+    nullable_type_names: BTreeSet::new(),
     unknown_globals: BTreeSet::new(),
     rebound_imports: None,
     small_globals: BTreeMap::new(),

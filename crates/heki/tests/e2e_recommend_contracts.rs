@@ -1250,7 +1250,8 @@ fn what_the_configuration_declares_or_ignores_is_not_proposed() {
         ignoring["notes"],
         json!([
             "the configuration ignores MUT203, so no read-owners contract is proposed",
-            "the configuration ignores EFF201, so no effect-boundaries contract is proposed"
+            "the configuration ignores EFF201, so no effect-boundaries contract is proposed",
+            common::recommend_candidates_note(true)
         ])
     );
 }

@@ -471,6 +471,9 @@ def mut114(sc, strip):
             sc.frozen = True
             build = f"Frozen_{sc.ns}({build})"
     body = ['name = "fixed"', f"return {build}"] if strip == "Keyed" else [f"return {build}"]
+    if strip == "Every implementation":
+        _cached_through_a_protocol(sc, deco, annotation, body, change)
+        return
     sc.define([deco] + block(f"def {cached}({params}){annotation}:", body))
     call = f"{cached}({'' if strip == 'Keyed' else 'name'})"
     lines = [f"result = {call}"]
@@ -479,6 +482,25 @@ def mut114(sc, strip):
     entry = sc.name("use")
     sc.define(block(f"def {entry}(name, {sc.params}):", lines + [change, "return result"]))
     _add_inputs(sc, entry, lambda k: [["a", "b"][k % 2]])
+
+
+def _cached_through_a_protocol(sc, deco, annotation, body, change):
+    """The cached function is the project's one implementation of a protocol's `split`, called on
+    a value typed by the protocol; a `str` has the method too, and its `split` hands out a new
+    list on every call, so on those inputs the line changes no list a cache keeps."""
+    sc.imports("from typing import Protocol")
+    proto, klass = sc.name("Splits"), sc.name("Cached")
+    sc.define(block(f"class {proto}(Protocol):", block("def split(self, name):", ["..."])))
+    sc.define(block(f"class {klass}:", [deco] + block(f"def split(self, name){annotation}:", body)))
+    entry = sc.name("use")
+    lines = ["result = source.split(name)", change, "return result"]
+    sc.define(block(f"def {entry}(name, source: {proto}, {sc.params}):", lines))
+
+    def values(k):
+        source = "a,b" if k % 2 else {"$obj": [f"{sc.main_module}:{klass}", [], {}]}
+        return [["a", "b"][k % 2], source]
+
+    _add_inputs(sc, entry, values)
 
 
 def mut115(sc, strip):
@@ -1066,7 +1088,7 @@ STRIPS = {
         "Reads the property",
         "Runs the writer",
     ],
-    "MUT114": ["Cached", "Keyed", "Container kind", "Same object", "Changed in place"],
+    "MUT114": ["Cached", "Keyed", "Container kind", "Same object", "Every implementation", "Changed in place"],
     "MUT115": ["Shallow copy", "Borrowed original", "Still shared", "Changed below the copy"],
     "MUT118": ["Object sentinel", "Held by the class", "Tested by identity", "Deep-copied"],
     "MUT119": ["New object", "Unnamed", "Changed in place"],
