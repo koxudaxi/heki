@@ -399,10 +399,18 @@ arguments of other bases give no class. A class method the catalog says returns 
 class gives an instance of that class, as one a project class annotates `-> Self` does.
 
 A name another module binds only under `if TYPE_CHECKING:` (no other statement of it stores or
-deletes the name, `ModuleDecls::type_checking_only`, so a module `__getattr__` may serve it at
-run time) is what that import names, as for a type checker: an import of it, an annotation
-naming it, and a class based on it follow it (`ProjectDecls::canonical`). A value read through
-it is no value heki knows (`ProjectDecls::canonical_value`).
+deletes the name, `ModuleDecls::type_checking_only`) is what that import names for the chases
+that read names as a type checker does (`resolver::Chase::reads_type_checking`): an annotation
+naming it (`ProjectDecls::declared_ty`), a type name, and a base of a class
+(`ProjectDecls::declared_mro`). At run time a module `__getattr__` may serve another object
+under it, or none, so the chases that decide what a name holds or runs (`ProjectDecls::canonical`,
+`object_named`, `canonical_value`) stop at it: calling it, or reading a value through it, is no
+call or value heki knows. A method call on a class based on such a name finds the method along
+the MRO a type checker reads, which types the call (`model_copy()` has the receiver's class) and
+gives its targets, but those are never every target (`ProjectDecls::lookup_rebound`): a report
+resting on them is heuristic, under the open premise "incomplete-targets". The facts that decide
+what the class's instances run otherwise (special methods, attribute hooks, stores) read the base
+as a base heki knows nothing of (`ProjectDecls::mro`).
 
 Some receivers have the class the language or the standard library gives them. An instance's
 own namespace (`obj.__dict__`, or `vars(obj)` of the builtin: `resolver::namespace_load`) is a

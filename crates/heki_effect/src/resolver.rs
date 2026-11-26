@@ -1055,8 +1055,8 @@ pub struct ModuleDecls {
     pub is_package: bool,
     /// Module-scope runtime imports: `bound name -> fqn`.
     pub imports: BTreeMap<String, String>,
-    /// `if TYPE_CHECKING:` imports: for annotation resolution, and for another module's import
-    /// of a name the module binds no other way ([`Self::type_checking_binding`]).
+    /// `if TYPE_CHECKING:` imports: for annotation resolution, and for another module's name of
+    /// a type the module binds no other way ([`Self::type_checking_binding`]).
     pub type_checking_imports: BTreeMap<String, String>,
     /// The names of [`Self::type_checking_imports`] that no other statement of the module
     /// stores or deletes: at run time the module does not bind them.
@@ -1371,7 +1371,8 @@ impl ModuleDecls {
     }
 
     /// What the `if TYPE_CHECKING:` import of `name` binds when no statement of the module binds
-    /// the name at run time: a type checker reads `from module import name` elsewhere as that.
+    /// the name at run time: a type checker reads `from module import name` elsewhere as that
+    /// ([`Chase::reads_type_checking`]).
     pub(crate) fn type_checking_binding(&self, name: &str) -> Option<&String> {
         self.type_checking_imports
             .get(name)
@@ -2372,8 +2373,9 @@ pub struct ProjectDecls {
     families: FxHashMap<(ContainerKind, FamilyLevel), FamilyMembers>,
     recorder: Recorder,
     /// The C3 linearizations computed so far of classes with multiple inheritance along their
-    /// bases (`Self::mro`); cleared with the indexes.
-    linearized: RwLock<FxHashMap<String, Vec<String>>>,
+    /// bases, by how the bases are named (`Self::mro`, `Self::declared_mro`); cleared with the
+    /// indexes.
+    linearized: RwLock<FxHashMap<(Chase, String), Vec<String>>>,
     /// One shared [`crate::ClassLine`] per class (`Self::lineage`); cleared with the indexes.
     lines: RwLock<FxHashMap<String, crate::SharedLine>>,
     /// The answers of [`Self::class_str_constant`] so far, by class, name, and whether the
@@ -2507,7 +2509,7 @@ enum Holds {
 }
 
 /// How far [`ProjectDecls::follow`] chases a name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Chase {
     /// Through re-exports ([`ProjectDecls::canonical`]).
     Reexports,
@@ -2520,6 +2522,31 @@ enum Chase {
     /// type expression reads as that type, whatever object its module also binds to it
     /// ([`ProjectDecls::type_name`]).
     Types,
+    /// [`Self::Reexports`] for the class a class statement names as a base, read as a type
+    /// checker reads it ([`ProjectDecls::declared_mro`]).
+    Bases,
+    /// [`Self::Objects`] for the class an annotation names ([`ProjectDecls::declared_ty`]).
+    Declared,
+}
+
+impl Chase {
+    /// Whether the chase reads a name as a type checker does: past a module's `if
+    /// TYPE_CHECKING:` import of a name it binds no other way
+    /// ([`ModuleDecls::type_checking_binding`]). At run time a module `__getattr__` may serve
+    /// another object under it, or none, so no chase deciding what a name holds or runs does.
+    fn reads_type_checking(self) -> bool {
+        matches!(self, Chase::Types | Chase::Bases | Chase::Declared)
+    }
+}
+
+/// What [`ProjectDecls::follow`] finds.
+struct Followed {
+    name: String,
+    /// The name is the object a class or function statement made rather than what it holds
+    /// once its module has run.
+    definition: bool,
+    /// The chase went past an `if TYPE_CHECKING:` import ([`Chase::reads_type_checking`]).
+    type_checking: bool,
 }
 
 /// `a`, `a.b`, and `a.b.c` of `a.b.c`.
@@ -2737,9 +2764,11 @@ impl ProjectDecls {
                         alias_names.insert(attr.clone());
                     }
                 }
+                // A class a type checker reads as a subclass may be one at run time: an
+                // instance of the base may be one of it.
                 for base in class.bases.iter().filter(|b| !is_unknown_base(b)) {
                     subclasses
-                        .entry(out.canonical(base))
+                        .entry(out.chase(base, Chase::Bases))
                         .or_default()
                         .push(fqn.clone());
                 }
@@ -2923,7 +2952,8 @@ impl ProjectDecls {
     /// or replaces the method's code ([`ModuleDecls::rebound_definitions`]), or another module
     /// stores into it, deletes it, or replaces its code ([`Self::rebound_elsewhere`]); or the
     /// project gives a project class of `mro` other bases (`__bases__`), or its instances
-    /// another class (`__class__`).
+    /// another class (`__class__`); or the lookup reaches a base named only under `if
+    /// TYPE_CHECKING:` ([`Self::typing_only_base`]) before a class binding the name.
     pub(crate) fn lookup_rebound(&self, mro: &[String], name: &str) -> bool {
         // Only an analysis whose reads are recorded asks for keys no module stores yet. Every
         // call whose targets are checked asks for each class it may run on, along its MRO.
@@ -2934,6 +2964,9 @@ impl ProjectDecls {
                 .split_module(c)
                 .and_then(|(m, q)| Some((m, q, m.classes.get(q)?)))
             else {
+                if !found && self.typing_only_base(c) {
+                    return true;
+                }
                 continue;
             };
             let elsewhere = recording || self.rebound_owners.contains(c);
@@ -2955,6 +2988,14 @@ impl ProjectDecls {
             found |= decl.members.contains(name);
         }
         false
+    }
+
+    /// Whether the base `base` of an MRO ([`Self::mro`]) is a name its module binds only under
+    /// `if TYPE_CHECKING:`: a type checker reads it as the class that import names
+    /// ([`Self::declared_mro`]), but at run time a module `__getattr__` may serve another class.
+    fn typing_only_base(&self, base: &str) -> bool {
+        self.follow(base, Chase::Bases)
+            .is_some_and(|found| found.type_checking)
     }
 
     /// Whether another project module may change what the module global `fqn` holds: grow it
@@ -3420,24 +3461,24 @@ impl ProjectDecls {
     /// `None` when a module on the way binds the name it re-exports again
     /// ([`ModuleDecls::fixed_import`]).
     pub fn canonical_value(&self, fqn: &str) -> Option<String> {
-        self.follow(fqn, Chase::Values).map(|(found, _)| found)
+        self.follow(fqn, Chase::Values).map(|found| found.name)
     }
 
     /// `fqn` chased as `how` says (at most `MAX_ALIAS_CHASE` steps).
     fn chase(&self, fqn: &str, how: Chase) -> String {
         self.follow(fqn, how)
-            .map_or_else(|| fqn.to_owned(), |(found, _)| found)
+            .map_or_else(|| fqn.to_owned(), |found| found.name)
     }
 
-    /// [`Self::chase`]: `None` only for [`Chase::Values`]. With the name found, whether it is
-    /// the object a class or function statement made rather than what the name holds once its
-    /// module has run: a module alias names the object it bound (`_orig = fetch`, then `fetch =
-    /// _patched`), so a definition the module binds again stays that definition past it.
-    fn follow(&self, fqn: &str, how: Chase) -> Option<(String, bool)> {
-        let aliases = matches!(how, Chase::Objects | Chase::Types);
+    /// [`Self::chase`]: `None` only for [`Chase::Values`]. A module alias names the object it
+    /// bound (`_orig = fetch`, then `fetch = _patched`), so a definition the module binds again
+    /// stays that definition past it ([`Followed::definition`]).
+    fn follow(&self, fqn: &str, how: Chase) -> Option<Followed> {
+        let aliases = matches!(how, Chase::Objects | Chase::Types | Chase::Declared);
         let values = how == Chase::Values;
         let mut cur = fqn.to_owned();
         let mut aliased_in: Option<String> = None;
+        let mut type_checking = false;
         for _ in 0..MAX_ALIAS_CHASE {
             let Some((m, rest)) = self.split_module(&cur) else {
                 break;
@@ -3470,7 +3511,11 @@ impl ProjectDecls {
                         if rebound_definition
                             && aliased_in.as_deref() == Some(m.module_name.as_str())
                         {
-                            return Some((cur, true));
+                            return Some(Followed {
+                                name: cur,
+                                definition: true,
+                                type_checking,
+                            });
                         }
                     }
                     match m.aliases.get(first) {
@@ -3480,9 +3525,7 @@ impl ProjectDecls {
                         }
                         Some(_) => break,
                         // A name the module binds no other way is what its star imports bind,
-                        // else, for a type checker, what its `if TYPE_CHECKING:` import binds
-                        // (a module `__getattr__` may serve it at run time); a value read
-                        // through it is no value heki knows.
+                        // else, for a type checker, what its `if TYPE_CHECKING:` import binds.
                         None => match self.star_binding(m, first) {
                             StarBinding::Bound { target, .. } => {
                                 aliased_in = None;
@@ -3491,9 +3534,11 @@ impl ProjectDecls {
                             }
                             StarBinding::Open if values => return None,
                             StarBinding::Unbound
-                                if !values && let Some(target) = m.type_checking_binding(first) =>
+                                if how.reads_type_checking()
+                                    && let Some(target) = m.type_checking_binding(first) =>
                             {
                                 aliased_in = None;
+                                type_checking = true;
                                 target
                             }
                             StarBinding::Open | StarBinding::Unbound => break,
@@ -3510,7 +3555,11 @@ impl ProjectDecls {
             }
             cur = next;
         }
-        Some((cur, false))
+        Some(Followed {
+            name: cur,
+            definition: false,
+            type_checking,
+        })
     }
 
     /// Whether another module rebinds or deletes the module alias `name` of `module`
@@ -3526,6 +3575,12 @@ impl ProjectDecls {
     /// `pkg.model`). The name itself stays the alias's: only values are the object.
     pub fn object_named(&self, fqn: &str) -> String {
         self.named_through(fqn, Chase::Objects)
+    }
+
+    /// The class the name `fqn` names in an annotation: [`Self::object_named`], read as a type
+    /// checker reads it ([`Chase::Declared`]).
+    fn declared_class(&self, fqn: &str) -> String {
+        self.named_through(fqn, Chase::Declared)
     }
 
     /// The name `fqn` chased as `how` says, also past the class body binding it to another
@@ -3554,7 +3609,11 @@ impl ProjectDecls {
     /// of them, each through [`Self::object_named`], a definition of the module or class as the
     /// object its statement made.
     pub(crate) fn named_on_paths(&self, fqn: &str) -> Option<Ty> {
-        let (named, definition) = self.follow(fqn, Chase::Objects)?;
+        let Followed {
+            name: named,
+            definition,
+            ..
+        } = self.follow(fqn, Chase::Objects)?;
         if definition {
             return None;
         }
@@ -4957,28 +5016,42 @@ impl ProjectDecls {
     /// linearize (Python rejects the class statement, or a cycle) keeps the depth-first,
     /// left-to-right order.
     fn mro(&self, class: &str) -> Vec<String> {
+        self.mro_with(class, Chase::Reexports)
+    }
+
+    /// [`Self::mro`] with the bases a type checker reads ([`Chase::Bases`]): a base another
+    /// module binds only under `if TYPE_CHECKING:` is the class that import names. What a
+    /// method call finds along it types the call and is a target of it, never every target: at
+    /// run time such a base may be another class ([`Self::lookup_rebound`]).
+    fn declared_mro(&self, class: &str) -> Vec<String> {
+        self.mro_with(class, Chase::Bases)
+    }
+
+    /// [`Self::mro`] with the bases chased as `how` says.
+    fn mro_with(&self, class: &str, how: Chase) -> Vec<String> {
         let class = self.canonical(class);
         // The depth-first walk reads the declarations the linearization depends on.
-        let (order, multiple) = self.depth_first_bases(&class);
+        let (order, multiple) = self.depth_first_bases(&class, how);
         // Without multiple inheritance, the depth-first order is the linearization.
         if !multiple {
             return order;
         }
+        let key = (how, class);
         let known = self
             .linearized
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&class)
+            .get(&key)
             .cloned();
         if let Some(mro) = known {
             return mro;
         }
         let mut done = FxHashMap::default();
-        let mro = self.c3(&class, &mut done, &mut Vec::new()).unwrap_or(order);
+        let mro = (self.c3(&key.1, how, &mut done, &mut Vec::new())).unwrap_or(order);
         self.linearized
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(class, mro.clone());
+            .insert(key, mro.clone());
         mro
     }
 
@@ -4988,6 +5061,7 @@ impl ProjectDecls {
     fn c3(
         &self,
         class: &str,
+        how: Chase,
         done: &mut FxHashMap<String, Vec<String>>,
         open: &mut Vec<String>,
     ) -> Option<Vec<String>> {
@@ -4999,12 +5073,12 @@ impl ProjectDecls {
         }
         let bases: Vec<String> = self
             .class(class)
-            .map(|d| d.bases.iter().map(|b| self.canonical(b)).collect())
+            .map(|d| d.bases.iter().map(|b| self.chase(b, how)).collect())
             .unwrap_or_default();
         open.push(class.to_owned());
         let mut seqs: Vec<std::collections::VecDeque<String>> = Vec::new();
         for base in &bases {
-            seqs.push(self.c3(base, done, open)?.into());
+            seqs.push(self.c3(base, how, done, open)?.into());
         }
         open.pop();
         seqs.push(bases.into());
@@ -5035,7 +5109,7 @@ impl ProjectDecls {
 
     /// Depth-first, left-to-right base order (project and external classes), and whether a
     /// class along it has more than one base.
-    fn depth_first_bases(&self, class: &str) -> (Vec<String>, bool) {
+    fn depth_first_bases(&self, class: &str, how: Chase) -> (Vec<String>, bool) {
         let mut out = Vec::new();
         let mut multiple = false;
         let mut seen = FxHashSet::default();
@@ -5047,7 +5121,7 @@ impl ProjectDecls {
             if let Some(decl) = self.class(&c) {
                 multiple |= decl.bases.len() > 1;
                 for base in decl.bases.iter().rev() {
-                    stack.push(self.canonical(base));
+                    stack.push(self.chase(base, how));
                 }
             }
             out.push(c);
@@ -5298,7 +5372,7 @@ impl ProjectDecls {
         }
         let named = |o: &crate::types::Obj| self.type_name(&o.class).filter(|_| names);
         let canonical = |o: &crate::types::Obj| {
-            let class = self.object_named(&o.class);
+            let class = self.declared_class(&o.class);
             if let Some((m, rest)) = self.split_module(&class)
                 && !rest.contains('.')
                 && !m.classes.contains_key(rest)
@@ -5373,8 +5447,8 @@ impl ProjectDecls {
     /// bound to `Model`); `None` when that type is no instance of one class (a union).
     fn class_named(&self, class: &str, names: bool) -> Option<String> {
         match self.type_name(class).filter(|_| names) {
-            Some(t) => Some(self.object_named(&t.obj()?.class)),
-            None => Some(self.object_named(class)),
+            Some(t) => Some(self.declared_class(&t.obj()?.class)),
+            None => Some(self.declared_class(class)),
         }
     }
 
@@ -5847,6 +5921,7 @@ impl ProjectDecls {
     /// Resolve `instance_of(class).method(...)`: MRO definition plus overriding project
     /// subclasses (Priority 4 CHA). A method no project class defines is the symbol of the
     /// base outside the project that defines it ([`Self::inherited_external`]), or unresolved.
+    /// The MRO is the one a type checker reads ([`Self::declared_mro`]).
     pub(crate) fn method_targets(
         &self,
         class: &str,
@@ -5858,7 +5933,7 @@ impl ProjectDecls {
         if !self.is_project_class(&class) {
             return self.outside(format!("{class}.{method}"));
         }
-        let mro = self.mro(&class);
+        let mro = self.declared_mro(&class);
         let found = self.definitions_along(&mro, &class, method, skip_self, !skip_self, |_| true);
         if found.len() > CHA_CANDIDATE_LIMIT {
             return Callee::TooMany;
@@ -6008,8 +6083,9 @@ impl ProjectDecls {
     }
 
     /// Resolve `class.method` on the class object `class` itself (`Base.method(obj)`, and the
-    /// `__init__` of constructing it): the definition its MRO finds first. The overrides of
-    /// subclasses do not count: the class object is no subclass.
+    /// `__init__` of constructing it): the definition its MRO finds first
+    /// ([`Self::declared_mro`]). The overrides of subclasses do not count: the class object is
+    /// no subclass.
     pub(crate) fn class_targets(
         &self,
         class: &str,
@@ -6017,7 +6093,7 @@ impl ProjectDecls {
         kb: &EffectiveEcosystemKb,
     ) -> Callee {
         let class = self.canonical(class);
-        let mro = self.mro(&class);
+        let mro = self.declared_mro(&class);
         let found = self.definitions_along(&mro, &class, method, false, false, |_| true);
         if found.is_empty() {
             return self

@@ -3,7 +3,8 @@
 //! class's type parameter types read on an instance whose annotation gives the argument, and a
 //! base class another module binds only under `if TYPE_CHECKING:`. A write of a `__dict__` key
 //! no target names is `MUT205` only on an object of unknown class: each shape either names the
-//! class (no report) or leaves it open (reported).
+//! class (no report) or leaves it open (reported). A name bound only under `if TYPE_CHECKING:`
+//! types what it names but never decides what a call runs: the tier of `EFF101` tells it.
 
 mod common;
 
@@ -391,4 +392,92 @@ fn a_type_checking_binding_of_another_module_names_its_class() {
         ],
     );
     assert_eq!(unknown_receivers(&p), names(&["otherwise"]));
+}
+
+const LAZY_HTTP: &str = r#"from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from requests import Session as Session
+    from time import sleep as pause
+
+
+def __getattr__(name: str) -> Any:
+    if name == "pause":
+        from asyncio import sleep  # noqa: PLC0415
+
+        return sleep
+    if name == "Session":
+        from httpx import AsyncClient  # noqa: PLC0415
+
+        return AsyncClient
+    raise AttributeError(name)
+"#;
+
+const LAZY_HTTP_USE: &str = r#"import time
+
+from pkg.lazy_http import Session, pause
+
+
+class Client(Session):
+    def own(self) -> None:
+        time.sleep(1)
+
+    async def through_super(self) -> None:
+        super().get("https://example.com")
+
+
+async def paused() -> None:
+    pause(1)
+
+
+async def on_instance(client: Client) -> None:
+    client.get("https://example.com")
+
+
+async def on_class(client: Client) -> None:
+    Client.get(client, "https://example.com")
+
+
+async def own_method(client: Client) -> None:
+    client.own()
+"#;
+
+/// The `EFF101` reports of `p`, each as its line and its tier ([`common::tiered_code`]).
+fn eff101_reports(p: &Project) -> BTreeSet<(u64, String)> {
+    let (_, out, err) = p.check(&["--select", "EFF101", "--output-format", "json", "pkg"]);
+    assert!(!err.contains("error"), "{err}");
+    let reports: Vec<serde_json::Value> =
+        serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+    reports
+        .iter()
+        .map(|d| {
+            let line = d["line"].as_u64().expect("a report has a line");
+            (line, common::tiered_code(d).to_owned())
+        })
+        .collect()
+}
+
+/// A name a module binds only under `if TYPE_CHECKING:` types what it names, but does not say
+/// which object runs: a module `__getattr__` may serve another one. Calling it is no call of
+/// the function the import names, and a method a class finds only through a base named so is
+/// at most a heuristic target, on an instance, on the class, and through `super()`. A method of
+/// the class itself comes before that base and stays exact.
+#[test]
+fn a_type_checking_binding_never_decides_what_a_call_runs() {
+    let p = project(
+        "type_checking_calls",
+        &[("lazy_http.py", LAZY_HTTP), ("use.py", LAZY_HTTP_USE)],
+    );
+    let heuristic = |line: u64| (line, "EFF101 [heuristic]".to_owned());
+    // `super().get(...)`, `client.get(...)`, `Client.get(client, ...)`, and `client.own()`;
+    // `pause(1)` (line 15) is no report.
+    assert_eq!(
+        eff101_reports(&p),
+        BTreeSet::from([
+            heuristic(11),
+            heuristic(19),
+            heuristic(23),
+            (27, "EFF101".to_owned()),
+        ])
+    );
 }

@@ -769,11 +769,13 @@ const HELD_ATTR_UNNAMED: &str = "from pkg.made_models import Quiet\n\n\ndef repl
 // An attribute a class's type parameter types (`ClassDecl::param_attrs`), read in another file
 // on an instance whose annotation gives the argument (`Site[Waiter]`), and a base another
 // module binds only under `if TYPE_CHECKING:` (`ModuleDecls::type_checking_only`): the class
-// holds while those declarations say so.
+// holds while those declarations say so, and a method found through that base is no exact
+// target while the module binds the name only there.
 const GENERIC_SITE: &str = "from typing import Generic, TypeVar\n\nT = TypeVar(\"T\")\n\n\nclass Site(Generic[T]):\n    obj: T\n";
 const GENERIC_SITE_OBJECT: &str = "from typing import Generic, TypeVar\n\nT = TypeVar(\"T\")\n\n\nclass Site(Generic[T]):\n    obj: object\n";
 const GENERIC_SITE_USE: &str = "from pkg.generic_site import Site\nfrom pkg.made_models import Waiter\n\n\nasync def serve_site(site: Site[Waiter]) -> None:\n    site.obj.wait()\n";
 const LAZY_MODELS: &str = "from typing import TYPE_CHECKING, Any\n\nif TYPE_CHECKING:\n    from pkg.made_models import Waiter as Waiter\n\n\ndef __getattr__(name: str) -> Any:\n    from pkg import made_models\n\n    return getattr(made_models, name)\n";
+const LAZY_MODELS_RUNTIME: &str = "from pkg.made_models import Waiter as Waiter\n";
 const LAZY_MODELS_ELSE: &str = "from typing import TYPE_CHECKING, Any\n\nif TYPE_CHECKING:\n    from pkg.made_models import Waiter as Waiter\nelse:\n    Waiter: Any = object\n";
 const LAZY_USE: &str = "from pkg.lazy_models import Waiter\n\n\nclass LazyWaiter(Waiter):\n    pass\n\n\nasync def serve_lazy(w: LazyWaiter) -> None:\n    w.wait()\n";
 // A factory function and a class attribute annotated with the callable they hold
@@ -1876,10 +1878,12 @@ fn steps_returned_types() -> Vec<Step> {
 /// A read in another file of an attribute annotated with a type parameter of its class, on an
 /// instance annotated with an argument, while the class's annotation names the parameter; and a
 /// class based on a name another module binds only under `if TYPE_CHECKING:`, while that module
-/// binds it no other way.
+/// binds it no other way: the wait its method makes is heuristic until the module imports the
+/// name at run time.
 fn steps_declared_types() -> Vec<Step> {
     const SITE: &[(&str, &str)] = &[("pkg/generic_site_use.py", "EFF101")];
-    const LAZY: &[(&str, &str)] = &[("pkg/lazy_use.py", "EFF101")];
+    const LAZY: &[(&str, &str)] = &[("pkg/lazy_use.py", "EFF101 [heuristic]")];
+    const LAZY_EXACT: &[(&str, &str)] = &[("pkg/lazy_use.py", "EFF101")];
     vec![
         Step::new(
             "an attribute typed by the class's type parameter holds the waiting class",
@@ -1917,6 +1921,18 @@ fn steps_declared_types() -> Vec<Step> {
             vec![save("pkg/lazy_models.py", LAZY_MODELS)],
         )
         .present(LAZY),
+        Step::new(
+            "that module imports the name at run time",
+            vec![save("pkg/lazy_models.py", LAZY_MODELS_RUNTIME)],
+        )
+        .present(LAZY_EXACT)
+        .absent(LAZY),
+        Step::new(
+            "the import only under TYPE_CHECKING once more",
+            vec![save("pkg/lazy_models.py", LAZY_MODELS)],
+        )
+        .present(LAZY)
+        .absent(LAZY_EXACT),
     ]
 }
 
