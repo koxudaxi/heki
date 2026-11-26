@@ -120,6 +120,9 @@ Options:
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
 
+      --snapshot <PATH>
+          Summary snapshot (`heki snapshot` output) that `MUT103` compares with, in place of `.heki-summary-snapshot.json` at the project root. A file that is missing, unreadable, malformed or of an unsupported version is an error (exit code 2), and so is a run in which `MUT103` is not enabled
+
       --fail-on <FAIL_ON>
           Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`). A heuristic report counts as a warning
           
@@ -435,6 +438,9 @@ Options:
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
 
+      --snapshot <PATH>
+          Summary snapshot (`heki snapshot` output) that `MUT103` compares with, in place of `.heki-summary-snapshot.json` at the project root. A file that is missing, unreadable, malformed or of an unsupported version is an error (exit code 2), and so is a run in which `MUT103` is not enabled
+
   -h, --help
           Print help (see a summary with '-h')
 
@@ -516,6 +522,9 @@ Options:
 
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
+
+      --snapshot <PATH>
+          Summary snapshot (`heki snapshot` output) that `MUT103` compares with, in place of `.heki-summary-snapshot.json` at the project root. A file that is missing, unreadable, malformed or of an unsupported version is an error (exit code 2), and so is a run in which `MUT103` is not enabled
 
   -h, --help
           Print help (see a summary with '-h')

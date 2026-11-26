@@ -205,7 +205,7 @@ struct CheckArgs {
     #[arg(long)]
     update_baseline: bool,
     /// Watch the directories given for file changes and re-run incrementally.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "snapshot")]
     watch: bool,
     /// Experimental: print a prompt for consulting a language model about this run instead of
     /// the report: the configuration, the rules that apply, the diagnostics, how to answer, and
@@ -271,6 +271,12 @@ struct AnalysisArgs {
     /// Ratchet baseline TOML file (line-number-independent).
     #[arg(long)]
     baseline: Option<PathBuf>,
+    /// Summary snapshot (`heki snapshot` output) that `MUT103` compares with, in place of
+    /// `.heki-summary-snapshot.json` at the project root. A file that is missing, unreadable,
+    /// malformed or of an unsupported version is an error (exit code 2), and so is a run in
+    /// which `MUT103` is not enabled.
+    #[arg(long, value_name = "PATH")]
+    snapshot: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

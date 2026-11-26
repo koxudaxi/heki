@@ -3153,6 +3153,27 @@ A run that cannot analyze every file (a syntax error, an unreadable file) does n
 snapshot: it reports the errors and exits with code 2, so the entries of those files are not
 lost.
 
+### Comparing with the protected base
+
+Instead of committing the snapshot, a pull request can be compared with a snapshot of
+its protected base branch. Generate `base.json` on the base with the same heki version, the same
+knowledge bases, the same `--target-version`, and the same configuration as the check on the
+pull request, then check the whole project against it:
+
+```console
+$ git switch --detach origin/main
+$ heki snapshot > ../base.json
+$ git switch --detach "$PR_HEAD"
+$ heki check --select MUT103 --fail-on warning --snapshot ../base.json
+```
+
+`--snapshot PATH` replaces `.heki-summary-snapshot.json` at the project root. A path that does
+not exist, a file that is not a snapshot, a snapshot of an unsupported version, and a run in
+which `MUT103` is not enabled all exit with code 2: the check never passes without having
+compared. A snapshot at the root is ignored while `--snapshot` is given. Run the whole project,
+not `--touched` on the files of the pull request: a public function gains an effect through a
+private helper in another module, and the report is on the public function.
+
 
 ---
 
@@ -3757,6 +3778,9 @@ Options:
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
 
+      --snapshot <PATH>
+          Summary snapshot (`heki snapshot` output) that `MUT103` compares with, in place of `.heki-summary-snapshot.json` at the project root. A file that is missing, unreadable, malformed or of an unsupported version is an error (exit code 2), and so is a run in which `MUT103` is not enabled
+
       --fail-on <FAIL_ON>
           Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`). A heuristic report counts as a warning
           
@@ -4072,6 +4096,9 @@ Options:
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
 
+      --snapshot <PATH>
+          Summary snapshot (`heki snapshot` output) that `MUT103` compares with, in place of `.heki-summary-snapshot.json` at the project root. A file that is missing, unreadable, malformed or of an unsupported version is an error (exit code 2), and so is a run in which `MUT103` is not enabled
+
   -h, --help
           Print help (see a summary with '-h')
 
@@ -4153,6 +4180,9 @@ Options:
 
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
+
+      --snapshot <PATH>
+          Summary snapshot (`heki snapshot` output) that `MUT103` compares with, in place of `.heki-summary-snapshot.json` at the project root. A file that is missing, unreadable, malformed or of an unsupported version is an error (exit code 2), and so is a run in which `MUT103` is not enabled
 
   -h, --help
           Print help (see a summary with '-h')
@@ -12223,6 +12253,9 @@ No automatic fix.
 ## Options
 - `lint.extend-select = ["MUT103"]` enables the rule.
 - The snapshot lives at `.heki-summary-snapshot.json`; `heki snapshot` prints it without writing.
+- `heki check --snapshot PATH` compares with the snapshot at `PATH` instead, for example one
+  generated on the protected base branch. The file must exist and be a snapshot of the supported
+  version, and the rule must be enabled, or the run exits with 2.
 
 
 ---
