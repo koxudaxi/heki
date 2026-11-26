@@ -16,7 +16,7 @@ use heki_diagnostics::{
 use heki_effect::ProjectIndex;
 use heki_env::{Docs, LintConfig, Problem, Severity, UnmatchedEntries};
 use heki_rules::project::{
-    CommandPaths, Facts, FileError, IndexFacts, Indexed, ParsedFile, Project, ProjectEnv,
+    CommandPaths, Facts, FileError, Hidden, IndexFacts, Indexed, ParsedFile, Project, ProjectEnv,
     ProjectOptions, RulesRun, baseline_key, canonical, imports_left_out, paths_leave_out,
     rel_posix,
 };
@@ -130,6 +130,8 @@ struct Analyzed {
     diags: Vec<Diagnostic>,
     /// The heuristic rules that did not run only because `lint.heuristic` is off.
     heuristic_off: usize,
+    /// The reports inline suppressions hid, when `--report-suppressed` is given.
+    hidden: Vec<Hidden>,
     /// The heuristic reports of exact rules withheld because `lint.heuristic` is off.
     withheld: Vec<Diagnostic>,
     selection: RuleSelection,
@@ -162,7 +164,13 @@ fn analyze(
         overrides,
         Facts::Check,
     )?;
-    let (diags, withheld) = indexed.diagnose()?;
+    let (diags, withheld, hidden) = if args.report_suppressed.is_some() {
+        let found = indexed.diagnose_recording_hidden()?;
+        (found.diags, found.withheld, found.hidden)
+    } else {
+        let (diags, withheld) = indexed.diagnose()?;
+        (diags, withheld, Vec::new())
+    };
     let Indexed {
         project,
         index,
@@ -175,6 +183,7 @@ fn analyze(
         project,
         index,
         diags,
+        hidden,
         heuristic_off: selection.heuristic_off().len(),
         withheld,
         selection,
@@ -695,6 +704,10 @@ fn run_check(args: &CheckArgs) -> Result<ExitCode> {
     let mut analyzed = analyze(args, &paths, None)?;
     analyzed.project.errors.extend(conflicts);
     let diags = std::mem::take(&mut analyzed.diags);
+    if let Some(path) = &args.report_suppressed {
+        let touched = Touched::selecting(analyzed.touched.as_ref());
+        crate::suppressed::write(path, &analyzed.hidden, &analyzed.project, touched)?;
+    }
     let code = report(args, &analyzed, diags, &styles)?;
     let Analyzed { project, index, .. } = analyzed;
     // The process ends here: freeing the index and the parsed files one allocation at a time

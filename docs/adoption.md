@@ -309,6 +309,65 @@ With SARIF:
 For custom tooling, `--output-format json` gives every field: see
 [Coding Agents](coding-agents.md#after-an-edit-heki-check).
 
+### Auditing inline suppressions
+
+A baseline, `report-unused-suppressions`, and `require-suppression-codes` do not stop a new
+`# heki: ignore[EFF101]`, `# noqa: EFF101`, or bare `# noqa` from hiding a report, and the run
+still exits 0. `--report-suppressed <PATH>` writes the reports that inline suppressions hid to a
+JSON file, next to any `--output-format`:
+
+```json
+{
+  "schema_version": 1,
+  "suppressed": [
+    {
+      "code": "EFF101",
+      "file": "app/handlers.py",
+      "function": "fetch",
+      "target": "time.sleep",
+      "line": 12,
+      "column": 5,
+      "directive": {"kind": "heki-ignore", "file": "app/handlers.py", "line": 12, "column": 20}
+    }
+  ]
+}
+```
+
+- `file`, `function`, `code`, and `target` are the key of the report in a
+  [baseline](#ratchet-baselines), so a change of line numbers does not change what a CI job
+  compares. Compare the entries as a multiset of those four fields: one removed entry does not
+  offset an added one.
+- `directive.kind` is `heki-ignore`, `heki-ignore-bare`, `noqa-code`, or `noqa-bare`. When several
+  suppressions on a line hide the same report, the first one in the source is named.
+- Only reports that a suppression hid are listed. A `# noqa: F401` that Ruff reads hides no heki
+  report, and a suppression that hid nothing is not listed (`report-unused-suppressions`
+  reports it).
+- The file covers what the run shows: with `--touched` or a file in PATHS, the reports of those
+  files, and a baseline changes nothing in it. It is the same bytes on every run of the same
+  code, and the command exits with 2 when the file cannot be written.
+
+A CI job can run the check on the base branch and on the change, and fail on an entry the change
+adds. Check the base out from its protected ref, so that the change cannot alter the comparison:
+
+```yaml
+- run: |
+    keys() { jq -r '.suppressed[] | [.file, .function, .code, .target] | @tsv' "$1" | sort; }
+    uvx heki check --report-suppressed head.json || test "$?" -eq 1
+    git worktree add ../base "origin/$BASE"
+    (cd ../base && uvx heki check --report-suppressed "$GITHUB_WORKSPACE/base.json" || test "$?" -eq 1)
+    # Sorted lines keep a repeated key apart, so one removed entry offsets no added one.
+    new=$(diff <(keys base.json) <(keys head.json) | grep '^>' || true)
+    test -z "$new" || { echo "New inline suppressions:"; echo "$new"; exit 1; }
+  shell: bash
+  env:
+    BASE: ${{ github.base_ref }}
+```
+
+The configuration, the baseline, and the CI files that decide this (`pyproject.toml` or
+`heki.toml`, the baseline file, and `.github/workflows/`) belong in `CODEOWNERS`:
+the audit file shows what suppressions hide, and a weakened configuration or baseline is the
+code owners' to review.
+
 ## Rolling out rules
 
 1. Run [`heki recommend`](recommend.md) (experimental): it says which rules would report on

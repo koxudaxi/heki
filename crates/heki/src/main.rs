@@ -17,6 +17,7 @@ mod open_premises;
 mod prompt;
 mod recommend;
 mod skill;
+mod suppressed;
 mod version;
 mod watch;
 
@@ -218,6 +219,22 @@ struct CheckArgs {
         conflicts_with_all = ["fix", "diff", "watch", "update_baseline", "include_size_dependent"]
     )]
     generate_prompt: Option<String>,
+    /// Write the reports that inline suppressions hid (`# heki: ignore[...]`, `# noqa`) to this
+    /// JSON file, next to any `--output-format`, so CI can compare it with the file of the
+    /// protected base branch and find the suppressions a change adds. It lists the reports of
+    /// the files the run shows (`--touched`, PATHS that are files); a baseline changes nothing
+    /// in it. Each entry names the report (`code`, `file`, `function`, `target` as its
+    /// baseline key, `line`, `column`) and the `directive` that hid it (`kind`, `file`, `line`,
+    /// `column`); the entries are sorted, and the same project gives the same bytes. Exits with
+    /// 2 when the file cannot be written.
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = [
+            "watch", "generate_prompt", "update_baseline", "fix", "diff", "output_format_json_schema"
+        ]
+    )]
+    report_suppressed: Option<PathBuf>,
     /// Print the JSON Schema of a JSON output and exit: `generate-prompt`, the object of
     /// `--generate-prompt --output-format json`.
     #[arg(long, value_enum, value_name = "TARGET")]
