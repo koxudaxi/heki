@@ -30,12 +30,6 @@ pub(crate) struct Decorator {
     pub annotations: ReadsAnnotations,
     /// Called with arguments, it gives a decorator of the same row (`@dataclass(frozen=True)`).
     pub takes_arguments: bool,
-    /// On a class, it leaves what storing, deleting, reading, and copying an attribute of an
-    /// instance do as the class body makes them: what it binds on the class is no descriptor of
-    /// an instance attribute and no hook but a `__setattr__` and a `__delattr__` that raise or
-    /// store on the instance (`dataclass(frozen=True)`) and state hooks handing the fields over
-    /// as they are (`frozen=True, slots=True`) (`ProjectDecls::reshaped`).
-    pub keeps_attribute_access: bool,
 }
 
 /// What a decorator of the table reads of annotations: a different annotation elsewhere changes
@@ -66,7 +60,6 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         beside_cache: true,
         annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
-        keeps_attribute_access: false,
     },
     Decorator {
         name: "classmethod",
@@ -77,7 +70,6 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         beside_cache: true,
         annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
-        keeps_attribute_access: false,
     },
     Decorator {
         name: "abstractmethod",
@@ -88,7 +80,6 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         beside_cache: false,
         annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
-        keeps_attribute_access: false,
     },
     Decorator {
         name: "override",
@@ -99,7 +90,6 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         beside_cache: true,
         annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
-        keeps_attribute_access: true,
     },
     Decorator {
         name: "final",
@@ -110,7 +100,6 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         beside_cache: true,
         annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
-        keeps_attribute_access: true,
     },
     Decorator {
         name: "property",
@@ -121,7 +110,6 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         beside_cache: false,
         annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
-        keeps_attribute_access: false,
     },
     Decorator {
         name: "cached_property",
@@ -132,7 +120,6 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         beside_cache: false,
         annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
-        keeps_attribute_access: false,
     },
     // A `cached_property` of another module (`werkzeug.utils`, the project's own) after the
     // `functools` one, which [`of_symbol`] finds first.
@@ -145,7 +132,6 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         beside_cache: false,
         annotations: ReadsAnnotations::Unknown,
         takes_arguments: false,
-        keeps_attribute_access: false,
     },
     // Decorators that keep none of the premises above and read no annotation of what they
     // decorate but `dataclass`: the class-body annotations (its fields), and the constructor's
@@ -160,7 +146,6 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         beside_cache: false,
         annotations: ReadsAnnotations::ConstructorWithoutDocstring,
         takes_arguments: true,
-        keeps_attribute_access: true,
     },
     Decorator {
         name: "total_ordering",
@@ -171,7 +156,6 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         beside_cache: false,
         annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
-        keeps_attribute_access: true,
     },
     Decorator {
         name: "unique",
@@ -182,7 +166,6 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         beside_cache: false,
         annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
-        keeps_attribute_access: true,
     },
     Decorator {
         name: "contextmanager",
@@ -193,7 +176,6 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         beside_cache: false,
         annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
-        keeps_attribute_access: false,
     },
     Decorator {
         name: "asynccontextmanager",
@@ -204,7 +186,6 @@ pub(crate) const DECORATORS: &[Decorator] = &[
         beside_cache: false,
         annotations: ReadsAnnotations::Nothing,
         takes_arguments: false,
-        keeps_attribute_access: false,
     },
 ];
 

@@ -103,7 +103,9 @@ Exact claims hold in every run consistent with seven assumptions
   function builds with constant text that can still spell it, may bind it, and a store under a
   name of unknown value (a parameter, a loop variable over `dir()`, `vars()`, or a mapping's keys,
   a value read from data, a module name bound to a built string) is taken to bind none. This
-  gives up `setattr(cls, name, hook)` binding `__setattr__` through such a `name`.
+  gives up `setattr(cls, name, hook)` binding `__setattr__` through such a `name`. Code heki
+  does not read is taken to bind none either: a class decorator outside the project, and a call
+  or a closure the class is handed to, bind on it only what the stores heki reads bind.
 - **R2**: a value annotated `C` is an instance of `C` or of a project subclass. A premise that
   goes through a method call holds only when every implementation in such a subclass has it.
   A value annotated with a nominal container ABC (`Sequence`, `Mapping`, `Set`, and their mutable

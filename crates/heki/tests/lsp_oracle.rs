@@ -1042,12 +1042,11 @@ const COPY_HELPER: &str = "def grow(rows):\n    return len(rows)\n";
 const COPY_HELPER_GROWING: &str = "def grow(rows):\n    rows.append(1)\n";
 const COPY_HANDED: &str = "from pkg.copy_helper import grow\n\n\ndef handed(options: dict[str, list[int]]) -> None:\n    result = dict(options)\n    grow(result[\"rows\"])\n";
 // A copy hook bound on the copied class after its body, from another module, and a decorator of
-// another module that hands the class back or hands it to code heki does not read.
+// another module that reads the class or binds a copy hook on it.
 const COPY_PATCH: &str = "from pkg.copied_node import Node\n\n\ndef _copy(self):\n    return self\n\n\nNode.__copy__ = _copy\n";
 const COPIED_NODE_DECORATED: &str = "from pkg.copy_deco import register\n\n\n@register\nclass Node:\n    def __init__(self) -> None:\n        self.children: list[int] = []\n";
 const COPY_DECO: &str = "def register(cls):\n    print(cls.__name__)\n    return cls\n";
-const COPY_DECO_HANDING_ON: &str =
-    "import abc\n\n\ndef register(cls):\n    abc.update_abstractmethods(cls)\n    return cls\n";
+const COPY_DECO_HOOK: &str = "def _copy(self):\n    return self\n\n\ndef register(cls):\n    cls.__copy__ = _copy\n    return cls\n";
 // A store under a name built at run time through a value that may be a class object: a name
 // that is never a copy hook's, one that may be, and the same one through an instance.
 const COPY_FILL_NO_HOOK: &str =
@@ -4487,8 +4486,8 @@ fn steps_mut115() -> Vec<Step> {
         )
         .present(&[("pkg/copy_user.py", "MUT115")]),
         Step::new(
-            "the decorator hands the class to code heki does not read: the claim is open",
-            vec![save("pkg/copy_deco.py", COPY_DECO_HANDING_ON)],
+            "the decorator binds a copy hook on the class: the claim is open",
+            vec![save("pkg/copy_deco.py", COPY_DECO_HOOK)],
         )
         .present(&[("pkg/copy_user.py", "MUT115")]),
         Step::new(

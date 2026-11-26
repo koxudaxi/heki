@@ -439,10 +439,13 @@ type Shape = (
     bool,
 );
 
-/// A hook bound on the class after its body leaves the claim open, wherever it is bound; a class
-/// nothing changes, or that only a decorator known to keep attribute access changes, keeps it. A
-/// store under a name of unknown value binds no hook (R1: a special method is installed under
-/// its own name), also when the name it is handed is one (`unknown_name_in_a_class_method`).
+/// A hook bound on the class after its body leaves the claim open, wherever heki reads the store:
+/// after the class statement, in another module, in a function handed the class, a class
+/// decorator, or an `__init_subclass__`. A class no store binds a hook on keeps it, also when a
+/// decorator outside the project decorates it or a call or a closure is handed it (R1: code heki
+/// does not read binds none). A store under a name of unknown value binds no hook (R1: a special
+/// method is installed under its own name), also when the name it is handed is one
+/// (`unknown_name_in_a_class_method`).
 const BOUND_AFTER_BODY: &[Shape] = &[
     (
         "decorator",
@@ -462,19 +465,43 @@ const BOUND_AFTER_BODY: &[Shape] = &[
     (
         "library_decorator",
         &[],
-        "import copy\n\nimport attrs\n\n\n@attrs.define\nclass Child:\n    x: int = 1\n",
-        false,
+        "import copy\n\nimport ext\n\n\n@ext.auto\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n",
+        true,
     ),
     (
         "called_library_decorator",
         &[],
-        "import copy\n\nimport attrs\n\n\n@attrs.define(slots=False)\nclass Child:\n    x: int = 1\n",
-        false,
+        "import copy\n\nfrom ext import deconstructible\n\n\n@deconstructible(path=\"pkg.child.Child\")\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n",
+        true,
     ),
     (
-        "decorator_handing_on",
+        "decorator_handing_the_class_on",
         &[],
         "import abc\nimport copy\n\n\ndef register(cls):\n    abc.update_abstractmethods(cls)\n    return cls\n\n\n@register\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n",
+        true,
+    ),
+    (
+        "decorator_reading_the_class_through_calls",
+        &[],
+        "import copy\nimport inspect\n\n\ndef register(cls):\n    print(vars(cls), inspect.getmro(cls), issubclass(cls, object))\n    return cls\n\n\n@register\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n",
+        true,
+    ),
+    (
+        "init_subclass_reading_the_class_through_calls",
+        &[],
+        "import copy\nimport inspect\n\n\nclass Base:\n    def __init_subclass__(cls, **kwargs):\n        super().__init_subclass__(**kwargs)\n        for name in vars(cls):\n            print(name)\n        print(inspect.getmro(cls), issubclass(cls, Base))\n\n\nclass Child(Base):\n    def __init__(self) -> None:\n        self.x = 1\n",
+        true,
+    ),
+    (
+        "decorator_closure",
+        &[],
+        "import copy\n\nHANDLERS = []\n\n\ndef register(cls):\n    def describe(self):\n        return cls.__name__\n\n    cls.describe = describe\n    HANDLERS.append(lambda: cls)\n    return cls\n\n\n@register\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n",
+        true,
+    ),
+    (
+        "decorator_closure_storing_the_hook",
+        &[],
+        "import copy\n\n\ndef register(cls):\n    def install():\n        cls.__setattr__ = hook\n\n    install()\n    return cls\n\n\n@register\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n",
         false,
     ),
     (
@@ -526,6 +553,12 @@ const BOUND_AFTER_BODY: &[Shape] = &[
         "concatenated_name",
         &[],
         "import copy\n\n\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n\n\nsetattr(Child, \"__set\" + \"attr__\", hook)\n",
+        false,
+    ),
+    (
+        "concatenation_grouped_to_the_left",
+        &[],
+        "import copy\n\n\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n\n\nsetattr(Child, \"__\" + \"set\" + \"attr__\", hook)\n",
         false,
     ),
     (

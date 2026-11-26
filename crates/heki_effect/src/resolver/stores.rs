@@ -2032,19 +2032,24 @@ enum End {
 }
 
 /// What the string `key` built at run time names ([`AttrName::Built`]): one starting and ending
-/// with the constant text [`built_end`] finds at each end, any name when both are empty.
-/// `constant` gives the string constant a variable holds.
+/// with the constant text [`built_end`] finds at each end, any name when both are empty. A walk
+/// that reads all of the text gives it as the head alone, so the two ends never overlap
+/// (`"__" + "set" + "attr__"` starts with `__setattr__`). `constant` gives the string constant a
+/// variable holds.
 fn built_name<'i>(
     f: &IrFunction,
     key: VarId,
     def: &dyn Fn(VarId) -> Option<&'i Inst>,
     constant: &dyn Fn(VarId) -> Option<String>,
 ) -> AttrName<'static> {
-    let (head, whole) = built_end(f, key, End::Head, def, constant);
-    let tail = match whole {
-        true => String::new(),
-        false => built_end(f, key, End::Tail, def, constant).0,
-    };
+    let (mut head, whole) = built_end(f, key, End::Head, def, constant);
+    let mut tail = String::new();
+    if !whole {
+        match built_end(f, key, End::Tail, def, constant) {
+            (text, true) => head = text,
+            (text, false) => tail = text,
+        }
+    }
     match head.is_empty() && tail.is_empty() {
         true => AttrName::Unknown,
         false => AttrName::Built { head, tail },

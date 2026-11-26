@@ -676,6 +676,88 @@ fn mut101_stays_quiet_once_a_hook_may_be_bound_on_the_class_after_its_body() {
     }
 }
 
+/// A class decorator or an `__init_subclass__` binds a hook on the class it is handed when heki
+/// reads the store; a decorator outside the project, and a call or a closure handed the class,
+/// are taken to bind none (R1), so the write is still a plain store.
+#[test]
+fn mut101_keeps_reporting_a_class_no_decorator_or_init_subclass_binds_a_hook_on() {
+    let decorated = |prelude: &str, decorator: &str| {
+        let class = PLAIN_SWITCH.replace("class Plain:", &format!("{decorator}\nclass Plain:"));
+        format!("{prelude}\n\n{class}")
+    };
+    let subclassed = |body: &str| {
+        let class = PLAIN_SWITCH.replace("class Plain:", "class Plain(Base):");
+        format!(
+            "import inspect\n\n\nclass Base:\n    def __init_subclass__(cls, **kwargs):\n        super().__init_subclass__(**kwargs)\n{body}\n\n\n{class}"
+        )
+    };
+    let shapes = [
+        (
+            "library_decorator",
+            decorated("import ext", "@ext.auto"),
+            true,
+        ),
+        (
+            "called_library_decorator",
+            decorated(
+                "from ext import deconstructible",
+                "@deconstructible(path=\"switch.Plain\")",
+            ),
+            true,
+        ),
+        (
+            "decorator_reading_the_class_through_calls",
+            decorated(
+                "import inspect\n\n\ndef register(cls):\n    print(vars(cls), inspect.getmro(cls), issubclass(cls, object))\n    return cls",
+                "@register",
+            ),
+            true,
+        ),
+        (
+            "decorator_closure",
+            decorated(
+                "HANDLERS = []\n\n\ndef register(cls):\n    def describe(self):\n        return cls.__name__\n\n    cls.describe = describe\n    HANDLERS.append(lambda: cls)\n    return cls",
+                "@register",
+            ),
+            true,
+        ),
+        (
+            "decorator_storing_the_hook",
+            decorated(
+                "def register(cls):\n    cls.__setattr__ = print\n    return cls",
+                "@register",
+            ),
+            false,
+        ),
+        (
+            "init_subclass_reading_the_class_through_calls",
+            subclassed(
+                "        for name in vars(cls):\n            print(name)\n        print(inspect.getmro(cls), issubclass(cls, Base))",
+            ),
+            true,
+        ),
+        (
+            "init_subclass_storing_the_hook",
+            subclassed("        setattr(cls, \"__delattr__\", print)"),
+            false,
+        ),
+    ];
+    for (name, source, reported) in shapes {
+        let p = Project::new(&format!("regr_mut101_decorated_{name}"));
+        p.write("switch.py", &source);
+        let line = source
+            .lines()
+            .position(|l| l == "        self._attr_is_on = True")
+            .unwrap()
+            + 1;
+        let expected = match reported {
+            true => vec![at(line as u64, "Plain.turn_on")],
+            false => Vec::new(),
+        };
+        assert_eq!(lines(&p, "MUT101"), expected, "{name}");
+    }
+}
+
 // ================================================ MUT101 / MUT107: writes that run code
 
 /// A store or delete of `self.<attr>` that is no plain store: a metaclass given through the bases

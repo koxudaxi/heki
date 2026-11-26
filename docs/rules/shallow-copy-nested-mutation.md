@@ -57,17 +57,17 @@ Its premises:
   (R2) defines `__copy__`, `__reduce__`, `__reduce_ex__`, `__getstate__`, or `__setstate__`, or
   has a metaclass or a base heki does not know; or `model_copy()` without `deep=True` of a
   pydantic model (R3) whose classes define no `__copy__` or `model_copy`. A class defines a
-  name also when code binds it on the class after its body: a store through a value that may
-  be a class object (any value heki does not establish as an instance: `self`, what a class
-  call makes, a parameter annotated with a class other than `type`) under the name, or under a
-  name built at run time whose constant text at its ends may be the name's (`Node.__copy__ =
-  f`, `setattr(cls, "__copy__", f)` in a function handed the class; `f"_cached_{name}"` is
-  never `__copy__`), a decorator other than `dataclass`,
-  `typing.final`, `functools.total_ordering`, `enum.unique`, and a project function that only
-  reads the class, stores its attributes by name, and hands it back, or an `__init_subclass__`
-  that does more with the class than that. A store under a name of unknown value (a
-  parameter, a key of `vars()` or of a mapping, a value read from data) binds none (R1). Open
-  for the other copies (`dataclasses.replace`, `copy.replace`, the catalog's other sanitizers).
+  name also when a store heki reads binds it on the class after its body: a store through a
+  value that may be a class object (any value heki does not establish as an instance: `self`,
+  what a class call makes, a parameter annotated with a class other than `type`) under the
+  name, or under a name built at run time whose constant text at its ends may be the name's
+  (`Node.__copy__ = f`, `setattr(cls, "__copy__", f)` in a class decorator, an
+  `__init_subclass__`, or another function handed the class; `f"_cached_{name}"` is never
+  `__copy__`). A store under a name of unknown value (a parameter, a key of `vars()` or of a
+  mapping, a value read from data) binds none, and so does code heki does not read: a class
+  decorator outside the project, and a call or a closure the class is handed to, bind only what
+  the stores heki reads bind (R1). Open for the other copies (`dataclasses.replace`,
+  `copy.replace`, the catalog's other sanitizers).
 - **Borrowed original**: on every path the copied value is state that outlives the call: a
   parameter, a global, a variable of an enclosing function, or what a plain attribute or item
   load reads from such state. Open: one path is enough. What a call returns is not followed.

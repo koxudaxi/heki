@@ -416,10 +416,13 @@ first, then a convention the code follows, then a contract.
      (R1: also a special method bound on a class after its body is bound under its own name, a
      constant or a name built with constant text that can still spell it; a store under a name
      of unknown value, such as a parameter or a key of `vars()`, binds none, which gives up
-     `setattr(cls, name, hook)` binding `__setattr__` through such a `name`; *rejected*: such
-     a name as any name, which opens every class of a project that has one
-     `setattr(obj, name, value)` through an untyped receiver, a descriptor's `__set__` or a loop
-     over a mapping's items), annotations (R2), the catalog, imports as configured, the checked files as the project
+     `setattr(cls, name, hook)` binding `__setattr__` through such a `name`, and code heki
+     does not read, such as a class decorator outside the project or a call handed the class,
+     binds none either; *rejected*: such a name as any name, which opens every class of a
+     project that has one `setattr(obj, name, value)` through an untyped receiver, a
+     descriptor's `__set__` or a loop over a mapping's items, and such code as binding any
+     name, which opens every class a library decorator decorates or an `__init_subclass__`
+     hands to `vars()` or `issubclass()`), annotations (R2), the catalog, imports as configured, the checked files as the project
      (R5: a receiver typed by a `Protocol` stays unresolved, as its implementers are never a
      complete set), and a library call's argument as a waiting value unless heki establishes
      otherwise (R6: a catalog entry that waits lists the values for which it returns at once),
