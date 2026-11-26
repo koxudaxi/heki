@@ -1126,6 +1126,23 @@ impl Indexed {
         self.diagnose_units(&self.project.units(), false)
     }
 
+    /// [`Self::diagnose`], and the reports of the selected rules that inline suppressions hid
+    /// (not the heuristic reports the selection withholds), each with the suppression that hid
+    /// it, from the same analysis.
+    pub fn diagnose_recording_hidden(&self) -> Result<Diagnosed, RuleConfigError> {
+        let units = self.project.units();
+        let mut diags = self.reports(&units, false)?;
+        let mut hidden = Vec::new();
+        self.retain_unsuppressed_in(&units, &mut diags, Some(&mut hidden));
+        hidden.retain(|h| !self.selection.withholds(&h.report));
+        let withheld = self.selection.take_heuristic(&mut diags);
+        Ok(Diagnosed {
+            diags,
+            withheld,
+            hidden,
+        })
+    }
+
     /// [`Self::diagnose`] in `units` (some or all of the project's files): the rules read the
     /// other files through the index only. `open_premises`: the heuristic reports of exact
     /// claims record the premises they left open ([`CheckExtras::open_premises`]).
@@ -1135,7 +1152,7 @@ impl Indexed {
         open_premises: bool,
     ) -> Result<(Vec<Diagnostic>, Vec<Diagnostic>), RuleConfigError> {
         let mut diags = self.reports(units, open_premises)?;
-        self.retain_unsuppressed_in(units, &mut diags);
+        self.retain_unsuppressed_in(units, &mut diags, None);
         let withheld = self.selection.take_heuristic(&mut diags);
         Ok((diags, withheld))
     }
@@ -1148,7 +1165,7 @@ impl Indexed {
         let units = self.project.units();
         let mut diags = self.reports(&units, false)?;
         let mut kept = diags.clone();
-        self.retain_unsuppressed_in(&units, &mut kept);
+        self.retain_unsuppressed_in(&units, &mut kept, None);
         // Both are in the same order, so one pass pairs them up; the reports on suppression
         // comments are not among `diags`.
         let mut next = kept
@@ -1164,14 +1181,20 @@ impl Indexed {
 
     /// Drop the reports on `units` that inline suppressions suppress, and add the reports on
     /// suppression comments the configuration asks for.
-    fn retain_unsuppressed_in(&self, units: &[ModuleUnit<'_>], diags: &mut Vec<Diagnostic>) {
+    fn retain_unsuppressed_in(
+        &self,
+        units: &[ModuleUnit<'_>],
+        diags: &mut Vec<Diagnostic>,
+        hidden: Option<&mut Vec<Hidden>>,
+    ) {
         // The reports of a unit are on its own file.
         let checked: FxHashSet<&Path> = units.iter().map(|u| u.input.path.as_path()).collect();
         let files = self.project.files.iter();
-        retain_unsuppressed(
+        retain_unsuppressed_recording(
             diags,
             files.filter(|f| checked.contains(f.path.as_path())),
             &self.rules_run(),
+            hidden,
         );
     }
 
@@ -1309,6 +1332,24 @@ impl RulesRun<'_> {
     }
 }
 
+/// The result of [`Indexed::diagnose_recording_hidden`].
+pub struct Diagnosed {
+    /// The reports after inline suppressions ([`Indexed::diagnose`]).
+    pub diags: Vec<Diagnostic>,
+    /// The heuristic reports the selection withholds.
+    pub withheld: Vec<Diagnostic>,
+    /// The reports inline suppressions hid, in the order of the reports.
+    pub hidden: Vec<Hidden>,
+}
+
+/// A report that an inline suppression hid.
+pub struct Hidden {
+    pub report: Diagnostic,
+    /// The suppression that hid it, in the report's file: the first of them in the source when
+    /// several do.
+    pub by: Suppression,
+}
+
 /// Drop diagnostics suppressed by `# heki: ignore[...]` / `# noqa` comments of their file
 /// (`files` holds every file the diagnostics are on), then add the reports on those comments
 /// that `run`'s settings ask for.
@@ -1316,6 +1357,17 @@ pub fn retain_unsuppressed<'f>(
     diags: &mut Vec<Diagnostic>,
     files: impl IntoIterator<Item = &'f ParsedFile>,
     run: &RulesRun<'_>,
+) {
+    retain_unsuppressed_recording(diags, files, run, None);
+}
+
+/// [`retain_unsuppressed`], pushing each report it drops onto `hidden` with the suppression
+/// that dropped it.
+fn retain_unsuppressed_recording<'f>(
+    diags: &mut Vec<Diagnostic>,
+    files: impl IntoIterator<Item = &'f ParsedFile>,
+    run: &RulesRun<'_>,
+    mut hidden: Option<&mut Vec<Hidden>>,
 ) {
     // For each file, its suppressions and the rules each one suppressed reports of.
     let mut ignores: FxHashMap<&Path, (&ParsedFile, InlineIgnores, Vec<FxHashSet<String>>)> = files
@@ -1334,6 +1386,12 @@ pub fn retain_unsuppressed<'f>(
             for i in ign.suppressing(d.line, &d.rule_code, &d.rule_slug) {
                 if judged {
                     suppressed[i].insert(d.rule_code.clone());
+                }
+                if kept && let Some(hidden) = hidden.as_deref_mut() {
+                    hidden.push(Hidden {
+                        report: d.clone(),
+                        by: ign.suppressions()[i].clone(),
+                    });
                 }
                 kept = false;
             }
