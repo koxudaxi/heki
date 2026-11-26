@@ -141,6 +141,16 @@ pub trait Contracts: Debug + Send + Sync {
     /// looking up the names of the parameters the call binds.
     fn marked_params(&self) -> &FxHashSet<String>;
 
+    /// Whether a call target with an argument list names every callee (`*(module="pkg.*")`):
+    /// the calls heki binds to no project function or class then keep the constants they pass
+    /// by keyword for the marked parameters (`OptInTables::unbound_calls`).
+    fn any_callee_arguments(&self) -> bool;
+
+    /// Whether a call target has a module part (`pkg:Kind`): the call and reference sites then
+    /// keep the name they load a definition of another module by from a project module object
+    /// (`CallSite::module_member`).
+    fn module_members(&self) -> bool;
+
     /// Whether a contract names calling `symbol`, a function or class outside the project (a
     /// `call-owners` target or a boundary's `call-targets` entry names it, or a boundary forbids
     /// `reads-environment` with the ecosystem catalog): its calls are kept

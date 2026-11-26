@@ -11,8 +11,8 @@ use crate::eff_rules::{forbidden_effects, names_function};
 use crate::inspect::ContractRole;
 use crate::mut_rules::{
     Allowance, AllowanceKeys, ContractTarget, EXTERNAL, FunctionMatcher, FunctionMatchers,
-    MemberPattern, ReadOnlyProducers, References, parse_read_targets, parse_targets, patterns,
-    project_classes, split_arguments, split_item,
+    MemberPattern, ReadOnlyProducers, References, names_every_callee, parse_read_targets,
+    parse_targets, patterns, project_classes, split_arguments, split_item,
 };
 use crate::{
     CheckContext, DottedPattern, RuleConfigError, RuleSelection, last_name, split_last_dot,
@@ -101,6 +101,10 @@ pub(crate) struct ConfigContracts {
     references: References,
     /// [`Contracts::marked_params`].
     marked_params: FxHashSet<String>,
+    /// [`Contracts::any_callee_arguments`].
+    any_callee_arguments: bool,
+    /// [`Contracts::module_members`].
+    module_members: bool,
     external: ExternalNames,
     /// [`Contracts::own_receiver_calls`].
     own_receiver_calls: bool,
@@ -282,6 +286,10 @@ impl ConfigContracts {
             unresolved_calls: call_last_names(calls.flat_map(|r| &r.targets))?,
             references: counts_references(config),
             marked_params: marked_params(config),
+            any_callee_arguments: call_target_texts(config).any(|t| names_every_callee(t)),
+            module_members: call_target_texts(config).any(|t| {
+                split_arguments(t, "call-targets").is_ok_and(|(name, _)| name.contains(':'))
+            }),
             external: ExternalNames::new(config, kb),
             own_receiver_calls: config
                 .call_owners
@@ -300,12 +308,15 @@ impl ConfigContracts {
     }
 }
 
-/// [`last_names`] of call targets, whose argument lists name no function.
+/// [`last_names`] of call targets, whose argument lists name no function. A target naming
+/// every callee (`*(module="pkg.*")`) names calls by their arguments, which a call on an object
+/// of unknown class passes as any call does: no name of it is unresolved.
 fn call_last_names<'t>(
     targets: impl Iterator<Item = &'t String>,
 ) -> Result<Vec<MemberPattern>, RuleConfigError> {
     let context = "call-owners.targets";
     let names: Vec<&str> = targets
+        .filter(|t| !names_every_callee(t))
         .map(|t| Ok(split_arguments(t, context)?.0))
         .collect::<Result<_, RuleConfigError>>()?;
     last_names(names.into_iter(), context)
@@ -314,18 +325,23 @@ fn call_last_names<'t>(
 /// [`Contracts::marked_params`] of `config`. A bad argument list is left out: it is a
 /// configuration error of the rule of its contract, which parses it before it reports.
 fn marked_params(config: &HekiConfig) -> FxHashSet<String> {
+    call_target_texts(config)
+        .filter_map(|t| split_arguments(t, "call-targets").ok()?.1)
+        .flatten()
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// The texts of the call targets of `config`: the `call-owners` targets and the `call-targets`
+/// of the boundaries forbidding `calls`.
+fn call_target_texts(config: &HekiConfig) -> impl Iterator<Item = &String> {
     let calls = config.call_owners.iter().flat_map(|r| &r.targets);
     let boundaries = config
         .effect_boundaries
         .iter()
         .filter(|b| b.forbid.iter().any(|t| t == "calls"))
         .flat_map(|b| &b.call_targets);
-    calls
-        .chain(boundaries)
-        .filter_map(|t| split_arguments(t, "call-targets").ok()?.1)
-        .flatten()
-        .map(|(name, _)| name)
-        .collect()
+    calls.chain(boundaries)
 }
 
 /// The patterns of the last dotted names of `targets` (`children` of `pkg.Reference.children`),
@@ -449,6 +465,14 @@ impl Contracts for ConfigContracts {
         &self.marked_params
     }
 
+    fn any_callee_arguments(&self) -> bool {
+        self.any_callee_arguments
+    }
+
+    fn module_members(&self) -> bool {
+        self.module_members
+    }
+
     fn own_receiver_calls(&self) -> bool {
         self.own_receiver_calls
     }
@@ -514,6 +538,7 @@ pub fn summary_contracts(
         && contracts.unresolved_calls.is_empty()
         && contracts.references == References::Ignored
         && contracts.marked_params.is_empty()
+        && !contracts.module_members
         && contracts.external.is_empty()
     {
         return Ok(None);

@@ -3,6 +3,7 @@
 //! Produces the function's local `EffectSummary` plus the `CallSite`s the interprocedural
 //! fixpoint (`callgraph`) maps callee facts through. No IR survives this module.
 
+use crate::UnboundCall;
 use crate::blind_spots::{self, Blind, BlindCall, UnresolvedReason};
 use crate::cache_flow::{self, KeptRemovalKind};
 use crate::capacity::{self, Bound, CapacityOf, CapacityWait, SiteQueues, WhileFull};
@@ -202,6 +203,7 @@ fn extract_module(
             kept_points,
             types,
             mut blind,
+            mut unbound,
             imports: by_name,
             mut unawaited,
             fresh_return,
@@ -240,6 +242,7 @@ fn extract_module(
             absorb_class_body(&mut summary, facts.summary, &key);
             external.extend(facts.external);
             blind.extend(facts.blind);
+            unbound.extend(facts.unbound);
             imported_by_name.extend(facts.imports);
             unawaited.extend(facts.unawaited);
             let in_function = |site: CallSite| CallSite {
@@ -298,6 +301,12 @@ fn extract_module(
                 .entry(key.clone())
                 .or_default()
                 .extend(external);
+        }
+        if !unbound.is_empty() {
+            (file.opt_in_tables_mut().unbound_calls)
+                .entry(key.clone())
+                .or_default()
+                .extend(unbound);
         }
         if !blind.is_empty() {
             // A `finally` body is built once per way out of its `try`: its calls once each.
@@ -811,6 +820,8 @@ struct Extracted {
     types: FxHashMap<VarId, Val>,
     /// [`FileSummary::blind_calls`].
     blind: Vec<BlindCall>,
+    /// [`FileSummary::unbound_calls_of`].
+    unbound: Vec<UnboundCall>,
     /// The calls importing a module by name ([`FileSummary::imports`]).
     imports: Vec<ImportSite>,
     /// [`FileSummary::unawaited_handoffs`].
@@ -1020,6 +1031,9 @@ struct Extractor<'a> {
     /// The calls heki is blind to (`OptInTables::blind_spots`), with
     /// [`OptInFacts::blind_spots`].
     blind: Vec<BlindCall>,
+    /// The calls heki binds to no project code ([`FileSummary::unbound_calls_of`]), with
+    /// [`Contracts::any_callee_arguments`].
+    unbound: Vec<UnboundCall>,
     /// The calls importing a module by name, with [`OptInFacts::imports`].
     imports: Vec<ImportSite>,
     /// The failures of the by-name imports the function's handlers take, built on first use.
@@ -1392,6 +1406,7 @@ impl<'a> Extractor<'a> {
             established: OnceCell::new(),
             followed_callables: OnceCell::new(),
             blind: Vec::new(),
+            unbound: Vec::new(),
             imports: Vec::new(),
             import_handlers: OnceCell::new(),
             unawaited: Vec::new(),
@@ -3172,6 +3187,7 @@ impl<'a> Extractor<'a> {
             kept_points: self.kept_points,
             types: self.types,
             blind: self.blind,
+            unbound: self.unbound,
             imports: self.imports,
             unawaited: self.unawaited,
             fresh_return,
@@ -3959,7 +3975,19 @@ impl<'a> Extractor<'a> {
         if constructs.is_none() && callees.is_empty() {
             return None;
         }
-        Some(self.handed_site(span, self.f.block_loop_depth(bb), callees, constructs))
+        let member = match self.defs.get(&var).map(|d| &d.kind) {
+            Some(InstKind::AttrLoad { obj, attr, .. }) => {
+                let target = constructs
+                    .clone()
+                    .or_else(|| (callees.len() == 1).then(|| callees[0].callee.fqn()));
+                target.and_then(|t| self.member_of_module(*obj, attr, &t))
+            }
+            _ => None,
+        };
+        Some(CallSite {
+            module_member: member,
+            ..self.handed_site(span, self.f.block_loop_depth(bb), callees, constructs)
+        })
     }
 
     /// The bases of the class statements in the function ([`Contracts::reference_bases`]), each
@@ -4043,6 +4071,7 @@ impl<'a> Extractor<'a> {
             complete: false,
             on_every_return: OnEveryReturn::default(),
             made_by: None,
+            module_member: None,
         }
     }
 
@@ -6713,7 +6742,17 @@ impl<'a> Extractor<'a> {
         if self.opt_in.blind_spots {
             self.note_blind(bb, name, &callee, call);
         }
-        if let Some((site, params)) = self.call(bb, &callee, call)
+        let sites_before = self.sites.len();
+        let made = self.call(bb, &callee, call);
+        if self.sites.len() > sites_before {
+            let member = self.module_member(call, name);
+            for site in &mut self.sites[sites_before..] {
+                site.module_member.clone_from(&member);
+            }
+        } else if !matches!(callee, Callee::Project(..)) {
+            self.unbound_call(call);
+        }
+        if let Some((site, params)) = made
             && let Some(dst) = call.dst
         {
             let binds_recv = self.sites[site].binds_recv && call.constructs.is_none();
@@ -6726,6 +6765,54 @@ impl<'a> Extractor<'a> {
             });
         }
         self.callees.insert((bb, index), callee);
+    }
+
+    /// [`FileSummary::unbound_calls_of`]: `call`, which heki binds to no project function or class,
+    /// when it passes by keyword a constant for a marked parameter and a call target names
+    /// every callee.
+    fn unbound_call(&mut self, call: &Call<'_>) {
+        if !self.contracts.is_some_and(|c| c.any_callee_arguments()) {
+            return;
+        }
+        if let Some(arguments) = self.keyword_marks(call) {
+            self.unbound.push(UnboundCall {
+                span: call.span,
+                arguments: *arguments,
+            });
+        }
+    }
+
+    /// [`CallSite::module_member`] of the site of a call of method `name` on `call`'s receiver.
+    fn module_member(&self, call: &Call<'_>, name: &str) -> Option<Box<FuncKey>> {
+        let site = self.sites.last()?;
+        let target = site.constructs.clone().or_else(|| {
+            let callees = site.project_callees();
+            (callees.len() == 1).then(|| callees[0].callee.fqn())
+        })?;
+        self.member_of_module(call.recv_var?, name, &target)
+    }
+
+    /// The name `name` of the project module `obj` holds, when a call target has a module part
+    /// and the module binds it to `target`, a definition of another module (a name it imports):
+    /// a load of it from the module object reads it by that name ([`CallSite::module_member`]).
+    fn member_of_module(&self, obj: VarId, name: &str, target: &str) -> Option<Box<FuncKey>> {
+        if !self.contracts.is_some_and(|c| c.module_members()) {
+            return None;
+        }
+        let Some(Val::Ref(module)) = self.val(obj) else {
+            return None;
+        };
+        self.cx.project.module(module)?;
+        let own = target
+            .strip_prefix(module.as_str())
+            .and_then(|rest| rest.strip_prefix('.'))
+            == Some(name);
+        (!own).then(|| {
+            Box::new(FuncKey {
+                module: module.clone(),
+                qualname: name.to_owned(),
+            })
+        })
     }
 
     /// [`FileSummary::blind_calls`]: the call `call` (of `name`, as for [`Self::call_inst`]) in
@@ -6928,6 +7015,7 @@ impl<'a> Extractor<'a> {
                         complete: false,
                         on_every_return: crate::OnEveryReturn::default(),
                         made_by: None,
+                        module_member: None,
                     });
                 }
                 if self.opt_in.unawaited_handoffs {
@@ -7771,6 +7859,7 @@ impl<'a> Extractor<'a> {
             complete,
             on_every_return,
             made_by: None,
+            module_member: None,
         }
     }
 
@@ -8982,6 +9071,7 @@ fn role_site(
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
         made_by: Some(site.span),
+        module_member: None,
     }
 }
 

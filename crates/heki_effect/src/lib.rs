@@ -1600,6 +1600,13 @@ impl ArgValue {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ArgumentValues(pub Vec<(String, ArgValue)>);
 
+impl ArgumentValues {
+    /// The constant passed for parameter `name`.
+    pub fn get(&self, name: &str) -> Option<&ArgValue> {
+        self.0.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+    }
+}
+
 /// What a caller knows about the value of a callee parameter at one call, when the argument
 /// binds the parameter exactly: the receiver, a keyword, a position before any `*` unpacking,
 /// or the literal default of an omitted parameter.
@@ -2488,6 +2495,12 @@ pub struct CallSite {
     /// project call, or awaited): the span of that call. `None` for a call's own site.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub made_by: Option<Span>,
+    /// The name the site loads its target by when it reads it from a project module object
+    /// that binds it to a definition of another module (`pkg.Kind` of `pkg.enums.Kind`, which
+    /// `pkg` imports): a call target with a module part judges the access by it
+    /// ([`Contracts::module_members`]; boxed: few sites have one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_member: Option<Box<FuncKey>>,
 }
 
 /// The locks the caller of a call certainly holds ([`CallSite::locks`]); one byte, as a call
@@ -2626,8 +2639,7 @@ impl CallSite {
 
     /// The constant the call passes for the parameter `name` ([`Self::arguments`]).
     pub fn argument(&self, name: &str) -> Option<&ArgValue> {
-        let values = &self.arguments.as_ref()?.0;
-        values.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+        self.arguments.as_ref()?.get(name)
     }
 
     /// Parameters of the caller the receiver of a class method's or a static method's call may be
@@ -2768,6 +2780,23 @@ pub struct OptInTables {
     /// one needs besides its summary ([`OptInFacts::suggestions`]; [`AnnotationFacts`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub annotation_facts: BTreeMap<String, AnnotationFacts>,
+    /// The calls heki binds to no project function or class, in the function's own body and in
+    /// the class bodies it runs, that pass constants for the parameters of a call target naming
+    /// every callee ([`Contracts::any_callee_arguments`]).
+    #[serde(default, skip_serializing_if = "FxHashMap::is_empty")]
+    pub unbound_calls: FxHashMap<FuncKey, Vec<UnboundCall>>,
+}
+
+/// A call heki binds to no project function or class: of a function or class outside the
+/// project, or of a value of unknown class (a parameter, an untyped value, a method of an
+/// object of unknown class). Only a keyword it writes, or an entry of a `**` mapping the
+/// function builds, binds a parameter of what it calls: a position or a default is no
+/// constant heki can tie to a name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnboundCall {
+    pub span: Span,
+    /// The constants it passes so for the parameters the argument lists of call targets name.
+    pub arguments: ArgumentValues,
 }
 
 /// A project function handed to a library call that calls it as a plain function and never
@@ -2824,6 +2853,14 @@ impl FileSummary {
     /// The opt-in tables of the file, made when it first has one of their facts.
     pub(crate) fn opt_in_tables_mut(&mut self) -> &mut OptInTables {
         self.opt_in_tables.get_or_insert_with(Box::default)
+    }
+
+    /// [`OptInTables::unbound_calls`] of `func`: none when the table was not built.
+    pub fn unbound_calls_of(&self, func: &FuncKey) -> &[UnboundCall] {
+        self.opt_in_tables
+            .as_ref()
+            .and_then(|t| t.unbound_calls.get(func))
+            .map_or(&[], Vec::as_slice)
     }
 
     /// [`OptInTables::kept_removals`] (none while the facts are not computed).

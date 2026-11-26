@@ -793,16 +793,22 @@ fn judge<'a>(
         Shape::Attribute => return judge_attribute(cx, names, (section, context), entry),
         Shape::Definition(definition) => definition,
     };
-    let name = match definition {
-        Definition::CallTarget => split_arguments(entry, context)?.0,
-        _ => entry,
+    let (name, arguments) = match definition {
+        Definition::CallTarget => split_arguments(entry, context)?,
+        _ => (entry, None),
     };
     let matched = match glob_holder_named(names, name, context)? {
         Some(held) => held,
         None => names_definition(cx, names, definition, name, context)?,
     };
     if matched {
-        return Ok(None);
+        let parameters: Vec<String> = arguments.into_iter().flatten().map(|(p, _)| p).collect();
+        if parameters.is_empty() || takes_parameters(cx, names, name, &parameters, context)? {
+            return Ok(None);
+        }
+        let quoted: Vec<String> = parameters.iter().map(|p| format!("`{p}`")).collect();
+        let names_no = format!("{} taking {}", definition.names_no(), quoted.join(" and "));
+        return Ok(Some(Missing::new(names_no, Vec::new())));
     }
     let nearest = match definition {
         Definition::Exempt => names.nearest_methods(name),
@@ -852,6 +858,7 @@ fn names_definition<'a>(
             let m = FunctionMatcher::new(cx, &names.classes, name, context)?;
             functions.iter().any(|k| m.matches(k))
                 || classes().any(|c| m.names_def(&c.fqn, c.qualname.as_deref().unwrap_or(&c.fqn)))
+                || binds_imported_name(cx, &m)
         }
         Definition::Scope => {
             let p = DottedPattern::new(name, context)?;
@@ -863,6 +870,65 @@ fn names_definition<'a>(
             !class_set(cx, &p, &names.classes, Subclasses::Excluded).is_empty()
         }
     })
+}
+
+/// Whether a function or class the call target `name` names may be called with every one of
+/// `parameters`: a call passing a constant for a parameter nothing it names takes raises
+/// `TypeError` (`DataType(is_dict=True)` without an `is_dict` parameter or `**kwargs`), so the
+/// target matches no call. A class whose initializer is not a project function, or that
+/// declares the name (a dataclass field, a pydantic model's field for `model_construct`), may
+/// take it. A target whose last name is a glob, or that names every callee, may name callables
+/// heki does not list.
+fn takes_parameters(
+    cx: &CheckContext<'_>,
+    names: &ProjectNames<'_>,
+    name: &str,
+    parameters: &[String],
+    context: &'static str,
+) -> Result<bool, RuleConfigError> {
+    if has_glob_syntax(last_name(name)) || name.contains(':') {
+        return Ok(true);
+    }
+    let m = FunctionMatcher::new(cx, &names.classes, name, context)?;
+    let function_takes = |k: &FuncKey| {
+        cx.decls
+            .function_decl(k)
+            .is_none_or(|d| d.has_kwargs || parameters.iter().all(|p| d.param_names.contains(p)))
+    };
+    let class_takes = |class: &str| {
+        let lineage: Vec<String> =
+            (std::iter::once(class.to_owned()).chain(cx.decls.ancestors_of(class))).collect();
+        let declared: FxHashSet<&str> = (lineage.iter())
+            .flat_map(|c| cx.decls.declared_names(c))
+            .collect();
+        parameters.iter().all(|p| declared.contains(p.as_str()))
+            || cx
+                .decls
+                .mro_method(class, "__init__")
+                .is_none_or(|init| function_takes(&init))
+    };
+    let named_class =
+        |c: &&ContractClass| m.names_def(&c.fqn, c.qualname.as_deref().unwrap_or(&c.fqn));
+    Ok(
+        (names.candidates(name).iter()).any(|k| m.matches(k) && function_takes(k))
+            || (names.candidate_classes(name).filter(named_class)).any(|c| class_takes(&c.fqn)),
+    )
+}
+
+/// Whether the module part of `m` names a project module that binds a name `m` matches to an
+/// object it imports or aliases (`pkg:Kind` of `from pkg.enums import Kind` in `pkg`): a read of
+/// it through the module object is a use of the target ([`heki_effect::CallSite::module_member`]).
+fn binds_imported_name(cx: &CheckContext<'_>, m: &FunctionMatcher) -> bool {
+    let Some(module) = m.whole().module().filter(|p| p.glob().is_none()) else {
+        return false;
+    };
+    let Some(decls) = cx.decls.module(module.text()) else {
+        return false;
+    };
+    let bound = decls.imports.keys().chain(decls.aliases.keys());
+    bound
+        .into_iter()
+        .any(|name| m.names_def(&format!("{}.{name}", module.text()), name))
 }
 
 /// For `name` whose last part is a glob: whether what holds that part names a module, class, or
