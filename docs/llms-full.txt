@@ -3495,8 +3495,9 @@ It takes the options of `heki check` that decide what is analyzed: `--select`,
 `--extend-select`, `--ignore`, `--heuristic` / `--no-heuristic`, `--config`,
 `--target-version`, and `--baseline`. The advice is relative to that configuration. `--all`
 shows every block of contracts, where the report shows the first 3 of each kind, lists up
-to 50 of the sites that keep blocks at `unresolved = "ignore"`, where it lists 5, and lists every
-suggestion group, the heuristic ones too, where the text lists the first 3 exact ones.
+to 50 of the sites that keep blocks at `unresolved = "ignore"`, where it lists 5, lists every
+suggestion group, the heuristic ones too, where the text lists the first 3 exact ones, and names
+every rule without reports.
 
 ## What it prints
 
@@ -3524,7 +3525,10 @@ suggestion group, the heuristic ones too, where the text lists the first 3 exact
   ([Rule Precision](https://heki.koxudaxi.dev/precision/)), or "not measured". A rule that runs now and withholds its
   heuristic reports says so. A line under the rows gives the `heki check --extend-select` command
   that shows the reports they count (with the paths given; a rule the configuration ignores is
-  left out of it, since `ignore` wins). Rules without reports here are named on one line.
+  left out of it, since `ignore` wins). The rules without reports here are on one line: how
+  many, the exact ones by code, the experimental exact ones apart, and the number of heuristic
+  ones, which `--all` names. `--all`, or a saved summary snapshot, also shows how to run
+  `MUT103`.
 - **What heki cannot see**: where heki is silent, so no count of reports applies (see
   [below](https://heki.koxudaxi.dev/recommend/#what-heki-cannot-see)). The source-root candidates, the one part that enters the
   block, come first.
@@ -3846,8 +3850,7 @@ Rules worth enabling here
   MUT106        1      -  bug          not measured                      -          yes
   OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
   see the 2 report(s): heki check app --extend-select MUT106,OPT110
-  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF112, EFF114, EFF115, EFF116, EFF117, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, OPT103, OPT111, OPT112, OPT120, OPT121, OPT130
-  MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it.
+  No reports here: 31 rule(s); exact: OPT103, OPT111, OPT120, OPT121, OPT130; experimental and exact: MUT101, MUT111; heki recommend --all names the 24 heuristic one(s)
 
 What heki cannot see (no report either way)
   calls of packages heki's catalog does not cover: 1 call(s) of 1 name(s) in 1 package(s)
@@ -4493,7 +4496,7 @@ Options:
           Print the JSON Schema of the object of `--output-format json` and exit
 
       --all
-          Show every block of contracts (by default the first 3 of each kind) and up to 50 of the sites keeping them at `unresolved = "ignore"` (by default 5), in the report and in the keys to add, and every suggestion group, the heuristic ones too (by default the text lists the first 3 exact ones)
+          Show every block of contracts (by default the first 3 of each kind) and up to 50 of the sites keeping them at `unresolved = "ignore"` (by default 5), in the report and in the keys to add, every suggestion group, the heuristic ones too (by default the text lists the first 3 exact ones), and every rule without reports by name
 
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable

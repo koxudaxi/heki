@@ -275,6 +275,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         all,
     } = request;
     let env = &project.env;
+    let snapshot_saved = env.root.join(crate::SNAPSHOT_FILE).is_file();
     // Without a configuration file, the keys go into a new `pyproject.toml`.
     let layout = env
         .config_file
@@ -477,7 +478,13 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         config_toml: block.toml,
         content: String::new(),
     };
-    report.content = render_text(&report, all);
+    report.content = render_text(
+        &report,
+        TextOptions {
+            all,
+            snapshot_saved,
+        },
+    );
     Ok(report)
 }
 
@@ -766,9 +773,18 @@ fn start_here(report: &RecommendReport) -> Vec<String> {
     steps
 }
 
-/// The report as the text output prints it; `all` lists every suggestion group, as the JSON
-/// object holds them with `--all`.
-pub fn render_text(report: &RecommendReport, all: bool) -> String {
+/// What the text shows beyond the JSON object.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TextOptions {
+    /// `--all`: every suggestion group, as the object holds them, and every rule without
+    /// reports by name.
+    pub all: bool,
+    /// Whether the project root holds a saved summary snapshot, which `MUT103` compares with.
+    pub snapshot_saved: bool,
+}
+
+/// The report as the text output prints it.
+pub fn render_text(report: &RecommendReport, text: TextOptions) -> String {
     let mut out = String::new();
     let analyzed = &report.analyzed;
     let _ = writeln!(
@@ -797,12 +813,13 @@ pub fn render_text(report: &RecommendReport, all: bool) -> String {
             let _ = writeln!(out, "  - {step}");
         }
     }
-    types::render(&mut out, &report.suggestions, all);
+    types::render(&mut out, &report.suggestions, text.all);
     rules::render(
         &mut out,
         &report.rules,
         now.baseline.is_some(),
         &report.analyzed.paths,
+        text,
     );
     blind_spots::render(&mut out, &report.blind_spots, &report.root);
     contracts::render(

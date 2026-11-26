@@ -359,8 +359,15 @@ fn measured(measurement: Option<&PublishedMeasurement>) -> (String, String) {
 }
 
 /// The section as the text prints it. `paths` are the paths given, which the command showing the
-/// reports counted names.
-pub(super) fn render(out: &mut String, rules: &[RuleAdvice], baseline: bool, paths: &[String]) {
+/// reports counted names. The heuristic rules without reports are named with `text.all`, and the
+/// rules not counted (`MUT103`) with `text.all` or when its snapshot is saved.
+pub(super) fn render(
+    out: &mut String,
+    rules: &[RuleAdvice],
+    baseline: bool,
+    paths: &[String],
+    text: super::TextOptions,
+) {
     out.push_str("\nRules worth enabling here\n");
     let regressions = if baseline { "  regressions" } else { "" };
     let _ = writeln!(
@@ -422,17 +429,45 @@ pub(super) fn render(out: &mut String, rules: &[RuleAdvice], baseline: bool, pat
             shown.reports, shown.command
         );
     }
-    let mut quiet: Vec<&str> = rules
-        .iter()
-        .filter(|r| r.reports == Some(0))
-        .map(|r| r.code.as_str())
-        .collect();
-    quiet.sort_unstable();
-    if !quiet.is_empty() {
-        let _ = writeln!(out, "  No reports here: {}", quiet.join(", "));
+    quiet_rules(out, rules, text.all);
+    if text.all || text.snapshot_saved {
+        for r in rules.iter().filter(|r| r.reports.is_none()) {
+            let _ = writeln!(out, "  {}: {}.", r.code, r.reason);
+        }
     }
-    for r in rules.iter().filter(|r| r.reports.is_none()) {
-        let _ = writeln!(out, "  {}: {}.", r.code, r.reason);
+}
+
+/// The rules without reports here, on one line: the exact ones by code, the experimental ones
+/// apart, and the heuristic ones counted, or with `all` named. Every one is off: a rule that
+/// runs and withholds nothing is not listed.
+fn quiet_rules(out: &mut String, rules: &[RuleAdvice], all: bool) {
+    let mut quiet: Vec<&RuleAdvice> = rules.iter().filter(|r| r.reports == Some(0)).collect();
+    quiet.sort_unstable_by(|a, b| a.code.cmp(&b.code));
+    let exact = |r: &&&RuleAdvice| r.certainty == Certainty::Exact.word();
+    let codes = |rules: Vec<&&RuleAdvice>| -> String {
+        let codes: Vec<&str> = rules.iter().map(|r| r.code.as_str()).collect();
+        codes.join(", ")
+    };
+    let mut parts = vec![format!("{} rule(s)", quiet.len())];
+    let (stable, experimental): (Vec<_>, Vec<_>) =
+        quiet.iter().filter(exact).partition(|r| !r.experimental);
+    if !stable.is_empty() {
+        parts.push(format!("exact: {}", codes(stable)));
+    }
+    if !experimental.is_empty() {
+        parts.push(format!("experimental and exact: {}", codes(experimental)));
+    }
+    let heuristic: Vec<&&RuleAdvice> = quiet.iter().filter(|r| !exact(r)).collect();
+    if all {
+        parts.push(format!("heuristic: {}", codes(heuristic)));
+    } else {
+        parts.push(format!(
+            "heki recommend --all names the {} heuristic one(s)",
+            heuristic.len()
+        ));
+    }
+    if !quiet.is_empty() {
+        let _ = writeln!(out, "  No reports here: {}", parts.join("; "));
     }
 }
 

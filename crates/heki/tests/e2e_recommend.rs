@@ -150,20 +150,30 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
          Reports now  2 shown (2 exact, 0 heuristic), 2 heuristic withheld, 4 heuristic rule(s) \
          off\n\
          \n\
+         Start here\n\
+         \x20 - heki check fails on 1 report(s) now: a Ratchet baseline records them, so that it \
+         fails only on new ones (Notes)\n\
+         \x20 - heki check --extend-select EFF101,OPT101,OPT110 shows 3 report(s) not shown now: \
+         0 exact, 3 heuristic (heuristic reports can be wrong)\n\
+         \x20 - 1 contract block(s) in the keys at the end: the code keeps them today; adopt only \
+         the boundaries you intend to keep (Notes)\n\
+         \n\
+         Types the code already keeps\n\
+         \x20 No read-only parameter to suggest a type for here.\n\
+         \n\
          Rules worth enabling here\n\
          \x20 rule    reports  exact  consequence  right about the code (published)  real harm  \
          block\n\
          \x20 EFF101        1      0  bug          82% (69-90%), n=50, 2026-11-21    32%        \
-         yes\n\
+         yes (on now: naming it adds its heuristic reports)\n\
          \x20 OPT101        1      0  slowdown     78% (45-94%), n=9, 2026-11-21     0%         \
-         no: slower code, not a bug\n\
+         no: slower code, not a bug (on now: naming it adds its heuristic reports)\n\
          \x20 OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         \
          no: slower code, not a bug\n\
-         \x20 No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF112, EFF114, EFF115, EFF116, \
-         EFF117, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT106, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, \
-         OPT103, OPT111, OPT112, OPT120, OPT121, OPT130\n\
-         \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then \
-         select it.\n\
+         \x20 see the 3 report(s): heki check --extend-select EFF101,OPT101,OPT110\n\
+         \x20 No reports here: 32 rule(s); exact: OPT103, OPT111, OPT120, OPT121, OPT130; \
+         experimental and exact: MUT101, MUT111; heki recommend --all names the 25 heuristic \
+         one(s)\n\
          \n\
          Contract candidates\n\
          \x20 effect-boundaries  app.lists  medium\n\
@@ -747,9 +757,8 @@ fn rules_worth_enabling_follow_the_policy() {
         \x20 Optional (experimental, never in the block)\n\
         \x20 EFF109        1      -  bug          not measured                      -          no: experimental\n\
         \x20 see the 7 report(s): heki check --extend-select EFF101,EFF107,MUT106,MUT107,OPT101,OPT110,EFF109\n\
-        \x20 No reports here: EFF102, EFF105, EFF106, EFF110, EFF112, EFF114, EFF115, EFF116, EFF117, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT108, MUT111, MUT112, MUT113, \
-        MUT115, MUT118, MUT120, OPT103, OPT111, OPT112, OPT120, OPT121, OPT130\n\
-        \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it."
+        \x20 No reports here: 28 rule(s); exact: OPT103, OPT111, OPT120, OPT121, OPT130; \
+        experimental and exact: MUT101, MUT111; heki recommend --all names the 21 heuristic one(s)"
     );
     assert!(
         out.contains(
@@ -758,6 +767,33 @@ fn rules_worth_enabling_follow_the_policy() {
         ),
         "{out}"
     );
+    // `--all` names the heuristic ones, and `MUT103`, as a saved snapshot does.
+    let quiet_lines = |args: &[&str]| -> Vec<String> {
+        let mut all = vec!["recommend"];
+        all.extend_from_slice(args);
+        let (_, out, _) = p.heki(&all);
+        (out.lines())
+            .skip_while(|l| !l.starts_with("  No reports here: "))
+            .take_while(|l| !l.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let listed = quiet_lines(&["--all"]);
+    assert!(
+        listed[0].ends_with(
+            "; experimental and exact: MUT101, MUT111; heuristic: EFF102, EFF105, EFF106, EFF110, \
+             EFF112, EFF114, EFF115, EFF116, EFF117, IMP101, IMP102, IMP104, IMP301, IMP302, \
+             MUT108, MUT112, MUT113, MUT115, MUT118, MUT120, OPT112"
+        ),
+        "{listed:?}"
+    );
+    let snapshot = "  MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, \
+                    then select it.";
+    assert_eq!(listed[1], snapshot);
+    let (code, _, err) = p.heki(&["snapshot", "--write"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(quiet_lines(&[])[1], snapshot);
+    std::fs::remove_file(p.dir.join(".heki-summary-snapshot.json")).unwrap();
     let (_, report, _) = recommend_json(&p, &[]);
     assert_eq!(
         rule(&report, "EFF107"),
