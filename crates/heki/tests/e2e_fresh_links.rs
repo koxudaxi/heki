@@ -15,6 +15,13 @@ const MODEL: &str = r#"class Node:
         self.flag = False
         self.parent: "Node | None" = None
         self.children: list["Node"] = []
+        self.count: int = 0
+
+    def __neg__(self) -> "Node | None":
+        return self.parent
+
+    def __lt__(self, other: "Node") -> "Node | None":
+        return self.parent
 
 
 OLD: list[object] = []
@@ -264,6 +271,54 @@ def links_after_the_holder_is_kept_in_a_loop(node: Node) -> None:
         b = Node()
         a.parent = b
         b.flag = True
+
+
+def unpacks_a_starred_display(nodes: list[Node]) -> Node:
+    first, second, third = *nodes, Node()
+    second.flag = True
+    return third
+
+
+def keeps_what_an_operator_reads_back(node: Node) -> Node:
+    copied, part = Node(), Node()
+    part.parent = copied
+    OLD.append(-part)
+    copied.flag = True
+    return copied
+
+
+def keeps_what_a_comparison_reads_back(node: Node) -> Node:
+    copied, part = Node(), Node()
+    part.parent = copied
+    OLD.append(part < node)
+    copied.flag = True
+    return copied
+
+
+def keeps_an_operator_of_a_number_read_back(node: Node) -> Node:
+    copied, part = Node(), Node()
+    part.parent = copied
+    OLD.append(-part.count)
+    OLD.append(part.count < 3)
+    copied.flag = True
+    return copied
+
+
+def keeps_a_negation_of_a_value_read_back(node: Node) -> Node:
+    copied, part = Node(), Node()
+    part.parent = copied
+    OLD.append(not part.flag)
+    copied.flag = True
+    return copied
+
+
+def keeps_a_string_of_a_value_read_back(node: Node) -> Node:
+    copied, part = Node(), Node()
+    part.parent = copied
+    OLD.append(f"{part.parent!r}")
+    OLD.append(f"parent: {part.parent}")
+    copied.flag = True
+    return copied
 "#;
 
 const CONFIG: &str = r#"[project]
@@ -355,6 +410,11 @@ fn objects_linked_to_one_another_stay_new_until_one_is_kept() {
         // when the loop makes a new object of the same allocation.
         at("links_after_the_holder_is_kept", "b.flag = True"),
         at("links_after_the_holder_is_kept_in_a_loop", "b.flag = True"),
+        // A starred element shifts the items: `second` is one of `nodes`.
+        at("unpacks_a_starred_display", "second.flag = True"),
+        // A project class's operator may return what it reads out of its operand.
+        at("keeps_what_an_operator_reads_back", "copied.flag = True"),
+        at("keeps_what_a_comparison_reads_back", "copied.flag = True"),
     ];
     expected.sort();
     assert_eq!(found, expected);

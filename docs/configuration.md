@@ -459,7 +459,9 @@ validators), links the two
 (`copied, part = Node(), Node(); part.parent = copied; copied.flag = True` constructs `copied`).
 The group stays new until one of its objects is stored anywhere else, yielded, captured, or
 handed to a call that may keep it, and so does a value read out of one of them (an attribute, an
-item, an iteration step, what a call over it returns), which may be another:
+item, an iteration step, what a call over it returns, and what an operator over it returns
+unless the operator is `object`'s or a builtin type's: `-part` may run a `Node.__neg__`
+returning `self.parent`), which may be another:
 `old.append(part.parent)` ends `copied`'s freshness, as does a helper handed `part`, which may
 store what it reads out of it. A project function's result that holds itself through the objects
 it links (`made.part = part; part.parent = made`) is new at a call until a value read out of it

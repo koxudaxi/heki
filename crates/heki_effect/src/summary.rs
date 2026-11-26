@@ -4847,7 +4847,7 @@ impl<'a> Extractor<'a> {
         let reads_of = |v: VarId, out: &mut Vec<VarId>| {
             if let Some(inst) = shape.inst(v)
                 && !unpacked.contains_key(&v)
-                && may_hold_operand_parts(&inst.kind)
+                && !self.holds_no_operand_part(v)
             {
                 out.extend(inst.kind.operands());
             }
@@ -4974,7 +4974,12 @@ impl<'a> Extractor<'a> {
             let Some(items) = reads.get(dst) else {
                 continue;
             };
-            if in_phi.contains(dst) || self.uses.get(dst).map_or(0, Vec::len) != items.len() {
+            // A starred element (`*xs, Node()`) adds as many items as `xs` holds, so a target's
+            // position is no element's.
+            if in_phi.contains(dst)
+                || shape.first_starred(*dst).is_some()
+                || self.uses.get(dst).map_or(0, Vec::len) != items.len()
+            {
                 continue;
             }
             // An item past the display's end raises before any target is bound.
@@ -5088,10 +5093,22 @@ impl<'a> Extractor<'a> {
         false
     }
 
-    /// Whether `var` may hold what a call in [`Self::maybe_new`] returned, or a part of it
-    /// ([`may_hold_operand_parts`]): through copies and the one operand of an attribute read, an
-    /// item, or an iteration step; anything else past the first step, a phi, or a definition of
-    /// several operands may.
+    /// Whether the value `v` holds no part of the operands of its definition: it is established
+    /// to be a builtin value of its exact class that holds only such values ([`Built::Atomic`]),
+    /// such as a constant, the `bool` of `not`, `is`, or `in`, an f-string's new `str`, or an
+    /// operator or a conversion whose operands' classes run only `object`'s or a builtin type's
+    /// special methods for it. A project class's operator may return anything, an object read
+    /// out of its operand too (`__neg__` returning `self.parent`).
+    fn holds_no_operand_part(&self, v: VarId) -> bool {
+        self.built(v) == Built::Atomic
+    }
+
+    /// Whether `var` may hold what a call in [`Self::maybe_new`] returned, or a part of it:
+    /// through copies and the one operand of an attribute read, an item, or an iteration step;
+    /// anything else past the first step, a phi, or a definition with operands may. The
+    /// resolution leaves out the operands of a value that holds no part of them
+    /// ([`Self::holds_no_operand_part`]), which is asked only after the visit: it reads the
+    /// callees the visit records.
     fn may_hold_or_read_new(&self, var: VarId) -> bool {
         if self.maybe_new.is_empty() {
             return false;
@@ -5110,9 +5127,6 @@ impl<'a> Extractor<'a> {
                     | InstKind::MakeIter { iterable: next, .. }
                     | InstKind::IterNext { iter: next, .. },
                 ) => cur = *next,
-                Some(kind) if !may_hold_operand_parts(kind) => {
-                    return self.maybe_new.contains(&cur);
-                }
                 Some(kind) => {
                     return self.maybe_new.contains(&cur) || !kind.operands().is_empty();
                 }
@@ -9174,21 +9188,6 @@ const NAMING_CALLS: &[&str] = &[
     "typing_extensions.NewType",
     "typing_extensions.TypeVar",
 ];
-
-/// Whether the result of the instruction `kind` may hold a part of one of its operands: anything
-/// but a comparison, a unary operator, or a string built from them (`reads_of` of
-/// `construction::Recorder::resolve`).
-fn may_hold_operand_parts(kind: &InstKind) -> bool {
-    !matches!(
-        kind,
-        InstKind::Const { .. }
-            | InstKind::Compare { .. }
-            | InstKind::UnaryOp { .. }
-            | InstKind::Convert { .. }
-            | InstKind::Format { .. }
-            | InstKind::BuildString { .. }
-    )
-}
 
 /// Whether calling `callee` hands none of its arguments on: a builtin that only inspects them
 /// ([`inspecting_builtin`]), or a call of [`NAMING_CALLS`].

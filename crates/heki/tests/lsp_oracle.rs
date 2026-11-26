@@ -152,7 +152,7 @@ allowed-writers = ["pkg.rack_ops.empty"]
 
 [[tool.heki.effect-boundaries]]
 name = "copy-pass"
-scopes = ["pkg.copy_pass", "pkg.guarded_build", "pkg.link_pass", "pkg.link_model_pass"]
+scopes = ["pkg.copy_pass", "pkg.guarded_build", "pkg.link_pass", "pkg.link_model_pass", "pkg.link_neg_pass"]
 write-universe = ["Ticket.flag", "Part.flag"]
 "#;
 
@@ -345,6 +345,9 @@ const COPY_OPS: &str = "import copy\n\nKEPT = []\n\n\nclass Ticket:\n    def __i
 // the part it reads out of the result before marking the result (`ReturnsNew::New::linked`).
 const LINK_OPS: &str = "from pkg.copy_ops import Ticket\n\n\ndef make() -> Ticket:\n    made, part = Ticket(), Ticket()\n    made.part = part\n    return made\n";
 const LINK_PASS: &str = "from pkg.copy_ops import KEPT, Ticket\nfrom pkg.link_ops import make\n\n\ndef run() -> Ticket:\n    made = make()\n    KEPT.append(made.part)\n    made.flag = True\n    return made\n";
+// A pass keeping the negation of a new ticket it links another new one into: the result holds
+// nothing of the ticket while no class the ticket may be defines `__neg__`.
+const LINK_NEG_PASS: &str = "from pkg.copy_ops import KEPT, Ticket\n\n\ndef run() -> Ticket:\n    copied, part = Ticket(), Ticket()\n    part.part = copied\n    KEPT.append(-part)\n    copied.flag = True\n    return copied\n";
 // A pydantic model of another module that two new objects of a pass link: a write of it stores
 // the value itself only while no class it may be configures the model
 // (`ProjectDecls::attr_write_stores_value`).
@@ -1285,6 +1288,7 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/copy_pass.py", COPY_PASS),
         ("pkg/link_ops.py", LINK_OPS),
         ("pkg/link_pass.py", LINK_PASS),
+        ("pkg/link_neg_pass.py", LINK_NEG_PASS),
         ("pkg/link_model.py", LINK_MODEL),
         ("pkg/link_model_pass.py", LINK_MODEL_PASS),
         ("pkg/strict_ops.py", STRICT_OPS),
@@ -3383,8 +3387,9 @@ fn steps_small_displays() -> Vec<Step> {
 /// or the one it returns, and whether a copy helper returns an element of an optional table only
 /// where the table defaults to a value without elements, and whether a factory's result holds
 /// itself through the new objects it links; whether a model's write validates the value (its
-/// class keywords, or a configuration in a subclass of another module) is a declaration of the
-/// modules of its classes; whether a helper returns its parameter
+/// class keywords, or a configuration in a subclass of another module), and whether an operator
+/// on a linked object runs project code that may return what it reads out of it, is a
+/// declaration of the modules of its classes; whether a helper returns its parameter
 /// is a declaration of its module; whether a parameter is typed, and with which class, is a fact of
 /// the callers the strict modes walk (`MUT205` writes, `MUT206` reads, `MUT207` calls), and
 /// whether that class defines a method a call target naming no class names is a declaration of
@@ -3841,6 +3846,22 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
             vec![Action::Delete("pkg/link_model_sub.py")],
         )
         .absent(&[("pkg/link_model_pass.py", "EFF201")]),
+        Step::new(
+            "the linked ticket's negation returns what the ticket holds",
+            vec![Action::Save(
+                "pkg/copy_ops.py",
+                COPY_OPS.replace(
+                    "        self.flag = False\n",
+                    "        self.flag = False\n\n    def __neg__(self):\n        return self.part\n",
+                ),
+            )],
+        )
+        .present(&[("pkg/link_neg_pass.py", "EFF201")]),
+        Step::new(
+            "the ticket has no negation again",
+            vec![save("pkg/copy_ops.py", COPY_OPS)],
+        )
+        .absent(&[("pkg/link_neg_pass.py", "EFF201")]),
     ]
 }
 
