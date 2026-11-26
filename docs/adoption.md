@@ -180,7 +180,7 @@ file is left, and the run says how many were.
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.6.0
+    rev: v0.7.0
     hooks:
       - id: heki
 ```
@@ -309,6 +309,65 @@ With SARIF:
 For custom tooling, `--output-format json` gives every field: see
 [Coding Agents](coding-agents.md#after-an-edit-heki-check).
 
+### Auditing inline suppressions
+
+A baseline, `report-unused-suppressions`, and `require-suppression-codes` do not stop a new
+`# heki: ignore[EFF101]`, `# noqa: EFF101`, or bare `# noqa` from hiding a report, and the run
+still exits 0. `--report-suppressed <PATH>` writes the reports that inline suppressions hid to a
+JSON file, next to any `--output-format`:
+
+```json
+{
+  "schema_version": 1,
+  "suppressed": [
+    {
+      "code": "EFF101",
+      "file": "app/handlers.py",
+      "function": "fetch",
+      "target": "time.sleep",
+      "line": 12,
+      "column": 5,
+      "directive": {"kind": "heki-ignore", "file": "app/handlers.py", "line": 12, "column": 20}
+    }
+  ]
+}
+```
+
+- `file`, `function`, `code`, and `target` are the key of the report in a
+  [baseline](#ratchet-baselines), so a change of line numbers does not change what a CI job
+  compares. Compare the entries as a multiset of those four fields: one removed entry does not
+  offset an added one.
+- `directive.kind` is `heki-ignore`, `heki-ignore-bare`, `noqa-code`, or `noqa-bare`. When several
+  suppressions on a line hide the same report, the first one in the source is named.
+- Only reports that a suppression hid are listed. A `# noqa: F401` that Ruff reads hides no heki
+  report, and a suppression that hid nothing is not listed (`report-unused-suppressions`
+  reports it).
+- The file covers what the run shows: with `--touched` or a file in PATHS, the reports of those
+  files, and a baseline changes nothing in it. It is the same bytes on every run of the same
+  code, and the command exits with 2 when the file cannot be written.
+
+A CI job can run the check on the base branch and on the change, and fail on an entry the change
+adds. Check the base out from its protected ref, so that the change cannot alter the comparison:
+
+```yaml
+- run: |
+    keys() { jq -r '.suppressed[] | [.file, .function, .code, .target] | @tsv' "$1" | sort; }
+    uvx heki check --report-suppressed head.json || test "$?" -eq 1
+    git worktree add ../base "origin/$BASE"
+    (cd ../base && uvx heki check --report-suppressed "$GITHUB_WORKSPACE/base.json" || test "$?" -eq 1)
+    # Sorted lines keep a repeated key apart, so one removed entry offsets no added one.
+    new=$(diff <(keys base.json) <(keys head.json) | grep '^>' || true)
+    test -z "$new" || { echo "New inline suppressions:"; echo "$new"; exit 1; }
+  shell: bash
+  env:
+    BASE: ${{ github.base_ref }}
+```
+
+The configuration, the baseline, and the CI files that decide this (`pyproject.toml` or
+`heki.toml`, the baseline file, and `.github/workflows/`) belong in `CODEOWNERS`:
+the audit file shows what suppressions hide, and a weakened configuration or baseline is the
+code owners' to review.
+
 ## Rolling out rules
 
 1. Run [`heki recommend`](recommend.md) (experimental): it says which rules would report on
@@ -393,3 +452,24 @@ $ heki check --extend-select MUT103            # reports functions that gained e
 A run that cannot analyze every file (a syntax error, an unreadable file) does not write the
 snapshot: it reports the errors and exits with code 2, so the entries of those files are not
 lost.
+
+### Comparing with the protected base
+
+Instead of committing the snapshot, a pull request can be compared with a snapshot of
+its protected base branch. Generate `base.json` on the base with the same heki version, the same
+knowledge bases, the same `--target-version`, and the same configuration as the check on the
+pull request, then check the whole project against it:
+
+```console
+$ git switch --detach origin/main
+$ heki snapshot > ../base.json
+$ git switch --detach "$PR_HEAD"
+$ heki check --select MUT103 --fail-on warning --snapshot ../base.json
+```
+
+`--snapshot PATH` replaces `.heki-summary-snapshot.json` at the project root. A path that does
+not exist, a file that is not a snapshot, a snapshot of an unsupported version, and a run in
+which `MUT103` is not enabled all exit with code 2: the check never passes without having
+compared. A snapshot at the root is ignored while `--snapshot` is given. Run the whole project,
+not `--touched` on the files of the pull request: a public function gains an effect through a
+private helper in another module, and the report is on the public function.

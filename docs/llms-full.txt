@@ -2880,7 +2880,7 @@ file is left, and the run says how many were.
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.6.0
+    rev: v0.7.0
     hooks:
       - id: heki
 ```
@@ -3009,6 +3009,65 @@ With SARIF:
 For custom tooling, `--output-format json` gives every field: see
 [Coding Agents](https://heki.koxudaxi.dev/coding-agents/#after-an-edit-heki-check).
 
+### Auditing inline suppressions
+
+A baseline, `report-unused-suppressions`, and `require-suppression-codes` do not stop a new
+`# heki: ignore[EFF101]`, `# noqa: EFF101`, or bare `# noqa` from hiding a report, and the run
+still exits 0. `--report-suppressed <PATH>` writes the reports that inline suppressions hid to a
+JSON file, next to any `--output-format`:
+
+```json
+{
+  "schema_version": 1,
+  "suppressed": [
+    {
+      "code": "EFF101",
+      "file": "app/handlers.py",
+      "function": "fetch",
+      "target": "time.sleep",
+      "line": 12,
+      "column": 5,
+      "directive": {"kind": "heki-ignore", "file": "app/handlers.py", "line": 12, "column": 20}
+    }
+  ]
+}
+```
+
+- `file`, `function`, `code`, and `target` are the key of the report in a
+  [baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines), so a change of line numbers does not change what a CI job
+  compares. Compare the entries as a multiset of those four fields: one removed entry does not
+  offset an added one.
+- `directive.kind` is `heki-ignore`, `heki-ignore-bare`, `noqa-code`, or `noqa-bare`. When several
+  suppressions on a line hide the same report, the first one in the source is named.
+- Only reports that a suppression hid are listed. A `# noqa: F401` that Ruff reads hides no heki
+  report, and a suppression that hid nothing is not listed (`report-unused-suppressions`
+  reports it).
+- The file covers what the run shows: with `--touched` or a file in PATHS, the reports of those
+  files, and a baseline changes nothing in it. It is the same bytes on every run of the same
+  code, and the command exits with 2 when the file cannot be written.
+
+A CI job can run the check on the base branch and on the change, and fail on an entry the change
+adds. Check the base out from its protected ref, so that the change cannot alter the comparison:
+
+```yaml
+- run: |
+    keys() { jq -r '.suppressed[] | [.file, .function, .code, .target] | @tsv' "$1" | sort; }
+    uvx heki check --report-suppressed head.json || test "$?" -eq 1
+    git worktree add ../base "origin/$BASE"
+    (cd ../base && uvx heki check --report-suppressed "$GITHUB_WORKSPACE/base.json" || test "$?" -eq 1)
+    # Sorted lines keep a repeated key apart, so one removed entry offsets no added one.
+    new=$(diff <(keys base.json) <(keys head.json) | grep '^>' || true)
+    test -z "$new" || { echo "New inline suppressions:"; echo "$new"; exit 1; }
+  shell: bash
+  env:
+    BASE: ${{ github.base_ref }}
+```
+
+The configuration, the baseline, and the CI files that decide this (`pyproject.toml` or
+`heki.toml`, the baseline file, and `.github/workflows/`) belong in `CODEOWNERS`:
+the audit file shows what suppressions hide, and a weakened configuration or baseline is the
+code owners' to review.
+
 ## Rolling out rules
 
 1. Run [`heki recommend`](https://heki.koxudaxi.dev/recommend/) (experimental): it says which rules would report on
@@ -3093,6 +3152,27 @@ $ heki check --extend-select MUT103            # reports functions that gained e
 A run that cannot analyze every file (a syntax error, an unreadable file) does not write the
 snapshot: it reports the errors and exits with code 2, so the entries of those files are not
 lost.
+
+### Comparing with the protected base
+
+Instead of committing the snapshot, a pull request can be compared with a snapshot of
+its protected base branch. Generate `base.json` on the base with the same heki version, the same
+knowledge bases, the same `--target-version`, and the same configuration as the check on the
+pull request, then check the whole project against it:
+
+```console
+$ git switch --detach origin/main
+$ heki snapshot > ../base.json
+$ git switch --detach "$PR_HEAD"
+$ heki check --select MUT103 --fail-on warning --snapshot ../base.json
+```
+
+`--snapshot PATH` replaces `.heki-summary-snapshot.json` at the project root. A path that does
+not exist, a file that is not a snapshot, a snapshot of an unsupported version, and a run in
+which `MUT103` is not enabled all exit with code 2: the check never passes without having
+compared. A snapshot at the root is ignored while `--snapshot` is given. Run the whole project,
+not `--touched` on the files of the pull request: a public function gains an effect through a
+private helper in another module, and the report is on the public function.
 
 
 ---
@@ -3704,6 +3784,9 @@ Options:
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
 
+      --snapshot <PATH>
+          Summary snapshot (`heki snapshot` output) that `MUT103` compares with, in place of `.heki-summary-snapshot.json` at the project root. A file that is missing, unreadable, malformed or of an unsupported version is an error (exit code 2), and so is a run in which `MUT103` is not enabled
+
       --fail-on <FAIL_ON>
           Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`). A heuristic report counts as a warning
           
@@ -3728,6 +3811,9 @@ Options:
 
       --generate-prompt [<QUESTION>]
           Experimental: print a prompt for consulting a language model about this run instead of the report: the configuration, the rules that apply, the diagnostics, how to answer, and QUESTION when given (put PATHS before the option). `--output-format json` prints it as JSON. Writes no file and exits with 0
+
+      --report-suppressed <PATH>
+          Write the reports that inline suppressions hid (`# heki: ignore[...]`, `# noqa`) to this JSON file, next to any `--output-format`, so CI can compare it with the file of the protected base branch and find the suppressions a change adds. It lists the reports of the files the run shows (`--touched`, PATHS that are files); a baseline changes nothing in it. Each entry names the report (`code`, `file`, `function`, `target` as its baseline key, `line`, `column`) and the `directive` that hid it (`kind`, `file`, `line`, `column`); the entries are sorted, and the same project gives the same bytes. Exits with 2 when the file cannot be written
 
       --output-format-json-schema <TARGET>
           Print the JSON Schema of a JSON output and exit: `generate-prompt`, the object of `--generate-prompt --output-format json`
@@ -4016,6 +4102,9 @@ Options:
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
 
+      --snapshot <PATH>
+          Summary snapshot (`heki snapshot` output) that `MUT103` compares with, in place of `.heki-summary-snapshot.json` at the project root. A file that is missing, unreadable, malformed or of an unsupported version is an error (exit code 2), and so is a run in which `MUT103` is not enabled
+
   -h, --help
           Print help (see a summary with '-h')
 
@@ -4097,6 +4186,9 @@ Options:
 
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
+
+      --snapshot <PATH>
+          Summary snapshot (`heki snapshot` output) that `MUT103` compares with, in place of `.heki-summary-snapshot.json` at the project root. A file that is missing, unreadable, malformed or of an unsupported version is an error (exit code 2), and so is a run in which `MUT103` is not enabled
 
   -h, --help
           Print help (see a summary with '-h')
@@ -12212,6 +12304,9 @@ No automatic fix.
 ## Options
 - `lint.extend-select = ["MUT103"]` enables the rule.
 - The snapshot lives at `.heki-summary-snapshot.json`; `heki snapshot` prints it without writing.
+- `heki check --snapshot PATH` compares with the snapshot at `PATH` instead, for example one
+  generated on the protected base branch. The file must exist and be a snapshot of the supported
+  version, and the rule must be enabled, or the run exits with 2.
 
 
 ---

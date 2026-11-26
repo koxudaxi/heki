@@ -306,6 +306,105 @@ fn snapshot_write_and_mut103_regressions() {
     assert_eq!(p.check(&["--extend-select", "MUT103"]).0, 2);
 }
 
+const SNAPSHOT_BASE_API: &str =
+    "from pkg import _helper\n\n\ndef run():\n    return _helper.pause()\n";
+
+/// `heki snapshot` of the base project (the one a pull request branched from), stored as
+/// `base.json` in a directory of its own, outside the root of the project that is checked.
+fn base_snapshot(name: &str) -> (Project, String) {
+    let base = Project::new(name);
+    base.write("pkg/__init__.py", "")
+        .write("pkg/_helper.py", "def pause():\n    return 1\n")
+        .write("pkg/api.py", SNAPSHOT_BASE_API);
+    let (code, stdout, stderr) = base.heki(&["snapshot"]);
+    assert_eq!(code, 0, "{stderr}");
+    base.write("base.json", &stdout);
+    let path = base.dir.join("base.json").display().to_string();
+    (base, path)
+}
+
+/// The project of the pull request: the private helper of another module now sleeps.
+fn snapshot_head(name: &str) -> Project {
+    let head = Project::new(name);
+    head.write("pkg/__init__.py", "")
+        .write(
+            "pkg/_helper.py",
+            "import time\n\n\ndef pause():\n    time.sleep(1)\n    return 1\n",
+        )
+        .write("pkg/api.py", SNAPSHOT_BASE_API);
+    head
+}
+
+const MUT103_RUN: &[&str] = &["--select", "MUT103", "--output-format", "concise"];
+
+#[test]
+fn snapshot_path_compares_the_whole_project_with_a_file_outside_the_root() {
+    let (_base, base_json) = base_snapshot("snapshot_path_base");
+    let head = snapshot_head("snapshot_path_head");
+    let args = [MUT103_RUN, &["--snapshot", &base_json]].concat();
+    let (code, stdout, stderr) = head.check(&args);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(
+        stdout.contains("pkg/api.py:4:1: MUT103") && stdout.contains("reaches effect `sleep`"),
+        "{stdout}"
+    );
+
+    // A snapshot at the root, regenerated with the new effect, is not read.
+    let (code, stdout, _) = head.heki(&["snapshot"]);
+    assert_eq!(code, 0);
+    head.write(".heki-summary-snapshot.json", &stdout);
+    assert_eq!(
+        head.check(MUT103_RUN).0,
+        0,
+        "the root file is read without the option"
+    );
+    let (code, stdout, stderr) = head.check(&args);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(stdout.contains("MUT103"), "{stdout}");
+}
+
+#[test]
+fn snapshot_path_that_cannot_be_read_is_an_error() {
+    let head = snapshot_head("snapshot_path_errors");
+    let dir = head.dir.display().to_string();
+    let run = |path: &str| {
+        let args = [MUT103_RUN, &["--snapshot", path]].concat();
+        head.check(&args)
+    };
+
+    let missing = format!("{dir}/missing.json");
+    let (code, stdout, stderr) = run(&missing);
+    assert_eq!(code, 2, "{stdout}");
+    assert!(stderr.contains("missing.json"), "{stderr}");
+
+    let broken = format!("{dir}/broken.json");
+    for (text, what) in [
+        ("not json", "invalid summary snapshot"),
+        ("{\"version\": 1}", "invalid summary snapshot"),
+        ("{\"version\": 99, \"functions\": {}}", "version"),
+    ] {
+        head.write("broken.json", text);
+        let (code, stdout, stderr) = run(&broken);
+        assert_eq!(code, 2, "{text}: {stdout}");
+        assert!(stderr.contains(what), "{text}: {stderr}");
+    }
+
+    // A directory is not a snapshot.
+    assert_eq!(run(&dir).0, 2);
+}
+
+#[test]
+fn snapshot_path_needs_mut103_and_does_not_meet_watch() {
+    let (_base, base_json) = base_snapshot("snapshot_path_needs_rule");
+    let head = snapshot_head("snapshot_path_needs_rule_head");
+    let (code, _, stderr) = head.check(&["--snapshot", &base_json]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("`MUT103` is not enabled"), "{stderr}");
+    let (code, _, stderr) = head.check(&["--watch", "--snapshot", &base_json]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+}
+
 /// PEP 263: a declared Latin-1 source is checked like any other, and `--fix` writes it back in
 /// Latin-1 (the bytes outside the rewrite stay as they were); an encoding heki does not read is
 /// an error, not a UTF-8 failure.
