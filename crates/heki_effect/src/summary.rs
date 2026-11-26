@@ -880,6 +880,9 @@ struct Extractor<'a> {
     fresh: FxHashSet<VarId>,
     /// Attributes the function assigns or deletes on any object.
     stored_attrs: Vec<&'a str>,
+    /// The inputs (`GuardSubject` as `(param, attr)`) whose object the function changes in
+    /// place somewhere, so its state at a later test is not the caller's ([`Self::changed_inputs`]).
+    changed_inputs: FxHashSet<(u8, Option<String>)>,
     /// The block and phi defining each phi variable (`GuardInputs::phis`).
     phis: OnceCell<FxHashMap<VarId, (BlockId, &'a PhiNode)>>,
     /// The function's integer constants (`capacity`), built on first use.
@@ -1321,6 +1324,7 @@ impl<'a> Extractor<'a> {
             retyped: FxHashSet::default(),
             fresh: FxHashSet::default(),
             stored_attrs,
+            changed_inputs: FxHashSet::default(),
             phis: OnceCell::new(),
             ints: OnceCell::new(),
             capacity_walks: RefCell::default(),
@@ -1386,6 +1390,7 @@ impl<'a> Extractor<'a> {
             ex.build_reach();
         }
         ex.build_aliases();
+        ex.changed_inputs = ex.changed_inputs();
         ex.find_new_cells();
         ex.memo_fills = ex.memo_fills();
         let class_of = |v: VarId| match ex.types.get(&v) {
@@ -1423,11 +1428,44 @@ impl<'a> Extractor<'a> {
             param_alias: &self.param_alias,
             param_slot_alias: &self.param_slot_alias,
             stored_attrs: &self.stored_attrs,
+            changed_inputs: &self.changed_inputs,
             fresh: &self.fresh,
             phis: &self.phis,
             kb: self.cx.kb,
             project: self.cx.project,
         }
+    }
+
+    /// The inputs whose items the function changes in place: an item store or delete, an
+    /// in-place operator, or a call of a method that adds or removes items, on the parameter or
+    /// an attribute of it. A truthiness test of one of them may find at the test another state
+    /// than the caller's; a `None`, `isinstance`, or `hasattr` test is decided otherwise
+    /// (`GuardInputs::subject_of`).
+    fn changed_inputs(&self) -> FxHashSet<(u8, Option<String>)> {
+        let input = |v: &VarId| match (self.param_alias.get(v), self.param_slot_alias.get(v)) {
+            (Some((i, None)), _) => Some((*i, None)),
+            (_, Some((i, Slot::Attr(a)))) => Some((*i, Some(a.clone()))),
+            _ => None,
+        };
+        let insts = self.f.blocks.iter().flat_map(|b| &b.insts);
+        insts
+            .filter_map(|inst| match &inst.kind {
+                InstKind::SubscriptStore { obj, .. } | InstKind::SubscriptDelete { obj, .. } => {
+                    input(obj)
+                }
+                InstKind::BinOp {
+                    lhs,
+                    in_place: true,
+                    ..
+                } => input(lhs),
+                InstKind::MethodCall { recv, method, .. }
+                    if guards::CHANGING_METHODS.contains(&method.as_str()) =>
+                {
+                    input(recv)
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// The loops around `bb`, from a table built on first use.

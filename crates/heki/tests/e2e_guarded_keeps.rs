@@ -150,6 +150,26 @@ def copy_into(node: Node, registry: list[Node] | None = None) -> Node:
     return copied
 
 
+def copy_if_flags(node: Node, flags: list[int]) -> Node:
+    copied = copy_node(node)
+    if flags:
+        KEPT.append(copied)
+    return copied
+
+
+def copy_after_changing_flags_here(node: Node, flags: list[int]) -> Node:
+    copied = copy_node(node)
+    flags.append(1)
+    if flags:
+        KEPT.append(copied)
+    return copied
+
+
+def relay_after_changing_flags(node: Node, flags: list[int]) -> Node:
+    flags.append(1)
+    return copy_if_flags(node, flags)
+
+
 def copy_kept_twice(node: Node, *, first: bool = False, second: bool = False) -> Node:
     copied = copy_node(node)
     if first:
@@ -183,12 +203,15 @@ from pkg.model import (
     Node,
     attach,
     attach_relayed,
+    copy_after_changing_flags_here,
+    copy_if_flags,
     copy_into,
     copy_kept_twice,
     copy_node,
     copy_quietly,
     copy_registered,
     copy_relayed,
+    relay_after_changing_flags,
     set_flag,
 )
 
@@ -258,6 +281,24 @@ def registry_none(node: Node) -> Node:
 
 def registry_passed_kept(node: Node, items: list[Node]) -> Node:
     copied = copy_into(node, items)
+    set_flag(copied)
+    return copied
+
+
+def empty_flags_unchanged(node: Node) -> Node:
+    copied = copy_if_flags(node, [])
+    set_flag(copied)
+    return copied
+
+
+def empty_flags_changed_here_kept(node: Node) -> Node:
+    copied = copy_after_changing_flags_here(node, [])
+    set_flag(copied)
+    return copied
+
+
+def empty_flags_changed_by_the_relay_kept(node: Node) -> Node:
+    copied = relay_after_changing_flags(node, [])
     set_flag(copied)
     return copied
 

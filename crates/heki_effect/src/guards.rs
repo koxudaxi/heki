@@ -466,11 +466,13 @@ enum TestAtCall {
 
 /// [`TestAtCall`] of the callee's test `g` at a call binding its subject's parameter to a value
 /// whose own outcome of the test is `outcome` (when the value decides it), or to the caller's
-/// input `input`, where the caller's tests `known` hold.
+/// input `input` (which the caller `changed` in place somewhere: a test of the object's state
+/// is then not a test of the caller's input), where the caller's tests `known` hold.
 fn test_at_call(
     g: &InputGuard,
     outcome: Option<bool>,
     input: Option<&GuardSubject>,
+    changed: bool,
     known: &[InputGuard],
 ) -> TestAtCall {
     if g.subject.attr.is_none()
@@ -481,6 +483,13 @@ fn test_at_call(
         } else {
             TestAtCall::Fails
         };
+    }
+    let is_state_test = !matches!(
+        g.test,
+        GuardTest::IsNone | GuardTest::IsInstance(_) | GuardTest::HasAttr(_)
+    );
+    if changed && is_state_test && g.subject.attr.is_none() {
+        return TestAtCall::Open;
     }
     let subject = match (input, &g.subject.attr) {
         (Some(GuardSubject { param, attr: None }), attr) => GuardSubject {
@@ -509,6 +518,7 @@ impl CallTests {
                 let b = o.binding.as_ref()?;
                 let view = match (b.constant(), &b.input) {
                     (Some(c), _) => ArgView::Const(c),
+                    (None, Some(input)) if b.input_changed => ArgView::ChangedInput(input.clone()),
                     (None, Some(input)) => ArgView::Input(input.clone()),
                     (None, None) => return None,
                 };
@@ -531,12 +541,13 @@ pub(crate) fn given_at_call(given: &MayGiven, at: &CallTests) -> MayGiven {
         let mut tests = at.known.clone();
         for g in alternative {
             let arg = (at.args.iter()).find_map(|(p, a)| (*p == g.subject.param).then_some(a));
-            let (outcome, input) = match arg {
-                Some(ArgView::Const(c)) => (c.decide(&g.test), None),
-                Some(ArgView::Input(input)) => (None, Some(input)),
-                None => (None, None),
+            let (outcome, input, changed) = match arg {
+                Some(ArgView::Const(c)) => (c.decide(&g.test), None, false),
+                Some(ArgView::Input(input)) => (None, Some(input), false),
+                Some(ArgView::ChangedInput(input)) => (None, Some(input), true),
+                None => (None, None, false),
             };
-            match test_at_call(g, outcome, input, &at.known) {
+            match test_at_call(g, outcome, input, changed, &at.known) {
                 TestAtCall::Fails => continue 'alternatives,
                 TestAtCall::Caller(t) => tests.push(t),
                 TestAtCall::Holds | TestAtCall::Open => {}
@@ -593,7 +604,7 @@ pub(crate) fn through_call(
         let outcome = (b.fact.as_deref())
             .filter(|_| g.subject.attr.is_none())
             .and_then(|f| fact_outcome(f, &g.test));
-        match test_at_call(g, outcome, b.input.as_ref(), &site.guards) {
+        match test_at_call(g, outcome, b.input.as_ref(), b.input_changed, &site.guards) {
             TestAtCall::Fails => return None,
             TestAtCall::Caller(t) => {
                 guards.inputs.insert(t);
@@ -1062,6 +1073,30 @@ fn for_each_source(kind: &InstKind, mut visit: impl FnMut(VarId)) {
     }
 }
 
+/// Methods that add items to or remove them from the builtin container they are called on,
+/// and so change its truthiness.
+pub(crate) const CHANGING_METHODS: &[&str] = &[
+    "__delitem__",
+    "__setitem__",
+    "add",
+    "append",
+    "appendleft",
+    "clear",
+    "difference_update",
+    "discard",
+    "extend",
+    "extendleft",
+    "insert",
+    "intersection_update",
+    "pop",
+    "popitem",
+    "popleft",
+    "remove",
+    "setdefault",
+    "symmetric_difference_update",
+    "update",
+];
+
 /// The inputs the guard analysis of one function reads (owned by the summary extractor).
 pub(crate) struct GuardInputs<'f, 'a> {
     pub f: &'a IrFunction,
@@ -1077,6 +1112,8 @@ pub(crate) struct GuardInputs<'f, 'a> {
     pub param_slot_alias: &'f FxHashMap<VarId, (u8, Slot)>,
     /// Attributes the function assigns or deletes on any object.
     pub stored_attrs: &'f [&'a str],
+    /// The inputs (`(param, attr)`) whose object the function changes in place somewhere.
+    pub changed_inputs: &'f FxHashSet<(u8, Option<String>)>,
     /// Instances the function constructs (copies and agreeing phis included).
     pub fresh: &'f FxHashSet<VarId>,
     /// The block and phi defining each phi variable (built on first use).
@@ -1279,6 +1316,9 @@ impl LocalGuards {
         ArgBinding {
             fact: None,
             input: cx.subject(var),
+            input_changed: cx
+                .subject(var)
+                .is_some_and(|s| cx.changed_inputs.contains(&(s.param, s.attr))),
             derived_params: d.params,
             derived_fresh: d.fresh,
             stays_in_loops: loops
@@ -1399,6 +1439,25 @@ impl<'a> GuardInputs<'_, 'a> {
                 })
             }
             _ => None,
+        }
+    }
+
+    /// [`Self::subject`] whose state the function leaves as its caller's until the test: the
+    /// one a truthiness or catalog test of the entry value is a test of.
+    fn entry_subject(&self, v: VarId) -> Option<GuardSubject> {
+        self.subject(v)
+            .filter(|s| !self.changed_inputs.contains(&(s.param, s.attr.clone())))
+    }
+
+    /// The subject `value` is for the `None`, `isinstance`, or `hasattr` test `test`
+    /// ([`GuardInputs::entry_subject`] is the one of a truthiness test): no change in place
+    /// alters a test of identity or class, nor of an attribute the function stores nowhere.
+    fn subject_of(&self, value: VarId, test: &GuardTest) -> Option<GuardSubject> {
+        match test {
+            GuardTest::HasAttr(name) => self
+                .subject(value)
+                .filter(|_| !self.stored_attrs.contains(&name.as_str())),
+            _ => self.subject(value),
         }
     }
 
@@ -2235,11 +2294,11 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
     /// with the outcome its truthiness means.
     fn test(&self, v: VarId) -> Option<(GuardSubject, GuardTest, bool)> {
         let cx = self.cx;
-        if let Some(s) = cx.subject(v) {
+        if let Some(s) = cx.entry_subject(v) {
             return Some((s, GuardTest::Truthy, true));
         }
         let (value, test, polarity) = self.tested(v)?;
-        Some((cx.subject(value)?, test, polarity))
+        Some((cx.subject_of(value, &test)?, test, polarity))
     }
 
     /// The test `v` makes of a value: `isinstance(x, C)`, `hasattr(x, "name")`, or `x is None`
@@ -2294,7 +2353,7 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
         }
         let mut edges = Vec::with_capacity(phi.incoming.len());
         for (pred, w) in &phi.incoming {
-            let along = match cx.subject(*w) {
+            let along = match cx.subject_of(*w, &test) {
                 Some(s) => EdgeOutcome::Atom(self.intern(s, test.clone())),
                 None => match self.classes.get(w).and_then(|c| c.decide(&test)) {
                     Some(outcome) => EdgeOutcome::Decided(outcome),

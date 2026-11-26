@@ -602,6 +602,9 @@ pub struct CallTests {
 pub enum ArgView {
     Const(ConstArg),
     Input(GuardSubject),
+    /// The caller's own input, which the caller changes in place somewhere: only a test that
+    /// holds of the object whatever changes in it (`None`, `isinstance`) is handed on.
+    ChangedInput(GuardSubject),
 }
 
 /// A fact a function may have only where tests of its inputs pass: the alternatives, each the
@@ -1602,6 +1605,9 @@ pub struct ArgBinding {
     pub fact: Option<Box<heki_kb::ArgFact>>,
     /// The caller's own input the argument is (a guard subject of the caller).
     pub input: Option<GuardSubject>,
+    /// The caller changes that input in place somewhere ([`GuardInputs::changed_inputs`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub input_changed: bool,
     /// Caller parameters the argument may come from: itself, its attributes and elements, and
     /// the results of calls on them.
     pub derived_params: u64,
