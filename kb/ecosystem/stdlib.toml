@@ -1564,7 +1564,7 @@ values = [{ arg = 1, calls = true }]
 
 [[invokes]]
 symbol = "unittest.TestCase.assertRaisesRegex"
-values = [{ arg = 1, calls = true }]
+values = [{ arg = 2, calls = true }]
 
 [[invokes]]
 symbol = "unittest.TestCase.assertWarns"
@@ -1572,15 +1572,15 @@ values = [{ arg = 1, calls = true }]
 
 [[invokes]]
 symbol = "unittest.TestCase.assertWarnsRegex"
-values = [{ arg = 1, calls = true }]
+values = [{ arg = 2, calls = true }]
 
 [[invokes]]
 symbol = "unittest.TestCase.enterContext"
-values = [{ arg = 0, methods = ["__enter__"] }]
+values = [{ arg = 0, param = "cm", methods = ["__enter__"] }]
 
 [[invokes]]
 symbol = "unittest.TestCase.enterClassContext"
-values = [{ arg = 0, methods = ["__enter__"] }]
+values = [{ arg = 0, param = "cm", methods = ["__enter__"] }]
 
 [[invokes]]
 symbol = "unittest.IsolatedAsyncioTestCase.assertRaises"
@@ -1588,7 +1588,7 @@ values = [{ arg = 1, calls = true }]
 
 [[invokes]]
 symbol = "unittest.IsolatedAsyncioTestCase.assertRaisesRegex"
-values = [{ arg = 1, calls = true }]
+values = [{ arg = 2, calls = true }]
 
 [[invokes]]
 symbol = "unittest.IsolatedAsyncioTestCase.assertWarns"
@@ -1596,19 +1596,19 @@ values = [{ arg = 1, calls = true }]
 
 [[invokes]]
 symbol = "unittest.IsolatedAsyncioTestCase.assertWarnsRegex"
-values = [{ arg = 1, calls = true }]
+values = [{ arg = 2, calls = true }]
 
 [[invokes]]
 symbol = "unittest.IsolatedAsyncioTestCase.enterContext"
-values = [{ arg = 0, methods = ["__enter__"] }]
+values = [{ arg = 0, param = "cm", methods = ["__enter__"] }]
 
 [[invokes]]
 symbol = "unittest.IsolatedAsyncioTestCase.enterClassContext"
-values = [{ arg = 0, methods = ["__enter__"] }]
+values = [{ arg = 0, param = "cm", methods = ["__enter__"] }]
 
 [[invokes]]
 symbol = "unittest.IsolatedAsyncioTestCase.enterAsyncContext"
-values = [{ arg = 0, methods = ["__aenter__"] }]
+values = [{ arg = 0, param = "cm", methods = ["__aenter__"] }]
 
 # --- Calls a callable without awaiting it (EFF115, opt-in) ---
 # What each of these calls calls without awaiting it is listed under `[[calls_unawaited]]`.
@@ -3480,7 +3480,7 @@ values = [{ arg = 1, calls = true }]
 
 [[invokes]]
 symbol = "unittest.TestCase.assertRaisesRegex"
-values = [{ arg = 1, calls = true }]
+values = [{ arg = 2, calls = true }]
 
 [[invokes]]
 symbol = "unittest.TestCase.assertWarns"
@@ -3488,15 +3488,15 @@ values = [{ arg = 1, calls = true }]
 
 [[invokes]]
 symbol = "unittest.TestCase.assertWarnsRegex"
-values = [{ arg = 1, calls = true }]
+values = [{ arg = 2, calls = true }]
 
 [[invokes]]
 symbol = "unittest.TestCase.enterContext"
-values = [{ arg = 0, methods = ["__enter__"] }]
+values = [{ arg = 0, param = "cm", methods = ["__enter__"] }]
 
 [[invokes]]
 symbol = "unittest.TestCase.enterClassContext"
-values = [{ arg = 0, methods = ["__enter__"] }]
+values = [{ arg = 0, param = "cm", methods = ["__enter__"] }]
 
 [[invokes]]
 symbol = "unittest.IsolatedAsyncioTestCase.assertRaises"
@@ -3504,7 +3504,7 @@ values = [{ arg = 1, calls = true }]
 
 [[invokes]]
 symbol = "unittest.IsolatedAsyncioTestCase.assertRaisesRegex"
-values = [{ arg = 1, calls = true }]
+values = [{ arg = 2, calls = true }]
 
 [[invokes]]
 symbol = "unittest.IsolatedAsyncioTestCase.assertWarns"
@@ -3512,19 +3512,19 @@ values = [{ arg = 1, calls = true }]
 
 [[invokes]]
 symbol = "unittest.IsolatedAsyncioTestCase.assertWarnsRegex"
-values = [{ arg = 1, calls = true }]
+values = [{ arg = 2, calls = true }]
 
 [[invokes]]
 symbol = "unittest.IsolatedAsyncioTestCase.enterContext"
-values = [{ arg = 0, methods = ["__enter__"] }]
+values = [{ arg = 0, param = "cm", methods = ["__enter__"] }]
 
 [[invokes]]
 symbol = "unittest.IsolatedAsyncioTestCase.enterClassContext"
-values = [{ arg = 0, methods = ["__enter__"] }]
+values = [{ arg = 0, param = "cm", methods = ["__enter__"] }]
 
 [[invokes]]
 symbol = "unittest.IsolatedAsyncioTestCase.enterAsyncContext"
-values = [{ arg = 0, methods = ["__aenter__"] }]
+values = [{ arg = 0, param = "cm", methods = ["__aenter__"] }]
 
 # --- Calls a callable without awaiting it (`[[calls_unawaited]]`, EFF115 and EFF116, opt-in) ---
 # Each entry names the callable argument (position `arg`, the receiver not counted, or the
