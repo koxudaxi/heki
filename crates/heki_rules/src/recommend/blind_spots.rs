@@ -1248,8 +1248,84 @@ fn hypothetical(code: &str, counts: Option<TrialReports>) -> String {
     }
 }
 
-/// A table of library names, as the text prints it.
-fn names_table(out: &mut String, symbols: &[&SymbolCalls], total: usize) {
+/// The order of the rows of a table of library names: the most exact reports the trial found
+/// through the name first, then the most heuristic ones, then by reach.
+fn trial_order(s: &SymbolCalls) -> impl Ord + '_ {
+    let (waits, queries) = (
+        s.if_waits.unwrap_or_default(),
+        s.if_queries.unwrap_or_default(),
+    );
+    (
+        std::cmp::Reverse(waits.exact + queries.exact),
+        std::cmp::Reverse(waits.heuristic + queries.heuristic),
+        s.counts.reach(),
+        &s.symbol,
+    )
+}
+
+/// The names of the packages the catalog does not cover, as the text prints them: those whose
+/// trial changes a report in a table ([`trial_order`]), then those whose trial changes none and
+/// those not tried, each counted on a line. Returns whether it printed a table.
+fn uncatalogued_names(out: &mut String, section: &BlindSpotsSection) -> bool {
+    let listed: Vec<&SymbolCalls> = (section.uncatalogued.iter())
+        .flat_map(|p| &p.symbols)
+        .collect();
+    let mut reporting: Vec<&SymbolCalls> = (listed.iter().copied())
+        .filter(|s| hypothetical_reports(s) > 0)
+        .collect();
+    reporting.sort_by(|a, b| trial_order(a).cmp(&trial_order(b)));
+    let reporting_total = reporting.len();
+    reporting.truncate(MAX_TEXT_ROWS);
+    if !reporting.is_empty() {
+        names_table(
+            out,
+            &reporting,
+            reporting_total,
+            " name(s) whose trial changes a report",
+        );
+    }
+    let more = |n: usize| {
+        if reporting.is_empty() {
+            n.to_string()
+        } else {
+            format!("and {n} more")
+        }
+    };
+    let mut quiet: Vec<&SymbolCalls> = (listed.iter().copied())
+        .filter(|s| s.if_waits.is_some() && hypothetical_reports(s) == 0)
+        .collect();
+    if !quiet.is_empty() {
+        quiet.sort_by(|a, b| (a.counts.reach(), &a.symbol).cmp(&(b.counts.reach(), &b.symbol)));
+        let mut names: Vec<&str> = (quiet.iter().take(MAX_EXAMPLES))
+            .map(|s| s.symbol.as_str())
+            .collect();
+        if quiet.len() > MAX_EXAMPLES {
+            names.push("...");
+        }
+        let _ = writeln!(
+            out,
+            "    {} name(s) whose trial changes no report ({})",
+            more(quiet.len()),
+            names.join(", ")
+        );
+    }
+    let not_tried = listed.iter().filter(|s| s.if_waits.is_none()).count();
+    if not_tried > 0 {
+        let _ = writeln!(
+            out,
+            "    {} name(s) not tried, past the first {MAX_TRIED_SYMBOLS} by reach",
+            more(not_tried)
+        );
+    }
+    let unlisted = section.totals.uncatalogued_symbols - listed.len();
+    if unlisted > 0 {
+        let _ = writeln!(out, "    and {unlisted} more name(s), not listed");
+    }
+    !reporting.is_empty()
+}
+
+/// A table of library names, as the text prints it; `more` says what the names past it are.
+fn names_table(out: &mut String, symbols: &[&SymbolCalls], total: usize, more: &str) {
     let width = symbols
         .iter()
         .map(|s| s.symbol.len())
@@ -1285,77 +1361,41 @@ fn names_table(out: &mut String, symbols: &[&SymbolCalls], total: usize) {
         );
     }
     if total > symbols.len() {
-        let _ = writeln!(out, "    and {} more", total - symbols.len());
+        let _ = writeln!(out, "    and {} more{more}", total - symbols.len());
     }
 }
 
-/// The section as the text prints it.
-pub(super) fn render(out: &mut String, section: &BlindSpotsSection) {
+/// Whether the calls are in test code, as `relax-async-in-tests` judges it
+/// ([`heki_effect::code_kind::is_test_code`]), from the function's dotted name and its file's
+/// path as the output writes them below `root`. The module is the file's path below a source
+/// root, so it is the longest run of the path's last names that starts the dotted name.
+fn in_test_code(u: &UnresolvedCalls, root: &str) -> bool {
+    let path = u.path.replace('\\', "/");
+    let rel = (root != ".")
+        .then(|| path.strip_prefix(root)?.strip_prefix('/'))
+        .flatten()
+        .unwrap_or(&path);
+    let file: Vec<&str> = rel
+        .strip_suffix(".py")
+        .unwrap_or(rel)
+        .split('/')
+        .filter(|name| *name != "__init__")
+        .collect();
+    let dotted: Vec<&str> = u.function.split('.').collect();
+    let module = (1..=file.len().min(dotted.len()))
+        .rev()
+        .find(|&n| file[file.len() - n..] == dotted[..n])
+        .unwrap_or_default();
+    heki_effect::code_kind::is_test_code(&dotted[module..].join("."), rel)
+}
+
+/// The section as the text prints it. `root` is the project root as the output writes it.
+pub(super) fn render(out: &mut String, section: &BlindSpotsSection, root: &str) {
     out.push_str("\nWhat heki cannot see (no report either way)\n");
     let t = &section.totals;
     let mut empty = true;
-    if t.uncatalogued_symbols > 0 {
-        empty = false;
-        let _ = writeln!(
-            out,
-            "  calls of packages heki's catalog does not cover: {} call(s) of {} name(s) in {} \
-             package(s)",
-            t.uncatalogued.calls, t.uncatalogued_symbols, t.uncatalogued_packages
-        );
-        let mut symbols: Vec<&SymbolCalls> = section
-            .uncatalogued
-            .iter()
-            .flat_map(|p| &p.symbols)
-            .collect();
-        symbols.sort_by(|a, b| (a.counts.reach(), &a.symbol).cmp(&(b.counts.reach(), &b.symbol)));
-        symbols.truncate(MAX_TEXT_ROWS);
-        names_table(out, &symbols, t.uncatalogued_symbols);
-    }
-    if !section.catalog_may_miss.is_empty() {
-        empty = false;
-        let _ = writeln!(
-            out,
-            "  names heki's catalog lacks in packages it covers, which heki would report through \
-             if they waited or sent a query (if they do, report them at {ISSUES_URL})"
-        );
-        let symbols: Vec<&SymbolCalls> = section
-            .catalog_may_miss
-            .iter()
-            .take(MAX_TEXT_ROWS)
-            .collect();
-        names_table(out, &symbols, section.catalog_may_miss.len());
-    }
-    if t.unresolved.calls > 0 {
-        empty = false;
-        let _ = writeln!(
-            out,
-            "  calls heki does not resolve: {} call(s) in {} function(s)",
-            t.unresolved.calls, t.unresolved_functions
-        );
-        let rows: Vec<&UnresolvedCalls> = section.unresolved.iter().take(MAX_TEXT_ROWS).collect();
-        let width = rows
-            .iter()
-            .map(|u| u.function.len())
-            .max()
-            .unwrap_or_default()
-            .max("function".len());
-        let _ = writeln!(out, "    {:<width$}  calls  async  loops  why", "function");
-        for u in &rows {
-            let c = u.counts;
-            let _ = writeln!(
-                out,
-                "    {:<width$}  {:>5}  {:>5}  {:>5}  {}",
-                u.function,
-                c.calls,
-                c.on_event_loop,
-                c.in_loops,
-                why(u)
-            );
-        }
-        if t.unresolved_groups > rows.len() {
-            let _ = writeln!(out, "    and {} more", t.unresolved_groups - rows.len());
-        }
-    }
+    let mut tables = false;
+    // The one part of the section that enters the block comes first.
     for root in section.source_roots.iter().take(MAX_TEXT_ROWS) {
         empty = false;
         let mut names: Vec<&str> = root.examples.iter().map(|e| e.name.as_str()).collect();
@@ -1386,6 +1426,88 @@ pub(super) fn render(out: &mut String, section: &BlindSpotsSection) {
             "  and {} more source-root candidate(s)",
             t.source_root_candidates - shown_roots
         );
+    }
+    if t.uncatalogued_symbols > 0 {
+        empty = false;
+        let _ = writeln!(
+            out,
+            "  calls of packages heki's catalog does not cover: {} call(s) of {} name(s) in {} \
+             package(s)",
+            t.uncatalogued.calls, t.uncatalogued_symbols, t.uncatalogued_packages
+        );
+        tables |= uncatalogued_names(out, section);
+    }
+    if !section.catalog_may_miss.is_empty() {
+        empty = false;
+        let _ = writeln!(
+            out,
+            "  names heki's catalog lacks in packages it covers, which heki would report through \
+             if they waited or sent a query (if they do, report them at {ISSUES_URL})"
+        );
+        let mut symbols: Vec<&SymbolCalls> = section.catalog_may_miss.iter().collect();
+        symbols.sort_by(|a, b| trial_order(a).cmp(&trial_order(b)));
+        symbols.truncate(MAX_TEXT_ROWS);
+        names_table(out, &symbols, section.catalog_may_miss.len(), "");
+        tables = true;
+    }
+    if tables {
+        out.push_str(
+            "  if it waits, if it sends a query: what heki check would print if the call waited on \
+             the network or sent a database query; a trial, not a fact (Notes)\n",
+        );
+    }
+    if t.unresolved.calls > 0 {
+        empty = false;
+        let _ = writeln!(
+            out,
+            "  calls heki does not resolve: {} call(s) in {} function(s)",
+            t.unresolved.calls, t.unresolved_functions
+        );
+        // Test code after the rest, each by reach as the list is.
+        let mut listed: Vec<(bool, &UnresolvedCalls)> = (section.unresolved.iter())
+            .map(|u| (in_test_code(u, root), u))
+            .collect();
+        listed.sort_by_key(|(test, _)| *test);
+        let (rows, past): (Vec<_>, Vec<_>) =
+            (listed.iter().enumerate()).partition(|(i, _)| *i < MAX_TEXT_ROWS);
+        let rows: Vec<&UnresolvedCalls> = rows.into_iter().map(|(_, (_, u))| *u).collect();
+        let tests_past = past.iter().filter(|(_, (test, _))| *test).count();
+        let width = rows
+            .iter()
+            .map(|u| u.function.len())
+            .max()
+            .unwrap_or_default()
+            .max("function".len());
+        let _ = writeln!(out, "    {:<width$}  calls  async  loops  why", "function");
+        for u in &rows {
+            let c = u.counts;
+            let _ = writeln!(
+                out,
+                "    {:<width$}  {:>5}  {:>5}  {:>5}  {}",
+                u.function,
+                c.calls,
+                c.on_event_loop,
+                c.in_loops,
+                why(u)
+            );
+        }
+        if t.unresolved_groups > rows.len() {
+            // Past the list, nothing is known of where the calls are.
+            let at_least = if t.unresolved_groups > listed.len() {
+                "at least "
+            } else {
+                ""
+            };
+            let in_tests = match tests_past {
+                0 => String::new(),
+                n => format!(", {at_least}{n} of them in test code"),
+            };
+            let _ = writeln!(
+                out,
+                "    and {} more{in_tests}",
+                t.unresolved_groups - rows.len()
+            );
+        }
     }
     let a1 = section.a1_hazards;
     if a1.functions > 0 {

@@ -89,6 +89,11 @@ pub struct Request<'a> {
     pub baseline: Option<RatchetBaseline>,
     /// The paths given on the command line.
     pub paths: &'a [PathBuf],
+    /// The paths the run analyzes ([`CommandPaths::analyzed`](crate::project::CommandPaths)):
+    /// what the command naming the counted reports has to carry.
+    pub analyzed_paths: &'a [PathBuf],
+    /// The words of the `heki check` options that analyze and select as this run did.
+    pub check_options: Vec<String>,
     /// A path as the output writes it: relative to the working directory when inside it, as
     /// `heki check` writes paths.
     pub shown: &'a dyn Fn(&Path) -> String,
@@ -180,6 +185,13 @@ pub struct Analyzed {
     pub errors: Vec<String>,
     /// The paths given on the command line.
     pub paths: Vec<String>,
+    /// The paths the run analyzes, as the command naming the counted reports writes them.
+    #[serde(skip)]
+    pub check_paths: Vec<String>,
+    /// The `heki check` options the run's own options give: what the command naming the counted
+    /// reports carries.
+    #[serde(skip)]
+    pub check_options: Vec<String>,
     pub left_out: LeftOut,
 }
 
@@ -270,11 +282,14 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         snapshot,
         baseline,
         paths,
+        analyzed_paths,
+        check_options,
         shown,
         errors,
         all,
     } = request;
     let env = &project.env;
+    let snapshot_saved = env.root.join(crate::SNAPSHOT_FILE).is_file();
     // Without a configuration file, the keys go into a new `pyproject.toml`.
     let layout = env
         .config_file
@@ -458,6 +473,8 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
             functions,
             errors,
             paths: paths.iter().map(|p| shown(p)).collect(),
+            check_paths: analyzed_paths.iter().map(|p| shown(p)).collect(),
+            check_options,
             left_out,
         },
         runs,
@@ -477,7 +494,13 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         config_toml: block.toml,
         content: String::new(),
     };
-    report.content = render_text(&report);
+    report.content = render_text(
+        &report,
+        TextOptions {
+            all,
+            snapshot_saved,
+        },
+    );
     Ok(report)
 }
 
@@ -663,6 +686,17 @@ fn candidates_note(ask_fail: bool) -> String {
     )
 }
 
+/// `word` as one word of a POSIX shell command: quoted unless it holds only characters no shell
+/// reads specially.
+fn command_word(word: &str) -> std::borrow::Cow<'_, str> {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "/._-+:@%=,".contains(c);
+    if !word.is_empty() && word.chars().all(plain) {
+        word.into()
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''")).into()
+    }
+}
+
 /// `diags` as `heki check` prints them: reports sharing a root cause folded into one.
 fn printed(diags: impl IntoIterator<Item = Diagnostic>) -> Vec<Diagnostic> {
     let mut diags: Vec<Diagnostic> = diags.into_iter().collect();
@@ -708,8 +742,75 @@ fn left_out_note(left_out: &LeftOut) -> String {
     )
 }
 
+/// The most steps "Start here" lists.
+const MAX_STEPS: usize = 3;
+
+/// The first steps the report points to, each a field it already has, the first
+/// [`MAX_STEPS`] of: the reports that fail `heki check` now, a source root the block adds (the
+/// contract candidates wait for a run with it), the command showing the reports the rules count,
+/// the exact types, and the contract blocks.
+fn start_here(report: &RecommendReport) -> Vec<String> {
+    let mut steps = Vec::new();
+    let now = &report.reports_now;
+    if now.failing > 0 && now.baseline.is_none() {
+        steps.push(format!(
+            "heki check fails on {} report(s) now: a Ratchet baseline records them, so that it \
+             fails only on new ones (Notes)",
+            now.failing
+        ));
+    }
+    if let Some(src) = (report.config_toml.lines()).find(|l| l.starts_with("src = ")) {
+        steps.push(format!(
+            "add {src} (keys at the end), then run heki recommend again: it renames modules, and \
+             the contract candidates come from that run"
+        ));
+    }
+    if let Some(shown) = rules::shown_by_check(&report.rules, &report.analyzed) {
+        let counted = format!(
+            "{} exact, {} heuristic (heuristic reports can be wrong)",
+            shown.exact, shown.heuristic
+        );
+        steps.push(if now.baseline.is_some() {
+            format!(
+                "{} shows {} regression(s) among {} report(s) not shown now: {counted}",
+                shown.command, shown.regressions, shown.reports
+            )
+        } else {
+            format!(
+                "{} shows {} report(s) not shown now: {counted}",
+                shown.command, shown.reports
+            )
+        });
+    }
+    let exact: usize = report.suggestions.counts.iter().map(|c| c.exact).sum();
+    if exact > 0 {
+        steps.push(format!(
+            "{exact} exact read-only parameter type(s) to write (Types the code already keeps)"
+        ));
+    }
+    if !report.contracts.is_empty() {
+        steps.push(format!(
+            "{} contract block(s) in the keys at the end: the code keeps them today; adopt only \
+             the boundaries you intend to keep (Notes)",
+            report.contracts.len()
+        ));
+    }
+    steps.truncate(MAX_STEPS);
+    steps
+}
+
+/// What the text shows beyond the JSON object.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TextOptions {
+    /// `--all`: every suggestion group, as the object holds them, and every rule without
+    /// reports by name.
+    pub all: bool,
+    /// Whether the project root holds a saved summary snapshot, which `MUT103` compares with.
+    pub snapshot_saved: bool,
+}
+
 /// The report as the text output prints it.
-pub fn render_text(report: &RecommendReport) -> String {
+pub fn render_text(report: &RecommendReport, text: TextOptions) -> String {
     let mut out = String::new();
     let analyzed = &report.analyzed;
     let _ = writeln!(
@@ -731,9 +832,22 @@ pub fn render_text(report: &RecommendReport) -> String {
             split.allowed, split.regressions
         );
     }
-    premises::render(&mut out, &report.open_premises);
-    blind_spots::render(&mut out, &report.blind_spots);
-    rules::render(&mut out, &report.rules, now.baseline.is_some());
+    let steps = start_here(report);
+    if !steps.is_empty() {
+        out.push_str("\nStart here\n");
+        for step in steps {
+            let _ = writeln!(out, "  - {step}");
+        }
+    }
+    types::render(&mut out, &report.suggestions, text.all);
+    rules::render(
+        &mut out,
+        &report.rules,
+        now.baseline.is_some(),
+        &report.analyzed,
+        text,
+    );
+    blind_spots::render(&mut out, &report.blind_spots, &report.root);
     contracts::render(
         &mut out,
         &report.contracts,
@@ -750,6 +864,9 @@ pub fn render_text(report: &RecommendReport) -> String {
             let _ = writeln!(out, "  - {}", entry.message());
         }
     }
+    // The reports this section is about are those `heki check` does not show: what can be
+    // adopted comes first.
+    premises::render(&mut out, &report.open_premises);
     if !report.notes.is_empty() {
         out.push_str("\nNotes\n");
         for note in &report.notes {
