@@ -5601,11 +5601,16 @@ against them. Replace `app` with your package.
               new=$(diff <(keys "$RUNNER_TEMP/base.json") <(keys "$RUNNER_TEMP/head.json") | grep '^>' || true)
               test -z "$new" || { echo "New inline suppressions:"; echo "$new"; exit 1; }
               (cd ../base && uvx heki snapshot > "$RUNNER_TEMP/base-summary.json")
-              uvx heki check --select MUT103 --fail-on warning --snapshot "$RUNNER_TEMP/base-summary.json"
+              uvx heki check --select MUT103 --fail-on warning --snapshot "$RUNNER_TEMP/base-summary.json" \
+                --report-suppressed "$RUNNER_TEMP/mut103.json"
+              hidden=$(keys "$RUNNER_TEMP/mut103.json")
+              test -z "$hidden" || { echo "Effect changes hidden by inline suppressions:"; echo "$hidden"; exit 1; }
     ```
 
     The base branch runs its own `heki.toml` and baseline, so the pull request cannot change what
-    it is compared with. `--report-suppressed` and `--snapshot` came after heki 0.7.0, so a pinned
+    it is compared with. `MUT103` is opt-in, so the first audit does not see a
+    `# heki: ignore[MUT103]`; the last run writes its own audit file, and any entry in it fails the
+    step, since the base compared with its own snapshot has no `MUT103` report to hide. `--report-suppressed` and `--snapshot` came after heki 0.7.0, so a pinned
     `uvx heki==<version>` here needs a later release. The base checkout sits next to the project
     (`../base`), not inside it, so that heki does not analyze it too.
 
