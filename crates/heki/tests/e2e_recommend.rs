@@ -957,6 +957,7 @@ fn the_command_under_the_rules_shows_every_report_they_count() {
 /// The sections of the text, in the order it prints them.
 const SECTIONS: &[&str] = &[
     "\nReports now  ",
+    "\nTypes the code already keeps\n",
     "\nRules worth enabling here\n",
     "\nWhat heki cannot see (no report either way)\n",
     "\nContract candidates\n",

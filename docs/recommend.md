@@ -17,8 +17,9 @@ $ heki recommend app --output-format json
 It takes the options of `heki check` that decide what is analyzed: `--select`,
 `--extend-select`, `--ignore`, `--heuristic` / `--no-heuristic`, `--config`,
 `--target-version`, and `--baseline`. The advice is relative to that configuration. `--all`
-shows every block of contracts, where the report shows the first 3 of each kind, and lists up
-to 50 of the sites that keep blocks at `unresolved = "ignore"`, where it lists 5.
+shows every block of contracts, where the report shows the first 3 of each kind, lists up
+to 50 of the sites that keep blocks at `unresolved = "ignore"`, where it lists 5, and lists every
+suggestion group, the heuristic ones too, where the text lists the first 3 exact ones.
 
 ## What it prints
 
@@ -27,6 +28,13 @@ to 50 of the sites that keep blocks at `unresolved = "ignore"`, where it lists 5
   reports (reports sharing a root cause count once, as `heki check` folds them), the heuristic
   reports of exact rules that `lint.heuristic = false` withholds, and the heuristic rules it
   leaves off. With a baseline, the reports it allows and the regressions.
+- **Types the code already keeps**: the [suggestions](#suggestions), counted exact and
+  heuristic, and whether heki found a type checker's configuration (without one, half of each
+  guard is missing). The first 3 exact groups by rank are listed, each on one line with its
+  place, function and parameter, the annotation now and as proposed, and its labels; `--all`
+  lists every group, the heuristic ones last with the premises they leave open. The lines under
+  them say what each group states, what reports a later change of the type it writes, and what
+  each label shown means. The edits are in the JSON object; none of it enters the block.
 - **Rules worth enabling here**: every rule the configuration leaves off, and every exact rule
   whose heuristic reports it withholds, with the reports naming it in `extend-select` would add
   (exact and heuristic, and with a baseline the regressions among them), its consequence, and
@@ -335,6 +343,15 @@ heki recommend (experimental) on .: 4 file(s), 13 function(s)
 
 Reports now  1 shown (1 exact, 0 heuristic), 0 heuristic withheld, 4 heuristic rule(s) off
 
+Types the code already keeps
+  2 read-only parameter group(s), exact; 2 heuristic (heki recommend --all lists them)
+  No type checker configuration found: half of each guard is a type checker's.
+    app/report.py:2  total_and_count(rows)  list[int] -> Sequence[int]  public
+    app/report.py:9  average(rows)          list[int] -> Sequence[int]  public
+  Each group states that the parameter itself is never changed, in its function and in every function it is handed to, and that it does not leave them. The edits of a group go together; --output-format json has them.
+  After the edit, a type checker reports a change of the parameter in the function and handing it to a `list`, `dict`, or `set` parameter; MUT110 (exact, on) reports handing it to a function without annotations that changes it.
+  public: a name without a leading underscore along it; callers, overriders, and implementers outside the checked files are not known
+
 Rules worth enabling here
   rule    reports  exact  consequence  right about the code (published)  real harm  block
   MUT106        1      -  bug          not measured                      -          yes
@@ -389,7 +406,8 @@ A suggestion is a claim about the code and the annotation edit that writes it in
 typing (ADR-023). It is no report: it has no rule code, severity, suppression, baseline entry,
 or exit code, and `heki check` never prints one. Edits valid only together are one group: a
 parameter and the parameters it is handed to, and the same parameter of every definition of an
-override family. The JSON object lists them under `suggestions`.
+override family. The text lists them under "Types the code already keeps", and the JSON object
+under `suggestions`, with the edits.
 
 The kind `readonly-parameter` suggests `Sequence`, `Mapping`, or `AbstractSet` for a parameter
 annotated `list`, `dict`, or `set` that the function, and every function it hands it to, only

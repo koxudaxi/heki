@@ -497,7 +497,7 @@ Options:
           Print the JSON Schema of the object of `--output-format json` and exit
 
       --all
-          Show every block of contracts (by default the first 3 of each kind) and up to 50 of the sites keeping them at `unresolved = "ignore"` (by default 5), in the report and in the keys to add
+          Show every block of contracts (by default the first 3 of each kind) and up to 50 of the sites keeping them at `unresolved = "ignore"` (by default 5), in the report and in the keys to add, and every suggestion group, the heuristic ones too (by default the text lists the first 3 exact ones)
 
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable

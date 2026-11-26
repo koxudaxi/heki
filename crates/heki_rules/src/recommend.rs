@@ -477,7 +477,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         config_toml: block.toml,
         content: String::new(),
     };
-    report.content = render_text(&report);
+    report.content = render_text(&report, all);
     Ok(report)
 }
 
@@ -719,8 +719,9 @@ fn left_out_note(left_out: &LeftOut) -> String {
     )
 }
 
-/// The report as the text output prints it.
-pub fn render_text(report: &RecommendReport) -> String {
+/// The report as the text output prints it; `all` lists every suggestion group, as the JSON
+/// object holds them with `--all`.
+pub fn render_text(report: &RecommendReport, all: bool) -> String {
     let mut out = String::new();
     let analyzed = &report.analyzed;
     let _ = writeln!(
@@ -742,6 +743,7 @@ pub fn render_text(report: &RecommendReport) -> String {
             split.allowed, split.regressions
         );
     }
+    types::render(&mut out, &report.suggestions, all);
     rules::render(
         &mut out,
         &report.rules,
