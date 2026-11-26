@@ -192,6 +192,17 @@ $ heki inspect app.users.load_user              # what one function does (experi
 $ heki recommend                                # configuration advice (experimental)
 ```
 
+## 🧭 What heki can do
+
+| Area | What it covers |
+| --- | --- |
+| [State ownership and mutation](https://heki.koxudaxi.dev/ownership/) | Changes to read-only parameters, `lru_cache` results, and frozen fields, and contracts for who may write, read, or call what |
+| [Async, I/O, and execution effects](https://heki.koxudaxi.dev/effects/) | Blocking calls in `async def`, queries and clients in loops, lock hazards, effect boundaries, and effect snapshots |
+| [Imports and module boundaries](https://heki.koxudaxi.dev/imports/) | Import cycles, import-order crashes, test and development code loaded by a package, and import boundaries (experimental) |
+| [Proven performance rewrites](https://heki.koxudaxi.dev/fixes/) | `OPT` findings, and the rewrites `heki check --fix` applies only after proving them |
+| [Function inspection and configuration advice](https://heki.koxudaxi.dev/recommend/) | What one function does with `heki inspect`, and the rules and contracts that fit a project with `heki recommend` (both experimental) |
+| [Coding-agent architecture walls](https://heki.koxudaxi.dev/coding-agents/) | Contracts, a Stop hook, JSON output, and an Agent Skill that keep an agent inside your architecture |
+
 ## ✅ Exact rules
 
 These rules run by default. Each report shows the chain of calls that leads to it.

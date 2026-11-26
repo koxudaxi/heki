@@ -127,6 +127,17 @@ uvx --python 3.12 --from "pytest==8.4.2" --with "pyyaml==6.0.3" --with "jsonsche
   `tests/semantic/fixtures.py` or `tests/difftest/` where they apply.
 - A rule's documentation lives in `crates/heki_rules/rule-docs/<CODE>.md`; regenerate
   `docs/rules/` and `llms.txt` with `scripts/build_docs.py` and `scripts/build_llms_txt.py`.
+- The feature pages group the capabilities by problem: `docs/ownership.md` (state ownership and
+  mutation), `docs/effects.md` (async and execution effects), `docs/imports.md` (imports and
+  module boundaries), `docs/fixes.md`, `docs/recommend.md`, and `docs/coding-agents.md`. A change
+  that adds or changes a feature, a rule, a contract kind or key, or a command or option, or
+  that makes a rule default or exact, updates the page that covers it in the same change, with
+  its tier (default, opt-in, experimental, heuristic) as `heki rule --all` prints it.
+- A new user-facing capability, contract kind, or default rule also updates the "What heki can
+  do" table in `README.md` and `docs/index.md`, and `zensical.toml` when it adds a page.
+  Regenerate `docs/llms.txt` and `docs/llms-full.txt` with `scripts/build_llms_txt.py`. A new
+  page opens with a sentence that says which problems, contracts, and commands it covers: that
+  sentence is its line in `llms.txt`.
 - A rule reads other files only through the index or the declarations (never another checked
   unit's IR), so that the language server's single-file check equals `heki check`. Every new
   rule and every new cross-file fact gets a step in `crates/heki/tests/lsp_oracle.rs`, which
