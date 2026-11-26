@@ -158,13 +158,16 @@ def project_class(error: ValueError) -> None:
     error.__dict__["_cache"] = 1  # write
 "#;
 
-/// `importlib.util.module_from_spec` gives a `types.ModuleType` (the catalog row), and an
-/// annotation of a local names the imports of its own function, which shadow the module's.
-const STDLIB: &str = r#"import importlib.machinery
+/// `importlib.util.module_from_spec` gives no class (a custom loader's `create_module` may give
+/// any object), an annotation of the result does, and an annotation of a local names the imports
+/// of its own function, which shadow the module's.
+const STDLIB: &str = r#"import importlib.abc
+import importlib.machinery
 import importlib.util
 import types
 
 import vendor
+from pkg.model import Node
 
 
 def made() -> None:
@@ -174,14 +177,37 @@ def made() -> None:
 
 def from_spec(spec: importlib.machinery.ModuleSpec) -> None:
     module = importlib.util.module_from_spec(spec)
-    module.__dict__["__builtins__"] = {}
+    module.__dict__["__builtins__"] = {}  # unresolved
 
 
 def from_spec_through_a_module_alias(spec: importlib.machinery.ModuleSpec) -> None:
     from importlib import util
 
     module = util.module_from_spec(spec)
+    module.__dict__["__builtins__"] = {}  # unresolved
+
+
+def from_spec_annotated(spec: importlib.machinery.ModuleSpec) -> None:
+    module: types.ModuleType = importlib.util.module_from_spec(spec)
     module.__dict__["__builtins__"] = {}
+
+
+def from_spec_annotated_through_a_local_import(spec: importlib.machinery.ModuleSpec) -> None:
+    import types
+
+    module: types.ModuleType = importlib.util.module_from_spec(spec)
+    module.__dict__["__builtins__"] = {}
+
+
+class ProjectLoader(importlib.abc.Loader):
+    def create_module(self, spec: importlib.machinery.ModuleSpec) -> Node:
+        return Node()
+
+
+def from_a_custom_loader() -> None:
+    spec = importlib.util.spec_from_loader("made", ProjectLoader())
+    module = importlib.util.module_from_spec(spec)
+    module.__dict__["__builtins__"] = {}  # unresolved
 
 
 def from_unknown_call() -> None:
@@ -305,4 +331,84 @@ fn builtin_exception_classes_are_known_classes() {
 #[test]
 fn standard_library_results_and_function_local_imports_type_a_receiver() {
     check_marks("stdlib", &[("pkg/stdlib.py", STDLIB)]);
+}
+
+const BLOCKING_WORKER: &str =
+    "import time\n\n\nclass Worker:\n    def work(self) -> None:\n        time.sleep(1)\n";
+const QUIET_WORKER: &str = "class Worker:\n    def work(self) -> None:\n        return None\n";
+
+/// An annotation reads a name the function binds once, by one import: the class of that import.
+const ONE_LOCAL_IMPORT: &str = r#"async def run(value):
+    from pkg.blocking import Worker
+
+    worker: Worker = value
+    worker.work()
+"#;
+
+/// A name the function binds more than once names no class: which binding the annotation reads
+/// is not decided, so the blocking `Worker` is not the receiver's class.
+const SEVERAL_BINDINGS: &str = r#"async def two_imports(value):
+    from pkg.blocking import Worker
+    from pkg.quiet import Worker
+
+    worker: Worker = value
+    worker.work()
+
+
+async def one_import_per_branch(value, flag):
+    if flag:
+        from pkg.blocking import Worker
+    else:
+        from pkg.quiet import Worker
+
+    worker: Worker = value
+    worker.work()
+
+
+async def an_import_and_an_assignment(value):
+    from pkg.blocking import Worker
+
+    Worker = value
+    worker: Worker = value
+    worker.work()
+"#;
+
+/// The lines of the `EFF101` reports of each file.
+fn blocking_reports(name: &str, files: &[(&str, &str)]) -> Vec<(String, u64)> {
+    let p = Project::new(name);
+    p.write("pyproject.toml", "[project]\nname = \"t\"\n");
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/blocking.py", BLOCKING_WORKER);
+    p.write("pkg/quiet.py", QUIET_WORKER);
+    for (path, text) in files {
+        p.write(path, text);
+    }
+    let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let mut out: Vec<(String, u64)> = diags
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF101")
+        .map(|d| {
+            assert_eq!(d["certainty"], "exact", "{d}");
+            (
+                d["path"].as_str().unwrap().to_owned(),
+                d["line"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn a_function_local_import_types_an_annotation_only_when_it_is_the_one_binding() {
+    assert_eq!(
+        blocking_reports("one_local_import", &[("pkg/one.py", ONE_LOCAL_IMPORT)]),
+        [("pkg/one.py".to_owned(), 5)]
+    );
+    assert_eq!(
+        blocking_reports("several_bindings", &[("pkg/several.py", SEVERAL_BINDINGS)]),
+        []
+    );
 }

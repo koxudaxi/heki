@@ -10584,10 +10584,22 @@ impl<'a> TypeCtx<'a> {
     /// The names the imports in the body of the function `f` bind, with what each names: they
     /// shadow the module's names in the annotations of the function's locals. The parameters'
     /// annotations are read in the scope around the function, and a module or class body's
-    /// imports are the module's own.
+    /// imports are the module's own. A name the function binds more than once (two imports,
+    /// an import on one branch and another on the other, an import and an assignment, a
+    /// parameter) names nothing here: which binding an annotation reads is not decided.
     pub(crate) fn local_imports(&self, f: &IrFunction) -> Vec<(String, String)> {
         if f.is_module_body || f.is_class_body {
             return Vec::new();
+        }
+        let mut bindings: FxHashMap<&str, usize> = FxHashMap::default();
+        for name in f.params.iter().map(|p| p.name.as_str()).chain(
+            f.blocks
+                .iter()
+                .flat_map(|b| &b.insts)
+                .filter_map(|inst| inst.kind.dst())
+                .filter_map(|dst| f.var_name(dst)),
+        ) {
+            *bindings.entry(name).or_default() += 1;
         }
         f.blocks
             .iter()
@@ -10596,8 +10608,12 @@ impl<'a> TypeCtx<'a> {
                 let InstKind::Import { dst, .. } = &inst.kind else {
                     return None;
                 };
+                let name = f.var_name(*dst)?;
+                if bindings.get(name) != Some(&1) {
+                    return None;
+                }
                 let target = self.import_by_span.get(&inst.span)?;
-                Some((f.var_name(*dst)?.to_owned(), target.clone()))
+                Some((name.to_owned(), target.clone()))
             })
             .collect()
     }
