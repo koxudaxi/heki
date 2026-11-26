@@ -45,6 +45,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 mod fields;
+mod init_containers;
 mod package_paths;
 mod returns;
 mod sentinels;
@@ -771,6 +772,11 @@ pub struct ClassDecl {
     /// capacity ([`ProjectDecls::attr_capacity`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub attr_capacities: BTreeMap<String, CapacityOf>,
+    /// The attributes the class's own `__init__` binds to a builtin container it makes there,
+    /// with the container's kind, sorted: when it returns, the attribute holds that container
+    /// and nothing else does ([`ProjectDecls::constructor_container`], `init_containers`).
+    #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
+    pub init_containers: Box<[(Box<str>, ContainerKind)]>,
     /// `typing.Protocol` is one of the bases (PEP 544: the class is a protocol, not an
     /// implementation of one).
     pub is_protocol: bool,
@@ -4561,6 +4567,46 @@ impl ProjectDecls {
             && self.binds_none_of(class, &[], catalog_stores)
     }
 
+    /// The kind of the builtin container `attr` of a new instance of the project class `class`
+    /// holds when the call constructing it returns, a container the call made and nothing else
+    /// holds: the `__init__` the call runs, that of the first class along the MRO defining one,
+    /// makes it there (`ClassDecl::init_containers`), and nothing else may run or change the
+    /// construction: no class along the MRO has a class decorator (which may generate another
+    /// `__init__`), `__init_subclass__`, a `dataclass_transform`, or a metaclass other than
+    /// `type` or `abc.ABCMeta` (whose `__call__` may run anything), and writing and reading
+    /// `attr` store and find the instance's own attribute
+    /// ([`Self::attr_write_stores_value`], [`Self::attr_read_finds_stored`]).
+    pub(crate) fn constructor_container(
+        &self,
+        class: &str,
+        attr: &str,
+        catalog_stores: impl Fn(&str) -> bool,
+    ) -> Option<ContainerKind> {
+        if self.has_custom_metaclass(class)
+            || !self.attr_write_stores_value(class, attr, &catalog_stores)
+            || !self.attr_read_finds_stored(class, attr, &catalog_stores)
+        {
+            return None;
+        }
+        let decls: Vec<Option<&ClassDecl>> = (self.mro(class).iter())
+            .map(|c| {
+                self.read(|k| note(&mut k.class_facts, c));
+                self.class(c)
+            })
+            .collect();
+        let changes_construction = |d: &ClassDecl| {
+            !d.decorators.is_empty()
+                || d.transform.is_some()
+                || d.members.contains("__init_subclass__")
+        };
+        if decls.iter().flatten().any(|d| changes_construction(d)) {
+            return None;
+        }
+        // A class outside the project before the one defining `__init__` may define its own.
+        let init = (decls.iter().map_while(|d| *d)).find(|d| d.members.contains("__init__"))?;
+        (init.init_containers.iter()).find_map(|(a, kind)| (&**a == attr).then_some(*kind))
+    }
+
     /// The project classes whose bodies may supply an attribute of a value of the class `class`
     /// under assumption R2 (a value typed `class` is an instance of it or of a project
     /// subclass): the project classes along its MRO, every project subclass, and the project
@@ -7111,6 +7157,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
     let path_changes = package_paths::path_changes(input, &decls);
     decls.path_changes = (!path_changes.is_empty()).then(|| Box::new(path_changes));
     attr_displays(input, &mut decls);
+    init_containers::init_containers(input, &mut decls);
     code_attrs(input, &mut decls);
     for (class, attr) in class_attrs_rebound(input, &decls) {
         if let Some(c) = decls.classes.get_mut(&class) {

@@ -28,7 +28,8 @@ use crate::order_flow;
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, ReturnOrigins, Source};
 use crate::partial::Partial;
 use crate::readonly::{
-    self, ContractSharing, Derivation, ProtectedReturn, ReturnStep, container_mutator,
+    self, ContainerKind, ContractSharing, Derivation, ProtectedReturn, ReturnStep,
+    container_mutator,
 };
 use crate::resolver::stores::{self, AttrName};
 use crate::resolver::{
@@ -1013,6 +1014,10 @@ struct Extractor<'a> {
     /// is the elements, the display is never seen ([`Self::build_unpacked_displays`]).
     unpacked: FxHashMap<VarId, VarId>,
     unpacked_displays: FxHashSet<VarId>,
+    /// The stores into containers that may be ones a constructor made ([`Escape::Added`]), by
+    /// position, for the check after the visit of whether they hand the value to code of the
+    /// project.
+    added: FxHashMap<crate::construction::Pos, AddedBy>,
     /// [`Contracts::ownership`]: the facts only ownership contracts read are computed.
     ownership: bool,
     /// The opt-in facts the enabled rules read.
@@ -1413,6 +1418,7 @@ impl<'a> Extractor<'a> {
             maybe_new: FxHashSet::default(),
             unpacked: FxHashMap::default(),
             unpacked_displays: FxHashSet::default(),
+            added: FxHashMap::default(),
             ownership: false,
             opt_in,
             must_run: FxHashMap::default(),
@@ -4899,12 +4905,53 @@ impl<'a> Extractor<'a> {
                 }
             }
         };
+        // A store into a container hands the value to code of the project when the call does,
+        // on the receiver's class, the items', or the values handed; an item store, only when
+        // the container's `__setitem__` does, and for the key also when hashing it or comparing
+        // it with the keys held does.
+        rec.adds_running_code(|pos, var| match &self.added[&pos] {
+            AddedBy::Call {
+                symbol,
+                recv,
+                args,
+                kwargs,
+                star,
+            } => self.library_call_runs_project_code(
+                symbol,
+                None,
+                Some(*recv),
+                args,
+                kwargs,
+                *star,
+                false,
+            ),
+            AddedBy::Item { obj, value } => {
+                let kind = &self.f.block(BlockId(pos.0)).insts[pos.1 as usize].kind;
+                let mut specials = self.f.special_methods(kind);
+                if var == *value {
+                    specials.retain(|s| s.value == *obj);
+                    for s in &mut specials {
+                        s.keyed = false;
+                    }
+                }
+                self.specials_run_project_code(&specials)
+            }
+        });
+        let kb = self.cx.kb;
+        let catalog_stores = |base: &str| {
+            kb.lookup(&format!("{base}.__setattr__"))
+                .is_some_and(|e| e.stores_on_instance)
+        };
+        let made = |class: &str, attr: &str| {
+            (self.cx.project).constructor_container(class, attr, catalog_stores)
+        };
         let (answers, returned) = rec.resolve(
             self.shape,
             &self.may_params,
             &param_of,
             (&element_of, &reads_of),
             &handed_to,
+            &made,
             returns,
         );
         for p in std::mem::take(&mut self.pending_sites) {
@@ -4967,7 +5014,7 @@ impl<'a> Extractor<'a> {
     fn escape(&mut self, var: VarId, how: Escape) {
         let params = self.may_params.get(&var).copied().unwrap_or(0);
         let recorded = self.track && (params != 0 || self.may_hold_or_read_new(var));
-        let keeps_params = matches!(how, Escape::Definite | Escape::Into(_)) && params != 0;
+        let keeps_params = !matches!(how, Escape::Handed(..)) && params != 0;
         if !recorded && !keeps_params {
             return;
         }
@@ -5221,6 +5268,33 @@ impl<'a> Extractor<'a> {
         .then_some(obj)
     }
 
+    /// Record, when `var` may hold a container the constructor of a new object made for it (what
+    /// a read of an attribute of an object that may be new gives, which `Recorder::resolve`
+    /// decides), the read for the store `how` ([`Escape::Added`]) into it at the current
+    /// instruction names; `how` otherwise.
+    fn added_to(&mut self, var: VarId, how: (ContainerKind, AddedBy)) -> Option<Escape> {
+        let shape = self.shape;
+        let read = shape.copy_root(var);
+        let Some(InstKind::AttrLoad { obj, attr, .. }) = shape.inst(read).map(|i| &i.kind) else {
+            return None;
+        };
+        if NAMESPACE_ATTRS.contains(&attr.as_str()) || !self.may_be_new(*obj) {
+            return None;
+        }
+        self.rec.container_read(read, *obj, attr);
+        self.added.insert(self.at(), how.1);
+        Some(Escape::Added(var, how.0))
+    }
+
+    /// Record a write of the attribute `attr` (`None`: of any, also its namespace or class) of
+    /// the object `obj` holds, which may rebind a container its constructor made.
+    fn attr_written(&mut self, obj: VarId, attr: Option<&str>) {
+        if self.track && self.may_hold_or_read_new(obj) {
+            let attr = attr.filter(|a| !NAMESPACE_ATTRS.contains(a));
+            self.rec.write(self.at(), obj, attr);
+        }
+    }
+
     /// Whether a query about `var` can be answered with anything but "no".
     fn trackable(&self, var: VarId) -> bool {
         matches!(self.param_alias.get(&var), Some((_, None))) || self.may_be_new(var)
@@ -5237,6 +5311,11 @@ impl<'a> Extractor<'a> {
                     .link_holder(*obj, attr)
                     .map_or(Escape::Definite, Escape::Into);
                 self.escape(*value, how);
+                self.attr_written(*obj, Some(attr));
+            }
+            InstKind::AttrDelete { obj, attr } => self.attr_written(*obj, Some(attr)),
+            InstKind::AttrLoad { obj, attr, .. } if NAMESPACE_ATTRS.contains(&attr.as_str()) => {
+                self.attr_written(*obj, None);
             }
             InstKind::StoreGlobal { value, .. }
             | InstKind::StoreDeref { value, .. }
@@ -5246,9 +5325,21 @@ impl<'a> Extractor<'a> {
             | InstKind::Yield {
                 value: Some(value), ..
             } => self.escape(*value, Escape::Definite),
-            InstKind::SubscriptStore { index, value, .. } => {
-                self.escape(*index, Escape::Definite);
-                self.escape(*value, Escape::Definite);
+            InstKind::SubscriptStore {
+                obj, index, value, ..
+            } => {
+                let kind = (self.types.get(obj).map(Val::instance_classes))
+                    .and_then(|classes| classes.first().filter(|_| classes.len() == 1))
+                    .and_then(|class| ContainerKind::of_class(class))
+                    .filter(|k| matches!(k, ContainerKind::List | ContainerKind::Dict));
+                let item = AddedBy::Item {
+                    obj: *obj,
+                    value: *value,
+                };
+                let how = kind.and_then(|kind| self.added_to(*obj, (kind, item)));
+                let how = how.unwrap_or(Escape::Definite);
+                self.escape(*index, how.clone());
+                self.escape(*value, how);
             }
             // The targets an unpacking binds hold the elements; the display is never seen.
             InstKind::AllocBuiltin { dst, .. } if self.unpacked_displays.contains(dst) => {}
@@ -8303,6 +8394,7 @@ impl<'a> Extractor<'a> {
             return;
         }
         match callee {
+            Callee::External(symbol) if self.adds_to_container(symbol, call) => {}
             Callee::External(symbol) => {
                 let new_instance = call
                     .constructs
@@ -8331,6 +8423,35 @@ impl<'a> Extractor<'a> {
         }
     }
 
+    /// Whether the call of the library method `symbol` stores what it is handed in a builtin
+    /// container that may be one a constructor made (`kids.append(part)`,
+    /// [`stored_into_container`]), recording its escapes: the receiver's and each argument's
+    /// [`Escape::Added`].
+    fn adds_to_container(&mut self, symbol: &str, call: &Call<'_>) -> bool {
+        let (Some(recv), Some(kind)) = (call.recv_var, stored_into_container(symbol)) else {
+            return false;
+        };
+        let site = AddedBy::Call {
+            symbol: symbol.to_owned(),
+            recv,
+            args: call.args.to_vec(),
+            kwargs: call.kwargs.to_vec(),
+            star: call.star_from.is_some(),
+        };
+        let Some(how) = (call.per_item.is_none() && call.args_at.is_some())
+            .then(|| self.added_to(recv, (kind, site)))
+            .flatten()
+        else {
+            return false;
+        };
+        // A keyword argument makes these methods raise before they store anything.
+        let keywords = call.kwargs.iter().map(|(_, v)| v);
+        for v in std::iter::once(&recv).chain(call.args).chain(keywords) {
+            self.escape(*v, how.clone());
+        }
+        true
+    }
+
     /// The allocation of a project call, its callees bound (`returns`: each with the parameters
     /// the call binds to values without elements): a constructor call allocates its object, a
     /// call handing back an argument as itself ([`Self::same_objects`]) gives that argument's
@@ -8345,12 +8466,14 @@ impl<'a> Extractor<'a> {
         };
         if let Some(class) = &call.constructs {
             if !self.cx.project.may_reuse_instances(class) {
-                self.rec.alloc(self.at(), dst, NewKind::Own, Vec::new());
+                let made = (NewKind::Own, Some(class.as_str()));
+                self.rec.alloc(self.at(), dst, made, Vec::new());
             }
         } else if let Some(&arg) = self.same_objects.get(&dst) {
             self.rec.handed_back(dst, arg);
         } else if self.may_be_new(dst) {
-            self.rec.alloc(self.at(), dst, NewKind::Own, returns);
+            self.rec
+                .alloc(self.at(), dst, (NewKind::Own, None), returns);
         }
     }
 
@@ -8405,6 +8528,26 @@ impl<'a> Extractor<'a> {
         kwargs: &[(Option<String>, VarId)],
         constructs: bool,
     ) {
+        // The object an attribute write by name writes (the receiver of a bound
+        // `obj.__setattr__`), and the name.
+        let written = match recv {
+            Some(obj) => Some((obj, args.first())),
+            None => args.first().map(|obj| (*obj, args.get(1))),
+        };
+        if let Some((obj, name)) = written
+            && let Some(named) = match symbol {
+                "builtins.setattr"
+                | "builtins.object.__setattr__"
+                | "builtins.delattr"
+                | "builtins.object.__delattr__" => Some(true),
+                "builtins.vars" => Some(false),
+                _ => None,
+            }
+        {
+            let attr = name.filter(|_| named);
+            let attr = attr.and_then(|a| self.shape.str_const(*a));
+            self.attr_written(obj, attr);
+        }
         let method = symbol.rsplit('.').next().unwrap_or(symbol);
         let deep_kwarg = || {
             kwargs.iter().any(|(k, v)| {
@@ -8437,7 +8580,7 @@ impl<'a> Extractor<'a> {
             _ => (None, false, 0),
         };
         if let (Some(kind), Some(dst)) = (alloc.filter(|_| self.track), dst) {
-            self.rec.alloc(self.at(), dst, kind, Vec::new());
+            self.rec.alloc(self.at(), dst, (kind, None), Vec::new());
         }
         if let Some(v) = recv.filter(|_| !recv_read) {
             self.escape(v, Escape::Definite);
@@ -9670,6 +9813,30 @@ impl BuiltRule {
 
 /// The attributes whose store or deletion replaces an object's whole namespace or its class.
 const NAMESPACE_ATTRS: &[&str] = &["__dict__", "__class__"];
+
+/// A store into a container that may be one a constructor made ([`Escape::Added`]).
+enum AddedBy {
+    /// A call of the library method `symbol` storing what it is handed in its receiver.
+    Call {
+        symbol: String,
+        recv: VarId,
+        args: Vec<VarId>,
+        kwargs: Vec<(Option<String>, VarId)>,
+        star: bool,
+    },
+    /// An item store, `obj[key] = value`.
+    Item { obj: VarId, value: VarId },
+}
+
+/// The kind of the builtin container whose method `symbol` stores what it is handed in it
+/// (`ownership::STORING_METHODS`: `list.append`, `set.add`, `dict.setdefault`, ...).
+fn stored_into_container(symbol: &str) -> Option<ContainerKind> {
+    let (class, method) = symbol.rsplit_once('.')?;
+    ownership::STORING_METHODS
+        .contains(&method)
+        .then(|| ContainerKind::of_class(class))
+        .flatten()
+}
 
 /// The operands of a call or method call instruction ([`call_operands`]).
 struct CallOperands<'i> {

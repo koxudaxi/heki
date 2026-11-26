@@ -152,7 +152,7 @@ allowed-writers = ["pkg.rack_ops.empty"]
 
 [[tool.heki.effect-boundaries]]
 name = "copy-pass"
-scopes = ["pkg.copy_pass", "pkg.guarded_build", "pkg.link_pass", "pkg.link_model_pass", "pkg.link_neg_pass"]
+scopes = ["pkg.copy_pass", "pkg.guarded_build", "pkg.link_pass", "pkg.link_model_pass", "pkg.link_neg_pass", "pkg.owned_pass"]
 write-universe = ["Ticket.flag", "Part.flag"]
 "#;
 
@@ -354,6 +354,11 @@ const LINK_NEG_PASS: &str = "from pkg.copy_ops import KEPT, Ticket\n\n\ndef run(
 const LINK_MODEL: &str = "from typing import Any\n\nfrom pydantic import BaseModel\n\n\nclass Part(BaseModel):\n    flag: bool = False\n    parent: Any = None\n";
 const LINK_MODEL_SUB: &str = "from pydantic import ConfigDict\n\nfrom pkg.link_model import Part\n\n\nclass Validated(Part):\n    model_config = ConfigDict(validate_assignment=True)\n";
 const LINK_MODEL_PASS: &str = "from pkg.link_model import Part\n\n\ndef run() -> Part:\n    copied, part = Part(), Part()\n    part.parent = copied\n    copied.flag = True\n    return copied\n";
+// A class of another module whose constructor makes a list for each instance, and a pass storing
+// a new ticket into the list of a new instance (`ClassDecl::init_containers`).
+const OWNED_MODEL: &str =
+    "SHARED = []\n\n\nclass Holder:\n    def __init__(self):\n        self.parts: list = []\n";
+const OWNED_PASS: &str = "from pkg.copy_ops import Ticket\nfrom pkg.owned_model import Holder\n\n\ndef run() -> Holder:\n    copied = Holder()\n    part = Ticket()\n    copied.parts.append(part)\n    part.flag = True\n    return copied\n";
 const COPY_PASS: &str = "from pkg.copy_ops import Ticket, copy_or_reuse, mark, stamp\n\n\ndef run(t: Ticket) -> Ticket:\n    copied = stamp(copy_or_reuse(t))\n    copied.flag = True\n    mark(copied)\n    return copied\n";
 const STRICT_OPS: &str = "def _reset(r):\n    r.entries = []\n";
 // The strict reads and calls: helpers that type nothing read and call a guarded attribute and
@@ -1305,6 +1310,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/link_neg_pass.py", LINK_NEG_PASS),
         ("pkg/link_model.py", LINK_MODEL),
         ("pkg/link_model_pass.py", LINK_MODEL_PASS),
+        ("pkg/owned_model.py", OWNED_MODEL),
+        ("pkg/owned_pass.py", OWNED_PASS),
         ("pkg/strict_ops.py", STRICT_OPS),
         ("pkg/strict_use.py", STRICT_USE),
         ("pkg/q_telemetry.py", Q_TELEMETRY),
@@ -3962,6 +3969,19 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
             vec![save("pkg/sealer.py", SEALER)],
         )
         .present(&[("pkg/reseal_helper.py", "MUT207")]),
+        Step::new(
+            "the constructor of another module's class binds the list to a shared one",
+            vec![Action::Save(
+                "pkg/owned_model.py",
+                OWNED_MODEL.replace("list = []", "list = SHARED"),
+            )],
+        )
+        .present(&[("pkg/owned_pass.py", "EFF201")]),
+        Step::new(
+            "the constructor makes a new list again",
+            vec![save("pkg/owned_model.py", OWNED_MODEL)],
+        )
+        .absent(&[("pkg/owned_pass.py", "EFF201")]),
         Step::new(
             "the copy helper of another module defaults its table to a shared dict",
             vec![Action::Save(

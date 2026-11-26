@@ -206,7 +206,8 @@ an object the function did not make, a container, a global, or a closure, no `yi
 call that may keep it ran before the write. An attribute store into another new object of a
 class whose attribute write runs no code links the holder to it instead: the object stays new
 until it, an object holding it, or a value read out of one is kept (see
-[configuration](../configuration.md#write-owners)). A project function keeps an object it
+[configuration](../configuration.md#write-owners)). So does a store into a list, set, or dict
+the class's constructor made for a new instance (`copied.children.append(part)`). A project function keeps an object it
 stores, yields, or hands to code heki does not follow or to a function that keeps it; reading
 or writing it keeps nothing. A
 store made only where tests of the function's parameters pass (`if register:`) keeps nothing at a
