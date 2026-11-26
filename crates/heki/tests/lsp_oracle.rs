@@ -5409,13 +5409,27 @@ fn steps_mut113() -> Vec<Step> {
 /// holds, and the holder of a module global starts passing the argument that leads another
 /// helper to it. It also follows the names they bind (`LockFacts::rebinds`) and the tests of
 /// state on the way to the lock (`CallSite::state_tests`), and the summaries carry the facts
-/// only while the rule is selected (`OptInFacts`).
+/// only while the rule is selected (`OptInFacts`). The exact tier follows whether the helper
+/// takes the lock on every return (`LockAcquire::on_every_return`), and a report goes when a
+/// method of the other module gives the lock back first (`LockFacts::gives_back`).
 fn steps_eff109() -> Vec<Step> {
     let more = LOCK_POOL.replace(
         "            return 1\n\n\ndef refill",
         "            return 1\n\n    def checked_size(self):\n        if self.closed:\n            return 0\n        return self.size()\n\n\ndef reset():\n    global LOCK\n    LOCK = threading.Lock()\n\n\ndef refill",
     );
     let resetting = "from pkg.lock_pool import LOCK, Pool, refill, reset\n\n\nclass Spool(Pool):\n    def grow(self):\n        return self.size()\n\n\ndef drain():\n    with LOCK:\n        reset()\n        return refill(force=True)\n";
+    let one_path = LOCK_POOL.replace(
+        "    def size(self):\n        with self._lock:\n            return 1\n",
+        "    def size(self):\n        if self.ready:\n            with self._lock:\n                return 1\n        return 0\n",
+    );
+    let pausing = LOCK_POOL.replace(
+        "\n\ndef refill",
+        "\n    def pause(self):\n        self._lock.release()\n\n\ndef refill",
+    );
+    let paused = LOCK_USE.replace(
+        "        with self._lock:\n            return self.size()\n",
+        "        with self._lock:\n            self.pause()\n            return self.size()\n",
+    );
     let wrapped = "from pkg.lock_pool import LOCK, Pool, refill\n\n\nclass Spool(Pool):\n    def grow(self):\n        with self._lock:\n            self.closed = True\n            return self.checked_size()\n\n\ndef drain():\n    with LOCK:\n        return refill()\n";
     vec![
         Step::new(
@@ -5497,6 +5511,40 @@ fn steps_eff109() -> Vec<Step> {
         .present(&[("pkg/lock_use.py", "EFF109")]),
         Step::new(
             "both files as they were",
+            vec![
+                save("pkg/lock_pool.py", LOCK_POOL),
+                save("pkg/lock_use.py", LOCK_USE),
+            ],
+        )
+        .present(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "the helper takes the lock on one path only: the report is heuristic",
+            vec![Action::Save("pkg/lock_pool.py", one_path)],
+        )
+        .present(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "the helper takes it on every return again: the report is exact",
+            vec![save("pkg/lock_pool.py", LOCK_POOL)],
+        )
+        .present(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "the subclass calls a method of the base class that gives the lock back first",
+            vec![
+                Action::Save("pkg/lock_pool.py", pausing.clone()),
+                Action::Save("pkg/lock_use.py", paused),
+            ],
+        )
+        .absent(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "that method no longer gives the lock back",
+            vec![Action::Save(
+                "pkg/lock_pool.py",
+                pausing.replace("        self._lock.release()\n", "        pass\n"),
+            )],
+        )
+        .present(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "both files as they were again",
             vec![
                 save("pkg/lock_pool.py", LOCK_POOL),
                 save("pkg/lock_use.py", LOCK_USE),
