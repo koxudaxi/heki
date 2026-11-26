@@ -1832,3 +1832,40 @@ fn eff109_counterexamples_of_each_premise_are_not_exact() {
         "{diags:#?}"
     );
 }
+
+/// An abstract method among the targets never runs: the report through it is exact when the
+/// implementations take the lock on every return.
+#[test]
+fn eff109_skips_an_abstract_method_among_the_targets() {
+    let p = Project::new("eff109_abstract_target");
+    p.write(
+        "counter.py",
+        r#"import abc
+import threading
+
+
+class Base(abc.ABC):
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    @abc.abstractmethod
+    def count(self) -> int: ...
+
+    def run(self) -> int:
+        with self._lock:
+            return self.count()
+
+
+class Counter(Base):
+    def count(self) -> int:
+        with self._lock:
+            return 1
+"#,
+    );
+    let diags = diagnostics(&p, SELECT);
+    assert_eq!(
+        tiers(&diags, "counter.py"),
+        vec![tier(14, "exact")],
+        "{diags:#?}"
+    );
+}
