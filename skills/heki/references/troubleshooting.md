@@ -87,3 +87,10 @@ applies the proven ones that pay off only for large inputs: ask the user before 
 
 `MUT103` compares the functions' effects with a saved snapshot. Write one with
 `heki snapshot --write` only when the user wants to record the current effects.
+
+## A new contract fails on legacy code
+
+Keep the wall as the team wants it, and record the code that already crosses it in a Ratchet
+baseline (`heki check --baseline <file> --update-baseline`, then `baseline = "<file>"` in
+`heki.toml`). Do not widen `allowed-writers`, `allowed-readers`, `allowed-callers`, or another
+`allowed-*` list to make the run pass. See [references/contracts.md](contracts.md).

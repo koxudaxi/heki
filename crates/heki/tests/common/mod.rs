@@ -204,3 +204,19 @@ pub fn with_tiers<'r>(rules: &[&'r str]) -> Vec<&'r str> {
     }
     out
 }
+
+/// The note on what the contract candidates are; `fail_on` when no other note says that
+/// `fail-on = "warning"` makes contract reports fail the run.
+pub fn recommend_candidates_note(fail_on: bool) -> String {
+    let fail_on = if fail_on {
+        ", and set `fail-on = \"warning\"` so that contract reports fail `heki check`"
+    } else {
+        ""
+    };
+    format!(
+        "the contract candidates are invariants the code keeps today, not architectural intent: \
+         adopt only the boundaries you intend to keep, give each an actionable `message`{fail_on}; \
+         consider a CODEOWNERS-protected heki.toml, and put the legacy violations of a stricter \
+         wall in a Ratchet baseline, not in an `allowed-*` list."
+    )
+}
