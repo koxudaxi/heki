@@ -384,7 +384,7 @@ shown and fails it too, and with a baseline, so is every regression. Run the who
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.6.0
+    rev: v0.7.0
     hooks:
       - id: heki
 ```
