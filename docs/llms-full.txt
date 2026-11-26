@@ -1553,6 +1553,46 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 - An attribute named through a string (`setattr`, `getattr`, `__dict__`, `vars`) is followed
   when the string is a constant: see [Dynamic names](https://heki.koxudaxi.dev/scope/#dynamic-names).
 
+### Defaults for the tables of a kind
+
+A configuration with many tables of one kind repeats the same values in each. A defaults table
+per kind, named `<kind>-defaults` (`[tool.heki.call-owners-defaults]`,
+`[tool.heki.effect-boundaries-defaults]`, and one for each of `write-owners`, `read-owners`,
+`call-owners`, `effect-boundaries`, `readonly-returns`, `invalidation`, and `import-boundaries`),
+sets the keys that every table of its kind takes when it does not set them:
+
+```toml
+[tool.heki.call-owners-defaults]
+attribution = "lexical"
+references = "reads"
+subclasses = false
+
+[[tool.heki.call-owners]]
+name = "commit"
+targets = ["pkg.db.Session.commit"]
+allowed-callers = ["pkg.db.*"]
+
+[[tool.heki.call-owners]]
+name = "rollback"
+targets = ["pkg.db.Session.rollback"]
+allowed-callers = ["pkg.db.*"]
+references = "ignore"
+```
+
+- The result is the configuration with every table written out: both tables above have
+  `attribution = "lexical"` and `subclasses = false`, and `rollback` keeps its own
+  `references`. `heki check`, `heki inspect`, and `heki recommend` read the effective values.
+- A table's own key overrides the default, an empty list too (`allowed-callers = []` is a list
+  of no callers). A list is replaced whole, never merged with the default's.
+- `name` and `targets` name one contract, so they are errors in a defaults table. Any other key
+  of the kind may be defaulted.
+- A defaults table is one table, not an array of tables. With no table of its kind it changes
+  nothing. In a file that is not a `pyproject.toml` it is written without the `tool.heki`
+  prefix (`[call-owners-defaults]`).
+- A table you add to the file from `heki recommend` takes the defaults like any other, and the
+  recommender tries it with them.
+- An error about a value of a defaults table is reported at the defaults table.
+
 ### `write-owners`
 
 ```toml

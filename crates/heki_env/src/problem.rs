@@ -91,7 +91,9 @@ impl Docs {
     /// The section of the configuration page that describes the table `table` (`lint`,
     /// `write-owners`; empty for the top level).
     pub fn of_table(table: &str) -> Self {
-        match table.split('.').next().unwrap_or_default() {
+        let table = table.split('.').next().unwrap_or_default();
+        // A defaults table is described with its contract.
+        match table.strip_suffix(crate::defaults::SUFFIX).unwrap_or(table) {
             "lint" => Self::Lint,
             "write-owners" => Self::WriteOwners,
             "read-owners" => Self::ReadOwners,
@@ -320,12 +322,29 @@ fn to_u32(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
-/// The span of `setting` in the configuration `text`.
+/// The span of `setting` in the configuration `text`: in its own table, else, for a key an
+/// entry of a contract leaves to its defaults, in the contract's defaults table.
 fn locate_setting(text: &str, layout: ConfigLayout, setting: &Setting) -> Option<Range<usize>> {
     let doc = toml_edit::Document::parse(text).ok()?;
     let root = settings_root(doc.as_table(), layout)?;
+    locate_in(root, &setting.table, setting.entry.as_deref(), setting).or_else(|| {
+        let defaults = format!("{}{}", setting.table, crate::defaults::SUFFIX);
+        // Only a key can be defaulted: a setting without one is not found in the defaults.
+        setting.key.as_ref()?;
+        locate_in(root, &defaults, None, setting)
+    })
+}
+
+/// The span of the key and value of `setting` in the tables of `table`, those of the entry named
+/// `entry` only when there is one.
+fn locate_in(
+    root: &dyn toml_edit::TableLike,
+    table: &str,
+    entry: Option<&str>,
+    setting: &Setting,
+) -> Option<Range<usize>> {
     let mut tables = vec![root];
-    for part in setting.table.split('.').filter(|p| !p.is_empty()) {
+    for part in table.split('.').filter(|p| !p.is_empty()) {
         tables = tables
             .into_iter()
             .filter_map(|t| t.get(part))
@@ -335,10 +354,7 @@ fn locate_setting(text: &str, layout: ConfigLayout, setting: &Setting) -> Option
     tables
         .into_iter()
         .filter(|t| {
-            setting
-                .entry
-                .as_deref()
-                .is_none_or(|name| t.get("name").and_then(toml_edit::Item::as_str) == Some(name))
+            entry.is_none_or(|name| t.get("name").and_then(toml_edit::Item::as_str) == Some(name))
         })
         .find_map(|t| {
             let keys: Vec<&str> = t.iter().map(|(k, _)| k).collect();
