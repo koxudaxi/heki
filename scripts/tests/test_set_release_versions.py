@@ -65,7 +65,10 @@ def test_every_version_a_build_reads_is_written(checkout: Path, capsys) -> None:
     assert {name: text for name, text in after.items() if name.startswith("crates/")} == {
         name: text for name, text in before.items() if name.startswith("crates/")
     }
-    written = "Cargo.toml, pyproject.toml, Cargo.lock, uv.lock, README.md, adoption.md, index.md"
+    written = (
+        "Cargo.toml, pyproject.toml, Cargo.lock, uv.lock, README.md, adoption.md, index.md, "
+        "coding-agents.md"
+    )
     assert capsys.readouterr().out == f"9.8.7: wrote {written}.\n"
 
 
