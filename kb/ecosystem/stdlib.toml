@@ -199,7 +199,49 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pathlib.Path.resolve"
+return_type = "Self"
 effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+# --- Paths made from a path (`pathlib.Path`) ---
+# A method, an operator, or a property that makes a path from one has the class of the path it is
+# read on (`Self`): in typeshed each of these returns `Self`. `/` and `__rtruediv__` are the
+# operators: `path / "a"` calls `path.__truediv__("a")`, and `"a" / path` calls
+# `path.__rtruediv__("a")`, a `str` having no `__truediv__`. They make no access to the disk.
+
+[[entries]]
+symbol = "pathlib.Path.joinpath"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.with_name"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.with_stem"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.with_suffix"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.relative_to"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.__truediv__"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.__rtruediv__"
+return_type = "Self"
 opaque_to_layer3 = true
 
 # --- File system, by module (EFF105, opt-in; `blocking-fs` boundaries) ---
@@ -533,13 +575,14 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pathlib.Path.iterdir"
+return_type = "typing.Iterator[Self]"
 effects = ["blocking_fs"]
 items = "entries"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pathlib.Path.glob"
-return_type = "pathlib.Path.glob()"
+return_type = "pathlib.Path.glob()[Self]"
 items = "entries"
 opaque_to_layer3 = true
 
@@ -550,7 +593,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pathlib.Path.rglob"
-return_type = "pathlib.Path.rglob()"
+return_type = "pathlib.Path.rglob()[Self]"
 items = "entries"
 opaque_to_layer3 = true
 
@@ -2322,21 +2365,25 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pathlib.Path.cwd"
+return_type = "pathlib.Path"
 environment = "call"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pathlib.Path.home"
+return_type = "pathlib.Path"
 environment = "call"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pathlib.Path.absolute"
+return_type = "Self"
 environment = "call"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pathlib.Path.expanduser"
+return_type = "Self"
 environment = "call"
 opaque_to_layer3 = true
 
@@ -2402,6 +2449,14 @@ type = "builtins.dict"
 [[attributes]]
 symbol = "contextvars.Token.var"
 type = "contextvars.ContextVar"
+
+[[attributes]]
+symbol = "pathlib.Path.parent"
+type = "Self"
+
+[[attributes]]
+symbol = "pathlib.Path.parents"
+type = "typing.Sequence[Self]"
 
 # --- What a call runs of the values it is handed (`[[invokes]]`) ---
 # Each entry lists every argument the call runs code of: the special methods it runs on the

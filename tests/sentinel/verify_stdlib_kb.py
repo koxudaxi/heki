@@ -5,9 +5,12 @@ type a value against the running CPython (3.11-3.15).
 The receiver typing reads these rows as the class of what a call or an attribute read gives
 (docs/ANALYSIS_AND_KB_SPEC.md section 4.2). Each is checked on instances this script builds
 (`RECEIVERS`), of a subclass too where the class may have one:
-  1. `[[attributes]]`: reading the attribute gives an instance of exactly the row's `type`.
+  1. `[[attributes]]`: reading the attribute gives an instance of exactly the row's `type`;
+     `"Self"`, of the class of the receiver; `"C[Self]"`, a `C` whose items are of that class.
   2. `return_type`: calling the method gives an instance of exactly that class; `"Self"`, of the
-     class of the receiver (the class it is called on, for a class method).
+     class of the receiver (the class it is called on, for a class method); `"C[Self]"`, a `C`
+     (any iterator for a class named with `()`) whose items are of that class. `pathlib.Path`
+     is the class of a path of this system (`PosixPath` or `WindowsPath`).
   3. `copy_sanitizer` on a method: the call gives a new object of the receiver's class holding the
      receiver's items (`"shallow"`).
   4. `returns_held`: the method gives the very object its receiver holds, and with `default`, the
@@ -23,9 +26,11 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextvars
+import inspect
 import sys
+import tempfile
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -53,18 +58,39 @@ def tokens() -> list[Any]:
     return [contextvars.ContextVar("sentinel").set(1)]
 
 
+def paths() -> list[Any]:
+    """A directory holding one file, kept for the life of the script."""
+    folder = Path(tempfile.mkdtemp(prefix="heki-sentinel-"))
+    (folder / "f.txt").write_text("x")
+    return [folder]
+
+
 # Instances of each class whose rows are checked, by the symbol the rows name it with.
 RECEIVERS: dict[str, Callable[[], list[Any]]] = {
     "typing.NamedTuple": named_tuples,
     "contextvars.ContextVar": context_variables,
     "contextvars.Token": tokens,
+    "pathlib.Path": paths,
 }
 
 # The arguments a method is called with, when it takes some.
 ARGUMENTS: dict[str, tuple[Any, ...]] = {
     "typing.NamedTuple._make": ([3, 4],),
     "contextvars.ContextVar.set": (object(),),
+    "pathlib.Path.joinpath": ("x",),
+    "pathlib.Path.with_name": ("n.py",),
+    "pathlib.Path.with_stem": ("s",),
+    "pathlib.Path.with_suffix": (".py",),
+    "pathlib.Path.relative_to": ("/",),
+    "pathlib.Path.__truediv__": ("x",),
+    "pathlib.Path.__rtruediv__": ("x",),
+    "pathlib.Path.glob": ("*",),
+    "pathlib.Path.rglob": ("*",),
 }
+
+
+# The first release that has a method, where the interpreter running the script may be older.
+SINCE: dict[str, tuple[int, int]] = {"pathlib.Path.walk": (3, 12)}
 
 
 def holding_context_variable(held: object) -> tuple[Any, Any]:
@@ -98,6 +124,8 @@ HOLDERS: dict[str, Callable[[object], tuple[Any, Any]]] = {
 
 
 def resolve(path: str) -> Any:
+    if path == "pathlib.Path":
+        return type(Path())
     module, _, name = path.rpartition(".")
     obj: Any = __import__(module, fromlist=[name])
     return getattr(obj, name)
@@ -108,12 +136,21 @@ def check_attribute(symbol: str, expected: str) -> list[str]:
     make = RECEIVERS.get(owner)
     if make is None:
         return [f"{symbol}: no receivers for {owner}"]
-    cls = resolve(expected)
-    return [
-        f"{symbol}: on {type(r).__qualname__} gives {type(v).__qualname__}, not {expected}"
-        for r in make()
-        if type(v := getattr(r, attr)) is not cls
-    ]
+    failures = []
+    for r in make():
+        value = getattr(r, attr)
+        if expected == "Self":
+            if type(value) is not type(r):
+                failures.append(f"{symbol}: on {type(r).__qualname__} gives {type(value).__qualname__}")
+        elif expected.endswith("[Self]"):
+            container = resolve(expected.removesuffix("[Self]").replace("typing.", "collections.abc."))
+            if not isinstance(value, container) or any(type(i) is not type(r) for i in value):
+                failures.append(f"{symbol}: on {type(r).__qualname__}, not {expected}")
+        elif type(value) is not resolve(expected):
+            failures.append(
+                f"{symbol}: on {type(r).__qualname__} gives {type(value).__qualname__}, not {expected}"
+            )
+    return failures
 
 
 def check_return(symbol: str, entry: dict) -> list[str]:
@@ -124,12 +161,29 @@ def check_return(symbol: str, entry: dict) -> list[str]:
         return [f"{symbol}: no receivers for {owner}"] if returns == "Self" else []
     failures = []
     args = ARGUMENTS.get(symbol, ())
+    if sys.version_info < SINCE.get(symbol, (0, 0)):
+        return failures
     for receiver in make():
         # A class method returns an instance of the class it is called on.
-        callers = [receiver, type(receiver)] if returns == "Self" else [receiver]
+        classmethod_too = inspect.ismethod(getattr(type(receiver), method, None))
+        callers = [receiver, type(receiver)] if returns == "Self" and classmethod_too else [receiver]
         for caller in callers:
             result = getattr(caller, method)(*args)
             on = caller if isinstance(caller, type) else type(caller)
+            if returns is not None and returns.endswith("[Self]"):
+                container = returns.removesuffix("[Self]")
+                items = list(result)
+                if (
+                    not items
+                    or any(type(i) is not on for i in items)
+                    or (not container.endswith("()") and not isinstance(result, resolve(
+                        container.replace("typing.", "collections.abc.")
+                    )))
+                ):
+                    failures.append(f"{symbol}: on {on.__qualname__}, not {returns}")
+                continue
+            if returns is not None and returns.endswith("()"):
+                continue  # The generator of a call is a class of heki's, named after the call.
             if returns == "Self":
                 expected = on
             elif returns is not None:

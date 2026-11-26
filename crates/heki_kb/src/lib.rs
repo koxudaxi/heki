@@ -777,6 +777,14 @@ impl EcosystemEntry {
     pub fn return_type_in<'e>(&'e self, case: Option<&'e ArgCase>) -> Option<&'e str> {
         self.declared_return_in(case)
             .filter(|t| *t != SELF_RETURN_TYPE)
+            .map(|t| split_receiver_items(t).0)
+    }
+
+    /// Whether the items of what the call returns are instances of its receiver's class
+    /// ([`SELF_ITEMS_SUFFIX`]).
+    pub fn returns_receiver_items_in(&self, case: Option<&ArgCase>) -> bool {
+        self.declared_return_in(case)
+            .is_some_and(|t| split_receiver_items(t).1)
     }
 
     /// Whether the method returns an instance of its receiver's class ([`SELF_RETURN_TYPE`]).
@@ -794,6 +802,20 @@ impl EcosystemEntry {
 /// builder (`openai.OpenAI.with_options`) called on an instance of a project subclass returns
 /// one of that subclass.
 pub const SELF_RETURN_TYPE: &str = "Self";
+
+/// What a `return_type` or an `[[attributes]]` `type` ends with when the items of the value are
+/// instances of the receiver's class: `typing.Iterator[Self]` (`Path.iterdir`),
+/// `typing.Sequence[Self]` (`Path.parents`).
+pub const SELF_ITEMS_SUFFIX: &str = "[Self]";
+
+/// The class a `return_type` or an attribute `type` names, and whether its items are instances
+/// of the receiver's class ([`SELF_ITEMS_SUFFIX`]).
+pub fn split_receiver_items(class: &str) -> (&str, bool) {
+    match class.strip_suffix(SELF_ITEMS_SUFFIX) {
+        Some(container) => (container, true),
+        None => (class, false),
+    }
+}
 
 /// A validated `[[tool.heki.ecosystem]]` entry: the keys it sets on the entry for `symbol`
 /// (`None`: left out, the built-in value stays).
@@ -2241,7 +2263,6 @@ mod tests {
                     "pathlib.Path.is_mount",
                     "pathlib.Path.is_socket",
                     "pathlib.Path.is_symlink",
-                    "pathlib.Path.iterdir",
                     "pathlib.Path.lchmod",
                     "pathlib.Path.lstat",
                     "pathlib.Path.mkdir",
@@ -2474,14 +2495,24 @@ mod tests {
                     "os.path.expanduser",
                     "os.path.expandvars",
                     "os.path.relpath",
-                    "pathlib.Path.absolute",
-                    "pathlib.Path.cwd",
-                    "pathlib.Path.expanduser",
-                    "pathlib.Path.home",
                 ]),
                 EcosystemEntry {
                     environment: Some(EnvironmentAccess::Call),
                     ..entry(&[])
+                },
+            ),
+            (
+                s(&["pathlib.Path.absolute", "pathlib.Path.expanduser"]),
+                EcosystemEntry {
+                    environment: Some(EnvironmentAccess::Call),
+                    ..returning(SELF_RETURN_TYPE, entry(&[]))
+                },
+            ),
+            (
+                s(&["pathlib.Path.cwd", "pathlib.Path.home"]),
+                EcosystemEntry {
+                    environment: Some(EnvironmentAccess::Call),
+                    ..returning("pathlib.Path", entry(&[]))
                 },
             ),
             (
@@ -2554,8 +2585,37 @@ mod tests {
             "ftplib.FTP_TLS.mlsd",
             "fsspec.AbstractFileSystem.walk",
         ] {
-            rows.push((s(&[call]), returning(&format!("{call}()"), entry(&[]))));
+            // The items of `glob` and `rglob` are paths of the receiver's class.
+            let items = if call.starts_with("pathlib.Path.") && call.ends_with("glob") {
+                SELF_ITEMS_SUFFIX
+            } else {
+                ""
+            };
+            rows.push((
+                s(&[call]),
+                returning(&format!("{call}(){items}"), entry(&[])),
+            ));
         }
+        rows.push((
+            s(&["pathlib.Path.iterdir"]),
+            returning(
+                &format!("typing.Iterator{SELF_ITEMS_SUFFIX}"),
+                entry(&[BlockingFs]),
+            ),
+        ));
+        // A path made from a path has the receiver's class, and reads no file.
+        rows.push((
+            s(&[
+                "pathlib.Path.joinpath",
+                "pathlib.Path.with_name",
+                "pathlib.Path.with_stem",
+                "pathlib.Path.with_suffix",
+                "pathlib.Path.relative_to",
+                "pathlib.Path.__truediv__",
+                "pathlib.Path.__rtruediv__",
+            ]),
+            returning(SELF_RETURN_TYPE, entry(&[])),
+        ));
         rows.push((
             s(&["fsspec.open"]),
             returning("fsspec.core.OpenFile", entry(&[])),
@@ -2882,10 +2942,13 @@ mod tests {
                     "pathlib.Path.stat",
                     "pathlib.Path.is_file",
                     "pathlib.Path.is_dir",
-                    "pathlib.Path.resolve",
                     "starlette.staticfiles.StaticFiles.lookup_path",
                 ]),
                 entry(&[BlockingFs]),
+            ),
+            (
+                s(&["pathlib.Path.resolve"]),
+                returning(SELF_RETURN_TYPE, entry(&[BlockingFs])),
             ),
             (s(&["socket.getfqdn"]), entry(&[BlockingNet])),
             (
@@ -4851,7 +4914,8 @@ mod tests {
                     kb.entries.keys().any(|k| k.starts_with(&methods))
                         || kb.attributes.keys().any(|k| k.starts_with(&methods))
                         || FUTURE_CLASSES.contains(&class)
-                        || class.starts_with("builtins."),
+                        || class.starts_with("builtins.")
+                        || (e.returns_receiver_items_in(None) && class.starts_with("typing.")),
                     "{symbol} -> {class}"
                 );
                 let name = symbol.rsplit('.').next().unwrap_or(symbol);
@@ -5482,11 +5546,14 @@ mod tests {
                 .is_some_and(|rest| rest.starts_with('.'))
         };
         for (symbol, class) in &kb.attributes {
+            let (class, _) = split_receiver_items(class);
             let members = format!("{class}.");
             assert!(
-                kb.entries.keys().any(|k| k.starts_with(&members))
+                class == SELF_RETURN_TYPE
+                    || kb.entries.keys().any(|k| k.starts_with(&members))
                     || kb.attributes.keys().any(|k| k.starts_with(&members))
-                    || class.starts_with("builtins."),
+                    || class.starts_with("builtins.")
+                    || class.starts_with("typing."),
                 "{symbol} -> {class}"
             );
             assert_eq!(kb.lookup(symbol), None, "{symbol}");
@@ -5536,7 +5603,7 @@ mod tests {
                 if !symbol.starts_with(&members) {
                     break;
                 }
-                reached.push(t.clone());
+                reached.push(split_receiver_items(t).0.to_owned());
             }
         }
     }

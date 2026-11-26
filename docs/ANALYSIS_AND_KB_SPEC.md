@@ -813,7 +813,11 @@ outside the project but builtin types may, allocate an instance of `C` without r
 Layer 2 `return_type` entries type the results of factories (`sqlite3.connect()` →
 `sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`); `"Self"` types
 a builder's result as its receiver (`client.with_options(...)`, an instance of a project subclass
-included). A call that cannot be resolved is not followed (`unknown_calls`); an external function
+included), and `"C[Self]"` types a result `C` whose items are instances of the receiver's class
+(`Path.iterdir()`, `Path.glob()`). The operators run the special methods the same rows type:
+`path / "a"` is `path.__truediv__("a")`, and `"a" / path`, a `str` having no `__truediv__`, is
+`path.__rtruediv__("a")`; a method a project class defines, and an operand of no known class,
+leave the result untyped. A call that cannot be resolved is not followed (`unknown_calls`); an external function
 that Layer 2 does not list has no effect.
 
 Reading an attribute on an instance whose MRO declares no type for it takes the class an
@@ -2892,8 +2896,10 @@ attribute on an instance of a library class gives (`symbol = "openai.OpenAI.chat
 release its distribution's verified range admits, the value read has the catalogued members of
 that class; it says nothing of its identity or of what the read runs, so a plain attribute, a
 property, and a cached property are alike to it. It is a table of its own because an attribute is
-no method a class takes from its base (`external_defines`). A row of the standard library
-(`typing.NamedTuple._fields`, `contextvars.Token.var`) holds on every interpreter heki supports,
+no method a class takes from its base (`external_defines`). A row's `type` may be `"Self"`, the
+class of the receiver (`pathlib.Path.parent`), or `"C[Self]"`, a `C` of instances of the
+receiver's class (`pathlib.Path.parents`). A row of the standard library
+(`typing.NamedTuple._fields`, `contextvars.Token.var`, `pathlib.Path.parent`) holds on every interpreter heki supports,
 which `tests/sentinel/verify_stdlib_kb.py` checks on CPython 3.11 to 3.15, with the other rows of
 the standard library that type a value (a method's `return_type`, a copy of its receiver,
 `returns_held`) on instances of each class it builds. The synchronous and asynchronous
