@@ -220,8 +220,8 @@ heki check does not fail on 1 report(s) shown now: warnings, and heuristic repor
 The report is heuristic: the contract rules are not [certified](precision.md#certifications)
 yet, and a `MUT201` report can rest on an alias or a helper's write on one path only. A heuristic
 report counts as a warning, so the run passes, as its last line says. To make a broken contract
-fail the run and CI, set `fail-on = "warning"` in `[tool.heki.lint]` next to the contracts. Every
-warning and heuristic report then fails the run, so record today's findings in a
+fail the run and CI, set `fail = true` in its table: the reports of that contract fail the run,
+and every other warning and heuristic report stays advisory. Record today's findings in a
 [Ratchet baseline](adoption.md#ratchet-baselines) first.
 
 heki follows aliases, helpers, and subclasses, with no decorators and nothing running at run
@@ -247,14 +247,12 @@ A rule written in `AGENTS.md` or `CLAUDE.md` is advice an agent can miss. Declar
 
 ```toml
 # heki.toml
-[lint]
-fail-on = "warning"   # contract reports are heuristic: let them fail the run
-
 [[write-owners]]
 name = "order-store"
 targets = ["app.models.Order.items"]
 allowed-writers = ["app.store.*"]
 message = "change Order.items through app.store"
+fail = true   # a report of this contract fails the run
 ```
 
 ```text

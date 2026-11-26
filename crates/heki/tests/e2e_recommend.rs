@@ -183,7 +183,8 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
          \"warning\"` in the lint settings makes them fail it.\n\
          \x20 - the contract candidates are invariants the code keeps today, not architectural \
          intent: adopt only the boundaries you intend to keep, give each an actionable \
-         `message`; consider a CODEOWNERS-protected heki.toml, and put the legacy violations of \
+         `message`, and set `fail = true` on each kept table so that its reports fail `heki \
+         check`; consider a CODEOWNERS-protected heki.toml, and put the legacy violations of \
          a stricter wall in a Ratchet baseline, not in an `allowed-*` list.\n\
          \n\
          pyproject.toml: keys to add or change\n\
@@ -302,7 +303,7 @@ fn the_json_object_names_the_project_and_its_run() {
             &json!(
                 [
                     exit_notes(1, 1),
-                    vec![common::recommend_candidates_note(false)]
+                    vec![common::recommend_candidates_note(true)]
                 ]
                 .concat()
             ),

@@ -229,8 +229,8 @@ heki check does not fail on 1 report(s) shown now: warnings, and heuristic repor
 The report is heuristic: the contract rules are not [certified](https://heki.koxudaxi.dev/precision/#certifications)
 yet, and a `MUT201` report can rest on an alias or a helper's write on one path only. A heuristic
 report counts as a warning, so the run passes, as its last line says. To make a broken contract
-fail the run and CI, set `fail-on = "warning"` in `[tool.heki.lint]` next to the contracts. Every
-warning and heuristic report then fails the run, so record today's findings in a
+fail the run and CI, set `fail = true` in its table: the reports of that contract fail the run,
+and every other warning and heuristic report stays advisory. Record today's findings in a
 [Ratchet baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) first.
 
 heki follows aliases, helpers, and subclasses, with no decorators and nothing running at run
@@ -256,14 +256,12 @@ A rule written in `AGENTS.md` or `CLAUDE.md` is advice an agent can miss. Declar
 
 ```toml
 # heki.toml
-[lint]
-fail-on = "warning"   # contract reports are heuristic: let them fail the run
-
 [[write-owners]]
 name = "order-store"
 targets = ["app.models.Order.items"]
 allowed-writers = ["app.store.*"]
 message = "change Order.items through app.store"
+fail = true   # a report of this contract fails the run
 ```
 
 ```text
@@ -1439,7 +1437,7 @@ the installed release changed, and the changelog on GitHub lists every release.
 | `severity` | `"warning"` for the rules that report slower code (`EFF102`, `EFF103`, `EFF105`, `DATA101`, and the `OPT` rules) and for `MUT110`, which reports a bug that is rarely harmful; `"error"` for the others, which report bugs that can be critical (`EFF101`: a blocked event loop holds up every other task) | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level. By default only exact errors make `heki check` fail: a heuristic report counts as a warning, whatever its severity; `fail-on = "warning"` makes warnings and heuristic reports fail it too. |
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF105`, and `EFF106` in test code as pytest finds it: `test_*` functions and the functions nested in them, `test_*.py` and `*_test.py` files, and files under `test/` or `tests/`. |
 | `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
-| `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. A heuristic report counts as a warning, whatever its severity: it can be wrong about the code, so at `"error"` only exact errors fail the run. Warnings and heuristic reports are reported either way, and the language server shows them. `--fail-on` overrides it. |
+| `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. A heuristic report counts as a warning, whatever its severity: it can be wrong about the code, so at `"error"` only exact errors fail the run. Warnings and heuristic reports are reported either way, and the language server shows them. `--fail-on` overrides it. A report of a contract with [`fail = true`](https://heki.koxudaxi.dev/configuration/#failing-on-a-contract) fails the run at either value. |
 | `report-unused-suppressions` | `false` | Report the codes of suppression comments that suppressed no report, and the baseline entries that matched none. See [Unused suppressions](https://heki.koxudaxi.dev/configuration/#unused-suppressions). |
 | `require-suppression-codes` | `false` | Report the `# heki: ignore` comments that name no rule. See [Suppressions that name no rule](https://heki.koxudaxi.dev/configuration/#suppressions-that-name-no-rule). |
 | `unmatched-contract-entries` | a warning, in a run over the whole project | `"warning"`, `"error"`, or `"ignore"`: what `heki check` does with a contract entry that matches nothing in the analyzed files. An error fails the run. See [Entries that match nothing](https://heki.koxudaxi.dev/configuration/#entries-that-match-nothing). |
@@ -1493,9 +1491,9 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   `functools.cache` functions are checked without one by `MUT114` (`cached-result-mutation`).
 - Declaring a contract selects its rule, whatever its certainty.
 - Their reports are heuristic, so they count as warnings for
-  [`fail-on`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint): to make a broken contract fail `heki check`, the
-  pre-commit hook, and CI, set `fail-on = "warning"` next to the contracts (with a
-  [baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines), only new reports fail).
+  [`fail-on`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint) and do not fail the run by default: to make a broken
+  contract fail `heki check`, the pre-commit hook, and CI, set `fail = true` in its table
+  ([below](https://heki.koxudaxi.dev/configuration/#failing-on-a-contract)).
 - Every name in a contract but `import-boundaries`, whose names are
   [module patterns](https://heki.koxudaxi.dev/configuration/#import-boundaries), is a dotted pattern. It matches the full name or any dotted suffix
   (`DataModel.fields` matches `pkg.model.DataModel.fields`, not `pkg.BigModel.fields`), and it
@@ -1591,7 +1589,9 @@ references = "ignore"
 - A table's own key overrides the default, an empty list too (`allowed-callers = []` is a list
   of no callers). A list is replaced whole, never merged with the default's.
 - `name` and `targets` name one contract, so they are errors in a defaults table. Any other key
-  of the kind may be defaulted.
+  of the kind may be defaulted, `fail` among them: `fail = true` in `[tool.heki.call-owners-defaults]`
+  makes the reports of every `call-owners` table fail the run, and a table with `fail = false`
+  keeps its reports advisory.
 - A defaults table is one table, not an array of tables. With no table of its kind it changes
   nothing. In a file that is not a `pyproject.toml` it is written without the `tool.heki`
   prefix (`[call-owners-defaults]`).
@@ -1622,6 +1622,7 @@ unresolved = "report"
 | `exempt-methods` | `[]` | Construction and copy methods allowed to write the targets. A plain name (`__deepcopy__`) matches any method of that name; a name with a dot or a glob (`DataModel.copy_deep`, `create_*`) is a pattern, as in `allowed-writers`. |
 | `forbid-cached-property-on` | `[]` | Classes on which defining a `@cached_property` is itself reported. |
 | `message` | none | The help of every report of the contract: where to write instead. |
+| `fail` | `false` | `true`: the reports of this contract make `heki check` (and `--watch`) exit with code 1, whatever their tier and severity; see [Failing on a contract](https://heki.koxudaxi.dev/configuration/#failing-on-a-contract). |
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes is reported. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the writes the contract cannot tie to a class are reported under [`MUT205`](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`: which function a write is judged in. See [How contracts report](https://heki.koxudaxi.dev/configuration/#how-contracts-report). |
@@ -1751,6 +1752,7 @@ protocol (see [How contracts report](https://heki.koxudaxi.dev/configuration/#ho
 | `forbidden-readers` | `[]` | When set, only reads by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to read the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
+| `fail` | `false` | `true`: the reports of this contract make `heki check` (and `--watch`) exit with code 1, whatever their tier and severity; see [Failing on a contract](https://heki.koxudaxi.dev/configuration/#failing-on-a-contract). |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the reads of a target's attribute name on an object of unknown class are reported under [`MUT206`](https://heki.koxudaxi.dev/rules/unresolved-guarded-read/). A target ending in a glob (`Context._*`) matches only the names a class it names, or a project subclass, has from project code ([below](https://heki.koxudaxi.dev/configuration/#globs-on-objects-of-unknown-class)). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 | `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
@@ -1784,6 +1786,7 @@ The call side of `write-owners`.
 | `forbidden-callers` | `[]` | When set, only calls by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to call the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
+| `fail` | `false` | `true`: the reports of this contract make `heki check` (and `--watch`) exit with code 1, whatever their tier and severity; see [Failing on a contract](https://heki.koxudaxi.dev/configuration/#failing-on-a-contract). |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the calls of a method named like a target (its last name) on an object of unknown class are reported under [`MUT207`](https://heki.koxudaxi.dev/rules/unresolved-guarded-call/). A target ending in a glob matches only the names a class it names, or a project subclass, has from project code ([below](https://heki.koxudaxi.dev/configuration/#globs-on-objects-of-unknown-class)). |
 | `references` | `"ignore"` | `"ignore"`, `"calls"`, `"calls-and-bases"`, or `"reads"`: whether a reference handing a target on to be called later counts as a call of it (`[decide]`, `return decide`, `partial(decide)`, `field(default_factory=Rule)`, `obj.callback = self.decide`), with `"calls-and-bases"` a class statement naming a class target among its bases too (`class Derived(Base)`), and with `"reads"` every other use of a target's value as well (`Keys.of(...)`, `Code.OK`, `isinstance(x, Keys)`, `case Keys():`, `tuple[Keys, int]`). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
@@ -2035,6 +2038,7 @@ import-probes = "report"
 | `import-probes` | `"allow"` | `"allow"` or `"report"`: whether `reads-environment` also forbids an import probe, an `import` inside a `try` with an `except` clause naming `ImportError` or `ModuleNotFoundError`. `"report"` without `reads-environment` is a configuration error. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the boundary also reports, under `EFF201`, what it cannot judge in its scopes' reach: a call heki resolves to no function, a function it does not model (`eval`, a body too large) or whose body only a stub declares, and a write of an attribute `write-targets` or `write-universe` names on an object of unknown class or under a name computed at run time. Each kind is one report per scope function, at the first one with its chain. |
 | `message` | none | The help of every report of the boundary. |
+| `fail` | `false` | `true`: the reports of this contract make `heki check` (and `--watch`) exit with code 1, whatever their tier and severity; see [Failing on a contract](https://heki.koxudaxi.dev/configuration/#failing-on-a-contract). |
 
 | `forbid` token | Forbids |
 | -------------- | ------- |
@@ -2138,6 +2142,7 @@ deep = true
 | `name` | `""` | The contract's name. |
 | `producers` | `[]` | Functions, methods, external symbols, or attributes (`Class.attr`) whose result every caller shares. |
 | `deep` | `false` | Protect the values below the result too: its attributes, items, and elements. |
+| `fail` | `false` | `true`: the reports of this contract make `heki check` (and `--watch`) exit with code 1, whatever their tier and severity; see [Failing on a contract](https://heki.koxudaxi.dev/configuration/#failing-on-a-contract). |
 
 - Functions decorated with `@lru_cache` / `@cache` are protected without configuration, also
   through an import alias, but not a `cache` decorator the module defines itself.
@@ -2162,6 +2167,7 @@ message = "tell the store which models changed"
 | `invalidators` | `[]` | Functions or methods whose call announces the change. |
 | `exempt-writers` | `[]` | Functions whose writes need no announcement of their own: the owner's operations, which announce or batch the change themselves, and construction methods. |
 | `message` | none | The help of every report of the contract. |
+| `fail` | `false` | `true`: the reports of this contract make `heki check` (and `--watch`) exit with code 1, whatever their tier and severity; see [Failing on a contract](https://heki.koxudaxi.dev/configuration/#failing-on-a-contract). |
 
 An invalidator call counts when it runs on every path from the write to the function's normal
 return:
@@ -2221,6 +2227,7 @@ or a glob whose `*` spans dots, never a suffix (`pkg.*` names `pkg.facts` and
 | `reach` | `"statement"` | `"statement"`: each import of an importer is judged. `"import-time"`: every module loading an importer loads while it loads. `"all"`: every module a chain of imports that run leads to. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the imports whose module heki cannot name are reported under [`IMP202`](https://heki.koxudaxi.dev/rules/unresolved-guarded-import/). |
 | `message` | none | The help of every report of the contract. |
+| `fail` | `false` | `true`: the reports of this contract make `heki check` (and `--watch`) exit with code 1, whatever their tier and severity; see [Failing on a contract](https://heki.koxudaxi.dev/configuration/#failing-on-a-contract). |
 
 - An import counts wherever it runs: in the module body, a class body, a function, or lazily,
   with or without an `ImportError` handler around it. `importlib.import_module` and
@@ -2312,6 +2319,38 @@ from pkg._runtime import c  # IMP201: allowed only through a relative import
   run while it loads): how the modules on a chain import each other is theirs, and a module of the
   key that a chain reaches is allowed.
 - A report's target is the module imported, as for the other reports of the contract.
+
+### Failing on a contract
+
+`fail = true` in a contract table makes every report of that contract fail `heki check` (and
+`--watch`): exit code 1, whatever the report's tier and severity. A contract without the key, or
+with `fail = false`, keeps the default: its reports are warnings, and fail the run only as
+`fail-on` says. Every kind of contract has the key.
+
+```toml
+[[tool.heki.write-owners]]
+name = "generation-store"
+targets = ["pkg.model.DataModel.fields"]
+allowed-writers = ["Store.*"]
+fail = true
+```
+
+- Other warnings and heuristic reports stay advisory: `fail = true` does not change `fail-on`,
+  the rules' severities, or the tier of a report. The outputs (text, JSON, SARIF, GitHub
+  annotations) are the same with and without it.
+- A report that several contracts find stands for each of them, and fails the run when one of
+  them has `fail = true`. A `MUT202` report is of the `readonly-returns` tables naming a producer
+  the changed value may come from: all of them when the change reaches the producer's result
+  itself, and only those with `deep = true` when it changes a value below it.
+- A report that a [baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) records, or that an inline
+  [suppression](https://heki.koxudaxi.dev/configuration/#inline-suppressions) hides, does not fail the run. With `--touched`, the reports
+  the run shows decide; the note about the ones it does not show says how many would fail it.
+- The closing note of a text run, which counts the reports that do not fail the run, leaves these
+  reports out.
+- `fail = true` in a [`<kind>-defaults` table](https://heki.koxudaxi.dev/configuration/#defaults-for-the-tables-of-a-kind) applies to
+  every table of the kind that does not set `fail` itself.
+- `fail-on = "warning"` is still there for a project that wants every warning and heuristic
+  report to fail the run.
 
 ### How contracts report
 
@@ -2896,37 +2935,38 @@ extend-select = [
 | [`EFF102`](https://heki.koxudaxi.dev/rules/loop-unpooled-client/), [`EFF117`](https://heki.koxudaxi.dev/rules/unlocked-write-of-guarded-state/) | heuristic | creates HTTP or database clients in loops, or changes state its threads share without the lock its other writers hold; these two are not opt-in and run with `--heuristic` |
 
 Their reports can be wrong about the code: they are printed, and fail the run only with
-`fail-on = "warning"`. Before adding a rule, [`heki recommend`](https://heki.koxudaxi.dev/recommend/) counts the reports
+`fail-on = "warning"`. A [contract](https://heki.koxudaxi.dev/configuration/#contracts) can make its own reports fail it with
+`fail = true`. Before adding a rule, [`heki recommend`](https://heki.koxudaxi.dev/recommend/) counts the reports
 it would add on your code ("Rules worth enabling here"). `relax-async-in-tests`, on by default,
 leaves `EFF101`, `EFF105`, and `EFF106` out of test code.
 
 ### Walls for a team or a coding agent
 
-Declare the architecture as contracts, make their reports fail the run, and give the file an
-owner, so that a wall moves only in a reviewed change:
+Declare the architecture as contracts, make their reports fail the run with `fail = true`, and give
+the file an owner, so that a wall moves only in a reviewed change:
 
 ```toml
 # heki.toml
 baseline = "heki-baseline.toml"
-
-[lint]
-fail-on = "warning"   # contract reports are heuristic: let them fail the run
 
 [[write-owners]]
 name = "order-store"
 targets = ["app.models.Order.items"]
 allowed-writers = ["app.store.*"]
 message = "change Order.items through app.store"
+fail = true   # contract reports are heuristic: this makes them fail the run
 
 [[effect-boundaries]]
 name = "pure-domain"
 scopes = ["app.domain.*"]
 forbid = ["blocking"]
+fail = true
 
 [[import-boundaries]]   # experimental
 name = "domain-without-web"
 importers = ["app.domain", "app.domain.*"]
 forbidden-imports = ["app.web", "app.web.*"]
+fail = true
 ```
 
 ```text
@@ -2938,8 +2978,9 @@ forbidden-imports = ["app.web", "app.web.*"]
 
 - heki reads the first of `heki.toml`, `.heki.toml`, and `pyproject.toml` it finds at the
   project root, without merging them: move every `[tool.heki]` setting into `heki.toml`.
-- `fail-on = "warning"` makes every warning and heuristic report fail the run, not only the
-  contracts' reports. Record today's findings in the baseline first
+- `fail = true` makes the reports of that contract fail the run and leaves every other warning
+  and heuristic report advisory. `fail-on = "warning"` would fail on all of them, which a project
+  that wants that can still set. Record today's findings in the baseline first
   (`uvx heki==0.7.0 check --update-baseline`), so that only new ones fail.
 - The `message` is the help of every report of the contract: write it as an instruction.
 - For Claude Code, add the [Stop hook](https://heki.koxudaxi.dev/coding-agents/#a-stop-hook-for-claude-code): it runs
@@ -3189,7 +3230,8 @@ A run fails (exit code 1) on an exact report of an `error` rule: a bug that can 
 as a call that blocks the event loop (`EFF101`). Warnings (slower code, or a bug that is rarely
 harmful) and heuristic reports, which can be wrong about the code, are reported without failing
 it, whatever their rule's severity: a contract report, heuristic today, is one of them.
-`fail-on = "warning"` in `[tool.heki.lint]` (or `--fail-on warning`) makes them fail it too. A
+`fail = true` on a contract table makes the reports of that contract fail the run, and
+`fail-on = "warning"` in `[tool.heki.lint]` (or `--fail-on warning`) makes every one of them fail it. A
 code base with errors today records them in a [Ratchet baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) first, so
 that the job fails only on new ones; [`heki recommend`](https://heki.koxudaxi.dev/recommend/) says how many reports fail
 the run now.
@@ -3486,7 +3528,7 @@ to 50 of the sites that keep blocks at `unresolved = "ignore"`, where it lists 5
   heuristic reports, which count as warnings), which `fail-on = "warning"` would make fail it.
   When contract candidates are listed, a note says that they are invariants the code keeps today,
   not architectural intent: adopt only the boundaries you intend to keep, give each an actionable
-  `message`, set `fail-on = "warning"` (unless it is set, or the note above says so), and consider
+  `message`, set `fail = true` on each kept table (unless `fail-on = "warning"` is set), and consider
   a `CODEOWNERS`-protected `heki.toml`, with the legacy violations of a stricter wall in a Ratchet
   baseline, not in an `allowed-*` list.
   When the paths given leave out Python files below the project root, the note names them: heki
@@ -3786,7 +3828,7 @@ Notes
   - 1 Python file(s) below the project root were not analyzed (tests/test_users.py): heki takes the analyzed files as the whole project, so what it says about callers, readers, and writers holds for those files only.
   - heki check fails on 1 report(s) shown now (exit code 1): a Ratchet baseline records them, so that it fails only on new ones (`heki check --baseline heki-baseline.toml --update-baseline`, then `baseline = "heki-baseline.toml"` in the configuration).
   - "if it waits" and "if it sends a query" come from a trial run that gives each library name tried a catalog entry with `effects = ["blocking_net", "db_query"]`: what `heki check` would print if the call waited on the network or sent a database query. heki cannot see what these calls do, so no entry for them is in the block; add one in `[[tool.heki.ecosystem]]` if you know.
-  - the contract candidates are invariants the code keeps today, not architectural intent: adopt only the boundaries you intend to keep, give each an actionable `message`, and set `fail-on = "warning"` so that contract reports fail `heki check`; consider a CODEOWNERS-protected heki.toml, and put the legacy violations of a stricter wall in a Ratchet baseline, not in an `allowed-*` list.
+  - the contract candidates are invariants the code keeps today, not architectural intent: adopt only the boundaries you intend to keep, give each an actionable `message`, and set `fail = true` on each kept table so that its reports fail `heki check`; consider a CODEOWNERS-protected heki.toml, and put the legacy violations of a stricter wall in a Ratchet baseline, not in an `allowed-*` list.
 
 pyproject.toml: keys to add or change
   [tool.heki.lint]
@@ -3948,7 +3990,7 @@ Documentation:
 
 Exit codes:
   0  no diagnostic fails the run
-  1  a diagnostic at the `fail-on` severity (an exact `error` by default; a heuristic one counts as a `warning`), a refused `--update-baseline`, or pending `--diff` changes
+  1  a diagnostic at the `fail-on` severity (an exact `error` by default; a heuristic one counts as a `warning`), a report of a contract with `fail = true`, a refused `--update-baseline`, or pending `--diff` changes
   2  a configuration, path, read, or syntax error; the error says what to do and links the documentation
 
 Examples:
@@ -4029,7 +4071,7 @@ Options:
           Summary snapshot (`heki snapshot` output) that `MUT103` compares with, in place of `.heki-summary-snapshot.json` at the project root. A file that is missing, unreadable, malformed or of an unsupported version is an error (exit code 2), and so is a run in which `MUT103` is not enabled
 
       --fail-on <FAIL_ON>
-          Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`). A heuristic report counts as a warning
+          Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`). A heuristic report counts as a warning. A report of a contract with `fail = true` fails the run at either
           
           [possible values: error, warning]
 
@@ -4076,7 +4118,7 @@ Documentation:
 
 Exit codes:
   0  no diagnostic fails the run
-  1  a diagnostic at the `fail-on` severity (an exact `error` by default; a heuristic one counts as a `warning`), a refused `--update-baseline`, or pending `--diff` changes
+  1  a diagnostic at the `fail-on` severity (an exact `error` by default; a heuristic one counts as a `warning`), a report of a contract with `fail = true`, a refused `--update-baseline`, or pending `--diff` changes
   2  a configuration, path, read, or syntax error; the error says what to do and links the documentation
 
 Examples:
@@ -4688,8 +4730,8 @@ default, and only those of the exact rules that are not opt-in.
   ends with a note saying how many.
 - Only an exact report fails a run by default: a heuristic report counts as a warning for
   [`fail-on`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint), whatever its rule's severity, and
-  fails the run only with `fail-on = "warning"`. A false heuristic report never stops a CI or a
-  hook that keeps the default.
+  fails the run only with `fail-on = "warning"`, or when its contract table sets `fail = true`. A
+  false heuristic report never stops a CI or a hook that keeps the default.
 
 See [Rule selection](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint). `EFF101`, `EFF103`,
 `DATA101`, `MUT101`, `MUT110`, `MUT111`, `MUT114`, `MUT119`, the proven tier of the eight `OPT`
@@ -5431,9 +5473,9 @@ Each diagnostic has:
 
 A text run ends with one line per reported rule: `heki rule <CODE>` and the rule's page.
 
-The run exits with 1 when it shows an exact `error`, a bug that can be critical, or with
-`fail-on = "warning"` any report: a heuristic report counts as a warning, whatever its
-`severity`.
+The run exits with 1 when it shows an exact `error`, a bug that can be critical, a report of a
+contract with `fail = true`, or with `fail-on = "warning"` any report: a heuristic report counts
+as a warning, whatever its `severity`.
 
 When the run cannot check (exit code 2: a configuration, path, or file error), the error says
 where the cause is, what to write instead, and which section of the documentation explains it.
@@ -5478,23 +5520,21 @@ Do not describe the architecture in the project's `AGENTS.md` or `CLAUDE.md`. De
 > asks.
 
 The `message` of a contract is what the agent reads as the fix, so write it as an instruction.
-Contract reports are heuristic, and a heuristic report fails a run only with
-`fail-on = "warning"`: set it with the contracts, so that `heki check` exits with 1 on a crossed
-wall.
+Contract reports are heuristic, so a run does not fail on them by default. Set `fail = true` on
+each contract table, so that `heki check` exits with 1 on a crossed wall and every other warning
+stays advisory.
 
 ```toml
 # heki.toml
-[lint]
-fail-on = "warning"
-
 [[write-owners]]
 name = "generation-store"
 targets = ["pkg.model.DataModel.fields"]
 allowed-writers = ["Store.*"]
 message = "use GenerationStore.set_fields() instead"
+fail = true
 ```
 
-Put the contracts, `fail-on`, and the baseline path in `heki.toml`, and give that file an owner
+Put the contracts and the baseline path in `heki.toml`, and give that file an owner
 (`CODEOWNERS`, or the host's rule for protected files). A change to a wall is then a reviewed
 change, and an agent cannot move a wall to make a report go away.
 
@@ -5505,8 +5545,8 @@ change, and an agent cannot move a wall to make a report go away.
 ```
 
 `fail-on = "warning"` makes every warning and heuristic report fail the run, not only the
-contracts' reports: record today's findings in the baseline first, so that only new ones fail.
-The [starter recipe](https://heki.koxudaxi.dev/adoption/#walls-for-a-team-or-a-coding-agent) has the whole file.
+contracts' reports; use it only when you want that, and record today's findings in the baseline
+first, so that only new ones fail. The [starter recipe](https://heki.koxudaxi.dev/adoption/#walls-for-a-team-or-a-coding-agent) has the whole file.
 
 ### Keep the walls thin
 
@@ -5529,7 +5569,7 @@ so that the old violations can only shrink and a new one fails at once.
 
 1. The agent inspects the code with `heki recommend`, `heki inspect`, and `heki inspect
    --imports`.
-2. It proposes a thin ideal wall in `heki.toml`, with `fail-on = "warning"` and a `message` that
+2. It proposes a thin ideal wall in `heki.toml`, with `fail = true` on each table and a `message` that
    says what to write instead. The old and undesired writers, readers, callers, and imports stay
    out of `allowed-*`.
 3. The maintainer approves the change to `heki.toml`, which is protected by `CODEOWNERS`.
@@ -5595,7 +5635,7 @@ Run on a project with findings that are already known, it would block every turn
 One pull request adds the walls, and every later pull request, from a person or an agent, runs
 against them. Replace `app` with your package.
 
-1. Put the walls in a `heki.toml` of their own, with `fail-on = "warning"` and the baseline path.
+1. Put the walls in a `heki.toml` of their own, with `fail = true` on each wall and the baseline path.
    heki reads the first of `heki.toml`, `.heki.toml`, and `pyproject.toml` it finds and does not
    merge them: a project that already has `[tool.heki]` in `pyproject.toml` must move every
    setting into `heki.toml` (without the `tool.heki` prefix), or they stop applying:
@@ -5604,14 +5644,12 @@ against them. Replace `app` with your package.
     # heki.toml
     baseline = "heki-baseline.toml"
 
-    [lint]
-    fail-on = "warning"   # contract reports are heuristic: let them fail the run
-
     [[write-owners]]
     name = "order-store"
     targets = ["app.models.Order.items"]
     allowed-writers = ["app.store.*"]
     message = "change Order.items through app.store"
+    fail = true   # contract reports are heuristic: this lets them fail the run
     ```
 
 2. Record today's findings, the old crossings of the walls among them, so that only new ones
@@ -7803,6 +7841,7 @@ No automatic fix.
     any function or method of that name, an entry with a dot or a glob is matched like
     `allowed-callers`.
   - `message`: the help of every report of the contract.
+  - `fail`: `true` makes every report of the contract fail `heki check` (exit code 1), whatever its tier and severity (default `false`).
   - `unresolved`: `"ignore"` (default) or `"report"`: also report the calls the contract cannot
     tie to a class, under `MUT207`. A function some code hands
     on as a value (a display, a class attribute, an argument, a return: `HANDLERS = [helper]`,
@@ -8747,6 +8786,7 @@ No automatic fix.
   - `allowed-callees`: functions, classes, modules, or ecosystem symbols whose effects are
     allowed.
   - `message`: the help of every report of the boundary.
+  - `fail`: `true` makes every report of the contract fail `heki check` (exit code 1), whatever its tier and severity (default `false`).
 
 
 ---
@@ -11476,6 +11516,7 @@ No automatic fix.
     name matches any function or method of that name, an entry with a dot or a glob is matched
     like `allowed-readers`.
   - `message`: the help of every report of the contract.
+  - `fail`: `true` makes every report of the contract fail `heki check` (exit code 1), whatever its tier and severity (default `false`).
   - `unresolved`: `"ignore"` (default) or `"report"`: also report the reads the contract cannot
     tie to a class, under `MUT206`. A function some code hands
     on as a value (a display, a class attribute, an argument, a return: `HANDLERS = [helper]`,
@@ -13657,6 +13698,7 @@ No automatic fix.
     allowed when any function on its chain (the writer and the private helpers between) is an
     allowed writer or an exempt method.
   - `message`: the help of every report of the contract (`use Store.add_field() instead`).
+  - `fail`: `true` makes every report of the contract fail `heki check` (exit code 1), whatever its tier and severity (default `false`).
   - `forbid-cached-property-on`: classes on which a `@cached_property` is itself reported.
   - `fresh-objects`: `"allow"` (default) or `"report"`: whether writes that construct the object
     they write are reported.

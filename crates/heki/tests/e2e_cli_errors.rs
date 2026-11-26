@@ -66,7 +66,7 @@ fn configuration_errors_name_the_fix_and_the_section() {
             &[
                 "error: pyproject.toml:6:1: unknown key `targets` in [[tool.heki.import-boundaries]]",
                 "  = help: `targets` is a key of [[tool.heki.write-owners]], [[tool.heki.read-owners]], [[tool.heki.call-owners]], [[tool.heki.invalidation]]: move it there",
-                "  = help: [[tool.heki.import-boundaries]] takes `allowed-imports`, `exempt-importers`, `forbidden-imports`, `ignored-imports`, `importers`, `message`, `name`, `reach`, `relative-imports`, `type-checking`, `unresolved`",
+                "  = help: [[tool.heki.import-boundaries]] takes `allowed-imports`, `exempt-importers`, `fail`, `forbidden-imports`, `ignored-imports`, `importers`, `message`, `name`, `reach`, `relative-imports`, `type-checking`, `unresolved`",
                 &docs("configuration/#write-owners"),
             ],
         ),

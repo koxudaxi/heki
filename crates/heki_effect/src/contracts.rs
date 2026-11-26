@@ -10,7 +10,7 @@
 //! and nothing is computed for contracts a project does not declare. Without a `Contracts`, only
 //! the configuration-free half of `MUT202` (`@lru_cache` results) is summarized.
 
-use crate::{FuncKey, ProjectDecls};
+use crate::{ContractSharing, FuncKey, ProjectDecls};
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
@@ -83,10 +83,10 @@ pub trait Contracts: Debug + Send + Sync {
     /// part: only then does a [`ContractClass`] carry its qualname.
     fn names_class_modules(&self) -> bool;
 
-    /// `Some(deep)` when a `readonly-returns` entry names a project function (`fqn` and its
-    /// `qualname`), an attribute of a class ([`ContractClass::member`]), or an external symbol
-    /// (the symbol twice).
-    fn readonly_producer(&self, fqn: &str, qualname: &str) -> Option<bool>;
+    /// What the result of a producer shares under each `readonly-returns` contract naming it,
+    /// when one names a project function (`fqn` and its `qualname`), an attribute of a class
+    /// ([`ContractClass::member`]), or an external symbol (the symbol twice).
+    fn readonly_producer(&self, fqn: &str, qualname: &str) -> Option<ContractSharing>;
 
     /// The number of `invalidation` contracts.
     fn invalidations(&self) -> usize;

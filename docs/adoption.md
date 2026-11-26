@@ -80,37 +80,38 @@ extend-select = [
 | [`EFF102`](rules/loop-unpooled-client.md), [`EFF117`](rules/unlocked-write-of-guarded-state.md) | heuristic | creates HTTP or database clients in loops, or changes state its threads share without the lock its other writers hold; these two are not opt-in and run with `--heuristic` |
 
 Their reports can be wrong about the code: they are printed, and fail the run only with
-`fail-on = "warning"`. Before adding a rule, [`heki recommend`](recommend.md) counts the reports
+`fail-on = "warning"`. A [contract](configuration.md#contracts) can make its own reports fail it with
+`fail = true`. Before adding a rule, [`heki recommend`](recommend.md) counts the reports
 it would add on your code ("Rules worth enabling here"). `relax-async-in-tests`, on by default,
 leaves `EFF101`, `EFF105`, and `EFF106` out of test code.
 
 ### Walls for a team or a coding agent
 
-Declare the architecture as contracts, make their reports fail the run, and give the file an
-owner, so that a wall moves only in a reviewed change:
+Declare the architecture as contracts, make their reports fail the run with `fail = true`, and give
+the file an owner, so that a wall moves only in a reviewed change:
 
 ```toml
 # heki.toml
 baseline = "heki-baseline.toml"
-
-[lint]
-fail-on = "warning"   # contract reports are heuristic: let them fail the run
 
 [[write-owners]]
 name = "order-store"
 targets = ["app.models.Order.items"]
 allowed-writers = ["app.store.*"]
 message = "change Order.items through app.store"
+fail = true   # contract reports are heuristic: this makes them fail the run
 
 [[effect-boundaries]]
 name = "pure-domain"
 scopes = ["app.domain.*"]
 forbid = ["blocking"]
+fail = true
 
 [[import-boundaries]]   # experimental
 name = "domain-without-web"
 importers = ["app.domain", "app.domain.*"]
 forbidden-imports = ["app.web", "app.web.*"]
+fail = true
 ```
 
 ```text
@@ -122,8 +123,9 @@ forbidden-imports = ["app.web", "app.web.*"]
 
 - heki reads the first of `heki.toml`, `.heki.toml`, and `pyproject.toml` it finds at the
   project root, without merging them: move every `[tool.heki]` setting into `heki.toml`.
-- `fail-on = "warning"` makes every warning and heuristic report fail the run, not only the
-  contracts' reports. Record today's findings in the baseline first
+- `fail = true` makes the reports of that contract fail the run and leaves every other warning
+  and heuristic report advisory. `fail-on = "warning"` would fail on all of them, which a project
+  that wants that can still set. Record today's findings in the baseline first
   (`uvx heki==0.7.0 check --update-baseline`), so that only new ones fail.
 - The `message` is the help of every report of the contract: write it as an instruction.
 - For Claude Code, add the [Stop hook](coding-agents.md#a-stop-hook-for-claude-code): it runs
@@ -373,7 +375,8 @@ A run fails (exit code 1) on an exact report of an `error` rule: a bug that can 
 as a call that blocks the event loop (`EFF101`). Warnings (slower code, or a bug that is rarely
 harmful) and heuristic reports, which can be wrong about the code, are reported without failing
 it, whatever their rule's severity: a contract report, heuristic today, is one of them.
-`fail-on = "warning"` in `[tool.heki.lint]` (or `--fail-on warning`) makes them fail it too. A
+`fail = true` on a contract table makes the reports of that contract fail the run, and
+`fail-on = "warning"` in `[tool.heki.lint]` (or `--fail-on warning`) makes every one of them fail it. A
 code base with errors today records them in a [Ratchet baseline](#ratchet-baselines) first, so
 that the job fails only on new ones; [`heki recommend`](recommend.md) says how many reports fail
 the run now.

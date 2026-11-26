@@ -80,9 +80,9 @@ Each diagnostic has:
 
 A text run ends with one line per reported rule: `heki rule <CODE>` and the rule's page.
 
-The run exits with 1 when it shows an exact `error`, a bug that can be critical, or with
-`fail-on = "warning"` any report: a heuristic report counts as a warning, whatever its
-`severity`.
+The run exits with 1 when it shows an exact `error`, a bug that can be critical, a report of a
+contract with `fail = true`, or with `fail-on = "warning"` any report: a heuristic report counts
+as a warning, whatever its `severity`.
 
 When the run cannot check (exit code 2: a configuration, path, or file error), the error says
 where the cause is, what to write instead, and which section of the documentation explains it.
@@ -127,23 +127,21 @@ Do not describe the architecture in the project's `AGENTS.md` or `CLAUDE.md`. De
 > asks.
 
 The `message` of a contract is what the agent reads as the fix, so write it as an instruction.
-Contract reports are heuristic, and a heuristic report fails a run only with
-`fail-on = "warning"`: set it with the contracts, so that `heki check` exits with 1 on a crossed
-wall.
+Contract reports are heuristic, so a run does not fail on them by default. Set `fail = true` on
+each contract table, so that `heki check` exits with 1 on a crossed wall and every other warning
+stays advisory.
 
 ```toml
 # heki.toml
-[lint]
-fail-on = "warning"
-
 [[write-owners]]
 name = "generation-store"
 targets = ["pkg.model.DataModel.fields"]
 allowed-writers = ["Store.*"]
 message = "use GenerationStore.set_fields() instead"
+fail = true
 ```
 
-Put the contracts, `fail-on`, and the baseline path in `heki.toml`, and give that file an owner
+Put the contracts and the baseline path in `heki.toml`, and give that file an owner
 (`CODEOWNERS`, or the host's rule for protected files). A change to a wall is then a reviewed
 change, and an agent cannot move a wall to make a report go away.
 
@@ -154,8 +152,8 @@ change, and an agent cannot move a wall to make a report go away.
 ```
 
 `fail-on = "warning"` makes every warning and heuristic report fail the run, not only the
-contracts' reports: record today's findings in the baseline first, so that only new ones fail.
-The [starter recipe](adoption.md#walls-for-a-team-or-a-coding-agent) has the whole file.
+contracts' reports; use it only when you want that, and record today's findings in the baseline
+first, so that only new ones fail. The [starter recipe](adoption.md#walls-for-a-team-or-a-coding-agent) has the whole file.
 
 ### Keep the walls thin
 
@@ -178,7 +176,7 @@ so that the old violations can only shrink and a new one fails at once.
 
 1. The agent inspects the code with `heki recommend`, `heki inspect`, and `heki inspect
    --imports`.
-2. It proposes a thin ideal wall in `heki.toml`, with `fail-on = "warning"` and a `message` that
+2. It proposes a thin ideal wall in `heki.toml`, with `fail = true` on each table and a `message` that
    says what to write instead. The old and undesired writers, readers, callers, and imports stay
    out of `allowed-*`.
 3. The maintainer approves the change to `heki.toml`, which is protected by `CODEOWNERS`.
@@ -244,7 +242,7 @@ Run on a project with findings that are already known, it would block every turn
 One pull request adds the walls, and every later pull request, from a person or an agent, runs
 against them. Replace `app` with your package.
 
-1. Put the walls in a `heki.toml` of their own, with `fail-on = "warning"` and the baseline path.
+1. Put the walls in a `heki.toml` of their own, with `fail = true` on each wall and the baseline path.
    heki reads the first of `heki.toml`, `.heki.toml`, and `pyproject.toml` it finds and does not
    merge them: a project that already has `[tool.heki]` in `pyproject.toml` must move every
    setting into `heki.toml` (without the `tool.heki` prefix), or they stop applying:
@@ -253,14 +251,12 @@ against them. Replace `app` with your package.
     # heki.toml
     baseline = "heki-baseline.toml"
 
-    [lint]
-    fail-on = "warning"   # contract reports are heuristic: let them fail the run
-
     [[write-owners]]
     name = "order-store"
     targets = ["app.models.Order.items"]
     allowed-writers = ["app.store.*"]
     message = "change Order.items through app.store"
+    fail = true   # contract reports are heuristic: this lets them fail the run
     ```
 
 2. Record today's findings, the old crossings of the walls among them, so that only new ones

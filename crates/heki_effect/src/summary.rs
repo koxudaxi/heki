@@ -26,7 +26,9 @@ use crate::one_at_a_time;
 use crate::order_flow;
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, ReturnOrigins, Source};
 use crate::partial::Partial;
-use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared, container_mutator};
+use crate::readonly::{
+    self, ContractSharing, Derivation, ProtectedReturn, ReturnStep, container_mutator,
+};
 use crate::resolver::stores::{self, AttrName};
 use crate::resolver::{
     self, Callee, DeclKeys, FunctionDecl, ModuleDecls, TypeCtx, Val, func_qualname,
@@ -607,20 +609,7 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary, func: &FuncKe
         });
     }
     if let Some(o) = other.returns_protected {
-        let ProtectedReturn {
-            producer,
-            shared,
-            chain,
-            declared,
-        } = o;
-        ProtectedReturn::add(
-            &mut into.returns_protected,
-            producer,
-            declared,
-            shared,
-            ReturnStep::ITSELF,
-            chain,
-        );
+        ProtectedReturn::add(&mut into.returns_protected, *o, ReturnStep::ITSELF);
     }
     // A must-fact: a new object only when both definitions return one.
     into.returns_new = match (std::mem::take(&mut into.returns_new), other.returns_new) {
@@ -5089,8 +5078,8 @@ impl<'a> Extractor<'a> {
                 {
                     let class = ContractClass::with_qualname(self.cx.project, class.clone());
                     let (fqn, qualname) = class.member(attr);
-                    if let Some(deep) = c.readonly_producer(&fqn, &qualname) {
-                        self.seed_protected(fqn, deep, step, span);
+                    if let Some(produced) = c.readonly_producer(&fqn, &qualname) {
+                        self.seed_protected(fqn, produced, step, span);
                     }
                 }
                 self.property_read(bb, index, Some(*dst), *obj, attr, span);
@@ -6868,9 +6857,9 @@ impl<'a> Extractor<'a> {
                         });
                     }
                     if let Some(step) = call.dst.and_then(|d| self.returned.get(&d).copied())
-                        && let Some(deep) = c.readonly_producer(symbol, symbol)
+                        && let Some(produced) = c.readonly_producer(symbol, symbol)
                     {
-                        self.seed_protected(symbol.clone(), deep, step, call.span);
+                        self.seed_protected(symbol.clone(), produced, step, call.span);
                     }
                     let mask = c.invalidator_of(symbol, symbol);
                     if let Some(events) = self.events.as_mut()
@@ -8628,17 +8617,24 @@ impl<'a> Extractor<'a> {
     }
 
     /// The function returns (through `step`) the result of the read-only producer `producer`
-    /// it calls or reads at `span` (`MUT202` return flow; `deep` as the producer is declared).
-    fn seed_protected(&mut self, producer: String, deep: bool, step: ReturnStep, span: Span) {
+    /// it calls or reads at `span` (`MUT202` return flow; `produced` as the contracts naming
+    /// the producer protect its result).
+    fn seed_protected(
+        &mut self,
+        producer: String,
+        produced: ContractSharing,
+        step: ReturnStep,
+        span: Span,
+    ) {
         let chain = vec![Arc::new(self.hop(producer.clone(), span))];
-        ProtectedReturn::add(
-            &mut self.summary.returns_protected,
+        let produced = ProtectedReturn {
             producer,
-            true,
-            Shared::produced(deep),
-            step,
+            shared: produced.shared(),
             chain,
-        );
+            declared: true,
+            contracts: produced,
+        };
+        ProtectedReturn::add(&mut self.summary.returns_protected, produced, step);
     }
 }
 
