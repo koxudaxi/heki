@@ -1015,3 +1015,41 @@ fn a_dict_key_only_read_names_nothing() {
         "{stderr}"
     );
 }
+
+/// The same read-only key of a read-owners target exists: a read of it is what the contract
+/// guards, so the target matches however the key is read, and a write-owners target of the key
+/// stays unmatched.
+#[test]
+fn a_dict_key_only_read_names_a_read_owners_target() {
+    let p = Project::new("unmatched_read_only_key_read_owners");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT203\"]\n\
+         unmatched-contract-entries = \"error\"\n\n\
+         [[tool.heki.write-owners]]\nname = \"field-cache-writes\"\n\
+         targets = [\"pkg.model.Field._cache\"]\nallowed-writers = [\"pkg.reader:*\"]\n\n\
+         [[tool.heki.read-owners]]\nname = \"field-cache-reads\"\n\
+         targets = [\"pkg.model.Field._cache\", \"pkg.model.Field._gone\"]\n\
+         allowed-readers = [\"pkg.reader:*\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/model.py",
+        "class Field:\n    def __init__(self) -> None:\n        self.kind = \"str\"\n",
+    )
+    .write(
+        "pkg/reader.py",
+        "from pkg.model import Field\n\n\n\
+         def read(field: Field) -> object:\n    return field.__dict__.get(\"_cache\")\n",
+    );
+    let (code, stdout, stderr) = p.heki(&["check"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert_eq!(
+        lines(&stderr, "error: "),
+        [
+            "`targets` entry `pkg.model.Field._cache` of write-owners `field-cache-writes` names no attribute, method, or `__dict__` key of `pkg.model.Field` in the analyzed files",
+            "`targets` entry `pkg.model.Field._gone` of read-owners `field-cache-reads` names no attribute, method, or `__dict__` key of `pkg.model.Field` in the analyzed files",
+        ],
+        "{stderr}"
+    );
+}

@@ -1144,7 +1144,7 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   class body binds (a method, an annotation, an assignment), one its methods or its module set
   on its instances, one of a project base, an attribute or a constant `__dict__` key the code
   writes on an object typed with the class or a subclass (a `__dict__` key only read does not
-  exist), or one written on an object heki cannot type. A key a loop takes from a tuple, list, or set of string constants
+  exist, except for a `read-owners` target, which guards the reads), or one written on an object heki cannot type. A key a loop takes from a tuple, list, or set of string constants
   (`for key in ("_a", "_b")`), or from a module's tuple of them (`for key in RECORDS`), names
   each of them, a list or set only while no code changes it, and so does the key of each pair a
   generator of them gives `update` (`ns.update((key, v) for key in RECORDS)`). A module

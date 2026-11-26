@@ -337,9 +337,13 @@ struct ProjectNames<'a> {
     classes: Vec<ContractClass>,
     /// The classes (by index) by the last part of each spelling of their qualname.
     classes_by_last: FxHashMap<String, Vec<usize>>,
-    /// The attributes and constant `__dict__` keys the code reads or writes on objects typed with
-    /// each class (fqn).
+    /// The attributes and constant `__dict__` keys the code writes on objects typed with each
+    /// class (fqn), and the attributes and keys it reads through the namespace of one.
     accessed: FxHashMap<&'a str, FxHashSet<&'a str>>,
+    /// The constant `__dict__` keys the code reads directly on objects typed with each class
+    /// (fqn): a key that exists only where some code writes it, which a read-owners target
+    /// matches all the same.
+    dict_read: FxHashMap<&'a str, FxHashSet<&'a str>>,
     /// The attributes and constant `__dict__` keys the code writes, and the target names it reads
     /// or calls, on objects heki cannot type: each may be any class's.
     on_unknown: FxHashSet<&'a str>,
@@ -348,8 +352,9 @@ struct ProjectNames<'a> {
     /// `unmatched-contract-entries = "error"`: an entry naming none of the known names of a
     /// class the code gives attributes named at run time is reported too.
     strict: bool,
-    /// The names each class has ([`Self::names_of`]), found once.
-    names: FxHashMap<String, FxHashSet<&'a str>>,
+    /// The names each class has ([`Self::names_of`]), found once, without and with the keys only
+    /// read.
+    names: [FxHashMap<String, FxHashSet<&'a str>>; 2],
     /// The top-level modules of the analyzed files.
     project_modules: FxHashSet<&'a str>,
     /// The top-level modules outside the project heki knows the analyzed files to use: those
@@ -452,6 +457,7 @@ impl<'a> ProjectNames<'a> {
         let mut functions_by_last: FxHashMap<Cow<'a, str>, Vec<&FuncKey>> = FxHashMap::default();
         let mut functions_within: FxHashMap<Cow<'a, str>, Vec<&FuncKey>> = FxHashMap::default();
         let mut accessed: FxHashMap<&str, FxHashSet<&str>> = FxHashMap::default();
+        let mut dict_read: FxHashMap<&str, FxHashSet<&str>> = FxHashMap::default();
         let (mut on_unknown, mut computed) = (FxHashSet::default(), FxHashSet::default());
         for &(key, s) in &defined {
             on_unknown.extend(s.unresolved_access_sites.iter().map(|a| a.name.as_str()));
@@ -486,12 +492,19 @@ impl<'a> ProjectNames<'a> {
                 functions_within.entry(part).or_default().push(key);
             }
             let writes = (s.typed_field_write_sites.iter()).map(|w| (&w.class_qualname, &w.attr));
-            // A key read through the namespace exists only where some code writes it.
-            let reads = (s.typed_field_read_sites.iter())
-                .filter(|r| r.kind != ReadKind::DictDirect)
-                .map(|r| (&r.class_qualname, &r.attr));
-            for (class, attr) in writes.chain(reads) {
+            let reads =
+                (s.typed_field_read_sites.iter()).map(|r| (r.kind, &r.class_qualname, &r.attr));
+            for (class, attr) in writes {
                 accessed.entry(class).or_default().insert(attr);
+            }
+            for (kind, class, attr) in reads {
+                // A key read through the namespace exists only where some code writes it.
+                let seen = if kind == ReadKind::DictDirect {
+                    &mut dict_read
+                } else {
+                    &mut accessed
+                };
+                seen.entry(class).or_default().insert(attr);
             }
         }
         let classes = project_classes(cx);
@@ -537,10 +550,11 @@ impl<'a> ProjectNames<'a> {
             classes,
             classes_by_last,
             accessed,
+            dict_read,
             on_unknown,
             computed,
             strict: cx.config.lint.unmatched_contract_entries == Some(UnmatchedEntries::Error),
-            names: FxHashMap::default(),
+            names: Default::default(),
             function_forms: None,
             class_forms: None,
             method_names: None,
@@ -658,17 +672,27 @@ impl<'a> ProjectNames<'a> {
     }
 
     /// The names `class` has: those it and its project bases declare, and those the code
-    /// accesses on objects typed with it.
-    fn names_of(&mut self, cx: &CheckContext<'a>, class: &str) -> &FxHashSet<&'a str> {
-        if !self.names.contains_key(class) {
+    /// accesses on objects typed with it. A `__dict__` key the code only reads counts when
+    /// `with_dict_reads`.
+    fn names_of(
+        &mut self,
+        cx: &CheckContext<'a>,
+        class: &str,
+        with_dict_reads: bool,
+    ) -> &FxHashSet<&'a str> {
+        let found = usize::from(with_dict_reads);
+        if !self.names[found].contains_key(class) {
             let mut names: FxHashSet<&str> = FxHashSet::default();
             for c in std::iter::once(class.to_owned()).chain(cx.decls.ancestors_of(class)) {
                 names.extend(cx.decls.declared_names(&c));
             }
             names.extend(self.accessed.get(class).into_iter().flatten().copied());
-            self.names.insert(class.to_owned(), names);
+            if with_dict_reads {
+                names.extend(self.dict_read.get(class).into_iter().flatten().copied());
+            }
+            self.names[found].insert(class.to_owned(), names);
         }
-        &self.names[class]
+        &self.names[found][class]
     }
 }
 
@@ -883,6 +907,8 @@ fn judge_attribute<'a>(
     (section, context): (&'static str, &'static str),
     entry: &str,
 ) -> Result<Option<Missing>, RuleConfigError> {
+    // A read-owners target guards the reads of a key, so a key only read exists for it.
+    let with_dict_reads = context == "read-owners.targets";
     let (base, item) = match split_item(entry) {
         Some((base, _)) => (base, &entry[base.len()..]),
         None => (entry, ""),
@@ -904,7 +930,7 @@ fn judge_attribute<'a>(
         for (i, class) in names.nearest_classes(class_part) {
             let fqn = names.classes[i].fqn.clone();
             if names
-                .names_of(cx, &fqn)
+                .names_of(cx, &fqn, with_dict_reads)
                 .iter()
                 .any(|n| target.matches_attr(n))
             {
@@ -919,7 +945,7 @@ fn judge_attribute<'a>(
     let mut known: Vec<&str> = Vec::new();
     let mut named_at_run_time = false;
     for class in family {
-        let has = names.names_of(cx, class);
+        let has = names.names_of(cx, class, with_dict_reads);
         if has.iter().any(|n| target.matches_attr(n)) {
             return Ok(None);
         }
