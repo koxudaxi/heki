@@ -3375,6 +3375,24 @@ objects it links (`made.part = part; part.parent = made`) is new at a call until
 out of it is stored. A store into an object the function did not make, or into one of its own
 that was kept before, still ends the freshness of what it stores.
 
+A container a class's constructor makes for each instance is held by that instance, so storing a new
+object into it links the two the same way: `copied = Node(); copied.children.append(part)` leaves
+`part` new while `copied` is (`append`, `appendleft`, `insert`, `add`, `setdefault`, and item
+stores, on a list, set, or dict, when they run no project code on what they store). The constructor
+is the project `__init__` the class runs, its own or a base's (no class decorator,
+`__init_subclass__`, `dataclass_transform`, or metaclass other than `type` or `abc.ABCMeta` along
+the MRO, and no code that reading the attribute runs), and it binds the attribute once, on every
+path to its return, to a list, dict, or set display or `list()`, `dict()`, `set()`, or
+`bytearray()`. It uses `self` only to store attributes (none of `__dict__` and `__class__`) and to
+call `super().__init__(...)`, whose `__init__` along the MRO does the same or is `object`'s, and
+no store in them runs code (a property's setter, a descriptor, `__setattr__`): a call handed
+`self` or a member of it, such as `self.setup()`, may hand the container anywhere. The object must
+be one the function made by calling the class on every path.
+Rebinding the attribute before an object is stored into the list (`copied.children = node.children`
+on some path, `setattr(copied, name, v)`, a write through `copied.__dict__`, or a helper handed
+`copied`), or keeping the list, ends the freshness of what is stored into it. A project function
+returning such an object does not carry the fact to its callers.
+
 A shallow copy's containers are the original's: only rebinding its attributes constructs it.
 
 A project function returns a new object at a call when every value it returns is one, or, on
@@ -14416,7 +14434,8 @@ an object the function did not make, a container, a global, or a closure, no `yi
 call that may keep it ran before the write. An attribute store into another new object of a
 class whose attribute write runs no code links the holder to it instead: the object stays new
 until it, an object holding it, or a value read out of one is kept (see
-[configuration](https://heki.koxudaxi.dev/configuration/#write-owners)). A project function keeps an object it
+[configuration](https://heki.koxudaxi.dev/configuration/#write-owners)). So does a store into a list, set, or dict
+the class's constructor made for a new instance (`copied.children.append(part)`). A project function keeps an object it
 stores, yields, or hands to code heki does not follow or to a function that keeps it; reading
 or writing it keeps nothing. A
 store made only where tests of the function's parameters pass (`if register:`) keeps nothing at a
