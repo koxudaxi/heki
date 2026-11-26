@@ -213,3 +213,32 @@ fn a_class_body_or_module_level_binding_of_a_target_is_a_read() {
     let calls = config_project("binding_reads_off", "");
     assert_eq!(lines(&calls), [], "{:#?}", found(&calls));
 }
+
+const DISCARDED: &str = r#"from pkg import backend
+
+backend.Model
+
+
+class Config:
+    backend.Model
+    model_type: type = backend.Model
+    [*backend.Model]
+    held = [backend.Model]
+
+
+DEFAULT = backend.Model
+"#;
+
+#[test]
+fn a_discarded_expression_is_no_binding() {
+    let p = config_project("binding_reads_discarded", "references = \"reads\"\n");
+    p.write("pkg/config.py", DISCARDED);
+    let read = |line: u64| {
+        (
+            line,
+            "`<module>` reads `pkg.backend.Model` inside the forbidden callers of `config-backend-reference`"
+                .to_owned(),
+        )
+    };
+    assert_eq!(lines(&p), [read(8), read(10), read(13)], "{:#?}", found(&p));
+}

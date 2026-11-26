@@ -170,7 +170,7 @@ struct HandedValues {
     /// With reads, in a class or module body: the loads of a name or an attribute that no call
     /// runs as its callee. Their uses are not followed past the name they are bound to (a class
     /// attribute's uses, `Config.model_type`, name no target), so a load nothing else takes is
-    /// itself the read: the binding.
+    /// itself the read: the binding. Only the loads a statement binds to a name are kept.
     plain: FxHashSet<VarId>,
     /// The uses are kept for reads too ([`Usage::Reads`], [`Held::Key`]).
     reads: bool,
@@ -215,6 +215,9 @@ impl HandedValues {
         };
         let binds_names = reads.is_some() && (f.is_module_body || f.is_class_body);
         let mut callees: FxHashSet<VarId> = FxHashSet::default();
+        // The values a class or module body binds to a name (an assignment, an annotated or an
+        // augmented one, a walrus): a discarded expression binds nothing.
+        let mut bound: FxHashSet<VarId> = FxHashSet::default();
         // The names an import or a `def` binds in a module body, where the statement is.
         let mut bound_by_statement: FxHashMap<VarId, Span> = FxHashMap::default();
         if binds_names && f.is_module_body {
@@ -256,7 +259,12 @@ impl HandedValues {
                         flow.add(*obj, span, Usage::Reads);
                     }
                     InstKind::Import { dst, .. } => flow.loads.push((at, *dst, span, true)),
-                    InstKind::Copy { dst, src } => flow.from.entry(*dst).or_default().push(*src),
+                    InstKind::Copy { dst, src } => {
+                        flow.from.entry(*dst).or_default().push(*src);
+                        if binds_names && !f.is_unpacked(*dst) {
+                            bound.insert(*src);
+                        }
+                    }
                     InstKind::AllocBuiltin { dst, elems, .. } => {
                         let elems = elems.iter().map(|v| (*v, Held::Value));
                         flow.held.entry(*dst).or_default().extend(elems);
@@ -326,6 +334,7 @@ impl HandedValues {
                     } => flow.add(*value, span, Usage::HandsOn),
                     InstKind::StoreGlobal { value, .. } => {
                         flow.add(*value, span, binding);
+                        bound.insert(*value);
                         // An assignment of such a name to another one (`Alias = imported`) is
                         // a binding of the object, which is a read of it.
                         if bound_by_statement.get(value).is_some_and(|s| *s != span) {
@@ -370,7 +379,25 @@ impl HandedValues {
         for (value, span) in reads.into_iter().flat_map(|ir| ir.statement_uses_of(f.id)) {
             flow.add(value, span, Usage::Reads);
         }
-        flow.plain.retain(|v| !callees.contains(v));
+        // A bound display binds what it holds (`held = [backend.Model]`), a bound copy or phi
+        // what it merges.
+        let budget = Budget::of_function("summary::reference_sites", f);
+        let starts: Vec<VarId> = bound.iter().copied().collect();
+        // Past the budget the function has no reference site, so what the walk left out is moot.
+        let _ = reach(
+            &budget,
+            starts,
+            |v, next| {
+                let held = flow.held.get(&v).into_iter().flatten().map(|(h, _)| *h);
+                next.extend(held.chain(flow.from.get(&v).into_iter().flatten().copied()));
+            },
+            |v| {
+                bound.insert(v);
+                Visit::Expand::<()>
+            },
+        );
+        flow.plain
+            .retain(|v| bound.contains(v) && !callees.contains(v));
         flow
     }
 
