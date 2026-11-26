@@ -5,6 +5,60 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
+## [0.6.0] - Unreleased
+
+### Breaking changes
+
+- The catalog now covers the file system, process, and network calls of the standard library by module (#434, #445, #466, #470), so code that called them without a report now gets one.
+  - `blocking-fs` (and `EFF105`) cover the rest of `os` and `os.path` (`open`, `replace`, `rename`, `remove`, `mkdir`, `makedirs`, `chmod`, `symlink`, `lstat`, `getsize`, `getmtime`, `islink` and similar), `pathlib.Path` (`iterdir`, `glob`, `rglob`, `walk`, `mkdir`, `touch`, `unlink`, `rename`, `replace`, `symlink_to`, `readlink`, `is_symlink` and similar), `shutil` (`move`, `copyfile`, `disk_usage`, archives), `tempfile` (`mkdtemp`, `mkstemp`, `NamedTemporaryFile`, `TemporaryDirectory` and similar), and `glob`.
+  - `blocking-subprocess` (and `EFF101`) cover the calls that wait for a child: `os.system`, `os.wait`, `os.waitpid`, `os.wait3`, `os.wait4`, `os.waitid` (not with `WNOHANG`), `os.spawn*` with `os.P_WAIT`, `subprocess.getoutput`, and `subprocess.getstatusoutput`. Calls that only start or replace a process (`os.exec*`, `os.spawn*` with another mode, `os.posix_spawn*`, `os.popen`, `subprocess.Popen`) are not blocking. `signal.sigwait`, `sigwaitinfo`, `sigtimedwait`, and `pause` are `blocking-sync`.
+  - `ftplib.FTP` and `FTP_TLS` are a client allocation for `EFF102` and their commands are `blocking-net`. `psutil` queries and `fsspec` file system calls are `blocking-fs`.
+  - A pool taken from a urllib3 `PoolManager` or `ProxyManager` (`connection_from_host`, `connection_from_url`, `connection_from_context`, `connection_from_pool_key`, `connection_from_pool_kwargs`), and `urllib3.connectionpool.connection_from_url`, make `blocking_net` calls through `request` and `urlopen`.
+- `os.getcwd`, `os.getcwdb`, `Path.cwd`, `Path.home`, `Path.absolute`, `Path.expanduser`, `os.path.abspath`, `relpath`, `expanduser`, and `expandvars` read the environment (`reads-environment`), not the disk.
+
+### Added
+
+- `heki inspect` shows `only_reads`: the function's parameters annotated with `list`, `dict`, or
+  `set` (or their `typing` and mutable abstract forms), those it and every function it hands them
+  to only read (no change in place, no store, capture, yield, or return, and every call it is
+  handed to resolved to a project function that only reads it or to a builtin Layer 1 lists as
+  reading it, also inside a call cycle), those whose every use the read-only type (`Sequence`,
+  `Mapping`, `AbstractSet`) allows, and those whose name it binds once. The text form prints an
+  `only reads` line. The language server keeps the fact current across files; `heki check` does
+  not compute it.
+- Layer 1 knows seven builtins that read an iterable: `sorted`, `any`, `all`, and `frozenset`
+  read their argument, `sum` its iterable (it may return its `start`), and `min` and `max`, given
+  several arguments, return one of them.
+- `heki recommend` (experimental) suggests read-only parameter types the code already keeps: a parameter annotated `list`, `dict`, or `set` that the function and every function it hands it to only read, as `Sequence`, `Mapping`, or `AbstractSet`. Each suggestion is a group of annotation edits with the premises of its claim, never a report; parameters handed to each other and override families are one group. An annotation trial analyzes each file of the groups again with their edits applied, in parallel, and withholds a group whose edits would change the facts of a function they edit or the file's reports. The JSON object (version 3) lists them under `suggestions`; the text output comes later. (#409)
+- The catalog's `[[annotation_readers]]` lists library code that reads annotations at run time (pydantic's `validate_call`, FastAPI routes and `Depends`, Typer commands, Typeguard, `functools.singledispatch`, `typing.get_type_hints` and the like) and the classes that read only their fields (`dataclass`, attrs, pydantic models). (#409)
+
+### Changed
+
+- `heki recommend` (experimental) merges its contract candidates into a few blocks (#374): the
+  candidates of one kind whose entries differ only in their targets or scopes are one entry.
+  Where no function changes an attribute of a class or its subclasses (for `read-owners`, reads
+  one whose name starts with `_`) outside what the block allows, the block names them all by one
+  pattern, `module:Class.*` (`module:Class._*`), which also covers attributes added later; a
+  pattern trial keeps the pattern only when it reports nothing the targets did not. The report
+  shows and declares the first 3 blocks of each kind and counts the rest; `--all` shows every
+  one. The sites of accesses heki cannot tie to a class that keep blocks at
+  `unresolved = "ignore"` are listed once each, with the candidates and blocks they hold back.
+  An ownership candidate is judged by its class and its subclasses, a method accessing the
+  attribute through its own receiver may be in any module (the entry then sets
+  `own-receiver = "allow"`), and test code is never taken for an owner. On a 421-file project
+  the default text went from 877 lines and 90 blocks to 179 lines and 7 blocks. The JSON object
+  is version 3 (`recommend-3.json`): `contracts` lists blocks, with `targets`, `candidates`, and
+  `patterns` in place of `target`, and the new fields `contracts_not_shown` and
+  `contract_blockers`. (#398)
+- `heki recommend` (experimental) no longer withholds the groups of functions that call `get`, `items`, `keys`, `values`, `index`, or `count` on a parameter typed `Sequence`, `Mapping`, or `Set`: these methods read as the builtin's. A `dict` parameter is left out of a suggestion (premise "The builtin's own reads") when a project class deriving from `dict` binds a method one of its reads runs; `heki inspect` shows the kinds of read under `only_reads.reads`. (#459)
+- `heki recommend` and `heki inspect` no longer count as only read a parameter compared with, or operated on with, a value of unknown class or of `object`, an item read of a `defaultdict`, the `start` of `sum`, or an argument of `min` or `max` (Layer 1 marks these `escaped`); a class deriving from `defaultdict` leaves out item reads of a `dict` parameter; a parameter annotation whose name a function or class body around the `def` binds is no builtin container; and only the `functools` `cached_property` is known to leave annotations unread. (#459)
+- Layer 1 marks the `start` of `sum` and every argument of `min` and `max` `escaped`: an item's `__radd__`, or the other argument's `__lt__` / `__gt__`, receives them and may keep them. `heki check --fix` no longer rewrites a list or dict accumulator handed to one of them (`OPT101`, `OPT102`), and the sentinel keeps a witness of each. (#459)
+- The read-only parameter suggestion of `heki recommend` now says that the parameter itself is never changed ("`x` itself is never changed in `f`"), since an element reached through the parameter may still change. A parameter whose value may be a project subclass of `Counter`, `OrderedDict`, `defaultdict`, `ChainMap`, `UserDict` or `UserList` that defines a member is no longer suggested as read-only exactly, because the library methods of these classes call other methods by name. (#474)
+
+### Fixed
+
+- The documentation a release deploys shows that release's tag in the pre-commit `rev:` lines of the README and the adoption page. The docs job writes the release with `scripts/set_release_versions.py`, as the build jobs do, instead of waiting for the Release Sync pull request. (#456, #475)
+
 ## [0.5.0] - 2026-11-25
 
 ### Breaking changes
@@ -2364,6 +2418,7 @@ The first public preview.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
+[0.6.0]: https://github.com/koxudaxi/heki/compare/v0.5.0...HEAD
 [0.5.0]: https://github.com/koxudaxi/heki/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/koxudaxi/heki/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/koxudaxi/heki/compare/v0.2.7...v0.3.0
