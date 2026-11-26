@@ -141,7 +141,7 @@ $ uvx heki check            # run without installing
     $ uvx heki==0.9.0 check
     All checks passed (4 file(s)).
     ...
-    hint: `heki recommend` (experimental) lists the rules and contracts that fit this project, and what heki could not see
+    hint: `heki recommend` (experimental) lists the parameter types and contracts the code already keeps, the rules that fit this project, and what heki could not see
     $ uvx heki==0.9.0 recommend
     heki recommend (experimental) on .: 4 file(s), 11 function(s)
     ...

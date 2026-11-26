@@ -446,8 +446,9 @@ pub fn not_failing_note(count: usize, which: &str) -> String {
 
 /// The line a text run ends with when it shows nothing on a whole project without contracts: what
 /// to do next is `heki recommend`'s question (ADR-020).
-pub const RECOMMEND_HINT: &str = "hint: `heki recommend` (experimental) lists the rules and \
-    contracts that fit this project, and what heki could not see";
+pub const RECOMMEND_HINT: &str = "hint: `heki recommend` (experimental) lists the parameter \
+    types and contracts the code already keeps, the rules that fit this project, and what heki \
+    could not see";
 
 #[cfg(test)]
 mod tests {

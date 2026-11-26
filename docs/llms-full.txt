@@ -145,7 +145,7 @@ enforce.
     $ uvx heki==0.9.0 check
     All checks passed (4 file(s)).
     ...
-    hint: `heki recommend` (experimental) lists the rules and contracts that fit this project, and what heki could not see
+    hint: `heki recommend` (experimental) lists the parameter types and contracts the code already keeps, the rules that fit this project, and what heki could not see
     $ uvx heki==0.9.0 recommend
     heki recommend (experimental) on .: 4 file(s), 11 function(s)
     ...
@@ -1005,9 +1005,9 @@ $ heki check app/api.py
 
 ## Ask what fits the project
 
-`heki recommend` (experimental) analyzes the project as `heki check` does and says which rules
-would report here, what heki could not see, and the contracts the code already keeps, with the
-keys to add to `[tool.heki]`. It writes no file. A run of `heki check` that shows nothing, on a
+`heki recommend` (experimental) analyzes the project as `heki check` does and says which
+parameter types and contracts the code already keeps, which rules would report here, and what
+heki could not see, with the keys to add to `[tool.heki]`. It writes no file. A run of `heki check` that shows nothing, on a
 project without contracts or a baseline, ends with a line that points to it:
 
 ```console
