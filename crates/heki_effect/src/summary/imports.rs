@@ -4,7 +4,7 @@
 //! effect boundaries forbid no import of.
 
 use super::statements::{Text, Walk};
-use super::{Call, Extractor, Passed};
+use super::{Call, Extractor, Passed, Val, is_dotted_name};
 use crate::environment::absolute_module_name;
 use crate::imports::{ImportForm, ImportHandlers, ImportSite, Named, Spelling, Timing};
 use crate::resolver;
@@ -61,6 +61,44 @@ impl Extractor<'_> {
             Some((names, spelling)) => (Answer::Known(names), spelling),
             None => (Answer::Open, Spelling::Absolute),
         };
+        self.push_import_site(bb, call, ImportForm::ByName, (modules, spelling));
+    }
+
+    /// Record the import site of an unresolved call `name` in block `bb` that may be one
+    /// importing a module by name: a function or method named like a catalog entry with
+    /// `loads_module` (`loader.import_module(...)` on an object of unknown class), or a value
+    /// that is one of several named objects, some of them such an entry
+    /// (`load = importlib.import_module if flag else print`). Its modules are open: the call may
+    /// be another function.
+    pub(super) fn maybe_import_by_name(&mut self, bb: BlockId, name: &str, call: &Call<'_>) {
+        let named = |fqn: &String| {
+            self.cx
+                .catalog(fqn)
+                .is_some_and(|e| e.loads_module.is_some())
+        };
+        let held = match call.value.and_then(|v| self.val(v)) {
+            Some(Val::OneOf(fqns)) => fqns.iter().any(named),
+            _ => false,
+        };
+        let last = name.rsplit('.').next().unwrap_or(name);
+        if held || (is_dotted_name(name) && self.cx.kb.may_load_module(last)) {
+            self.push_import_site(
+                bb,
+                call,
+                ImportForm::MaybeByName,
+                (Answer::Open, Spelling::Absolute),
+            );
+        }
+    }
+
+    /// Record a call in block `bb` as an import site of `form`.
+    fn push_import_site(
+        &mut self,
+        bb: BlockId,
+        call: &Call<'_>,
+        form: ImportForm,
+        (modules, spelling): (Answer<Vec<Named>>, Spelling),
+    ) {
         let in_module_body = self.key.qualname == "<module>";
         // A class body's own paths say nothing of whether its class statement runs.
         let unconditional =
@@ -68,7 +106,7 @@ impl Extractor<'_> {
         self.imports.push(ImportSite {
             span: call.span,
             qualname: self.key.qualname.clone(),
-            form: ImportForm::ByName,
+            form,
             modules,
             spelling,
             timing: Answer::Known(if in_module_body {
