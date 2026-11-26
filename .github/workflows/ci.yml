@@ -435,6 +435,10 @@ jobs:
         run: python tests/difftest/container_abc_counterexamples.py
       - name: Counterexamples of the implementations a call may run
         run: python tests/difftest/cached_result_counterexamples.py
+      - name: Counterexamples of a lock taken again while held
+        run: python tests/difftest/lock_retaken_counterexamples.py
+      - name: Counterexamples of a generator never iterated
+        run: python tests/difftest/never_iterated_counterexamples.py
       # Template strings and PEP 798 comprehensions: CPython 3.15 only.
       - name: Counterexamples of the shapes the IR models
         if: matrix.python == '3.15'

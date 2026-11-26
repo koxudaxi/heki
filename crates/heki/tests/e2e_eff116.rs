@@ -572,3 +572,38 @@ def load(source: Rows, table: Table) -> None:
         .collect();
     assert_eq!(tiers, vec![(14, "heuristic"), (15, "exact")], "{diags:#?}");
 }
+
+/// The counterexamples `tests/difftest/never_iterated_counterexamples.py` runs on CPython, one
+/// or more per premise, each running the body on the input the script runs: those of Generator
+/// function (a name bound to two definitions) and Every implementation through a protocol are
+/// heuristic; a subclass's plain method and a generator that is iterated or kept are not
+/// reported. The base shapes, which never run the body, are exact.
+#[test]
+fn counterexamples_of_each_premise_are_not_exact() {
+    let p = Project::new("eff116_counterexamples");
+    let source = std::fs::read_to_string(
+        common::repo_root().join("tests/difftest/never_iterated_counterexamples.py"),
+    )
+    .unwrap();
+    p.write("cases.py", &source);
+    let diags = diagnostics(&p, &["--select", "EFF116"]);
+    let tiers: Vec<(&str, &str)> = eff116(&diags)
+        .iter()
+        .map(|d| {
+            (
+                d["qualname"].as_str().unwrap(),
+                d["certainty"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        tiers,
+        vec![
+            ("refresh", "exact"),
+            ("refresh_tested", "exact"),
+            ("refresh_bound_twice", "heuristic"),
+            ("refresh_protocol", "heuristic"),
+        ],
+        "{diags:#?}"
+    );
+}

@@ -1791,3 +1791,44 @@ def pause() -> None:
     let diags = diagnostics(&p, SELECT);
     assert_eq!(found(&diags), vec![], "{diags:#?}");
 }
+
+/// `(qualname, certainty)` of every `EFF109` diagnostic.
+fn qualname_tiers(diags: &[Value]) -> Vec<(String, String)> {
+    diags
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF109")
+        .map(|d| {
+            let qualname = d["qualname"].as_str().unwrap().to_owned();
+            (qualname, d["certainty"].as_str().unwrap().to_owned())
+        })
+        .collect()
+}
+
+/// The counterexamples `tests/difftest/lock_retaken_counterexamples.py` runs on CPython, one or
+/// more per premise, each returning without waiting on the input the script runs: those of
+/// Non-reentrant (a project class derived from `asyncio.Lock`), Every implementation (a
+/// decorator that may skip the body, a subclass's method), and Every return are heuristic;
+/// those of Held and Same lock are not reported. The base shape, which waits for itself, is
+/// exact.
+#[test]
+fn eff109_counterexamples_of_each_premise_are_not_exact() {
+    let p = Project::new("eff109_counterexamples");
+    let source = std::fs::read_to_string(
+        common::repo_root().join("tests/difftest/lock_retaken_counterexamples.py"),
+    )
+    .unwrap();
+    p.write("cases.py", &source);
+    let diags = diagnostics(&p, SELECT);
+    let expected = [
+        ("Store.add", "exact"),
+        ("Store.add_maybe", "heuristic"),
+        ("Store.add_skipped", "heuristic"),
+        ("Base.run", "heuristic"),
+        ("Board.beat", "heuristic"),
+    ];
+    assert_eq!(
+        qualname_tiers(&diags),
+        expected.map(|(q, c)| (q.to_owned(), c.to_owned())),
+        "{diags:#?}"
+    );
+}
