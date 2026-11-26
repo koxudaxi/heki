@@ -1,24 +1,22 @@
-//! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
-//! narrowing through phis, the passes of the type inference and of the classes of merged values,
-//! the closure cells child scopes read, the entries of a contract target's container through
-//! views and aliases, the stores of the cells a comprehension's assignment
-//! expressions bind and the reads seeing them, the iterables child scopes receive from the
-//! functions creating them, the fixpoint joining the stores of attributes, the names its
-//! functions store and read, the stores through namespaces and `setattr`, the classes whose code
-//! may store into an instance, the size of the Soundness lane's proof state, the values `EFF107`
-//! follows from a task factory, the walk to the callable a builtin calls once per item, contracts
-//! with many call targets and argument lists, the names offered for contract entries that match
-//! nothing, the
-//! mappings a call unpacks, the walk to the uses handing a reference to a call target on, the
-//! locks `EFF109` follows, the thread locks and guarded writes `EFF117` follows, the values class
-//! statements pass as bases, the bindings the deque
-//! rewrite's candidates check, the star imports a name is bound through, many or nested deep,
-//! the sizes of a thousand lists each extending the next or of one list extending many deep
-//! chains, the walks over the import graph (`heki inspect --imports`), the ends of the handler
-//! bodies around imports, the tests of their arguments that helpers hand on to their callers,
-//! through a long chain of helpers, for many parameters, or from many implementations of one
-//! call, the type expressions aliases and casts spell, and the names a module `__getattr__`
-//! serves.
+//! The cost of the analyses past the IR, end to end through the real binary: `isinstance` narrowing
+//! through phis, the passes of the type inference and of the classes of merged values, the closure
+//! cells child scopes read, the entries of a contract target's container through views and aliases,
+//! and through items and attributes a helper handed it reaches, once per narrowing scope, the
+//! stores of the cells a comprehension's assignment expressions bind and the reads seeing them, the
+//! iterables child scopes receive from the functions creating them, the fixpoint joining the stores
+//! of attributes, the names its functions store and read, the stores through namespaces and
+//! `setattr`, the classes whose code may store into an instance, the size of the Soundness lane's
+//! proof state, the values `EFF107` follows from a task factory, the walk to the callable a builtin
+//! calls once per item, contracts with many call targets and argument lists, the names offered for
+//! contract entries that match nothing, the mappings a call unpacks, the walk to the uses handing a
+//! reference to a call target on, the locks `EFF109` follows, the thread locks and guarded writes
+//! `EFF117` follows, the shields and re-delivered cancellations `EFF118` follows, the values class statements pass as bases, the bindings the deque rewrite's
+//! candidates check, the star imports a name is bound through, many or nested deep, the sizes of a
+//! thousand lists each extending the next or of one list extending many deep chains, the walks over
+//! the import graph (`heki inspect --imports`), the ends of the handler bodies around imports, the
+//! tests of their arguments that helpers hand on to their callers, through a long chain of helpers,
+//! for many parameters, or from many implementations of one call, and the type expressions aliases
+//! and casts spell, and the names a module `__getattr__` serves.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -1077,6 +1075,104 @@ fn a_long_chain_of_in_place_operators_gives_the_display_back() {
         .map(|d| d["qualname"].as_str().unwrap())
         .collect();
     assert_eq!(reported, vec!["extend"], "{found:#?}");
+}
+
+/// A helper handed a `write-owners` target's container of entries of unknown class, with a long
+/// chain of values each an attribute or an item of the one before (`e{i + 1} = e{i}.child if
+/// flags[i] else e{i}[0]`), each with an attribute written (`MUT201` at the call): every
+/// value's entries are one closure over the chain, each value expanded once, not one walk per
+/// path or per write.
+#[test]
+fn entries_down_a_long_chain_of_items_and_attributes_are_one_closure() {
+    let config = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n\
+                  [[tool.heki.write-owners]]\nname = \"box\"\ntargets = [\"m.Holder.box\"]\n\
+                  allowed-writers = [\"m.Holder.*\"]\n";
+    let links = 800;
+    let found = check_linear(links, |links| {
+        let mut lines = vec![
+            "class Holder:".to_owned(),
+            "    def __init__(self) -> None:".to_owned(),
+            "        self.box: list = []".to_owned(),
+            String::new(),
+            String::new(),
+            "def fill(rows: list, flags: list[bool]) -> None:".to_owned(),
+            "    e0 = rows[0]".to_owned(),
+        ];
+        for i in 0..links {
+            lines.push(format!(
+                "    e{} = e{i}.child if flags[{i}] else e{i}[0]",
+                i + 1
+            ));
+            lines.push(format!("    e{}.mark = {i}", i + 1));
+        }
+        lines.extend([
+            String::new(),
+            String::new(),
+            "def use(holder: Holder) -> None:".to_owned(),
+            "    fill(holder.box, [])".to_owned(),
+        ]);
+        let p = Project::new(&format!("bounds_entry_attr_chain_{links}"));
+        p.write("pyproject.toml", config)
+            .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    });
+    let reported: Vec<(&str, u64)> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT201")
+        .map(|d| (d["qualname"].as_str().unwrap(), d["line"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(reported, vec![("use", 2 * links as u64 + 11)], "{found:#?}");
+}
+
+/// The chain of [`entries_down_a_long_chain_of_items_and_attributes_are_one_closure`] with the
+/// attribute of its last value written in many blocks one `isinstance` check guards (`if
+/// flags[i]: e{n}.mark = i`): the checks give every value the same types in those blocks, so
+/// they share one narrowing scope, and the walks of the entries go down the chain once in it,
+/// not once per block.
+#[test]
+fn writes_in_the_blocks_one_check_guards_walk_the_entries_once() {
+    let config = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n\
+                  [[tool.heki.write-owners]]\nname = \"box\"\ntargets = [\"m.Holder.box\"]\n\
+                  allowed-writers = [\"m.Holder.*\"]\n";
+    let links = 800;
+    let found = check_linear(links, |links| {
+        let mut lines = vec![
+            "class Holder:".to_owned(),
+            "    def __init__(self) -> None:".to_owned(),
+            "        self.box: list = []".to_owned(),
+            String::new(),
+            String::new(),
+            "def fill(rows: list, flags: list[bool], other: object) -> None:".to_owned(),
+            "    e0 = rows[0]".to_owned(),
+        ];
+        for i in 0..links {
+            lines.push(format!(
+                "    e{} = e{i}.child if flags[{i}] else e{i}[0]",
+                i + 1
+            ));
+        }
+        lines.push("    if isinstance(other, Holder):".to_owned());
+        for i in 0..links {
+            lines.push(format!("        if flags[{i}]:"));
+            lines.push(format!("            e{links}.mark = {i}"));
+        }
+        lines.extend([
+            String::new(),
+            String::new(),
+            "def use(holder: Holder) -> None:".to_owned(),
+            "    fill(holder.box, [], None)".to_owned(),
+        ]);
+        let p = Project::new(&format!("bounds_entry_scope_writes_{links}"));
+        p.write("pyproject.toml", config)
+            .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    });
+    let reported: Vec<(&str, u64)> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT201")
+        .map(|d| (d["qualname"].as_str().unwrap(), d["line"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(reported, vec![("use", 3 * links as u64 + 12)], "{found:#?}");
 }
 
 /// A function with a long chain of entries of a `write-owners` target's container that a loop
@@ -4903,6 +4999,85 @@ fn guarded_writes_in_one_released_region_take_linear_steps() {
     assert_eq!(reported, vec!["C.reset"; n]);
 }
 
+/// A `finally` body of `n` awaits: each helper sleeps, one in two inside a shielded scope of its
+/// own, one in two followed by the re-delivery checkpoint, and the body ends with one.
+fn shielded_cleanups(n: usize) -> Project {
+    let mut lines = vec!["import anyio".to_owned(), String::new()];
+    for i in 0..n {
+        lines.extend([
+            String::new(),
+            format!("async def stop{i}() -> None:"),
+            "    await anyio.sleep(0)".to_owned(),
+        ]);
+    }
+    lines.extend(
+        [
+            "",
+            "",
+            "async def close() -> None:",
+            "    try:",
+            "        pass",
+            "    finally:",
+        ]
+        .map(str::to_owned),
+    );
+    for i in 0..n {
+        if i % 2 == 0 {
+            lines.push("        with anyio.CancelScope(shield=True):".to_owned());
+            lines.push(format!("            await stop{i}()"));
+        } else {
+            lines.push(format!("        await stop{i}()"));
+            lines.push("        await anyio.lowlevel.checkpoint()".to_owned());
+        }
+    }
+    lines.push("        await anyio.lowlevel.checkpoint()".to_owned());
+    let p = Project::new(&format!("bounds_shielded_cleanups_{n}"));
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// Thousands of awaits in one `finally` body, half of them in shielded scopes and half followed
+/// by a re-delivered cancellation: the shields are one dataflow with a bit per scope, and each
+/// re-delivery's walk to the end of the function stops at the first call after it.
+#[test]
+fn shielded_cleanups_take_linear_steps() {
+    let n = 2_000;
+    let found = check_linear(n, shielded_cleanups);
+    let reported = found.iter().filter(|d| d["rule_code"] == "EFF118").count();
+    // Each unshielded helper and each re-delivery something runs after, once per position (the
+    // body is built once per way out); not the last re-delivery.
+    assert_eq!(reported, n);
+}
+
+/// A shielded cancel scope bound once and copied through a chain of `n` names, entered once per
+/// name in a `finally` body.
+fn aliased_cancel_scope_entries(n: usize) -> Project {
+    let mut lines = vec![
+        "import anyio".to_owned(),
+        String::new(),
+        String::new(),
+        "async def close() -> None:".to_owned(),
+        "    scope0 = anyio.CancelScope(shield=True)".to_owned(),
+    ];
+    lines.extend((1..n).map(|i| format!("    scope{i} = scope{}", i - 1)));
+    lines.extend(["    try:", "        pass", "    finally:"].map(str::to_owned));
+    for i in 0..n {
+        lines.push(format!("        with scope{i}:"));
+        lines.push("            await anyio.sleep(0)".to_owned());
+    }
+    let p = Project::new(&format!("bounds_aliased_cancel_scope_entries_{n}"));
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// Thousands of entries of one cancel scope, each through the next of a chain of as many names:
+/// the copy root of each name is read from the function's shared table, not walked per entry.
+#[test]
+fn aliased_cancel_scope_entries_take_linear_steps() {
+    let found = check_linear(2_000, aliased_cancel_scope_entries);
+    assert!(found.iter().all(|d| d["rule_code"] != "EFF118"));
+}
+
 /// `n` attributes a thread writes holding a lock, each through the next of a chain of `n` names
 /// bound to `self`, and a method writing them the same way holding none.
 fn guarded_alias_writes(n: usize) -> Project {
@@ -6196,6 +6371,96 @@ fn values_read_out_of_linked_objects_are_walked_once() {
     let writes = |found: &[Value]| found.iter().filter(|d| d["rule_code"] == "MUT201").count();
     assert_eq!(writes(&check(&shape(8))), 1);
     assert_eq!(writes(&check_linear(2_048, shape)), 1);
+}
+
+/// A constructor making thousands of lists behind as many branches, and a function storing a
+/// new object into the list of another thousands of times, each under a branch beside a write of
+/// another attribute: the constructor's lists are decided once per attribute, and each store and
+/// write once, so the work grows with the functions; the write before the list is kept constructs
+/// its object and is allowed, the one after it is reported.
+#[test]
+fn stores_into_containers_a_constructor_made_are_decided_once() {
+    let shape = |stores: usize| {
+        let mut lines = vec![
+            "class Model:".to_owned(),
+            "    def __init__(self, flags):".to_owned(),
+            "        self.attr = 0".to_owned(),
+            "        self.kids = []".to_owned(),
+        ];
+        for i in 0..stores {
+            lines.push(format!("        if flags[{i}]:"));
+            lines.push(format!("            self.x{i} = 0"));
+            lines.push(format!("        self.c{i} = []"));
+        }
+        lines.extend([
+            "KEPT = []".to_owned(),
+            "def build(flags):".to_owned(),
+            "    m, p = Model(flags), Model(flags)".to_owned(),
+        ]);
+        for i in 0..stores {
+            lines.push(format!("    if flags[{i}]:"));
+            lines.push("        m.kids.append(p)".to_owned());
+            lines.push(format!("        m.y{i} = {i}"));
+        }
+        lines.extend([
+            "    p.attr = 1".to_owned(),
+            "    KEPT.append(m.kids)".to_owned(),
+            "    p.attr = 2".to_owned(),
+            "    return m".to_owned(),
+        ]);
+        let p = Project::new(&format!("bounds_construction_containers_{stores}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n\
+             [[tool.heki.write-owners]]\nname = \"attrs\"\ntargets = [\"m.Model.attr\"]\n\
+             allowed-writers = [\"m.Model.*\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let writes = |found: &[Value]| found.iter().filter(|d| d["rule_code"] == "MUT201").count();
+    assert_eq!(writes(&check(&shape(8))), 1);
+    assert_eq!(writes(&check_linear(2_048, shape)), 1);
+}
+
+/// A constructor binding a list to an attribute through a chain of thousands of names, each
+/// bound to the one before: the walk from the store back to the list visits each copy once, on
+/// the constructor's budget, so the list is still the instance's own and the write before it is
+/// kept is allowed, the one after it reported.
+#[test]
+fn containers_bound_through_long_alias_chains_are_walked_once() {
+    let shape = |aliases: usize| {
+        let mut lines = vec![
+            "class Model:".to_owned(),
+            "    def __init__(self):".to_owned(),
+            "        self.attr = 0".to_owned(),
+            "        k0 = []".to_owned(),
+        ];
+        lines.extend((1..=aliases).map(|i| format!("        k{i} = k{}", i - 1)));
+        lines.extend([
+            format!("        self.kids = k{aliases}"),
+            "KEPT = []".to_owned(),
+            "def build():".to_owned(),
+            "    m, p = Model(), Model()".to_owned(),
+            "    m.kids.append(p)".to_owned(),
+            "    p.attr = 1".to_owned(),
+            "    KEPT.append(m.kids)".to_owned(),
+            "    p.attr = 2".to_owned(),
+            "    return m".to_owned(),
+        ]);
+        let p = Project::new(&format!("bounds_construction_alias_chain_{aliases}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n\
+             [[tool.heki.write-owners]]\nname = \"attrs\"\ntargets = [\"m.Model.attr\"]\n\
+             allowed-writers = [\"m.Model.*\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let writes = |found: &[Value]| found.iter().filter(|d| d["rule_code"] == "MUT201").count();
+    assert_eq!(writes(&check(&shape(8))), 1);
+    assert_eq!(writes(&check_linear(4_096, shape)), 1);
 }
 
 /// A function of thousands of parameters a nested function captures: the walk to the values

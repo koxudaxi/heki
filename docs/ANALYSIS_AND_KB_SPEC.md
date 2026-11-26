@@ -1009,6 +1009,14 @@ EffectSummary(f) = {
                                                            // "[]": an object it holds as an item or an element
                                                            // (p["k"].append(x), for x in p: x.clear()), also
                                                            // through a shallow copy of it (ELEMENTS_PATH)
+    entry_change_params:      Bitset,                      // the "[]" changes that change an entry as part of
+                                                           // the container: in place, or an attribute heki ties
+                                                           // to no project class (an attribute of an entry of a
+                                                           // project class is that class's write, also of one
+                                                           // an isinstance check gives it, in the blocks the
+                                                           // check guards); with ArgOrigin::param_entries,
+                                                           // which argument is such an entry; contract-only
+                                                           // (IndirectItemMut)
     changed_param_attrs:      Map<ParamIdx, Set<AttrName>>,// attributes (and "[]") whose objects change (in place
                                                            // or deeper), not just rebound: what a shallow copy
                                                            // shares (MUT202)
@@ -1213,7 +1221,8 @@ declaring the name `global`), and all of them when a star import, `exec`, or `gl
 rebind its names. `TypeCtx::global_literal` and `TypeCtx::global_str` read through it, and so do
 re-exports (`ProjectDecls::canonical_value`, which `literal_constant`, `str_constant`, and
 `small_global` follow). Contract-only facts
-(container entries, `WriteKind::ItemMut`, and a helper's `WriteKind::IndirectItemMut`, construction through `ArgOrigin::new_object` and
+(container entries, `WriteKind::ItemMut`, and a helper's `WriteKind::IndirectItemMut` from
+`EffectSummary::entry_change_params` and `ArgOrigin::param_entries`, construction through `ArgOrigin::new_object` and
 `TypedFieldWriteSite::construction`, `unresolved_write_sites`) are computed only when
 `Contracts::ownership()` is true, that is when write-owners, read-owners, effect-boundaries, or
 invalidation contracts are declared. `TypedFieldWriteSite::key` names the entry a write goes to.
@@ -2237,7 +2246,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   callers, with the same initializer and allowed-context rules as `MUT201`. Reads through
   parameters without a project-class type are not seen.
 
-### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF117`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF117`, `EFF118`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
 0. **Must-facts and the exact tier** (`EffectSummary::must_exec`, computed only when `EFF101`,
    `EFF103`, `DATA101`, or `EFF114` runs: `OptInFacts::must_effects`):
    - Per call instruction, the path facts (`heki_ir::Paths`, with the reader of
@@ -2590,7 +2599,31 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      and the files of the functions whose membership changed otherwise; the locked writes are
      places other files' reports show.
 
-14. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
+15. **`EFF118`** (heuristic): a cleanup awaiting a call that reaches an AnyIO or Trio cancellation
+   checkpoint with no shield on the way.
+   - The facts (computed only while the rule runs: `OptInFacts::checkpoints`): the catalog's
+     `checkpoint` effect is kept on an awaited call (an `async with` awaits the manager's
+     `__aenter__`) outside a shield, and propagates like any execution effect through the calls
+     that run a callee's body (an awaited `async def`), with its guards and shortest chain; a
+     constant argument deciding a guard against it stops it. `lowlevel.checkpoint()` and
+     `checkpoint_if_cancelled()` count only where a call, an await, or a `with` step follows on
+     some path (a walk over the blocks after them, linear in the function). `CallSite::shield`
+     is the state at the call (`heki_effect::cancellation::ShieldPoints`, a forward
+     must-dataflow over the `with` regions, `held::at_entry`): shielded inside a catalog cancel
+     scope (`cancel_scope`) made with a constant `shield=True`, open inside one made with
+     another value, one whose `shield` attribute the function sets, or one made elsewhere;
+     `CallSite::hides` drops the checkpoint at both. `anyio.Lock(fast_acquire=True)` is typed as
+     a class of its own (an argument case's `return_type`), which has no checkpoint rows.
+   - The rule (`eff_rules::unshielded_cleanup`) reads the cleanups of each `async def` from the
+     IR: `IrFunction::finally_bodies`, the `except` clauses first to take the cancellation (the
+     clause classes resolved as `EFF114` resolves them), and an `__aexit__` body; an awaited
+     call there with no scope around it reaching the checkpoint (`ProjectIndex::site_effects`) is
+     reported, once per position, unless the function's calls one level up (at most 64) all run
+     it shielded or only create its coroutine. The checkpoint effect is part of the summaries
+     and `CallSite::shield` of the call sites, so the language server's caller and callee
+     invalidation covers both.
+
+16. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function (and each module body a scope names as `<module>`,
    `DottedPattern::names_module_bodies`) finds the shortest chain to each forbidden effect,
    without entering `allowed-callees`, other scope functions, or bodies that do not run at the

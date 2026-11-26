@@ -1700,6 +1700,7 @@ fn transfer(
             }
             None => {}
         }
+        t.entry_change_params |= entry_changes_at_call(o, i, paths, callee, facts);
         // The callee's parameter is an object the caller's parameter holds as an item or an
         // element, or one below it: any change of it is a change below that parameter.
         for (p, path) in &o.param_elements {
@@ -2061,16 +2062,15 @@ pub(crate) fn indirect_writes<'a>(
     lead: &[Arc<CallHop>],
 ) -> Vec<IndirectWrite<'a>> {
     let mut out = Vec::new();
-    let ownership = index.contracts.as_deref().is_some_and(|c| c.ownership());
     for (&param, paths) in &facts.mutated_param_paths {
         let Some(origin) = bc.params.get(usize::from(param)).filter(|_| param < 64) else {
             continue;
         };
-        // A change of the value itself, and one of the entries it holds (`box["k"].add(v)`,
-        // through an alias of the entry or the calls it is handed to; a contract-only fact, as
-        // `WriteKind::ItemMut` is), each its own write: a helper may leave one to an allowed
-        // callee and make the other itself. A helper writing the value's own attributes writes
-        // those, as `obj.attr.x = v` does.
+        // A change of the value itself, and one of the entries it holds as part of it
+        // (`box["k"].add(v)`, through an alias of the entry or the calls it is handed to;
+        // `EffectSummary::entry_change_params`), each its own write: a helper may leave one to
+        // an allowed callee and make the other itself. A helper writing the value's own
+        // attributes writes those, as `obj.attr.x = v` does.
         if let Some((class, attr)) = &origin.typed_field {
             let obj_params = match &origin.param {
                 Some((p, Some(path))) if path == attr => 1u64 << p,
@@ -2086,7 +2086,7 @@ pub(crate) fn indirect_writes<'a>(
                     WriteKind::IndirectHelper,
                 ),
                 (
-                    paths.contains(crate::ELEMENTS_PATH) && ownership,
+                    facts.entry_change_params >> param & 1 != 0,
                     WriteKind::ItemMut,
                     WriteKind::IndirectItemMut,
                 ),
@@ -2126,6 +2126,43 @@ pub(crate) fn indirect_writes<'a>(
     }
     out.retain(|w| !records_write(bc, facts, w));
     out
+}
+
+/// The caller parameters whose entries a callee changes as part of the container
+/// ([`EffectSummary::entry_change_params`]) through its parameter `i`, bound to the argument
+/// `o` and changed at `paths`: the caller's parameter, or a shallow copy of it, whose entries
+/// the callee so changes; and the parameters an entry of which the argument is
+/// ([`ArgOrigin::param_entries`]), when the callee changes the argument in place, so changes an
+/// entry of it, or writes an attribute of it that neither the callee nor the caller ties to a
+/// project class. `callee` types the parameters; `facts` run at the call.
+pub(crate) fn entry_changes_at_call(
+    o: &ArgOrigin,
+    i: u8,
+    paths: &BTreeSet<String>,
+    callee: &EffectSummary,
+    facts: &EffectSummary,
+) -> u64 {
+    let bit = |p: u8| 1u64.checked_shl(u32::from(p)).unwrap_or(0);
+    let changes_entries = facts.entry_change_params & bit(i) != 0;
+    let mut mask = 0;
+    if changes_entries {
+        for (p, attr) in [&o.param, &o.param_copy].into_iter().flatten() {
+            if attr.is_none() {
+                mask |= bit(*p);
+            }
+        }
+    }
+    if o.param_entries != 0 {
+        let untied_attr = callee.typed_params & bit(i) == 0
+            && o.instance_classes().next().is_none()
+            && paths
+                .iter()
+                .any(|path| !path.is_empty() && path != crate::ELEMENTS_PATH);
+        if changes_entries || paths.contains("") || untied_attr {
+            mask |= o.param_entries;
+        }
+    }
+    mask
 }
 
 /// Whether the callee records `w` among its own typed writes: one of the same field on an

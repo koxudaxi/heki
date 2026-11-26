@@ -442,7 +442,11 @@ A write into the entries of a target's container (`model.meta["kw"][name] = v`) 
 the target. So is a write through a local alias of the container (`kw = model.meta["kw"]`), also
 after an augmented assignment that changes the container in place and so keeps it
 (`kw |= other`, `items += more`, `-=`, `&=`, `^=` on a set); one on any other value
-(`count += 1`) binds a new object.
+(`count += 1`) binds a new object. An attribute write on an entry of a project class
+(`model.fields[0].name = v` with `fields: list[Field]`) is a write of that class's attribute
+(`Field.name`), judged by its own contracts, also in a helper handed the container
+(`rename_all(model.fields)`); on an entry heki ties to no project class, a helper handed the
+container writes the target.
 
 With `fresh-objects = "allow"`, a write is no violation when it constructs the object it writes:
 
@@ -474,6 +478,24 @@ may store what it reads out of it. A project function's result that holds itself
 objects it links (`made.part = part; part.parent = made`) is new at a call until a value read
 out of it is stored. A store into an object the function did not make, or into one of its own
 that was kept before, still ends the freshness of what it stores.
+
+A container a class's constructor makes for each instance is held by that instance, so storing a new
+object into it links the two the same way: `copied = Node(); copied.children.append(part)` leaves
+`part` new while `copied` is (`append`, `appendleft`, `insert`, `add`, `setdefault`, and item
+stores, on a list, set, or dict, when they run no project code on what they store). The constructor
+is the project `__init__` the class runs, its own or a base's (no class decorator,
+`__init_subclass__`, `dataclass_transform`, or metaclass other than `type` or `abc.ABCMeta` along
+the MRO, and no code that reading the attribute runs), and it binds the attribute once, on every
+path to its return, to a list, dict, or set display or `list()`, `dict()`, `set()`, or
+`bytearray()`. It uses `self` only to store attributes (none of `__dict__` and `__class__`) and to
+call `super().__init__(...)`, whose `__init__` along the MRO does the same or is `object`'s, and
+no store in them runs code (a property's setter, a descriptor, `__setattr__`): a call handed
+`self` or a member of it, such as `self.setup()`, may hand the container anywhere. The object must
+be one the function made by calling the class on every path.
+Rebinding the attribute before an object is stored into the list (`copied.children = node.children`
+on some path, `setattr(copied, name, v)`, a write through `copied.__dict__`, or a helper handed
+`copied`), or keeping the list, ends the freshness of what is stored into it. A project function
+returning such an object does not carry the fact to its callers.
 
 A shallow copy's containers are the original's: only rebinding its attributes constructs it.
 
@@ -1430,7 +1452,7 @@ excluded = true               # never reported
 | Key | Meaning |
 | --- | ------- |
 | `symbol` | Fully qualified function or method name (`package.module.Class.method`). |
-| `effects` | Any of `blocking_net`, `blocking_db`, `blocking_subprocess`, `blocking_sync`, `sleep`, `blocking_fs`, `unpooled_client_alloc`, `db_query`, `quadratic_realloc`. |
+| `effects` | Any of `blocking_net`, `blocking_db`, `blocking_subprocess`, `blocking_sync`, `sleep`, `blocking_fs`, `unpooled_client_alloc`, `db_query`, `quadratic_realloc`, `checkpoint` (an await where a cancelled AnyIO or Trio scope raises, `EFF118`). |
 | `async-safe` | Safe to call from `async def`: it never blocks the event loop, so the blocking effects in `effects` are ignored (`db_query` and `unpooled_client_alloc` still count in loops). |
 | `offloads-blocking-arg` | Index of the callable argument this function runs on another thread (the receiver is not counted). |
 | `excluded` | Never reported (logging and similar). |

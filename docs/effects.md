@@ -15,12 +15,13 @@ Two rules are exact and run by default. Their reports show the call chain, and a
 
 `EFF103` also has heuristic reports, for a loop that can run a query on every iteration. They appear with `--heuristic`.
 
-Two more rules run by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because they can be wrong about the code:
+Three more rules run by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because they can be wrong about the code:
 
 | Rule | Reports | Tier |
 | --- | --- | --- |
 | [`EFF102`](rules/loop-unpooled-client.md) | an HTTP, database, or RPC client, or a sessionless request, created inside a loop | heuristic, runs with `--heuristic` |
 | [`EFF117`](rules/unlocked-write-of-guarded-state.md) | state that one writer changes holding a thread lock and another changes holding none, where both can run on threads heki resolves | heuristic, runs with `--heuristic` |
+| [`EFF118`](rules/unshielded-cleanup-checkpoint.md) | a `finally` body, an `except` taking the cancellation, or an `__aexit__` that awaits a call reaching an AnyIO or Trio cancellation checkpoint with no shield on the way, so in a cancelled scope the cleanup stops there | heuristic, runs with `--heuristic` |
 
 The first page of the docs shows [`EFF101` two helpers below an `async def` and `EFF103` one helper below a loop](index.md), with their output.
 

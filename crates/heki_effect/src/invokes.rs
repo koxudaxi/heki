@@ -426,7 +426,7 @@ pub(crate) fn attribute_access_runs_project_code(
         }
         match access {
             AttrAccess::Read => !reads_plainly(class),
-            AttrAccess::Write => !project.attr_write_runs_no_code(class, attr, catalog_stores),
+            AttrAccess::Write => !project.attr_write_runs_no_code(class, &[attr], catalog_stores),
         }
     };
     match h.val {

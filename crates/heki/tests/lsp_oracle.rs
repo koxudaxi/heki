@@ -28,7 +28,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "EFF115", "EFF116", "EFF117", "MUT115", "MUT118", "MUT119", "MUT120", "OPT103", "OPT110", "OPT111", "OPT120", "OPT121", "OPT130"]
+extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "EFF115", "EFF116", "EFF117", "EFF118", "MUT115", "MUT118", "MUT119", "MUT120", "OPT103", "OPT110", "OPT111", "OPT120", "OPT121", "OPT130"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -152,7 +152,7 @@ allowed-writers = ["pkg.rack_ops.empty"]
 
 [[tool.heki.effect-boundaries]]
 name = "copy-pass"
-scopes = ["pkg.copy_pass", "pkg.guarded_build", "pkg.link_pass", "pkg.link_model_pass", "pkg.link_neg_pass"]
+scopes = ["pkg.copy_pass", "pkg.guarded_build", "pkg.link_pass", "pkg.link_model_pass", "pkg.link_neg_pass", "pkg.owned_pass"]
 write-universe = ["Ticket.flag", "Part.flag"]
 "#;
 
@@ -354,6 +354,13 @@ const LINK_NEG_PASS: &str = "from pkg.copy_ops import KEPT, Ticket\n\n\ndef run(
 const LINK_MODEL: &str = "from typing import Any\n\nfrom pydantic import BaseModel\n\n\nclass Part(BaseModel):\n    flag: bool = False\n    parent: Any = None\n";
 const LINK_MODEL_SUB: &str = "from pydantic import ConfigDict\n\nfrom pkg.link_model import Part\n\n\nclass Validated(Part):\n    model_config = ConfigDict(validate_assignment=True)\n";
 const LINK_MODEL_PASS: &str = "from pkg.link_model import Part\n\n\ndef run() -> Part:\n    copied, part = Part(), Part()\n    part.parent = copied\n    copied.flag = True\n    return copied\n";
+// A class of another module whose constructor makes a list for each instance after calling the
+// constructor of a base in a third module, and a pass storing a new ticket into the list of a new
+// instance (`ClassDecl::plain_init`).
+const OWNED_BASE: &str =
+    "SHARED_STATE = {}\n\n\nclass Base:\n    def __init__(self):\n        self.ready = True\n";
+const OWNED_MODEL: &str = "from pkg.owned_base import Base\n\nSHARED = []\n\n\nclass Holder(Base):\n    def __init__(self):\n        super().__init__()\n        self.parts: list = []\n";
+const OWNED_PASS: &str = "from pkg.copy_ops import Ticket\nfrom pkg.owned_model import Holder\n\n\ndef run() -> Holder:\n    copied = Holder()\n    part = Ticket()\n    copied.parts.append(part)\n    part.flag = True\n    return copied\n";
 const COPY_PASS: &str = "from pkg.copy_ops import Ticket, copy_or_reuse, mark, stamp\n\n\ndef run(t: Ticket) -> Ticket:\n    copied = stamp(copy_or_reuse(t))\n    copied.flag = True\n    mark(copied)\n    return copied\n";
 const STRICT_OPS: &str = "def _reset(r):\n    r.entries = []\n";
 // The strict reads and calls: helpers that type nothing read and call a guarded attribute and
@@ -1040,6 +1047,13 @@ const LOCKED_LIST_CLEAR: &str =
 const LOCKED_LIST_RUN: &str =
     "from pkg.locked_list import add\n\n\ndef run(line: str) -> None:\n    add(line)\n";
 
+// A `finally` body awaiting a helper in another module that sleeps (`EFF118`), and a third module
+// calling the function holding the cleanup.
+const CLEANUP_HELPERS: &str =
+    "import anyio\n\n\nasync def stop() -> None:\n    await anyio.sleep(1)\n";
+const CLEANUP_USE: &str = "from pkg.cleanup_helpers import stop\n\n\nasync def close() -> None:\n    try:\n        pass\n    finally:\n        await stop()\n        print(\"stopped\")\n";
+const CLEANUP_CALLER: &str = "import anyio\n\nfrom pkg.cleanup_use import close\n\n\nasync def shutdown() -> None:\n    with anyio.CancelScope(shield=True):\n        await close()\n";
+
 // `MUT115`: the declarations of a copied class and of the builtin containers' subclasses in
 // other modules, and a helper in another module, decide whether a change below a copy states
 // the exact claim.
@@ -1327,6 +1341,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/link_neg_pass.py", LINK_NEG_PASS),
         ("pkg/link_model.py", LINK_MODEL),
         ("pkg/link_model_pass.py", LINK_MODEL_PASS),
+        ("pkg/owned_base.py", OWNED_BASE),
+        ("pkg/owned_model.py", OWNED_MODEL),
+        ("pkg/owned_pass.py", OWNED_PASS),
         ("pkg/strict_ops.py", STRICT_OPS),
         ("pkg/strict_use.py", STRICT_USE),
         ("pkg/q_telemetry.py", Q_TELEMETRY),
@@ -4022,6 +4039,32 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
         )
         .present(&[("pkg/reseal_helper.py", "MUT207")]),
         Step::new(
+            "the constructor of another module's class binds the list to a shared one",
+            vec![Action::Save(
+                "pkg/owned_model.py",
+                OWNED_MODEL.replace("list = []", "list = SHARED"),
+            )],
+        )
+        .present(&[("pkg/owned_pass.py", "EFF201")]),
+        Step::new(
+            "the constructor makes a new list again",
+            vec![save("pkg/owned_model.py", OWNED_MODEL)],
+        )
+        .absent(&[("pkg/owned_pass.py", "EFF201")]),
+        Step::new(
+            "the base constructor of a third module replaces the instance's namespace",
+            vec![Action::Save(
+                "pkg/owned_base.py",
+                OWNED_BASE.replace("self.ready = True", "self.__dict__ = SHARED_STATE"),
+            )],
+        )
+        .present(&[("pkg/owned_pass.py", "EFF201")]),
+        Step::new(
+            "the base constructor only stores an attribute again",
+            vec![save("pkg/owned_base.py", OWNED_BASE)],
+        )
+        .absent(&[("pkg/owned_pass.py", "EFF201")]),
+        Step::new(
             "the copy helper of another module defaults its table to a shared dict",
             vec![Action::Save(
                 "pkg/copy_ops.py",
@@ -4838,11 +4881,18 @@ fn steps_captured_parameters() -> Vec<Step> {
 /// callee, while its final summary stays the same: the writes the boundary and the owner
 /// contract count are decided from the helpers' own changes (`EFF201`, `MUT201`). A change of
 /// an entry of the field's value is one of the field too, unless only the allowed callee makes
-/// it.
+/// it; an attribute write on an entry is one only while the helper does not know the entry's
+/// class, which an annotation alone changes (the helper changes the same paths of its
+/// parameter either way).
 fn steps_indirect_helpers() -> Vec<Step> {
     let changing = RACK_OPS.replace("    empty(xs)\n", "    xs.append(1)\n    empty(xs)\n");
     let entry = RACK_OPS.replace("    empty(xs)\n", "    xs[0].append(1)\n    empty(xs)\n");
     let allowed_entry = RACK_OPS.replace("    xs.clear()\n", "    xs[0].clear()\n");
+    let untyped_attr = RACK_OPS.replace("    empty(xs)\n", "    xs[0].label = 1\n    empty(xs)\n");
+    let typed_attr = format!(
+        "from pkg.rack import Rack\n\n\n{}",
+        untyped_attr.replace("def refill(xs):", "def refill(xs: list[Rack]):")
+    );
     let writes = &[
         ("pkg/rack_view.py", "EFF201"),
         ("pkg/rack_view.py", "MUT201"),
@@ -4874,6 +4924,21 @@ fn steps_indirect_helpers() -> Vec<Step> {
             ("pkg/rack_view.py", "EFF201"),
             ("pkg/rack_view.py", "MUT201"),
         ]),
+        Step::new(
+            "the helper sets an attribute of an entry whose class it does not know",
+            vec![Action::Save("pkg/rack_ops.py", untyped_attr)],
+        )
+        .present(writes),
+        Step::new(
+            "the helper types the entries: the attribute is their class's",
+            vec![Action::Save("pkg/rack_ops.py", typed_attr)],
+        )
+        .absent(writes),
+        Step::new(
+            "the helper is back to its first form",
+            vec![save("pkg/rack_ops.py", RACK_OPS)],
+        )
+        .absent(writes),
     ]
 }
 
@@ -5803,6 +5868,58 @@ fn steps_eff117() -> Vec<Step> {
 /// `EFF116`: whether a call's callees are generator functions comes from their declarations in
 /// other modules, a function's and a method's and its override's, which change between a
 /// generator function and a plain one; a call that may run a plain override is no report.
+/// `EFF118`: whether the `finally` body's await is reported comes from the helper's module, whose
+/// sleep stops or starts being shielded, and from the module calling the function holding the
+/// cleanup, which runs it shielded or not.
+fn steps_eff118() -> Vec<Step> {
+    let shielded_helper = CLEANUP_HELPERS.replace(
+        "    await anyio.sleep(1)\n",
+        "    with anyio.CancelScope(shield=True):\n        await anyio.sleep(1)\n",
+    );
+    let unshielded_caller = CLEANUP_CALLER.replace(
+        "    with anyio.CancelScope(shield=True):\n        await close()\n",
+        "    await close()\n",
+    );
+    vec![
+        Step::new(
+            "a `finally` body awaits a helper in another module that sleeps",
+            vec![
+                Action::Create("pkg/cleanup_helpers.py", CLEANUP_HELPERS.to_owned()),
+                Action::Create("pkg/cleanup_use.py", CLEANUP_USE.to_owned()),
+            ],
+        )
+        .present(&[("pkg/cleanup_use.py", "EFF118")]),
+        Step::new(
+            "the helper's module shields the sleep",
+            vec![save("pkg/cleanup_helpers.py", &shielded_helper)],
+        )
+        .absent(&[("pkg/cleanup_use.py", "EFF118")]),
+        Step::new(
+            "the sleep is unshielded again",
+            vec![save("pkg/cleanup_helpers.py", CLEANUP_HELPERS)],
+        )
+        .present(&[("pkg/cleanup_use.py", "EFF118")]),
+        Step::new(
+            "the only call of the function holding the cleanup runs it shielded",
+            vec![Action::Create(
+                "pkg/cleanup_caller.py",
+                CLEANUP_CALLER.to_owned(),
+            )],
+        )
+        .absent(&[("pkg/cleanup_use.py", "EFF118")]),
+        Step::new(
+            "the call stops shielding it",
+            vec![save("pkg/cleanup_caller.py", &unshielded_caller)],
+        )
+        .present(&[("pkg/cleanup_use.py", "EFF118")]),
+        Step::new(
+            "it shields it again",
+            vec![save("pkg/cleanup_caller.py", CLEANUP_CALLER)],
+        )
+        .absent(&[("pkg/cleanup_use.py", "EFF118")]),
+    ]
+}
+
 fn steps_eff116() -> Vec<Step> {
     vec![
         Step::new(
@@ -7745,6 +7862,7 @@ sessions!(editing, Session::start, {
     eff115: steps_eff115,
     eff116: steps_eff116,
     eff117: steps_eff117,
+    eff118: steps_eff118,
     attribute_types: steps_attribute_types,
     builtin_receivers: steps_builtin_receivers,
     receiver_typing: steps_receiver_typing,

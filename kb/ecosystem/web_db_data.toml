@@ -42,10 +42,13 @@ opaque_packages = [
 # Awaiting what `run_sync(func, *args, ...)` and `run_in_threadpool(func, *args, **kwargs)`
 # return gives what `func` returns (`result_of`); `run_sync` takes keywords of its own. A process
 # or an interpreter hands back a copy made by pickling, of the class of the object it copies.
-# The decorators return a function to call, not an awaitable.
+# The decorators return a function to call, not an awaitable. Each of these awaits checks for
+# cancellation before the callable starts: in a cancelled scope it raises there (`checkpoint`,
+# `EFF118`; Starlette's runs `anyio.to_thread.run_sync`).
 
 [[entries]]
 symbol = "anyio.to_thread.run_sync"
+effects = ["checkpoint"]
 async_safe = true
 offloads_blocking_arg = 0
 result_of = { arg = 0 }
@@ -53,6 +56,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "anyio.to_process.run_sync"
+effects = ["checkpoint"]
 async_safe = true
 offloads_blocking_arg = 0
 result_of = { arg = 0 }
@@ -60,6 +64,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "anyio.to_interpreter.run_sync"
+effects = ["checkpoint"]
 async_safe = true
 offloads_blocking_arg = 0
 result_of = { arg = 0 }
@@ -67,6 +72,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "trio.to_thread.run_sync"
+effects = ["checkpoint"]
 async_safe = true
 offloads_blocking_arg = 0
 result_of = { arg = 0 }
@@ -74,6 +80,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "starlette.concurrency.run_in_threadpool"
+effects = ["checkpoint"]
 async_safe = true
 offloads_blocking_arg = 0
 result_of = { arg = 0, keywords = true }
@@ -81,6 +88,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fastapi.concurrency.run_in_threadpool"
+effects = ["checkpoint"]
 async_safe = true
 offloads_blocking_arg = 0
 result_of = { arg = 0, keywords = true }
@@ -1739,6 +1747,404 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "anyio.abc.TaskGroup.start_soon"
 async_safe = true
+opaque_to_layer3 = true
+
+# --- Cancellation checkpoints and shields: AnyIO, Trio (EFF118) ---
+# Awaiting one of these calls checks whether the scope around it is cancelled and raises the
+# cancellation there (a checkpoint, `checkpoint`): in a `finally` body, a handler taking the
+# cancellation, or an `__aexit__`, the cleanup after it does not run. A lock or semaphore made
+# with `fast_acquire=True` takes no checkpoint while nobody holds it, so it is typed as a class
+# of its own with no row here. Not checkpoints: `anyio.lowlevel.cancel_shielded_checkpoint`,
+# `anyio.aclose_forcefully` (it closes under a shield), `anyio.AsyncFile.aclose`, and the
+# native asyncio awaits (a scope is AnyIO's or Trio's). `lowlevel.checkpoint()` and
+# `checkpoint_if_cancelled()` do no work of their own: in a cleanup they deliver the
+# cancellation again on purpose, so the analysis keeps them only where something runs after
+# them.
+#
+# A cancel scope (`cancel_scope`) made with `shield=True` shields what runs inside a `with` over
+# it from the cancellation of the scopes around it. `move_on_after(delay, shield=False)` and
+# its siblings take `shield` second; Trio's and `CancelScope` take it by keyword only.
+
+[[entries]]
+symbol = "anyio.sleep"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.sleep_forever"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.sleep_until"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.lowlevel.checkpoint"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.lowlevel.checkpoint_if_cancelled"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.run_process"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.open_process"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.open_file"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.connect_tcp"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.connect_unix"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.getaddrinfo"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.wait_readable"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.wait_writable"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.Event.wait"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.Lock.acquire"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.Lock.__aenter__"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.Semaphore.acquire"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.Semaphore.__aenter__"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.CapacityLimiter.acquire"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.CapacityLimiter.acquire_on_behalf_of"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.CapacityLimiter.__aenter__"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.Condition.acquire"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.Condition.__aenter__"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.Condition.wait"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.streams.memory.MemoryObjectSendStream.send"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.streams.memory.MemoryObjectReceiveStream.receive"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.abc.Process.wait"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.Lock"
+cases = [
+    { param = "fast_acquire", equals = true, return_type = "anyio.Lock(fast_acquire=True)" },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.Semaphore"
+cases = [
+    { param = "fast_acquire", equals = true, return_type = "anyio.Semaphore(fast_acquire=True)" },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.Lock(fast_acquire=True).acquire"
+async_safe = true
+api = "anyio.Lock.acquire"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.Lock(fast_acquire=True).__aenter__"
+async_safe = true
+api = "anyio.Lock.__aenter__"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.Semaphore(fast_acquire=True).acquire"
+async_safe = true
+api = "anyio.Semaphore.acquire"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.Semaphore(fast_acquire=True).__aenter__"
+async_safe = true
+api = "anyio.Semaphore.__aenter__"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.CancelScope"
+cancel_scope = { param = "shield" }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.move_on_after"
+cancel_scope = { arg = 1, param = "shield" }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.fail_after"
+cancel_scope = { arg = 1, param = "shield" }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.move_on_at"
+cancel_scope = { arg = 1, param = "shield" }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.fail_at"
+cancel_scope = { arg = 1, param = "shield" }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.sleep"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.sleep_forever"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.sleep_until"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.lowlevel.checkpoint"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.lowlevel.checkpoint_if_cancelled"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.open_file"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.open_tcp_stream"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.open_unix_socket"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.run_process"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.Event.wait"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.Lock.acquire"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.Lock.__aenter__"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.Semaphore.acquire"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.Semaphore.__aenter__"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.CapacityLimiter.acquire"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.CapacityLimiter.acquire_on_behalf_of"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.CapacityLimiter.__aenter__"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.Condition.acquire"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.Condition.__aenter__"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.Condition.wait"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.MemorySendChannel.send"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.MemoryReceiveChannel.receive"
+effects = ["checkpoint"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.CancelScope"
+cancel_scope = { param = "shield" }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.move_on_after"
+cancel_scope = { param = "shield" }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.fail_after"
+cancel_scope = { param = "shield" }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.move_on_at"
+cancel_scope = { param = "shield" }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.fail_at"
+cancel_scope = { param = "shield" }
 opaque_to_layer3 = true
 
 # --- DB: asyncpg ---
