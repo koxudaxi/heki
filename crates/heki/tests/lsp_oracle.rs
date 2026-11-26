@@ -1048,6 +1048,19 @@ const COPY_USER: &str = "import copy\n\nfrom pkg.copied_node import Node\n\n\nde
 const COPY_HELPER: &str = "def grow(rows):\n    return len(rows)\n";
 const COPY_HELPER_GROWING: &str = "def grow(rows):\n    rows.append(1)\n";
 const COPY_HANDED: &str = "from pkg.copy_helper import grow\n\n\ndef handed(options: dict[str, list[int]]) -> None:\n    result = dict(options)\n    grow(result[\"rows\"])\n";
+// A copy hook bound on the copied class after its body, from another module, and a decorator of
+// another module that reads the class or binds a copy hook on it.
+const COPY_PATCH: &str = "from pkg.copied_node import Node\n\n\ndef _copy(self):\n    return self\n\n\nNode.__copy__ = _copy\n";
+const COPIED_NODE_DECORATED: &str = "from pkg.copy_deco import register\n\n\n@register\nclass Node:\n    def __init__(self) -> None:\n        self.children: list[int] = []\n";
+const COPY_DECO: &str = "def register(cls):\n    print(cls.__name__)\n    return cls\n";
+const COPY_DECO_HOOK: &str = "def _copy(self):\n    return self\n\n\ndef register(cls):\n    cls.__copy__ = _copy\n    return cls\n";
+// A store under a name built at run time through a value that may be a class object: a name
+// that is never a copy hook's, one that may be, and the same one through an instance.
+const COPY_FILL_NO_HOOK: &str =
+    "def fill(target, name, value):\n    setattr(target, f\"_cached_{name}\", value)\n";
+const COPY_FILL_HOOK: &str =
+    "def fill(target, name, value):\n    setattr(target, f\"__{name}__\", value)\n";
+const COPY_FILL_INSTANCE: &str = "import types\n\n\ndef fill(name, value):\n    target = types.SimpleNamespace()\n    setattr(target, f\"__{name}__\", value)\n";
 
 // `MUT202` through summaries of changes below a parameter's items: a helper two modules below
 // changes an item of its own copy of what it is handed, then gives that item a new list first; a
@@ -4461,6 +4474,62 @@ fn steps_mut115() -> Vec<Step> {
             vec![save("pkg/copy_helper.py", COPY_HELPER)],
         )
         .absent(&[("pkg/copy_handed.py", "MUT115")]),
+        Step::new(
+            "a new module binds a `__copy__` on the copied class after its body: the claim is open",
+            vec![Action::Create("pkg/copy_patch.py", COPY_PATCH.to_owned())],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "the module is deleted",
+            vec![Action::Delete("pkg/copy_patch.py")],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "a decorator of a new module that hands the class back decorates the copied class",
+            vec![
+                Action::Create("pkg/copy_deco.py", COPY_DECO.to_owned()),
+                save("pkg/copied_node.py", COPIED_NODE_DECORATED),
+            ],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "the decorator binds a copy hook on the class: the claim is open",
+            vec![save("pkg/copy_deco.py", COPY_DECO_HOOK)],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "the decorator only reads the class again",
+            vec![save("pkg/copy_deco.py", COPY_DECO)],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "the copied class is no longer decorated, and the decorator's module is deleted",
+            vec![
+                save("pkg/copied_node.py", COPIED_NODE),
+                Action::Delete("pkg/copy_deco.py"),
+            ],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "a new module stores under a built name that is never a copy hook's",
+            vec![Action::Create(
+                "pkg/copy_fill.py",
+                COPY_FILL_NO_HOOK.to_owned(),
+            )],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "the built name may be a copy hook's: the claim is open",
+            vec![save("pkg/copy_fill.py", COPY_FILL_HOOK)],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "the store goes through an instance",
+            vec![save("pkg/copy_fill.py", COPY_FILL_INSTANCE)],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new("the module is deleted", vec![Action::Delete("pkg/copy_fill.py")])
+            .present(&[("pkg/copy_user.py", "MUT115")]),
     ]
 }
 

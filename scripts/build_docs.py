@@ -298,6 +298,13 @@ def experimental_page(registry: dict, rules: list[dict]) -> str:
         "`extend-select` names its code or name, and `heki check` then reports it like any "
         "other rule. `heki rule <CODE>` and the rule's page say that it is experimental.",
         "",
+        "On the way to 1.0, heki keeps these stable: the exit codes `0`, `1`, and `2`, the "
+        "exact rules that run by default, the format of the Ratchet baseline, the contract tables "
+        "`write-owners`, `read-owners`, `call-owners`, `readonly-returns`, `invalidation`, and "
+        "`effect-boundaries` with `fail = true` and `[lint] fail = [...]`, and the `json`, `sarif`, "
+        "and `github` output formats. A change to one of them is listed under \"Breaking changes\" "
+        "in the release notes. See [Adopting heki](adoption.md#stability-on-the-way-to-10).",
+        "",
         "| ID | Kind | Target | Since | Tracking |",
         "| -- | ---- | ------ | ----- | -------- |",
     ]
@@ -429,15 +436,16 @@ def certifications_table(precision: dict, rules: list[dict]) -> str:
     share) says so in its row."""
     experimental = {r["code"] for r in rules if r["experimental"]}
     lines = [
-        "| Rule | Certified | Census: reports / false | Holdout: reports / false |",
-        "| ---- | --------- | ----------------------: | -----------------------: |",
+        "| Rule | Certified | Census: reports / false | Holdout: reports / false | Real bugs |",
+        "| ---- | --------- | ----------------------: | -----------------------: | --------: |",
     ]
     for c in precision["certifications"]:
         census, holdout = c["census"], c["holdout"]
         release = c["release"] + (" (experimental)" if c["rule"] in experimental else "")
         lines.append(
             f"| `{c['rule']}` | {release} | {census['reports']} / {census['false_claims']} "
-            f"| {holdout['reports']} / {holdout['false_claims']} |"
+            f"| {holdout['reports']} / {holdout['false_claims']} "
+            f"| {c.get('real_bugs', '-')} |"
         )
     return "\n".join(lines) + "\n"
 
@@ -712,6 +720,40 @@ def stale_experimental_marks(rules: list[dict], registry: dict) -> list[str]:
     return stale
 
 
+# The rules certified before the rare-failure path existed (docs/precision.md, "Rare failures"):
+# they need no recorded real bugs. A rule certified later is not listed here.
+CERTIFIED_BEFORE_RARE_FAILURES = frozenset(
+    {
+        "OPT101", "OPT102", "OPT103", "OPT110", "OPT111", "OPT120", "OPT121", "OPT130", "OPT113",
+        "EFF101", "EFF103", "DATA101", "MUT110", "MUT114", "MUT101", "MUT111", "MUT119",
+    }
+)
+RARE_REPORTS = 10
+REAL_BUGS_NEEDED = 2
+
+
+def rare_failures_without_real_bugs(rules: list[dict]) -> list[str]:
+    """The exact rules in the default set whose census and holdout run have fewer than 10 exact
+    reports and that record fewer than two real bugs, except the rules of consequence
+    `minor-bug` and those certified before the rare-failure path."""
+    missing = []
+    for r in rules:
+        certification = r.get("certification")
+        if r["certainty"] != "exact" or not r["default_enabled"] or certification is None:
+            continue
+        if r["consequence"] == "minor-bug" or r["code"] in CERTIFIED_BEFORE_RARE_FAILURES:
+            continue
+        reports = certification["census"]["reports"] + certification["holdout"]["reports"]
+        bugs = certification.get("real_bugs") or 0
+        if reports < RARE_REPORTS and bugs < REAL_BUGS_NEEDED:
+            missing.append(
+                f"{r['code']}: {reports} exact report(s) in the census and the holdout run "
+                f"(under {RARE_REPORTS}) and {bugs} real bug(s) recorded (needs "
+                f"{REAL_BUGS_NEEDED}, as `real_bugs` in crates/heki_rules/src/precision.rs)"
+            )
+    return missing
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     # Resolved: `subprocess` looks a bare `heki` (what `Path("./heki")` prints) up on `PATH`.
@@ -736,6 +778,9 @@ def main() -> int:
         ),
         "Exact rules lack their certification in crates/heki_rules/src/precision.rs": (
             uncertified_exact_rules(rules)
+        ),
+        "Rare-failure rules lack their real bugs in crates/heki_rules/src/precision.rs": (
+            rare_failures_without_real_bugs(rules)
         ),
         "Rules do not say what a report states": rules_without_claims(rules),
         "Rule pages and the premise table list different premises": premises_disagreeing(rules),

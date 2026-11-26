@@ -136,9 +136,14 @@ enforce.
     $ uvx heki==0.9.0 check
     All checks passed (4 file(s)).
     ...
-    hint: `heki recommend` (experimental) lists the rules and contracts that fit this project, and what heki could not see
+    hint: `heki recommend` (experimental) lists the parameter types and contracts the code already keeps, the rules that fit this project, and what heki could not see
     $ uvx heki==0.9.0 recommend
-    heki recommend (experimental) on .: 4 file(s), 10 function(s)
+    heki recommend (experimental) on .: 4 file(s), 11 function(s)
+    ...
+    Types the code already keeps
+      1 read-only parameter group(s), exact; 0 heuristic
+      No type checker configuration found: half of each guard is a type checker's.
+        app/report.py:8  total(prices)  list[float] -> Sequence[float]  public
     ...
     What heki cannot see (no report either way)
       calls of packages heki's catalog does not cover: 1 call(s) of 1 name(s) in 1 package(s)
@@ -151,9 +156,10 @@ enforce.
     ...
     ```
 
-    heki's catalog doesn't say what `stripe.Charge.create` does, so heki reports nothing through
-    it. If the call waits on the network, `EFF101` would report it in `async def checkout`. Only
-    `app.store` writes `Order.items`, so the report ends with the keys that make that a contract.
+    `total` only reads `prices`, so its annotation can say so. heki's catalog doesn't say what
+    `stripe.Charge.create` does, so heki reports nothing through it. If the call waits on the
+    network, `EFF101` would report it in `async def checkout`. Only `app.store` writes
+    `Order.items`, so the report ends with the keys that make that a contract.
 
 3. Keep it running with the [pre-commit hook](adoption.md#pre-commit) and a CI step. If the project
    has findings today, record them in a [Ratchet baseline](adoption.md#ratchet-baselines) so only

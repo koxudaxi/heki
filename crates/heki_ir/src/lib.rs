@@ -877,6 +877,11 @@ pub struct IrFunction {
     /// it builds and `ALTER TABLE ` of `f"ALTER TABLE {name}"`, in the order of the variables.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub str_heads: Vec<(VarId, String)>,
+    /// The text each f-string ends with when it is not empty (`heki_ast::fstring_tail`): the
+    /// `dst` of the string it builds and `_changed` of `f"{name}_changed"`, in the order of the
+    /// variables.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub str_tails: Vec<(VarId, String)>,
     /// The spans of the function's `finally` bodies, from the first statement to the end of
     /// the last, in source order: a body is built once per way out of its `try`, and its
     /// instructions keep the spans of its statements.
@@ -1024,6 +1029,15 @@ impl IrFunction {
             .binary_search_by_key(&var, |(v, _)| *v)
             .ok()?;
         Some(self.str_heads[i].1.as_str())
+    }
+
+    /// The text the f-string `var` holds ends with ([`Self::str_tails`]): `""` for one that
+    /// ends with a replacement field.
+    pub fn str_tail(&self, var: VarId) -> &str {
+        match self.str_tails.binary_search_by_key(&var, |(v, _)| *v) {
+            Ok(i) => self.str_tails[i].1.as_str(),
+            Err(_) => "",
+        }
     }
 
     /// Whether the function's body is left unmodeled ([`UNMODELED`]): the scopes it creates are

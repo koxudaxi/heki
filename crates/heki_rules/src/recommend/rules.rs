@@ -3,7 +3,7 @@
 //! the published measurement of how often its reports are right, and whether the block enables
 //! it ([`RULE_POLICY`]).
 
-use super::{BaselineSplit, printed};
+use super::{Analyzed, BaselineSplit, printed};
 use crate::experimental::experimental_rule;
 use crate::precision::{self, PublishedMeasurement};
 use crate::project::{ParsedFile, regressed};
@@ -30,6 +30,10 @@ pub enum RulePolicy {
     /// A contract rule: declaring its contract selects it, so contract candidates cover it.
     Contract,
 }
+
+/// The reason of a rule the configuration ignores: `ignore` wins over `extend-select`, so naming
+/// it shows none of its reports.
+const IGNORED: &str = "the configuration ignores it";
 
 /// The least share of real harm, in percent, a published measurement of a rule the block
 /// enables may show.
@@ -274,7 +278,7 @@ fn decide(
 ) -> (bool, String) {
     let out = |reason: &str| (false, reason.to_owned());
     if current.is_ignored(rule.code) {
-        return out("the configuration ignores it");
+        return out(IGNORED);
     }
     if advice.experimental {
         return out("experimental");
@@ -298,6 +302,53 @@ fn decide(
     (true, "a bug, reported here".to_owned())
 }
 
+/// The `heki check` command that shows the reports the section counts, and how many it adds.
+pub(super) struct ShownByCheck {
+    pub command: String,
+    pub reports: usize,
+    pub exact: usize,
+    pub heuristic: usize,
+    /// With a baseline: the regressions among them, which a run with the baseline prints.
+    pub regressions: usize,
+}
+
+/// The command naming in `extend-select` every rule with reports here, in the order the section
+/// lists them, but those the configuration ignores; `None` when there is none. A rule's reports do
+/// not depend on the other rules selected, so its count holds among the others.
+pub(super) fn shown_by_check(rules: &[RuleAdvice], analyzed: &Analyzed) -> Option<ShownByCheck> {
+    let mut named: Vec<&RuleAdvice> = (rules.iter())
+        .filter(|r| r.reports > Some(0) && r.reason != IGNORED)
+        .collect();
+    named.sort_by_key(|r| r.experimental);
+    if named.is_empty() {
+        return None;
+    }
+    let codes: Vec<&str> = named.iter().map(|r| r.code.as_str()).collect();
+    let mut command = "heki check".to_owned();
+    if analyzed.check_paths != ["."] {
+        for word in &analyzed.check_paths {
+            command.push(' ');
+            command.push_str(&super::command_word(word));
+        }
+    }
+    for word in &analyzed.check_options {
+        command.push(' ');
+        command.push_str(&super::command_word(word));
+    }
+    command.push_str(" --extend-select ");
+    command.push_str(&codes.join(","));
+    Some(ShownByCheck {
+        command,
+        reports: named.iter().map(|r| r.reports.unwrap_or_default()).sum(),
+        exact: named.iter().map(|r| r.exact).sum(),
+        heuristic: named.iter().map(|r| r.heuristic).sum(),
+        regressions: (named.iter())
+            .filter_map(|r| r.baseline.as_ref())
+            .map(|b| b.regressions)
+            .sum(),
+    })
+}
+
 /// The measurement as the text prints it.
 fn measured(measurement: Option<&PublishedMeasurement>) -> (String, String) {
     match measurement {
@@ -312,8 +363,16 @@ fn measured(measurement: Option<&PublishedMeasurement>) -> (String, String) {
     }
 }
 
-/// The section as the text prints it.
-pub(super) fn render(out: &mut String, rules: &[RuleAdvice], baseline: bool) {
+/// The section as the text prints it. `analyzed` names the paths and options of the command showing the
+/// reports counted names. The heuristic rules without reports are named with `text.all`, and the
+/// rules not counted (`MUT103`) with `text.all` or when its snapshot is saved.
+pub(super) fn render(
+    out: &mut String,
+    rules: &[RuleAdvice],
+    baseline: bool,
+    analyzed: &Analyzed,
+    text: super::TextOptions,
+) {
     out.push_str("\nRules worth enabling here\n");
     let regressions = if baseline { "  regressions" } else { "" };
     let _ = writeln!(
@@ -338,11 +397,14 @@ pub(super) fn render(out: &mut String, rules: &[RuleAdvice], baseline: bool) {
             Consequence::MinorBug => "minor bug",
             Consequence::Slowdown => "slowdown",
         };
-        let block = if r.in_block {
+        let mut block = if r.in_block {
             "yes".to_owned()
         } else {
             format!("no: {}", r.reason)
         };
+        if r.enabled_now {
+            block.push_str(" (on now: naming it adds its heuristic reports)");
+        }
         let reports = r.reports.unwrap_or_default();
         let _ = writeln!(
             out,
@@ -360,17 +422,57 @@ pub(super) fn render(out: &mut String, rules: &[RuleAdvice], baseline: bool) {
             row(out, r);
         }
     }
-    let mut quiet: Vec<&str> = rules
-        .iter()
-        .filter(|r| r.reports == Some(0))
-        .map(|r| r.code.as_str())
-        .collect();
-    quiet.sort_unstable();
-    if !quiet.is_empty() {
-        let _ = writeln!(out, "  No reports here: {}", quiet.join(", "));
+    if let Some(shown) = shown_by_check(rules, analyzed) {
+        let regressions = if baseline {
+            format!(", {} regression(s) among them", shown.regressions)
+        } else {
+            String::new()
+        };
+        let _ = writeln!(
+            out,
+            "  see the {} report(s){regressions}: {}",
+            shown.reports, shown.command
+        );
     }
-    for r in rules.iter().filter(|r| r.reports.is_none()) {
-        let _ = writeln!(out, "  {}: {}.", r.code, r.reason);
+    quiet_rules(out, rules, text.all);
+    if text.all || text.snapshot_saved {
+        for r in rules.iter().filter(|r| r.reports.is_none()) {
+            let _ = writeln!(out, "  {}: {}.", r.code, r.reason);
+        }
+    }
+}
+
+/// The rules without reports here, on one line: the exact ones by code, the experimental ones
+/// apart, and the heuristic ones counted, or with `all` named. Every one is off: a rule that
+/// runs and withholds nothing is not listed.
+fn quiet_rules(out: &mut String, rules: &[RuleAdvice], all: bool) {
+    let mut quiet: Vec<&RuleAdvice> = rules.iter().filter(|r| r.reports == Some(0)).collect();
+    quiet.sort_unstable_by(|a, b| a.code.cmp(&b.code));
+    let exact = |r: &&&RuleAdvice| r.certainty == Certainty::Exact.word();
+    let codes = |rules: Vec<&&RuleAdvice>| -> String {
+        let codes: Vec<&str> = rules.iter().map(|r| r.code.as_str()).collect();
+        codes.join(", ")
+    };
+    let mut parts = vec![format!("{} rule(s)", quiet.len())];
+    let (stable, experimental): (Vec<_>, Vec<_>) =
+        quiet.iter().filter(exact).partition(|r| !r.experimental);
+    if !stable.is_empty() {
+        parts.push(format!("exact: {}", codes(stable)));
+    }
+    if !experimental.is_empty() {
+        parts.push(format!("experimental and exact: {}", codes(experimental)));
+    }
+    let heuristic: Vec<&&RuleAdvice> = quiet.iter().filter(|r| !exact(r)).collect();
+    if all {
+        parts.push(format!("heuristic: {}", codes(heuristic)));
+    } else {
+        parts.push(format!(
+            "heki recommend --all names the {} heuristic one(s)",
+            heuristic.len()
+        ));
+    }
+    if !quiet.is_empty() {
+        let _ = writeln!(out, "  No reports here: {}", parts.join("; "));
     }
 }
 

@@ -1,7 +1,9 @@
 # Installation
 
 heki is a single executable: its Python package ships only that executable and installs no
-Python dependencies into your environment.
+Python dependencies into your environment. It is published as prebuilt wheels on PyPI for the
+platforms listed below, so `uvx heki`, `pip install heki`, and the pre-commit hook need no Rust
+toolchain and compile nothing.
 
 ## With uv, pipx, or pip
 
@@ -38,16 +40,6 @@ Wheels are published for these platforms:
 | macOS | Apple silicon, Intel |
 | Windows | x86-64 |
 
-## From source
-
-heki needs Rust 1.99 or newer:
-
-```console
-$ git clone https://github.com/koxudaxi/heki
-$ cd heki
-$ cargo install --path crates/heki
-```
-
 ## Check the installation
 
 ```console
@@ -62,3 +54,17 @@ $ heki rule --all
 - The version of the checked code comes from
   [`target-version`](configuration.md#top-level-settings), or from `requires-python`; see
   [Scope](scope.md#the-target-python-version) for what it changes.
+
+## From source
+
+??? note "Only for a platform without a wheel, or for development on heki"
+
+    heki needs Rust 1.99 or newer:
+
+    ```console
+    $ git clone https://github.com/koxudaxi/heki
+    $ cd heki
+    $ cargo install --path crates/heki
+    ```
+
+    `pip install` of the source distribution builds the same executable with maturin.

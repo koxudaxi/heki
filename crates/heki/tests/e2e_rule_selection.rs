@@ -495,8 +495,9 @@ fn the_size_dependent_rewrites_are_opt_in_and_the_option_applying_them_selects_t
 
 #[test]
 fn a_clean_text_run_of_a_project_without_contracts_points_to_recommend() {
-    let hint = "hint: `heki recommend` (experimental) lists the rules and contracts that fit \
-                this project, and what heki could not see\n";
+    let hint = "hint: `heki recommend` (experimental) lists the parameter types and contracts \
+                the code already keeps, the rules that fit this project, and what heki could not \
+                see\n";
     let p = Project::new("recommend_hint");
     p.write("pyproject.toml", "[project]\nname = \"t\"\n")
         .write("app/__init__.py", "")

@@ -143,5 +143,5 @@ The import is in `total`, so it runs when `total` runs, and loading `app.domain.
 
 - [Configuration: import-boundaries](configuration.md#import-boundaries) lists every key of the contract.
 - [Configuration: imports](configuration.md#imports-toolhekiimports) lists `cycle-edges` and `module-distributions`.
-- [Adopting heki in a code base](adoption.md) shows how to start with a baseline.
+- [Adopting heki in a code base](adoption.md) shows how to start with a baseline, and has a [domain boundary with a read-only settings contract](adoption.md#a-layered-application) to copy.
 - [State Ownership and Mutation](ownership.md) and [Async and Execution Effects](effects.md) cover the other contracts.

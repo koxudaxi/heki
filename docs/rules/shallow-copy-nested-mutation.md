@@ -56,8 +56,18 @@ Its premises:
   project subclass replaces; `copy.copy` of an instance of a project class no class of which
   (R2) defines `__copy__`, `__reduce__`, `__reduce_ex__`, `__getstate__`, or `__setstate__`, or
   has a metaclass or a base heki does not know; or `model_copy()` without `deep=True` of a
-  pydantic model (R3) whose classes define no `__copy__` or `model_copy`. Open for the other
-  copies (`dataclasses.replace`, `copy.replace`, the catalog's other sanitizers).
+  pydantic model (R3) whose classes define no `__copy__` or `model_copy`. A class defines a
+  name also when a store heki reads binds it on the class after its body: a store through a
+  value that may be a class object (any value heki does not establish as an instance: `self`,
+  what a class call makes, a parameter annotated with a class other than `type`) under the
+  name, or under a name built at run time whose constant text at its ends may be the name's
+  (`Node.__copy__ = f`, `setattr(cls, "__copy__", f)` in a class decorator, an
+  `__init_subclass__`, or another function handed the class; `f"_cached_{name}"` is never
+  `__copy__`). A store under a name of unknown value (a parameter, a key of `vars()` or of a
+  mapping, a value read from data) binds none, and so does code heki does not read: a class
+  decorator outside the project, and a call or a closure the class is handed to, bind only what
+  the stores heki reads bind (R1). Open for the other copies (`dataclasses.replace`,
+  `copy.replace`, the catalog's other sanitizers).
 - **Borrowed original**: on every path the copied value is state that outlives the call: a
   parameter, a global, a variable of an enclosing function, or what a plain attribute or item
   load reads from such state. Open: one path is enough. What a call returns is not followed.
@@ -73,8 +83,9 @@ Its premises:
   changing method, or an in-place operator on a builtin `list`, `dict`, or `set` (by
   annotation, R2) that no project subclass replaces, or a plain attribute store or delete on an
   instance of a project class (no property, descriptor, `__setattr__`, or metaclass in a class it
-  may be; pydantic's `BaseModel.__setattr__` stores on the instance, R3). Open: a change made by
-  a helper the object is handed to.
+  may be, also none bound on the class after its body as for **Shallow copy**; pydantic's
+  `BaseModel.__setattr__` stores on the instance, R3). Open: a change made by a helper the
+  object is handed to.
 
 ## Why is this bad?
 The copy suggests the original stays as it was, but the objects below the copy are the

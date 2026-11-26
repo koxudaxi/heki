@@ -10,19 +10,19 @@
 
 use super::{
     AttrStore, ClassDecl, ModuleDecls, ProjectDecls, StoreDependency, StoreFallbacks, StoreTarget,
-    StoredElsewhere, StoresElsewhere, Table, TypeCtx, aliases_of, is_summarized_function,
-    kept_in_declarations, note, self_aliases,
+    StoredElsewhere, StoredName, StoresElsewhere, Table, TypeCtx, aliases_of, is_any_callable,
+    is_summarized_function, kept_in_declarations, note, of_any_class, self_aliases,
 };
 use crate::ModuleInput;
 use crate::infer::Inferred;
-use crate::types::{Added, Change, Ty};
+use crate::types::{Added, Change, Obj, Ty};
 
 use heki_ir::walk::{
     Answer, Budget, Closure, Def, Facts, FnShape, Join, Sparse, Use, Visit, fixpoint, reach,
 };
 use heki_ir::{
-    BlockId, BuiltinKind, FunctionId, InPlaceChanges, Inst, InstKind, IrFunction, LastBindings,
-    Terminator, VarId,
+    BinOpKind, BlockId, BuiltinKind, FunctionId, InPlaceChanges, Inst, InstKind, IrFunction,
+    LastBindings, Terminator, VarId,
 };
 use heki_kb::{EffectiveEcosystemKb, FieldItems};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -159,6 +159,17 @@ fn untyped_key(attr: &str) -> String {
 /// The same key for the stores under a name heki cannot read through such a receiver
 /// ([`StoresElsewhere::untyped_unnamed`]): no attribute is named `.` after the dot.
 const UNTYPED_UNNAMED_KEY: &str = "..";
+
+/// The key an answer of [`ProjectDecls::bound_on_classes`] notes for a store under the constant
+/// name `name` through a receiver that may be a class object: the name after a colon, which no
+/// fqn starts with.
+fn on_classes_key(name: &str) -> String {
+    format!(":{name}")
+}
+
+/// The same key for the stores under a name built at run time through such a receiver
+/// ([`StoredName::Built`]).
+const ON_CLASSES_BUILT_KEY: &str = "::";
 
 /// Most visits of one storing function in the fixpoint of [`record`]: the first finds the
 /// values of the stores reading nothing being decided, each next one a value a read gave since.
@@ -426,17 +437,13 @@ impl Joins {
             }
         }
         for target in &self.in_place {
-            if let StoreTarget::Attr(class, attr) = target {
-                let declared = decls
-                    .classes
-                    .get(class)
-                    .is_none_or(|c| c.attr_types.contains_key(attr));
-                if !declared {
-                    out.in_place
-                        .entry(class.clone())
-                        .or_default()
-                        .insert(attr.clone());
-                }
+            if let StoreTarget::Attr(class, attr) = target
+                && !declares_items(decls, class, attr)
+            {
+                out.in_place
+                    .entry(class.clone())
+                    .or_default()
+                    .insert(attr.clone());
             }
         }
         for (target, joined) in &self.every {
@@ -448,11 +455,7 @@ impl Joins {
                     }
                 }
                 StoreTarget::Attr(class, attr) => {
-                    let declared = decls
-                        .classes
-                        .get(class)
-                        .is_none_or(|c| c.attr_types.contains_key(attr));
-                    if declared {
+                    if declares_items(decls, class, attr) {
                         continue;
                     }
                     let store = match (established, joined) {
@@ -483,6 +486,18 @@ struct Decided {
     restoring: BTreeSet<String>,
     in_place: BTreeMap<String, BTreeSet<String>>,
     unowned: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// Whether the module's stores into `attr` of `class` decide nothing of the attribute's type:
+/// the class is not the module's, or an annotation names more than a container class
+/// (`list[Handler]`), which types every store. A bare container annotation (`list`) fixes only
+/// the class: the stores give the items as they give an unannotated attribute's type.
+fn declares_items(decls: &ModuleDecls, class: &str, attr: &str) -> bool {
+    decls.classes.get(class).is_none_or(|c| {
+        c.attr_types
+            .get(attr)
+            .is_some_and(|t| !t.is_bare_container())
+    })
 }
 
 impl Decided {
@@ -668,6 +683,7 @@ struct Foreign {
     unnamed: BTreeSet<String>,
     untyped: BTreeSet<String>,
     untyped_unnamed: bool,
+    on_classes: BTreeSet<StoredName>,
 }
 
 /// What the stores of a function do to one name of another module.
@@ -733,12 +749,14 @@ impl Foreign {
             unnamed: self.unnamed,
             untyped_attrs: self.untyped,
             untyped_unnamed: self.untyped_unnamed,
+            on_classes: self.on_classes,
         };
         let any = !(out.globals.is_empty()
             && out.attrs.is_empty()
             && out.unnamed.is_empty()
             && out.untyped_attrs.is_empty()
-            && !out.untyped_unnamed);
+            && !out.untyped_unnamed
+            && out.on_classes.is_empty());
         any.then_some(out)
     }
 }
@@ -762,9 +780,11 @@ impl Foreign {
 /// `__post_init__` binds to one through `self`, have the join of every store as their type; a
 /// store of a value of unknown type leaves none. An annotation types every store of the name it
 /// declares: an annotated global's stores hold its declaration or a narrower value, and an
-/// attribute its class annotates has no entry. In a module whose globals `globals()` or `exec`
-/// may change, each store of an unannotated global binds a value of unknown type, and so does a
-/// store of the module body before a star import, which may rebind the name.
+/// attribute its class annotates has no entry, unless the annotation is a bare container class
+/// (`list`), which fixes only the class: its stores give the items as they give an unannotated
+/// attribute's type. In a module whose globals `globals()` or `exec` may change, each store of
+/// an unannotated global binds a value of unknown type, and so does a store of the module body
+/// before a star import, which may rebind the name.
 ///
 /// A store reading a name being decided (`self.items = self.items[1:]`,
 /// `self.active = self.client`) binds a value whose type depends on the one being decided. The
@@ -1259,18 +1279,22 @@ impl Deciding<'_> {
             }
             restoring |= joins.restoring.contains(qualname);
             in_place |= joins.in_place.contains(&target);
-            match self.decls.classes[qualname].attr_types.get(attr) {
-                Some(t) => out.add(Some(Some(t))),
-                None => match joins
-                    .every
-                    .get(&StoreTarget::Attr(qualname.to_owned(), attr.to_owned()))
-                {
-                    Some(Stored::Open) => return None,
-                    Some(stored) => {
-                        out.join(stored);
-                    }
-                    None => {}
-                },
+            let declared = self.decls.classes[qualname].attr_types.get(attr);
+            if let Some(t) = declared.filter(|t| !t.is_bare_container()) {
+                out.add(Some(Some(t)));
+                continue;
+            }
+            match joins.every.get(&target) {
+                Some(Stored::Open) => return None,
+                Some(stored) => {
+                    out.join(stored);
+                }
+                None => {}
+            }
+            if let Some(bare) = declared
+                && joins.established(&target).is_none()
+            {
+                out.add(Some(Some(bare)));
             }
         }
         if restoring
@@ -1341,20 +1365,27 @@ impl Deciding<'_> {
             if project.property_at(c, attr) {
                 return None;
             }
-            if let Some(t) = self.decls.classes[qualname].attr_types.get(attr) {
+            let declared = self.decls.classes[qualname].attr_types.get(attr);
+            if let Some(t) = declared.filter(|t| !t.is_bare_container()) {
                 return Some(Read::Of(t.clone()));
             }
+            let bare = declared.map(|t| Read::Of(t.clone()));
             let target = StoreTarget::Attr(qualname.to_owned(), attr.to_owned());
             if !self.establishable.contains(&target) {
+                if bare.is_some() {
+                    return bare;
+                }
                 continue;
             }
             let mut consulted = self.consulted.borrow_mut();
             consulted.push(Key::Name(target.clone()));
             consulted.push(Key::Class(qualname.to_owned()));
             drop(consulted);
-            let family = self.family(class)?;
+            let Some(family) = self.family(class) else {
+                return bare;
+            };
             let joins = self.joins.borrow();
-            return match joins.establishing.get(&target) {
+            let read = match joins.establishing.get(&target) {
                 None | Some(Stored::Nothing) => {
                     self.pending.borrow_mut().insert(target);
                     Some(Read::Pending)
@@ -1362,6 +1393,11 @@ impl Deciding<'_> {
                 Some(Stored::Open) => None,
                 Some(Stored::Of(_)) if joins.any.contains(qualname) => None,
                 Some(Stored::Of(_)) => self.join_family(&joins, &family, attr).map(Read::Of),
+            };
+            return match (declared, read) {
+                (Some(d), Some(Read::Of(t))) => Some(Read::Of(d.holding_stored(Some(t)))),
+                (Some(_), None) => bare,
+                (_, read) => read,
             };
         }
         None
@@ -1600,6 +1636,9 @@ pub(crate) enum AttrName<'f> {
     /// instance has already, or a field the class declares (`for name in type(src).model_fields`,
     /// `heki_kb::DeclaredFields`) ([`ProjectDecls::keys_exist_in`]).
     KeyOf(Vec<String>),
+    /// One built at run time whose constant text starts with `head` and ends with `tail`, which
+    /// do not overlap ([`built_name`]): `f"__attr_{name}"` starts with `__attr_`.
+    Built { head: String, tail: String },
     /// One heki cannot read: any name.
     Unknown,
 }
@@ -1958,7 +1997,8 @@ impl Wrapper {
 /// `src.__dict__.items()`, also through a copy, `list`, `tuple`, or `sorted`) names an attribute
 /// that object has, and one it takes from the fields a class declares (`type(src).model_fields`
 /// and its keys or pairs as for a namespace, the `name` of each of `dataclasses.fields(src)`)
-/// names an attribute the class declares. Any other key may be any name.
+/// names an attribute the class declares. A key built at run time names one with the constant
+/// text at its ends ([`built_name`]). Any other key may be any name.
 pub(crate) fn key_name<'i>(
     cx: &TypeCtx<'_>,
     f: &IrFunction,
@@ -2002,7 +2042,177 @@ pub(crate) fn key_name<'i>(
     match items {
         Some(Items::Constants(names)) => AttrName::OneOf(names),
         Some(Items::Keys(classes)) => AttrName::KeyOf(classes),
-        Some(Items::Pairs(_) | Items::Fields(_)) | None => AttrName::Unknown,
+        Some(Items::Pairs(_) | Items::Fields(_)) | None => built_name(f, key, def, &constant),
+    }
+}
+
+/// Which end of a string [`built_end`] reads.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum End {
+    Head,
+    Tail,
+}
+
+/// What the string `key` built at run time names ([`AttrName::Built`]): one starting and ending
+/// with the constant text [`built_end`] finds at each end, any name when both are empty. A walk
+/// that reads all of the text gives it as the head alone, so the two ends never overlap
+/// (`"__" + "set" + "attr__"` starts with `__setattr__`). `constant` gives the string constant a
+/// variable holds.
+fn built_name<'i>(
+    f: &IrFunction,
+    key: VarId,
+    def: &dyn Fn(VarId) -> Option<&'i Inst>,
+    constant: &dyn Fn(VarId) -> Option<String>,
+) -> AttrName<'static> {
+    let (mut head, whole) = built_end(f, key, End::Head, def, constant);
+    let mut tail = String::new();
+    if !whole {
+        match built_end(f, key, End::Tail, def, constant) {
+            (text, true) => head = text,
+            (text, false) => tail = text,
+        }
+    }
+    match head.is_empty() && tail.is_empty() {
+        true => AttrName::Unknown,
+        false => AttrName::Built { head, tail },
+    }
+}
+
+/// The constant text the string `v` starts (`end`) or ends with, through copies, and whether it
+/// is all of its text. An f-string has its literal text before its first and after its last
+/// replacement field (`IrFunction::str_head`, `IrFunction::str_tail`); `a + b` starts as `a`
+/// does, followed by how `b` starts when `a` is a constant, and ends likewise; a `%` or
+/// `.format()` of a constant template has the template's text before its first and after its
+/// last field ([`template_ends`]). Nothing is known of the ends of any other value, nor past
+/// [`BUILT_STEPS`] steps.
+fn built_end<'i>(
+    f: &IrFunction,
+    mut v: VarId,
+    end: End,
+    def: &dyn Fn(VarId) -> Option<&'i Inst>,
+    constant: &dyn Fn(VarId) -> Option<String>,
+) -> (String, bool) {
+    // The pieces from the end inwards.
+    let mut pieces: Vec<String> = Vec::new();
+    let joined = |mut pieces: Vec<String>| {
+        if end == End::Tail {
+            pieces.reverse();
+        }
+        pieces.concat()
+    };
+    let mut whole = true;
+    for _ in 0..BUILT_STEPS {
+        if let Some(text) = constant(v) {
+            pieces.push(text);
+            return (joined(pieces), whole);
+        }
+        let Some(inst) = def(v) else { break };
+        let template = |template: VarId, format: bool| {
+            let (head, tail, whole) = template_ends(&constant(template)?, format);
+            Some((if end == End::Head { head } else { tail }, whole))
+        };
+        let last = match &inst.kind {
+            InstKind::Copy { src, .. } => {
+                v = *src;
+                continue;
+            }
+            InstKind::BinOp {
+                op: BinOpKind::Add,
+                lhs,
+                rhs,
+                in_place: false,
+                ..
+            } => {
+                let (near, far) = match end {
+                    End::Head => (*lhs, *rhs),
+                    End::Tail => (*rhs, *lhs),
+                };
+                match constant(near) {
+                    Some(text) => {
+                        pieces.push(text);
+                        v = far;
+                    }
+                    None => {
+                        whole = false;
+                        v = near;
+                    }
+                }
+                continue;
+            }
+            InstKind::BuildString { parts, .. } => Some((
+                match end {
+                    End::Head => f.str_head(v).unwrap_or_default().to_owned(),
+                    End::Tail => f.str_tail(v).to_owned(),
+                },
+                parts.is_empty(),
+            )),
+            InstKind::BinOp {
+                op: BinOpKind::Mod,
+                lhs,
+                in_place: false,
+                ..
+            } => template(*lhs, false),
+            InstKind::MethodCall { recv, method, .. } if method == "format" => {
+                template(*recv, true)
+            }
+            _ => None,
+        };
+        let Some((text, all)) = last else { break };
+        pieces.push(text);
+        return (joined(pieces), whole && all);
+    }
+    (joined(pieces), false)
+}
+
+/// The methods Python calls with a class as the first argument although no decorator says so:
+/// the implicit class methods, and `__new__`.
+const CLASS_FIRST_METHODS: &[&str] = &["__init_subclass__", "__class_getitem__", "__new__"];
+
+/// Most steps [`built_end`] takes through copies and `+` operands from one name.
+const BUILT_STEPS: usize = 16;
+
+/// The literal text of a `%` template (`format`: false) or of a `str.format()` one before its
+/// first and after its last field, and whether it has none. A doubled `%%`, `{{`, or `}}` is the
+/// character itself. Formatting with a malformed template (a lone `}`, a `%` ending it) raises,
+/// so what such a template gives here is never stored.
+fn template_ends(template: &str, format: bool) -> (String, String, bool) {
+    let special: &[char] = if format { &['{', '}'] } else { &['%'] };
+    let mut chars = template.chars().peekable();
+    let (mut head, mut text) = (None, String::new());
+    while let Some(c) = chars.next() {
+        if !special.contains(&c) || chars.next_if_eq(&c).is_some() || c == '}' {
+            text.push(c);
+            continue;
+        }
+        if format {
+            // A field may nest fields in its format specification.
+            skip_nested(&mut chars, '{', '}');
+        } else {
+            // A mapping key, flags, width, precision, and a length modifier, then the conversion.
+            if chars.next_if_eq(&'(').is_some() {
+                skip_nested(&mut chars, '(', ')');
+            }
+            while chars
+                .next_if(|c| c.is_ascii_digit() || "#- +*.hlL".contains(*c))
+                .is_some()
+            {}
+            chars.next();
+        }
+        head.get_or_insert(std::mem::take(&mut text));
+    }
+    match head {
+        Some(head) => (head, text, false),
+        None => (text.clone(), text, true),
+    }
+}
+
+/// Skip what `chars` holds up to the `close` matching an `open` just read.
+fn skip_nested(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, open: char, close: char) {
+    let mut depth = 1;
+    while depth > 0
+        && let Some(c) = chars.next()
+    {
+        depth = depth + usize::from(c == open) - usize::from(c == close);
     }
 }
 
@@ -2314,6 +2524,9 @@ impl<'c, 'f> Classifier<'c, 'f> {
                 continue;
             }
             let op = attr_op(&inst.kind, |v| self.vals.get(&v), |v| self.key_name(v));
+            if let Some(AttrOp::Store { obj, name, .. }) = &op {
+                self.on_class(&mut out, *obj, name);
+            }
             match op {
                 Some(AttrOp::Store {
                     obj,
@@ -2339,7 +2552,7 @@ impl<'c, 'f> Classifier<'c, 'f> {
                 }
                 Some(AttrOp::Store {
                     obj,
-                    name: name @ (AttrName::KeyOf(_) | AttrName::Unknown),
+                    name: name @ (AttrName::KeyOf(_) | AttrName::Built { .. } | AttrName::Unknown),
                     value,
                 }) => self.unnamed(&mut out, obj, Some(value), &name),
                 Some(AttrOp::Namespace { dst, obj }) => namespaces.push((dst, obj)),
@@ -2575,6 +2788,63 @@ impl<'c, 'f> Classifier<'c, 'f> {
             return AttrName::Unknown;
         }
         trace(&|v| self.s.shape.inst(v))
+    }
+
+    /// Note a store under `name` through `obj` when `obj` may be a class object
+    /// ([`StoresElsewhere::on_classes`]). A name of unknown value (a parameter, a key of a
+    /// namespace or a mapping, a value read from data) is not noted, as R1 takes a special
+    /// method to be bound under its own name.
+    fn on_class(&self, out: &mut Sink<'_>, obj: VarId, name: &AttrName<'_>) {
+        let Some(foreign) = out
+            .foreign
+            .as_deref_mut()
+            .filter(|_| self.may_be_class(obj))
+        else {
+            return;
+        };
+        match name {
+            AttrName::Named(n) => {
+                foreign.on_classes.insert(StoredName::Named(n.to_string()));
+            }
+            AttrName::OneOf(names) => {
+                (foreign.on_classes).extend(names.iter().cloned().map(StoredName::Named));
+            }
+            AttrName::Built { head, tail } => {
+                foreign.on_classes.insert(StoredName::Built {
+                    head: head.clone(),
+                    tail: tail.clone(),
+                });
+            }
+            AttrName::KeyOf(_) | AttrName::Unknown => {}
+        }
+    }
+
+    /// Whether the receiver `obj` may be a class object: any value heki does not establish as
+    /// an instance. `self` of a method (and `super()` there) is one, except in the methods
+    /// Python hands a class first ([`CLASS_FIRST_METHODS`]), and so is a value of a class (what
+    /// calling it makes, a parameter or an attribute annotated with it) unless the class may
+    /// hold class objects: `type` and `abc.ABCMeta`, `Any`, `object`, and `Callable`
+    /// ([`of_any_class`], [`is_any_callable`]), and a project protocol, which a class object
+    /// may implement. A project module is none.
+    fn may_be_class(&self, obj: VarId) -> bool {
+        let selfs = self.s.selfs.as_ref();
+        if selfs.is_some_and(|(_, selfs)| selfs.contains(&obj)) {
+            // Inference types the first parameter of every method as an instance.
+            return CLASS_FIRST_METHODS.contains(&self.s.f.name.as_str());
+        }
+        let project = self.cx.project;
+        let holds_classes = |o: &Obj| {
+            matches!(o.class.as_str(), "builtins.type" | "abc.ABCMeta")
+                || of_any_class(&o.class)
+                || is_any_callable(&o.class)
+                || project.protocol(&o.class).is_some()
+        };
+        match self.types.ty(obj) {
+            Some(Ty::Super(_)) => selfs.is_none(),
+            Some(Ty::Ref(m)) => project.module(m).is_none(),
+            Some(t) if !t.members().is_empty() => t.members().iter().any(holds_classes),
+            _ => true,
+        }
     }
 
     /// What the receiver `obj` holds.
@@ -3166,6 +3436,12 @@ pub(super) struct Elsewhere {
     /// Some module stores under a name heki cannot read through such a receiver
     /// ([`StoresElsewhere::untyped_unnamed`]).
     untyped_unnamed: bool,
+    /// The constant names some module stores under through a receiver that may be a class
+    /// object ([`StoresElsewhere::on_classes`]).
+    on_classes: FxHashSet<String>,
+    /// The `head` and `tail` of the names built at run time some module stores under through
+    /// such a receiver ([`StoredName::Built`]).
+    on_classes_built: FxHashSet<(String, String)>,
 }
 
 /// What other modules store into a module: its globals and the attributes of its classes, by
@@ -3238,6 +3514,11 @@ impl Elsewhere {
         if self.untyped_unnamed != after.untyped_unnamed {
             out.insert(UNTYPED_UNNAMED_KEY.to_owned());
         }
+        let on_classes = (self.on_classes).symmetric_difference(&after.on_classes);
+        out.extend(on_classes.map(|name| on_classes_key(name)));
+        if self.on_classes_built != after.on_classes_built {
+            out.insert(ON_CLASSES_BUILT_KEY.to_owned());
+        }
         for module in self.held.keys().chain(after.held.keys()) {
             if self.held.get(module) != after.held.get(module) {
                 out.insert(module.clone());
@@ -3300,6 +3581,14 @@ impl ProjectDecls {
             out.untyped_attrs
                 .extend(stores.untyped_attrs.iter().cloned());
             out.untyped_unnamed |= stores.untyped_unnamed;
+            for name in &stores.on_classes {
+                match name {
+                    StoredName::Named(n) => out.on_classes.insert(n.clone()),
+                    StoredName::Built { head, tail } => {
+                        out.on_classes_built.insert((head.clone(), tail.clone()))
+                    }
+                };
+            }
             for (fqn, t) in &stores.globals {
                 let fqn = self.canonical(fqn);
                 let Some((module, rest)) = owner(&fqn, m) else {
@@ -3425,6 +3714,22 @@ impl ProjectDecls {
         self.elsewhere.untyped_attrs.contains(attr) || self.elsewhere.untyped_unnamed
     }
 
+    /// Whether some module may store `name` through a receiver that may be a class object
+    /// ([`StoresElsewhere::on_classes`]): under `name` itself, or under a name built at run time
+    /// that starts and ends as `name` does, with room for both ends. A store under a name of
+    /// unknown value binds none of the names asked about here (`Classifier::on_class`).
+    pub(super) fn bound_on_classes(&self, name: &str) -> bool {
+        self.read(|k| note(&mut k.grown_globals, &on_classes_key(name)));
+        self.read(|k| note(&mut k.grown_globals, ON_CLASSES_BUILT_KEY));
+        let built = |(head, tail): &(String, String)| {
+            name.len() >= head.len() + tail.len()
+                && name.starts_with(head.as_str())
+                && name.ends_with(tail.as_str())
+        };
+        self.elsewhere.on_classes.contains(name)
+            || self.elsewhere.on_classes_built.iter().any(built)
+    }
+
     /// What the module's code stores in `attr` of the instances of the canonical class `class`
     /// (`decl`), with its fallback when another module stores into the class's module.
     pub(super) fn attr_store<'s>(
@@ -3456,9 +3761,10 @@ impl ProjectDecls {
 
     /// The join of what the code of the project stores in `attr` of the instances of the
     /// classes of `family` (canonical, [`Self::instance_family`]): each class's stores (an
-    /// annotated attribute's declared type), and what other modules store into its instances;
-    /// `None` for none or an unknown one, and when a class's instances get attributes heki
-    /// cannot name.
+    /// annotated attribute's declared type; a bare container annotation's class, `list`, is
+    /// joined only where `__init__` does not establish the attribute), and what other modules
+    /// store into its instances; `None` for none or an unknown one, and when a class's instances
+    /// get attributes heki cannot name.
     pub(super) fn join_family(&self, family: &[String], attr: &str) -> Option<Ty> {
         let mut out = Stored::Nothing;
         let mut restoring = false;
@@ -3472,15 +3778,25 @@ impl ProjectDecls {
                 return None;
             }
             restoring |= decl.restores_state;
-            if let Some(t) = decl.attr_types.get(attr) {
+            let declared = decl.attr_types.get(attr);
+            if let Some(t) = declared.filter(|t| !t.is_bare_container()) {
                 out.add(Some(Some(t)));
                 continue;
             }
             in_place |= decl.in_place_attrs.iter().any(|a| &**a == attr);
-            match self.attr_store(class, decl, attr) {
+            let store = self.attr_store(class, decl, attr);
+            match store {
                 Some(AttrStore::Established(t) | AttrStore::Of(t)) => out.add(Some(Some(t))),
                 Some(AttrStore::Open) => return None,
                 None => {}
+            }
+            // The class's instances start with a value its stores do not give unless its
+            // `__init__` establishes the attribute (a dataclass's generated `__init__` binds
+            // one): any value of the annotation's class.
+            if let Some(bare) = declared
+                && !matches!(store, Some(AttrStore::Established(_)))
+            {
+                out.add(Some(Some(bare)));
             }
             if let Some(stored) = self.elsewhere.attrs.get(class).and_then(|a| a.get(attr)) {
                 in_place |= stored.in_place;

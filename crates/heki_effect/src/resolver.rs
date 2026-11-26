@@ -528,7 +528,7 @@ impl ClassDecl {
     }
 
     /// The Priority 3 attribute types, sorted by attribute: the declared ones and those
-    /// `__init__` or `__post_init__` establishes.
+    /// `__init__` or `__post_init__` establishes (both for a bare container annotation).
     pub fn typed_attrs(&self) -> Vec<(&str, &Ty)> {
         let established = self.attr_stores.iter().filter_map(|(a, s)| match s {
             AttrStore::Established(t) => Some((&**a, t)),
@@ -594,6 +594,25 @@ pub struct StoresElsewhere {
     /// ([`ProjectDecls::held_attr`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub untyped_unnamed: bool,
+    /// The names it stores under, here or in its own module, through a receiver that may be a
+    /// class object: one heki does not establish as an instance (`Child.__setattr__ = hook`,
+    /// `setattr(cls, "__setattr__", hook)` in a class method, `target.__setattr__ = hook` with
+    /// `target` a parameter without an annotation). Such a store may bind what Python looks up on
+    /// the instances of a class ([`ProjectDecls::bound_after_body`]); one through an instance does
+    /// not, as Python looks special methods up on the type. A store under a name of unknown value
+    /// is not listed (R1: a special method is installed under its own name).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub on_classes: BTreeSet<StoredName>,
+}
+
+/// A name a store binds ([`StoresElsewhere::on_classes`]), as far as heki reads it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum StoredName {
+    /// The one a string constant gives.
+    Named(String),
+    /// One built at run time that starts with `head` and ends with `tail`, which do not overlap
+    /// and are not both empty (`stores::AttrName::Built`).
+    Built { head: String, tail: String },
 }
 
 /// What a module's stores bind one name of another module to.
@@ -666,7 +685,9 @@ pub struct ClassDecl {
     /// left out.
     pub bases: Vec<String>,
     /// The declared instance attribute types, `attr -> type`: annotations in the class body or
-    /// on `self` in a method, which type every store of the attribute.
+    /// on `self` in a method, which type every store of the attribute. A bare container
+    /// annotation (`list`, `dict`) types only the class: the stores give the items
+    /// ([`Self::attr_stores`], [`ProjectDecls::member_type`]).
     pub attr_types: BTreeMap<String, Ty>,
     /// The attributes annotated with one of the class's type parameters (`obj: T` in `class
     /// Site(Generic[T])` or `class Site[T]:`), sorted, each with the parameter's position: an
@@ -675,7 +696,8 @@ pub struct ClassDecl {
     #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
     pub param_attrs: Box<[(Box<str>, u8)]>,
     /// What the module's code stores in the attributes of the class's instances it does not
-    /// annotate, through `self` or another receiver of the class, sorted by attribute
+    /// annotate or annotates with a bare container class (`list`), through `self` or another
+    /// receiver of the class, sorted by attribute
     /// (`stores::record`). A slice rather than a map: most classes store a few, and a map's
     /// first node would hold room for eleven.
     #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
@@ -4425,8 +4447,10 @@ impl ProjectDecls {
     /// code instead of changing the instance's own attribute: a class along its MRO defines
     /// `__setattr__` or `__delattr__`, binds `attr` to a property (`ClassDecl::properties`), or
     /// has a metaclass other than `type` ([`Self::has_custom_metaclass`]), which may install a
-    /// descriptor.
+    /// descriptor; or `__setattr__` or `__delattr__` may be bound on a class along it after its
+    /// body ([`Self::bound_after_body`]).
     pub fn attr_write_runs_code(&self, class: &str, attr: &str) -> bool {
+        let names = ["__setattr__", "__delattr__"];
         self.has_custom_metaclass(class)
             || self.mro(class).into_iter().any(|c| {
                 self.read(|k| note(&mut k.class_facts, &c));
@@ -4434,15 +4458,37 @@ impl ProjectDecls {
                     decl.properties.contains(attr)
                         || decl.members.contains("__setattr__")
                         || decl.members.contains("__delattr__")
+                        || self.bound_after_body(&names)
                 })
             })
     }
 
+    /// Whether one of `names` may be bound on a class object once its body has run, otherwise
+    /// than the body binds it: a store heki reads, wherever it is, may bind one when its name may
+    /// be that one and its receiver may be a class object ([`Self::bound_on_classes`]), also one
+    /// in a class decorator or an `__init_subclass__` storing on the class it is handed. A
+    /// constant name decides, and a name built at run time is ruled out when the constant text at
+    /// its ends already differs (`f"__attr_{name}"` is never `__setattr__`). A name of unknown
+    /// value (a parameter, a key of `vars()` or of a mapping, a value read from data) binds none
+    /// of `names`: R1 takes a special method to be installed under its own name, which gives up
+    /// `setattr(cls, computed, hook)` installing `__setattr__`. A receiver heki establishes as an
+    /// instance (`self`, what a class call makes, a parameter annotated with a class other than
+    /// `type`) binds nothing Python looks a special method up on, and any other may be the class
+    /// (`Child.__setattr__ = hook`, `setattr(cls, "__setattr__", hook)` in a function the class is
+    /// handed to). Code heki does not read is taken to bind none (R1): a class decorator outside
+    /// the project, and a call or a closure the class reaches, bind on it only what the stores
+    /// heki reads bind.
+    fn bound_after_body(&self, names: &[&str]) -> bool {
+        names.iter().any(|n| self.bound_on_classes(n))
+    }
+
     /// Whether `class` is a project class and every class a value of it may be under R2
-    /// ([`Self::value_classes`], each once) is a project class that binds none of `names` and
-    /// has no metaclass heki does not know, and every base of one outside the project is a plain
-    /// base or one `known_base` accepts: the classes whose code runs on such a value are the
-    /// project's, which heki reads, and those `known_base` stands for.
+    /// ([`Self::value_classes`], each once) is a project class that binds none of `names`, in
+    /// its body or after it ([`Self::bound_after_body`]), and has no metaclass heki does not
+    /// know, and every base of one outside the project is a plain base or one `known_base`
+    /// accepts: the classes whose code runs on such a value are the project's, which heki
+    /// reads, as their bodies and the code heki reads leave them, and those `known_base` stands
+    /// for.
     pub fn binds_none_of(
         &self,
         class: &str,
@@ -4458,6 +4504,7 @@ impl ProjectDecls {
                 self.class(c).is_some_and(|d| {
                     !d.custom_metaclass
                         && names.iter().all(|n| !d.members.contains(*n))
+                        && !self.bound_after_body(names)
                         && d.bases.iter().all(|b| {
                             let base = self.canonical(b);
                             self.is_project_class(&base) || known(&base)
@@ -4472,8 +4519,9 @@ impl ProjectDecls {
     /// anything that may be a descriptor (`ClassDecl::code_attrs`), or has a metaclass heki does
     /// not know, and every class outside the project is a plain base or one whose `__setattr__`
     /// the ecosystem catalog says stores on the instance (`catalog_stores`: R3,
-    /// `pydantic.BaseModel`). A strict form of [`Self::attr_write_runs_code`]'s question, for an
-    /// exact claim.
+    /// `pydantic.BaseModel`); and nothing may bind a hook on one after its body
+    /// ([`Self::bound_after_body`]). A strict form of [`Self::attr_write_runs_code`]'s question,
+    /// for an exact claim.
     pub fn attr_store_on_instance(
         &self,
         class: &str,
@@ -4558,7 +4606,7 @@ impl ProjectDecls {
         read.declared
             && !read.runs_hook(true)
             && read.code_binders.is_empty()
-            && self.binds_none_of(class, &[], catalog_stores)
+            && self.binds_none_of(class, &["__getattribute__", "__getattr__"], catalog_stores)
     }
 
     /// The project classes whose bodies may supply an attribute of a value of the class `class`
@@ -4789,6 +4837,7 @@ impl ProjectDecls {
                 let read = self.attr_read(&class, attr);
                 read.binders.is_empty()
                     && !read.runs_hook(false)
+                    && !self.bound_after_body(&["__getattribute__"])
                     && (read.bases_known || self.binds_none_of(&class, &[], catalog_stores))
             })
     }
@@ -5452,8 +5501,10 @@ impl ProjectDecls {
     /// name some project property has gives none), or the Priority 3 attribute type. Overriding
     /// subclasses do not count for an annotation, as for a type checker; an inferred type joins
     /// what the project's code stores into the instances of every class whose code may store
-    /// into the instance ([`Self::stored_attr_type`]). The getter's module is a declaration read
-    /// like any other (`DeclKeys::modules`).
+    /// into the instance ([`Self::stored_attr_type`]). A bare container annotation (`list`)
+    /// gives its class only: with the items of that join where `__init__` or `__post_init__`
+    /// establishes the attribute and the join is an instance of the class. The getter's module
+    /// is a declaration read like any other (`DeclKeys::modules`).
     pub(crate) fn member_type(&self, class: &str, attr: &str, skip_self: bool) -> Option<Ty> {
         self.read(|k| note(&mut k.property_names, attr));
         let property = self.property_names.contains(attr);
@@ -5464,10 +5515,20 @@ impl ProjectDecls {
             let Some(decl) = self.class(c) else {
                 continue;
             };
+            let established = || {
+                matches!(
+                    self.attr_store(c, decl, attr),
+                    Some(AttrStore::Established(_))
+                )
+            };
             if let Some(t) = decl.attr_types.get(attr) {
-                return Some(t.clone());
+                if !t.is_bare_container() {
+                    return Some(t.clone());
+                }
+                let stored = established().then(|| self.stored_attr_type(class, attr));
+                return Some(t.holding_stored(stored.flatten()));
             }
-            if let Some(AttrStore::Established(_)) = self.attr_store(c, decl, attr) {
+            if established() {
                 return self.stored_attr_type(class, attr);
             }
         }
@@ -9215,18 +9276,47 @@ pub(crate) fn passed_var(
     args: &[VarId],
     kwargs: &[(Option<String>, VarId)],
     star_from: Option<u8>,
-    (index, keyword): (Option<u8>, Option<&str>),
+    at: (Option<u8>, Option<&str>),
 ) -> Option<VarId> {
+    match bound_arg(args, kwargs, star_from, at) {
+        BoundArg::Var(v) => Some(v),
+        BoundArg::Unbound | BoundArg::Unpacked => None,
+    }
+}
+
+/// What a call binds to a parameter of the callable ([`bound_arg`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BoundArg {
+    Var(VarId),
+    /// No argument: the parameter keeps its default.
+    Unbound,
+    /// `*` or `**` unpacking may pass the argument.
+    Unpacked,
+}
+
+/// What a call binds to the parameter at position `index` that the keyword `keyword` also
+/// names (`None`: a parameter taken by position only, which a `**` mapping does not bind, as
+/// for `list(iterable)`).
+pub(crate) fn bound_arg(
+    args: &[VarId],
+    kwargs: &[(Option<String>, VarId)],
+    star_from: Option<u8>,
+    (index, keyword): (Option<u8>, Option<&str>),
+) -> BoundArg {
     if let Some(k) = keyword
         && let Some((_, v)) = kwargs.iter().find(|(name, _)| name.as_deref() == Some(k))
     {
-        return Some(*v);
+        return BoundArg::Var(*v);
     }
-    let i = index?;
-    if star_from.is_some_and(|s| i >= s) {
-        return None;
+    let position = index.map(|i| (i, args.get(usize::from(i))));
+    match position {
+        Some((i, _)) if star_from.is_some_and(|s| i >= s) => BoundArg::Unpacked,
+        Some((_, Some(v))) => BoundArg::Var(*v),
+        _ if keyword.is_some() && kwargs.iter().any(|(name, _)| name.is_none()) => {
+            BoundArg::Unpacked
+        }
+        _ => BoundArg::Unbound,
     }
-    args.get(usize::from(i)).copied()
 }
 
 /// The constant `var` holds (through copies), with `def` giving each variable's definition: a
