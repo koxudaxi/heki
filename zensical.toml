@@ -1,6 +1,6 @@
 [project]
 site_name = "heki"
-site_description = "Experimental static checker for Python that tracks side effects and mutations across function calls."
+site_description = "Static checker for Python that tracks side effects and mutations across function calls."
 site_url = "https://heki.koxudaxi.dev"
 repo_name = "koxudaxi/heki"
 repo_url = "https://github.com/koxudaxi/heki"
