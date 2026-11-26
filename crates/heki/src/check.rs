@@ -966,12 +966,14 @@ fn report(
             .flat_map(|b| &b.counts)
             .filter(|(key, _)| !covered(key))
             .collect();
-        // Kept entries of version 2 stay as they are: an entry that records no heuristic site
-        // allows as many exact ones as it had sites, as their version did.
-        let legacy_kept = !kept.is_empty()
-            && recorded
-                .as_ref()
-                .is_some_and(|b| b.version.unit() == CountUnit::Diagnostics);
+        // A file of an earlier version is rewritten only whole: a version 1 file counts
+        // diagnostics, and site counts beside its entries would mix units; a version 2 file keys
+        // some exact EFF101 and EFF103 reports by another call than version 3 does, and its kept
+        // entries cannot be keyed again without the reports of the files the run does not cover.
+        let legacy_kept = recorded
+            .as_ref()
+            .map(|b| b.version)
+            .filter(|version| !kept.is_empty() && *version < BaselineVersion::V3);
         if regressions > 0 {
             let refused = Problem::new(format!(
                 "baseline `{}` not updated: {regressions} entry(ies) grew",
@@ -981,14 +983,28 @@ fn report(
             .docs(Docs::Baselines);
             failure::print(fmt, &refused);
             refused_update = true;
-        } else if legacy_kept {
-            // Its other entries count diagnostics, and site counts beside them would mix units.
+        } else if let Some(version) = legacy_kept {
+            let (written, rewrite) = match version.unit() {
+                CountUnit::Diagnostics => (
+                    format!(
+                        "it counts diagnostics (written before version {})",
+                        BaselineVersion::V2.number()
+                    ),
+                    "count sites",
+                ),
+                CountUnit::Sites => (
+                    format!(
+                        "it was written before version {}, which keys some reports by another call",
+                        BaselineVersion::V3.number()
+                    ),
+                    "use the current keys",
+                ),
+            };
             let refused = Problem::new(format!(
-                "baseline `{}` not updated: it counts diagnostics (written before version {}), and this run covers part of the project",
+                "baseline `{}` not updated: {written}, and this run covers part of the project",
                 bp.display(),
-                BaselineVersion::V2.number()
             ))
-            .help("update it once from the project root with `heki check --update-baseline`, which rewrites it to count sites")
+            .help(format!("update it once from the project root with `heki check --update-baseline`, which rewrites it to {rewrite}"))
             .docs(Docs::Baselines);
             failure::print(fmt, &refused);
             refused_update = true;

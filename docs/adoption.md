@@ -65,7 +65,7 @@ To record new findings on purpose, delete the baseline and record it again.
 
 A run over part of the project (`heki check pkg_a --baseline heki-baseline.toml`) compares and
 updates only the entries of the files below its paths: the entries of the other files stay as
-they are, since the run did not analyze them. A baseline written before version 2 is updated
+they are, since the run did not analyze them. A baseline written before version 3 is updated
 whole first. `--update-baseline` takes directories: a file given to `heki check` selects what is
 shown, and a baseline records every report of what a run covers.
 
