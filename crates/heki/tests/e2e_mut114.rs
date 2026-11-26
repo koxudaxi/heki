@@ -217,7 +217,9 @@ fn mut114_states_its_claim_only_where_every_premise_holds() {
         at(34)["message"],
         "`use` mutates the shared object returned by cached function `producers.entry_points` through `producers.wrapper`"
     );
-    // A cached method called through a bound-method alias, and a method keyed by `self` alone.
+    // A cached method called through a bound-method alias, whose targets are not established
+    // to be every implementation the call can run (`TypeCtx::inst_targets_complete` judges no
+    // held method), and a method keyed by `self` alone.
     let formatter: Vec<Value> = diags
         .iter()
         .filter(|d| d["path"] == "producers.py")
@@ -225,7 +227,7 @@ fn mut114_states_its_claim_only_where_every_premise_holds() {
         .collect();
     assert_eq!(
         claims(&formatter),
-        vec![(79, true), (80, false)],
+        vec![(79, false), (80, false)],
         "{formatter:#?}"
     );
 }
@@ -554,5 +556,55 @@ def use(name):
         claims(&diags),
         vec![(24, true), (26, true), (27, true)],
         "{diags:#?}"
+    );
+}
+
+/// The counterexamples `tests/difftest/cached_result_counterexamples.py` runs on CPython: a call
+/// through a protocol, or on a class that takes the method from a base made at run time, may run
+/// an implementation heki does not see, which caches nothing, so the change is heuristic with
+/// "Every implementation" open; the same change through the cached class stays exact.
+#[test]
+fn mut114_through_a_call_whose_targets_are_not_every_implementation_is_heuristic() {
+    let p = Project::new("mut114_incomplete_targets");
+    let source = std::fs::read_to_string(
+        common::repo_root().join("tests/difftest/cached_result_counterexamples.py"),
+    )
+    .unwrap();
+    p.write("cases.py", &source);
+    let (code, stdout, stderr) = p.heki(&["dump-open-premises", "--select", "MUT114", "."]);
+    assert_eq!(code, 0, "{stderr}");
+    let out: Value = serde_json::from_str(&stdout).unwrap();
+    let reports: Vec<(String, String, Vec<String>)> = out["reports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            let open = r["open_premises"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| {
+                    format!(
+                        "{}: {}",
+                        o["premise"].as_str().unwrap(),
+                        o["cause"].as_str().unwrap()
+                    )
+                })
+                .collect();
+            (
+                r["qualname"].as_str().unwrap().to_owned(),
+                r["certainty"].as_str().unwrap().to_owned(),
+                open,
+            )
+        })
+        .collect();
+    let open = vec!["Every implementation: incomplete-targets".to_owned()];
+    assert_eq!(
+        reports,
+        vec![
+            ("add".to_owned(), "heuristic".to_owned(), open.clone()),
+            ("add_listed".to_owned(), "heuristic".to_owned(), open),
+            ("add_cached".to_owned(), "exact".to_owned(), Vec::new()),
+        ]
     );
 }

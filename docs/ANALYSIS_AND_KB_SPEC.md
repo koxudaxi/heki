@@ -2016,11 +2016,15 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      live return, by its return annotation or by construction), the changed value is that one
      function's result on every path (`MustResult`, an optimistic fixpoint over copies and phis:
      a value starts unset and moves only down, to one cached function, then to anything else),
-     and the instruction changes a container of that kind in place. One decision,
+     each call it is the result of has that function as every implementation it can run
+     (`TypeCtx::inst_targets_complete`: no protocol receiver, no base heki knows nothing of, no
+     unresolved member of a union, no name the project binds to another object), and the
+     instruction changes a container of that kind in place. One decision,
      `Mut202Fn::cached_change_steps`, tells each premise that does not hold, which a heuristic
      report records as open when the run asks (`CheckExtras::open_premises`): "Same object" from
      `MustResult` (over the result of any one project function, so that the cached function's
-     own premises stay apart) or a wrapper on the way, "Cached", "Keyed", and "Container kind"
+     own premises stay apart) or a wrapper on the way, "Every implementation" from a call among
+     them whose targets are not complete, "Cached", "Keyed", and "Container kind"
      together from a missing `CachedResult` (it keeps no reason, so all three are recorded), and
      "Changed in place" from a change through a called function, a line that is no change of the
      kind, or a subclass the annotation admits that replaces the method. Filling a memo of the shared object or initializing one of its attributes

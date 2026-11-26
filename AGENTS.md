@@ -83,6 +83,8 @@ python3.15 tests/difftest/counterexamples.py
 python3.15 tests/difftest/soundness_e2e_counterexamples.py
 # Classes a value of a container ABC may be (each runs project code the exact claim rules out)
 python3.15 tests/difftest/container_abc_counterexamples.py
+# Calls that may run an implementation heki does not see (the exact claim rules them out)
+python3.15 tests/difftest/cached_result_counterexamples.py
 # Shapes the IR models (frames, bindings, paths); CPython 3.15 only (template strings, PEP 798)
 python3.15 tests/difftest/ir_counterexamples.py
 # Generated documentation

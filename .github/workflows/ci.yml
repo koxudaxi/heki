@@ -433,6 +433,8 @@ jobs:
         run: python tests/difftest/soundness_e2e_counterexamples.py
       - name: Counterexamples of the classes a container ABC value may be
         run: python tests/difftest/container_abc_counterexamples.py
+      - name: Counterexamples of the implementations a call may run
+        run: python tests/difftest/cached_result_counterexamples.py
       # Template strings and PEP 798 comprehensions: CPython 3.15 only.
       - name: Counterexamples of the shapes the IR models
         if: matrix.python == '3.15'

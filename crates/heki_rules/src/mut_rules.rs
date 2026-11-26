@@ -3651,13 +3651,16 @@ type FactsByCall<'a> =
 /// The passes of [`Mut202Fn::must_results`] before it gives up.
 const MUST_RESULT_PASSES: usize = 64;
 
-/// The cached function whose result a variable is on every path (`MUT114`'s identity premise).
+/// The cached function whose result a variable is on every path (`MUT114`'s "Same object"),
+/// and whether each call it is the result of runs that function ("Every implementation").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MustResult<'k> {
     /// No value reaches it yet.
     Unset,
-    /// On every path, the result of a direct call of this cached function.
-    Of(&'k FuncKey),
+    /// On every path, the result of a direct call resolved to this one function; `complete`
+    /// when each such call has as its targets every implementation it can run
+    /// ([`Mut202Fn::single_callee`]).
+    Of { callee: &'k FuncKey, complete: bool },
     /// Something else on some path.
     Other,
 }
@@ -3666,7 +3669,16 @@ impl MustResult<'_> {
     fn join(self, other: Self) -> Self {
         match (self, other) {
             (Self::Unset, x) | (x, Self::Unset) => x,
-            (Self::Of(a), Self::Of(b)) if a == b => self,
+            (
+                Self::Of { callee, complete },
+                Self::Of {
+                    callee: b,
+                    complete: c,
+                },
+            ) if callee == b => Self::Of {
+                callee,
+                complete: complete && c,
+            },
             _ => Self::Other,
         }
     }
@@ -3721,28 +3733,33 @@ impl<'a> Mut202Fn<'a> {
     /// same function (`MUT114`'s claim also needs the function's
     /// [`heki_effect::CachedResult`], which "Same object" leaves to the cached function's own
     /// premises). An optimistic fixpoint: a variable
-    /// starts unset and only moves down (unset, then one function, then other), so a loop
-    /// passing the value around keeps it. In reverse postorder each pass carries the values
+    /// starts unset and only moves down (unset, then one function every call of which is
+    /// complete, then one function, then other), so a loop passing the value around keeps it.
+    /// What a call gives does not change between passes, so it is decided once, before them.
+    /// In reverse postorder each pass carries the values
     /// across one more back edge, so the passes follow the nesting of loops, which Python limits
     /// to 20 blocks; past [`MUST_RESULT_PASSES`] no variable is known.
     fn must_results(&self) -> &FxHashMap<VarId, MustResult<'a>> {
         self.cached.get_or_init(|| {
             let f = self.f;
-            let defined: FxHashSet<VarId> = f
-                .blocks
-                .iter()
-                .flat_map(|b| {
-                    b.phis
-                        .iter()
-                        .map(|p| p.dst)
-                        .chain(b.insts.iter().filter_map(|i| i.kind.dst()))
-                })
-                .collect();
             // A variable no instruction or phi defines (a parameter) is no cached result.
-            let mut state: FxHashMap<VarId, MustResult<'a>> = defined
-                .into_iter()
-                .map(|v| (v, MustResult::Unset))
-                .collect();
+            let mut state: FxHashMap<VarId, MustResult<'a>> = FxHashMap::default();
+            for b in &f.blocks {
+                state.extend(b.phis.iter().map(|p| (p.dst, MustResult::Unset)));
+                for inst in &b.insts {
+                    let Some(dst) = inst.kind.dst() else {
+                        continue;
+                    };
+                    let value = match &inst.kind {
+                        InstKind::Copy { .. } => MustResult::Unset,
+                        _ => self.single_callee(inst).map_or(
+                            MustResult::Other,
+                            |(callee, complete)| MustResult::Of { callee, complete },
+                        ),
+                    };
+                    state.insert(dst, value);
+                }
+            }
             let get = |state: &FxHashMap<VarId, MustResult<'a>>, v: VarId| {
                 state.get(&v).copied().unwrap_or(MustResult::Other)
             };
@@ -3760,16 +3777,10 @@ impl<'a> Mut202Fn<'a> {
                         changed |= state.insert(phi.dst, joined) != Some(joined);
                     }
                     for inst in &block.insts {
-                        let Some(dst) = inst.kind.dst() else {
-                            continue;
-                        };
-                        let value = match &inst.kind {
-                            InstKind::Copy { src, .. } => get(&state, *src),
-                            _ => self
-                                .single_callee(inst)
-                                .map_or(MustResult::Other, MustResult::Of),
-                        };
-                        changed |= state.insert(dst, value) != Some(value);
+                        if let InstKind::Copy { dst, src } = &inst.kind {
+                            let value = get(&state, *src);
+                            changed |= state.insert(*dst, value) != Some(value);
+                        }
                     }
                 }
                 !changed
@@ -3780,17 +3791,20 @@ impl<'a> Mut202Fn<'a> {
         })
     }
 
-    /// The one project function the call instruction `inst` runs: its one target, whose name
-    /// the project binds to no other object (R1, [`ProjectDecls::call_rebound`]).
-    fn single_callee(&self, inst: &'a Inst) -> Option<&'a FuncKey> {
+    /// The one project function the call instruction `inst` resolves to, and whether that is
+    /// every implementation the call can run ([`TypeCtx::inst_targets_complete`]: no protocol
+    /// receiver, base heki knows nothing of, unresolved member of a union, or name the project
+    /// binds to another object, R1, R2, R5).
+    fn single_callee(&self, inst: &'a Inst) -> Option<(&'a FuncKey, bool)> {
         let shape = self.shape();
         let call = site_call(&|v| shape.inst(v), self.sites, inst, false)?;
         let callees = call.site?.project_callees();
         let bc = callees.first().filter(|_| callees.len() == 1)?;
-        if self.cx.decls.call_rebound(&bc.callee.fqn()) {
-            return None;
-        }
-        self.cx.index.summary(&bc.callee).map(|_| &bc.callee)
+        self.cx.index.summary(&bc.callee)?;
+        let complete = self
+            .tcx
+            .inst_targets_complete(&inst.kind, |v| self.types.get(&v));
+        Some((&bc.callee, complete))
     }
 
     /// `MUT114`'s exact claim at `inst`, which changes `changed`, a value from the cached
@@ -3810,9 +3824,11 @@ impl<'a> Mut202Fn<'a> {
         let mut told = Told::new(steps);
         let named = |key: &FuncKey| Some(format!("`{}`", key.fqn()));
         // "Same object": the result of a direct call of one function on every path.
-        let result_of = match self.must_results().get(&changed).copied() {
-            Some(MustResult::Of(key)) if r.via.is_empty() => Some(key),
-            _ => None,
+        let (result_of, complete) = match self.must_results().get(&changed).copied() {
+            Some(MustResult::Of { callee, complete }) if r.via.is_empty() => {
+                (Some(callee), complete)
+            }
+            _ => (None, true),
         };
         if let Some(wrapper) = r.via.first() {
             let about = Some(format!("`{}`", wrapper.callee));
@@ -3821,6 +3837,10 @@ impl<'a> Mut202Fn<'a> {
             }
         } else if result_of.is_none() && told.step((&premises::NOT_THE_RESULT_ON_EVERY_PATH, None))
         {
+            return None;
+        }
+        // "Every implementation": each of those calls runs that function and no other.
+        if !complete && told.step((&premises::INCOMPLETE_TARGETS, result_of.and_then(named))) {
             return None;
         }
         // "Cached", "Keyed", and "Container kind": one fact of the cached function's summary.
