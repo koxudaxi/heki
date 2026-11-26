@@ -2994,6 +2994,20 @@ fn missing_name_param(
     (!first.is_vararg && !first.is_kwarg && !first.kw_only && !hook_loaded).then_some(first.var)
 }
 
+/// The module's `__getattr__` that only Python calls, for a name the namespace lacks, and the
+/// parameter that name arrives in ([`missing_name_param`]), when it is the module's only `def`
+/// of that name: of two, the hook is whichever ran last.
+pub fn module_getattr_hook(module: &crate::ModuleIr) -> Option<(&IrFunction, VarId)> {
+    let mut named = (module.functions.iter())
+        .filter(|f| f.qualname == "__getattr__" && f.enclosing == Some(module.module_fn));
+    let hook = named.next()?;
+    if named.next().is_some() {
+        return None;
+    }
+    let name = missing_name_param(hook, module.module_fn, &module.functions)?;
+    Some((hook, name))
+}
+
 /// How a module's code binds each module global: the stores in the module body or in a
 /// function after `global name`, and the deletions (`del NAME` at module level or after
 /// `global NAME`). The one count every view of a module name bound once reads: the constants

@@ -16,7 +16,7 @@
 //! the import graph (`heki inspect --imports`), the ends of the handler bodies around imports, the
 //! tests of their arguments that helpers hand on to their callers, through a long chain of helpers,
 //! for many parameters, or from many implementations of one call, and the type expressions aliases
-//! and casts spell.
+//! and casts spell, and the names a module `__getattr__` serves.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -8721,4 +8721,88 @@ fn a_long_chain_of_declared_call_attributes_takes_linear_time() {
         p.write("m.py", &text);
         p
     });
+}
+
+/// A module whose `__getattr__` tests its name against a display of `n` literals, returning the
+/// class a factory of the module defines, then serves `n` more names from a table of factories,
+/// and a module basing a class on each name it serves and calling its waiting method. (The
+/// hook is a chain of `n` tests each followed by a `return`.)
+fn served_names(n: usize) -> Project {
+    let p = Project::new(&format!("bounds_getattr_{n}"));
+    p.write("pkg/__init__.py", "");
+    let listed: String = (0..n).map(|i| format!("\"B{i}\", ")).collect();
+    let branches = format!("    if name in ({listed}):\n        return _make()\n");
+    let table: String = (0..n).map(|i| format!("\"T{i}\": _make, ")).collect();
+    p.write(
+        "pkg/lazy.py",
+        &format!(
+            "import time\nfrom typing import Any\n\n\nclass Base:\n    def wait(self) -> None:\n        time.sleep(1)\n\n\ndef _make() -> type:\n    class _Made(Base):\n        pass\n\n    return _Made\n\n\n_TABLE = {{{table}}}\n\n\ndef __getattr__(name: str) -> Any:\n{branches}    if (factory := _TABLE.get(name)) is not None:\n        return factory()\n    raise AttributeError(name)\n"
+        ),
+    );
+    let uses: String = (0..n)
+        .flat_map(|i| [format!("B{i}"), format!("T{i}")])
+        .map(|name| {
+            format!(
+                "\n\nclass On{name}(lazy.{name}):\n    pass\n\n\nasync def wait_{name}(obj: On{name}) -> None:\n    obj.wait()\n"
+            )
+        })
+        .collect();
+    p.write("pkg/use.py", &format!("from pkg import lazy\n{uses}"));
+    p
+}
+
+/// What a module `__getattr__` serves is decided by one walk over its blocks, whose facts list
+/// the literals a branch tests on the way it holds, and by reading each `return` once per name
+/// that may reach it: the steps grow linearly with the names, and every class based on one has
+/// the waiting method.
+#[test]
+fn the_names_a_module_getattr_serves_take_linear_steps() {
+    let n = 8 * SCALE;
+    let found = check_linear(n, served_names);
+    let blocking: Vec<&Value> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF101")
+        .collect();
+    assert_eq!(blocking.len(), 1);
+    let message = blocking[0]["message"].as_str().unwrap();
+    let more = format!("(+{} more async call sites", 2 * n - 1);
+    assert!(message.contains(&more), "{message}");
+}
+
+/// A module `__getattr__` testing its name against a display of `n` literals, then making `n`
+/// tests of something else before it returns the class a factory of the module defines, and a
+/// module basing a class on the first name and calling its waiting method.
+fn served_past_tests(n: usize) -> Project {
+    let p = Project::new(&format!("bounds_getattr_tests_{n}"));
+    p.write("pkg/__init__.py", "");
+    let listed: String = (0..n).map(|i| format!("\"B{i}\", ")).collect();
+    let tests: String = (0..n)
+        .map(|i| format!("    if name.endswith(\"{i}\"):\n        _seen.append(name)\n"))
+        .collect();
+    p.write(
+        "pkg/lazy.py",
+        &format!(
+            "import time\nfrom typing import Any\n\n_seen = []\n\n\nclass Base:\n    def wait(self) -> None:\n        time.sleep(1)\n\n\ndef _make() -> type:\n    class _Made(Base):\n        pass\n\n    return _Made\n\n\ndef __getattr__(name: str) -> Any:\n    if name not in ({listed}):\n        raise AttributeError(name)\n{tests}    return _make()\n"
+        ),
+    );
+    p.write(
+        "pkg/use.py",
+        "from pkg import lazy\n\n\nclass OnB0(lazy.B0):\n    pass\n\n\nasync def wait_b0(obj: OnB0) -> None:\n    obj.wait()\n",
+    );
+    p
+}
+
+/// Every block of the hook past its first test holds the names it lists: past the budget of the
+/// walk, proportional to the module's code, the hook serves no name, and a class based on one
+/// has no known method. A hook a size smaller serves it.
+#[test]
+fn a_module_getattr_past_its_budget_serves_no_name() {
+    let owner = "heki_effect::resolver::getattr_exports";
+    let n = 64 * SCALE;
+    let found = check_past_budgets(n, &[owner], served_past_tests);
+    assert_eq!(blocking_callers(&found), Vec::<String>::new());
+    assert_eq!(
+        blocking_callers(&check(&served_past_tests(n / SCALE))),
+        ["wait_b0"]
+    );
 }
