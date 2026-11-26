@@ -5,6 +5,106 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
+## [0.9.0] - Unreleased
+
+### Breaking changes
+
+- `forbidden-imports` of `import-boundaries` takes `module:name` with a glob in either part, as
+  `allowed-imports` does: `"pkg.parser.*:_*"` reports `from pkg.parser.base import _helper` and
+  not `from pkg.parser import jsonschema` (a submodule) or a public name. Where heki cannot tell
+  whether the name is a submodule (`"xml:etree"` with `from xml import etree`), the import is
+  `IMP202` under `unresolved = "report"` and not an exact `IMP201`. An allowed module or name and
+  an `ignored-imports` pair carve it out; with `reach`, it is judged at the import of any module
+  the walk reaches; a by-name import takes no name, so it never breaks a forbidden name. Before,
+  such a pattern was a configuration error. (#534)
+- `hasattr(obj, "NAME")` with a constant name is a read of `NAME` for `read-owners` (`MUT203`, and `MUT206` on an object of unknown class), as `getattr` is: it evaluates the attribute, and probing a capability by name is what such a contract refuses. A report says "with `hasattr`". (#535)
+- A relative import that climbs past the top-level package (`from ... import x` in
+  `pkg/sub/use.py`) names no module and raises `ImportError` when it runs. An `import-boundaries`
+  contract with `unresolved = "report"` now reports it as `IMP202`, which gave no report before.
+  (#536)
+- A string value holding `*`, `?`, `[`, or `{` in an argument-list target is a glob matched
+  against the whole string, as the names of targets are: `module="pkg.backend.*"` matches every
+  backend module. A value that held one of these characters as plain text matched only itself
+  before; write the character in brackets (`[*]`, `[?]`, `[[]`, `[{]`) to keep that. (#537)
+- With `unresolved = "report"`, an `import-boundaries` contract reports under `IMP202` a call that
+  may be `importlib.import_module` or `__import__` and that heki cannot tell from them: a method of
+  that name on an object of unknown class (`loader.import_module("pkg.backend")`), and a call of a
+  name that may be bound to one of them on some path (`load = importlib.import_module if flag
+  else print`). Such a forbidden import passed unseen before. A contract that forbids only names of
+  modules (`"pkg.parser:_*"`) reports no by-name import for them, as it takes no name; a call is
+  still reported for its other restrictions (`relative-imports`). (#538)
+- With `references = "reads"`, a class body or a module binding a name to a target (`model_type = backend.Model`, `Alias = Model`) is a read of it. The uses of a class attribute or a global are not all followed back to the target, so such a default escaped the contract. A local keeps its rule: its own uses count, and an expression statement nothing uses binds nothing. (#540)
+
+### Added
+
+- A `call-owners` target or an effect boundary's `call-targets` entry `*(...)` names every call
+  passing the argument list's constants, whatever it calls: `'*(module="pkg.backend.*")'`
+  reports `factory(module=BACKEND)` for a parameter `factory`, a method of an object of unknown
+  class, and a library call, with `BACKEND = "pkg.backend.dataclass"`. A call heki binds to no
+  project code passes the constants it writes as keywords (or in a `**` mapping the function
+  builds). An argument list naming a parameter no function or class the target
+  names takes is reported as an entry that matches nothing. (#537)
+- A call target with a module part (`pkg:Kind`, `pkg:*`) also names the names the module imports
+  from other modules, read or called through the module object, judged at the access:
+  `targets = ["pkg:Kind"]` with `references = "reads"` reports `pkg.Kind.A` after
+  `import pkg.fmt` (which binds `pkg`), and no longer warns that the entry names nothing. An
+  import of the name and its uses are judged at the definition, as before. (#539)
+- `fail = ["IMP101"]` in `[lint]` makes the reports of the rules it lists fail `heki check` and
+  `--watch` (exit code 1) whatever their tier and severity, as `fail = true` does for a contract:
+  a new import cycle fails the run while other warnings and heuristic reports stay advisory. A rule
+  is named as `select` names it (a code, a name, or a prefix), a report a baseline records or an
+  inline suppression hides does not fail, and a rule that names none is a configuration error.
+  (#559)
+
+### Changed
+
+- A call of a value read from a table of `functools.partial` objects (`self._policy[kind](...)`
+  of `{"row": partial(Field)}`, a module table, a list) calls their callables when no object
+  holds a position, as a table of plain functions does: its effects are theirs, and its result
+  is a new object for `fresh-objects` when every callable returns one. A function and a partial
+  object may share a table. A partial object holding a position, and a table that something
+  changes in place, binds again, or fills with a value heki does not know, still leave the call
+  unresolved. (#425, first step)
+
+### Fixed
+
+- A `finally` body no path of its `try` enters again is no longer read as code that runs with nothing known: when the `try` body cannot raise, or every path in it leaves by `return`, the unreachable copy of the `finally` body is not built, so a parameter's annotation (and `self`) holds in the copy that runs. `MUT205` and `EFF201` no longer report a write or a call on an object of unknown class there. (#541)
+- The builtin exception and warning classes (`BaseException`, `ValueError`, `OSError`, ...) are known classes: a parameter or local annotated with one, or a value built by calling one, is typed, so a write through its `__dict__` is no longer `MUT205` on an object of unknown class, and a call of one of its methods (`add_note`) is no longer an unresolved call. (#542)
+- The annotation of a local names the imports of its own function: with `import types` inside the function, `module: types.ModuleType = ...` types `module`. A name the function binds more than once (two imports, an import on each branch, an import and an assignment) names no class. `importlib.util.module_from_spec(spec)` stays of unknown class, since a custom loader's `create_module` may return any object. (#543)
+- A class method the catalog says returns `Self` gives the class it is called on: pydantic's
+  `Model.model_construct(...)` and `Model.model_validate(...)` are an instance of `Model`, as
+  `model.model_copy()` already was, so writes and reads through them are judged on that class
+  instead of an object of unknown class. (#544)
+- An attribute annotated with a type parameter of its class (`obj: T` in
+  `class Site(Generic[T])`, `Protocol[T]`, or `class Site[T]:`, also `self.obj: T` in a method)
+  holds the argument an instance's annotation gives at that position: with `site: Site[Schema]`,
+  also through a type alias (`SchemaSite: TypeAlias = "Site[Schema]"`), `site.obj` is a `Schema`.
+  An argument that may be `None`, a missing argument, and a wrapped parameter (`Optional[T]`) give
+  no class. (#545)
+- A name another module binds only under `if TYPE_CHECKING:` (serving it at run time from a module
+  `__getattr__`) is the class that import names, as for a type checker: a class based on it has
+  that class's methods, so `obj.model_copy()` of a model whose base is such a lazy re-export of
+  `pydantic.BaseModel` has the model's class. A method found only through that base is never
+  every target of the call, so a report resting on it is heuristic, and calling such a name
+  (`pause(1)` for a `TYPE_CHECKING`-only `from time import sleep as pause`) is no call of the
+  function the import names. A module that also binds the name at run time keeps that binding.
+  (#546)
+- `MUT201` and `EFF201`: a helper handed a target's container that changes an entry of it in
+  place (`box["k"].add(v)`, also `names = box["k"]; names.add(v)` or through its own callees)
+  writes the target at the call, as an item store on it does (an `indirect_item_mut` write,
+  "inside an item, through a helper"). A method of the container changing an entry of its own
+  `self`, called on the attribute's value, is an `item_mut` write at the call. A helper that
+  leaves only the entry change to an allowed writer stays allowed. (#547)
+- `MUT201` and `EFF201`: the entries a loop takes from `values()` or `items()` of a target's
+  container (`for names in holder.box.values(): names.clear()`, also `for _key, names in
+  holder.box.items()`), and the entry `get` returns, are entries of it: changing one in place is
+  an `item_mut` write, as `holder.box["k"].clear()` is. (#548)
+- `MUT201`: an alias of an object's `__dict__` that a nested function or lambda captures keeps
+  its object (`namespace = node.__dict__`, then `def inner(): namespace["_mark"] = 1`), with or
+  without an annotation, as a direct alias does: a key no target names is reported under
+  `unlisted-dict-keys = "report"`, and the namespace of an object of unknown class is `MUT205`
+  under `unresolved = "report"`. A nested scope rebinding it (`nonlocal`) keeps nothing. (#549)
+
 ## [0.8.0] - 2026-11-26
 
 ### Breaking changes
@@ -2598,6 +2698,7 @@ The first public preview.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
+[0.9.0]: https://github.com/koxudaxi/heki/compare/v0.8.0...HEAD
 [0.8.0]: https://github.com/koxudaxi/heki/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/koxudaxi/heki/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/koxudaxi/heki/compare/v0.5.0...v0.6.0
