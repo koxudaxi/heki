@@ -302,6 +302,7 @@ mod tests {
             contracts: Vec::new(),
             allowed_examples: Vec::new(),
             group: false,
+            key_target: None,
         };
         let uri = Url::parse("file:///a.py").unwrap();
         let target = EditTarget {

@@ -1444,6 +1444,7 @@ fn suppression_report(
         contracts: Vec::new(),
         allowed_examples: Vec::new(),
         group: false,
+        key_target: None,
     })
 }
 

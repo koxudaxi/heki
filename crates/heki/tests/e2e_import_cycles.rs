@@ -458,15 +458,16 @@ fn record(p: &Project) {
     assert_eq!(code, 0, "{err}");
 }
 
-/// The baseline file `--update-baseline` writes for the `IMP101` groups `targets`.
+/// The baseline file `--update-baseline` writes for the `IMP101` groups `targets` (a heuristic
+/// report each).
 fn group_entries(targets: &[&str]) -> String {
-    let mut text = "# heki Ratchet baseline: counts may only shrink (`heki check --update-baseline`).\nversion = 2\n".to_owned();
+    let mut text = "# heki Ratchet baseline: counts may only shrink (`heki check --update-baseline`).\nversion = 3\n".to_owned();
     if targets.is_empty() {
         text.push_str("entries = []\n");
     }
     for target in targets {
         text.push_str(&format!(
-            "\n[[entries]]\nrule_code = \"IMP101\"\ntarget = \"{target}\"\ncount = 1\n"
+            "\n[[entries]]\nrule_code = \"IMP101\"\ntarget = \"{target}\"\ncount = 1\nheuristic = 1\n"
         ));
     }
     text
@@ -740,7 +741,7 @@ fn an_entry_naming_the_closing_import_is_read_as_its_group() {
     );
     let (code, err) = ratchet(&p, &[]);
     assert_eq!(code, 0, "{err}");
-    assert!(!err.contains("note:"), "{err}");
+    assert!(!err.contains("note: baseline entry"), "{err}");
     modules(&p, &[("b", &[]), ("c", &["a"])]);
     let (code, err) = ratchet(&p, &[]);
     assert_eq!(code, 0, "{err}");

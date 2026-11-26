@@ -33,7 +33,7 @@ their modules):
 
 ```toml
 # heki Ratchet baseline: counts may only shrink (`heki check --update-baseline`).
-version = 2
+version = 3
 
 [[entries]]
 path = "app/api.py"
@@ -41,6 +41,14 @@ qualname = "get_user"
 rule_code = "EFF101"
 target = "requests.get"
 count = 1
+
+[[entries]]
+path = "app/jobs.py"
+qualname = "refresh"
+rule_code = "EFF101"
+target = "time.sleep"
+count = 2
+heuristic = 1
 ```
 
 The recorded set can only shrink:
@@ -49,18 +57,19 @@ The recorded set can only shrink:
 | --------- | ------------ | ------------------------------ |
 | No baseline file yet | an error (exit code 2) | records today's findings |
 | A finding was fixed | a note that the entry can shrink; with [`report-unused-suppressions`](configuration.md#unused-suppressions), an entry that matches nothing is an error (exit code 1) | records the smaller entry |
-| An entry grew, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1 for an exact error, and for a warning or a heuristic report with [`fail-on = "warning"`](configuration.md#rule-selection-toolhekilint)) | reports it the same way and leaves the file as it is (exit code 1) |
+| An entry grew, a recorded heuristic report is exact now, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1 for an exact error, and for a warning or a heuristic report with [`fail-on = "warning"`](configuration.md#rule-selection-toolhekilint)) | reports it the same way and leaves the file as it is (exit code 1) |
+| A recorded exact report is heuristic now | a note that the entry can shrink | records it as heuristic |
 | A file could not be analyzed (a syntax error, an unreadable file) | reports the error and the other files' findings (exit code 2); a run over given files fails only on an error in one of them | writes nothing, so the entries of that file are not lost (exit code 2) |
 
 To record new findings on purpose, delete the baseline and record it again.
 
 A run over part of the project (`heki check pkg_a --baseline heki-baseline.toml`) compares and
 updates only the entries of the files below its paths: the entries of the other files stay as
-they are, since the run did not analyze them. A baseline written before version 2 is updated
+they are, since the run did not analyze them. A baseline written before version 3 is updated
 whole first. `--update-baseline` takes directories: a file given to `heki check` selects what is
 shown, and a baseline records every report of what a run covers.
 
-### What an entry counts
+### What an entry allows
 
 Each entry counts violation sites, not reports (`sites` in JSON output):
 
@@ -70,11 +79,28 @@ Each entry counts violation sites, not reports (`sites` in JSON output):
 
 So a second violation behind a recorded report is a regression too.
 
-A baseline without `version = 2` was written before heki counted sites, and counts reports:
+`heuristic` says how many of the sites were [heuristic](precision.md) reports, and is left out
+when none were. A heuristic report states the weaker claim of the same premises as an exact one,
+so an entry allows the claims it recorded and no stronger one: a run regresses when it finds more
+sites than `count`, or more exact sites than `count` less `heuristic`. In the example, `refresh`
+may have two reports of `EFF101` at `time.sleep`, and one of them may be exact. A recorded
+heuristic report that heki proves after a change of the code, or after an upgrade in which heki
+proves more, is a regression once: fix it, or record the baseline anew. An exact report that turns
+heuristic passes, and `--update-baseline` records it as heuristic. A rule with two tiers keys both
+in the same entry: `EFF101` and `EFF103` key a report by the last call of the shortest call chain
+to the blocking call or the query, also where the exact report names the call every
+implementation runs (a file of version 2 keys it by the call the exact report names).
 
-- `heki check` says so in a note, and a second site behind a recorded report is no regression;
-- `--update-baseline` compares in the old unit first, so nothing that grew is taken in, then
-  rewrites the file with `version = 2`.
+Older files keep their meaning until `--update-baseline` rewrites them with `version = 3`, which
+heki 0.5.0 and earlier cannot read:
+
+- A baseline with `version = 2` does not record which sites were heuristic: any of them may be
+  exact, as before. `heki check` says so in a note.
+- A baseline without a `version` (or with `version = 1`) was written before heki counted sites,
+  and counts reports. `heki check` says so in a note, and a second site behind a recorded report
+  is no regression.
+- `--update-baseline` compares in the file's own terms first, so nothing that grew is taken in,
+  then rewrites the file.
 
 A version this heki does not know is an error, and so is a file listing one entry twice (a hand
 merge of two baselines).
@@ -308,6 +334,18 @@ or where the code is named. The old codes and names are not kept.
 - A baseline entry with `rule_code = "EFF111"` or `"EFF113"` no longer matches: its reports count
   as regressions. Change the code to `"EFF101"` or `"EFF103"` (adding up the counts of two entries
   that then have the same file, function, and target), or record the baseline anew.
+
+### From heki 0.5 and earlier
+
+- `--update-baseline` writes `version = 3`, which heki 0.5.0 and earlier refuse: update heki
+  everywhere the baseline is read (the pre-commit `rev`, CI) before committing a rewritten
+  baseline. A file of version 2 is read as before, with a note ([What an entry
+  allows](#what-an-entry-allows)).
+- Once rewritten, an entry recorded for a heuristic report no longer allows an exact one: a
+  report that heki proves is a regression once.
+- An exact `EFF101` or `EFF103` report is keyed by the last call of the shortest call chain, as a
+  heuristic one is, in a file of version 3. A file of version 2 keeps the call the report names,
+  so its entries still match, and `--update-baseline` rewrites them with the new key.
 
 ## Effect snapshots (`MUT103`)
 
