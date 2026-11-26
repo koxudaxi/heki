@@ -118,6 +118,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("lint.relax-async-in-tests", "false"),
     ("lint.heuristic", "true"),
     ("lint.fail-on", r#""warning""#),
+    ("lint.fail", r#"["IMP101"]"#),
     ("lint.report-unused-suppressions", "true"),
     ("lint.require-suppression-codes", "true"),
     ("lint.unmatched-contract-entries", r#""error""#),

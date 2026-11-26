@@ -2210,7 +2210,7 @@ fn class_attribute_writes_name_how_they_write() {
     );
     p.write(
         "m.py",
-        "class Model:\n    def __init__(self):\n        self.name = \"\"\n        self.items = [[]]\n\n\ndef delete(m: Model):\n    del m.name\n\n\ndef set_by_name(m: Model):\n    setattr(m, \"name\", \"x\")\n\n\ndef set_in_dict(m: Model):\n    m.__dict__[\"name\"] = \"x\"\n\n\ndef append(m: Model):\n    m.items.append(1)\n\n\ndef append_to_alias(m: Model):\n    xs = m.items\n    xs.append(1)\n\n\ndef append_to_item(m: Model):\n    m.items[0].append(1)\n\n\ndef helper(x):\n    x.items.append(1)\n\n\ndef through_helper(m: Model):\n    helper(m)\n",
+        "class Model:\n    def __init__(self):\n        self.name = \"\"\n        self.items = [[]]\n\n\ndef delete(m: Model):\n    del m.name\n\n\ndef set_by_name(m: Model):\n    setattr(m, \"name\", \"x\")\n\n\ndef set_in_dict(m: Model):\n    m.__dict__[\"name\"] = \"x\"\n\n\ndef append(m: Model):\n    m.items.append(1)\n\n\ndef append_to_alias(m: Model):\n    xs = m.items\n    xs.append(1)\n\n\ndef append_to_item(m: Model):\n    m.items[0].append(1)\n\n\ndef helper(x):\n    x.items.append(1)\n\n\ndef through_helper(m: Model):\n    helper(m)\n\n\ndef entry_helper(xs):\n    xs[0].append(1)\n\n\ndef through_entry_helper(m: Model):\n    entry_helper(m.items)\n",
     );
     for (symbol, kind) in [
         ("delete", "attr_delete"),
@@ -2220,6 +2220,7 @@ fn class_attribute_writes_name_how_they_write() {
         ("append_to_alias", "alias_container_mut"),
         ("append_to_item", "item_mut"),
         ("through_helper", "indirect_helper"),
+        ("through_entry_helper", "indirect_item_mut"),
     ] {
         let r = report_with(&p, &[symbol, "--extend-select", "MUT112"]);
         let kinds: Vec<&Value> = r["changes"]["class_attrs"]

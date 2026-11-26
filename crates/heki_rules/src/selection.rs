@@ -156,6 +156,8 @@ pub struct RuleSelection {
     heuristic: bool,
     /// The rules `ignore` names (by code, slug, or prefix).
     ignored: BTreeSet<&'static str>,
+    /// The rules `lint.fail` names (by code, slug, or prefix): their reports fail the run.
+    fail: BTreeSet<&'static str>,
 }
 
 /// The selectors a run applies: the command line's `select` over the configuration's (`None`:
@@ -338,6 +340,7 @@ impl RuleSelection {
                 origin: "lint.severity",
             });
         }
+        let fail = codes((&lint.fail, "lint.fail"), &any_rule)?;
         Ok(Self {
             enabled,
             per_file,
@@ -345,12 +348,18 @@ impl RuleSelection {
             exact_reports_only,
             heuristic,
             ignored,
+            fail,
         })
     }
 
     /// Whether the heuristic rules run as the exact ones do (`lint.heuristic`).
     pub fn heuristic(&self) -> bool {
         self.heuristic
+    }
+
+    /// Whether `lint.fail` names the rule `code`.
+    pub fn fails_run(&self, code: &str) -> bool {
+        self.fail.contains(code)
     }
 
     pub fn is_enabled(&self, code: &str) -> bool {
@@ -563,7 +572,7 @@ mod tests {
             group: false,
             key_target: None,
             key_module: None,
-            fails_run_by_contract: false,
+            fails_run_by_config: false,
         };
         let selection = RuleSelection {
             enabled: BTreeSet::from(["OPT110", "OPT111"]),
@@ -572,6 +581,7 @@ mod tests {
             exact_reports_only: BTreeSet::from(["OPT110"]),
             heuristic: false,
             ignored: BTreeSet::new(),
+            fail: BTreeSet::new(),
         };
         let mut diags = vec![
             report("OPT110", Certainty::Exact),

@@ -1185,6 +1185,11 @@ pub struct EffectiveEcosystemKb {
     /// `run_in_executor`), so a call of another name is known to hand nothing back without
     /// resolving it ([`Self::may_hand_back`]).
     pub result_of_names: BTreeSet<String>,
+    /// The last name of every symbol with a [`EcosystemEntry::loads_module`] (`import_module`,
+    /// `__import__`), so a call of that name is known to be one that may import a module by name
+    /// ([`Self::may_load_module`]).
+    #[serde(default)]
+    pub loads_module_names: BTreeSet<String>,
     /// Catalog class -> the library class whose methods it has, by the [`EcosystemEntry::api`]
     /// of its methods' entries ([`Self::api_class`]).
     pub api_classes: BTreeMap<String, String>,
@@ -1217,6 +1222,11 @@ impl EffectiveEcosystemKb {
             .filter(|e| e.result_of.is_some())
             .map(|e| e.symbol.rsplit('.').next().unwrap_or(&e.symbol).to_owned())
             .collect();
+        let loads_module_names = entries
+            .values()
+            .filter(|e| e.loads_module.is_some())
+            .map(|e| e.symbol.rsplit('.').next().unwrap_or(&e.symbol).to_owned())
+            .collect();
         let api_classes = entries
             .values()
             .filter_map(|e| {
@@ -1244,6 +1254,7 @@ impl EffectiveEcosystemKb {
             distributions: Vec::new(),
             provides: Vec::new(),
             result_of_names,
+            loads_module_names,
             api_classes,
             case_classes,
             case_flags,
@@ -1480,6 +1491,12 @@ impl EffectiveEcosystemKb {
     /// [`EcosystemEntry::result_of`].
     pub fn may_hand_back(&self, name: &str) -> bool {
         self.result_of_names.contains(name)
+    }
+
+    /// Whether a call of a function or method named `name` may be one of an entry with a
+    /// [`EcosystemEntry::loads_module`] (`importlib.import_module`, `__import__`).
+    pub fn may_load_module(&self, name: &str) -> bool {
+        self.loads_module_names.contains(name)
     }
 
     /// The library class whose methods the catalog class `class` has
@@ -2735,7 +2752,7 @@ mod tests {
                         keywords: true,
                         ..FieldValues::default()
                     }),
-                    ..entry(&[])
+                    ..returning(SELF_RETURN_TYPE, entry(&[]))
                 },
             ),
             (
@@ -2747,7 +2764,7 @@ mod tests {
                         only_from_dict: true,
                         ..FieldValues::default()
                     }),
-                    ..entry(&[])
+                    ..returning(SELF_RETURN_TYPE, entry(&[]))
                 },
             ),
         ]
@@ -5982,6 +5999,8 @@ mod tests {
             })
         );
         assert_eq!(loads("importlib.util.find_spec"), None);
+        assert!(kb.may_load_module("import_module") && kb.may_load_module("__import__"));
+        assert!(!kb.may_load_module("find_spec"));
         for (module, distributions) in [
             ("yaml", vec!["PyYAML"]),
             ("yaml.loader", vec!["PyYAML"]),

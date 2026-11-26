@@ -34,8 +34,8 @@ pub enum Ty {
     Inst(Obj),
     /// `typing.Self` in a declaration: the type of the receiver.
     SelfType,
-    /// A `functools.partial(f, ...)` object: calling it calls `f`.
-    Partial(Box<Ty>),
+    /// A `functools.partial(f, ...)` object: calling it calls `f`, after the arguments it holds.
+    Partial(Box<Ty>, Held),
     /// The coroutine a call of an `async def` returns: awaiting it gives the inner type, what
     /// the function's declaration says it returns.
     Coroutine(Box<Ty>),
@@ -44,6 +44,33 @@ pub enum Ty {
     /// One of two to [`MAX_NAMED`] named objects, by fqn (sorted): what several paths bind, or
     /// an item of a table of functions (`HANDLERS[kind]`). Calling it calls one of them.
     OneOf(Vec<String>),
+}
+
+/// What a `functools.partial` object passes its callable besides the call's own arguments
+/// ([`Ty::Partial`]), ordered from the least to the most a call cannot see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Held {
+    /// Nothing: calling the object is calling its callable with the same arguments.
+    Nothing,
+    /// Keywords only (a `**` mapping among them): the call's positions bind as written, and any
+    /// keyword may come from the object.
+    Keywords,
+    /// Positions, or a `*` unpacking: the call's positions bind past ones heki does not know.
+    Positions,
+}
+
+impl Held {
+    /// What a `functools.partial(f, ...)` call holds for `f`, by the arguments past `f` (`held`,
+    /// with `open` when one is unpacked with `*`) and its keywords.
+    pub(crate) fn of(held: &[VarId], open: bool, kwargs: &[(Option<String>, VarId)]) -> Self {
+        if open || !held.is_empty() {
+            Held::Positions
+        } else if kwargs.is_empty() {
+            Held::Nothing
+        } else {
+            Held::Keywords
+        }
+    }
 }
 
 /// An instance of a class, with the type arguments of a known generic container.
@@ -79,6 +106,11 @@ pub enum Args {
     /// What calling the value gives (`Callable[..., T]`): an instance of one class or one class
     /// object ([`Args::returns`]).
     Returns(Box<Ty>),
+    /// The type arguments an annotation gives an instance of a project class with type
+    /// parameters (`Site[Schema]`), by position: what its attributes annotated with a parameter
+    /// hold (`crate::resolver::ClassDecl::param_attrs`). An argument that may be `None` is
+    /// unknown.
+    TypeArgs(Vec<Elem>),
 }
 
 /// The type of the items in one slot of a container.
@@ -255,7 +287,7 @@ impl Ty {
             | Ty::Class(_)
             | Ty::Super(_)
             | Ty::SelfType
-            | Ty::Partial(_)
+            | Ty::Partial(..)
             | Ty::Coroutine(_)
             | Ty::Union(_)
             | Ty::OneOf(_) => None,
@@ -280,7 +312,7 @@ impl Ty {
             | Ty::Class(_)
             | Ty::Super(_)
             | Ty::SelfType
-            | Ty::Partial(_)
+            | Ty::Partial(..)
             | Ty::Coroutine(_)
             | Ty::OneOf(_) => &[],
         }
@@ -312,7 +344,7 @@ impl Ty {
             | Ty::Class(_)
             | Ty::Super(_)
             | Ty::SelfType
-            | Ty::Partial(_)
+            | Ty::Partial(..)
             | Ty::Coroutine(_)
             | Ty::OneOf(_) => Some(self.clone()),
         }
@@ -399,6 +431,15 @@ impl Ty {
             (Ty::Ref(_) | Ty::OneOf(_), Ty::Ref(_) | Ty::OneOf(_)) => {
                 Ty::one_of(self.named().iter().chain(other.named()).cloned())
             }
+            // A call of either calls one of their callables; a named object is a partial object
+            // holding nothing (`{"a": f, "b": partial(g)}`).
+            (Ty::Partial(a, held_a), Ty::Partial(b, held_b)) => {
+                Ty::partial_of_either(a, b, (*held_a).max(*held_b))
+            }
+            (Ty::Partial(a, held), named @ (Ty::Ref(_) | Ty::OneOf(_)))
+            | (named @ (Ty::Ref(_) | Ty::OneOf(_)), Ty::Partial(a, held)) => {
+                Ty::partial_of_either(a, named, *held)
+            }
             // Either coroutine may be awaited: the result is either declared result.
             (Ty::Coroutine(a), Ty::Coroutine(b)) => a.join(b).map(|t| Ty::Coroutine(Box::new(t))),
             // Catalog awaitables carry their awaited result: join by it (EFF107 only misses).
@@ -416,7 +457,7 @@ impl Ty {
         match self {
             Ty::Inst(o) => 1 + o.args.depth(),
             Ty::Union(os) => 1 + os.iter().map(|o| o.args.depth()).max().unwrap_or(0),
-            Ty::Partial(t) | Ty::Coroutine(t) => 1 + t.depth(),
+            Ty::Partial(t, _) | Ty::Coroutine(t) => 1 + t.depth(),
             Ty::Ref(_) | Ty::Class(_) | Ty::Super(_) | Ty::SelfType | Ty::OneOf(_) => 1,
         }
     }
@@ -428,6 +469,16 @@ impl Ty {
             Ty::OneOf(fqns) => fqns,
             _ => &[],
         }
+    }
+
+    /// A partial object holding `held` of one of the named objects `a` and `b` name, when both
+    /// name some.
+    fn partial_of_either(a: &Ty, b: &Ty, held: Held) -> Option<Ty> {
+        if a.named().is_empty() || b.named().is_empty() {
+            return None;
+        }
+        let callable = Ty::one_of(a.named().iter().chain(b.named()).cloned())?;
+        Some(Ty::Partial(Box::new(callable), held))
     }
 
     /// The value that is one of the named objects `fqns`: one of them, a [`Ty::OneOf`] of at
@@ -490,6 +541,15 @@ impl Args {
         }
     }
 
+    /// `TypeArgs(args)`, without tracking arguments that are all unknown.
+    pub(crate) fn type_args(args: Vec<Elem>) -> Self {
+        if args.iter().all(|a| *a == Elem::Unknown) {
+            Args::None
+        } else {
+            Args::TypeArgs(args)
+        }
+    }
+
     /// What the instance holds in its field `name` ([`Args::Fields`]): `None` when it is not
     /// listed.
     pub(crate) fn field(&self, name: &str) -> Option<&Elem> {
@@ -516,6 +576,7 @@ impl Args {
                 Args::Fields(fs.iter().map(|(n, e)| (n.clone(), elem(e))).collect())
             }
             Args::Returns(t) => Args::returns(f(t)),
+            Args::TypeArgs(es) => Args::type_args(es.iter().map(elem).collect()),
         }
     }
 
@@ -523,7 +584,11 @@ impl Args {
     /// which yields itself while it waits).
     pub(crate) fn item(&self) -> Elem {
         match self {
-            Args::None | Args::Result(_) | Args::Fields(_) | Args::Returns(_) => Elem::Unknown,
+            Args::None
+            | Args::Result(_)
+            | Args::Fields(_)
+            | Args::Returns(_)
+            | Args::TypeArgs(_) => Elem::Unknown,
             Args::Items(e) | Args::Map(e, _) => (**e).clone(),
             Args::Tuple(es) => es.iter().fold(Elem::Empty, |acc, e| acc.join(e)),
         }
@@ -542,6 +607,9 @@ impl Args {
             }
             (Args::Result(a), Args::Result(b)) => Args::result(a.join(b)),
             (Args::Returns(a), Args::Returns(b)) => Args::returns(a.join(b)),
+            (Args::TypeArgs(a), Args::TypeArgs(b)) if a.len() == b.len() => {
+                Args::type_args(a.iter().zip(b).map(|(x, y)| x.join(y)).collect())
+            }
             // A field one of them leaves to its declared type is the declared type's.
             (Args::Fields(a), Args::Fields(b)) => {
                 let joined: Box<[(Box<str>, Elem)]> = a
@@ -562,7 +630,7 @@ impl Args {
             Args::None => 0,
             Args::Items(e) | Args::Result(e) => e.depth(),
             Args::Map(k, v) => k.depth().max(v.depth()),
-            Args::Tuple(es) => es.iter().map(Elem::depth).max().unwrap_or(0),
+            Args::Tuple(es) | Args::TypeArgs(es) => es.iter().map(Elem::depth).max().unwrap_or(0),
             Args::Fields(fs) => fs.iter().map(|(_, e)| e.depth()).max().unwrap_or(0),
             Args::Returns(t) => t.depth(),
         }
@@ -982,7 +1050,27 @@ mod tests {
         assert_eq!(both.map_members(|_| None), None);
         assert_eq!(both.depth(), 1);
         assert_eq!(f.depth(), 1);
-        assert_eq!(Ty::Partial(Box::new(f.clone())).depth(), 2);
+        assert_eq!(Ty::Partial(Box::new(f.clone()), Held::Nothing).depth(), 2);
+        // A partial object joins a named object or another partial object of a named object
+        // into one of their callables, holding the most either holds; one of a partial object,
+        // nothing.
+        let partial = |callable: &Ty, held| Ty::Partial(Box::new(callable.clone()), held);
+        let g = Ty::Ref("m.g".to_owned());
+        let either = Ty::one_of(["m.f".to_owned(), "m.g".to_owned()]).unwrap();
+        assert_eq!(
+            partial(&f, Held::Keywords).join(&partial(&g, Held::Nothing)),
+            Some(partial(&either, Held::Keywords))
+        );
+        assert_eq!(
+            g.join(&partial(&f, Held::Positions)),
+            Some(partial(&either, Held::Positions))
+        );
+        assert_eq!(
+            partial(&f, Held::Nothing).join(&g),
+            Some(partial(&either, Held::Nothing))
+        );
+        let nested = partial(&partial(&f, Held::Nothing), Held::Nothing);
+        assert_eq!(nested.join(&partial(&g, Held::Nothing)), None);
         assert_eq!(list(Elem::Of(f.clone())).depth(), 2);
         // A value is one of the named objects it names: one, those of a choice, none for an
         // instance. One name is that object; two to eight are a choice; none or more, nothing.

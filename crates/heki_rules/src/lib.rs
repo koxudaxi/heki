@@ -1021,7 +1021,7 @@ pub enum RuleConfigError {
     },
     /// A `module:name` in an import contract list that takes none, or with an empty part.
     #[error(
-        "invalid name `{pattern}` in {context} (a module and a name of it, `module:name`, only in `allowed-imports` and the imported side of `ignored-imports`)"
+        "invalid name `{pattern}` in {context} (a module and a name of it, `module:name`, only in `allowed-imports`, `forbidden-imports` and the imported side of `ignored-imports`)"
     )]
     ImportName {
         pattern: String,
@@ -1415,7 +1415,7 @@ pub fn check_project(
         }
         same
     });
-    gates::mark_failing_reports(config, &mut out);
+    gates::mark_failing_reports(config, selection, &mut out);
     Ok(out)
 }
 
@@ -1585,6 +1585,20 @@ impl<'a> CheckContext<'a> {
         })
     }
 
+    /// The calls `func` makes that heki binds to no project code, in its own body and in the
+    /// class bodies it runs ([`heki_effect::FileSummary::unbound_calls`]), with the file
+    /// defining it.
+    pub(crate) fn unbound_calls<'f>(
+        &self,
+        func: &'f FuncKey,
+    ) -> impl Iterator<Item = (&'a Path, &'a heki_effect::UnboundCall)> + use<'a, 'f> {
+        let index = self.index;
+        index.file_of(func).into_iter().flat_map(move |path| {
+            let own = index.files[path].unbound_calls.get(func);
+            own.into_iter().flatten().map(move |u| (path, u))
+        })
+    }
+
     /// Every summarized function once, from its defining file, sorted by key.
     pub fn defined_functions(&self) -> Vec<(&'a FuncKey, &'a EffectSummary)> {
         let mut funcs: Vec<(&FuncKey, &EffectSummary)> = self
@@ -1732,7 +1746,7 @@ impl<'a> CheckContext<'a> {
             group: reports_groups(meta.code),
             key_target: None,
             key_module: None,
-            fails_run_by_contract: false,
+            fails_run_by_config: false,
         });
         out.last_mut()
     }

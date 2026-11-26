@@ -12,9 +12,9 @@ use heki_diagnostics::{Certainty, Diagnostic, OpenPremise, OpenRecord};
 use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
     AccessKind, AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite, CallTarget,
-    Callee, Construction, ContractClass, ContractSharing, Delivery, EffectSummary, Facts, FuncKey,
-    ProjectDecls, ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx,
-    TypedFieldReadSite, TypedFieldWriteSite, Unresolved, Val, WriteKind, attr_writes,
+    Callee, Construction, ContractClass, ContractSharing, Delivery, ELEMENTS_PATH, EffectSummary,
+    Facts, FuncKey, ProjectDecls, ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole,
+    TypeCtx, TypedFieldReadSite, TypedFieldWriteSite, Unresolved, Val, WriteKind, attr_writes,
     container_mutator, initializes_own_self, is_initializer, self_attr_writes,
 };
 use heki_env::HekiConfig;
@@ -1307,12 +1307,13 @@ struct GuardedTargets {
 
 impl GuardedTargets {
     fn any(&self, key: &FuncKey) -> bool {
-        match &self.only {
-            None => self.matchers.any(key),
-            Some(only) => {
-                (self.matchers.matching(key).iter()).any(|i| only.binary_search(i).is_ok())
-            }
-        }
+        (self.matchers.matching(key).iter()).any(|&i| {
+            self.matchers.guards(i)
+                && self
+                    .only
+                    .as_ref()
+                    .is_none_or(|o| o.binary_search(&i).is_ok())
+        })
     }
 }
 
@@ -1336,6 +1337,10 @@ pub(crate) struct FunctionMatcher {
     /// The text names nothing outside the project ([`Self::names_external`]): the target had an
     /// argument list, which heki binds only for project functions.
     project_only: bool,
+    /// The functions the text names are part of the operation a `call-owners` contract guards,
+    /// and may call its targets ([`GuardedTargets`]); not for a target naming every callee
+    /// (`*(module="pkg.*")`), which names calls, not functions.
+    guards: bool,
 }
 
 /// The holder standing for every module and class outside the project (`<external>._*`).
@@ -1391,6 +1396,7 @@ impl FunctionMatcher {
                 method: None,
                 outside: Some(DottedPattern::new(last, context)?),
                 project_only: false,
+                guards: true,
             });
         }
         let (holder, last) = match split_last_dot(text) {
@@ -1408,7 +1414,23 @@ impl FunctionMatcher {
             method: None,
             outside: None,
             project_only: false,
+            guards: true,
         })
+    }
+
+    /// The same matcher, naming calls only: no function it names is part of the guarded
+    /// operation ([`Self::guards`]).
+    pub(crate) fn naming_calls_only(self) -> Self {
+        Self {
+            guards: false,
+            ..self
+        }
+    }
+
+    /// Whether the functions the text names are part of the operation a `call-owners`
+    /// contract guards ([`GuardedTargets`]).
+    pub(crate) fn guards(&self) -> bool {
+        self.guards
     }
 
     /// The same matcher, naming project functions and classes only.
@@ -2055,9 +2077,10 @@ fn runs_inside_allowed_through(
     allowed_contexts
 }
 
-/// Whether the helper `bc` calls changes the typed field `w` (an `IndirectHelper` write) that
-/// its caller hands it, as the field's value or as the instance holding it, itself or through
-/// the callees it hands the argument to. `delivers` says what of a callee runs at a call
+/// Whether the helper `bc` calls changes the typed field `w` (an `IndirectHelper` write, or an
+/// `IndirectItemMut` one of an entry of its value) that its caller hands it, as the field's
+/// value or as the instance holding it, itself or through the callees it hands the argument
+/// to. `delivers` says what of a callee runs at a call
 /// (`None`: nothing that counts, such as a callee the contract allows). The helper's summary
 /// also holds what its callees change, so a change made only inside allowed callees is no write
 /// of the helper's caller.
@@ -2074,7 +2097,11 @@ pub(crate) fn helper_changes_field<'s>(
             .as_ref()
             .is_some_and(|(class, attr)| *class == w.class_qualname && *attr == w.attr)
         {
-            ParamChange::Itself
+            if w.kind == WriteKind::IndirectItemMut {
+                ParamChange::Entries
+            } else {
+                ParamChange::Itself
+            }
         } else if o.instance_classes().any(|c| *c == w.class_qualname) {
             ParamChange::Attr(&w.attr)
         } else {
@@ -2119,11 +2146,13 @@ fn indirect_write_outside(
 }
 
 /// What change of a parameter counts: an in-place change of the value itself (what a handed
-/// field's `IndirectHelper` write is), any in-place change of it or below it, or a change of its
+/// field's `IndirectHelper` write is), of an entry it holds or one below it (an
+/// `IndirectItemMut` write), any in-place change of it or below it, or a change of its
 /// attribute (rebinding it, or changing its value in place).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ParamChange<'a> {
     Itself,
+    Entries,
     Any,
     Attr(&'a str),
 }
@@ -2154,6 +2183,7 @@ fn changes_param<'s>(
             .and_then(|k| local?.mutated_param_paths.get(&k));
         let changed_here = match want {
             ParamChange::Itself => paths.is_some_and(|p| p.contains("")),
+            ParamChange::Entries => paths.is_some_and(|p| p.contains(ELEMENTS_PATH)),
             ParamChange::Any => {
                 k < 64 && local.is_some_and(|s| s.mutates_params & (1u64 << k) != 0)
             }
@@ -2170,9 +2200,26 @@ fn changes_param<'s>(
                     .enumerate()
                     .filter_map(|(j, o)| match (&o.param, want) {
                         (Some((p, None)), _) if usize::from(*p) == k => Some((j, want)),
+                        // An entry of the parameter, or a shallow copy holding its entries.
+                        (None, ParamChange::Entries) => {
+                            if o.param_copy
+                                .as_ref()
+                                .is_some_and(|(p, a)| usize::from(*p) == k && a.is_none())
+                            {
+                                Some((j, want))
+                            } else if o
+                                .param_elements
+                                .iter()
+                                .any(|(p, path)| usize::from(*p) == k && path == ELEMENTS_PATH)
+                            {
+                                Some((j, ParamChange::Any))
+                            } else {
+                                None
+                            }
+                        }
                         // The callee is handed a part of the parameter: a change there is below
                         // the value, or of another attribute.
-                        (Some((_, Some(_))), ParamChange::Itself) => None,
+                        (Some((_, Some(_))), ParamChange::Itself | ParamChange::Entries) => None,
                         (Some((p, Some(attr))), ParamChange::Attr(a))
                             if usize::from(*p) == k && a != attr =>
                         {
@@ -3105,7 +3152,7 @@ pub(crate) fn mut201(
                     // A write a callee hands up is that callee's own, except the change of a
                     // typed object handed to a helper that never sees its class.
                     let own = site.via_chain.is_empty()
-                        || site.kind == WriteKind::IndirectHelper && site.via_chain.len() == 1;
+                        || site.kind.through_helper() && site.via_chain.len() == 1;
                     if lexical && !own {
                         continue;
                     }
@@ -3129,7 +3176,7 @@ pub(crate) fn mut201(
                         {
                             continue;
                         }
-                        let origin = if site.kind == WriteKind::IndirectHelper && chain.len() >= 2 {
+                        let origin = if site.kind.through_helper() && chain.len() >= 2 {
                             chain.len() - 2
                         } else {
                             chain.len() - 1
@@ -3162,7 +3209,7 @@ pub(crate) fn mut201(
                         }
                         // A helper handed the field that changes it only inside allowed
                         // writers or exempt methods.
-                        if site.kind == WriteKind::IndirectHelper
+                        if site.kind.through_helper()
                             && !indirect_write_outside(cx, sites, site, |callee| {
                                 rule.allowance.allows(callee)
                             })
@@ -5249,6 +5296,6 @@ pub(crate) fn delegated_reports<'k>(
 mod call_owners;
 
 pub(crate) use call_owners::{
-    CallTargets, FunctionMatchers, Subclasses, call_verb, group_texts, mut204, parse_call_targets,
-    site_callee, split_arguments,
+    CallTargets, FunctionMatchers, Subclasses, call_verb, group_texts, mut204, names_every_callee,
+    parse_call_targets, site_callee, split_arguments,
 };

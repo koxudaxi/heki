@@ -341,8 +341,9 @@ fn references_handing_a_target_on_count_as_calls_only_with_the_key() {
     );
 
     // Every other use counts too, as a read: the uses that only name a target, a subscript, a
-    // receiver of an attribute load, an `except` clause, and a test of a display holding one. A
-    // name nothing uses, the annotations, and the module binding another name stay silent.
+    // receiver of an attribute load, an `except` clause, a test of a display holding one, and a
+    // module binding another name to one (`ALIAS = decide`). A name nothing uses and the
+    // annotations stay silent.
     let reads = |line: u64, column: u64, func: &str, target: &str| {
         (
             line,
@@ -351,8 +352,11 @@ fn references_handing_a_target_on_count_as_calls_only_with_the_key() {
         )
     };
     with.extend([
+        // The helpers module binds `run` to `core.decide`: a binding is a read.
+        reads(3, 7, "<module>", "pkg.core.decide"),
         reads(12, 5, "<module>", "pkg.core.Rule"),
         reads(13, 9, "<module>", "pkg.core.Rule"),
+        reads(15, 1, "<module>", "pkg.core.decide"),
         reads(77, 24, "method_refs", "pkg.core.Rule"),
         reads(82, 14, "names_only", "pkg.core.Rule"),
         reads(83, 13, "names_only", "pkg.core.Error"),
@@ -364,6 +368,7 @@ fn references_handing_a_target_on_count_as_calls_only_with_the_key() {
         reads(88, 84, "names_only", "pkg.core.Rule"),
         reads(88, 98, "names_only", "pkg.core.decide"),
         reads(113, 4, "<module>", "pkg.core.decide"),
+        reads(114, 5, "<module>", "pkg.core.decide"),
     ]);
     with.sort();
     assert_eq!(
@@ -1042,6 +1047,9 @@ fn every_other_use_of_a_target_counts_with_reads() {
     let mut expected = vec![
         reads(6, 19, "<module>", "Keys"),
         reads(7, 16, "<module>", "Keys"),
+        // A module binding another name to a target (`Alias = Keys`) is a read of it, as the
+        // class body's bindings are.
+        reads(8, 1, "<module>", "Keys"),
         reads(10, 1, "<module>", "Keys"),
         reads(14, 12, "receiver", "Keys"),
         reads(18, 5, "attributes", "Keys"),

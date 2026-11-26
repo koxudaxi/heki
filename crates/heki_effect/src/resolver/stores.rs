@@ -917,7 +917,7 @@ fn tables(
                 table.push((Box::from(key), types.ty(*value).cloned()));
             }
             let callable = |t: &Option<Ty>| match t {
-                Some(Ty::Ref(_) | Ty::OneOf(_) | Ty::Class(_) | Ty::Partial(_)) => true,
+                Some(Ty::Ref(_) | Ty::OneOf(_) | Ty::Class(_) | Ty::Partial(..)) => true,
                 // An instance whose fields hold named objects (`{"a": Spec(run=f)}`).
                 Some(t) => t
                     .obj()

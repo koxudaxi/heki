@@ -169,15 +169,18 @@ opaque_to_layer3 = true
 # Pydantic 2's class methods building an instance without its `__init__`:
 # `model_construct(_fields_set=None, **values)` sets the fields from the keywords without
 # validation; `model_validate(obj, ...)` validates `obj` into a new instance when it is a dict,
-# and returns an instance of the class as it is (`revalidate_instances = "never"`).
+# and returns an instance of the class as it is (`revalidate_instances = "never"`). Both are
+# annotated `-> Self`: called on a subclass, they give an instance of that subclass.
 [[entries]]
 symbol = "pydantic.BaseModel.model_construct"
 builds_receiver = { keywords = true }
+return_type = "Self"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pydantic.BaseModel.model_validate"
 builds_receiver = { arg = 0, param = "obj", only_from_dict = true }
+return_type = "Self"
 opaque_to_layer3 = true
 
 # The fields a model declares (see `[[declared_fields]]` in stdlib.toml), each kept in the

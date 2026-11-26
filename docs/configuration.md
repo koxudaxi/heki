@@ -235,6 +235,7 @@ the installed release changed, and the changelog on GitHub lists every release.
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF105`, and `EFF106` in test code as pytest finds it: `test_*` functions and the functions nested in them, `test_*.py` and `*_test.py` files, and files under `test/` or `tests/`. |
 | `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
 | `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. A heuristic report counts as a warning, whatever its severity: it can be wrong about the code, so at `"error"` only exact errors fail the run. Warnings and heuristic reports are reported either way, and the language server shows them. `--fail-on` overrides it. A report of a contract with [`fail = true`](#failing-on-a-contract) fails the run at either value. |
+| `fail` | `[]` | Rules whose reports fail `heki check` (and `--watch`) with exit code 1 whatever their tier and severity, named as `select` names them (`["IMP101", "EFF"]`). A rule that is not selected reports nothing, so nothing fails on it. Like [`fail = true`](#failing-on-a-contract) on a contract, it leaves `fail-on`, the severities, and the tiers as they are, and a report a [baseline](adoption.md#ratchet-baselines) records or an inline [suppression](#inline-suppressions) hides does not fail the run. An unknown rule is a configuration error. |
 | `report-unused-suppressions` | `false` | Report the codes of suppression comments that suppressed no report, and the baseline entries that matched none. See [Unused suppressions](#unused-suppressions). |
 | `require-suppression-codes` | `false` | Report the `# heki: ignore` comments that name no rule. See [Suppressions that name no rule](#suppressions-that-name-no-rule). |
 | `unmatched-contract-entries` | a warning, in a run over the whole project | `"warning"`, `"error"`, or `"ignore"`: what `heki check` does with a contract entry that matches nothing in the analyzed files. An error fails the run. See [Entries that match nothing](#entries-that-match-nothing). |
@@ -528,8 +529,8 @@ unresolved = "report"
 ```
 
 The read side of `write-owners`. A read is `ref.children`, a read through a local alias,
-`getattr(ref, "children")`, or `ref.__dict__["children"]`, also through a class object, which
-reads the class attribute (`Reference.children`, `cls.children`, a value typed
+`getattr(ref, "children")`, `hasattr(ref, "children")`, or `ref.__dict__["children"]`, also
+through a class object, which reads the class attribute (`Reference.children`, `cls.children`, a value typed
 `type[Reference]`).
 
 A read, or a call (`call-owners`, and an effect boundary's `call-targets` and
@@ -577,7 +578,7 @@ The call side of `write-owners`.
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `name` | `""` | The contract's name in reports. |
-| `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass, also through a `functools.partial` object holding it and through a library method building an instance of its receiver's class (a pydantic model's `model_construct`, `model_validate` of a dict, `model_copy`). A target may end in an argument list (`DataType(is_dict=True)`, below). An entry can also name functions and classes outside the project ([below](#symbols-outside-the-project)). |
+| `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass, also through a `functools.partial` object holding it and through a library method building an instance of its receiver's class (a pydantic model's `model_construct`, `model_validate` of a dict, `model_copy`). A target may end in an argument list (`DataType(is_dict=True)`, below), and `*` with an argument list names every call passing its constants, whatever it calls (`*(module="pkg.backend.*")`). A target with a module part (`pkg:Kind`, `pkg:*`) also names the names the module imports, read or called through the module object (`pkg.Kind.A`, below). An entry can also name functions and classes outside the project ([below](#symbols-outside-the-project)). |
 | `subclasses` | `true` | `false`: a class target means constructing exactly the class, not a subclass (an exception class whose subclasses anyone may raise). `Class.method` targets keep covering overrides. |
 | `allowed-callers` | `[]` | Functions allowed to call the targets. |
 | `forbidden-callers` | `[]` | When set, only calls by these functions are reported. |
@@ -616,7 +617,11 @@ The call side of `write-owners`.
   callable a builtin calls once per item (`sorted(xs, key=decide)`) is a call already.
 - A target ending in an argument list, `name(parameter=value, ...)`, names the calls of `name`
   that pass each value: `"DataType(is_dict=True)"`, `'container_flags(kind="dict")'`. A value is
-  `True`, `False`, `None`, an integer, or a string in single or double quotes (no escapes). A call
+  `True`, `False`, `None`, an integer, or a string in single or double quotes (no escapes). A
+  string holding `*`, `?`, `[`, or `{` is a glob matched against the whole string constant
+  passed, dots included: `'make(module="pkg.backend.*")'` matches `"pkg.backend.dataclass"`. Write
+  one of these characters in brackets to match it literally (`[*]`, `[?]`, `[[]`, `[{]`):
+  `'make(module="pkg[*]")'` matches `"pkg*"` only. A call
   passes it when heki establishes that the argument bound to the parameter is that constant (a
   literal, a string constant bound once, such as a module's `Final` name, or a module's number or
   boolean bound once, as `EFF101` evaluates them: `LIMIT = 0`, also imported (by the module or by
@@ -653,6 +658,30 @@ The call side of `write-owners`.
   unpacking of another mapping) is not established, and the call is not reported. A reference passes no arguments, so it never matches. A target with an argument list
   names no symbol outside the project; `unresolved = "report"` matches its last name before the
   list, whatever the arguments of a call on an object of unknown class.
+- `*` followed by an argument list names every call passing its constants, whatever it calls:
+  `targets = ['*(module="pkg.backend.*")']` reports `factory(module=BACKEND)` for a parameter
+  `factory`, `loader.build(module=BACKEND)` on an object of unknown class, and
+  `dict(module=BACKEND)`, with `BACKEND = "pkg.backend.dataclass"`, whatever `unresolved` says,
+  and `MUT207` leaves the target out. A call of project code passes its constants as above. A
+  call heki binds to no project function or class (a function or class outside the project, or
+  a value of unknown class) passes only the constants it writes as keywords, or as entries of a
+  `**` mapping the function builds (`factory(**{"module": BACKEND})`): heki cannot tell which
+  parameter a position or a default binds there. No function is part of the operation such a
+  target guards, so the functions making the calls may not make them unless `allowed-callers`
+  names them.
+- An argument list naming a parameter that no function or class the target names takes (no
+  parameter of the name and no `**kwargs`; a class may take a name it declares, and one whose
+  initializer is not project code any keyword) matches no call, since the call raises
+  `TypeError`: `lint.unmatched-contract-entries` warns about it ("names no function, method, or
+  class taking `kind`").
+- A target with a module part also names the names that module binds to definitions of other
+  modules (`from pkg.enums import Kind` in `pkg`), read or called through the module object,
+  judged at the access, not at the definition the name resolves to: `targets = ["pkg:Kind"]`
+  with `references = "reads"` reports `pkg.Kind.A` after `import pkg.fmt` (which binds `pkg`)
+  and `root.Kind(1)` after `import pkg as root`, and `pkg:*` every such name of `pkg`. An import
+  of the name (`from pkg import Kind`, `from pkg.enums import Kind`) and its uses are judged at
+  the definition, which the target does not name, and so is a submodule read through its
+  package (`pkg.fmt.X`). A target without a module part (`pkg.Kind`) names only definitions.
 - With `references = "calls-and-bases"`, a class statement passing a class target as a base is
   reported too ("`<module>` subclasses `pkg.core.Base`"), at the base, or at the class statement
   for a name an import or the module body binds: the class it makes holds the base, and
@@ -673,9 +702,11 @@ The call side of `write-owners`.
   (`isinstance(value, (Keys, Code))`, a test of a module-level display holding it). No read: a
   call (a call of its own), an annotation, evaluated or not (`list[Keys]`, `Keys | None`), the
   values Python evaluates only when asked (a `type` statement's value, the bounds and defaults of
-  type parameters), an import, a name bound to the target by itself (`Alias = Keys`, a local, a
+  type parameters), an import, a name bound to the target by itself in a function (a local, a
   `nonlocal` cell), whose own uses count, and a value nothing uses (`Keys` as an expression
-  statement). A load handing a target on is reported as a hand-on only. A read is matched as a
+  statement). A class body or a module binding a name to the target is a read of it
+  (`model_type = Keys`, `Alias = Keys`), because the uses of a class attribute or a global are not
+  all followed back to the target. A load handing a target on is reported as a hand-on only. A read is matched as a
   construction is, so a subclass counts unless `subclasses = false`; an instance of the class is
   no read of it.
 
@@ -1017,12 +1048,12 @@ or a glob whose `*` spans dots, never a suffix (`pkg.*` names `pkg.facts` and
 | `importers` | every module | The modules judged. |
 | `exempt-importers` | `[]` | Modules of `importers` that are not judged. |
 | `allowed-imports` | `[]` | The modules the importers may import: every other import is reported, but those of `relative-imports`. `"pkg.db:Session"` allows one name of a module: only `from pkg.db import Session` imports it (a glob may stand in either part), and another name of `pkg.db` is still reported. |
-| `forbidden-imports` | `[]` | When set, only imports of these modules are reported, less the allowed ones, as in [Allowed and forbidden functions](#allowed-and-forbidden-functions). A contract setting none of `allowed-imports`, `forbidden-imports`, and `relative-imports` allows no imports. |
+| `forbidden-imports` | `[]` | When set, only imports of these modules are reported, less the allowed ones, as in [Allowed and forbidden functions](#allowed-and-forbidden-functions). `"pkg.parser:_*"` forbids the names of a module that match: `from pkg.parser.base import _helper` is reported through `"pkg.parser.*:_*"`, and `from pkg.parser import jsonschema` (a submodule) and `from pkg.parser.base import Parser` are not (a glob may stand in either part). A contract setting none of `allowed-imports`, `forbidden-imports`, and `relative-imports` allows no imports. |
 | `relative-imports` | `[]` | The modules the importers may import only through a relative import ([Relative imports only](#relative-imports-only)). |
 | `ignored-imports` | `[]` | `"importer -> imported"` pairs of module patterns whose imports the contract accepts (`"pkg.cli -> pkg.db"`; `"pkg.cli -> pkg.db:Session"` accepts one name of the module, as in `allowed-imports`). With `reach`, an import accepted or allowed by a name is not followed. |
 | `type-checking` | `"ignore"` | `"ignore"` or `"report"`: whether the imports under `if TYPE_CHECKING:`, which never run, count. |
 | `reach` | `"statement"` | `"statement"`: each import of an importer is judged. `"import-time"`: every module loading an importer loads while it loads. `"all"`: every module a chain of imports that run leads to. |
-| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the imports whose module heki cannot name are reported under [`IMP202`](rules/unresolved-guarded-import.md). |
+| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the imports whose module heki cannot name are reported under [`IMP202`](rules/unresolved-guarded-import.md): a name the code does not fix, a call that may be `importlib.import_module` or `__import__` (a method of that name on an object of unknown class, a name bound to one on some path), and a relative import that climbs past the top-level package. |
 | `message` | none | The help of every report of the contract. |
 | `fail` | `false` | `true`: the reports of this contract make `heki check` (and `--watch`) exit with code 1, whatever their tier and severity; see [Failing on a contract](#failing-on-a-contract). |
 
@@ -1147,7 +1178,8 @@ fail = true
 - `fail = true` in a [`<kind>-defaults` table](#defaults-for-the-tables-of-a-kind) applies to
   every table of the kind that does not set `fail` itself.
 - `fail-on = "warning"` is still there for a project that wants every warning and heuristic
-  report to fail the run.
+  report to fail the run. To fail the run on the reports of single rules that belong to no
+  contract (`IMP101`), list them in [`lint.fail`](#rule-selection-toolhekilint).
 
 ### How contracts report
 
@@ -1258,8 +1290,9 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
   files leaves out.
 - Each entry is matched as its rule matches it, against the definitions of the analyzed files:
   a function pattern names a function, method, class, or module body; a call target a function,
-  method, or class; an exempt method a method's name; a scope a module, class, or function; a
-  class pattern a class.
+  method, or class (or, with a module part, a name the module imports), and one with an
+  argument list one that takes each parameter the list names; an exempt method a method's
+  name; a scope a module, class, or function; a class pattern a class.
 - A `Class.attr` entry needs a project class, and an attribute the class family has: a name its
   class body binds (a method, an annotation, an assignment), one its methods or its module set
   on its instances, one of a project base, an attribute or a constant `__dict__` key the code
