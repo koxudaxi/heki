@@ -31,17 +31,25 @@ fn inspect(p: &Project, symbol: &str) -> Value {
     serde_json::from_str(&out).unwrap()
 }
 
-/// `(type, slots changed under the context)` of each context of `symbol`.
+/// `(type, the slots of each change record under the context)` of each context of `symbol`: a
+/// context that changes nothing has no record.
 fn contexts(p: &Project, symbol: &str) -> Vec<(String, Vec<String>)> {
     let r = inspect(p, symbol);
     assert_eq!(r["changes"]["params"], Value::Array(Vec::new()), "{r:#}");
+    records(&r)
+}
+
+fn records(r: &Value) -> Vec<(String, Vec<String>)> {
     (r["registered"].as_array().unwrap().iter())
         .map(|c| {
-            let slots = (c["changes"].as_array().unwrap().iter())
-                .flat_map(|ch| ch["slots"].as_array().unwrap().clone())
-                .map(|s| s.as_str().unwrap().to_owned())
+            let records = (c["changes"].as_array().unwrap().iter())
+                .map(|ch| {
+                    let slots = ch["slots"].as_array().unwrap().iter();
+                    let slots: Vec<&str> = slots.map(|s| s.as_str().unwrap()).collect();
+                    slots.join(", ")
+                })
                 .collect();
-            (c["type"].as_str().unwrap().to_owned(), slots)
+            (c["type"].as_str().unwrap().to_owned(), records)
         })
         .collect()
 }
@@ -171,6 +179,241 @@ fn a_read_in_place_of_the_change_keeps_the_context_without_it() {
     );
 }
 
+/// The table reaches the holder by keyword, and the helper picks the row of the registered
+/// key: the context stays.
+#[test]
+fn a_table_passed_by_keyword_and_a_constant_row_key_keep_the_context() {
+    let p = panels(
+        "dispatch_keyword_table",
+        &[
+            (
+                "owners.py",
+                "        return Channel(table)\n\n\nclass Right:",
+                "        return Channel(bindings=table)\n\n\nclass Right:",
+            ),
+            (
+                "channel.py",
+                "select(self.items, key)",
+                "select(self.items, \"first\")",
+            ),
+        ],
+    );
+    assert_eq!(
+        contexts(&p, "panels.views.Page.store"),
+        one("panels.owners.Left", "journal")
+    );
+    assert_eq!(contexts(&p, "panels.views.Deck.store"), Vec::new());
+}
+
+/// Starred operands of a display give their items (an empty one gives none), and so do those
+/// of a call, a starred tuple of positions among them.
+#[test]
+fn starred_operands_of_a_display_hand_on_their_items() {
+    let p = panels(
+        "dispatch_starred_display",
+        &[(
+            "adapter.py",
+            "    return await callback(*values)",
+            "    prefix = []\n    return await callback(*[*prefix, *values])",
+        )],
+    );
+    assert_eq!(
+        contexts(&p, "panels.views.Page.store"),
+        one("panels.owners.Left", "journal")
+    );
+    let p = panels(
+        "dispatch_starred_tuple",
+        &[(
+            "adapter.py",
+            "    return await callback(*values)",
+            "    return await forward(callback, *values)\n\n\nasync def forward(fn, *rest):\n    return await fn(*rest)",
+        )],
+    );
+    assert_eq!(
+        contexts(&p, "panels.views.Page.store"),
+        one("panels.owners.Left", "journal")
+    );
+}
+
+/// A constant name is looked up among the members it names only: helpers of another name do
+/// not count toward the most handlers a lookup may find.
+#[test]
+fn a_constant_name_is_followed_past_many_other_members() {
+    let helpers: String = (0..9)
+        .map(|i| format!("    def help{i}(self):\n        pass\n\n"))
+        .collect();
+    let p = panels(
+        "dispatch_constant_many",
+        &[
+            (
+                "views.py",
+                "class Commands:\n",
+                &format!("class Commands:\n{helpers}"),
+            ),
+            (
+                "views.py",
+                "getattr(self, name)",
+                "getattr(self, \"store\")",
+            ),
+        ],
+    );
+    assert_eq!(
+        contexts(&p, "panels.views.Page.store"),
+        one("panels.owners.Left", "journal")
+    );
+}
+
+/// A lookup in a helper of another module: the lookup and the call of what it found keep the
+/// function and file each runs in.
+#[test]
+fn a_lookup_in_another_module_keeps_its_own_site() {
+    let p = panels(
+        "dispatch_lookup_elsewhere",
+        &[
+            (
+                "views.py",
+                "class Commands:\n",
+                "from .lookup import find\n\n\nclass Commands:\n",
+            ),
+            ("views.py", "getattr(self, name)", "find(self, name)"),
+        ],
+    );
+    p.write(
+        "panels/lookup.py",
+        "def find(view, name):\n    return getattr(view, name)\n",
+    );
+    let r = inspect(&p, "panels.views.Page.store");
+    let c = &r["registered"][0];
+    let site = |s: &Value| {
+        (
+            s["function"].as_str().map(str::to_owned),
+            s["path"].as_str().map(str::to_owned),
+            s["line"].as_u64(),
+        )
+    };
+    assert_eq!(
+        site(&c["selected_at"]),
+        (
+            Some("panels.lookup.find".to_owned()),
+            Some("panels/lookup.py".to_owned()),
+            Some(2)
+        ),
+        "{r:#}"
+    );
+    assert_eq!(
+        site(&c["invoked_at"]),
+        (
+            Some("panels.views.Commands.choose".to_owned()),
+            Some("panels/views.py".to_owned()),
+            Some(8)
+        )
+    );
+}
+
+/// A handler whose parameter is annotated with a base class of both owners: each context types
+/// it as its own owner's class.
+#[test]
+fn a_context_types_an_annotated_parameter_as_its_owner() {
+    let p = panels(
+        "dispatch_annotated",
+        &[
+            ("owners.py", "capture(Deck, self)", "capture(Page, self)"),
+            (
+                "owners.py",
+                "from .views import Page, Deck\n",
+                "from .views import Page, Deck, Owner\n",
+            ),
+            ("owners.py", "class Left:", "class Left(Owner):"),
+            ("owners.py", "class Right:", "class Right(Owner):"),
+            (
+                "views.py",
+                "class Commands:\n",
+                "class Owner:\n    def stamp(self):\n        pass\n\n\nclass Commands:\n",
+            ),
+            (
+                "views.py",
+                "    async def store(self, packet, ledger):\n        ledger.stamp()\n\n    async def noop",
+                "    async def store(self, packet, ledger: Owner):\n        ledger.stamp()\n\n    async def noop",
+            ),
+        ],
+    );
+    let mut found = records(&inspect(&p, "panels.views.Page.store"));
+    found.sort();
+    let mut both = one("panels.owners.Left", "journal");
+    both.extend(one("panels.owners.Right", "audit"));
+    assert_eq!(found, both);
+}
+
+/// A change of a container held in an item of the parameter is named in the text report.
+#[test]
+fn the_text_report_names_items_changed_under_a_context() {
+    let p = panels(
+        "dispatch_item_text",
+        &[(
+            "views.py",
+            "    async def noop(self, packet, ledger):\n        pass\n",
+            "    async def noop(self, packet, ledger):\n        ledger[\"k\"].append(1)\n",
+        )],
+    );
+    let (code, text, err) = p.heki(&["inspect", "panels.views.Page.noop"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        text.contains("  then changes ledger[\"k\"]: in place, "),
+        "{text}"
+    );
+}
+
+/// Helpers the join reads for whether the registered row can come back: tests on the way to
+/// the return that the row's key and the call's arguments decide (or leave to run time), and
+/// returns not reached through plain branches from the loop's body or rows not unpacked into
+/// plain targets, which give no context.
+#[test]
+fn helper_shapes_decide_whether_the_row_comes_back() {
+    let select = "def select(rows, wanted):\n    for tag, item in rows:\n        if tag == wanted:\n            return tag, item\n    return None, None\n";
+    let skips = "def select(rows, wanted):\n    for tag, item in rows:\n        if tag is None:\n            continue\n        if not tag:\n            continue\n        if tag == 0:\n            continue\n        if tag != wanted:\n            continue\n        if tag == \"unused\":\n            continue\n        if len(tag) < 0:\n            continue\n        return tag, item\n    return None, None\n";
+    let unset = "def select(rows, wanted):\n    for tag, item in rows:\n        if wanted is None:\n            return tag, item\n    return None, None\n";
+    let merged = "def select(rows, wanted):\n    for tag, item in rows:\n        if tag == wanted:\n            found = 1\n        else:\n            found = 2\n        return tag, item\n    return None, None\n";
+    let handler = "def select(rows, wanted):\n    for tag, item in rows:\n        try:\n            wanted.check(tag)\n        except ValueError:\n            return tag, item\n    return None, None\n";
+    let in_a_try = "def select(rows, wanted):\n    for tag, item in rows:\n        try:\n            if tag == wanted:\n                return tag, item\n        except ValueError:\n            pass\n    return None, None\n";
+    let starred = "def select(rows, wanted):\n    for tag, *rest in rows:\n        if tag == wanted:\n            return tag, rest\n    return None, None\n";
+    let key = |k: &'static str| ("channel.py", "select(self.items, key)", k);
+    let (first, second, none) = (
+        key("select(self.items, \"first\")"),
+        key("select(self.items, \"second\")"),
+        key("select(self.items, None)"),
+    );
+    let cases: &[(&str, &str, Option<Edit>, bool)] = &[
+        ("skips", skips, None, true),
+        ("skips_other_key", skips, Some(second), false),
+        ("skips_first_key", skips, Some(first), true),
+        ("unset_argument", unset, Some(none), true),
+        ("after_a_merge", merged, None, false),
+        ("in_a_try", in_a_try, None, true),
+        ("in_a_handler", handler, None, false),
+        ("starred_target", starred, None, false),
+    ];
+    let wrong: Vec<&str> = (cases.iter())
+        .filter(|(name, helper, call, kept)| {
+            let mut edits = vec![("channel.py", select, *helper)];
+            edits.extend(*call);
+            let p = panels(&format!("dispatch_helper_{name}"), &edits);
+            let found = contexts(&p, "panels.views.Page.store");
+            found
+                != if *kept {
+                    one("panels.owners.Left", "journal")
+                } else {
+                    Vec::new()
+                }
+        })
+        .map(|(name, ..)| *name)
+        .collect();
+    assert_eq!(
+        wrong,
+        Vec::<&str>::new(),
+        "the helpers the join reads wrongly"
+    );
+}
+
 #[test]
 fn a_registration_without_its_owner_gives_no_context() {
     let p = panels(
@@ -262,6 +505,62 @@ fn premises_that_break_give_no_context() {
                 "channel.py",
                 "        self.items = bindings\n",
                 "        self.items = bindings\n        self.items = []\n",
+            )],
+        ),
+        (
+            "table_argument_keyword_only",
+            &[(
+                "channel.py",
+                "def __init__(self, bindings):",
+                "def __init__(self, *, bindings):",
+            )],
+        ),
+        (
+            "row_unpacked_into_more_targets",
+            &[(
+                "channel.py",
+                "for tag, item in rows:",
+                "for tag, item, extra in rows:",
+            )],
+        ),
+        (
+            "row_key_of_another_registration",
+            &[(
+                "channel.py",
+                "select(self.items, key)",
+                "select(self.items, \"second\")",
+            )],
+        ),
+        (
+            "attribute_hook_stored",
+            &[(
+                "views.py",
+                "class Page(Commands):",
+                "Commands.__getattr__ = None\n\n\nclass Page(Commands):",
+            )],
+        ),
+        (
+            "attribute_hook_assigned",
+            &[(
+                "views.py",
+                "class Commands:\n",
+                "def redirect(self, key):\n    return None\n\n\nclass Commands:\n    __getattribute__ = redirect\n\n",
+            )],
+        ),
+        (
+            "constant_lookup_that_fails_first",
+            &[(
+                "views.py",
+                "        operation = getattr(self, name)\n",
+                "        await getattr(self, \"missing\")(event, owner)\n        operation = getattr(self, name)\n",
+            )],
+        ),
+        (
+            "coroutine_awaited_twice",
+            &[(
+                "views.py",
+                "        return await operation(event, owner)",
+                "        pending = operation(event, owner)\n        alias = pending\n        await pending\n        return await alias",
             )],
         ),
         (
@@ -448,14 +747,14 @@ fn premises_that_break_give_no_context() {
             )],
         ),
     ];
-    for (name, edits) in cases {
-        let p = panels(&format!("dispatch_{name}"), edits);
-        assert_eq!(
-            contexts(&p, "panels.views.Page.store"),
-            Vec::new(),
-            "{name}"
-        );
-    }
+    let kept: Vec<&str> = (cases.iter())
+        .filter(|(name, edits)| {
+            let p = panels(&format!("dispatch_{name}"), edits);
+            !contexts(&p, "panels.views.Page.store").is_empty()
+        })
+        .map(|(name, _)| *name)
+        .collect();
+    assert_eq!(kept, Vec::<&str>::new(), "the cases that keep a context");
 }
 
 const MARKS: &str = r#"LISTED = []
@@ -640,7 +939,7 @@ class Router:
 
 
 def pick(table, path):
-    for pattern, target in table:
+    for pattern, target, size in table:
         if pattern == path:
             return pattern, target
         found = pattern.match(path)
@@ -709,5 +1008,13 @@ fn adapters_decorators_and_kept_tables_under_both_comprehension_models() {
         assert_eq!(contexts(&p, "relay.screens.Search.put"), Vec::new());
         let patched = contexts(&p, "relay.screens.Search.patch");
         assert_eq!(patched, vec![("relay.hub.Hub".to_owned(), Vec::new())]);
+        // The comprehension unpacking each row into more targets than it holds raises.
+        let copy = "for p, target in table]";
+        assert_eq!(HUB.matches(copy).count(), 1);
+        p.write(
+            "relay/hub.py",
+            &HUB.replace(copy, "for p, target, extra in table]"),
+        );
+        assert_eq!(contexts(&p, "relay.screens.Overview.get"), Vec::new());
     }
 }

@@ -957,7 +957,7 @@ impl<'a, 'i> Inspector<'a, 'i> {
                 },
                 called_at: site(&c.called_in, c.called_at),
                 selected_at: site(&c.selected_in, c.selected_at),
-                invoked_at: site(&c.selected_in, c.invoked_at),
+                invoked_at: site(&c.invoked_in, c.invoked_at),
                 changes,
             });
         }

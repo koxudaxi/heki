@@ -5568,6 +5568,23 @@ impl ProjectDecls {
         self.function_taken_along(&self.mro(class), name)
     }
 
+    /// Whether a class along the MRO of the project class `class` binds `name`, to whatever
+    /// object: in its body or its methods (`ClassDecl::members`), or by a store elsewhere.
+    /// `None` when a class on the way other than `object` is not a project class (heki does not
+    /// know what it binds).
+    pub fn binds_along(&self, class: &str, name: &str) -> Option<bool> {
+        let mro = self.mro(class);
+        if self.lookup_rebound(&mro, name) {
+            return Some(true);
+        }
+        let mut binds = false;
+        for c in mro.iter().filter(|c| *c != "builtins.object") {
+            self.read(|k| note(&mut k.class_facts, c));
+            binds |= self.class(c)?.members.contains(name);
+        }
+        Some(binds)
+    }
+
     /// The name reading `attr` on the class `class` or on one of its instances finds, when the
     /// first class along the MRO defining it binds it last to one module-level name
     /// ([`Self::class_aliases`]), with whether the body wraps it in `staticmethod`.

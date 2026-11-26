@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use heki_ast::Span;
-use heki_ir::walk::{Answer, Budget, FnShape};
+use heki_ir::walk::{Answer, Budget, FnShape, Use};
 use heki_ir::{
     BuiltinKind, CompareOpKind, ConstLiteral, FunctionKind, InstKind, IrFunction, ModuleIr,
     Terminator, UnaryOpKind, VarId,
@@ -109,6 +109,9 @@ pub struct Row {
     pub callee: Named,
     pub args: Vec<Leaf>,
     pub kwargs: Vec<(String, Leaf)>,
+    /// The fields of the row the function returns, one per slot (`Leaf::Other` for a slot it
+    /// computes, and for the registered one).
+    pub fields: Vec<Leaf>,
     /// The factory call.
     pub site: Span,
 }
@@ -135,6 +138,8 @@ pub struct RowCall {
     pub helper: FuncKey,
     /// The position of `self.<attr>` among the helper's arguments.
     pub helper_arg: u8,
+    /// The helper's arguments by position.
+    pub helper_args: Vec<Leaf>,
     pub slot: u8,
     /// The names of the values the call passes, by position and by keyword.
     pub args: Vec<String>,
@@ -145,11 +150,40 @@ pub struct RowCall {
 
 /// The function returns, in `slot`, field `field` of the row it picks from parameter `param`
 /// (every other return gives `None`s).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pick {
     pub param: u8,
     pub field: u8,
     pub slot: u8,
+    /// The targets each row is unpacked into.
+    pub unpacks: u8,
+    /// The tests on the way from the loop over the rows to each return giving the field.
+    pub when: Vec<Vec<Test>>,
+}
+
+/// A branch on the way to a return: the return is reached when the condition is `holds`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Test {
+    /// The comparison the condition is (`None`: another condition, never decided).
+    pub compare: Option<(Equality, Operand, Operand)>,
+    pub holds: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Equality {
+    Eq,
+    NotEq,
+    Is,
+    IsNot,
+}
+
+/// A value a test compares: a field of the row, a parameter, a constant, or another value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Operand {
+    Field(u8),
+    Param(u8),
+    Lit(Lit),
+    Other,
 }
 
 /// A function's body as the join follows it: its blocks over its SSA values.
@@ -218,8 +252,8 @@ pub enum Op {
     Global(u32, Named),
     Cell(u32, String),
     Copy(u32, u32),
-    Tuple(u32, Vec<u32>),
-    List(u32, Vec<u32>),
+    Tuple(u32, Vec<Item>),
+    List(u32, Vec<Item>),
     Attr(u32, u32, String),
     SetAttr(u32, String),
     Item(u32, u32, u32),
@@ -238,6 +272,9 @@ pub enum Op {
     Other,
 }
 
+/// An operand of a display or a call, `true` when it is starred (`*xs` gives the items of `xs`).
+pub type Item = (u32, bool);
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallOp {
     pub dst: u32,
@@ -245,7 +282,7 @@ pub struct CallOp {
     pub callee: u32,
     pub method: Option<String>,
     /// Each argument, `true` when it is starred.
-    pub args: Vec<(u32, bool)>,
+    pub args: Vec<Item>,
     /// `None`: `**mapping`.
     pub kwargs: Vec<(Option<String>, u32)>,
     pub site: Span,
@@ -356,6 +393,7 @@ fn factory_call(cx: &TypeCtx<'_>, f: &IrFunction, shape: &FnShape<'_>, v: VarId)
         callee,
         args,
         kwargs,
+        fields: Vec::new(),
         site: inst.span,
     })
 }
@@ -401,7 +439,7 @@ fn table_rows(
     table: VarId,
 ) -> Option<Vec<Row>> {
     let names = |v: VarId| shape.copy_root(v) == table;
-    let mut stored: Vec<(u8, VarId)> = Vec::new();
+    let mut stored: Vec<Appended> = Vec::new();
     let mut iterated = Vec::new();
     let mut returned = false;
     // A comprehension before 3.12 is a function of its own, called with the table.
@@ -440,7 +478,8 @@ fn table_rows(
                     ..
                 } if *recv == v && method == "append" && kwargs.is_empty() && args.len() == 1 => {
                     let items = tuple_items(shape, args[0])?;
-                    stored.extend(items.iter().enumerate().map(|(s, x)| (s as u8, *x)));
+                    let slots = items.iter().enumerate().map(|(s, x)| (s as u8, *x));
+                    stored.push((items.len(), slots.collect()));
                 }
                 InstKind::MakeClosure {
                     dst,
@@ -452,27 +491,44 @@ fn table_rows(
         }
     }
     let kept = kept_slots(f, shape, table, &iterated, returned, comprehension)?;
-    let rows = stored.into_iter().filter(|(s, _)| kept.contains(s));
-    Some(
-        rows.filter_map(|(slot, v)| {
-            Some(Row {
-                slot,
-                ..factory_call(cx, f, shape, v)?
+    // A copy unpacking the rows into another number of targets raises.
+    let copies = |width: usize| kept.unpacks.is_none_or(|n| usize::from(n) == width);
+    if !stored.iter().all(|(width, _)| copies(*width)) {
+        return None;
+    }
+    let mut out = Vec::new();
+    for (width, slots) in stored {
+        let slots: Vec<(u8, VarId)> = slots.into_iter().filter(|(s, _)| kept.has(*s)).collect();
+        let fields: Vec<Leaf> = (0..kept.width.map_or(width, usize::from))
+            .map(|k| {
+                let held = slots.iter().find(|(s, _)| usize::from(*s) == k);
+                held.map_or(Leaf::Other, |(_, v)| leaf(cx, f, shape, *v))
             })
-        })
-        .collect(),
-    )
+            .collect();
+        out.extend(slots.iter().filter_map(|(slot, v)| {
+            Some(Row {
+                slot: *slot,
+                fields: fields.clone(),
+                ..factory_call(cx, f, shape, *v)?
+            })
+        }));
+    }
+    Some(out)
 }
 
-/// The values `f` hands, by slot, to the nested function `n` (made at `closure`) that appends
-/// a tuple of its parameters to the list in its cell `cell`: each call of it in `f`.
+/// A row appended to a table: its width, and the value of each slot the model sees.
+type Appended = (usize, Vec<(u8, VarId)>);
+
+/// The rows `f` appends through the nested function `n` (made at `closure`) that appends a
+/// tuple of its parameters to the list in its cell `cell`: for each call of it in `f`, the
+/// tuple's width and the values the call hands, by slot.
 fn appended(
     f: &IrFunction,
     shape: &FnShape<'_>,
     n: &IrFunction,
     closure: VarId,
     cell: VarId,
-) -> Option<Vec<(u8, VarId)>> {
+) -> Option<Vec<Appended>> {
     let name = f.var_names.get(cell.0 as usize)?.as_deref()?;
     let insts: Vec<&InstKind> = n
         .blocks
@@ -521,7 +577,7 @@ fn appended(
                 } = &f.blocks[b.0 as usize].insts[*i as usize].kind
                 && *c == v
             {
-                stored_by(n, &slots, args, kwargs, &mut out);
+                out.push((elems.len(), stored_by(n, &slots, args, kwargs)));
             }
         }
     }
@@ -534,17 +590,14 @@ fn stored_by(
     slots: &[Option<u8>],
     args: &[VarId],
     kwargs: &[(Option<String>, VarId)],
-    out: &mut Vec<(u8, VarId)>,
-) {
+) -> Vec<(u8, VarId)> {
     let by_name = kwargs.iter().filter_map(|(k, a)| {
         let j = n.params.iter().position(|p| Some(&p.name) == k.as_ref())?;
         Some((j, *a))
     });
-    for (j, a) in args.iter().copied().enumerate().chain(by_name) {
-        if let Some(Some(s)) = slots.get(j) {
-            out.push((*s, a));
-        }
-    }
+    (args.iter().copied().enumerate().chain(by_name))
+        .filter_map(|(j, a)| Some(((*slots.get(j)?)?, a)))
+        .collect()
 }
 
 /// The returned values of `f`, through copies.
@@ -557,6 +610,22 @@ fn returned_values(f: &IrFunction, shape: &FnShape<'_>) -> Vec<VarId> {
         .collect()
 }
 
+/// What `f` returns of the table's rows.
+struct Kept {
+    /// The slots it keeps (`None`: every slot).
+    slots: Option<Vec<u8>>,
+    /// The width of the rows it returns (`None`: the rows of the table).
+    width: Option<u8>,
+    /// The targets a copy unpacks each row of the table into.
+    unpacks: Option<u8>,
+}
+
+impl Kept {
+    fn has(&self, slot: u8) -> bool {
+        self.slots.as_ref().is_none_or(|s| s.contains(&slot))
+    }
+}
+
 /// The slots of the table's rows that what `f` returns keeps: every slot when it returns the
 /// table, or those a list of tuples built from the table's rows copies (in `f`, or in the
 /// comprehension function `f` calls with the table).
@@ -567,11 +636,15 @@ fn kept_slots(
     iterated: &[VarId],
     returned: bool,
     comprehension: Option<(&IrFunction, VarId)>,
-) -> Option<Vec<u8>> {
+) -> Option<Kept> {
     let values = returned_values(f, shape);
     let value = *values.first().filter(|_| values.len() == 1)?;
     if returned && value == table {
-        return Some((0..=u8::MAX).collect());
+        return Some(Kept {
+            slots: None,
+            width: None,
+            unpacks: None,
+        });
     }
     match comprehension {
         Some((n, call)) if call == value => {
@@ -606,7 +679,7 @@ fn copied_slots(
     shape: &FnShape<'_>,
     value: VarId,
     iterated: &[VarId],
-) -> Option<Vec<u8>> {
+) -> Option<Kept> {
     let appends: Vec<&[VarId]> = (shape.readers(value).iter())
         .filter_map(|u| {
             if let heki_ir::walk::Use::Inst(b, i) = u
@@ -624,22 +697,58 @@ fn copied_slots(
     let item = appends
         .first()
         .filter(|a| appends.len() == 1 && a.len() == 1)?[0];
-    let row_item = |e: VarId| -> Option<u8> {
+    let row_item = |e: VarId| -> Option<(VarId, u8)> {
         if let InstKind::SubscriptLoad { obj, index, .. } = &shape.inst(shape.copy_root(e))?.kind
             && let InstKind::IterNext { iter, .. } = &shape.inst(*obj)?.kind
             && iterated.contains(iter)
         {
-            return u8::try_from(shape.int_const(*index)?).ok();
+            return Some((*obj, u8::try_from(shape.int_const(*index)?).ok()?));
         }
         None
     };
     let items = tuple_items(shape, item)?;
-    Some(
-        (items.iter().enumerate())
-            .filter(|(s, e)| row_item(**e) == Some(*s as u8))
-            .map(|(s, _)| s as u8)
-            .collect(),
-    )
+    let copied: Vec<(u8, VarId)> = (items.iter().enumerate())
+        .filter_map(|(s, e)| {
+            let (row, k) = row_item(*e)?;
+            (usize::from(k) == s).then_some((k, row))
+        })
+        .collect();
+    let mut unpacks = None;
+    for (_, row) in &copied {
+        let n = unpacked_into(shape, *row)?;
+        (unpacks.is_none() || unpacks == Some(n)).then_some(())?;
+        unpacks = Some(n);
+    }
+    Some(Kept {
+        slots: Some(copied.iter().map(|(k, _)| *k).collect()),
+        width: Some(u8::try_from(items.len()).ok()?),
+        unpacks,
+    })
+}
+
+/// The number of plain targets the loop unpacks each row it gives in `item` into (the model
+/// reads a row's fields only through such an unpacking); `None` for a starred target.
+fn unpacked_into(shape: &FnShape<'_>, item: VarId) -> Option<u8> {
+    let readers = (shape.readers(item).iter()).filter(|u| !matches!(u, Use::Terminator(_)));
+    let loads: Vec<i64> = readers
+        .map(|u| unpack_index(shape, u))
+        .collect::<Option<_>>()?;
+    let plain = (0..loads.len()).all(|k| loads.contains(&(k as i64)));
+    plain.then(|| u8::try_from(loads.len()).ok()).flatten()
+}
+
+/// The index of the target `u` unpacks a row into.
+fn unpack_index(shape: &FnShape<'_>, u: &Use) -> Option<i64> {
+    let Use::Inst(b, i) = u else { return None };
+    let inst = &shape.f.blocks[b.0 as usize].insts[*i as usize];
+    match &inst.kind {
+        InstKind::SubscriptLoad { index, .. }
+            if crate::consumption::is_unpacking(shape, *index, inst.span) =>
+        {
+            shape.int_const(*index)
+        }
+        _ => None,
+    }
 }
 
 /// `t = self.<m>()` passed to a call of a project class.
@@ -768,6 +877,7 @@ fn row_calls(cx: &TypeCtx<'_>, f: &IrFunction, shape: &FnShape<'_>) -> Vec<RowCa
         let Some(InstKind::Call {
             callee_var: Some(h),
             args: helper_args,
+            star_from: None,
             ..
         }) = shape.inst(*obj).map(|i| &i.kind)
         else {
@@ -797,6 +907,9 @@ fn row_calls(cx: &TypeCtx<'_>, f: &IrFunction, shape: &FnShape<'_>) -> Vec<RowCa
             attr,
             helper,
             helper_arg,
+            helper_args: (helper_args.iter())
+                .map(|a| leaf(cx, f, shape, *a))
+                .collect(),
             slot: u8::try_from(slot).unwrap_or(u8::MAX),
             args: args.iter().map(name).collect(),
             kwargs,
@@ -808,7 +921,10 @@ fn row_calls(cx: &TypeCtx<'_>, f: &IrFunction, shape: &FnShape<'_>) -> Vec<RowCa
 }
 
 /// Every return of `f` gives either `None`s or a tuple whose slots hold fields of the row it
-/// iterates a parameter for: the `(field, slot)` pairs every such return keeps.
+/// iterates a parameter for: the `(field, slot)` pairs every such return keeps, each with the
+/// tests on the way to every return giving it. None when such a return is reached other than
+/// through a chain of tests from the loop's body, or the rows are unpacked other than into
+/// plain targets: whether the row can be given back is not checked then.
 fn picks(f: &IrFunction, shape: &FnShape<'_>) -> Vec<Pick> {
     let mut kept: Option<Vec<Pick>> = None;
     for b in &f.blocks {
@@ -830,31 +946,125 @@ fn picks(f: &IrFunction, shape: &FnShape<'_>) -> Vec<Pick> {
         if items.iter().all(none) {
             continue;
         }
-        let field = |slot: usize, e: VarId| -> Option<Pick> {
-            if let InstKind::SubscriptLoad { obj, index, .. } =
-                &shape.inst(shape.copy_root(e))?.kind
-                && let InstKind::IterNext { iter, .. } = &shape.inst(*obj)?.kind
-                && let InstKind::MakeIter { iterable, .. } = &shape.inst(*iter)?.kind
-            {
-                return Some(Pick {
-                    param: param_of(f, shape.copy_root(*iterable))?,
-                    field: u8::try_from(shape.int_const(*index)?).ok()?,
-                    slot: slot as u8,
-                });
-            }
-            None
-        };
-        let here: Vec<Pick> = items
-            .iter()
-            .enumerate()
-            .filter_map(|(s, e)| field(s, *e))
+        let fields: Vec<(u8, RowField)> = (items.iter().enumerate())
+            .filter_map(|(s, e)| Some((s as u8, row_field(f, shape, *e)?)))
             .collect();
+        // Each field with how its loop unpacks the rows and the tests from that loop's body.
+        let here: Option<Vec<Pick>> = (fields.iter())
+            .map(|(slot, r)| {
+                Some(Pick {
+                    param: r.param,
+                    field: r.field,
+                    slot: *slot,
+                    unpacks: unpacked_into(shape, r.item)?,
+                    when: vec![tests_to(shape, b.id, r.item)?],
+                })
+            })
+            .collect();
+        let Some(here) = here else {
+            return Vec::new();
+        };
         kept = Some(match kept {
             None => here,
-            Some(k) => k.into_iter().filter(|p| here.contains(p)).collect(),
+            Some(k) => (k.into_iter())
+                .filter_map(|mut p| {
+                    let same = |h: &&Pick| {
+                        (h.param, h.field, h.slot, h.unpacks)
+                            == (p.param, p.field, p.slot, p.unpacks)
+                    };
+                    let h = here.iter().find(same)?;
+                    p.when.extend(h.when.iter().cloned());
+                    Some(p)
+                })
+                .collect(),
         });
     }
     kept.unwrap_or_default()
+}
+
+/// Field `field` of the row the loop over parameter `param` gives in `item`.
+struct RowField {
+    item: VarId,
+    param: u8,
+    field: u8,
+}
+
+fn row_field(f: &IrFunction, shape: &FnShape<'_>, e: VarId) -> Option<RowField> {
+    if let InstKind::SubscriptLoad { obj, index, .. } = &shape.inst(shape.copy_root(e))?.kind
+        && let InstKind::IterNext { iter, .. } = &shape.inst(*obj)?.kind
+        && let InstKind::MakeIter { iterable, .. } = &shape.inst(*iter)?.kind
+    {
+        return Some(RowField {
+            item: *obj,
+            param: param_of(f, shape.copy_root(*iterable))?,
+            field: u8::try_from(shape.int_const(*index)?).ok()?,
+        });
+    }
+    None
+}
+
+/// The tests on the way to block `to` from the body of the loop giving rows in `item`: each
+/// block on the way has one predecessor, which jumps or branches to it (an exception edge is
+/// not followed).
+fn tests_to(shape: &FnShape<'_>, to: heki_ir::BlockId, item: VarId) -> Option<Vec<Test>> {
+    let mut tests = Vec::new();
+    let mut at = to;
+    // Each block is passed at most once.
+    let mut passes = 0..shape.f.blocks.len();
+    loop {
+        let (&[from], Some(_)) = (shape.preds(at), passes.next()) else {
+            return None;
+        };
+        match shape.f.blocks[from.0 as usize].terminator {
+            // The loop's own test: `at` is its body.
+            Terminator::Branch { cond, then_bb, .. } if cond == item => {
+                return (then_bb == at).then_some(tests);
+            }
+            Terminator::Jump(t) if t == at => {}
+            Terminator::Branch {
+                cond,
+                then_bb,
+                else_bb,
+            } if (then_bb == at) != (else_bb == at) => tests.push(Test {
+                compare: comparison(shape, cond, item),
+                holds: then_bb == at,
+            }),
+            _ => return None,
+        }
+        at = from;
+    }
+}
+
+fn comparison(
+    shape: &FnShape<'_>,
+    cond: VarId,
+    item: VarId,
+) -> Option<(Equality, Operand, Operand)> {
+    let InstKind::Compare { op, lhs, rhs, .. } = &shape.inst(shape.copy_root(cond))?.kind else {
+        return None;
+    };
+    let equality = match op {
+        CompareOpKind::Eq => Equality::Eq,
+        CompareOpKind::NotEq => Equality::NotEq,
+        CompareOpKind::Is => Equality::Is,
+        CompareOpKind::IsNot => Equality::IsNot,
+        _ => return None,
+    };
+    let operand = |v: VarId| {
+        let v = shape.copy_root(v);
+        if let Some(i) = param_of(shape.f, v) {
+            return Operand::Param(i);
+        }
+        match shape.inst(v).map(|i| &i.kind) {
+            Some(InstKind::SubscriptLoad { obj, index, .. }) if *obj == item => {
+                let field = shape.int_const(*index).and_then(|k| u8::try_from(k).ok());
+                field.map_or(Operand::Other, Operand::Field)
+            }
+            Some(InstKind::Const { literal, .. }) => Operand::Lit(lit(literal)),
+            _ => Operand::Other,
+        }
+    };
+    Some((equality, operand(*lhs), operand(*rhs)))
 }
 
 /// The program of `f`, when it has at most [`MAX_PROGRAM`] instructions.
@@ -906,7 +1116,9 @@ fn program(cx: &TypeCtx<'_>, ir: &ModuleIr, f: &IrFunction) -> Option<Program> {
             InstKind::LoadDeref { dst, name } => Op::Cell(dst.0, name.clone()),
             InstKind::Copy { dst, src } => Op::Copy(dst.0, src.0),
             InstKind::AllocBuiltin { dst, kind, elems } => {
-                let elems = elems.iter().map(|e| e.0).collect();
+                let elems = (elems.iter().enumerate())
+                    .map(|(i, e)| (e.0, starred.contains(&(*dst, i as u32))))
+                    .collect();
                 match kind {
                     BuiltinKind::Tuple => Op::Tuple(dst.0, elems),
                     BuiltinKind::List => Op::List(dst.0, elems),
@@ -1059,9 +1271,10 @@ pub struct Context {
     /// The call of the table's row.
     pub called_in: FuncKey,
     pub called_at: Span,
-    /// The lookup by name and the call of what it found.
+    /// The lookup by name and the call of what it found, each with the function it runs in.
     pub selected_in: FuncKey,
     pub selected_at: Span,
+    pub invoked_in: FuncKey,
     pub invoked_at: Span,
     /// The name looked up (the expression it is computed from, or the constant).
     pub selector: String,
@@ -1133,7 +1346,7 @@ fn follow(
     let Some(owner) = owner_of(e.key) else {
         return Answer::Open;
     };
-    let Some(flow) = consumer(entries, by_fqn, decls, e.key, &owner, row.slot) else {
+    let Some(flow) = consumer(entries, by_fqn, decls, e.key, &owner, row) else {
         return Answer::Open;
     };
     let mut run = Run {
@@ -1144,6 +1357,8 @@ fn follow(
         stack: Vec::new(),
         lists: Vec::new(),
         cells: Vec::new(),
+        coroutines: 0,
+        awaited: FxHashSet::default(),
         found: Vec::new(),
     };
     let value = |l: &Leaf| match l {
@@ -1194,6 +1409,7 @@ fn follow(
                 called_at: flow.call.site,
                 selected_in: t.selected_in.clone(),
                 selected_at: t.selected_at,
+                invoked_in: t.invoked_in.clone(),
                 invoked_at: t.invoked_at,
                 selector: t.selector.clone(),
                 equals: t.member.clone(),
@@ -1211,14 +1427,14 @@ struct Flow<'i> {
 
 /// The one call of the registered slot: a method of the owner hands the table `registrar`
 /// returns to a class whose `__init__` keeps it in an attribute that nothing else of the class
-/// writes, and a method of that class calls the slot of the row a helper picks from it.
+/// writes, and a method of that class calls the slot of the row a helper may give back from it.
 fn consumer<'i>(
     entries: &'i [Entry<'i>],
     by_fqn: &FxHashMap<String, usize>,
     decls: &ProjectDecls,
     registrar: &FuncKey,
     owner: &str,
-    slot: u8,
+    row: &Row,
 ) -> Option<Flow<'i>> {
     let method = registrar.qualname.rsplit('.').next()?;
     let entry = |k: &FuncKey| by_fqn.get(&k.fqn()).map(|i| &entries[*i]);
@@ -1231,16 +1447,13 @@ fn consumer<'i>(
         let Some(init) = method_key(decls, &hand.class, "__init__") else {
             continue;
         };
-        let names = decls
-            .function_decl(&init)
-            .map(|d| d.param_names.clone())
-            .unwrap_or_default();
-        let param = match &hand.arg {
-            ArgAt::Position(i) => i + 1,
-            ArgAt::Keyword(k) => names
-                .iter()
-                .position(|n| n == k)
-                .map_or(u8::MAX, |i| i as u8),
+        // The parameter of `__init__` the call binds the table to (the receiver comes first).
+        let param = decls.function_decl(&init).and_then(|d| match &hand.arg {
+            ArgAt::Position(i) => d.positional_param(usize::from(*i) + 1),
+            ArgAt::Keyword(k) => d.keyword_param(k),
+        });
+        let Some(param) = param.and_then(|p| u8::try_from(p).ok()) else {
+            continue;
         };
         let kept = entry(&init).into_iter().flat_map(|i| &i.facts.keeps);
         for (attr, _) in kept.filter(|(_, p)| *p == param) {
@@ -1256,7 +1469,10 @@ fn consumer<'i>(
                 for call in reader.facts.row_calls.iter().filter(|c| c.attr == *attr) {
                     let picked = entry(&call.helper).into_iter().flat_map(|h| &h.facts.picks);
                     let picked = picked.filter(|p| {
-                        p.param == call.helper_arg && p.field == slot && p.slot == call.slot
+                        p.param == call.helper_arg
+                            && p.field == row.slot
+                            && p.slot == call.slot
+                            && gives_back(p, row, call)
                     });
                     if picked.count() > 0 {
                         flows.push(Flow {
@@ -1271,6 +1487,67 @@ fn consumer<'i>(
     match flows.len() {
         1 => flows.pop(),
         _ => None,
+    }
+}
+
+/// Whether the helper may give back the registered row: it unpacks rows of the row's width,
+/// and on the way to one of its returns no test fails for what the model knows of the row's
+/// fields and of the helper's arguments. A test reading a value the model does not know (one
+/// the call gets at run time) may hold: it is a condition of the context, as the name the
+/// lookup reads is.
+fn gives_back(p: &Pick, row: &Row, call: &RowCall) -> bool {
+    usize::from(p.unpacks) == row.fields.len()
+        && (p.when.iter()).any(|tests| {
+            tests
+                .iter()
+                .all(|t| t.may_hold(&row.fields, &call.helper_args))
+        })
+}
+
+/// A constant a test may decide on.
+#[derive(PartialEq)]
+enum Known<'a> {
+    Str(&'a str),
+    None,
+}
+
+impl<'a> Known<'a> {
+    fn of_leaf(l: &'a Leaf) -> Option<Self> {
+        match l {
+            Leaf::Str(s) => Some(Self::Str(s)),
+            Leaf::None => Some(Self::None),
+            _ => None,
+        }
+    }
+
+    /// The value of `o` for a row with `fields` and a call with `args`, when the model knows it.
+    fn of(o: &'a Operand, fields: &'a [Leaf], args: &'a [Leaf]) -> Option<Self> {
+        match o {
+            Operand::Field(k) => fields.get(usize::from(*k)).and_then(Self::of_leaf),
+            Operand::Param(i) => args.get(usize::from(*i)).and_then(Self::of_leaf),
+            Operand::Lit(Lit::Str(s)) => Some(Self::Str(s)),
+            Operand::Lit(Lit::None) => Some(Self::None),
+            Operand::Lit(_) | Operand::Other => None,
+        }
+    }
+}
+
+impl Test {
+    fn may_hold(&self, fields: &[Leaf], args: &[Leaf]) -> bool {
+        let Some((equality, lhs, rhs)) = &self.compare else {
+            return true;
+        };
+        let (l, r) = (Known::of(lhs, fields, args), Known::of(rhs, fields, args));
+        // `None` equals and is only itself; two strings are equal by their text, and whether
+        // they are the same object is not decided.
+        let decided = match (equality, l, r) {
+            (_, Some(Known::None), Some(Known::None)) => Some(true),
+            (_, Some(Known::None), Some(_)) | (_, Some(_), Some(Known::None)) => Some(false),
+            (Equality::Eq | Equality::NotEq, Some(l), Some(r)) => Some(l == r),
+            _ => None,
+        };
+        let negated = matches!(equality, Equality::NotEq | Equality::IsNot);
+        decided.is_none_or(|d| (d != negated) == self.holds)
     }
 }
 
@@ -1293,30 +1570,40 @@ struct FnV {
     receiver: Option<V>,
 }
 
-/// `getattr(<instance of class>, <name>)`: the selector text, and the name when it is constant.
+/// `getattr(<instance of class>, <name>)`: the selector text, the name when it is constant, and
+/// where it runs.
 #[derive(Debug, Clone, PartialEq)]
 struct LookupV {
     class: String,
     receiver: V,
     selector: String,
     fixed: Option<String>,
-    at: Span,
+    at: Site,
 }
 
-/// The coroutine a call of an `async def` returns, with its arguments and the call site.
+/// A position in the function (by fqn) it is in.
+#[derive(Debug, Clone, PartialEq)]
+struct Site {
+    function: String,
+    span: Span,
+}
+
+/// The coroutine a call of an `async def` returns, with its arguments. Its copies share `id`:
+/// awaiting it a second time raises.
 #[derive(Debug, Clone, PartialEq)]
 struct PendingV {
+    id: usize,
     coroutine: Coroutine,
     args: Vec<V>,
     kwargs: Vec<(String, V)>,
-    site: Span,
 }
 
 /// What awaiting a coroutine does: run a function, or call what a lookup selects.
 #[derive(Debug, Clone, PartialEq)]
 enum Coroutine {
     Run(FnV),
-    Select(LookupV),
+    /// What the lookup finds, called at the site.
+    Select(LookupV, Site),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1372,7 +1659,7 @@ impl V {
             Self::Pending(p) => {
                 let receiver = match &p.coroutine {
                     Coroutine::Run(f) => f.receiver.as_ref(),
-                    Coroutine::Select(l) => Some(&l.receiver),
+                    Coroutine::Select(l, _) => Some(&l.receiver),
                 };
                 let held = p.args.iter().chain(p.kwargs.iter().map(|(_, v)| v));
                 held.chain(receiver).collect()
@@ -1410,6 +1697,7 @@ struct Found {
     others_open: bool,
     selected_in: FuncKey,
     selected_at: Span,
+    invoked_in: FuncKey,
     invoked_at: Span,
 }
 
@@ -1422,6 +1710,9 @@ struct Run<'r, 'i> {
     stack: Vec<String>,
     lists: Vec<Vec<V>>,
     cells: Vec<Vec<(String, V)>>,
+    /// The coroutines made so far, and those awaited.
+    coroutines: usize,
+    awaited: FxHashSet<usize>,
     found: Vec<Found>,
 }
 
@@ -1509,18 +1800,24 @@ impl<'i> Run<'_, 'i> {
     }
 
     /// The method of a project class an instance's attribute `name` reads, when nothing but its
-    /// definitions decides what the read gives.
+    /// definitions decides what the read gives ([`Self::plain_reads`]).
     fn method_of(&self, class: &str, name: &str) -> Res<String> {
-        let hooked = ["__getattr__", "__getattribute__"]
-            .iter()
-            .any(|h| method_key(self.decls, class, h).is_some());
-        let key = method_key(self.decls, class, name)
-            .filter(|_| !hooked)
-            .ok_or(Open)?;
+        self.plain_reads(class)?;
+        let key = method_key(self.decls, class, name).ok_or(Open)?;
         let d = self.decls.function_decl(&key).ok_or(Open)?;
         let plain =
             d.called_as_defined && !d.is_staticmethod && !d.is_classmethod && !d.is_property;
         plain.then(|| key.fqn()).ok_or(Open)
+    }
+
+    /// Every class along the MRO of `class` is a project class, and none binds an attribute
+    /// hook, to a method or to any other object: its definitions decide what a read gives.
+    fn plain_reads(&self, class: &str) -> Res<()> {
+        for hook in ["__getattr__", "__getattribute__"] {
+            let bound = self.decls.binds_along(class, hook).ok_or(Open)?;
+            (!bound).then_some(()).ok_or(Open)?;
+        }
+        Ok(())
     }
 
     fn attribute(&self, v: V, attr: &str) -> Res<V> {
@@ -1553,22 +1850,22 @@ impl<'i> Run<'_, 'i> {
 
     /// A call of a builtin or library function the model knows.
     fn builtin(&self, name: &str, args: Vec<V>, site: Span) -> Res<V> {
-        let lookup = |class: &String, selector, fixed| {
-            V::Lookup(Box::new(LookupV {
+        let lookup = |class: &String, selector, fixed| -> Res<V> {
+            Ok(V::Lookup(Box::new(LookupV {
                 class: class.clone(),
                 receiver: args[0].clone(),
                 selector,
                 fixed,
-                at: site,
-            }))
+                at: self.site(site)?,
+            })))
         };
         let function = |v: &V| matches!(v, V::Fn(f) if f.receiver.is_none());
         Ok(match (name, args.as_slice()) {
             ("builtins.getattr", [V::Object(class, _), V::Sym(s)]) => {
-                lookup(class, s.clone(), None)
+                lookup(class, s.clone(), None)?
             }
             ("builtins.getattr", [V::Object(class, _), V::Str(s)]) => {
-                lookup(class, format!("{s:?}"), Some(s.clone()))
+                lookup(class, format!("{s:?}"), Some(s.clone()))?
             }
             ("builtins.isinstance", [v, V::Named(t)])
                 if matches!(v, V::Class(_)) || function(v) =>
@@ -1600,22 +1897,21 @@ impl<'i> Run<'_, 'i> {
     }
 
     /// The handlers the lookup may find on an instance of a project class, called with `args`
-    /// and awaited: each `async def` method along the MRO (at most [`MAX_CANDIDATES`]) the name
-    /// may be and the arguments bind to.
+    /// and awaited: each `async def` method along the MRO the name may be and the arguments
+    /// bind to (at most [`MAX_CANDIDATES`]). A constant name must find one, or the lookup or the
+    /// call raises, or gives what the model does not follow.
     fn select(
         &mut self,
         l: LookupV,
-        site: Span,
+        site: Site,
         args: Vec<V>,
         kwargs: Vec<(String, V)>,
     ) -> Res<()> {
+        self.plain_reads(&l.class)?;
         let mut seen = FxHashSet::default();
         let mut members = Vec::new();
         let mro = self.decls.mro_of(&l.class);
         for c in mro.into_iter().filter(|c| c != "builtins.object") {
-            if !self.decls.is_project_class(&c) {
-                return Err(Open);
-            }
             for key in self.decls.methods_of(&c) {
                 let name = key
                     .qualname
@@ -1624,43 +1920,53 @@ impl<'i> Run<'_, 'i> {
                     .unwrap_or_default()
                     .to_owned();
                 if seen.insert(name.clone())
+                    && l.fixed.as_ref().is_none_or(|f| *f == name)
                     && self.method_of(&l.class, &name).ok() == Some(key.fqn())
                 {
                     members.push((name, key));
                 }
             }
         }
-        if members.len() > MAX_CANDIDATES {
-            return Err(Open);
-        }
-        let here = self
-            .stack
-            .last()
-            .and_then(|f| self.by_fqn.get(f))
-            .ok_or(Open)?;
-        let selected_in = self.entries[*here].key.clone();
         let mut bound_args = vec![l.receiver.clone()];
         bound_args.extend(args);
+        let mut found = Vec::new();
         for (member, key) in members {
             let d = self.decls.function_decl(&key).ok_or(Open)?;
-            if l.fixed.as_ref().is_some_and(|f| *f != member) || !d.is_async {
-                continue;
-            }
-            let Some(params) = bind_handler(d, &bound_args, &kwargs) else {
-                continue;
-            };
+            let params = bind_handler(d, &bound_args, &kwargs).filter(|_| d.is_async);
+            found.extend(params.map(|params| (member, key, params)));
+        }
+        let fixed_found = l.fixed.is_none() || found.len() == 1;
+        if !fixed_found || found.len() > MAX_CANDIDATES {
+            return Err(Open);
+        }
+        let selected_in = self.key_of(&l.at.function)?;
+        let invoked_in = self.key_of(&site.function)?;
+        for (member, handler, params) in found {
             self.found.push(Found {
-                handler: key,
+                handler,
                 member,
                 params,
                 selector: l.selector.clone(),
                 others_open: l.fixed.is_none(),
                 selected_in: selected_in.clone(),
-                selected_at: l.at,
-                invoked_at: site,
+                selected_at: l.at.span,
+                invoked_in: invoked_in.clone(),
+                invoked_at: site.span,
             });
         }
         Ok(())
+    }
+
+    /// The key of the project function `fqn`.
+    fn key_of(&self, fqn: &str) -> Res<FuncKey> {
+        let i = self.by_fqn.get(fqn).ok_or(Open)?;
+        Ok(self.entries[*i].key.clone())
+    }
+
+    /// `span` in the function running now.
+    fn site(&self, span: Span) -> Res<Site> {
+        let function = self.stack.last().ok_or(Open)?.clone();
+        Ok(Site { function, span })
     }
 
     /// Call `callee`: a call of an `async def` gives the coroutine, run when it is awaited.
@@ -1676,46 +1982,59 @@ impl<'i> Run<'_, 'i> {
         site: Span,
     ) -> Res<V> {
         self.step()?;
-        let pending = |coroutine, args, kwargs| {
-            V::Pending(Box::new(PendingV {
-                coroutine,
-                args,
-                kwargs,
-                site,
-            }))
+        let coroutine = match callee {
+            V::Fn(f) if self.program_of(&f.fqn)?.is_async => Coroutine::Run(*f),
+            V::Lookup(l) => Coroutine::Select(*l, self.site(site)?),
+            V::Fn(f) => return self.enter_body(*f, args, kwargs),
+            V::Class(c) => return self.construct(&c, &args, &kwargs),
+            V::Named(n) if kwargs.is_empty() => return self.builtin(&n, args, site),
+            _ => return Err(Open),
         };
-        match callee {
-            V::Fn(f) if self.program_of(&f.fqn)?.is_async => {
-                Ok(pending(Coroutine::Run(*f), args, kwargs))
-            }
-            V::Fn(f) => self.enter_body(*f, args, kwargs),
-            V::Lookup(l) => Ok(pending(Coroutine::Select(*l), args, kwargs)),
-            V::Class(c) => self.construct(&c, &args, &kwargs),
-            V::Named(n) if kwargs.is_empty() => self.builtin(&n, args, site),
-            _ => Err(Open),
-        }
+        self.coroutines += 1;
+        Ok(V::Pending(Box::new(PendingV {
+            id: self.coroutines,
+            coroutine,
+            args,
+            kwargs,
+        })))
     }
 
-    /// Await `value`: run the coroutine (a handler looked up is selected, not run).
+    /// Await `value`: run the coroutine (a handler looked up is selected, not run). A coroutine
+    /// runs once: awaiting it again raises.
     fn await_value(&mut self, value: V) -> Res<V> {
         let V::Pending(p) = value else {
             return Err(Open);
         };
+        self.awaited.insert(p.id).then_some(()).ok_or(Open)?;
         match p.coroutine {
-            Coroutine::Select(l) => self
-                .select(l, p.site, p.args, p.kwargs)
-                .map(|()| V::Unknown),
+            Coroutine::Select(l, site) => {
+                self.select(l, site, p.args, p.kwargs).map(|()| V::Unknown)
+            }
             Coroutine::Run(f) => self.enter_body(f, p.args, p.kwargs),
         }
     }
 
-    /// Run the body of a project function, a nested function, or a bound method.
-    fn enter_body(&mut self, f: FnV, mut args: Vec<V>, kwargs: Vec<(String, V)>) -> Res<V> {
+    /// Run the body of a project function, a nested function, or a bound method. The function
+    /// counts toward the nesting from its decorators on, which run first.
+    fn enter_body(&mut self, f: FnV, args: Vec<V>, kwargs: Vec<(String, V)>) -> Res<V> {
         let p = self.program_of(&f.fqn)?;
         if self.stack.contains(&f.fqn) || self.stack.len() >= MAX_DEPTH {
             self.budget.spend();
             return Err(Open);
         }
+        self.stack.push(f.fqn.clone());
+        let out = self.decorated_body(p, f, args, kwargs);
+        self.stack.pop();
+        out
+    }
+
+    fn decorated_body(
+        &mut self,
+        p: &Program,
+        f: FnV,
+        mut args: Vec<V>,
+        kwargs: Vec<(String, V)>,
+    ) -> Res<V> {
         let module_level = f.cells.is_none() && f.receiver.is_none();
         if !module_level && !p.decorators.is_empty() {
             return Err(Open);
@@ -1730,10 +2049,7 @@ impl<'i> Run<'_, 'i> {
         }
         args.splice(0..0, f.receiver);
         let values = bind(&p.params, args, kwargs)?;
-        self.stack.push(f.fqn);
-        let out = self.run_body(p, values, f.cells);
-        self.stack.pop();
-        out
+        self.run_body(p, values, f.cells)
     }
 
     fn run_body(&mut self, p: &Program, values: Vec<V>, cells: Option<usize>) -> Res<V> {
@@ -1806,9 +2122,10 @@ impl<'i> Run<'_, 'i> {
                 (*d, cell.map(|(_, v)| v.clone()).ok_or(Open)?)
             }
             Op::Copy(d, s) => (*d, get(s)?),
-            Op::Tuple(d, es) => (*d, V::Tuple(es.iter().map(get).collect::<Res<_>>()?)),
+            Op::Tuple(d, es) => (*d, V::Tuple(self.items(es, vals)?)),
             Op::List(d, es) => {
-                self.lists.push(es.iter().map(get).collect::<Res<_>>()?);
+                let items = self.items(es, vals)?;
+                self.lists.push(items);
                 (*d, V::List(self.lists.len() - 1))
             }
             Op::Attr(d, o, a) => (*d, self.attribute(get(o)?, a)?),
@@ -1857,14 +2174,7 @@ impl<'i> Run<'_, 'i> {
                 (*d, V::Fn(Box::new(f)))
             }
             Op::Call(c) => {
-                let mut args = Vec::new();
-                for (a, starred) in &c.args {
-                    match (get(a)?, starred) {
-                        (V::List(l), true) => args.extend(self.lists[l].clone()),
-                        (_, true) => return Err(Open),
-                        (v, false) => args.push(v),
-                    }
-                }
+                let args = self.items(&c.args, vals)?;
                 let kwargs = (c.kwargs.iter())
                     .map(|(k, v)| Ok((k.clone().ok_or(Open)?, get(v)?)))
                     .collect::<Res<Vec<_>>>()?;
@@ -1891,6 +2201,21 @@ impl<'i> Run<'_, 'i> {
         value.bounded().then_some(()).ok_or(Open)?;
         vals.insert(dst, value);
         Ok(())
+    }
+
+    /// The values of the operands of a display or a call: a starred one gives the items of a
+    /// tuple or list the model follows.
+    fn items(&self, operands: &[Item], vals: &FxHashMap<u32, V>) -> Res<Vec<V>> {
+        let mut out = Vec::new();
+        for (a, starred) in operands {
+            match (vals.get(a).cloned().ok_or(Open)?, starred) {
+                (V::List(l), true) => out.extend(self.lists[l].iter().cloned()),
+                (V::Tuple(t), true) => out.extend(t),
+                (_, true) => return Err(Open),
+                (v, false) => out.push(v),
+            }
+        }
+        Ok(out)
     }
 
     /// `recv.<m>(...)`: the methods of the builtin values the model follows, or a call of the

@@ -1324,8 +1324,8 @@ struct Step {
     /// `(function, parameter, kinds)`: the kinds of read `heki inspect` says reach the
     /// parameter's object after the step.
     reads: Option<(&'static str, &'static str, &'static [&'static str])>,
-    /// `(function, [(type, slots)])`: the registration contexts `heki inspect` gives the
-    /// function after the step, with the slots each changes.
+    /// `(function, [(type, records)])`: the registration contexts `heki inspect` gives the
+    /// function after the step, with the slots of each change record under it.
     registered: Option<(&'static str, Registered)>,
 }
 
@@ -6793,10 +6793,14 @@ impl Session {
             let mut found: Vec<(String, Vec<String>)> = (report["registered"].as_array().unwrap())
                 .iter()
                 .map(|c| {
+                    // One entry per change record: a context that changes nothing has none.
                     let changes = c["changes"].as_array().unwrap().iter();
-                    let slots =
-                        changes.flat_map(|ch| ch["slots"].as_array().unwrap().iter().map(text));
-                    (text(&c["type"]), slots.collect())
+                    let records = changes.map(|ch| {
+                        let slots: Vec<String> =
+                            ch["slots"].as_array().unwrap().iter().map(text).collect();
+                        slots.join(", ")
+                    });
+                    (text(&c["type"]), records.collect())
                 })
                 .collect();
             found.sort();

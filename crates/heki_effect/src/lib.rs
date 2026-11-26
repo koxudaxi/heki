@@ -1778,6 +1778,16 @@ impl EffectSummary {
         self.without_locations() == other.without_locations()
     }
 
+    /// [`Self::same_facts`] of everything but [`Self::dispatch`], which only the join over the
+    /// whole index reads (`dispatch::contexts`), never a caller.
+    pub fn same_facts_for_callers(&self, other: &Self) -> bool {
+        let without = |s: &Self| Self {
+            dispatch: None,
+            ..s.without_locations()
+        };
+        without(self) == without(other)
+    }
+
     /// Equality of everything callers copy into their own summaries: the facts, and the
     /// positions of call chains and write sites. Only the positions of the function's own read
     /// sites, parameter, container, and global changes, iterations, and unresolved accesses are
@@ -2721,6 +2731,12 @@ impl FinalFacts {
     fn same_facts(&self, other: &Self) -> bool {
         self.summary.same_facts(&other.summary) && self.fresh_return == other.fresh_return
     }
+
+    /// [`Self::same_facts`] of what callers read ([`EffectSummary::same_facts_for_callers`]).
+    fn same_facts_for_callers(&self, other: &Self) -> bool {
+        self.summary.same_facts_for_callers(&other.summary)
+            && self.fresh_return == other.fresh_return
+    }
 }
 
 /// Result of an incremental file update (Early Cutoff indicator for `heki_lsp`).
@@ -3526,9 +3542,15 @@ impl ProjectIndex {
         let mut changed: BTreeSet<FuncKey> = BTreeSet::new();
         // Same facts, but positions callers copy (call chains, write sites) moved.
         let mut moved: BTreeSet<FuncKey> = BTreeSet::new();
+        // Only facts no caller reads changed (the registration facts): the function's own
+        // record changed, its callers' did not.
+        let mut own_only: BTreeSet<FuncKey> = BTreeSet::new();
         for func in &region {
             match (previous.get(func), self.final_facts(func)) {
-                (Some(old), Some(new)) if old.same_facts(&new) => {
+                (Some(old), Some(new)) if old.same_facts_for_callers(&new) => {
+                    if !old.same_facts(&new) {
+                        own_only.insert(func.clone());
+                    }
                     if !old.summary.same_for_callers(&new.summary) {
                         moved.insert(func.clone());
                     }
@@ -3555,6 +3577,7 @@ impl ProjectIndex {
         let excluded: FxHashSet<FuncKey> = changed.iter().chain(&affected).cloned().collect();
         let relocated = self.callers_closure(&moved, &excluded);
         let summary_changed = !changed.is_empty();
+        changed.extend(own_only);
         let changed: Vec<FuncKey> = changed.into_iter().collect();
         if affected.is_empty() && relocated.is_empty() {
             return IncrementalUpdate {

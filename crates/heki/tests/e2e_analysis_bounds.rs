@@ -7909,7 +7909,8 @@ fn panels_project(name: &str, edits: &[(&str, &str, &str)]) -> Project {
 const PAGE_STORE: &str = "panels.views.Page.store";
 
 /// `n` registrations of one handler by one owner: each registration is followed with a budget of
-/// its own, and the handler's change record under the owner's class is computed once.
+/// its own (the other owner's registration too), and the handler's change record under the
+/// owner's class is computed once.
 #[test]
 fn many_registrations_of_one_handler_are_followed_one_at_a_time() {
     let n = 160;
@@ -7923,8 +7924,18 @@ fn many_registrations_of_one_handler_are_followed_one_at_a_time() {
             &[("owners.py", old, rows.as_str())],
         )
     };
-    let r = past_budgets(n, &[], shape, |p| inspect_counted(p, PAGE_STORE));
+    let (r, budgets) = past_budgets(n, &[], shape, |p| {
+        let (r, steps) = inspect_counted(p, PAGE_STORE);
+        let records: Vec<Value> =
+            serde_json::from_str(&std::fs::read_to_string(p.dir.join(".walk-steps.json")).unwrap())
+                .unwrap();
+        let budgets = (records.iter())
+            .filter(|r| r["owner"] == "registration contexts")
+            .count();
+        ((r, budgets), steps)
+    });
     assert_eq!(r["registered"].as_array().unwrap().len(), n);
+    assert_eq!(budgets, n + 1);
 }
 
 /// A callback reaching the dispatching method through `n` coroutines, each awaiting the next:
@@ -7953,6 +7964,38 @@ fn a_chain_of_forwarding_coroutines_past_the_nesting_gives_no_context() {
                     &format!("    return receive\n{hops}"),
                 ),
             ],
+        )
+    };
+    let owner = "registration contexts";
+    let r = past_budgets(n, &[owner], shape, |p| inspect_counted(p, PAGE_STORE));
+    assert_eq!(r["registered"], json!([]));
+    let near = inspect(&shape(n / SCALE), &[PAGE_STORE]);
+    assert_eq!(near["registered"].as_array().unwrap().len(), 1);
+}
+
+/// An adapter decorated by the last of `n` decorators, each decorated by the one before it: the
+/// decorators run nested, and past the nesting the interpretation follows the registration
+/// gives no context.
+#[test]
+fn a_chain_of_decorated_decorators_past_the_nesting_gives_no_context() {
+    let n = 40;
+    let shape = |n: usize| {
+        let mut marks = "def mark0(fn):\n    return fn\n\n\n".to_owned();
+        for i in 1..n {
+            let before = i - 1;
+            marks.push_str(&format!(
+                "@mark{before}\ndef mark{i}(fn):\n    return fn\n\n\n"
+            ));
+        }
+        let last = n - 1;
+        let decorated = format!("{marks}@mark{last}\nasync def spread(callback, **items):");
+        panels_project(
+            &format!("bounds_decorators_{n}"),
+            &[(
+                "adapter.py",
+                "async def spread(callback, **items):",
+                decorated.as_str(),
+            )],
         )
     };
     let owner = "registration contexts";
