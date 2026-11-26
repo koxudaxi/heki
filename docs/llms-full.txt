@@ -5297,7 +5297,9 @@ Before approving a pull request that adds or changes contracts:
    write, read, call, or import the target.
 2. Every `message` says what to write instead, so that an agent can act on it.
 3. `heki.toml`, the baseline, and the CI configuration are protected by `CODEOWNERS`.
-4. The baseline did not grow, and no new `# heki: ignore[...]` or `# noqa` hides a report.
+4. The baseline did not grow, and no new `# heki: ignore[...]` or `# noqa` hides a report: compare
+   the `heki check --report-suppressed <PATH>` file of the pull request with the base branch's
+   ([Auditing inline suppressions](https://heki.koxudaxi.dev/adoption/#auditing-inline-suppressions)).
 
 ### A Stop hook for Claude Code
 
