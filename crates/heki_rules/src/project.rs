@@ -1504,6 +1504,7 @@ fn suppression_report(
         group: false,
         key_target: None,
         key_module: None,
+        fails_run_by_contract: false,
     })
 }
 

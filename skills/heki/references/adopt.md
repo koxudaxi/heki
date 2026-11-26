@@ -24,8 +24,8 @@ before writing it.
 
 ## 3. Write the files
 
-1. Put the contracts, `fail-on`, and the baseline path in `heki.toml`, not in code the agent edits
-   as part of its task. heki reads only the first of `heki.toml`, `.heki.toml` and `[tool.heki]` in
+1. Put the contracts, each with `fail = true` so that a crossed wall fails the run, and the baseline
+   path in `heki.toml`, not in code the agent edits as part of its task. heki reads only the first of `heki.toml`, `.heki.toml` and `[tool.heki]` in
    `pyproject.toml` that exists, without merging them. If the repository already configures heki in
    `.heki.toml` or `pyproject.toml`, add to that file, or move all of its settings into the new
    `heki.toml` in the same change.

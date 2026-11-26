@@ -181,7 +181,7 @@ struct CheckArgs {
     analysis: AnalysisArgs,
     /// Exit with code 1 on reports of this severity or higher: `error` (the default), or
     /// `warning` to fail on warnings too (`lint.fail-on`). A heuristic report counts as a
-    /// warning.
+    /// warning. A report of a contract with `fail = true` fails the run at either.
     #[arg(long, value_enum)]
     fail_on: Option<FailOn>,
     /// Output format: `full`, or `github` in GitHub Actions (`GITHUB_ACTIONS=true`);

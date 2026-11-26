@@ -28,8 +28,8 @@ default, and only those of the exact rules that are not opt-in.
   ends with a note saying how many.
 - Only an exact report fails a run by default: a heuristic report counts as a warning for
   [`fail-on`](configuration.md#rule-selection-toolhekilint), whatever its rule's severity, and
-  fails the run only with `fail-on = "warning"`. A false heuristic report never stops a CI or a
-  hook that keeps the default.
+  fails the run only with `fail-on = "warning"`, or when its contract table sets `fail = true`. A
+  false heuristic report never stops a CI or a hook that keeps the default.
 
 See [Rule selection](configuration.md#rule-selection-toolhekilint). `EFF101`, `EFF103`,
 `DATA101`, `MUT101`, `MUT110`, `MUT111`, `MUT114`, `MUT119`, the proven tier of the eight `OPT`

@@ -753,7 +753,7 @@ heki/
 
 ## 9. CLI, configuration, and Ratchet baseline (one interface with Ruff and `t-linter`)
 
-### 9.1 Commands (exit codes: `0` clean, or only warnings and heuristic reports / `1` exact errors, and any report with `--fail-on warning` / `2` configuration, I/O, or syntax errors)
+### 9.1 Commands (exit codes: `0` clean, or only warnings and heuristic reports / `1` exact errors, any report with `--fail-on warning`, and the reports of a contract with `fail = true` / `2` configuration, I/O, or syntax errors)
 ```bash
 heki check [PATHS...]                         # semantic diagnostics (MUT, EFF / DATA, OPT)
 heki check FILE...                            # the project of the files, showing what touches them (as ROOT --touched FILE...)

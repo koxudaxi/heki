@@ -18,6 +18,7 @@ mod contracts;
 mod data_rules;
 mod eff_rules;
 pub mod experimental;
+mod gates;
 mod imp_rules;
 pub mod import_view;
 pub mod inspect;
@@ -1414,6 +1415,7 @@ pub fn check_project(
         }
         same
     });
+    gates::mark_failing_reports(config, &mut out);
     Ok(out)
 }
 
@@ -1730,6 +1732,7 @@ impl<'a> CheckContext<'a> {
             group: reports_groups(meta.code),
             key_target: None,
             key_module: None,
+            fails_run_by_contract: false,
         });
         out.last_mut()
     }

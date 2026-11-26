@@ -78,9 +78,9 @@ Each diagnostic has:
 
 A text run ends with one line per reported rule: `heki rule <CODE>` and the rule's page.
 
-The run exits with 1 when it shows an exact `error`, a bug that can be critical, or with
-`fail-on = "warning"` any report: a heuristic report counts as a warning, whatever its
-`severity`.
+The run exits with 1 when it shows an exact `error`, a bug that can be critical, a report of a
+contract with `fail = true`, or with `fail-on = "warning"` any report: a heuristic report counts
+as a warning, whatever its `severity`.
 
 When the run cannot check (exit code 2: a configuration, path, or file error), the error says
 where the cause is, what to write instead, and which section of the documentation explains it.
@@ -126,22 +126,20 @@ Do not describe the architecture in the project's `AGENTS.md` or `CLAUDE.md`. De
 
 The `message` of a contract is what the agent reads as the fix, so write it as an instruction.
 Contract reports are heuristic, and a heuristic report fails a run only with
-`fail-on = "warning"`: set it with the contracts, so that `heki check` exits with 1 on a crossed
-wall.
+`fail-on = "warning"`: set `fail = true` on each contract table instead, so that `heki check`
+exits with 1 on a crossed wall and every other warning stays advisory.
 
 ```toml
 # heki.toml
-[lint]
-fail-on = "warning"
-
 [[write-owners]]
 name = "generation-store"
 targets = ["pkg.model.DataModel.fields"]
 allowed-writers = ["Store.*"]
 message = "use GenerationStore.set_fields() instead"
+fail = true
 ```
 
-Put the contracts, `fail-on`, and the baseline path in `heki.toml`, and give that file an owner
+Put the contracts and the baseline path in `heki.toml`, and give that file an owner
 (`CODEOWNERS`, or the host's rule for protected files). A change to a wall is then a reviewed
 change, and an agent cannot move a wall to make a report go away.
 
@@ -152,8 +150,8 @@ change, and an agent cannot move a wall to make a report go away.
 ```
 
 `fail-on = "warning"` makes every warning and heuristic report fail the run, not only the
-contracts' reports: record today's findings in the baseline first, so that only new ones fail.
-The [starter recipe](adoption.md#walls-for-a-team-or-a-coding-agent) has the whole file.
+contracts' reports; use it only when you want that, and record today's findings in the baseline
+first, so that only new ones fail. The [starter recipe](adoption.md#walls-for-a-team-or-a-coding-agent) has the whole file.
 
 ### A Stop hook for Claude Code
 

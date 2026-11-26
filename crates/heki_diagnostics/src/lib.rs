@@ -178,6 +178,11 @@ pub struct Diagnostic {
     /// `--update-baseline` rewrites it per name. Written by no output format.
     #[serde(skip)]
     pub key_module: Option<String>,
+    /// A contract of the report has `fail = true`: the report fails the run whatever its tier
+    /// and severity ([`Self::fails_run`]). Set once the contracts of a report are known
+    /// (`heki_rules::check_project`); written by no output format.
+    #[serde(skip)]
+    pub fails_run_by_contract: bool,
 }
 
 /// Why a heuristic report of an exact rule is not exact.
@@ -257,8 +262,12 @@ impl Diagnostic {
     /// Whether the report makes a run fail (exit code 1) when `fail_on` is the least severity
     /// that does: an exact `error`, or any report at `warning`. A heuristic report counts as a
     /// warning whatever its severity: it can be wrong about the code, and only a certain bug
-    /// that can be critical stops a run by default (ADR-019).
+    /// that can be critical stops a run by default (ADR-019). A report of a contract with
+    /// `fail = true` fails it whatever `fail_on` is.
     pub fn fails_run(&self, fail_on: Severity) -> bool {
+        if self.fails_run_by_contract {
+            return true;
+        }
         match fail_on {
             Severity::Warning => true,
             Severity::Error => {
@@ -1347,6 +1356,7 @@ mod tests {
             group: false,
             key_target: None,
             key_module: None,
+            fails_run_by_contract: false,
         }
     }
 

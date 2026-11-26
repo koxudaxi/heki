@@ -101,6 +101,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("name", r#""generation-store""#),
     ("targets", r#"["pkg.model.DataModel.fields"]"#),
     ("message", r#""use GenerationStore.set_fields() instead""#),
+    ("fail", "true"),
     ("exempt-methods", r#"["__deepcopy__"]"#),
     ("fresh-objects", r#""allow""#),
     ("unresolved", r#""report""#),
