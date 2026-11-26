@@ -362,14 +362,10 @@ repos:
       - id: heki
 ```
 
-[heki-pre-commit](https://github.com/koxudaxi/heki-pre-commit) installs heki from its PyPI wheel, so
-there is no compile and no Rust toolchain. Its tags follow heki releases, so `pre-commit autoupdate`
-moves `rev` to the latest release.
-
-To build heki from source instead, point `repo` at `https://github.com/koxudaxi/heki` with a release
-`rev`. pre-commit then installs the repository as a Python package, which maturin compiles with cargo
-(Rust 1.99 or newer; when cargo is not on `PATH`, the build installs Rust into a cache directory
-first). That takes a few minutes, and pre-commit keeps the installed hook for later runs.
+[heki-pre-commit](https://github.com/koxudaxi/heki-pre-commit) installs heki from its prebuilt PyPI
+wheel (the [platforms](installation.md) heki publishes wheels for), so it compiles nothing and needs
+no Rust toolchain. Its tags follow heki releases, so `pre-commit autoupdate` moves `rev` to the
+latest release.
 
 A local hook can run any version of the PyPI wheel, also without a compile or a Rust toolchain:
 
@@ -423,6 +419,14 @@ report of its key, so a run with `--touched` compares all of them and shows ever
 grown entry fails the commit wherever its reports are, also in a file the commit left alone, since
 the commit added the report. It judges the stale entries of the touched files and of the reports
 that touch them only: a stale entry elsewhere is left to a run over the whole project.
+
+??? note "Building the hook from source"
+
+    Only a platform without a wheel, or a development version of heki, needs this. Point `repo` at
+    `https://github.com/koxudaxi/heki` with a release `rev`. pre-commit then installs the repository
+    as a Python package, which maturin compiles with cargo (Rust 1.99 or newer; when cargo is not on
+    `PATH`, the build installs Rust into a cache directory first). That takes a few minutes, and
+    pre-commit keeps the installed hook for later runs.
 
 ## Continuous integration
 

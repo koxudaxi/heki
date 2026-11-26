@@ -126,6 +126,11 @@ $ uv tool install heki      # or: pipx install heki / pip install heki
 $ uvx heki check            # run without installing
 ```
 
+heki ships prebuilt wheels on PyPI for Linux (x86-64, AArch64, x86-64 musl), macOS (Apple silicon,
+Intel), and Windows (x86-64). `uvx heki`, `pip install heki`, and the pre-commit hook need no Rust
+toolchain and compile nothing. Building from source is for other platforms and for development:
+see [Installation](https://heki.koxudaxi.dev/installation/).
+
 ### Try it in 5 minutes
 
 1. In your project's root (the directory with `pyproject.toml`), run `uvx heki==0.9.0 check`. An
