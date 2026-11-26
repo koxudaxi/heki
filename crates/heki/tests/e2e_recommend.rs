@@ -738,14 +738,15 @@ fn rules_worth_enabling_follow_the_policy() {
     assert_eq!(
         section,
         "  rule    reports  exact  consequence  right about the code (published)  real harm  block\n\
-        \x20 EFF101        1      0  bug          82% (69-90%), n=50, 2026-11-21    32%        yes\n\
+        \x20 EFF101        1      0  bug          82% (69-90%), n=50, 2026-11-21    32%        yes (on now: naming it adds its heuristic reports)\n\
         \x20 EFF107        1      -  bug          not measured                      -          yes\n\
         \x20 MUT106        1      -  bug          not measured                      -          yes\n\
         \x20 MUT107        1      -  bug          78% (65-87%), n=50, 2026-11-21    4%         no: real harm below 10%\n\
-        \x20 OPT101        1      0  slowdown     78% (45-94%), n=9, 2026-11-21     0%         no: slower code, not a bug\n\
+        \x20 OPT101        1      0  slowdown     78% (45-94%), n=9, 2026-11-21     0%         no: slower code, not a bug (on now: naming it adds its heuristic reports)\n\
         \x20 OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug\n\
         \x20 Optional (experimental, never in the block)\n\
         \x20 EFF109        1      -  bug          not measured                      -          no: experimental\n\
+        \x20 see the 7 report(s): heki check --extend-select EFF101,EFF107,MUT106,MUT107,OPT101,OPT110,EFF109\n\
         \x20 No reports here: EFF102, EFF105, EFF106, EFF110, EFF112, EFF114, EFF115, EFF116, EFF117, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT108, MUT111, MUT112, MUT113, \
         MUT115, MUT118, MUT120, OPT103, OPT111, OPT112, OPT120, OPT121, OPT130\n\
         \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it."
@@ -895,6 +896,64 @@ fn the_block_enables_exactly_the_reports_it_promises() {
     }
 }
 
+/// The command the text of `heki recommend <args>` names under "Rules worth enabling here".
+fn command_shown(p: &Project, args: &[&str]) -> Vec<String> {
+    let mut all = vec!["recommend"];
+    all.extend_from_slice(args);
+    let (_, out, _) = p.heki(&all);
+    let line = (out.lines())
+        .find(|l| l.starts_with("  see the "))
+        .unwrap_or_else(|| panic!("{out}"));
+    let command = line.split_once(": heki ").unwrap().1;
+    command.split_whitespace().map(str::to_owned).collect()
+}
+
+#[test]
+fn the_command_under_the_rules_shows_every_report_they_count() {
+    let p = shop_with_opt_in("recommend_rules_command");
+    for (args, codes) in [
+        (vec![], "EFF101,EFF107,MUT106,MUT107,OPT101,OPT110,EFF109"),
+        // The paths given are the command's; a rule the configuration ignores stays out of it,
+        // since `ignore` wins over `extend-select`.
+        (
+            vec!["app", "--ignore", "MUT106"],
+            "EFF101,EFF107,MUT107,OPT101,OPT110,EFF109",
+        ),
+    ] {
+        let (_, report, _) = recommend_json(&p, &args);
+        let command = command_shown(&p, &args);
+        assert_eq!(command.last().unwrap(), codes, "{command:?}");
+        if args.is_empty() {
+            assert_eq!(command, ["check", "--extend-select", codes]);
+        } else {
+            assert_eq!(command[..2], ["check", "app"]);
+        }
+        let named: Vec<&str> = codes.split(',').collect();
+        let counted: u64 = (report["rules"].as_array().unwrap().iter())
+            .filter(|r| named.contains(&r["code"].as_str().unwrap()))
+            .map(|r| r["reports"].as_u64().unwrap())
+            .sum();
+        assert_eq!(counted, 7 - u64::from(!args.is_empty()));
+        // The command, with the options given to `heki recommend`.
+        let mut run: Vec<&str> = command[1..].iter().map(String::as_str).collect();
+        run.extend(args.iter().filter(|a| **a != "app"));
+        let shown = checked(&p, &run);
+        assert_eq!(
+            shown.len() as u64,
+            report["reports_now"]["shown"].as_u64().unwrap() + counted,
+            "{run:?}"
+        );
+    }
+    // A path a shell would split is quoted.
+    let q = Project::new("recommend_rules_command_quoted");
+    q.write("my app/opt_in.py", OPT_IN);
+    let (_, out, _) = q.heki(&["recommend", "my app"]);
+    assert!(
+        out.contains(": heki check 'my app' --extend-select "),
+        "{out}"
+    );
+}
+
 #[test]
 fn a_rules_reports_do_not_depend_on_the_other_rules_selected() {
     let p = shop_with_opt_in("recommend_independence");
@@ -957,6 +1016,16 @@ fn a_baseline_splits_each_rules_reports() {
     assert!(
         out.contains("  rule    reports  exact  regressions  consequence  ")
             && out.contains("\n  MUT106        1      -            1  bug  "),
+        "{out}"
+    );
+    // A run with the baseline prints the regressions of the reports the command adds.
+    let regressions: u64 = (report["rules"].as_array().unwrap().iter())
+        .filter_map(|r| r["baseline"]["regressions"].as_u64())
+        .sum();
+    assert!(
+        out.contains(&format!(
+            ", {regressions} regression(s) among them: heki check --extend-select "
+        )),
         "{out}"
     );
     assert_follows_the_schema(&report);

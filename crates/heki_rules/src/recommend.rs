@@ -663,6 +663,17 @@ fn candidates_note(ask_fail: bool) -> String {
     )
 }
 
+/// `word` as one word of a POSIX shell command: quoted unless it holds only characters no shell
+/// reads specially.
+fn command_word(word: &str) -> std::borrow::Cow<'_, str> {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "/._-+:@%=,".contains(c);
+    if !word.is_empty() && word.chars().all(plain) {
+        word.into()
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''")).into()
+    }
+}
+
 /// `diags` as `heki check` prints them: reports sharing a root cause folded into one.
 fn printed(diags: impl IntoIterator<Item = Diagnostic>) -> Vec<Diagnostic> {
     let mut diags: Vec<Diagnostic> = diags.into_iter().collect();
@@ -733,7 +744,12 @@ pub fn render_text(report: &RecommendReport) -> String {
     }
     premises::render(&mut out, &report.open_premises);
     blind_spots::render(&mut out, &report.blind_spots);
-    rules::render(&mut out, &report.rules, now.baseline.is_some());
+    rules::render(
+        &mut out,
+        &report.rules,
+        now.baseline.is_some(),
+        &report.analyzed.paths,
+    );
     contracts::render(
         &mut out,
         &report.contracts,

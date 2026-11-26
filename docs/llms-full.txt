@@ -3513,8 +3513,10 @@ to 50 of the sites that keep blocks at `unresolved = "ignore"`, where it lists 5
   whose heuristic reports it withholds, with the reports naming it in `extend-select` would add
   (exact and heuristic, and with a baseline the regressions among them), its consequence, and
   the published measurement of how often its reports are right about the code
-  ([Rule Precision](https://heki.koxudaxi.dev/precision/)), or "not measured". Rules without reports here are named on
-  one line.
+  ([Rule Precision](https://heki.koxudaxi.dev/precision/)), or "not measured". A rule that runs now and withholds its
+  heuristic reports says so. A line under the rows gives the `heki check --extend-select` command
+  that shows the reports they count (with the paths given; a rule the configuration ignores is
+  left out of it, since `ignore` wins). Rules without reports here are named on one line.
 - **Contract candidates**: the `write-owners`, `read-owners`, and `effect-boundaries`
   contracts the code already keeps, as blocks: the candidates whose entries differ only in their
   targets or scopes are one entry. Each block has its confidence, evidence, and the trial run of
@@ -3822,6 +3824,7 @@ Rules worth enabling here
   rule    reports  exact  consequence  right about the code (published)  real harm  block
   MUT106        1      -  bug          not measured                      -          yes
   OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
+  see the 2 report(s): heki check app --extend-select MUT106,OPT110
   No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF112, EFF114, EFF115, EFF116, EFF117, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, OPT103, OPT111, OPT112, OPT120, OPT121, OPT130
   MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it.
 

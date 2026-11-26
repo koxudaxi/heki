@@ -31,6 +31,10 @@ pub enum RulePolicy {
     Contract,
 }
 
+/// The reason of a rule the configuration ignores: `ignore` wins over `extend-select`, so naming
+/// it shows none of its reports.
+const IGNORED: &str = "the configuration ignores it";
+
 /// The least share of real harm, in percent, a published measurement of a rule the block
 /// enables may show.
 pub const MIN_REAL_HARM_PERCENT: u32 = 10;
@@ -273,7 +277,7 @@ fn decide(
 ) -> (bool, String) {
     let out = |reason: &str| (false, reason.to_owned());
     if current.is_ignored(rule.code) {
-        return out("the configuration ignores it");
+        return out(IGNORED);
     }
     if advice.experimental {
         return out("experimental");
@@ -297,6 +301,45 @@ fn decide(
     (true, "a bug, reported here".to_owned())
 }
 
+/// The `heki check` command that shows the reports the section counts, and how many it adds.
+pub(super) struct ShownByCheck {
+    pub command: String,
+    pub reports: usize,
+    /// With a baseline: the regressions among them, which a run with the baseline prints.
+    pub regressions: usize,
+}
+
+/// The command naming in `extend-select` every rule with reports here, in the order the section
+/// lists them, but those the configuration ignores; `None` when there is none. A rule's reports do
+/// not depend on the other rules selected, so its count holds among the others.
+pub(super) fn shown_by_check(rules: &[RuleAdvice], paths: &[String]) -> Option<ShownByCheck> {
+    let mut named: Vec<&RuleAdvice> = (rules.iter())
+        .filter(|r| r.reports > Some(0) && r.reason != IGNORED)
+        .collect();
+    named.sort_by_key(|r| r.experimental);
+    if named.is_empty() {
+        return None;
+    }
+    let codes: Vec<&str> = named.iter().map(|r| r.code.as_str()).collect();
+    let mut command = "heki check".to_owned();
+    if paths != ["."] {
+        for path in paths {
+            command.push(' ');
+            command.push_str(&super::command_word(path));
+        }
+    }
+    command.push_str(" --extend-select ");
+    command.push_str(&codes.join(","));
+    Some(ShownByCheck {
+        command,
+        reports: named.iter().map(|r| r.reports.unwrap_or_default()).sum(),
+        regressions: (named.iter())
+            .filter_map(|r| r.baseline.as_ref())
+            .map(|b| b.regressions)
+            .sum(),
+    })
+}
+
 /// The measurement as the text prints it.
 fn measured(measurement: Option<&PublishedMeasurement>) -> (String, String) {
     match measurement {
@@ -311,8 +354,9 @@ fn measured(measurement: Option<&PublishedMeasurement>) -> (String, String) {
     }
 }
 
-/// The section as the text prints it.
-pub(super) fn render(out: &mut String, rules: &[RuleAdvice], baseline: bool) {
+/// The section as the text prints it. `paths` are the paths given, which the command showing the
+/// reports counted names.
+pub(super) fn render(out: &mut String, rules: &[RuleAdvice], baseline: bool, paths: &[String]) {
     out.push_str("\nRules worth enabling here\n");
     let regressions = if baseline { "  regressions" } else { "" };
     let _ = writeln!(
@@ -337,11 +381,14 @@ pub(super) fn render(out: &mut String, rules: &[RuleAdvice], baseline: bool) {
             Consequence::MinorBug => "minor bug",
             Consequence::Slowdown => "slowdown",
         };
-        let block = if r.in_block {
+        let mut block = if r.in_block {
             "yes".to_owned()
         } else {
             format!("no: {}", r.reason)
         };
+        if r.enabled_now {
+            block.push_str(" (on now: naming it adds its heuristic reports)");
+        }
         let reports = r.reports.unwrap_or_default();
         let _ = writeln!(
             out,
@@ -358,6 +405,18 @@ pub(super) fn render(out: &mut String, rules: &[RuleAdvice], baseline: bool) {
         for r in counted.iter().filter(|r| r.experimental) {
             row(out, r);
         }
+    }
+    if let Some(shown) = shown_by_check(rules, paths) {
+        let regressions = if baseline {
+            format!(", {} regression(s) among them", shown.regressions)
+        } else {
+            String::new()
+        };
+        let _ = writeln!(
+            out,
+            "  see the {} report(s){regressions}: {}",
+            shown.reports, shown.command
+        );
     }
     let mut quiet: Vec<&str> = rules
         .iter()
