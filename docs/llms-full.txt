@@ -3521,7 +3521,8 @@ suggestion group, the heuristic ones too, where the text lists the first 3 exact
   that shows the reports they count (with the paths given; a rule the configuration ignores is
   left out of it, since `ignore` wins). Rules without reports here are named on one line.
 - **What heki cannot see**: where heki is silent, so no count of reports applies (see
-  [below](https://heki.koxudaxi.dev/recommend/#what-heki-cannot-see)).
+  [below](https://heki.koxudaxi.dev/recommend/#what-heki-cannot-see)). The source-root candidates, the one part that enters the
+  block, come first.
 - **Contract candidates**: the `write-owners`, `read-owners`, and `effect-boundaries`
   contracts the code already keeps, as blocks: the candidates whose entries differ only in their
   targets or scopes are one entry. Each block has its confidence, evidence, and the trial run of
@@ -3579,7 +3580,9 @@ one.
   then print through it, exact and heuristic: "if it waits" (`EFF101`) and "if it sends a query"
   (`EFF103`). heki cannot know what a library call does, so no entry enters the block, and the
   trial's counts are kept out of every count of reports: add an entry if you know what the call
-  does.
+  does. The text lists the names whose trial changes a report, the most exact reports first,
+  then the most heuristic ones, then by reach, and counts the others on a line each: the names
+  whose trial changes no report, with the first few by reach, and the names not tried.
 - **Names heki's catalog lacks in packages it covers**: the same, for the names the trial shows
   heki would report through. If such a call waits or sends a query, report it at heki's issue
   tracker: the catalog should list it.
@@ -3839,6 +3842,7 @@ What heki cannot see (no report either way)
   calls of packages heki's catalog does not cover: 1 call(s) of 1 name(s) in 1 package(s)
     name                  calls  async  loops  if it waits     if it sends a query
     stripe.Charge.create      1      1      0  EFF101 1 exact  -
+  if it waits, if it sends a query: what heki check would print if the call waited on the network or sent a database query; a trial, not a fact (Notes)
 
 Contract candidates
   effect-boundaries  app.report  medium

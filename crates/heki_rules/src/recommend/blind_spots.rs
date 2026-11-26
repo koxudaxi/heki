@@ -1248,8 +1248,84 @@ fn hypothetical(code: &str, counts: Option<TrialReports>) -> String {
     }
 }
 
-/// A table of library names, as the text prints it.
-fn names_table(out: &mut String, symbols: &[&SymbolCalls], total: usize) {
+/// The order of the rows of a table of library names: the most exact reports the trial found
+/// through the name first, then the most heuristic ones, then by reach.
+fn trial_order(s: &SymbolCalls) -> impl Ord + '_ {
+    let (waits, queries) = (
+        s.if_waits.unwrap_or_default(),
+        s.if_queries.unwrap_or_default(),
+    );
+    (
+        std::cmp::Reverse(waits.exact + queries.exact),
+        std::cmp::Reverse(waits.heuristic + queries.heuristic),
+        s.counts.reach(),
+        &s.symbol,
+    )
+}
+
+/// The names of the packages the catalog does not cover, as the text prints them: those whose
+/// trial changes a report in a table ([`trial_order`]), then those whose trial changes none and
+/// those not tried, each counted on a line. Returns whether it printed a table.
+fn uncatalogued_names(out: &mut String, section: &BlindSpotsSection) -> bool {
+    let listed: Vec<&SymbolCalls> = (section.uncatalogued.iter())
+        .flat_map(|p| &p.symbols)
+        .collect();
+    let mut reporting: Vec<&SymbolCalls> = (listed.iter().copied())
+        .filter(|s| hypothetical_reports(s) > 0)
+        .collect();
+    reporting.sort_by(|a, b| trial_order(a).cmp(&trial_order(b)));
+    let reporting_total = reporting.len();
+    reporting.truncate(MAX_TEXT_ROWS);
+    if !reporting.is_empty() {
+        names_table(
+            out,
+            &reporting,
+            reporting_total,
+            " name(s) whose trial changes a report",
+        );
+    }
+    let more = |n: usize| {
+        if reporting.is_empty() {
+            n.to_string()
+        } else {
+            format!("and {n} more")
+        }
+    };
+    let mut quiet: Vec<&SymbolCalls> = (listed.iter().copied())
+        .filter(|s| s.if_waits.is_some() && hypothetical_reports(s) == 0)
+        .collect();
+    if !quiet.is_empty() {
+        quiet.sort_by(|a, b| (a.counts.reach(), &a.symbol).cmp(&(b.counts.reach(), &b.symbol)));
+        let mut names: Vec<&str> = (quiet.iter().take(MAX_EXAMPLES))
+            .map(|s| s.symbol.as_str())
+            .collect();
+        if quiet.len() > MAX_EXAMPLES {
+            names.push("...");
+        }
+        let _ = writeln!(
+            out,
+            "    {} name(s) whose trial changes no report ({})",
+            more(quiet.len()),
+            names.join(", ")
+        );
+    }
+    let not_tried = listed.iter().filter(|s| s.if_waits.is_none()).count();
+    if not_tried > 0 {
+        let _ = writeln!(
+            out,
+            "    {} name(s) not tried, past the first {MAX_TRIED_SYMBOLS} by reach",
+            more(not_tried)
+        );
+    }
+    let unlisted = section.totals.uncatalogued_symbols - listed.len();
+    if unlisted > 0 {
+        let _ = writeln!(out, "    and {unlisted} more name(s), not listed");
+    }
+    !reporting.is_empty()
+}
+
+/// A table of library names, as the text prints it; `more` says what the names past it are.
+fn names_table(out: &mut String, symbols: &[&SymbolCalls], total: usize, more: &str) {
     let width = symbols
         .iter()
         .map(|s| s.symbol.len())
@@ -1285,7 +1361,7 @@ fn names_table(out: &mut String, symbols: &[&SymbolCalls], total: usize) {
         );
     }
     if total > symbols.len() {
-        let _ = writeln!(out, "    and {} more", total - symbols.len());
+        let _ = writeln!(out, "    and {} more{more}", total - symbols.len());
     }
 }
 
@@ -1294,6 +1370,39 @@ pub(super) fn render(out: &mut String, section: &BlindSpotsSection) {
     out.push_str("\nWhat heki cannot see (no report either way)\n");
     let t = &section.totals;
     let mut empty = true;
+    let mut tables = false;
+    // The one part of the section that enters the block comes first.
+    for root in section.source_roots.iter().take(MAX_TEXT_ROWS) {
+        empty = false;
+        let mut names: Vec<&str> = root.examples.iter().map(|e| e.name.as_str()).collect();
+        names.dedup();
+        let more = if names.len() > MAX_EXAMPLES {
+            ", ..."
+        } else {
+            ""
+        };
+        names.truncate(MAX_EXAMPLES);
+        let verdict = if root.in_block {
+            "in the block".to_owned()
+        } else {
+            format!("stays out: {}", root.reason)
+        };
+        let _ = writeln!(
+            out,
+            "  source root `{}`: {} import(s) name its files ({}{more}): {verdict}",
+            root.directory,
+            root.imports,
+            names.join(", ")
+        );
+    }
+    let shown_roots = section.source_roots.len().min(MAX_TEXT_ROWS);
+    if t.source_root_candidates > shown_roots {
+        let _ = writeln!(
+            out,
+            "  and {} more source-root candidate(s)",
+            t.source_root_candidates - shown_roots
+        );
+    }
     if t.uncatalogued_symbols > 0 {
         empty = false;
         let _ = writeln!(
@@ -1302,14 +1411,7 @@ pub(super) fn render(out: &mut String, section: &BlindSpotsSection) {
              package(s)",
             t.uncatalogued.calls, t.uncatalogued_symbols, t.uncatalogued_packages
         );
-        let mut symbols: Vec<&SymbolCalls> = section
-            .uncatalogued
-            .iter()
-            .flat_map(|p| &p.symbols)
-            .collect();
-        symbols.sort_by(|a, b| (a.counts.reach(), &a.symbol).cmp(&(b.counts.reach(), &b.symbol)));
-        symbols.truncate(MAX_TEXT_ROWS);
-        names_table(out, &symbols, t.uncatalogued_symbols);
+        tables |= uncatalogued_names(out, section);
     }
     if !section.catalog_may_miss.is_empty() {
         empty = false;
@@ -1318,12 +1420,17 @@ pub(super) fn render(out: &mut String, section: &BlindSpotsSection) {
             "  names heki's catalog lacks in packages it covers, which heki would report through \
              if they waited or sent a query (if they do, report them at {ISSUES_URL})"
         );
-        let symbols: Vec<&SymbolCalls> = section
-            .catalog_may_miss
-            .iter()
-            .take(MAX_TEXT_ROWS)
-            .collect();
-        names_table(out, &symbols, section.catalog_may_miss.len());
+        let mut symbols: Vec<&SymbolCalls> = section.catalog_may_miss.iter().collect();
+        symbols.sort_by(|a, b| trial_order(a).cmp(&trial_order(b)));
+        symbols.truncate(MAX_TEXT_ROWS);
+        names_table(out, &symbols, section.catalog_may_miss.len(), "");
+        tables = true;
+    }
+    if tables {
+        out.push_str(
+            "  if it waits, if it sends a query: what heki check would print if the call waited on \
+             the network or sent a database query; a trial, not a fact (Notes)\n",
+        );
     }
     if t.unresolved.calls > 0 {
         empty = false;
@@ -1355,37 +1462,6 @@ pub(super) fn render(out: &mut String, section: &BlindSpotsSection) {
         if t.unresolved_groups > rows.len() {
             let _ = writeln!(out, "    and {} more", t.unresolved_groups - rows.len());
         }
-    }
-    for root in section.source_roots.iter().take(MAX_TEXT_ROWS) {
-        empty = false;
-        let mut names: Vec<&str> = root.examples.iter().map(|e| e.name.as_str()).collect();
-        names.dedup();
-        let more = if names.len() > MAX_EXAMPLES {
-            ", ..."
-        } else {
-            ""
-        };
-        names.truncate(MAX_EXAMPLES);
-        let verdict = if root.in_block {
-            "in the block".to_owned()
-        } else {
-            format!("stays out: {}", root.reason)
-        };
-        let _ = writeln!(
-            out,
-            "  source root `{}`: {} import(s) name its files ({}{more}): {verdict}",
-            root.directory,
-            root.imports,
-            names.join(", ")
-        );
-    }
-    let shown_roots = section.source_roots.len().min(MAX_TEXT_ROWS);
-    if t.source_root_candidates > shown_roots {
-        let _ = writeln!(
-            out,
-            "  and {} more source-root candidate(s)",
-            t.source_root_candidates - shown_roots
-        );
     }
     let a1 = section.a1_hazards;
     if a1.functions > 0 {

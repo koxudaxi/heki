@@ -1506,11 +1506,13 @@ fn library_names_without_a_catalog_entry_are_listed_with_what_heki_would_report(
     for line in [
         "  calls of packages heki's catalog does not cover: 3 call(s) of 3 name(s) in 1 \
          package(s)",
-        "    name                        calls  async  loops  if it waits     if it sends a query",
-        "    stripe.Charge.create            1      1      0  EFF101 1 exact  -",
-        "    stripe.Charge.capture           1      0      1  -               EFF103 1 exact",
-        "    stripe.Refund.create_async      1      0      0  -               -",
+        "    name                   calls  async  loops  if it waits     if it sends a query",
+        "    stripe.Charge.create       1      1      0  EFF101 1 exact  -",
+        "    stripe.Charge.capture      1      0      1  -               EFF103 1 exact",
+        "    and 1 more name(s) whose trial changes no report (stripe.Refund.create_async)",
         "    requests.utils.quote      1      1      0  EFF101 1 exact  -",
+        "  if it waits, if it sends a query: what heki check would print if the call waited on \
+         the network or sent a database query; a trial, not a fact (Notes)",
         "  1 function(s) with an A1 hazard, 0 of them too large to model: the Soundness lane \
          proves nothing in them (`heki assumptions` lists them)",
     ] {
@@ -1520,6 +1522,29 @@ fn library_names_without_a_catalog_entry_are_listed_with_what_heki_would_report(
         out.contains("(if they do, report them at https://github.com/koxudaxi/heki/issues)"),
         "{out}"
     );
+    // A name whose trial changes no report comes after those whose trial changes one, however
+    // busy it is (on the event loop in test code, where `EFF101` reports nothing); the JSON keeps
+    // its order by reach.
+    p.write(
+        "tests/test_refunds.py",
+        "import stripe\n\n\nasync def test_refunds():\n    stripe.Refund.create_async(amount=1)\n    \
+         stripe.Refund.create_async(amount=2)\n",
+    );
+    let (_, busy, _) = recommend_json(&p, &[]);
+    assert_eq!(
+        busy["blind_spots"]["uncatalogued"][0]["symbols"][0]["symbol"],
+        "stripe.Refund.create_async"
+    );
+    let (_, out, _) = p.heki(&["recommend"]);
+    assert!(
+        out.contains(
+            "\n    stripe.Charge.create       1      1      0  EFF101 1 exact  -\n    \
+             stripe.Charge.capture      1      0      1  -               EFF103 1 exact\n    \
+             and 1 more name(s) whose trial changes no report (stripe.Refund.create_async)\n"
+        ),
+        "{out}"
+    );
+    std::fs::remove_file(p.dir.join("tests/test_refunds.py")).unwrap();
     // What the trial counts is what `heki check` prints with such an entry.
     p.write(
         "pyproject.toml",
