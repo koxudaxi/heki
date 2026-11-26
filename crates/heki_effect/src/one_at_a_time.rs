@@ -7,7 +7,7 @@
 //! and those of the calls that run in its body on its task, in the function's names
 //! ([`ObjRef`]), as `EffectSummary::acquires_locks` does for locks. A use while the function
 //! certainly holds a lock does not count, and neither do the uses of a call made while it holds
-//! one (`CallSite::under_lock`): the lock keeps the tasks to one at a time.
+//! one (`CallSite::locks`): the lock keeps the tasks to one at a time.
 
 use crate::callgraph;
 use crate::locks::ObjRef;
@@ -93,7 +93,7 @@ pub(crate) fn through_call(
     lead: &[Arc<CallHop>],
     rewrite: bool,
 ) -> Option<(ObjRef, ExclusiveUse)> {
-    if site.under_lock || site.runner == Runner::Worker {
+    if site.locks.exclusive() || site.runner == Runner::Worker {
         return None;
     }
     let mapped = obj.through(bc)?;

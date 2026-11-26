@@ -527,7 +527,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "heki"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anstyle-query",
  "anyhow",
@@ -556,7 +556,7 @@ dependencies = [
 
 [[package]]
 name = "heki_ast"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ruff_python_ast",
  "ruff_python_parser",
@@ -567,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "heki_diagnostics"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anstyle",
  "heki_ast",
@@ -580,7 +580,7 @@ dependencies = [
 
 [[package]]
 name = "heki_effect"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "globset",
  "heki_ast",
@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "heki_env"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -607,7 +607,7 @@ dependencies = [
 
 [[package]]
 name = "heki_ir"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "heki_ast",
  "heki_env",
@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "heki_kb"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "blake3",
  "heki_env",
@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "heki_lsp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "globset",
  "heki_ast",
@@ -651,7 +651,7 @@ dependencies = [
 
 [[package]]
 name = "heki_rules"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "globset",
  "heki_ast",
@@ -675,7 +675,7 @@ dependencies = [
 
 [[package]]
 name = "heki_semantic"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "heki_ast",
  "heki_env",
@@ -685,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "heki_soundness"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "heki_ast",
  "heki_env",
