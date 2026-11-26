@@ -6,14 +6,16 @@ An effect is what a call does besides returning a value: it waits on the network
 
 ## 🔍 What runs without configuration
 
-Two rules are exact and run by default. Their reports show the call chain, and an error fails `heki check`.
+Four rules are exact and run by default. Their reports show the call chain, and an error fails `heki check`; `EFF116` reports are warnings.
 
 | Rule | Reports | Tier |
 | --- | --- | --- |
 | [`EFF101`](rules/async-blocking-call.md) | a call in an `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop, however many helpers below | exact, default |
 | [`EFF103`](rules/loop-db-query.md) | a loop over data whose every iteration sends a database statement | exact, default |
+| [`EFF109`](rules/lock-reacquired-while-held.md) | a lock that is not reentrant, taken again while it is held, so the thread or task waits for itself | exact, default |
+| [`EFF116`](rules/generator-never-iterated.md) | a call of a generator function whose generator nothing iterates, so its body never runs | exact, default |
 
-`EFF103` also has heuristic reports, for a loop that can run a query on every iteration. They appear with `--heuristic`.
+`EFF103`, `EFF109`, and `EFF116` also have heuristic reports, where a premise of the claim is open (a loop that can run a query on every iteration, a helper that takes the lock on some paths, a call that may run another implementation). They appear with `--heuristic`.
 
 Two more rules run by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because they can be wrong about the code:
 
@@ -70,12 +72,10 @@ This output is from heki 0.9.0. The other opt-in rules:
 | [`EFF105`](rules/async-blocking-fs.md) | blocking local file I/O reached from an `async def` | heuristic, opt-in |
 | [`EFF106`](rules/lock-or-tx-held-across-io.md) | an `await` or blocking network I/O while a `threading` lock or a database transaction is held | heuristic, opt-in |
 | [`EFF107`](rules/unretained-async-task.md) | an `asyncio.create_task` result that is never awaited, returned, or stored | heuristic, opt-in |
-| [`EFF109`](rules/lock-reacquired-while-held.md) | a lock that is not reentrant, taken again while it is held, so the thread or task waits for itself | heuristic, experimental, opt-in |
 | [`EFF110`](rules/exclusive-object-fanout.md) | an object that allows one operation at a time (a stream reader, an asyncpg connection, a WebSocket) used by tasks started together | heuristic, experimental, opt-in |
 | [`EFF112`](rules/set-order-output.md) | the iteration order of a set of strings, which changes between runs, reaching a file, a stream, or a serializer | heuristic, experimental, opt-in |
 | [`EFF114`](rules/recursion-error-as-value.md) | an `except` around a recursion that takes the `RecursionError` and goes on, so the result depends on the stack depth | heuristic, experimental, opt-in |
 | [`EFF115`](rules/async-def-as-sync-callback.md) | an `async def` handed to a library call that does not await it (a thread target, an executor function, a signal handler), so the body never runs | heuristic, experimental, opt-in |
-| [`EFF116`](rules/generator-never-iterated.md) | a call of a generator function whose generator nothing iterates, so its body never runs | heuristic, experimental, opt-in |
 
 Experimental rules can change or go away between releases. [Experimental Features](experimental.md) says why each one is marked.
 

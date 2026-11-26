@@ -2,28 +2,20 @@
 
 # lock-reacquired-while-held (EFF109)
 
-Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+Family: Execution Effects (EFF) · Exact · Enabled by default · Severity `error` (a bug) · No automatic fix
 
-Opt-in: a non-reentrant lock (`threading.Lock`, `asyncio.Lock`) taken again, directly or through a call, while it is held (the thread or task waits for itself).
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
-
-!!! warning "Experimental"
-
-    Its precision is measured on a small sample of reports only. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](../experimental.md).
+A non-reentrant lock (`threading.Lock`, `asyncio.Lock`) taken again, directly or through a call, while it is held (the thread or task waits for itself).
 
 ## What it does
 Checks for a non-reentrant lock taken again while it is held: by the function holding it, or by
-a function it calls, any number of calls deep. The rule is opt-in: enable it with
-`--extend-select EFF109` or `extend-select = ["EFF109"]`.
+a function it calls, any number of calls deep.
 
 A lock is non-reentrant when the catalog says so: `threading.Lock`, `asyncio.Lock`,
 `asyncio.Condition`, and `multiprocessing.Lock` (`threading.RLock` is reentrant; a
 `threading.Condition` uses an `RLock` unless it is given another lock; a semaphore's class does
 not say its count). Add your own with `non-reentrant-lock = true` in
-`[[tool.heki.ecosystem]]`.
+`[[tool.heki.ecosystem]]`. `anyio.Lock` is not one of them: taken again by the task holding it,
+it raises `RuntimeError` instead of waiting, so the error shows where it happens.
 
 A function holds a lock from a `with` or `async with` over it to the end of that statement, and
 from an `acquire()` to a `release()`, on every path. An `acquire()` counts when it is awaited,
@@ -55,7 +47,8 @@ It does not report:
   under the lock): such code keeps a flag to know whether it holds the lock, which heki does not
   evaluate;
 - a lock the code gives back before taking it again, also inside the `with` that took it
-  (`self._lock.release()`, then `self._lock.acquire()`);
+  (`self._lock.release()`, then `self._lock.acquire()`), or in a function it calls (a helper
+  releasing its caller's lock);
 - a lock whose name may be bound to another object before it is taken again
   (`self._lock = threading.Lock()`, `global _LOCK`, `del self._lock`): by the holder, by a
   function the holder calls first, or by the function taking the lock or one on the way to it;
@@ -68,22 +61,38 @@ It does not report:
 
 ## What a report states
 
-A report states that a function holding a non-reentrant lock takes the same lock again, itself
-or through the calls it makes on its thread or task, so the thread or task waits for itself.
+A report states that a function holding a non-reentrant lock attempts to take the same lock
+again whenever the reported call or acquisition returns, itself or through the calls it makes on
+its thread or task, so the thread or task waits for itself there. A heuristic report states that
+the function holding the lock can reach an acquisition of it: some premise below may be open.
 
 Its premises:
 
 - **Non-reentrant**: the lock is an instance of a class the catalog or the configuration flags,
-  by the value inferred or an annotation (assumptions R2, R3).
-- **Held**: a `with` over it, or an awaited or blocking `acquire()`, holds it on every path to the
-  inner acquisition, and nothing gives it back or binds its name again on the way. Established.
-- **Same object**: both sides name the lock the same way, through the arguments of each call, and
-  no function on the way may bind that name. Established, as long as no other thread binds it.
-- **Resolves**: each call on the chain is to the function shown (assumption R1). Open through a
-  method call: one candidate implementation that takes the lock is enough.
-- **Reaches**: each function on the chain reaches the next call on its thread or task. Open: one
-  path is enough, and a branch heki cannot decide counts as taken; only the branches the caller's
-  arguments switch off, and those behind a test of state the holder changes, are left out.
+  by the value inferred or an annotation (assumptions R2, R3), and no project class a value of it
+  may be binds how it is taken or given back (`acquire`, `release`, `__enter__`, `__exit__`,
+  `__aenter__`, `__aexit__`). Open in a heuristic report: a project subclass of the lock class
+  binds one of them.
+- **Held**: a `with` over it, or an awaited or blocking `acquire()`, holds it on every path to
+  the reported call or inner acquisition, and nothing the holder runs on the way gives it back or
+  binds its name: neither the holder nor a function it calls. Established for every report.
+- **Same lock**: both sides name the lock the same way, through the arguments of each call, and
+  no function on the way may bind that name or give a lock back under it. Established for every
+  report.
+- **Every implementation**: each call on the chain has as its targets every implementation it
+  can run (assumptions R1, R2, and R5), each run as written at the call (no decorator that may
+  replace it, its name bound to one definition), and each has the fact below. Open in a
+  heuristic report: through a method call, one candidate implementation that takes the lock is
+  enough.
+- **Every return**: each function on the chain attempts the next call, or the acquisition, on
+  every path on which it returns normally, exception edges into handlers included. Open in a
+  heuristic report: one path is enough, and a branch heki cannot decide counts as taken; only
+  the branches the caller's arguments switch off, and those behind a test of state the holder
+  changes, are left out.
+
+Not part of the claim: what another thread does with the lock's name while it is held, and
+whether the call is reached at all (the claim is anchored at it, so a branch around it in the
+holder does not matter).
 
 ## Why is this bad?
 A thread that takes a `threading.Lock` it already holds waits for itself forever, and so does an
@@ -131,6 +140,4 @@ Use instead:
 No automatic fix.
 
 ## Options
-- `lint.extend-select = ["EFF109"]` (or `--extend-select EFF109`) enables the rule. It is
-  opt-in: selecting the `EFF` prefix does not enable it.
 - `[[tool.heki.ecosystem]]` entries with `non-reentrant-lock = true` add lock classes.

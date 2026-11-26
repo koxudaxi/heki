@@ -211,6 +211,8 @@ These rules run by default. Each report shows the chain of calls that leads to i
 | --- | --- |
 | A blocking call that a call in an `async def` always runs, several helpers below | `EFF101` |
 | A database statement on every iteration of a loop over data | `EFF103` |
+| A lock that is not reentrant, taken again while it is held, so the thread or task waits for itself | `EFF109` |
+| A call of a generator function whose generator nothing iterates, so its body never runs | `EFF116` |
 | A `Sequence` / `Mapping` / `AbstractSet` argument changed in place by a helper | `MUT110` |
 | A list, dict, or set that an `lru_cache` / `cache` function returned, changed in place | `MUT114` |
 | A change of a builtin container that is lost because the object is new and nothing holds it (`list(xs).sort()`) | `MUT119` |

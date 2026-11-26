@@ -5460,15 +5460,18 @@ fn steps_eff109() -> Vec<Step> {
         )
         .absent(&[("pkg/lock_use.py", "EFF109")]),
         Step::new(
-            "EFF109 is no longer selected, and the helper's module changes",
+            "EFF109 is ignored, and the helper's module changes",
             vec![
-                Action::Configure(CONFIG.replace(", \"EFF109\"", "")),
+                Action::Configure(CONFIG.replace(
+                    "[tool.heki.lint]\n",
+                    "[tool.heki.lint]\nignore = [\"EFF109\"]\n",
+                )),
                 Action::Save("pkg/lock_pool.py", format!("# Pools.\n{LOCK_POOL}")),
             ],
         )
         .absent(&[("pkg/lock_use.py", "EFF109")]),
         Step::new(
-            "EFF109 is selected again",
+            "EFF109 is no longer ignored",
             vec![Action::Configure(CONFIG.to_owned())],
         )
         .present(&[("pkg/lock_use.py", "EFF109")]),

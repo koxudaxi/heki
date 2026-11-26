@@ -200,6 +200,8 @@ These rules run by default. Each report shows the chain of calls that leads to i
 | --- | --- |
 | A blocking call that a call in an `async def` always runs, several helpers below | [`EFF101`](https://heki.koxudaxi.dev/rules/async-blocking-call/) |
 | A database statement on every iteration of a loop over data | [`EFF103`](https://heki.koxudaxi.dev/rules/loop-db-query/) |
+| A lock that is not reentrant, taken again while it is held, so the thread or task waits for itself | [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) |
+| A call of a generator function whose generator nothing iterates, so its body never runs | [`EFF116`](https://heki.koxudaxi.dev/rules/generator-never-iterated/) |
 | A `Sequence` / `Mapping` / `AbstractSet` argument changed in place by a helper | [`MUT110`](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) |
 | A list, dict, or set that an `lru_cache` / `cache` function returned, changed in place | [`MUT114`](https://heki.koxudaxi.dev/rules/cached-result-mutation/) |
 | A change of a builtin container that is lost because the object is new and nothing holds it (`list(xs).sort()`) | [`MUT119`](https://heki.koxudaxi.dev/rules/change-lost-on-new-object/) |
@@ -983,6 +985,8 @@ false ([Rule Precision](https://heki.koxudaxi.dev/precision/#certifications)). W
 - [`MUT119` (change-lost-on-new-object)](https://heki.koxudaxi.dev/rules/change-lost-on-new-object/)
 - [`EFF101` (async-blocking-call)](https://heki.koxudaxi.dev/rules/async-blocking-call/)
 - [`EFF103` (loop-db-query)](https://heki.koxudaxi.dev/rules/loop-db-query/)
+- [`EFF109` (lock-reacquired-while-held)](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/)
+- [`EFF116` (generator-never-iterated)](https://heki.koxudaxi.dev/rules/generator-never-iterated/)
 - [`DATA101` (loop-carried-concat)](https://heki.koxudaxi.dev/rules/loop-carried-concat/)
 - [`OPT101` (list-quadratic-concat)](https://heki.koxudaxi.dev/rules/list-quadratic-concat/)
 - [`OPT102` (set-dict-quadratic-merge)](https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/)
@@ -1355,14 +1359,16 @@ An effect is what a call does besides returning a value: it waits on the network
 
 ## 🔍 What runs without configuration
 
-Two rules are exact and run by default. Their reports show the call chain, and an error fails `heki check`.
+Four rules are exact and run by default. Their reports show the call chain, and an error fails `heki check`; `EFF116` reports are warnings.
 
 | Rule | Reports | Tier |
 | --- | --- | --- |
 | [`EFF101`](https://heki.koxudaxi.dev/rules/async-blocking-call/) | a call in an `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop, however many helpers below | exact, default |
 | [`EFF103`](https://heki.koxudaxi.dev/rules/loop-db-query/) | a loop over data whose every iteration sends a database statement | exact, default |
+| [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) | a lock that is not reentrant, taken again while it is held, so the thread or task waits for itself | exact, default |
+| [`EFF116`](https://heki.koxudaxi.dev/rules/generator-never-iterated/) | a call of a generator function whose generator nothing iterates, so its body never runs | exact, default |
 
-`EFF103` also has heuristic reports, for a loop that can run a query on every iteration. They appear with `--heuristic`.
+`EFF103`, `EFF109`, and `EFF116` also have heuristic reports, where a premise of the claim is open (a loop that can run a query on every iteration, a helper that takes the lock on some paths, a call that may run another implementation). They appear with `--heuristic`.
 
 Two more rules run by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because they can be wrong about the code:
 
@@ -1419,12 +1425,10 @@ This output is from heki 0.9.0. The other opt-in rules:
 | [`EFF105`](https://heki.koxudaxi.dev/rules/async-blocking-fs/) | blocking local file I/O reached from an `async def` | heuristic, opt-in |
 | [`EFF106`](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/) | an `await` or blocking network I/O while a `threading` lock or a database transaction is held | heuristic, opt-in |
 | [`EFF107`](https://heki.koxudaxi.dev/rules/unretained-async-task/) | an `asyncio.create_task` result that is never awaited, returned, or stored | heuristic, opt-in |
-| [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) | a lock that is not reentrant, taken again while it is held, so the thread or task waits for itself | heuristic, experimental, opt-in |
 | [`EFF110`](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/) | an object that allows one operation at a time (a stream reader, an asyncpg connection, a WebSocket) used by tasks started together | heuristic, experimental, opt-in |
 | [`EFF112`](https://heki.koxudaxi.dev/rules/set-order-output/) | the iteration order of a set of strings, which changes between runs, reaching a file, a stream, or a serializer | heuristic, experimental, opt-in |
 | [`EFF114`](https://heki.koxudaxi.dev/rules/recursion-error-as-value/) | an `except` around a recursion that takes the `RecursionError` and goes on, so the result depends on the stack depth | heuristic, experimental, opt-in |
 | [`EFF115`](https://heki.koxudaxi.dev/rules/async-def-as-sync-callback/) | an `async def` handed to a library call that does not await it (a thread target, an executor function, a signal handler), so the body never runs | heuristic, experimental, opt-in |
-| [`EFF116`](https://heki.koxudaxi.dev/rules/generator-never-iterated/) | a call of a generator function whose generator nothing iterates, so its body never runs | heuristic, experimental, opt-in |
 
 Experimental rules can change or go away between releases. [Experimental Features](https://heki.koxudaxi.dev/experimental/) says why each one is marked.
 
@@ -2180,7 +2184,7 @@ Rules worth enabling here
   rule    reports  exact  consequence  right about the code (published)  real harm  block
   MUT106        1      -  bug          not measured                      -          yes
   OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
-  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF112, EFF114, EFF115, EFF116, EFF117, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, OPT103, OPT111, OPT112, OPT120, OPT121, OPT130
+  No reports here: EFF102, EFF105, EFF106, EFF107, EFF110, EFF112, EFF114, EFF115, EFF117, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, OPT103, OPT111, OPT112, OPT120, OPT121, OPT130
   MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it.
 
 Contract candidates
@@ -3093,8 +3097,8 @@ the installed release changed, and the changelog on GitHub lists every release.
   `heuristic = true`, or when its code or name is selected.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   says how many.
-- A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
-  `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `IMP101`, `IMP102`, `IMP104`, `IMP301`,
+- A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF110`,
+  `EFF112`, `EFF114`, `EFF115`, `IMP101`, `IMP102`, `IMP104`, `IMP301`,
   `IMP302`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`,
   `MUT115`, `MUT120`, `OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`): they need
   their exact code or name. In `ignore`, a prefix covers every rule it matches.
@@ -4432,8 +4436,9 @@ baseline; the CI step checks the whole project. Both fail on new exact errors.
 
 ### An async web or database service
 
-`EFF101` (a blocking call that holds up the event loop) and `EFF103` (a query on every iteration
-of a loop) are exact and run by default. Add the checks that fit the service:
+`EFF101` (a blocking call that holds up the event loop), `EFF103` (a query on every iteration
+of a loop), and `EFF109` (a lock taken again while it is held) are exact and run by default.
+Add the checks that fit the service:
 
 ```toml
 # pyproject.toml
@@ -4450,7 +4455,6 @@ extend-select = [
 | [`EFF105`](https://heki.koxudaxi.dev/rules/async-blocking-fs/) | heuristic | reads or writes files, templates, or static assets in `async def` handlers |
 | [`EFF106`](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/) | heuristic | holds a `threading` lock or a database transaction around network I/O or an `await` |
 | [`EFF107`](https://heki.koxudaxi.dev/rules/unretained-async-task/) | heuristic | starts background work with `asyncio.create_task` |
-| [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) | heuristic, experimental | takes a `threading.Lock` or an `asyncio.Lock` in a function that a holder of the lock calls |
 | [`EFF110`](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/) | heuristic, experimental | shares a connection, a stream, or a WebSocket between tasks started with `asyncio.gather` or a task group |
 | [`EFF115`](https://heki.koxudaxi.dev/rules/async-def-as-sync-callback/) | heuristic, experimental | hands `async def` functions to threads, executors, or signal handlers |
 | [`EFF102`](https://heki.koxudaxi.dev/rules/loop-unpooled-client/), [`EFF117`](https://heki.koxudaxi.dev/rules/unlocked-write-of-guarded-state/) | heuristic | creates HTTP or database clients in loops, or changes state its threads share without the lock its other writers hold; these two are not opt-in and run with `--heuristic` |
@@ -5683,12 +5687,12 @@ Work that runs where it should not: blocking calls on the event loop, clients an
 | EFF105 | [async-blocking-fs](https://heki.koxudaxi.dev/rules/async-blocking-fs/) | Opt-in: blocking local filesystem I/O reachable from `async def`. | ≈ 🔌 |
 | EFF106 | [lock-or-tx-held-across-io](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/) | Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction. | ≈ 🔌 |
 | EFF107 | [unretained-async-task](https://heki.koxudaxi.dev/rules/unretained-async-task/) | Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored. | ≈ 🔌 |
-| EFF109 | [lock-reacquired-while-held](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) | Opt-in: a non-reentrant lock (`threading.Lock`, `asyncio.Lock`) taken again, directly or through a call, while it is held (the thread or task waits for itself). | ≈ 🔌 🧪 |
+| EFF109 | [lock-reacquired-while-held](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) | A non-reentrant lock (`threading.Lock`, `asyncio.Lock`) taken again, directly or through a call, while it is held (the thread or task waits for itself). |  |
 | EFF110 | [exclusive-object-fanout](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/) | Opt-in: an object allowing one operation at a time (`asyncio.StreamReader`, an asyncpg connection, a WebSocket) used by tasks started together (`asyncio.gather`, a task group). | ≈ 🔌 🧪 |
 | EFF112 | [set-order-output](https://heki.koxudaxi.dev/rules/set-order-output/) | Opt-in: the iteration order of a set of strings, which changes between runs, reaches a file, a stream, a serializer, or a raised exception's message across a call. | ≈ 🔌 🧪 |
 | EFF114 | [recursion-error-as-value](https://heki.koxudaxi.dev/rules/recursion-error-as-value/) | Opt-in: an `except` clause around a recursion (a call cycle reached from its `try` body) takes the `RecursionError` and goes on without raising, so the result depends on the stack depth. | ≈ 🔌 🧪 |
 | EFF115 | [async-def-as-sync-callback](https://heki.koxudaxi.dev/rules/async-def-as-sync-callback/) | Opt-in: an `async def` handed to a library call that calls it without awaiting what it returns (a thread's target, an executor's function, an `atexit` or signal handler, a `filter` predicate), so the call only creates a coroutine and the body does not run. | ≈ 🔌 🧪 |
-| EFF116 | [generator-never-iterated](https://heki.koxudaxi.dev/rules/generator-never-iterated/) | Opt-in: a call of a generator function whose generator nothing iterates (a statement, a value only tested for truth, a function handed to a thread, an `atexit` handler, or a `filter` predicate), so its body does not run. | ≈ 🔌 🧪 |
+| EFF116 | [generator-never-iterated](https://heki.koxudaxi.dev/rules/generator-never-iterated/) | A call of a generator function whose generator nothing iterates (a statement, a value only tested for truth, a function handed to a thread, an `atexit` handler, or a `filter` predicate), so its body does not run. |  |
 | EFF117 | [unlocked-write-of-guarded-state](https://heki.koxudaxi.dev/rules/unlocked-write-of-guarded-state/) | State that another writer changes holding a thread lock (`threading.Lock`, `RLock`, `Condition`, `Semaphore`), changed here holding none, where a thread heki resolves can run one of the writes: an update can be lost. | ≈ |
 | EFF201 | [effect-boundary-violation](https://heki.koxudaxi.dev/rules/effect-boundary-violation/) | Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope. | ≈ 📜 |
 
@@ -5753,7 +5757,7 @@ open: an `OPT` rewrite heki could not prove safe, a size-dependent `OPT` rewrite
 trip count the data does not decide (the code fixes or caps it, or the loop's items are not a
 parameter, the rows of a query, the lines of a file, or the entries of a directory), an `OPT113`
 join whose rule page premises do not all hold, or
-an `EFF101`, `EFF103`, `DATA101`, `MUT110`, `MUT114`, or `MUT119` report whose rule page premises are not all established. Only exact reports are shown by
+an `EFF101`, `EFF103`, `EFF109`, `EFF116`, `DATA101`, `MUT110`, `MUT114`, or `MUT119` report whose rule page premises are not all established. Only exact reports are shown by
 default, and only those of the exact rules that are not opt-in.
 
 - A heuristic rule runs when `select` or `extend-select` names its code or name. With
@@ -5770,7 +5774,7 @@ default, and only those of the exact rules that are not opt-in.
   false heuristic report never stops a CI or a hook that keeps the default.
 
 See [Rule selection](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint). `EFF101`, `EFF103`,
-`DATA101`, `MUT101`, `MUT110`, `MUT111`, `MUT114`, `MUT119`, the proven tier of the eight `OPT`
+`EFF109`, `EFF116`, `DATA101`, `MUT101`, `MUT110`, `MUT111`, `MUT114`, `MUT119`, the proven tier of the eight `OPT`
 rewrite rules, and the exact tier of `OPT113` are exact (certified below); the other rules are
 heuristic. `MUT101`, `MUT111`, and the six size-dependent `OPT` rules (`OPT103`, `OPT110`,
 `OPT111`, `OPT120`, `OPT121`, `OPT130`) are exact and opt-in, for their share of real harm
@@ -6024,12 +6028,10 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `command.inspect` | command | `heki inspect` | 0.2.1 | - |
 | `command.recommend` | command | `heki recommend` | 0.2.2 | - |
 | `command.skill` | command | `heki skill` | 0.2.5 | - |
-| `rule.EFF109` | rule | [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) | 0.2.1 | - |
 | `rule.EFF110` | rule | [`EFF110`](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/) | 0.2.1 | - |
 | `rule.EFF112` | rule | [`EFF112`](https://heki.koxudaxi.dev/rules/set-order-output/) | 0.2.4 | - |
 | `rule.EFF114` | rule | [`EFF114`](https://heki.koxudaxi.dev/rules/recursion-error-as-value/) | 0.2.4 | - |
 | `rule.EFF115` | rule | [`EFF115`](https://heki.koxudaxi.dev/rules/async-def-as-sync-callback/) | 0.2.5 | - |
-| `rule.EFF116` | rule | [`EFF116`](https://heki.koxudaxi.dev/rules/generator-never-iterated/) | 0.2.6 | - |
 | `rule.IMP101` | rule | [`IMP101`](https://heki.koxudaxi.dev/rules/import-cycle/) | 0.2.7 | - |
 | `rule.IMP102` | rule | [`IMP102`](https://heki.koxudaxi.dev/rules/circular-import-failure/) | 0.3.0 | - |
 | `rule.IMP104` | rule | [`IMP104`](https://heki.koxudaxi.dev/rules/development-code-import/) | 0.3.0 | - |
@@ -6075,14 +6077,6 @@ The sections, their policies, the candidates it infers, and its JSON object can 
 
 Where coding agents read skills, and so where `heki skill install` writes, can change as the agents evolve; the skill's wording changes with heki's commands.
 
-## `rule.EFF109`
-
-- **Kind:** rule
-- **Target:** [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/)
-- **Since:** 0.2.1
-
-Its precision is measured on a small sample of reports only.
-
 ## `rule.EFF110`
 
 - **Kind:** rule
@@ -6114,14 +6108,6 @@ Its precision is measured on a sample of reports of one corpus only, and its pre
 - **Since:** 0.2.5
 
 The development corpus has no report of it, so its precision is not measured, and its premises are not yet certified.
-
-## `rule.EFF116`
-
-- **Kind:** rule
-- **Target:** [`EFF116`](https://heki.koxudaxi.dev/rules/generator-never-iterated/)
-- **Since:** 0.2.6
-
-The development corpus has few reports of it, and its premises are not yet certified.
 
 ## `rule.IMP101`
 
@@ -9448,17 +9434,9 @@ Source: https://heki.koxudaxi.dev/rules/generator-never-iterated/
 
 # generator-never-iterated (EFF116)
 
-Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+Family: Execution Effects (EFF) · Exact · Enabled by default · Severity `warning` (a bug that is rarely harmful) · No automatic fix
 
-Opt-in: a call of a generator function whose generator nothing iterates (a statement, a value only tested for truth, a function handed to a thread, an `atexit` handler, or a `filter` predicate), so its body does not run.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
-
-!!! warning "Experimental"
-
-    The development corpus has few reports of it, and its premises are not yet certified. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
+A call of a generator function whose generator nothing iterates (a statement, a value only tested for truth, a function handed to a thread, an `atexit` handler, or a `filter` predicate), so its body does not run.
 
 ## What it does
 Checks for a call of a generator function whose generator nothing iterates. Calling a function
@@ -9507,7 +9485,7 @@ It does not report:
 
 A report states that the named function is a generator function, so the call only creates a
 generator, and that nothing iterates that generator: the body of the function does not run
-there.
+there. A heuristic report states the same with some premise below open.
 
 Its premises:
 
@@ -9519,8 +9497,9 @@ Its premises:
   method, more than 64 classes to dispatch over, a member of a union that does not resolve, or a
   name the project binds to another object.
 - **Never iterated**: the generator is only the value of the call, with no name, and nothing
-  reads it but a truth test; or the library call that runs the function drops what it returns or
-  tests it for truth, as the catalog describes it (R3).
+  reads it but a truth test (a branch, `not`, the builtin `bool`); or the library call that runs
+  the function drops what it returns or tests it for truth, as the catalog describes it (R3).
+  Established for every report.
 
 Not part of the claim: whether the body would have had an effect, and whether the caller meant
 the generator to run.
@@ -9530,6 +9509,9 @@ The work the function does never happens, and nothing fails: rows are never load
 the next line reads, a fallback behind `if not gen():` never runs, a test helper with `yield`
 verifies nothing, a thread starts and ends at once. Adding a `yield` to a function (for a debug
 print, or to stream its results) silently breaks every caller that called it as a statement.
+
+A report is a warning, not an error: the first test that uses the function shows that its body
+did not run, so the bug rarely reaches a release.
 
 ## Example
 ```python
@@ -9578,10 +9560,6 @@ def check(text: str) -> None:
 
 ## Fix safety
 No automatic fix.
-
-## Options
-- `lint.extend-select = ["EFF116"]` (or `--extend-select EFF116`) enables the rule. It is
-  opt-in: selecting the `EFF` prefix does not enable it.
 
 ## Known limitations
 - A generator bound to a name that nothing reads (`rows = gen()`) is not reported.
@@ -10702,28 +10680,20 @@ Source: https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/
 
 # lock-reacquired-while-held (EFF109)
 
-Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+Family: Execution Effects (EFF) · Exact · Enabled by default · Severity `error` (a bug) · No automatic fix
 
-Opt-in: a non-reentrant lock (`threading.Lock`, `asyncio.Lock`) taken again, directly or through a call, while it is held (the thread or task waits for itself).
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
-
-!!! warning "Experimental"
-
-    Its precision is measured on a small sample of reports only. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
+A non-reentrant lock (`threading.Lock`, `asyncio.Lock`) taken again, directly or through a call, while it is held (the thread or task waits for itself).
 
 ## What it does
 Checks for a non-reentrant lock taken again while it is held: by the function holding it, or by
-a function it calls, any number of calls deep. The rule is opt-in: enable it with
-`--extend-select EFF109` or `extend-select = ["EFF109"]`.
+a function it calls, any number of calls deep.
 
 A lock is non-reentrant when the catalog says so: `threading.Lock`, `asyncio.Lock`,
 `asyncio.Condition`, and `multiprocessing.Lock` (`threading.RLock` is reentrant; a
 `threading.Condition` uses an `RLock` unless it is given another lock; a semaphore's class does
 not say its count). Add your own with `non-reentrant-lock = true` in
-`[[tool.heki.ecosystem]]`.
+`[[tool.heki.ecosystem]]`. `anyio.Lock` is not one of them: taken again by the task holding it,
+it raises `RuntimeError` instead of waiting, so the error shows where it happens.
 
 A function holds a lock from a `with` or `async with` over it to the end of that statement, and
 from an `acquire()` to a `release()`, on every path. An `acquire()` counts when it is awaited,
@@ -10755,7 +10725,8 @@ It does not report:
   under the lock): such code keeps a flag to know whether it holds the lock, which heki does not
   evaluate;
 - a lock the code gives back before taking it again, also inside the `with` that took it
-  (`self._lock.release()`, then `self._lock.acquire()`);
+  (`self._lock.release()`, then `self._lock.acquire()`), or in a function it calls (a helper
+  releasing its caller's lock);
 - a lock whose name may be bound to another object before it is taken again
   (`self._lock = threading.Lock()`, `global _LOCK`, `del self._lock`): by the holder, by a
   function the holder calls first, or by the function taking the lock or one on the way to it;
@@ -10768,22 +10739,38 @@ It does not report:
 
 ## What a report states
 
-A report states that a function holding a non-reentrant lock takes the same lock again, itself
-or through the calls it makes on its thread or task, so the thread or task waits for itself.
+A report states that a function holding a non-reentrant lock attempts to take the same lock
+again whenever the reported call or acquisition returns, itself or through the calls it makes on
+its thread or task, so the thread or task waits for itself there. A heuristic report states that
+the function holding the lock can reach an acquisition of it: some premise below may be open.
 
 Its premises:
 
 - **Non-reentrant**: the lock is an instance of a class the catalog or the configuration flags,
-  by the value inferred or an annotation (assumptions R2, R3).
-- **Held**: a `with` over it, or an awaited or blocking `acquire()`, holds it on every path to the
-  inner acquisition, and nothing gives it back or binds its name again on the way. Established.
-- **Same object**: both sides name the lock the same way, through the arguments of each call, and
-  no function on the way may bind that name. Established, as long as no other thread binds it.
-- **Resolves**: each call on the chain is to the function shown (assumption R1). Open through a
-  method call: one candidate implementation that takes the lock is enough.
-- **Reaches**: each function on the chain reaches the next call on its thread or task. Open: one
-  path is enough, and a branch heki cannot decide counts as taken; only the branches the caller's
-  arguments switch off, and those behind a test of state the holder changes, are left out.
+  by the value inferred or an annotation (assumptions R2, R3), and no project class a value of it
+  may be binds how it is taken or given back (`acquire`, `release`, `__enter__`, `__exit__`,
+  `__aenter__`, `__aexit__`). Open in a heuristic report: a project subclass of the lock class
+  binds one of them.
+- **Held**: a `with` over it, or an awaited or blocking `acquire()`, holds it on every path to
+  the reported call or inner acquisition, and nothing the holder runs on the way gives it back or
+  binds its name: neither the holder nor a function it calls. Established for every report.
+- **Same lock**: both sides name the lock the same way, through the arguments of each call, and
+  no function on the way may bind that name or give a lock back under it. Established for every
+  report.
+- **Every implementation**: each call on the chain has as its targets every implementation it
+  can run (assumptions R1, R2, and R5), each run as written at the call (no decorator that may
+  replace it, its name bound to one definition), and each has the fact below. Open in a
+  heuristic report: through a method call, one candidate implementation that takes the lock is
+  enough.
+- **Every return**: each function on the chain attempts the next call, or the acquisition, on
+  every path on which it returns normally, exception edges into handlers included. Open in a
+  heuristic report: one path is enough, and a branch heki cannot decide counts as taken; only
+  the branches the caller's arguments switch off, and those behind a test of state the holder
+  changes, are left out.
+
+Not part of the claim: what another thread does with the lock's name while it is held, and
+whether the call is reached at all (the claim is anchored at it, so a branch around it in the
+holder does not matter).
 
 ## Why is this bad?
 A thread that takes a `threading.Lock` it already holds waits for itself forever, and so does an
@@ -10831,8 +10818,6 @@ Use instead:
 No automatic fix.
 
 ## Options
-- `lint.extend-select = ["EFF109"]` (or `--extend-select EFF109`) enables the rule. It is
-  opt-in: selecting the `EFF` prefix does not enable it.
 - `[[tool.heki.ecosystem]]` entries with `non-reentrant-lock = true` add lock classes.
 
 

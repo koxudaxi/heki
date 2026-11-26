@@ -677,10 +677,20 @@ fn eff109_selection_and_rule_page() {
     let p = Project::new("eff109_selection");
     p.write("pkg/__init__.py", "")
         .write("pkg/registry.py", REGISTRY);
-    assert!(found(&diagnostics(&p, &[])).is_empty());
-    assert!(found(&diagnostics(&p, &["--select", "EFF"])).is_empty());
     let named = diagnostics(&p, &["--select", "lock-reacquired-while-held"]);
     assert_eq!(found(&named).len(), 8);
+    // A default rule: with `--heuristic` and the `EFF` prefix every report, without it the
+    // exact ones, as errors.
+    assert_eq!(found(&diagnostics(&p, &[])), found(&named));
+    assert_eq!(found(&diagnostics(&p, &["--select", "EFF"])), found(&named));
+    let exact: Vec<Value> = (named.iter())
+        .filter(|d| d["certainty"] == "exact")
+        .cloned()
+        .collect();
+    assert!(exact.iter().all(|d| d["severity"] == "error"));
+    let (_, plain, _) = p.heki(&["check", "--output-format", "json"]);
+    let plain: Vec<Value> = serde_json::from_str(&plain).unwrap();
+    assert_eq!(found(&plain), found(&exact));
     assert_eq!(named[0]["rule_slug"], "lock-reacquired-while-held");
     let (code, doc, _) = p.heki(&["rule", "EFF109"]);
     assert_eq!(code, 0);

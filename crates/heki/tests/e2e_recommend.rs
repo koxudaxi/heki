@@ -159,7 +159,7 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
          no: slower code, not a bug\n\
          \x20 OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         \
          no: slower code, not a bug\n\
-         \x20 No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF112, EFF114, EFF115, EFF116, \
+         \x20 No reports here: EFF102, EFF105, EFF106, EFF107, EFF110, EFF112, EFF114, EFF115, \
          EFF117, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT106, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT120, \
          OPT103, OPT111, OPT112, OPT120, OPT121, OPT130\n\
          \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then \
@@ -660,7 +660,7 @@ fn the_count_of_files_left_out_stops_at_its_caps() {
 }
 
 /// Reports of opt-in rules: `MUT106` and `EFF107` (bugs, not measured), `MUT107` (a bug whose
-/// measurement shows real harm below 10%), and the experimental `EFF109`.
+/// measurement shows real harm below 10%), and the experimental `EFF110`.
 const OPT_IN: &str = "\
 import asyncio
 import threading
@@ -690,10 +690,11 @@ class Point:
     def move(self, dx):
         self.x += dx
 
-def twice():
-    with lock:
-        with lock:
-            pass
+async def read_line(reader: asyncio.StreamReader):
+    return await reader.readline()
+
+async def both(reader: asyncio.StreamReader):
+    return await asyncio.gather(read_line(reader), read_line(reader))
 ";
 
 fn shop_with_opt_in(name: &str) -> Project {
@@ -745,8 +746,8 @@ fn rules_worth_enabling_follow_the_policy() {
         \x20 OPT101        1      0  slowdown     78% (45-94%), n=9, 2026-11-21     0%         no: slower code, not a bug\n\
         \x20 OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug\n\
         \x20 Optional (experimental, never in the block)\n\
-        \x20 EFF109        1      -  bug          not measured                      -          no: experimental\n\
-        \x20 No reports here: EFF102, EFF105, EFF106, EFF110, EFF112, EFF114, EFF115, EFF116, EFF117, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT108, MUT111, MUT112, MUT113, \
+        \x20 EFF110        1      -  bug          not measured                      -          no: experimental\n\
+        \x20 No reports here: EFF102, EFF105, EFF106, EFF112, EFF114, EFF115, EFF117, IMP101, IMP102, IMP104, IMP301, IMP302, MUT101, MUT108, MUT111, MUT112, MUT113, \
         MUT115, MUT118, MUT120, OPT103, OPT111, OPT112, OPT120, OPT121, OPT130\n\
         \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it."
     );

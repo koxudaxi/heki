@@ -12,12 +12,10 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `command.inspect` | command | `heki inspect` | 0.2.1 | - |
 | `command.recommend` | command | `heki recommend` | 0.2.2 | - |
 | `command.skill` | command | `heki skill` | 0.2.5 | - |
-| `rule.EFF109` | rule | [`EFF109`](rules/lock-reacquired-while-held.md) | 0.2.1 | - |
 | `rule.EFF110` | rule | [`EFF110`](rules/exclusive-object-fanout.md) | 0.2.1 | - |
 | `rule.EFF112` | rule | [`EFF112`](rules/set-order-output.md) | 0.2.4 | - |
 | `rule.EFF114` | rule | [`EFF114`](rules/recursion-error-as-value.md) | 0.2.4 | - |
 | `rule.EFF115` | rule | [`EFF115`](rules/async-def-as-sync-callback.md) | 0.2.5 | - |
-| `rule.EFF116` | rule | [`EFF116`](rules/generator-never-iterated.md) | 0.2.6 | - |
 | `rule.IMP101` | rule | [`IMP101`](rules/import-cycle.md) | 0.2.7 | - |
 | `rule.IMP102` | rule | [`IMP102`](rules/circular-import-failure.md) | 0.3.0 | - |
 | `rule.IMP104` | rule | [`IMP104`](rules/development-code-import.md) | 0.3.0 | - |
@@ -63,14 +61,6 @@ The sections, their policies, the candidates it infers, and its JSON object can 
 
 Where coding agents read skills, and so where `heki skill install` writes, can change as the agents evolve; the skill's wording changes with heki's commands.
 
-## `rule.EFF109`
-
-- **Kind:** rule
-- **Target:** [`EFF109`](rules/lock-reacquired-while-held.md)
-- **Since:** 0.2.1
-
-Its precision is measured on a small sample of reports only.
-
 ## `rule.EFF110`
 
 - **Kind:** rule
@@ -102,14 +92,6 @@ Its precision is measured on a sample of reports of one corpus only, and its pre
 - **Since:** 0.2.5
 
 The development corpus has no report of it, so its precision is not measured, and its premises are not yet certified.
-
-## `rule.EFF116`
-
-- **Kind:** rule
-- **Target:** [`EFF116`](rules/generator-never-iterated.md)
-- **Since:** 0.2.6
-
-The development corpus has few reports of it, and its premises are not yet certified.
 
 ## `rule.IMP101`
 

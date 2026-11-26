@@ -49,7 +49,7 @@
 - [development-dependency-at-import-time (IMP301)](https://heki.koxudaxi.dev/rules/development-dependency-at-import-time/): Family: Imports (IMP) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
 - [effect-boundary-violation (EFF201)](https://heki.koxudaxi.dev/rules/effect-boundary-violation/): Family: Execution Effects (EFF) · Heuristic · Runs when its contract is declared · Severity error (a bug) · No automatic fix
 - [exclusive-object-fanout (EFF110)](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/): Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
-- [generator-never-iterated (EFF116)](https://heki.koxudaxi.dev/rules/generator-never-iterated/): Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
+- [generator-never-iterated (EFF116)](https://heki.koxudaxi.dev/rules/generator-never-iterated/): Family: Execution Effects (EFF) · Exact · Enabled by default · Severity warning (a bug that is rarely harmful) · No automatic fix
 - [hash-attr-mutation (MUT107)](https://heki.koxudaxi.dev/rules/hash-attr-mutation/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity error (a bug) · No automatic fix
 - [immutable-quadratic-concat (OPT103)](https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/): Family: Complexity Rewrites (OPT) · Exact · Opt-in · Severity warning (slower code) · No automatic fix
 - [import-boundary-violation (IMP201)](https://heki.koxudaxi.dev/rules/import-boundary-violation/): Family: Imports (IMP) · Heuristic · Runs when its contract is declared · Experimental · Severity error (a bug) · No automatic fix
@@ -60,7 +60,7 @@
 - [list-front-pop (OPT120)](https://heki.koxudaxi.dev/rules/list-front-pop/): Family: Complexity Rewrites (OPT) · Exact · Opt-in · Severity warning (slower code) · Proven-safe suggestion (--fix --include-size-dependent)
 - [list-quadratic-concat (OPT101)](https://heki.koxudaxi.dev/rules/list-quadratic-concat/): Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity warning (slower code) · Safe fix (--fix)
 - [lock-or-tx-held-across-io (EFF106)](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/): Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity error (a bug) · No automatic fix
-- [lock-reacquired-while-held (EFF109)](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/): Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
+- [lock-reacquired-while-held (EFF109)](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/): Family: Execution Effects (EFF) · Exact · Enabled by default · Severity error (a bug) · No automatic fix
 - [loop-carried-concat (DATA101)](https://heki.koxudaxi.dev/rules/loop-carried-concat/): Family: Data Pipelines (DATA) · Exact · Enabled by default · Severity warning (slower code) · No automatic fix
 - [loop-db-query (EFF103)](https://heki.koxudaxi.dev/rules/loop-db-query/): Family: Execution Effects (EFF) · Exact · Enabled by default · Severity warning (slower code) · No automatic fix
 - [loop-invariant-container-rebuild (OPT130)](https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/): Family: Complexity Rewrites (OPT) · Exact · Opt-in · Severity warning (slower code) · Proven-safe suggestion (--fix --include-size-dependent)

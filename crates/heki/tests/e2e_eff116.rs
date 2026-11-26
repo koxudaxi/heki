@@ -516,14 +516,22 @@ fn a_suppression_comment_silences_a_report() {
 }
 
 #[test]
-fn the_rule_is_opt_in() {
-    let p = project("eff116_opt_in");
-    assert!(found(&diagnostics(&p, &[])).is_empty());
-    assert!(found(&diagnostics(&p, &["--select", "EFF"])).is_empty());
-    assert_eq!(
-        found(&diagnostics(&p, &["--select", "generator-never-iterated"])),
-        marked()
-    );
+fn the_rule_runs_by_default() {
+    let p = project("eff116_default");
+    let named = diagnostics(&p, &["--select", "generator-never-iterated"]);
+    assert_eq!(found(&named), marked());
+    // With `--heuristic` and the `EFF` prefix every report, without it the exact ones, as
+    // warnings.
+    assert_eq!(found(&diagnostics(&p, &[])), marked());
+    assert_eq!(found(&diagnostics(&p, &["--select", "EFF"])), marked());
+    let exact: Vec<Value> = (eff116(&named).into_iter())
+        .filter(|d| d["certainty"] == "exact")
+        .cloned()
+        .collect();
+    assert!(exact.iter().all(|d| d["severity"] == "warning"));
+    let (_, plain, _) = p.heki(&["check", "--output-format", "json"]);
+    let plain: Vec<Value> = serde_json::from_str(&plain).unwrap();
+    assert_eq!(found(&plain), found(&exact));
 }
 
 #[test]
@@ -533,7 +541,7 @@ fn heki_rule_explains_it() {
     assert_eq!(code, 0);
     assert!(stdout.contains("generator-never-iterated"));
     assert!(stdout.contains("Never iterated"));
-    assert!(stdout.contains("experimental"));
+    assert!(!stdout.contains("experimental"), "{stdout}");
 }
 
 /// A receiver typed by a protocol leaves Every implementation open: its implementers are never
