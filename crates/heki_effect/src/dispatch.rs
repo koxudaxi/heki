@@ -1674,6 +1674,7 @@ impl<'i> Run<'_, 'i> {
         let mut iters: FxHashMap<u32, (Vec<V>, usize)> = FxHashMap::default();
         let (mut at, mut from) = (0u32, u32::MAX);
         loop {
+            self.step()?;
             let b = p.blocks.get(at as usize).ok_or(Open)?;
             let joined: Vec<(u32, V)> = (b.joins.iter())
                 .map(|(dst, inputs)| {

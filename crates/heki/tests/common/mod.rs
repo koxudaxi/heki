@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 pub mod lsp;
+pub mod panels;
 pub mod schema;
 
 use std::path::{Path, PathBuf};

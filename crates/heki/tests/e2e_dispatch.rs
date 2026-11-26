@@ -11,135 +11,12 @@ mod common;
 use common::Project;
 use serde_json::Value;
 
-const OWNERS: &str = r#"from .adapter import package as capture
-from .channel import Channel
-from .views import Page, Deck
-
-
-class Left:
-    def __init__(self):
-        self.journal = []
-
-    def stamp(self):
-        self.journal.append(1)
-
-    def entries(self):
-        registry = []
-
-        def save(key, callback):
-            registry.append((key, callback))
-
-        save("first", capture(Page, self))
-        return registry
-
-    def start(self):
-        table = self.entries()
-        return Channel(table)
-
-
-class Right:
-    def __init__(self):
-        self.audit = []
-
-    def stamp(self):
-        self.audit.append(1)
-
-    def entries(self):
-        index = []
-
-        def save(key, callback):
-            index.append((key, callback))
-
-        save("second", capture(Deck, self))
-        return index
-
-    def start(self):
-        table = self.entries()
-        return Channel(table)
-"#;
-
-const ADAPTER: &str = r#"import inspect as reflection
-
-
-def arguments(callback, options):
-    order = reflection.signature(callback).parameters.keys()
-    values = []
-    for field in order:
-        if field not in options:
-            raise TypeError(field)
-        values.append(options[field])
-    return values
-
-
-async def spread(callback, **items):
-    values = arguments(callback, items)
-    return await callback(*values)
-
-
-def package(component, resource):
-    async def receive(note, emit):
-        worker = component()
-        return await spread(worker.choose, event=note, owner=resource, output=emit)
-    return receive
-"#;
-
-const CHANNEL: &str = r#"def select(rows, wanted):
-    for tag, item in rows:
-        if tag == wanted:
-            return tag, item
-    return None, None
-
-
-class Channel:
-    def __init__(self, bindings):
-        self.items = bindings
-
-    async def serve(self, message, stream, key):
-        tag, callback = select(self.items, key)
-        return await callback(message, stream)
-"#;
-
-const VIEWS: &str = r#"class Commands:
-    async def choose(self, owner, event):
-        name = event.action.lower()
-        operation = getattr(self, name)
-        return await operation(event, owner)
-
-
-class Page(Commands):
-    async def store(self, packet, ledger):
-        ledger.stamp()
-
-    async def noop(self, packet, ledger):
-        pass
-
-
-class Deck(Commands):
-    async def store(self, packet, ledger):
-        ledger.stamp()
-
-
-class Unused(Commands):
-    async def store(self, packet, ledger):
-        ledger.stamp()
-"#;
-
 /// The `panels` project, each file with the edits `(file, old, new)` applied once.
 fn panels(name: &str, edits: &[(&str, &str, &str)]) -> Project {
     let p = Project::new(name);
     p.write("pyproject.toml", "[project]\nname = \"t\"\n");
     p.write("panels/__init__.py", "");
-    for (file, text) in [
-        ("owners.py", OWNERS),
-        ("adapter.py", ADAPTER),
-        ("channel.py", CHANNEL),
-        ("views.py", VIEWS),
-    ] {
-        let mut text = text.to_owned();
-        for (_, old, new) in edits.iter().filter(|(f, _, _)| *f == file) {
-            assert_eq!(text.matches(old).count(), 1, "{file}: {old}");
-            text = text.replace(old, new);
-        }
+    for (file, text) in common::panels::files(edits) {
         p.write(&format!("panels/{file}"), &text);
     }
     p
@@ -507,6 +384,14 @@ fn premises_that_break_give_no_context() {
                 "channel.py",
                 "    async def serve",
                 "    def reset(self):\n        self.items = []\n\n    async def serve",
+            )],
+        ),
+        (
+            "too_many_handlers",
+            &[(
+                "views.py",
+                "    async def noop(",
+                "    async def extra0(self, packet, ledger):\n        pass\n\n    async def extra1(self, packet, ledger):\n        pass\n\n    async def extra2(self, packet, ledger):\n        pass\n\n    async def extra3(self, packet, ledger):\n        pass\n\n    async def extra4(self, packet, ledger):\n        pass\n\n    async def extra5(self, packet, ledger):\n        pass\n\n    async def extra6(self, packet, ledger):\n        pass\n\n    async def extra7(self, packet, ledger):\n        pass\n\n    async def noop(",
             )],
         ),
     ];
