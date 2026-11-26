@@ -49,6 +49,7 @@ pub use only_read::{
     AnnotationFacts, AnnotationReads, ContainerParams, LiteralAnnotation, ParamAnnotation,
     ReadKinds, ReadOverride, read_override,
 };
+pub mod dispatch;
 pub mod order_flow;
 pub mod ownership;
 mod partial;
@@ -568,9 +569,111 @@ pub struct CondParts {
     /// The object comes from calls of these project functions: each must return a new object
     /// at its call (`EffectSummary::returns_new`).
     pub returns: Vec<NewFrom>,
-    /// Earlier calls handed the object to these `(callee, parameter)`: none may keep it
-    /// (`EffectSummary::retains_params`).
-    pub keeps: Vec<(FuncKey, u8)>,
+    /// Earlier stores of the object: each may keep it.
+    pub keeps: Vec<Keep>,
+}
+
+/// A store that may keep an object ([`CondParts::keeps`]): a hand-over to parameter `.1` of the
+/// project function `.0`, which keeps it when that callee keeps the parameter there
+/// ([`EffectSummary::retains_params`]), or, for `None`, a store that keeps it. `at` tells what
+/// the store's call binds and the tests of the function's inputs that hold where it runs: a
+/// store under `if register:` keeps the object only at the calls of the function leaving
+/// `register` true.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Keep {
+    pub by: Option<(FuncKey, u8)>,
+    pub at: CallTests,
+}
+
+/// What a call tells of the tests its callee makes of its parameters ([`MayGiven`]): the
+/// arguments that decide such a test or hand it on to the caller, by parameter, and the tests of
+/// the caller's inputs that hold where the call runs (`CallSite::guards`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct CallTests {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<(u8, ArgView)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known: Vec<InputGuard>,
+}
+
+/// An argument of [`CallTests`]: a constant, which decides a test of the parameter by its class
+/// and truthiness, or the caller's own input, to which a test of the parameter is handed on.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArgView {
+    Const(ConstArg),
+    Input(GuardSubject),
+    /// The caller's own input, which the caller changes in place somewhere: only a test that
+    /// holds of the object whatever changes in it (`None`, `isinstance`) is handed on.
+    ChangedInput(GuardSubject),
+}
+
+/// A fact a function may have only where tests of its inputs pass: the alternatives, each the
+/// tests ([`InputGuard`], sorted) that hold where the fact arises. A call that decides a test of
+/// every alternative against it does not get the fact; the tests it leaves to the caller's own
+/// inputs are the caller's (`guards::given_at_call`). Without alternatives the fact never
+/// arises; with an alternative of no tests it arises whatever is passed, as it does past
+/// [`MAX_GIVEN_TESTS`] tests in an alternative or [`MAX_GIVEN_CHAINS`] alternatives (the bounds
+/// of [`GivenChains`]). One pointer: most facts have none.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MayGiven(Option<Box<Alternatives>>);
+
+/// The boxed alternatives of a [`MayGiven`], so it stays one pointer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+struct Alternatives(Vec<Vec<InputGuard>>);
+
+impl MayGiven {
+    /// The fact arises where the tests `tests` hold.
+    pub fn given(tests: Vec<InputGuard>) -> Self {
+        let mut out = Self::default();
+        out.add(tests);
+        out
+    }
+
+    pub fn alternatives(&self) -> &[Vec<InputGuard>] {
+        self.0.as_deref().map_or(&[], |a| a.0.as_slice())
+    }
+
+    /// The fact never arises.
+    pub fn never(&self) -> bool {
+        self.0.is_none()
+    }
+
+    /// The fact arises whatever is passed.
+    pub fn always(&self) -> bool {
+        self.alternatives().iter().any(Vec::is_empty)
+    }
+
+    /// Add the alternative `tests`, unless one needing some of them is there; it replaces the
+    /// alternatives needing more.
+    pub fn add(&mut self, mut tests: Vec<InputGuard>) {
+        tests.sort();
+        tests.dedup();
+        if tests.len() > MAX_GIVEN_TESTS {
+            tests.clear();
+        }
+        let within =
+            |small: &[InputGuard], large: &[InputGuard]| small.iter().all(|t| large.contains(t));
+        let all = &mut self.0.get_or_insert_with(Box::default).0;
+        if all.iter().any(|a| within(a, &tests)) {
+            return;
+        }
+        all.retain(|a| !within(&tests, a));
+        all.push(tests);
+        all.sort();
+        if all.len() > MAX_GIVEN_CHAINS {
+            *all = vec![Vec::new()];
+        }
+    }
+
+    /// The fact arises where it does in either.
+    pub fn join(&mut self, other: &Self) {
+        for tests in other.alternatives() {
+            self.add(tests.clone());
+        }
+    }
 }
 
 /// A project function whose result an object is, at one call of it ([`CondParts::returns`]).
@@ -582,11 +685,15 @@ pub struct NewFrom {
     /// nothing there ([`ReturnsNew::kind_at`]).
     #[serde(default)]
     pub empty_params: u64,
+    /// What the call binds, for the stores of the result the callee makes only under tests of
+    /// its parameters (`ReturnsNew::New::kept`).
+    #[serde(default)]
+    pub at: CallTests,
 }
 
 impl NewCond {
     /// The conditions, sorted and without duplicates.
-    pub fn new(mut returns: Vec<NewFrom>, mut keeps: Vec<(FuncKey, u8)>) -> Self {
+    pub fn new(mut returns: Vec<NewFrom>, mut keeps: Vec<Keep>) -> Self {
         returns.sort();
         returns.dedup();
         keeps.sort();
@@ -605,7 +712,7 @@ impl NewCond {
         self.0.as_ref().map_or(&[], |c| &c.returns)
     }
 
-    pub fn keeps(&self) -> &[(FuncKey, u8)] {
+    pub fn keeps(&self) -> &[Keep] {
         self.0.as_ref().map_or(&[], |c| &c.keeps)
     }
 
@@ -675,6 +782,11 @@ pub enum ReturnsNew {
         /// them to a value that has no elements, where those returns return nothing.
         #[serde(default)]
         elements_of: u64,
+        /// The function may store the result before it returns it where these tests of its
+        /// inputs pass (final summaries): the result is new only at a call deciding them against
+        /// the store ([`Self::at_call`]).
+        #[serde(default, skip_serializing_if = "MayGiven::never")]
+        kept: MayGiven,
     },
 }
 
@@ -687,12 +799,21 @@ impl ReturnsNew {
     /// The kind of a resolved `New` at a call binding the parameters `empty_params` to values
     /// that have no elements ([`NewFrom::empty_params`]).
     pub fn kind_at(&self, empty_params: u64) -> Option<NewKind> {
+        let (kind, kept) = self.at_call(empty_params)?;
+        kept.never().then_some(kind)
+    }
+
+    /// The kind of a resolved `New` at a call binding `empty_params` as [`Self::kind_at`] says,
+    /// and the tests under which the function may have stored the result
+    /// (`ReturnsNew::New::kept`), for the call to decide.
+    pub fn at_call(&self, empty_params: u64) -> Option<(NewKind, &MayGiven)> {
         match self {
             Self::New {
                 kind,
                 cond,
                 elements_of,
-            } if cond.is_empty() && elements_of & !empty_params == 0 => Some(*kind),
+                kept,
+            } if cond.is_empty() && elements_of & !empty_params == 0 => Some((*kind, kept)),
             _ => None,
         }
     }
@@ -1104,7 +1225,13 @@ pub struct EffectSummary {
     /// global, or a closure cell, yielded, captured by a closure, handed to code heki does not
     /// follow, or to a project function that keeps them. Reading, writing, or passing a
     /// parameter to project functions that do not keep it keeps nothing (`fresh-objects`).
+    /// Changed through [`Self::keep_params`].
     pub retains_params: u64,
+    /// The parameters of [`Self::retains_params`] the function keeps only where tests of its
+    /// inputs pass, with those tests; one without an entry is kept whatever is passed. `None`
+    /// without any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retains_given: Option<Box<BTreeMap<u8, MayGiven>>>,
     /// The positions (bit `i`: parameter `i`, then the captured values of
     /// `FunctionDecl::captured_params`) whose object the function only reads, leaving changes of
     /// the object itself to [`Self::mutated_param_paths`] ([`Self::only_read_mask`] joins the
@@ -1176,6 +1303,12 @@ pub struct EffectSummary {
     /// a final summary holds its local summary's facts until propagation changes them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_state: Option<Arc<SharedStateFacts>>,
+
+    /// What the function contributes to registration contexts (only with
+    /// `OptInFacts::dispatch`: `heki inspect` and the language server): local, never propagated
+    /// to callers, and read by no rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch: Option<Arc<dispatch::DispatchFacts>>,
 
     /// What iterating the object this plain function returns runs: the bodies of the
     /// generators it returns (directly, through lazy wrappers, or through the functions whose
@@ -1395,7 +1528,7 @@ pub struct EffectGuards {
 
 /// The exact class of a value a function knows: a constant, a display or comprehension, or a
 /// buffer it constructs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConstClass {
     None,
@@ -1419,7 +1552,7 @@ pub enum ConstClass {
 /// An argument (or a literal default) whose class the caller knows: its class and, where the
 /// value decides it, its truthiness (`False`, `None`, `0`, `""`, and empty displays are falsy)
 /// and, for an integer, whether it is above zero (a default may be negative: `size=-1`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ConstArg {
     pub class: ConstClass,
     pub truthy: Option<bool>,
@@ -1479,6 +1612,9 @@ pub struct ArgBinding {
     pub fact: Option<Box<heki_kb::ArgFact>>,
     /// The caller's own input the argument is (a guard subject of the caller).
     pub input: Option<GuardSubject>,
+    /// The caller changes that input in place somewhere ([`GuardInputs::changed_inputs`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub input_changed: bool,
     /// Caller parameters the argument may come from: itself, its attributes and elements, and
     /// the results of calls on them.
     pub derived_params: u64,
@@ -1511,6 +1647,42 @@ impl ArgBinding {
 }
 
 impl EffectSummary {
+    /// The tests under which the function keeps its parameter `p` ([`Self::retains_given`]):
+    /// never, for a parameter it does not keep.
+    pub fn retained_given(&self, p: u8) -> MayGiven {
+        // A parameter past the 64 the mask holds is taken to be kept whatever is passed.
+        if (self.retains_params.checked_shr(p.into())).is_some_and(|rest| rest & 1 == 0) {
+            return MayGiven::default();
+        }
+        (self.retains_given.as_deref().and_then(|g| g.get(&p)))
+            .map_or_else(|| MayGiven::given(Vec::new()), Clone::clone)
+    }
+
+    /// Keep the parameters of `mask` where `given` holds, besides where they are kept already.
+    pub(crate) fn keep_params(&mut self, mask: u64, given: &MayGiven) {
+        if given.never() {
+            return;
+        }
+        for p in (0..64u8).filter(|p| mask & (1u64 << p) != 0) {
+            let had = self.retained_given(p);
+            let mut now = had.clone();
+            now.join(given);
+            self.retains_params |= 1u64 << p;
+            if now == had {
+                continue;
+            }
+            let entries = self.retains_given.get_or_insert_with(Box::default);
+            if now.always() {
+                entries.remove(&p);
+            } else {
+                entries.insert(p, now);
+            }
+            if entries.is_empty() {
+                self.retains_given = None;
+            }
+        }
+    }
+
     /// [`KeptFacts::must_read_self_attrs`] (none while the facts are not computed).
     pub fn must_read_self_attrs(&self) -> &BTreeSet<AttrKeyPath> {
         static NONE: BTreeSet<AttrKeyPath> = BTreeSet::new();
@@ -1652,6 +1824,9 @@ impl EffectSummary {
     /// so an edit that only moves code does not notify callers.
     pub fn without_locations(&self) -> Self {
         let mut out = self.clone();
+        if let Some(d) = &mut out.dispatch {
+            *d = Arc::new(d.without_locations());
+        }
         for chain in out.exec_chains.values_mut() {
             zero_hop_spans(chain);
         }
@@ -1768,6 +1943,16 @@ impl EffectSummary {
         self.without_locations() == other.without_locations()
     }
 
+    /// [`Self::same_facts`] of everything but [`Self::dispatch`], which only the join over the
+    /// whole index reads (`dispatch::contexts`), never a caller.
+    pub fn same_facts_for_callers(&self, other: &Self) -> bool {
+        let without = |s: &Self| Self {
+            dispatch: None,
+            ..s.without_locations()
+        };
+        without(self) == without(other)
+    }
+
     /// Equality of everything callers copy into their own summaries: the facts, and the
     /// positions of call chains and write sites. Only the positions of the function's own read
     /// sites, parameter, container, and global changes, iterations, and unresolved accesses are
@@ -1791,6 +1976,7 @@ impl EffectSummary {
             iterations: s.iterations.as_ref().and_then(|f| f.propagated()),
             unresolved_write_sites: BTreeSet::new(),
             unresolved_access_sites: BTreeSet::new(),
+            dispatch: None,
             ..s.clone()
         };
         without_local(self) == without_local(other) && self.same_facts(other)
@@ -2710,6 +2896,12 @@ impl FinalFacts {
     fn same_facts(&self, other: &Self) -> bool {
         self.summary.same_facts(&other.summary) && self.fresh_return == other.fresh_return
     }
+
+    /// [`Self::same_facts`] of what callers read ([`EffectSummary::same_facts_for_callers`]).
+    fn same_facts_for_callers(&self, other: &Self) -> bool {
+        self.summary.same_facts_for_callers(&other.summary)
+            && self.fresh_return == other.fresh_return
+    }
 }
 
 /// Result of an incremental file update (Early Cutoff indicator for `heki_lsp`).
@@ -2765,7 +2957,7 @@ pub struct SiteEffect {
 }
 
 /// Incremental project-wide summary & reverse call-graph index.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ProjectIndex {
     pub files: FxHashMap<PathBuf, FileSummary>,
     pub reverse_call_graph: FxHashMap<FuncKey, FxHashSet<FuncKey>>,
@@ -2952,11 +3144,14 @@ pub struct OptInFacts {
     /// [`OptInTables::annotation_facts`], and the references handing a project function on
     /// ([`FileSummary::reference_sites`]), its uses as a value.
     pub suggestions: bool,
+    /// [`EffectSummary::dispatch`], which `heki inspect`'s registration contexts read and the
+    /// language server keeps current.
+    pub dispatch: bool,
 }
 
 impl OptInFacts {
     /// Every opt-in fact a rule or `heki inspect` reads. The blind spots, which neither reads,
-    /// are left out.
+    /// are left out, and so are the registration facts, which summary snapshots do not record.
     pub const ALL: Self = Self {
         return_origins: true,
         iterations: true,
@@ -2974,6 +3169,7 @@ impl OptInFacts {
         imports: true,
         only_read: true,
         suggestions: false,
+        dispatch: false,
     };
 
     /// Whether the call sites carry [`CallSite::complete`] and [`CallSite::on_every_return`].
@@ -3325,6 +3521,43 @@ impl ProjectIndex {
         self.update_file(file)
     }
 
+    /// The index under one registration context's premise: parameter `param` of `func`, a
+    /// function of `input`'s module, holds an instance of `class`. The module is summarized again
+    /// with that type and propagated as an edit is; the index itself is left as it is, so no
+    /// unconditional fact, report, or fix reads the premise.
+    pub fn with_param_type(
+        &self,
+        input: &ModuleInput<'_>,
+        kb: &EffectiveEcosystemKb,
+        soundness: Option<&EffectiveSoundnessKb>,
+        func: &FuncKey,
+        param: u8,
+        class: &str,
+    ) -> ProjectIndex {
+        let others: Vec<(PathBuf, Arc<ModuleDecls>)> = (self.files.values())
+            .filter(|f| f.path != input.path)
+            .map(|f| (f.path.clone(), Arc::clone(&f.decls)))
+            .collect();
+        let (decls, own) =
+            resolver::project_decls_for(std::slice::from_ref(input), kb, Some(others), false);
+        let (own, _) = own.into_iter().next().expect("one module in, one out");
+        let key = (func.qualname.clone(), usize::from(param));
+        let seeded = resolver::SeededParams::from_iter([(key, types::Ty::inst(class))]);
+        let file = summary::summarize_module_seeded(
+            input,
+            &decls,
+            kb,
+            soundness,
+            own,
+            self.contracts.as_deref(),
+            self.opt_in,
+            &seeded,
+        );
+        let mut scratch = self.clone();
+        scratch.update_file(file);
+        scratch
+    }
+
     /// [`Self::reanalyze_module`] against cached project declarations (both passes, kept up
     /// to date in place): the edit costs the size of the module unless its declarations
     /// changed. Also returns what changed in the declarations (empty: nothing), which every
@@ -3474,9 +3707,15 @@ impl ProjectIndex {
         let mut changed: BTreeSet<FuncKey> = BTreeSet::new();
         // Same facts, but positions callers copy (call chains, write sites) moved.
         let mut moved: BTreeSet<FuncKey> = BTreeSet::new();
+        // Only facts no caller reads changed (the registration facts): the function's own
+        // record changed, its callers' did not.
+        let mut own_only: BTreeSet<FuncKey> = BTreeSet::new();
         for func in &region {
             match (previous.get(func), self.final_facts(func)) {
-                (Some(old), Some(new)) if old.same_facts(&new) => {
+                (Some(old), Some(new)) if old.same_facts_for_callers(&new) => {
+                    if !old.same_facts(&new) {
+                        own_only.insert(func.clone());
+                    }
                     if !old.summary.same_for_callers(&new.summary) {
                         moved.insert(func.clone());
                     }
@@ -3503,6 +3742,7 @@ impl ProjectIndex {
         let excluded: FxHashSet<FuncKey> = changed.iter().chain(&affected).cloned().collect();
         let relocated = self.callers_closure(&moved, &excluded);
         let summary_changed = !changed.is_empty();
+        changed.extend(own_only);
         let changed: Vec<FuncKey> = changed.into_iter().collect();
         if affected.is_empty() && relocated.is_empty() {
             return IncrementalUpdate {

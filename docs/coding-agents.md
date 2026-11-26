@@ -145,6 +145,16 @@ Put the contracts, `fail-on`, and the baseline path in `heki.toml`, and give tha
 (`CODEOWNERS`, or the host's rule for protected files). A change to a wall is then a reviewed
 change, and an agent cannot move a wall to make a report go away.
 
+```text
+# .github/CODEOWNERS
+/heki.toml           @your-org/maintainers
+/heki-baseline.toml  @your-org/maintainers
+```
+
+`fail-on = "warning"` makes every warning and heuristic report fail the run, not only the
+contracts' reports: record today's findings in the baseline first, so that only new ones fail.
+The [starter recipe](adoption.md#walls-for-a-team-or-a-coding-agent) has the whole file.
+
 ### A Stop hook for Claude Code
 
 A [Stop hook](https://code.claude.com/docs/en/hooks) runs when Claude Code is about to end its turn.
@@ -200,6 +210,7 @@ $ printf '%s\n' app.users.load_user 'app.orders.*' | heki inspect - --output-for
 | `retains` | the parameters it stores where they outlive the call |
 | `only_reads` | its parameters annotated with a mutable container (`list`, `dict`, `set`), those it and every function it hands them to only read (no change, no store, every call resolved), those whose uses the read-only type (`Sequence`, `Mapping`, `AbstractSet`) allows, those whose name it binds once, and, by parameter it only reads, the kinds of read that reach the object here and in the functions it is handed to (`reads`). These are the function's facts: `heki recommend` also checks that no project subclass of the argument's class changes it in one of those reads, so a parameter listed here is no proof that every override only reads |
 | `returns` | whether its result is a new object, a parameter, or state that outlives the call |
+| `registered` | each registration that may reach it through a table of callbacks and a lookup by name (`getattr(self, <name>)`), with the parameter bound to the registering object and its class, the condition (`selector` equals the function's name; `others_open` when the name is not a constant), the sites on the way, and what it changes of that parameter under the context. Advisory: no other fact or report assumes it |
 | `purity` | `pure`, `impure` with the reasons, or `unknown` with the reasons; whatever the verdict, the functions below it whose calls heki cannot resolve, nearest first, each with the call chain to it; and what the verdict assumes |
 | `callers` | who calls it, whether in a loop; with `--callers`, transitively |
 | `reports` | what `heki check` reports in it; with `--callers`, also above it |

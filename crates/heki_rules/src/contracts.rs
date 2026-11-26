@@ -580,6 +580,7 @@ pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
             .any(|code| selection.is_enabled(code)),
         only_read: false,
         suggestions: false,
+        dispatch: false,
     }
 }
 
@@ -591,6 +592,7 @@ pub fn inspect_facts(selection: &RuleSelection) -> OptInFacts {
         return_origins: true,
         shared_state: true,
         only_read: true,
+        dispatch: true,
         ..opt_in_facts(selection)
     }
 }

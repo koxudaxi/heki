@@ -1,7 +1,8 @@
 # Adopting heki in a Code Base
 
-An existing code base usually has findings you cannot fix at once. This page shows how to adopt
-heki step by step:
+An existing code base usually has findings you cannot fix at once. The
+[starter recipes](#starter-recipes) below are the common setups as blocks to copy. The rest of
+this page shows how to adopt heki step by step:
 
 1. Record today's findings in a [Ratchet baseline](#ratchet-baselines), so heki fails only on
    new ones.
@@ -14,6 +15,122 @@ To have a coding agent do this, ask it to adopt heki: the [Agent Skill](coding-a
 carries a playbook that proposes the first one or two contracts, writes `heki.toml` with a
 `CODEOWNERS` line, the baseline, the hook and the CI job, and runs the whole project before it
 finishes.
+
+## Starter recipes
+
+Each recipe is one change to copy, with the version pinned: an upgrade is then a change of the
+pins, reviewed like any other (`pre-commit autoupdate` moves `rev`). Replace `app` with your
+package.
+
+### Add heki to an existing project in one pull request
+
+Record today's findings, so that only new ones fail, and commit `heki-baseline.toml` with the
+configuration, the hook, and the CI step:
+
+```console
+$ uvx heki==0.7.0 check --baseline heki-baseline.toml --update-baseline
+```
+
+```toml
+# pyproject.toml
+[tool.heki]
+baseline = "heki-baseline.toml"
+```
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/koxudaxi/heki-pre-commit
+    rev: v0.7.0
+    hooks:
+      - id: heki   # heki check --touched on the staged files
+```
+
+```yaml
+# A step of the CI job, with uv installed
+- run: uvx heki==0.7.0 check
+```
+
+The hook shows the reports in and through the staged files, and every regression of the
+baseline; the CI step checks the whole project. Both fail on new exact errors.
+
+### An async web or database service
+
+`EFF101` (a blocking call that holds up the event loop) and `EFF103` (a query on every iteration
+of a loop) are exact and run by default. Add the checks that fit the service:
+
+```toml
+# pyproject.toml
+[tool.heki.lint]
+extend-select = [
+  "EFF105",  # blocking file I/O reached from an async def
+  "EFF106",  # an await or network I/O while a threading lock or a transaction is held
+  "EFF107",  # an asyncio task bound to a name and then lost
+]
+```
+
+| Rule | Certainty | Add it when the service |
+| ---- | --------- | ----------------------- |
+| [`EFF105`](rules/async-blocking-fs.md) | heuristic | reads or writes files, templates, or static assets in `async def` handlers |
+| [`EFF106`](rules/lock-or-tx-held-across-io.md) | heuristic | holds a `threading` lock or a database transaction around network I/O or an `await` |
+| [`EFF107`](rules/unretained-async-task.md) | heuristic | starts background work with `asyncio.create_task` |
+| [`EFF109`](rules/lock-reacquired-while-held.md) | heuristic, experimental | takes a `threading.Lock` or an `asyncio.Lock` in a function that a holder of the lock calls |
+| [`EFF110`](rules/exclusive-object-fanout.md) | heuristic, experimental | shares a connection, a stream, or a WebSocket between tasks started with `asyncio.gather` or a task group |
+| [`EFF115`](rules/async-def-as-sync-callback.md) | heuristic, experimental | hands `async def` functions to threads, executors, or signal handlers |
+| [`EFF102`](rules/loop-unpooled-client.md), [`EFF117`](rules/unlocked-write-of-guarded-state.md) | heuristic | creates HTTP or database clients in loops, or changes state its threads share without the lock its other writers hold; these two are not opt-in and run with `--heuristic` |
+
+Their reports can be wrong about the code: they are printed, and fail the run only with
+`fail-on = "warning"`. Before adding a rule, [`heki recommend`](recommend.md) counts the reports
+it would add on your code ("Rules worth enabling here"). `relax-async-in-tests`, on by default,
+leaves `EFF101`, `EFF105`, and `EFF106` out of test code.
+
+### Walls for a team or a coding agent
+
+Declare the architecture as contracts, make their reports fail the run, and give the file an
+owner, so that a wall moves only in a reviewed change:
+
+```toml
+# heki.toml
+baseline = "heki-baseline.toml"
+
+[lint]
+fail-on = "warning"   # contract reports are heuristic: let them fail the run
+
+[[write-owners]]
+name = "order-store"
+targets = ["app.models.Order.items"]
+allowed-writers = ["app.store.*"]
+message = "change Order.items through app.store"
+
+[[effect-boundaries]]
+name = "pure-domain"
+scopes = ["app.domain.*"]
+forbid = ["blocking"]
+
+[[import-boundaries]]   # experimental
+name = "domain-without-web"
+importers = ["app.domain", "app.domain.*"]
+forbidden-imports = ["app.web", "app.web.*"]
+```
+
+```text
+# .github/CODEOWNERS
+/heki.toml           @your-org/maintainers
+/heki-baseline.toml  @your-org/maintainers
+```
+
+- heki reads the first of `heki.toml`, `.heki.toml`, and `pyproject.toml` it finds at the
+  project root, without merging them: move every `[tool.heki]` setting into `heki.toml`.
+- `fail-on = "warning"` makes every warning and heuristic report fail the run, not only the
+  contracts' reports. Record today's findings in the baseline first
+  (`uvx heki==0.7.0 check --update-baseline`), so that only new ones fail.
+- The `message` is the help of every report of the contract: write it as an instruction.
+- For Claude Code, add the [Stop hook](coding-agents.md#a-stop-hook-for-claude-code): it runs
+  `heki check`, with the baseline `heki.toml` names, when the agent is about to end its turn,
+  and sends a failing report back to it.
+
+[Contracts](configuration.md#contracts) has every key, and
+[Coding Agents](coding-agents.md#architecture-rules-with-agents) the instructions for the agent.
 
 ## Ratchet baselines
 
@@ -180,7 +297,7 @@ file is left, and the run says how many were.
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.6.0
+    rev: v0.7.0
     hooks:
       - id: heki
 ```
@@ -205,7 +322,7 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
         hooks:
           - id: heki
             name: heki
-            entry: uvx heki check --touched
+            entry: uvx heki==0.7.0 check --touched
             language: system   # needs uv on PATH
             types_or: [python, toml]
             files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
@@ -225,7 +342,7 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
             name: heki
             entry: heki check --touched
             language: python
-            additional_dependencies: [heki]
+            additional_dependencies: [heki==0.7.0]
             types_or: [python, toml]
             files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
             pass_filenames: true
@@ -261,14 +378,14 @@ the run now.
 === "GitHub Actions annotations"
 
     ```yaml
-    - run: uvx heki check --output-format github
+    - run: uvx heki==0.7.0 check --output-format github
     ```
 
 === "Code scanning (SARIF)"
 
     ```yaml
     # The job needs `permissions: security-events: write`.
-    - run: uvx heki check --output-format sarif > heki.sarif || test "$?" -eq 1
+    - run: uvx heki==0.7.0 check --output-format sarif > heki.sarif || test "$?" -eq 1
     - uses: github/codeql-action/upload-sarif@v4
       with:
         sarif_file: heki.sarif
@@ -282,11 +399,16 @@ In GitHub Actions (`GITHUB_ACTIONS=true`), `heki check` writes these annotations
 `--output-format github`. To keep the text output there, pass `--output-format full`, or set
 `HEKI_OUTPUT_FORMAT` (any format) in the job's `env`: it applies whenever the option is not given.
 
+One run is enough: the annotations step fails the job on what fails the run. A run prints one
+output format, so a job that also keeps code-scanning alerts runs heki twice: the annotations
+step is the one that fails the job, and the SARIF step, which keeps the step green on findings,
+uploads them.
+
 On a pull request, a project with old findings can report only what the change touches, as the
 pre-commit hook does (the checkout needs `fetch-depth: 0` for the base branch):
 
 ```yaml
-- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' pyproject.toml heki.toml .heki.toml | xargs -0 -r uvx heki check --touched
+- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' pyproject.toml heki.toml .heki.toml | xargs -0 -r uvx heki==0.7.0 check --touched
   env:
     BASE: ${{ github.base_ref }}
 ```
@@ -308,6 +430,65 @@ With SARIF:
 
 For custom tooling, `--output-format json` gives every field: see
 [Coding Agents](coding-agents.md#after-an-edit-heki-check).
+
+### Auditing inline suppressions
+
+A baseline, `report-unused-suppressions`, and `require-suppression-codes` do not stop a new
+`# heki: ignore[EFF101]`, `# noqa: EFF101`, or bare `# noqa` from hiding a report, and the run
+still exits 0. `--report-suppressed <PATH>` writes the reports that inline suppressions hid to a
+JSON file, next to any `--output-format`:
+
+```json
+{
+  "schema_version": 1,
+  "suppressed": [
+    {
+      "code": "EFF101",
+      "file": "app/handlers.py",
+      "function": "fetch",
+      "target": "time.sleep",
+      "line": 12,
+      "column": 5,
+      "directive": {"kind": "heki-ignore", "file": "app/handlers.py", "line": 12, "column": 20}
+    }
+  ]
+}
+```
+
+- `file`, `function`, `code`, and `target` are the key of the report in a
+  [baseline](#ratchet-baselines), so a change of line numbers does not change what a CI job
+  compares. Compare the entries as a multiset of those four fields: one removed entry does not
+  offset an added one.
+- `directive.kind` is `heki-ignore`, `heki-ignore-bare`, `noqa-code`, or `noqa-bare`. When several
+  suppressions on a line hide the same report, the first one in the source is named.
+- Only reports that a suppression hid are listed. A `# noqa: F401` that Ruff reads hides no heki
+  report, and a suppression that hid nothing is not listed (`report-unused-suppressions`
+  reports it).
+- The file covers what the run shows: with `--touched` or a file in PATHS, the reports of those
+  files, and a baseline changes nothing in it. It is the same bytes on every run of the same
+  code, and the command exits with 2 when the file cannot be written.
+
+A CI job can run the check on the base branch and on the change, and fail on an entry the change
+adds. Check the base out from its protected ref, so that the change cannot alter the comparison:
+
+```yaml
+- run: |
+    keys() { jq -r '.suppressed[] | [.file, .function, .code, .target] | @tsv' "$1" | sort; }
+    uvx heki check --report-suppressed head.json || test "$?" -eq 1
+    git worktree add ../base "origin/$BASE"
+    (cd ../base && uvx heki check --report-suppressed "$GITHUB_WORKSPACE/base.json" || test "$?" -eq 1)
+    # Sorted lines keep a repeated key apart, so one removed entry offsets no added one.
+    new=$(diff <(keys base.json) <(keys head.json) | grep '^>' || true)
+    test -z "$new" || { echo "New inline suppressions:"; echo "$new"; exit 1; }
+  shell: bash
+  env:
+    BASE: ${{ github.base_ref }}
+```
+
+The configuration, the baseline, and the CI files that decide this (`pyproject.toml` or
+`heki.toml`, the baseline file, and `.github/workflows/`) belong in `CODEOWNERS`:
+the audit file shows what suppressions hide, and a weakened configuration or baseline is the
+code owners' to review.
 
 ## Rolling out rules
 
@@ -393,3 +574,24 @@ $ heki check --extend-select MUT103            # reports functions that gained e
 A run that cannot analyze every file (a syntax error, an unreadable file) does not write the
 snapshot: it reports the errors and exits with code 2, so the entries of those files are not
 lost.
+
+### Comparing with the protected base
+
+Instead of committing the snapshot, a pull request can be compared with a snapshot of
+its protected base branch. Generate `base.json` on the base with the same heki version, the same
+knowledge bases, the same `--target-version`, and the same configuration as the check on the
+pull request, then check the whole project against it:
+
+```console
+$ git switch --detach origin/main
+$ heki snapshot > ../base.json
+$ git switch --detach "$PR_HEAD"
+$ heki check --select MUT103 --fail-on warning --snapshot ../base.json
+```
+
+`--snapshot PATH` replaces `.heki-summary-snapshot.json` at the project root. A path that does
+not exist, a file that is not a snapshot, a snapshot of an unsupported version, and a run in
+which `MUT103` is not enabled all exit with code 2: the check never passes without having
+compared. A snapshot at the root is ignored while `--snapshot` is given. Run the whole project,
+not `--touched` on the files of the pull request: a public function gains an effect through a
+private helper in another module, and the report is on the public function.

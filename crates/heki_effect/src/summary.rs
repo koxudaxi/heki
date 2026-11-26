@@ -34,13 +34,13 @@ use crate::resolver::{
 };
 use crate::{
     Access, ArgBinding, ArgOrigin, ArgTargets, ArgValue, AttrKeyPath, BoundCallee, CallHop,
-    CallSite, CallTarget, CellChange, Construction, ContainerParams, ContractClass, Contracts,
-    Dispatch, EffectSummary, EntryKey, FileSummary, FuncKey, GuardSubject, HandedState,
-    Implementers, Items, KeptFacts, ListedCache, ModuleInput, MustExec, NewArg, NewCond, NewFrom,
-    NewKind, OnEveryReturn, OptInFacts, PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner,
-    SharedLine, SharedState, SharedStateFacts, SiteRole, Slot, TypedFieldReadSite,
-    TypedFieldWriteSite, UnawaitedHandoff, Unresolved, UnresolvedAccessSite, UnresolvedWriteSite,
-    WriteKind,
+    CallSite, CallTarget, CallTests, CellChange, Construction, ContainerParams, ContractClass,
+    Contracts, Dispatch, EffectSummary, EntryKey, FileSummary, FuncKey, GuardSubject, HandedState,
+    Implementers, InputGuard, Items, KeptFacts, ListedCache, MayGiven, ModuleInput, MustExec,
+    NewArg, NewCond, NewFrom, NewKind, OnEveryReturn, OptInFacts, PerItem, ProjectDecls, ReadKind,
+    ReturnsNew, Runner, SharedLine, SharedState, SharedStateFacts, SiteRole, Slot,
+    TypedFieldReadSite, TypedFieldWriteSite, UnawaitedHandoff, Unresolved, UnresolvedAccessSite,
+    UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, KeySet, Use};
@@ -114,10 +114,10 @@ pub(crate) fn summarize_module(
 ) -> FileSummary {
     let (own_decls, completion_reads) = own;
     let (mut file, reads) = if track {
-        decls.record(|| extract_module(input, decls, kb, soundness, contracts, opt_in))
+        decls.record(|| extract_module(input, decls, kb, soundness, contracts, opt_in, None))
     } else {
         (
-            extract_module(input, decls, kb, soundness, contracts, opt_in),
+            extract_module(input, decls, kb, soundness, contracts, opt_in, None),
             DeclKeys::default(),
         )
     };
@@ -127,6 +127,25 @@ pub(crate) fn summarize_module(
     file
 }
 
+/// [`summarize_module`] with the parameter types `seeded` gives functions of the module (the
+/// one premise of a registration context), recording no reads.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn summarize_module_seeded(
+    input: &ModuleInput<'_>,
+    decls: &ProjectDecls,
+    kb: &EffectiveEcosystemKb,
+    soundness: Option<&EffectiveSoundnessKb>,
+    own: Arc<ModuleDecls>,
+    contracts: Option<&dyn Contracts>,
+    opt_in: OptInFacts,
+    seeded: &crate::resolver::SeededParams,
+) -> FileSummary {
+    let mut file = extract_module(input, decls, kb, soundness, contracts, opt_in, Some(seeded));
+    file.decls = own;
+    file
+}
+
+#[allow(clippy::too_many_arguments)]
 fn extract_module(
     input: &ModuleInput<'_>,
     decls: &ProjectDecls,
@@ -134,8 +153,11 @@ fn extract_module(
     soundness: Option<&EffectiveSoundnessKb>,
     contracts: Option<&dyn Contracts>,
     opt_in: OptInFacts,
+    seeded: Option<&crate::resolver::SeededParams>,
 ) -> FileSummary {
-    let cx = TypeCtx::new(input, decls, kb).with_layer1(soundness);
+    let cx = TypeCtx::new(input, decls, kb)
+        .with_layer1(soundness)
+        .with_seeded(seeded);
     let mut file = FileSummary {
         path: input.path.clone(),
         module_name: input.module_name.clone(),
@@ -194,6 +216,9 @@ fn extract_module(
         .run();
         cell_aliases.extend(cells);
         imported_by_name.extend(by_name);
+        if opt_in.dispatch {
+            summary.dispatch = crate::dispatch::extract(&cx, input.ir, f);
+        }
         // A `class` statement runs its body where it runs, in a function or the module body:
         // the body's effects, calls (a class attribute's value, a decorator, a default
         // argument), and accesses are that code's (its methods run only when they are called).
@@ -483,6 +508,11 @@ fn rebase_origin_nodes(summary: &mut EffectSummary, sites: &mut [CallSite], offs
 }
 
 fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary, func: &FuncKey) {
+    // A name defined twice is not followed by the registration contexts.
+    into.dispatch = None;
+    for p in (0..64u8).filter(|p| other.retains_params & (1u64 << p) != 0) {
+        into.keep_params(1u64 << p, &other.retained_given(p));
+    }
     // A must-fact: only read where both definitions only read it.
     into.only_read_params &= other.only_read_params;
     into.join_read_kinds(&other);
@@ -592,7 +622,6 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary, func: &FuncKe
             chain,
         );
     }
-    into.retains_params |= other.retains_params;
     // A must-fact: a new object only when both definitions return one.
     into.returns_new = match (std::mem::take(&mut into.returns_new), other.returns_new) {
         (
@@ -600,16 +629,22 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary, func: &FuncKe
                 kind: a,
                 cond: c,
                 elements_of: x,
+                kept: mut k,
             },
             ReturnsNew::New {
                 kind: b,
                 cond: d,
                 elements_of: y,
+                kept: l,
             },
         ) => ReturnsNew::New {
             kind: a.min(b),
             cond: c.and(&d),
             elements_of: x | y,
+            kept: {
+                k.join(&l);
+                k
+            },
         },
         _ => ReturnsNew::No,
     };
@@ -872,6 +907,9 @@ struct Extractor<'a> {
     fresh: FxHashSet<VarId>,
     /// Attributes the function assigns or deletes on any object.
     stored_attrs: Vec<&'a str>,
+    /// The inputs (`GuardSubject` as `(param, attr)`) whose object the function changes in
+    /// place somewhere, so its state at a later test is not the caller's ([`Self::changed_inputs`]).
+    changed_inputs: FxHashSet<(u8, Option<String>)>,
     /// The block and phi defining each phi variable (`GuardInputs::phis`).
     phis: OnceCell<FxHashMap<VarId, (BlockId, &'a PhiNode)>>,
     /// The function's integer constants (`capacity`), built on first use.
@@ -1313,6 +1351,7 @@ impl<'a> Extractor<'a> {
             retyped: FxHashSet::default(),
             fresh: FxHashSet::default(),
             stored_attrs,
+            changed_inputs: FxHashSet::default(),
             phis: OnceCell::new(),
             ints: OnceCell::new(),
             capacity_walks: RefCell::default(),
@@ -1378,6 +1417,7 @@ impl<'a> Extractor<'a> {
             ex.build_reach();
         }
         ex.build_aliases();
+        ex.changed_inputs = ex.changed_inputs();
         ex.find_new_cells();
         ex.memo_fills = ex.memo_fills();
         let class_of = |v: VarId| match ex.types.get(&v) {
@@ -1415,11 +1455,44 @@ impl<'a> Extractor<'a> {
             param_alias: &self.param_alias,
             param_slot_alias: &self.param_slot_alias,
             stored_attrs: &self.stored_attrs,
+            changed_inputs: &self.changed_inputs,
             fresh: &self.fresh,
             phis: &self.phis,
             kb: self.cx.kb,
             project: self.cx.project,
         }
+    }
+
+    /// The inputs whose items the function changes in place: an item store or delete, an
+    /// in-place operator, or a call of a method that adds or removes items, on the parameter or
+    /// an attribute of it. A truthiness test of one of them may find at the test another state
+    /// than the caller's; a `None`, `isinstance`, or `hasattr` test is decided otherwise
+    /// (`GuardInputs::subject_of`).
+    fn changed_inputs(&self) -> FxHashSet<(u8, Option<String>)> {
+        let input = |v: &VarId| match (self.param_alias.get(v), self.param_slot_alias.get(v)) {
+            (Some((i, None)), _) => Some((*i, None)),
+            (_, Some((i, Slot::Attr(a)))) => Some((*i, Some(a.clone()))),
+            _ => None,
+        };
+        let insts = self.f.blocks.iter().flat_map(|b| &b.insts);
+        insts
+            .filter_map(|inst| match &inst.kind {
+                InstKind::SubscriptStore { obj, .. } | InstKind::SubscriptDelete { obj, .. } => {
+                    input(obj)
+                }
+                InstKind::BinOp {
+                    lhs,
+                    in_place: true,
+                    ..
+                } => input(lhs),
+                InstKind::MethodCall { recv, method, .. }
+                    if guards::CHANGING_METHODS.contains(&method.as_str()) =>
+                {
+                    input(recv)
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// The loops around `bb`, from a table built on first use.
@@ -4755,10 +4828,9 @@ impl<'a> Extractor<'a> {
             && !self.summary.decorator_may_replace;
         let sites = &self.sites;
         // Hand-overs are to project callees of the function's own call sites.
-        let callee_of = |site: u32, callee: u16| {
-            sites[site as usize].project_callees()[usize::from(callee)]
-                .callee
-                .clone()
+        let handed_to = |site: u32, callee: u16, known: &[InputGuard]| {
+            let bc = &sites[site as usize].project_callees()[usize::from(callee)];
+            (bc.callee.clone(), CallTests::of_call(&bc.params, known))
         };
         let element_of = |v: VarId| self.element_of_params(v);
         let (answers, returned) = rec.resolve(
@@ -4766,7 +4838,7 @@ impl<'a> Extractor<'a> {
             &self.may_params,
             &param_of,
             &element_of,
-            &callee_of,
+            &handed_to,
             returns,
         );
         for p in std::mem::take(&mut self.pending_sites) {
@@ -4826,13 +4898,19 @@ impl<'a> Extractor<'a> {
     /// parameter keeps it (`EffectSummary::retains_params`). Only reached when an ownership
     /// contract is declared ([`Self::store_escapes`], [`Self::call_escapes`]).
     fn escape(&mut self, var: VarId, how: Escape) {
-        if how == Escape::Definite {
-            self.summary.retains_params |= self.may_params.get(&var).copied().unwrap_or(0);
+        let params = self.may_params.get(&var).copied().unwrap_or(0);
+        let recorded = self.track && (params != 0 || self.may_be_new(var));
+        let keeps_params = how == Escape::Definite && params != 0;
+        if !recorded && !keeps_params {
+            return;
         }
-        if self.track
-            && (self.may_params.get(&var).is_some_and(|p| *p != 0) || self.may_be_new(var))
-        {
-            self.rec.escape(self.at(), var, how);
+        let known = self.guards.facts_at(&self.guard_inputs(), self.pos.0);
+        if keeps_params {
+            self.summary
+                .keep_params(params, &MayGiven::given(known.clone()));
+        }
+        if recorded {
+            self.rec.escape(self.at(), var, how, known);
         }
     }
 
@@ -7054,9 +7132,11 @@ impl<'a> Extractor<'a> {
                         ));
                     }
                     if self.ownership {
+                        let known = self.guards.facts_at(&self.guard_inputs(), bb);
                         returns.push(NewFrom {
                             callee: key.clone(),
                             empty_params: params_without_elements(&params),
+                            at: CallTests::of_call(&params, &known),
                         });
                     }
                     // A copy of the exact length; the buffer keeps its room for the next call.

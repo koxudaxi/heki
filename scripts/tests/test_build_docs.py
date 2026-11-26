@@ -156,16 +156,39 @@ def test_a_heuristic_rule_without_premises_needs_none() -> None:
     assert build_docs.premises_disagreeing([rule]) == []
 
 
-def test_a_precommit_example_must_pin_the_workspace_version(monkeypatch) -> None:
-    version = set_release_versions.manifest_versions(build_docs.ROOT)[
+def workspace_version() -> str:
+    return set_release_versions.manifest_versions(build_docs.ROOT)[
         set_release_versions.WORKSPACE_VERSION
     ]
-    assert build_docs.stale_precommit_revs() == []
+
+
+def test_a_precommit_example_must_pin_the_workspace_version(monkeypatch) -> None:
+    version = workspace_version()
+    assert build_docs.stale_release_pins() == []
     pinned = {"README.md": [version], "docs/adoption.md": ["0.2.7"]}
     monkeypatch.setattr(set_release_versions, "precommit_revs", lambda root: pinned)
-    assert build_docs.stale_precommit_revs() == [f"docs/adoption.md: rev: v0.2.7, not v{version}"]
+    assert build_docs.stale_release_pins() == [f"docs/adoption.md: rev: v0.2.7, not v{version}"]
     monkeypatch.setitem(pinned, "README.md", [])
-    assert build_docs.stale_precommit_revs() == [
+    assert build_docs.stale_release_pins() == [
         "README.md: no pre-commit `rev:` line",
         f"docs/adoption.md: rev: v0.2.7, not v{version}",
+    ]
+
+
+def test_a_command_must_pin_the_workspace_version(monkeypatch) -> None:
+    version = workspace_version()
+    pinned = {"README.md": [version, "0.2.7"], "docs/index.md": []}
+    monkeypatch.setattr(set_release_versions, "package_pins", lambda root: pinned)
+    assert build_docs.stale_release_pins() == [
+        f"README.md: heki==0.2.7, not heki=={version}",
+        "docs/index.md: no `heki==` pin",
+    ]
+
+
+def test_a_pin_in_a_page_the_release_does_not_rewrite_fails(monkeypatch) -> None:
+    listed = tuple(n for n in set_release_versions.PACKAGE_PIN_DOCS if n != "docs/index.md")
+    monkeypatch.setattr(set_release_versions, "PACKAGE_PIN_DOCS", listed)
+    assert build_docs.stale_release_pins() == [
+        "docs/index.md: pins `heki==`, which a release does not rewrite (add the page to "
+        "PACKAGE_PIN_DOCS in scripts/set_release_versions.py)"
     ]
