@@ -2170,6 +2170,105 @@ fn the_text_lists_the_unresolved_calls_with_the_most_reach_first() {
         out.contains("\n    app.job_08      1      0      0  parameter `client` has no annotation (run)\n    and 2 more\n"),
         "{out}"
     );
+    // Test code comes after the rest whatever its reach, as `relax-async-in-tests` judges it: a
+    // package directory named `test_*` is no test location.
+    p.write(
+        "tests/test_jobs.py",
+        "async def test_poll(client):\n    client.run()\n    client.stop()\n",
+    )
+    .write(
+        "test_utils/helpers.py",
+        "async def help_poll(client):\n    client.run()\n    client.stop()\n    client.wait()\n",
+    );
+    let (_, report, _) = recommend_json(&p, &[]);
+    let listed: Vec<&str> = (report["blind_spots"]["unresolved"]
+        .as_array()
+        .unwrap()
+        .iter())
+    .take(3)
+    .map(|u| u["function"].as_str().unwrap())
+    .collect();
+    assert_eq!(
+        listed,
+        [
+            "test_utils.helpers.help_poll",
+            "tests.test_jobs.test_poll",
+            "app.job_11"
+        ]
+    );
+    let (_, out, _) = p.heki(&["recommend"]);
+    let rows: Vec<&str> = (out.lines())
+        .skip_while(|l| !l.starts_with("  calls heki does not resolve: "))
+        .skip(2)
+        .take_while(|l| l.starts_with("    "))
+        .map(|l| l.split_whitespace().next().unwrap())
+        .collect();
+    let mut jobs: Vec<String> = vec!["test_utils.helpers.help_poll".into(), "app.job_11".into()];
+    jobs.extend((0..8).map(|i| format!("app.job_{i:02}")));
+    jobs.push("and".into());
+    assert_eq!(rows, jobs, "{out}");
+    assert!(
+        out.contains("\n    and 4 more, 1 of them in test code\n"),
+        "{out}"
+    );
+}
+
+#[test]
+fn long_lists_fold_into_counts_in_the_text() {
+    // A project below the working directory: paths are written below its root.
+    let p = Project::new("recommend_long_lists");
+    let calls = |package: &str, names: &[String]| -> String {
+        let body: String = names
+            .iter()
+            .map(|n| format!("    {package}.{n}()\n"))
+            .collect();
+        format!("def use_{package}():\n{body}\n\n")
+    };
+    let alpha: Vec<String> = (0..60).map(|i| format!("f{i:02}")).collect();
+    let beta: Vec<String> = (0..10).map(|i| format!("g{i}")).collect();
+    let jobs: String = (0..52)
+        .map(|i| format!("def j{i:02}(client):\n    client.run()\n\n\n"))
+        .collect();
+    p.write("proj/pyproject.toml", "[project]\nname = \"proj\"\n")
+        .write("proj/app/__init__.py", "")
+        .write(
+            "proj/app/calls.py",
+            &format!(
+                "import alpha\nimport beta\n\n\n{}{}",
+                calls("alpha", &alpha),
+                calls("beta", &beta)
+            ),
+        )
+        .write("proj/app/jobs.py", &jobs)
+        .write(
+            "proj/tests/test_jobs.py",
+            "async def test_job(client):\n    client.run()\n",
+        );
+    let (_, report, _) = recommend_json(&p, &["proj"]);
+    assert_eq!(report["root"], "proj");
+    let totals = &report["blind_spots"]["totals"];
+    assert_eq!(
+        (
+            &totals["tried"],
+            &totals["not_tried"],
+            &totals["unresolved_groups"]
+        ),
+        (&json!(64), &json!(6), &json!(53))
+    );
+    let (_, out, _) = p.heki(&["recommend", "proj"]);
+    // 50 names of `alpha` are listed, and 10 of `beta`, 6 of which are past the 64 tried; no
+    // trial changes a report, so there is no table.
+    for line in [
+        "    54 name(s) whose trial changes no report (alpha.f00, alpha.f01, alpha.f02, ...)",
+        "    6 name(s) not tried, past the first 64 by reach",
+        "    and 10 more name(s), not listed",
+        // The test function is listed first by reach and printed after the rest; the groups
+        // past the list are not known.
+        "    and 43 more, at least 1 of them in test code",
+    ] {
+        assert!(out.lines().any(|l| l == line), "{line}\n{out}");
+    }
+    assert!(!out.contains("a trial, not a fact"), "{out}");
 }
 
 #[test]

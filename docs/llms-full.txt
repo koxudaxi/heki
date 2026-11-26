@@ -3591,7 +3591,8 @@ one.
   name nothing heki sees binds, a protocol whose implementations heki cannot list, a call's
   result or an attribute heki gives no class, a method named at run time, more implementations
   than heki follows, or a member heki does not find. An annotation would resolve most of them;
-  an annotation is an edit of the program, so none enters the block.
+  an annotation is an edit of the program, so none enters the block. The text lists the calls in
+  test code, as `relax-async-in-tests` finds it, after the others, and counts those it leaves out.
 - **Source roots**: a directory below the project root, neither a source root nor a regular
   package (a directory with `__init__.py` is imported by its own name, so heki never takes one
   for a source root), below which the dotted path of an import that names no project module is a

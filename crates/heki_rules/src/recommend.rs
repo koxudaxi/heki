@@ -750,7 +750,7 @@ pub fn render_text(report: &RecommendReport, all: bool) -> String {
         now.baseline.is_some(),
         &report.analyzed.paths,
     );
-    blind_spots::render(&mut out, &report.blind_spots);
+    blind_spots::render(&mut out, &report.blind_spots, &report.root);
     contracts::render(
         &mut out,
         &report.contracts,

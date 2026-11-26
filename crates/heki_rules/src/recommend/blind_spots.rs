@@ -1365,8 +1365,32 @@ fn names_table(out: &mut String, symbols: &[&SymbolCalls], total: usize, more: &
     }
 }
 
-/// The section as the text prints it.
-pub(super) fn render(out: &mut String, section: &BlindSpotsSection) {
+/// Whether the calls are in test code, as `relax-async-in-tests` judges it
+/// ([`heki_effect::code_kind::is_test_code`]), from the function's dotted name and its file's
+/// path as the output writes them below `root`. The module is the file's path below a source
+/// root, so it is the longest run of the path's last names that starts the dotted name.
+fn in_test_code(u: &UnresolvedCalls, root: &str) -> bool {
+    let path = u.path.replace('\\', "/");
+    let rel = (root != ".")
+        .then(|| path.strip_prefix(root)?.strip_prefix('/'))
+        .flatten()
+        .unwrap_or(&path);
+    let file: Vec<&str> = rel
+        .strip_suffix(".py")
+        .unwrap_or(rel)
+        .split('/')
+        .filter(|name| *name != "__init__")
+        .collect();
+    let dotted: Vec<&str> = u.function.split('.').collect();
+    let module = (1..=file.len().min(dotted.len()))
+        .rev()
+        .find(|&n| file[file.len() - n..] == dotted[..n])
+        .unwrap_or_default();
+    heki_effect::code_kind::is_test_code(&dotted[module..].join("."), rel)
+}
+
+/// The section as the text prints it. `root` is the project root as the output writes it.
+pub(super) fn render(out: &mut String, section: &BlindSpotsSection, root: &str) {
     out.push_str("\nWhat heki cannot see (no report either way)\n");
     let t = &section.totals;
     let mut empty = true;
@@ -1439,7 +1463,15 @@ pub(super) fn render(out: &mut String, section: &BlindSpotsSection) {
             "  calls heki does not resolve: {} call(s) in {} function(s)",
             t.unresolved.calls, t.unresolved_functions
         );
-        let rows: Vec<&UnresolvedCalls> = section.unresolved.iter().take(MAX_TEXT_ROWS).collect();
+        // Test code after the rest, each by reach as the list is.
+        let mut listed: Vec<(bool, &UnresolvedCalls)> = (section.unresolved.iter())
+            .map(|u| (in_test_code(u, root), u))
+            .collect();
+        listed.sort_by_key(|(test, _)| *test);
+        let (rows, past): (Vec<_>, Vec<_>) =
+            (listed.iter().enumerate()).partition(|(i, _)| *i < MAX_TEXT_ROWS);
+        let rows: Vec<&UnresolvedCalls> = rows.into_iter().map(|(_, (_, u))| *u).collect();
+        let tests_past = past.iter().filter(|(_, (test, _))| *test).count();
         let width = rows
             .iter()
             .map(|u| u.function.len())
@@ -1460,7 +1492,21 @@ pub(super) fn render(out: &mut String, section: &BlindSpotsSection) {
             );
         }
         if t.unresolved_groups > rows.len() {
-            let _ = writeln!(out, "    and {} more", t.unresolved_groups - rows.len());
+            // Past the list, nothing is known of where the calls are.
+            let at_least = if t.unresolved_groups > listed.len() {
+                "at least "
+            } else {
+                ""
+            };
+            let in_tests = match tests_past {
+                0 => String::new(),
+                n => format!(", {at_least}{n} of them in test code"),
+            };
+            let _ = writeln!(
+                out,
+                "    and {} more{in_tests}",
+                t.unresolved_groups - rows.len()
+            );
         }
     }
     let a1 = section.a1_hazards;
