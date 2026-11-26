@@ -2770,7 +2770,7 @@ proves more, is a regression once: fix it, or record the baseline anew. An exact
 heuristic passes, and `--update-baseline` records it as heuristic. A rule with two tiers keys both
 in the same entry: `EFF101` and `EFF103` key a report by the last call of the shortest call chain
 to the blocking call or the query, also where the exact report names the call every
-implementation runs.
+implementation runs (a file of version 2 keys it by the call the exact report names).
 
 Older files keep their meaning until `--update-baseline` rewrites them with `version = 3`, which
 heki 0.5.0 and earlier cannot read:
@@ -3025,8 +3025,8 @@ or where the code is named. The old codes and names are not kept.
 - Once rewritten, an entry recorded for a heuristic report no longer allows an exact one: a
   report that heki proves is a regression once.
 - An exact `EFF101` or `EFF103` report is keyed by the last call of the shortest call chain, as a
-  heuristic one is. Where its entry named the call every implementation runs and a shorter chain
-  ends at another call, the entry no longer matches: record the baseline anew.
+  heuristic one is, in a file of version 3. A file of version 2 keeps the call the report names,
+  so its entries still match, and `--update-baseline` rewrites them with the new key.
 
 ## Effect snapshots (`MUT103`)
 

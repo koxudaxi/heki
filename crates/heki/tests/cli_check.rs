@@ -880,6 +880,36 @@ fn version_2_baselines_are_compared_as_before_until_they_are_rewritten() {
 }
 
 #[test]
+fn a_version_2_entry_of_an_exact_report_keeps_the_call_the_report_names() {
+    // `handler` always runs `subprocess.run` two calls down, and `tool` may run
+    // `subprocess.check_call` before it: the exact report names the first, and from version 3
+    // its entry is keyed by the second (the shortest chain's call). A version 2 file, written
+    // with the call the report names, still holds the site.
+    let src = "import subprocess\n\n\ndef tool(flag: bool) -> None:\n    if flag:\n        subprocess.check_call([\"true\"])\n    step()\n\n\ndef step() -> None:\n    subprocess.run([\"true\"])\n\n\nasync def handler(flag: bool) -> None:\n    tool(flag)\n";
+    let p = Project::new("baseline_v2_exact_key");
+    p.write("a.py", src);
+    let check = ["--baseline", "b.toml"];
+    let update = ["--baseline", "b.toml", "--update-baseline"];
+    assert_eq!(p.heki(&update).0, 0);
+    let v3 = std::fs::read_to_string(p.dir.join("b.toml")).unwrap();
+    assert!(v3.contains("target = \"subprocess.check_call\""), "{v3}");
+    let v2 = v3
+        .replace("version = 3", "version = 2")
+        .replace("subprocess.check_call", "subprocess.run");
+    p.write("b.toml", &v2);
+    let (code, stdout, stderr) = p.heki(&check);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(!stderr.contains("matched no report"), "{stderr}");
+    assert!(!stderr.contains("Ratchet regression"), "{stderr}");
+    // `--update-baseline` rewrites it as version 3, keyed as version 3 keys, and that passes.
+    assert_eq!(p.heki(&update).0, 0);
+    assert_eq!(std::fs::read_to_string(p.dir.join("b.toml")).unwrap(), v3);
+    let (code, stdout, stderr) = p.heki(&check);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(!stderr.contains("note: baseline"), "{stderr}");
+}
+
+#[test]
 fn baselines_and_snapshots_are_kept_when_a_file_fails_to_parse() {
     let p = Project::new("keep_on_errors");
     p.write("a.py", BLOCKING)
