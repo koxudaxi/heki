@@ -61,10 +61,11 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.14"
-      # A release deploys docs that show its own tag in the pre-commit `rev:` lines, written the
-      # way the build jobs of release.yml write the version: the tagged tree still shows the
-      # previous release until the Release Sync pull request merges.
-      - name: Write the release into the manifests and the pre-commit examples
+      # A release deploys docs that pin its own version (the pre-commit `rev:` lines and the
+      # `heki==` of the commands), written the way the build jobs of release.yml write the
+      # version: the tagged tree still shows the previous release until the Release Sync pull
+      # request merges.
+      - name: Write the release into the manifests and the pages' pins
         if: github.event_name == 'release'
         env:
           TAG: ${{ github.event.release.tag_name }}
