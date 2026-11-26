@@ -764,7 +764,7 @@ heki check --output-format full|concise|json|github|sarif   # default: HEKI_OUTP
 heki check --color auto|always|never          # colored full / concise / --diff output (NO_COLOR, FORCE_COLOR, as in Ruff)
 heki check --baseline heki-baseline.toml      # Ratchet: more findings fail, fewer ask to shrink the file
 heki check --update-baseline                  # record a new baseline or shrink an existing one (growth is refused; entries of files PATHS leave out stay)
-heki check [PATHS...] --touched FILE...       # analyze PATHS, show and fail on the reports in FILEs or whose call chain reaches one
+heki check [PATHS...] --touched FILE...       # analyze PATHS, show and fail on the reports in FILEs or whose call chain reaches one (every Ratchet regression; every report for a configuration file)
 heki check --watch [PATHS...]                 # re-check on file changes
 
 heki server                                   # incremental LSP server (alias: heki lsp)

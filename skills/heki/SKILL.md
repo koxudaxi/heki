@@ -6,7 +6,7 @@ description: >
   or when the user asks to check Python code for side effects, changes to shared state, blocking
   calls in async code, queries in loops, or quadratic patterns. After the edit, run
   `heki check --touched <edited files> --output-format json` and act on the reports the edit
-  caused.
+  caused; before finishing, run `heki check` on the whole project.
 license: MIT
 metadata:
   status: experimental
@@ -14,35 +14,37 @@ metadata:
 
 # heki
 
-heki is a static checker for Python that follows calls across files. This skill is the routine of
-[Coding Agents](https://heki.koxudaxi.dev/coding-agents/) after an edit.
+heki is a static checker for Python that follows calls across files. This is the routine of
+[Coding Agents](https://heki.koxudaxi.dev/coding-agents/).
 
 Run `heki`, or `uv run heki` when the project lists it as a development dependency, or
 `uvx heki`. Do not add or upgrade heki without the user's approval.
 
 ## After an edit
 
-1. Run `heki check --touched <edited files> --output-format json` in the project: heki analyzes
-   the project and shows the reports whose `path` or a `related[].path` is an edited file, as a
-   report sits where the problem shows, often in a caller's file.
-2. Act on the reports it shows. On a project with old findings, record them once before editing
-   with `heki check --baseline <file outside the project> --update-baseline` and add
-   `--baseline <file>` to each check: it then reports only new findings.
+1. Run `heki check --touched <edited files> --output-format json` in the project: it shows the
+   reports whose `path` or a `related[].path` is an edited file (often in a caller).
+2. Act on the reports it shows. With old findings, first record them with
+   `heki check --baseline <file outside the project> --update-baseline`, and add
+   `--baseline <file>` to each check.
 3. Follow `related` to the root cause, read `heki rule <CODE>`, and fix it there as `help` says.
 4. A `heuristic` report can be wrong: confirm from the code what its message says before
-   changing anything, and tell the user when it does not hold. A wrong `exact` report is a bug
-   in heki: tell the user.
+   changing anything, and tell the user when it does not hold; a wrong `exact` report is a bug
+   in heki.
 5. Never suppress a report (`# heki: ignore[...]`, `# noqa`, `ignore`, a baseline) or weaken a
    contract unless the rule's documentation describes the case as intended or the user asks.
 6. Apply rewrites only with `heki check --fix` (`--diff` previews them), and leave what a
    `blocker` stops.
+7. Before you finish, run `heki check --output-format json` without `--touched` (with step 2's
+   `--baseline`), act on it, and tell the user its exit code: an edit can add a report that
+   touches no edited file.
 
 ## On demand
 
 - `heki inspect <function> --output-format json` (experimental): what a function reaches,
-  changes, keeps, and returns, when a report or a question is about it.
+  changes, keeps, and returns, when a report or question is about it.
 - `heki check --generate-prompt "<question>"` (experimental): a prompt with the configuration,
-  the rules, and the reports, when a report or its fix is unclear.
+  rules, and reports, when a report or its fix is unclear.
 - [Contracts](https://heki.koxudaxi.dev/configuration/#contracts), when the user wants heki to
   enforce who may write, read, or call something, or what a scope must not reach.
 

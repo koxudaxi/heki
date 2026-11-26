@@ -12,7 +12,7 @@ use anyhow::Result;
 use heki_diagnostics::{Diagnostic, Stylesheet, render, sort_diagnostics};
 use heki_effect::ModuleLayout;
 use heki_env::{LintConfig, Problem};
-use heki_lsp::{CONFIG_FILES, EditOutcome, Source, Workspace};
+use heki_lsp::{EditOutcome, Source, Workspace};
 use heki_rules::project::{
     Facts, FileError, ProjectEnv, ProjectOptions, collect_files, display_path, exclude_set,
 };
@@ -172,7 +172,7 @@ impl Watcher<'_> {
     /// workspace.
     fn load(&self, earlier: (&Stamps, &Stamps)) -> Result<Loaded> {
         let env = ProjectEnv::load(&self.opts())?;
-        let config_files = self.config_files(&env);
+        let config_files = crate::check::project_wide_files(&self.args.analysis, &env);
         let config = stamps_of(&config_files, earlier.1);
         let files = self.scan(&env, earlier.0)?;
         // The workspace loads the catalogs again: kept through its analysis, these would be a
@@ -191,16 +191,6 @@ impl Watcher<'_> {
             config_files,
             config,
         })
-    }
-
-    /// The files whose change reloads the workspace: the configuration, the summary snapshot,
-    /// and the Ratchet baseline the diagnostics are compared with.
-    fn config_files(&self, env: &ProjectEnv) -> Vec<PathBuf> {
-        let root = &env.root;
-        let mut config: Vec<PathBuf> = CONFIG_FILES.iter().map(|n| root.join(n)).collect();
-        config.extend(self.args.analysis.config.clone());
-        config.extend(crate::check::baseline_path(&self.args.analysis, env));
-        config
     }
 
     /// The Python files of the project with their stamps. A path of the command line that does

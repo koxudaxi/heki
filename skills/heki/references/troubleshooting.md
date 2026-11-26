@@ -17,6 +17,16 @@ interpreter to run.
 `0`: nothing fails the run. `1`: a diagnostic fails it (an exact `error`, or any diagnostic with
 `--fail-on warning`: a heuristic one counts as a warning); the output lists it. `2`: a configuration, I/O, or syntax error (below).
 
+## The whole project reports what `--touched` did not show
+
+`--touched` shows the diagnostics in the edited files and those whose call chain passes through
+one. An edit can also add a diagnostic elsewhere without such a chain: a module re-exports a name
+from another one, or another module relied on an annotation the edit changed. No run over the
+edited files can tell, so without a baseline it ends with the note "N report(s) that would fail
+the run are not shown" (on stderr, also with `--output-format json`), and with a baseline it shows
+every regression wherever it is. Naming `pyproject.toml` or `heki.toml` shows every diagnostic.
+Run `heki check` on the whole project before finishing, and fix what it reports.
+
 ## A diagnostic disappears when a directory is checked
 
 `heki check path/to/dir` (or `heki check` run in a directory below the project root) analyzes
