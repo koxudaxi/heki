@@ -36,7 +36,7 @@ on a corpus was checked by hand ([Rule precision](https://heki.koxudaxi.dev/prec
 [![CI](https://github.com/koxudaxi/heki/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/koxudaxi/heki/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/koxudaxi/heki/blob/main/LICENSE)
 
-⚡ Try it in your project's root, without installing: `uvx heki==0.6.0 check`, then follow
+⚡ Try it in your project's root, without installing: `uvx heki==0.7.0 check`, then follow
 [Try it in 5 minutes](https://heki.koxudaxi.dev/#try-it-in-5-minutes)
 
 ---
@@ -133,7 +133,7 @@ use it next to them.
 ### Try it in 5 minutes
 
 1. In the project's root, the directory with `pyproject.toml`, run the default rules without
-   installing heki: `uvx heki==0.6.0 check`. An exact error, a bug that can be critical like the
+   installing heki: `uvx heki==0.7.0 check`. An exact error, a bug that can be critical like the
    first example above, fails the run (exit code 1). Warnings, like the second, and heuristic
    reports, which can be wrong about the code, are printed and do not fail it (exit code 0)
    unless `--fail-on warning` is given. A note at the end says how many heuristic rules were
@@ -146,11 +146,11 @@ use it next to them.
    contract the code already keeps:
 
     ```console
-    $ uvx heki==0.6.0 check
+    $ uvx heki==0.7.0 check
     All checks passed (4 file(s)).
     ...
     hint: `heki recommend` (experimental) lists the rules and contracts that fit this project, and what heki could not see
-    $ uvx heki==0.6.0 recommend
+    $ uvx heki==0.7.0 recommend
     heki recommend (experimental) on .: 4 file(s), 10 function(s)
     ...
     What heki cannot see (no report either way)
@@ -170,10 +170,10 @@ use it next to them.
     contract.
 
 3. Keep it running. The [pre-commit hook](https://heki.koxudaxi.dev/adoption/#pre-commit) checks what a commit
-   touches (`heki check --touched`), and a CI step runs `uvx heki==0.6.0 check` on the whole
+   touches (`heki check --touched`), and a CI step runs `uvx heki==0.7.0 check` on the whole
    project. On code with findings today, record them first in a
    [Ratchet baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines), so that only new ones fail:
-   `uvx heki==0.6.0 check --baseline heki-baseline.toml --update-baseline`, then
+   `uvx heki==0.7.0 check --baseline heki-baseline.toml --update-baseline`, then
    `baseline = "heki-baseline.toml"` in `[tool.heki]`. The
    [starter recipes](https://heki.koxudaxi.dev/adoption/#starter-recipes) have these setups as blocks to copy.
 
@@ -182,7 +182,7 @@ use it next to them.
     The exact rules are certified, but heki is still under active development: rules,
     configuration keys, diagnostics, and output formats can change between releases without a
     deprecation period, and each change is listed in the release notes. So pin the version you
-    adopt (`heki==0.6.0`, and the hook's `rev`): an upgrade is then a change you review like any
+    adopt (`heki==0.7.0`, and the hook's `rev`): an upgrade is then a change you review like any
     other. A Ratchet baseline of today's findings, and `--touched` in the hook, keep old findings
     from blocking work. Try it on your code and report what it gets wrong.
 
@@ -2774,7 +2774,7 @@ Record today's findings, so that only new ones fail, and commit `heki-baseline.t
 configuration, the hook, and the CI step:
 
 ```console
-$ uvx heki==0.6.0 check --baseline heki-baseline.toml --update-baseline
+$ uvx heki==0.7.0 check --baseline heki-baseline.toml --update-baseline
 ```
 
 ```toml
@@ -2787,14 +2787,14 @@ baseline = "heki-baseline.toml"
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.6.0
+    rev: v0.7.0
     hooks:
       - id: heki   # heki check --touched on the staged files
 ```
 
 ```yaml
 # A step of the CI job, with uv installed
-- run: uvx heki==0.6.0 check
+- run: uvx heki==0.7.0 check
 ```
 
 The hook shows the reports in and through the staged files, and every regression of the
@@ -2869,7 +2869,7 @@ forbidden-imports = ["app.web", "app.web.*"]
   project root, without merging them: move every `[tool.heki]` setting into `heki.toml`.
 - `fail-on = "warning"` makes every warning and heuristic report fail the run, not only the
   contracts' reports. Record today's findings in the baseline first
-  (`uvx heki==0.6.0 check --update-baseline`), so that only new ones fail.
+  (`uvx heki==0.7.0 check --update-baseline`), so that only new ones fail.
 - The `message` is the help of every report of the contract: write it as an instruction.
 - For Claude Code, add the [Stop hook](https://heki.koxudaxi.dev/coding-agents/#a-stop-hook-for-claude-code): it runs
   `heki check`, with the baseline `heki.toml` names, when the agent is about to end its turn,
@@ -3068,7 +3068,7 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
         hooks:
           - id: heki
             name: heki
-            entry: uvx heki==0.6.0 check --touched
+            entry: uvx heki==0.7.0 check --touched
             language: system   # needs uv on PATH
             types_or: [python, toml]
             files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
@@ -3088,7 +3088,7 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
             name: heki
             entry: heki check --touched
             language: python
-            additional_dependencies: [heki==0.6.0]
+            additional_dependencies: [heki==0.7.0]
             types_or: [python, toml]
             files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
             pass_filenames: true
@@ -3124,14 +3124,14 @@ the run now.
 === "GitHub Actions annotations"
 
     ```yaml
-    - run: uvx heki==0.6.0 check --output-format github
+    - run: uvx heki==0.7.0 check --output-format github
     ```
 
 === "Code scanning (SARIF)"
 
     ```yaml
     # The job needs `permissions: security-events: write`.
-    - run: uvx heki==0.6.0 check --output-format sarif > heki.sarif || test "$?" -eq 1
+    - run: uvx heki==0.7.0 check --output-format sarif > heki.sarif || test "$?" -eq 1
     - uses: github/codeql-action/upload-sarif@v4
       with:
         sarif_file: heki.sarif
@@ -3154,7 +3154,7 @@ On a pull request, a project with old findings can report only what the change t
 pre-commit hook does (the checkout needs `fetch-depth: 0` for the base branch):
 
 ```yaml
-- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' pyproject.toml heki.toml .heki.toml | xargs -0 -r uvx heki==0.6.0 check --touched
+- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' pyproject.toml heki.toml .heki.toml | xargs -0 -r uvx heki==0.7.0 check --touched
   env:
     BASE: ${{ github.base_ref }}
 ```

@@ -26,7 +26,7 @@ on a corpus was checked by hand
 [![CI](https://github.com/koxudaxi/heki/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/koxudaxi/heki/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/koxudaxi/heki/blob/main/LICENSE)
 
-⚡ Try it in your project's root, without installing: `uvx heki==0.6.0 check`, then follow
+⚡ Try it in your project's root, without installing: `uvx heki==0.7.0 check`, then follow
 [Try it in 5 minutes](#try-it-in-5-minutes)
 
 ---
@@ -123,7 +123,7 @@ use it next to them.
 ### Try it in 5 minutes
 
 1. In the project's root, the directory with `pyproject.toml`, run the default rules without
-   installing heki: `uvx heki==0.6.0 check`. An exact error, a bug that can be critical like the
+   installing heki: `uvx heki==0.7.0 check`. An exact error, a bug that can be critical like the
    first example above, fails the run (exit code 1). Warnings, like the second, and heuristic
    reports, which can be wrong about the code, are printed and do not fail it (exit code 0)
    unless `--fail-on warning` is given. A note at the end says how many heuristic rules were
@@ -137,11 +137,11 @@ use it next to them.
    contract the code already keeps:
 
     ```console
-    $ uvx heki==0.6.0 check
+    $ uvx heki==0.7.0 check
     All checks passed (4 file(s)).
     ...
     hint: `heki recommend` (experimental) lists the rules and contracts that fit this project, and what heki could not see
-    $ uvx heki==0.6.0 recommend
+    $ uvx heki==0.7.0 recommend
     heki recommend (experimental) on .: 4 file(s), 10 function(s)
     ...
     What heki cannot see (no report either way)
@@ -162,9 +162,9 @@ use it next to them.
 
 3. Keep it running. The [pre-commit hook](https://heki.koxudaxi.dev/adoption/#pre-commit)
    checks what a commit touches (`heki check --touched`), and a CI step runs
-   `uvx heki==0.6.0 check` on the whole project. On code with findings today, record them first
+   `uvx heki==0.7.0 check` on the whole project. On code with findings today, record them first
    in a [Ratchet baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines), so that only
-   new ones fail: `uvx heki==0.6.0 check --baseline heki-baseline.toml --update-baseline`, then
+   new ones fail: `uvx heki==0.7.0 check --baseline heki-baseline.toml --update-baseline`, then
    `baseline = "heki-baseline.toml"` in `[tool.heki]`. The
    [starter recipes](https://heki.koxudaxi.dev/adoption/#starter-recipes) have these setups as
    blocks to copy.
@@ -173,7 +173,7 @@ use it next to them.
 > 🧪 **Pre-release.** The exact rules are certified, but heki is still under active development:
 > rules, configuration keys, diagnostics, and output formats can change between releases without
 > a deprecation period, and each change is listed in the release notes. So pin the version you
-> adopt (`heki==0.6.0`, and the hook's `rev`): an upgrade is then a change you review like any
+> adopt (`heki==0.7.0`, and the hook's `rev`): an upgrade is then a change you review like any
 > other. A Ratchet baseline of today's findings, and `--touched` in the hook, keep old findings
 > from blocking work. Try it on your code and report what it gets wrong.
 
@@ -391,7 +391,7 @@ repos:
 
 ```yaml
 # A step of a GitHub Actions job that has uv
-- run: uvx heki==0.6.0 check
+- run: uvx heki==0.7.0 check
 ```
 
 Exact errors fail the hook and the step. Warnings and heuristic reports do not, unless you pass
