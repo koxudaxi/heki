@@ -34,6 +34,7 @@ use crate::resolver::{
     self, Callee, DeclKeys, FunctionDecl, ModuleDecls, TypeCtx, Val, func_qualname,
     is_generator_function, self_aliases,
 };
+use crate::types::{Held, Ty};
 use crate::{
     Access, ArgBinding, ArgOrigin, ArgTargets, ArgValue, AttrKeyPath, BoundCallee, CallHop,
     CallSite, CallTarget, CallTests, CellChange, Construction, ContainerParams, ContractClass,
@@ -2681,9 +2682,16 @@ impl<'a> Extractor<'a> {
                 callee_var: Some(c),
                 args,
                 ..
-            } => match self.val(*c)? {
-                Val::Ref(fqn) if fqn == "builtins.object.__new__" => self.bare_allocation(args),
-                _ => self.class_called(*c),
+            } => match self.val(*c) {
+                Some(Val::Ref(fqn)) if fqn == "builtins.object.__new__" => {
+                    self.bare_allocation(args)
+                }
+                Some(_) => self.class_called(*c),
+                None => self
+                    .typed_partial(*c)?
+                    .0
+                    .class_object(project)
+                    .map(str::to_owned),
             },
             InstKind::MethodCall { recv, method, .. }
                 if let Some(class) = self.held_class(*recv, method) =>
@@ -2737,6 +2745,23 @@ impl<'a> Extractor<'a> {
     /// its `__init__`: the class object passed first.
     fn bare_allocation(&self, args: &[VarId]) -> Option<String> {
         self.class_called(*args.first()?)
+    }
+
+    /// The callable a call of `var` calls with the call's own positions, and what the object
+    /// adds, when `var` holds a `functools.partial` object the function does not make (an item
+    /// of a table, `POLICY[kind]`) of a named object, or of one of several, holding no
+    /// positions: its type says so, and calling it runs what a call of the callable written out
+    /// runs. One the function makes is [`Self::partial`]'s.
+    fn typed_partial(&self, var: VarId) -> Option<(Val, Held)> {
+        if self.partial(var).is_some() {
+            return None;
+        }
+        match self.inferred.ty(var)? {
+            Ty::Partial(callable, held) if *held != Held::Positions => {
+                Some((callable.val()?, *held))
+            }
+            _ => None,
+        }
     }
 
     /// The project class calling `callee` constructs (`Model`, `cls` in a class method).
@@ -5361,8 +5386,14 @@ impl<'a> Extractor<'a> {
                     self.call_inst((bb, index), &method, target, &call);
                     return;
                 }
+                // A partial object read here (`TABLE[kind](x)`) calls its callable.
+                let partial = match (callee_val, callee_var) {
+                    (None, Some(v)) => self.typed_partial(*v),
+                    _ => None,
+                };
+                let callable = callee_val.or(partial.as_ref().map(|(c, _)| c));
                 let target = match callee_var {
-                    Some(_) => self.cx.resolve_call(callee_val),
+                    Some(_) => self.cx.resolve_call(callable),
                     // Non-inlined comprehension (Python 3.11, `__comp_<function id>`) runs
                     // immediately.
                     None => callee
@@ -5370,6 +5401,10 @@ impl<'a> Extractor<'a> {
                         .and_then(|n| n.parse::<u32>().ok())
                         .map_or(Callee::Unresolved, |id| self.child_callee(FunctionId(id))),
                 };
+                if partial.is_some() {
+                    let complete = self.cx.call_targets_complete(callable, &target);
+                    self.held_calls_complete.insert((bb, index), complete);
+                }
                 self.deep_copy(&target, args, kwargs, *star_from, span);
                 let constructs = self.construction(kind);
                 let call = Call {
@@ -5385,7 +5420,7 @@ impl<'a> Extractor<'a> {
                     recv_is_self: false,
                     constructs,
                     per_item: None,
-                    unseen_keywords: false,
+                    unseen_keywords: partial.is_some_and(|(_, held)| held == Held::Keywords),
                     span,
                 };
                 self.call_inst((bb, index), callee, target, &call);

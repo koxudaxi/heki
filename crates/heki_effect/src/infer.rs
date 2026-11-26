@@ -33,7 +33,7 @@ use crate::ownership::CASTS;
 use crate::partial::Partial;
 use crate::resolver::stores::Read;
 use crate::resolver::{self, Callee, CopyMade, ProjectDecls, TypeCtx, Val};
-use crate::types::{Added, Args, Change, Container, Elem, Obj, Operands, Ty};
+use crate::types::{Added, Args, Change, Container, Elem, Held, Obj, Operands, Ty};
 use heki_ast::Span;
 use heki_ir::walk::{Answer, Budget, Facts, FnShape, Join, Sparse, fixpoint};
 use heki_ir::{
@@ -2755,9 +2755,13 @@ impl<'e, 'a> Engine<'e, 'a> {
                 return item_ty(items(0).join(&default));
             }
             "functools.partial" if !args.is_empty() => {
+                let held = crate::partial::parts(args, call.kwargs, call.star_from)
+                    .map_or(Held::Positions, |(_, held, kwargs, open)| {
+                        Held::of(held, open, kwargs)
+                    });
                 return Ok(self
                     .need(args[0])?
-                    .map(|t| Ty::Partial(Box::new(t.clone()))));
+                    .map(|t| Ty::Partial(Box::new(t.clone()), held)));
             }
             // `typing.cast(T, value)` returns `value`, which `T` declares.
             _ if CASTS.contains(&fqn) && !args.is_empty() => {
@@ -2890,7 +2894,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             Ty::Ref(_)
             | Ty::Class(_)
             | Ty::SelfType
-            | Ty::Partial(_)
+            | Ty::Partial(..)
             | Ty::Coroutine(_)
             | Ty::Union(_)
             | Ty::OneOf(_) => None,
@@ -3058,7 +3062,8 @@ impl<'e, 'a> Engine<'e, 'a> {
                 // Whether it binds the instance or not, the partial object calls the callable it
                 // holds, which gives what it returns.
                 ([], None, Some(partial)) => {
-                    let callable = Ty::Partial(Box::new(cx.named(&partial.callable)));
+                    let callable =
+                        Ty::Partial(Box::new(cx.named(&partial.callable)), partial.held());
                     self.called(&callable, call)
                 }
                 _ => None,
@@ -3139,7 +3144,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                 self.cx.call_result(fqn, |i, k| self.passed(call, i, k))
             }
             // What the partial object binds shifts the arguments: they are not followed.
-            Ty::Partial(inner) => self.called(inner, Passed::default()),
+            Ty::Partial(inner, _) => self.called(inner, Passed::default()),
             Ty::OneOf(fqns) => join_all(
                 fqns.iter()
                     .map(|fqn| self.cx.call_result(fqn, |i, k| self.passed(call, i, k))),
