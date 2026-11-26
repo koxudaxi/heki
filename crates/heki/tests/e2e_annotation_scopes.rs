@@ -837,3 +837,32 @@ fn a_local_binding_other_than_one_import_shadows_the_module_import() {
         [("pkg/assigned.py".to_owned(), 30)]
     );
 }
+
+/// A class whose `__call__` attribute is declared as itself, or two classes declaring each other,
+/// give a call no result (so the write on it is unresolved) and no crash.
+const CALL_CYCLES: &str = r#"class Loop:
+    __call__: "Loop"
+
+
+def invoke(value: Loop):
+    made = value()
+    made.__dict__["_mark"] = 1  # unresolved
+
+
+class A:
+    __call__: "B"
+
+
+class B:
+    __call__: "A"
+
+
+def around(value: A):
+    made = value()
+    made.__dict__["_mark"] = 1  # unresolved
+"#;
+
+#[test]
+fn a_call_attribute_declared_in_a_cycle_gives_no_result() {
+    check_marks("call_cycles", &[("pkg/call_cycles.py", CALL_CYCLES)]);
+}

@@ -1085,6 +1085,10 @@ fn awaited(t: &Ty) -> Step {
     }
 }
 
+/// The most calls through `__call__` one call of a value follows, past which its result is
+/// unknown.
+const MAX_CALL_DEPTH: u8 = 16;
+
 /// The join of every type, `None` when one is unknown or none covers them all.
 fn join_all(types: impl IntoIterator<Item = Option<Ty>>) -> Option<Ty> {
     let mut out: Option<Ty> = None;
@@ -1245,6 +1249,10 @@ struct Engine<'e, 'a> {
     /// and depth, while one block is entered: a condition reaches the same phi through many
     /// paths (a loop header's phi is an input of itself on each `continue`).
     implied_memo: RefCell<FxHashMap<(VarId, bool, BlockId, u8), Narrowed>>,
+    /// How many calls of a value through its `__call__` are in progress ([`Self::called`]): a
+    /// class whose `__call__` is declared as itself (or as a class declaring it back) calls
+    /// itself forever.
+    call_depth: Cell<u8>,
     /// The value of the body of each lambda the function makes and calls (by the variable
     /// holding it), as the function's cells hold in this pass: what calling the lambda gives.
     lambda_bodies: RefCell<FxHashMap<VarId, Elem>>,
@@ -1434,6 +1442,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             narrowing: None,
             cur: FxHashMap::default(),
             implied_memo: RefCell::default(),
+            call_depth: Cell::new(0),
             lambda_bodies: RefCell::default(),
             lambdas_called: RefCell::default(),
             own_stores: StoreCells::default(),
@@ -3174,7 +3183,16 @@ impl<'e, 'a> Engine<'e, 'a> {
                 fqns.iter()
                     .map(|fqn| self.cx.call_result(fqn, |i, k| self.passed(call, i, k))),
             ),
-            other => self.member_call(other, "__call__", call),
+            other => {
+                let depth = self.call_depth.get();
+                if depth >= MAX_CALL_DEPTH {
+                    return None;
+                }
+                self.call_depth.set(depth + 1);
+                let result = self.member_call(other, "__call__", call);
+                self.call_depth.set(depth);
+                result
+            }
         }
     }
 
