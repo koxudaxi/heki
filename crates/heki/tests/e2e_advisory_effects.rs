@@ -1956,8 +1956,9 @@ async def through_untyped_function() -> object:
 "#;
 
 /// A project function hands back the class its returns give, also through an offloading API:
-/// the cursor of a file connection waits, the cursor of an in-memory one does not, and a
-/// function without a return annotation returns nothing known.
+/// the cursor of a file connection waits, the cursor of an in-memory one does not. A function
+/// without a return annotation whose every return is a call gives what the call gives: `untyped`
+/// returns the cursor of the file connection, so its `fetchone()` waits too.
 #[test]
 fn an_offloaded_project_function_hands_back_the_cursor_it_returns() {
     let p = Project::new("offloaded_project_functions");
@@ -1980,6 +1981,7 @@ fn an_offloaded_project_function_hands_back_the_cursor_it_returns() {
             (21, "EFF101", "sqlite3.Connection.execute"),
             (21, "EFF101", "sqlite3.Cursor.fetchone"),
             (26, "EFF101", "sqlite3.Cursor.fetchone"),
+            (37, "EFF101", "sqlite3.Cursor.fetchone"),
         ]
     );
 }

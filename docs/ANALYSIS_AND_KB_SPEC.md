@@ -764,7 +764,17 @@ no class (none, `Any`, `object`, `Callable`) returns the named object every retu
 or one of them (`Ty::OneOf`): a `def` or `lambda` it makes (`make_requirer()` returning the
 `requirer` it defines, whose cells a call away from it binds to nothing), or a function or class
 a name binds; a `return` of anything else, `None` included, gives no fact. Only the functions
-every value of which a definition, a module-level name, or a cell gives are inferred for it. A module constant the module
+every value of which a definition, a module-level name, or a cell gives are inferred for it.
+Where the annotation names no class and every returned value is what a call gives, or awaits
+one (`Path(name)`, `Store()`, `Other()` imported from another module, `sqlite3.connect(...)`),
+the function returns the instance of one class those calls give, when they agree: returns of
+two classes, `None` on a path, or a parameter, an attribute, or a display give no fact (an
+instance's attribute holds what the whole project stores there, which pass 1 does not see). A
+class of another module is the name an annotation would name, so `declared_ty` drops it when
+the project binds that name to no class, and the fact says nothing once another module rebinds
+a global the function reads (`ReturnFact::ty_globals`: the class's name). A method call reads
+only the annotation of the definition the receiver's MRO finds, so this types calls of
+functions. A module constant the module
 body binds once, outside a loop, to a value that names a file (`ModuleDecls::file_constants`,
 `names_a_file`) names it where a function or another module reads it
 (`TypeCtx::names_file_constant`), unless another module rebinds it.

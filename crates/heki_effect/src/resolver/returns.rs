@@ -13,7 +13,7 @@ use super::{
     Callee, ModuleDecls, ProjectDecls, Ty, TypeCtx, Val, complete_decls, is_generator_function,
     is_summarized_function, keeps_body_result,
 };
-use crate::infer::{Called, HandedArgs, MAX_HANDED_CALLS};
+use crate::infer::{Called, HandedArgs, Inferred, MAX_HANDED_CALLS};
 use crate::partial::Partial;
 use crate::{FuncKey, ModuleInput};
 use heki_ir::walk::{Answer, Budget, FnShape};
@@ -421,6 +421,7 @@ pub(super) fn record_return_facts(
     let facts = ReturnFacts {
         cx: TypeCtx::new(input, &completed, kb),
         candidates: &candidates,
+        inferred: RefCell::default(),
         types: RefCell::default(),
     };
     let mut decided: FxHashMap<&str, ReturnFact> = FxHashMap::default();
@@ -473,6 +474,9 @@ enum Returned {
     /// The named objects they are (a `def` or `lambda` the function makes, a function or class a
     /// name binds), where the annotation names no class (none, `Any`, `object`, `Callable`).
     Named,
+    /// The instance of one class that the calls they are give (a construction of the class, a
+    /// call the declarations or the catalog give a class), where the annotation names no class.
+    Called,
 }
 
 /// The functions of the module whose every definition returns a value on every `return` and
@@ -480,7 +484,8 @@ enum Returned {
 /// specialize ([`ProjectDecls::specializes`]: a library class some catalog class has the methods
 /// of, `sqlite3.Connection` of a connection on a file, or a class of the module that another of
 /// its classes names as a base), or one whose annotation names no class and every value of
-/// which may be a named object ([`may_return_named`]).
+/// which may be a named object ([`may_return_named`]) or is what a call gives
+/// ([`returned_without_class`]).
 fn typed_candidates<'f>(
     input: &'f ModuleInput<'_>,
     decls: &ModuleDecls,
@@ -510,12 +515,9 @@ fn typed_candidates<'f>(
             (Some(t), Some(_)) if t.obj().is_some_and(|o| specializable(&o.class)) => {
                 Some(Returned::Narrower(t.clone()))
             }
-            (None, Some(values)) => may_return_named(decls, f, values).then_some(Returned::Named),
-            (Some(t), Some(values))
-                if t.obj().is_some_and(|o| names_no_class(&o.class))
-                    && may_return_named(decls, f, values) =>
-            {
-                Some(Returned::Named)
+            (None, Some(values)) => returned_without_class(decls, f, values),
+            (Some(t), Some(values)) if t.obj().is_some_and(|o| names_no_class(&o.class)) => {
+                returned_without_class(decls, f, values)
             }
             _ => None,
         };
@@ -540,11 +542,40 @@ fn names_no_class(class: &str) -> bool {
     super::of_any_class(class) || super::is_any_callable(class)
 }
 
+/// What the values `f` returns may say where its annotation names no class: the named objects
+/// they may be ([`may_return_named`]), or the class of the instance the calls they are give
+/// when each is a call or awaits one. A value made another way (a parameter, an attribute, a
+/// display) is not inferred: an instance's attribute holds what the whole project stores
+/// there, which the module's own declarations do not see.
+fn returned_without_class(
+    decls: &ModuleDecls,
+    f: &IrFunction,
+    values: &[VarId],
+) -> Option<Returned> {
+    let shape = FnShape::new(f);
+    if may_return_named(decls, &shape, values) {
+        return Some(Returned::Named);
+    }
+    let made_by = |v: VarId| shape.inst(shape.copy_root(v)).map(|i| &i.kind);
+    let is_call = |kind: Option<&InstKind>| {
+        matches!(
+            kind,
+            Some(InstKind::Call { .. } | InstKind::MethodCall { .. })
+        )
+    };
+    values
+        .iter()
+        .all(|v| match made_by(*v) {
+            Some(InstKind::Await { value, .. }) => is_call(made_by(*value)),
+            kind => is_call(kind),
+        })
+        .then_some(Returned::Called)
+}
+
 /// Whether every value `f` returns may be a named object, by what makes it: a `def` or `lambda`
 /// of `f`, a name its module binds to a definition, an import, or an alias, or a name a scope
 /// enclosing it binds. Only such functions are inferred for a [`Returned::Named`] fact.
-fn may_return_named(decls: &ModuleDecls, f: &IrFunction, values: &[VarId]) -> bool {
-    let shape = FnShape::new(f);
+fn may_return_named(decls: &ModuleDecls, shape: &FnShape<'_>, values: &[VarId]) -> bool {
     let named = |name: &str| {
         decls.functions.contains_key(name)
             || decls.classes.contains_key(name)
@@ -639,7 +670,10 @@ fn returned_origins(
 struct ReturnFacts<'c, 'f> {
     cx: TypeCtx<'c>,
     candidates: &'c FxHashMap<&'f str, Vec<Returns>>,
-    /// The types of each function a returned call is in, inferred once.
+    /// The types of each function a returned call is in, and of each typed candidate's
+    /// definition, inferred once for both facts.
+    inferred: RefCell<FxHashMap<heki_ir::FunctionId, Rc<Inferred>>>,
+    /// The values of [`Self::inferred`] the item origins read.
     types: RefCell<FxHashMap<heki_ir::FunctionId, Rc<FxHashMap<VarId, Val>>>>,
 }
 
@@ -688,16 +722,16 @@ impl<'f> ReturnFacts<'_, 'f> {
     }
 
     /// The type every value of `definitions` returns, past what the annotations say: one class
-    /// narrower than the annotation that they agree on, or the named objects they are, when
-    /// each is one ([`Returned::Named`]: a function returning one of two functions returns one of
-    /// them).
+    /// narrower than the annotation, or the instance of one class where the annotation names
+    /// none, that they agree on, or the named objects they are, when each is one
+    /// ([`Returned::Named`]: a function returning one of two functions returns one of them).
     fn returned_type(&self, definitions: &[TypedReturns<'_>]) -> Option<Ty> {
         let project = self.cx.project;
         let mut each = definitions.iter().flat_map(|d| {
-            let inferred = self.cx.infer_types(d.f);
+            let inferred = self.inferred(d.f);
             let declared = match &d.returned {
                 Returned::Narrower(t) => project.declared_ty(t),
-                Returned::Named => None,
+                Returned::Named | Returned::Called => None,
             };
             d.values
                 .iter()
@@ -709,6 +743,7 @@ impl<'f> ReturnFacts<'_, 'f> {
                             .is_some_and(|declared| project.narrower(t, declared, self.cx.kb))
                             .then(|| t.clone()),
                         Returned::Named => (!t.named().is_empty()).then(|| t.clone()),
+                        Returned::Called => matches!(t, Ty::Inst(_)).then(|| t.clone()),
                     }
                 })
                 .collect::<Vec<_>>()
@@ -717,11 +752,26 @@ impl<'f> ReturnFacts<'_, 'f> {
         if !first.named().is_empty() {
             let mut named: Vec<String> = first.named().to_vec();
             for t in each {
-                named.extend(t?.named().iter().cloned());
+                let t = t?;
+                // A definition giving an instance where another gives a named object.
+                (!t.named().is_empty()).then_some(())?;
+                named.extend(t.named().iter().cloned());
             }
             return Ty::one_of(named);
         }
         each.all(|t| t.as_ref() == Some(&first)).then_some(first)
+    }
+
+    /// The types of `f`, inferred once.
+    fn inferred(&self, f: &IrFunction) -> Rc<Inferred> {
+        if let Some(done) = self.inferred.borrow().get(&f.id) {
+            return Rc::clone(done);
+        }
+        let inferred = self.cx.infer_types(f);
+        self.inferred
+            .borrow_mut()
+            .insert(f.id, Rc::clone(&inferred));
+        inferred
     }
 
     /// The items of the returned value whose items come from the call `call`.
@@ -739,7 +789,7 @@ impl<'f> ReturnFacts<'_, 'f> {
             self.types
                 .borrow_mut()
                 .entry(f.id)
-                .or_insert_with(|| Rc::new(self.cx.infer(f))),
+                .or_insert_with(|| Rc::new(self.inferred(f).vals())),
         );
         let shape = FnShape::new(f);
         let def = |v: VarId| shape.inst(v);
