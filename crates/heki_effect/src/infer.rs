@@ -711,7 +711,11 @@ impl Join for Reaching {
 /// the scope's entry, or through a suspension or a `yield`, where the enclosing function may run
 /// and bind the variable, sees what the cell held before. The scope is a comprehension's or a
 /// generator expression's, whose blocks have no exception edges (it holds no statement).
-fn own_store_reads(shape: &FnShape<'_>, names: &FxHashSet<&str>) -> FxHashMap<VarId, VarId> {
+fn own_store_reads(
+    shape: &FnShape<'_>,
+    names: &FxHashSet<&str>,
+    budget: &Budget,
+) -> FxHashMap<VarId, VarId> {
     let f = shape.f;
     let slots: FxHashMap<&str, usize> = names.iter().enumerate().map(|(i, n)| (*n, i)).collect();
     let rpo = shape.rpo();
@@ -743,10 +747,9 @@ fn own_store_reads(shape: &FnShape<'_>, names: &FxHashSet<&str>) -> FxHashMap<Va
         readers: &readers,
         max_visits: u32::try_from(1 + most_preds * (1 + 2 * slots.len())).unwrap_or(u32::MAX),
     };
-    let budget = Budget::of_function("cell stores", f);
     let mut reads = FxHashMap::default();
     // Past the budget no read is tied to a store: each sees every value the cell may hold.
-    if let Answer::Known(entries) = fixpoint(&budget, spec, transfer) {
+    if let Answer::Known(entries) = fixpoint(budget, spec, transfer) {
         let blocks = (rpo.iter().enumerate()).filter_map(|(i, b)| Some((*b, entries.get(i)?)));
         for (b, entry) in blocks {
             let mut state = entry.0.clone();
@@ -1250,7 +1253,7 @@ struct Engine<'e, 'a> {
     lambdas_called: RefCell<Vec<(VarId, FunctionId)>>,
     /// The variables the scope stores in each cell of an enclosing function that it alone stores
     /// ([`Nesting::stored_by_one`]), by the name it stores it with.
-    own_stores: FxHashMap<String, Vec<VarId>>,
+    own_stores: StoreCells,
     /// The variable of the store of one of those cells that each read of it sees
     /// ([`own_store_reads`]).
     store_read: FxHashMap<VarId, VarId>,
@@ -1313,6 +1316,58 @@ impl BoundFacts {
 
     fn joined(&self) -> &Fact {
         &self.nodes[1]
+    }
+}
+
+/// The cells of enclosing functions that a scope stores in, by name: the join of what the scope
+/// stores in each, kept as [`BoundFacts`] so that reads of a cell no single store reaches take it
+/// from one joined fact, however many stores and reads there are.
+#[derive(Default)]
+struct StoreCells {
+    cells: FxHashMap<String, BoundFacts>,
+    /// The cell and the position among its stores of each variable stored.
+    at: FxHashMap<VarId, Vec<(String, usize)>>,
+}
+
+impl StoreCells {
+    /// The cells joining the stores `vars` (by cell name), from the facts `fact` gives their
+    /// variables now. Joining takes a step per store of the budget.
+    fn new(
+        vars: FxHashMap<&str, Vec<VarId>>,
+        budget: &Budget,
+        fact: impl Fn(VarId) -> Fact,
+    ) -> Self {
+        // Past the budget the joined fact is what a read sees without a store of its own too.
+        budget.take(vars.values().map(Vec::len).sum());
+        let mut out = Self::default();
+        for (name, vars) in vars {
+            for (i, v) in vars.iter().enumerate() {
+                out.at.entry(*v).or_default().push((name.to_owned(), i));
+            }
+            let facts = vars.iter().map(|v| fact(*v)).collect();
+            out.cells.insert(name.to_owned(), BoundFacts::new(facts));
+        }
+        out
+    }
+
+    /// What the scope stores in cell `name`, joined: `Unset` when it stores nothing there.
+    fn joined(&self, name: &str) -> Fact {
+        self.cells
+            .get(name)
+            .map_or(Fact::Unset, |c| c.joined().clone())
+    }
+
+    fn binds(&self, var: VarId) -> bool {
+        self.at.contains_key(&var)
+    }
+
+    /// Hands the new fact of `var` to the cells it is stored in.
+    fn set_stored(&mut self, var: VarId, fact: &Fact) {
+        for (name, i) in self.at.get(&var).into_iter().flatten() {
+            if let Some(cell) = self.cells.get_mut(name) {
+                cell.set(*i, fact.clone());
+            }
+        }
     }
 }
 
@@ -1381,7 +1436,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             implied_memo: RefCell::default(),
             lambda_bodies: RefCell::default(),
             lambdas_called: RefCell::default(),
-            own_stores: FxHashMap::default(),
+            own_stores: StoreCells::default(),
             store_read: FxHashMap::default(),
             child_stored: RefCell::default(),
             child_stored_grew: Cell::new(false),
@@ -1454,18 +1509,17 @@ impl<'e, 'a> Engine<'e, 'a> {
             .stored_by(f.id)
             .map(|(n, _)| n.as_str())
             .collect();
+        let budget = Budget::of_function("cell stores", f);
+        let mut store_vars: FxHashMap<&str, Vec<VarId>> = FxHashMap::default();
         if !stored.is_empty() {
             for i in insts() {
                 if let InstKind::StoreDeref { name, value } = &i.kind
                     && stored.contains(name.as_str())
                 {
-                    self.own_stores
-                        .entry(name.clone())
-                        .or_default()
-                        .push(*value);
+                    store_vars.entry(name.as_str()).or_default().push(*value);
                 }
             }
-            self.store_read = own_store_reads(self.shape, &stored);
+            self.store_read = own_store_reads(self.shape, &stored, &budget);
         }
         if insts().any(|i| {
             matches!(&i.kind, InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. }
@@ -1514,6 +1568,8 @@ impl<'e, 'a> Engine<'e, 'a> {
                 }
             }
         }
+        let own_stores = StoreCells::new(store_vars, &budget, |v| self.bound_fact(v));
+        self.own_stores = own_stores;
         let cell_vars = cell_bindings(f);
         if !cell_vars.is_empty() {
             self.nested_read = true;
@@ -1752,10 +1808,14 @@ impl<'e, 'a> Engine<'e, 'a> {
 
     /// Hands the new fact of `var` to the cell it binds, if it binds one.
     fn rebind(&mut self, var: VarId) {
+        if !self.bound_at.contains_key(&var) && !self.own_stores.binds(var) {
+            return;
+        }
+        let fact = self.bound_fact(var);
+        self.own_stores.set_stored(var, &fact);
         let Some(&i) = self.bound_at.get(&var) else {
             return;
         };
-        let fact = self.bound_fact(var);
         let cell = self.f.var_name(var).and_then(|n| self.own_cells.get_mut(n));
         cell.expect("a variable binds the cell it is named after")
             .bound
@@ -2067,9 +2127,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                     return Ok(self.need(*stored)?.cloned());
                 }
                 let outside = self.cells.get(name).cloned().unwrap_or(Fact::Unknown);
-                let stores = self.own_stores.get(name).into_iter().flatten();
-                let held = stores.fold(outside, |acc, v| acc.join(&self.fact(*v)));
-                return held.as_step();
+                return outside.join(&self.own_stores.joined(name)).as_step();
             }
             InstKind::Import { .. } => cx.import_type(inst.span),
             InstKind::Copy { src, .. } => self.need(*src)?.cloned(),

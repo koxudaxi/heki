@@ -876,6 +876,58 @@ fn the_cells_a_comprehension_stores_are_collected_in_one_pass() {
     );
 }
 
+/// A list comprehension with `filters` conditions `gate() or (m := make())`, each storing the same
+/// variable, and `reads` reads of it in its element: different stores reach the element, so every
+/// read sees what the cell may hold.
+fn walrus_stores_of_one_cell_read_many_times(filters: usize, reads: usize) -> String {
+    let stores = vec!["if gate() or (m := make())"; filters];
+    let reads = vec!["m._given"; reads];
+    let lines = [
+        "class Model:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self._given = 1".to_owned(),
+        String::new(),
+        String::new(),
+        "def make() -> Model:".to_owned(),
+        "    return Model()".to_owned(),
+        String::new(),
+        String::new(),
+        "def gate() -> bool:".to_owned(),
+        "    return False".to_owned(),
+        String::new(),
+        String::new(),
+        "def shape(xs):".to_owned(),
+        format!(
+            "    out = [({},) for _ in xs {}]",
+            reads.join(", "),
+            stores.join(" ")
+        ),
+        "    return out, m".to_owned(),
+    ];
+    lines.join("\n") + "\n"
+}
+
+/// Reads of a cell no single store of the comprehension reaches take its joined fact, kept once
+/// for the cell from the facts of its stores: the work grows with the stores and the reads
+/// added, not with their product.
+#[test]
+fn many_reads_of_a_cell_many_stores_reach_take_one_joined_fact() {
+    let config = "[project]\nname = \"t\"\nrequires-python = \">=3.11\"\n\n\
+                  [tool.heki.lint]\nselect = [\"MUT203\"]\n\n[[tool.heki.read-owners]]\n\
+                  name = \"given\"\ntargets = [\"m.Model._given\"]\nforbidden-readers = [\"m:*\"]\n";
+    let n = 400;
+    let found = check_linear(n, |n| {
+        let p = Project::new(&format!("bounds_walrus_one_join_{n}"));
+        p.write("pyproject.toml", config)
+            .write("m.py", &walrus_stores_of_one_cell_read_many_times(n, n));
+        p
+    });
+    assert_eq!(
+        found.iter().filter(|d| d["rule_code"] == "MUT203").count(),
+        1
+    );
+}
+
 /// A nested function an initializer calls writes a name chosen at run time on the last of a long
 /// chain of copies (`s1 = s0`, `s2 = s1`, ...) of each of two closure cells: the initializer's
 /// `self`, and another of its parameters. The parameter each chain holds is read from the copy

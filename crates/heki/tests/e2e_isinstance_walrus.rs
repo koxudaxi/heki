@@ -490,3 +490,61 @@ fn narrowing_keeps_every_class_and_only_where_the_test_holds() {
         );
     }
 }
+
+const OWN_CLASS_MODELS: &str = r#"class A:
+    _keys = 1
+
+
+class B:
+    _keys = 2
+"#;
+
+const OWN_CLASS_USE: &str = r#"from __future__ import annotations
+
+from pkg.models import A, B
+
+
+def declared_copy(x):  # noqa: ANN001
+    a: A = x
+    if isinstance(x, (A, B)):
+        return a._keys
+    return None
+
+
+def untyped_copy(x):  # noqa: ANN001
+    a = x
+    if isinstance(x, (A, B)):
+        return a._keys
+    return None
+"#;
+
+/// A copy of a narrowed value that declares a narrower class keeps it in the ownership summary,
+/// as in inference; an untyped copy gets the narrowed classes. A contract on `B._keys` alone
+/// reports only the untyped copy.
+#[test]
+fn a_copy_declaring_a_narrower_class_keeps_it_in_the_summaries() {
+    let p = Project::new("isinstance_own_class");
+    p.write("pyproject.toml", PYPROJECT)
+        .write(
+            "heki.toml",
+            r#"[lint]
+select = ["MUT203"]
+
+[[read-owners]]
+name = "b-private-read"
+targets = ["pkg.models.B._[!_]*"]
+forbidden-readers = ["pkg.use:*"]
+own-receiver = "allow"
+unresolved = "report"
+attribution = "lexical"
+"#,
+        )
+        .write("pkg/__init__.py", "")
+        .write("pkg/models.py", OWN_CLASS_MODELS)
+        .write("pkg/use.py", OWN_CLASS_USE);
+    let found: Vec<_> = reports(&p, "py312")
+        .into_iter()
+        .filter(|(at, _, _)| at.starts_with("pkg/use.py"))
+        .collect();
+    assert_eq!(found, [r("pkg/use.py:16", "MUT203", "untyped_copy")]);
+}

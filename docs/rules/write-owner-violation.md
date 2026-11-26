@@ -109,9 +109,11 @@ classes of the values reaching it; a value of two or three classes (`Model | Nod
 annotation or from different assignments) is each of them, and an `isinstance` check narrows it
 in the code it guards (`if isinstance(x, Model): ...`, `if not isinstance(x, Model): return`,
 also inside `and` / `or`), whatever class it had before and under each of its names
-(`isinstance(v := x.source, Model)` narrows `v`). An assignment expression in a comprehension or
-generator expression binds the enclosing function's variable with the class of its value, in
-the items built from it and after the comprehension. A value typed with a project `Protocol` is
+(`isinstance(v := x.source, Model)` narrows `v`). An assignment expression in a comprehension binds
+the enclosing function's variable with the class of its value, in the items built from it and after
+the comprehension, when the comprehension's body runs. A generator expression runs its body only as
+it advances, so an unadvanced generator binds nothing. A nested scope that rebinds the variable with
+`nonlocal` makes its type unknown. A value typed with a project `Protocol` is
 an instance of the protocol and of the project classes that implement it structurally (having
 every member it defines; at most eight, counting a class and not its subclasses), also when it
 is handed to a helper that does not type it: a target on the protocol and one on an
