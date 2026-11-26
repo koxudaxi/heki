@@ -19,8 +19,9 @@ the allowed readers:
 - through a class object, which reads the class attribute: the class itself
   (`Reference.children`), `cls` in a class method, `type(ref)`, or a value typed
   `type[Reference]` / `typing.Type[Reference]`;
-- through `getattr(ref, "children"[, default])` or `object.__getattribute__(ref, "children")`
-  with a constant name: a string literal or a string constant, as for `MUT201`;
+- through `getattr(ref, "children"[, default])`, `object.__getattribute__(ref, "children")`, or
+  `hasattr(ref, "children")` (which evaluates the attribute) with a constant name: a string
+  literal or a string constant, as for `MUT201`;
 - through `ref.__dict__["children"]` or `ref.__dict__.get("children")` (also on `vars(ref)`),
   also with a string constant for the key.
 
@@ -51,8 +52,13 @@ from: a loop over such a container (`for model in models`), a subscript (`models
 display, the items appended to a local list, or a comprehension or generator expression. A
 method call or a `@property` / `cached_property` read has the return annotation of the
 definition the receiver's class finds first along its MRO, as for a type checker (`typing.Self`
-is the receiver's class); a copy (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`,
-`model_copy`) has its original's class, calling a `functools.partial` object returns what the
+is the receiver's class, and a class method returning `Self`, such as pydantic's
+`Model.model_construct(...)`, gives the class it is called on); an attribute annotated with a
+type parameter of its class (`obj: T` in `class Site(Generic[T])` or `class Site[T]:`) holds
+the argument the instance's annotation gives (`site: Site[Schema]`, also through a type alias);
+a name another module binds only under `if TYPE_CHECKING:` (serving it from a module
+`__getattr__`) is the class that import names, also as a base class; a copy (`copy.copy`,
+`copy.deepcopy`, `dataclasses.replace`, `model_copy`) has its original's class, calling a `functools.partial` object returns what the
 wrapped function returns, and `typing.cast` names the class of its value, its type read as
 an annotation (`cast(list[Model], x)` as `cast("list[Model]", x)`): a cast to a subclass narrows
 a value known as its base, and a cast to `Any` or to a base class keeps the class the value is
@@ -117,7 +123,7 @@ with their files as `allowed_examples` (`fqn`, `path`).
 ## What a report states
 
 A report states that the function reads a target of a `read-owners` contract outside the contract's
-read owners, directly, through an alias, `getattr`, or `__dict__`, or through the helpers shown.
+read owners, directly, through an alias, `getattr`, `hasattr`, or `__dict__`, or through the helpers shown.
 
 Its premises:
 

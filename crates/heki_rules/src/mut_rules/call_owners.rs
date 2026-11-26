@@ -14,12 +14,15 @@ use super::{
 };
 use crate::patterns::{ModuleIndex, PartIndex};
 use crate::{
-    CheckContext, DottedPattern, RuleConfigError, SitesByCaller, def_spellings, last_name,
-    module_of, split_last_dot,
+    CheckContext, DottedPattern, RuleConfigError, SitesByCaller, def_spellings, has_glob_syntax,
+    last_name, module_of, split_last_dot,
 };
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
-use heki_effect::{AccessKind, ArgValue, CallHop, CallSite, ContractClass, FuncKey, SiteRole};
+use heki_effect::{
+    AccessKind, ArgValue, CallHop, CallSite, ContractClass, FuncKey, SiteRole, UnboundCall,
+};
+use heki_env::glob::AnyGlob;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,6 +46,9 @@ pub(crate) struct CallTargetPattern {
     list: String,
     /// The constants the list names: a call matches only when it passes each.
     arguments: Arguments,
+    /// The text is an argument list after the bare glob `*` ([`names_every_callee`]): it names
+    /// every call passing the constants, whatever it calls.
+    any_callee: bool,
 }
 
 /// The call targets of one contract (`call-owners.targets`, `effect-boundaries.call-targets`),
@@ -69,35 +75,69 @@ impl CallTargets {
         if site.role != SiteRole::Call {
             return Vec::new();
         }
-        if let Some(class) = &site.constructs {
+        let mut out = if let Some(class) = &site.constructs {
             let hits = self.constructors.get(class).map_or(&[][..], Vec::as_slice);
             let passing = hits.iter().filter(|&&i| self.passed(i, site));
-            return passing.map(|&i| vec![i]).collect();
-        }
-        let per_callee: Vec<Vec<usize>> = judged_callees(site)
-            .map(|callee| {
-                let mut matching = self.functions.matching(callee);
-                matching.retain(|&i| self.passed(i, site));
-                matching
-            })
-            .collect();
-        groups(&per_callee)
+            passing.map(|&i| vec![i]).collect()
+        } else {
+            let per_callee: Vec<Vec<usize>> = judged_callees(site)
+                .map(|callee| {
+                    let mut matching = self.functions.matching(callee);
+                    matching.retain(|&i| self.passed(i, site));
+                    matching
+                })
+                .collect();
+            groups(&per_callee)
+        };
+        add_alone(&mut out, self.module_members(site));
+        out
     }
 
     /// Whether `site` passes every constant the argument list of target `i` names (a target
     /// without one: always).
     fn passed(&self, i: usize, site: &CallSite) -> bool {
-        self.patterns[i]
-            .arguments
-            .iter()
-            .all(|(name, value)| site.argument(name) == Some(value))
+        self.passes(i, |name| site.argument(name))
+    }
+
+    /// Whether a call passing `argument` for each parameter passes every constant the argument
+    /// list of target `i` names.
+    fn passes<'v>(&self, i: usize, argument: impl Fn(&str) -> Option<&'v ArgValue>) -> bool {
+        (self.patterns[i].arguments.iter())
+            .all(|(name, value)| argument(name).is_some_and(|passed| value.matches(passed)))
+    }
+
+    /// The targets naming every callee that `call`, which heki binds to no project code,
+    /// passes the constants of, ascending.
+    pub(crate) fn called_unbound(&self, call: &UnboundCall) -> Vec<usize> {
+        (0..self.patterns.len())
+            .filter(|&i| self.patterns[i].any_callee && self.passes(i, |n| call.arguments.get(n)))
+            .collect()
+    }
+
+    /// The targets with a module part that the name `site` loads its target by names
+    /// ([`CallSite::module_member`]) and whose constants it passes, ascending: such a target
+    /// judges the access, whatever the name resolves to.
+    fn module_members(&self, site: &CallSite) -> Vec<usize> {
+        let Some(member) = site.module_member.as_deref() else {
+            return Vec::new();
+        };
+        let mut found = self.functions.naming_module_member(member);
+        found.retain(|&i| self.passed(i, site));
+        found
     }
 
     /// What `site` calls of target `i`: the method the protocol typing the receiver declares
-    /// ([`CallSite::declared`]), the class it constructs, or every candidate the target names.
+    /// ([`CallSite::declared`]), the name it loads from a module object that the target names
+    /// ([`CallSite::module_member`]), the class it constructs, or every candidate the target
+    /// names.
     pub(crate) fn called_at(&self, i: usize, site: &CallSite) -> Vec<String> {
         if let Some(declared) = site.declared() {
             return vec![declared.fqn()];
+        }
+        if let Some(member) = site.module_member.as_deref()
+            && self.functions.matchers[i].names_def(&member.fqn(), &member.qualname)
+        {
+            return vec![member.fqn()];
         }
         match &site.constructs {
             Some(class) => vec![class.clone()],
@@ -203,6 +243,15 @@ fn judged_callees(site: &CallSite) -> Box<dyn Iterator<Item = &FuncKey> + '_> {
     }
 }
 
+/// Add to `groups` each of `targets` that none of them holds, as a group of its own.
+fn add_alone(groups: &mut Vec<Vec<usize>>, targets: Vec<usize>) {
+    for t in targets {
+        if !groups.iter().any(|g| g.contains(&t)) {
+            groups.push(vec![t]);
+        }
+    }
+}
+
 /// The groups of [`CallTargets::called`] from the targets each candidate of a call matches
 /// (each list ascending).
 fn groups(per_callee: &[Vec<usize>]) -> Vec<Vec<usize>> {
@@ -272,6 +321,11 @@ impl<'t> ContractCalls<'t> {
         }
         let mut by_contract: BTreeMap<usize, Vec<Vec<usize>>> = BTreeMap::new();
         let passed = |&(c, t): &(usize, usize)| self.contracts[c].passed(t, site);
+        let members = || {
+            (self.contracts.iter().enumerate())
+                .map(|(c, targets)| (c, targets.module_members(site)))
+                .filter(|(_, found)| !found.is_empty())
+        };
         if let Some(class) = &site.constructs {
             for &(c, t) in self
                 .constructors
@@ -281,6 +335,9 @@ impl<'t> ContractCalls<'t> {
                 .filter(|p| passed(p))
             {
                 by_contract.entry(c).or_default().push(vec![t]);
+            }
+            for (c, found) in members() {
+                add_alone(by_contract.entry(c).or_default(), found);
             }
             return by_contract.into_iter().collect();
         }
@@ -297,11 +354,15 @@ impl<'t> ContractCalls<'t> {
                 per_callee[k].push(t);
             }
         }
-        by_contract
+        let mut out: BTreeMap<usize, Vec<Vec<usize>>> = by_contract
             .into_iter()
             .map(|(c, per_callee)| (c, groups(&per_callee)))
-            .filter(|(_, g)| !g.is_empty())
-            .collect()
+            .collect();
+        for (c, found) in members() {
+            add_alone(out.entry(c).or_default(), found);
+        }
+        out.retain(|_, g| !g.is_empty());
+        out.into_iter().collect()
     }
 }
 
@@ -381,9 +442,15 @@ impl FunctionMatchers {
         found
     }
 
-    /// Whether `key` satisfies some matcher.
-    pub(crate) fn any(&self, key: &FuncKey) -> bool {
-        !self.matching(key).is_empty()
+    /// The matchers with a module part naming `key`, a name a project module binds
+    /// ([`CallSite::module_member`]), ascending.
+    pub(crate) fn naming_module_member(&self, key: &FuncKey) -> Vec<usize> {
+        let mut found = Vec::new();
+        self.modules.find(&key.module, &key.qualname, &mut found);
+        found.sort_unstable();
+        found.dedup();
+        found.retain(|&i| self.matchers[i].names_def(&key.fqn(), &key.qualname));
+        found
     }
 
     /// The matchers naming `symbol`, a function, class, or module attribute outside the
@@ -401,6 +468,11 @@ impl FunctionMatchers {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.matchers.is_empty()
+    }
+
+    /// [`FunctionMatcher::guards`] of matcher `i`.
+    pub(crate) fn guards(&self, i: usize) -> bool {
+        self.matchers[i].guards()
     }
 
     /// The matchers whose whole text names the project class `class`.
@@ -487,10 +559,42 @@ impl CallTargetPattern {
     pub(crate) fn family(&self) -> &FxHashSet<String> {
         &self.family
     }
+
+    /// Whether the text names every callee ([`names_every_callee`]): it names calls by their
+    /// arguments, never by a name an object of unknown class is called by.
+    pub(crate) fn names_every_callee(&self) -> bool {
+        self.any_callee
+    }
 }
 
 /// The constants an argument list names, by parameter.
-pub(crate) type Arguments = Vec<(String, ArgValue)>;
+pub(crate) type Arguments = Vec<(String, ArgPattern)>;
+
+/// A value of an argument list: a constant, or a string glob (`"pkg.backend.*"`), which
+/// matches every string constant it matches whole, dots included.
+#[derive(Debug, Clone)]
+pub(crate) enum ArgPattern {
+    Value(ArgValue),
+    Glob(AnyGlob),
+}
+
+impl ArgPattern {
+    fn matches(&self, passed: &ArgValue) -> bool {
+        match (self, passed) {
+            (Self::Value(value), passed) => value == passed,
+            (Self::Glob(glob), ArgValue::Str(text)) => glob.is_match(text),
+            (Self::Glob(_), _) => false,
+        }
+    }
+}
+
+/// Whether the call target `text` is an argument list after the bare glob `*`
+/// (`*(module="pkg.backend.*")`): it names every call passing the constants, whatever it calls,
+/// a function or class of the project or outside it, or a value of unknown class.
+pub(crate) fn names_every_callee(text: &str) -> bool {
+    text.strip_prefix('*')
+        .is_some_and(|rest| rest.starts_with('('))
+}
 
 /// A call target's text split into the name it matches and the constants its argument list
 /// names (`pkg.types.DataType(is_dict=True)`; none for a text without a list). The name never
@@ -523,6 +627,12 @@ pub(crate) fn split_arguments<'t>(
         }
         let (value, after) =
             literal_prefix(after.trim_start()).ok_or_else(|| invalid("a value is no constant"))?;
+        let value = match value {
+            ArgValue::Str(text) if has_glob_syntax(&text) => ArgPattern::Glob(
+                AnyGlob::new(&text).map_err(|_| invalid("a string glob is not valid"))?,
+            ),
+            value => ArgPattern::Value(value),
+        };
         arguments.push((name.to_owned(), value));
         let after = after.trim_start();
         if after.is_empty() {
@@ -590,11 +700,15 @@ pub(crate) fn parse_call_targets(
         if arguments.is_some() {
             functions = functions.project_only();
         }
+        if names_every_callee(text) {
+            functions = functions.naming_calls_only();
+        }
         patterns.push(CallTargetPattern {
             text: text.clone(),
             family: functions.method_family().cloned().unwrap_or_default(),
             name: member_name(name, all_classes, context)?,
             list: text[name.len()..].to_owned(),
+            any_callee: names_every_callee(text),
             arguments: arguments.unwrap_or_default(),
         });
         matchers.push(functions);
@@ -977,6 +1091,36 @@ pub(crate) fn mut204<'c>(
                 access_groups.report(&mut reports, (c, t, called.clone()), site_id, walk, add);
             }
         }
+        // A call heki binds to no project code is a call of each target naming every callee
+        // whose constants it passes, judged as a call outside the project is.
+        for (path, u) in cx.unbound_calls(key) {
+            for (c, rule) in rules.iter().enumerate() {
+                for t in rule.targets.called_unbound(u) {
+                    let target = rule.targets.patterns[t].text.as_str();
+                    let called = format!("`{target}`");
+                    let callee = || target.to_owned();
+                    let call = CallMade {
+                        caller: key,
+                        at: (path, u.span),
+                        group: (c, t),
+                        texts: (target, &called),
+                        verb: "calls",
+                        callee: &callee,
+                    };
+                    let inside = &mut outside[c][t];
+                    let allowance = rule.allowance_for(&[t]);
+                    let walk = || {
+                        delegated_reports(cx, &sites, (&allowance, &no_family), (key, 0, 0), inside)
+                    };
+                    let add =
+                        |reports: &mut MergedReports<'c, usize>, r: &DelegatedReport, sites| {
+                            add_call_report(cx, reports, rule, &call, r, sites);
+                        };
+                    let site_id = (key.fqn(), u.span);
+                    access_groups.report(&mut reports, (c, t, called.clone()), site_id, walk, add);
+                }
+            }
+        }
     }
     reports.emit(cx, ("MUT204", "allowed callers"), out, |examples| {
         let owners = |k: &FuncKey| rules.iter().any(|r| r.allowance.names_place(k));
@@ -1026,7 +1170,7 @@ pub(crate) fn mut204<'c>(
 
 #[cfg(test)]
 mod tests {
-    use super::split_arguments;
+    use super::{ArgPattern, split_arguments};
     use heki_effect::ArgValue;
 
     #[test]
@@ -1063,17 +1207,28 @@ mod tests {
                 "pkg.*_flags",
                 Some(vec![("_kind", text(""))]),
             ),
+            // A string glob is no constant value.
+            (
+                r#"*(module="pkg.*", n=1)"#,
+                "*",
+                Some(vec![("n", ArgValue::Int(1))]),
+            ),
         ] {
             let expected = arguments.map(|list| {
                 list.into_iter()
                     .map(|(n, v)| (n.to_owned(), v))
                     .collect::<Vec<_>>()
             });
-            assert_eq!(
-                split_arguments(target, "call-owners.targets").unwrap(),
-                (name, expected),
-                "{target}"
-            );
+            let (split, patterns) = split_arguments(target, "call-owners.targets").unwrap();
+            let values = patterns.map(|list| {
+                list.into_iter()
+                    .filter_map(|(n, p)| match p {
+                        ArgPattern::Value(v) => Some((n, v)),
+                        ArgPattern::Glob(_) => None,
+                    })
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!((split, values), (name, expected), "{target}");
         }
     }
 }

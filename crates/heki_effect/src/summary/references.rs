@@ -54,14 +54,17 @@ impl Extractor<'_> {
         let mut out = Vec::new();
         for &(at, var, span, imported) in &flow.loads {
             let (is_handed, is_used) = (handed.contains(&var), used.contains(&var));
-            if !is_handed && !is_used {
+            let bound = !is_handed && !is_used && flow.only_bound(var, span);
+            if !is_handed && !is_used && !bound {
                 continue;
             }
             self.pos = at;
             let Some(site) = self.reference_site(var, at.0, span) else {
                 continue;
             };
-            let (handed_at, read_at) = if imported || flow.bound_by_module(var) {
+            let (handed_at, read_at) = if bound {
+                (Vec::new(), vec![span])
+            } else if imported || flow.bound_by_module(var) {
                 let taken = |taking| flow.taken_at(&budget, var, taking).open_means(Vec::new());
                 let handed_at = taken(Taking::HandedOn);
                 let mut read_at = if is_used {
@@ -164,6 +167,11 @@ struct HandedValues {
     uses: FxHashMap<VarId, Vec<(Span, Usage)>>,
     /// The loads: where, the value, its span, and whether it is an import.
     loads: Vec<(Position, VarId, Span, bool)>,
+    /// With reads, in a class or module body: the loads of a name or an attribute that no call
+    /// runs as its callee. Their uses are not followed past the name they are bound to (a class
+    /// attribute's uses, `Config.model_type`, name no target), so a load nothing else takes is
+    /// itself the read: the binding. Only the loads a statement binds to a name are kept.
+    plain: FxHashSet<VarId>,
     /// The uses are kept for reads too ([`Usage::Reads`], [`Held::Key`]).
     reads: bool,
     /// The annotations the function evaluates, in order: an annotation is no read.
@@ -195,6 +203,7 @@ impl HandedValues {
             held: FxHashMap::default(),
             uses: FxHashMap::default(),
             loads: Vec::new(),
+            plain: FxHashSet::default(),
             reads: reads.is_some(),
             annotations: reads.map_or_else(Vec::new, |ir| ir.annotations_of(f.id).collect()),
             onward: OnceCell::new(),
@@ -204,6 +213,21 @@ impl HandedValues {
         } else {
             Usage::HandsOn
         };
+        let binds_names = reads.is_some() && (f.is_module_body || f.is_class_body);
+        let mut callees: FxHashSet<VarId> = FxHashSet::default();
+        // The values a class or module body binds to a name (an assignment, an annotated or an
+        // augmented one, a walrus): a discarded expression binds nothing.
+        let mut bound: FxHashSet<VarId> = FxHashSet::default();
+        // The names an import or a `def` binds in a module body, where the statement is.
+        let mut bound_by_statement: FxHashMap<VarId, Span> = FxHashMap::default();
+        if binds_names && f.is_module_body {
+            for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+                if let InstKind::Import { dst, .. } | InstKind::MakeClosure { dst, .. } = &inst.kind
+                {
+                    bound_by_statement.insert(*dst, inst.span);
+                }
+            }
+        }
         for bb in &f.blocks {
             for phi in &bb.phis {
                 let inputs = phi.incoming.iter().map(|(_, v)| *v);
@@ -211,16 +235,36 @@ impl HandedValues {
             }
             for (index, inst) in bb.insts.iter().enumerate() {
                 let (at, span) = ((bb.id, index), inst.span);
+                if let InstKind::Call {
+                    callee_var: Some(callee),
+                    ..
+                } = &inst.kind
+                {
+                    callees.insert(*callee);
+                }
                 match &inst.kind {
                     InstKind::LoadGlobal { dst, .. }
                     | InstKind::LoadName { dst, .. }
-                    | InstKind::LoadDeref { dst, .. } => flow.loads.push((at, *dst, span, false)),
+                    | InstKind::LoadDeref { dst, .. } => {
+                        flow.loads.push((at, *dst, span, false));
+                        if binds_names {
+                            flow.plain.insert(*dst);
+                        }
+                    }
                     InstKind::AttrLoad { dst, obj, .. } => {
                         flow.loads.push((at, *dst, span, false));
+                        if binds_names {
+                            flow.plain.insert(*dst);
+                        }
                         flow.add(*obj, span, Usage::Reads);
                     }
                     InstKind::Import { dst, .. } => flow.loads.push((at, *dst, span, true)),
-                    InstKind::Copy { dst, src } => flow.from.entry(*dst).or_default().push(*src),
+                    InstKind::Copy { dst, src } => {
+                        flow.from.entry(*dst).or_default().push(*src);
+                        if binds_names && !f.is_unpacked(*dst) {
+                            bound.insert(*src);
+                        }
+                    }
                     InstKind::AllocBuiltin { dst, elems, .. } => {
                         let elems = elems.iter().map(|v| (*v, Held::Value));
                         flow.held.entry(*dst).or_default().extend(elems);
@@ -288,7 +332,15 @@ impl HandedValues {
                     InstKind::Yield {
                         value: Some(value), ..
                     } => flow.add(*value, span, Usage::HandsOn),
-                    InstKind::StoreGlobal { value, .. } => flow.add(*value, span, binding),
+                    InstKind::StoreGlobal { value, .. } => {
+                        flow.add(*value, span, binding);
+                        bound.insert(*value);
+                        // An assignment of such a name to another one (`Alias = imported`) is
+                        // a binding of the object, which is a read of it.
+                        if bound_by_statement.get(value).is_some_and(|s| *s != span) {
+                            flow.add(*value, span, Usage::Reads);
+                        }
+                    }
                     // A `def` or `lambda` makes the function its value refers to: in a module
                     // body, bound to its name as an import is, so read without a load of its own
                     // (`HANDLERS = [run]` after `def run`). A class statement's own uses are its
@@ -327,7 +379,32 @@ impl HandedValues {
         for (value, span) in reads.into_iter().flat_map(|ir| ir.statement_uses_of(f.id)) {
             flow.add(value, span, Usage::Reads);
         }
+        // A bound display binds what it holds (`held = [backend.Model]`), a bound copy or phi
+        // what it merges.
+        let budget = Budget::of_function("summary::reference_sites", f);
+        let starts: Vec<VarId> = bound.iter().copied().collect();
+        // Past the budget the function has no reference site, so what the walk left out is moot.
+        let _ = reach(
+            &budget,
+            starts,
+            |v, next| {
+                let held = flow.held.get(&v).into_iter().flatten().map(|(h, _)| *h);
+                next.extend(held.chain(flow.from.get(&v).into_iter().flatten().copied()));
+            },
+            |v| {
+                bound.insert(v);
+                Visit::Expand::<()>
+            },
+        );
+        flow.plain
+            .retain(|v| bound.contains(v) && !callees.contains(v));
         flow
+    }
+
+    /// Whether `var` is a load in a class or module body that nothing takes (no use reaches
+    /// it): bound to a name, which is the read ([`Self::plain`]). An annotation is no read.
+    fn only_bound(&self, var: VarId, span: Span) -> bool {
+        self.plain.contains(&var) && !self.in_annotation(span)
     }
 
     fn add(&mut self, var: VarId, span: Span, usage: Usage) {

@@ -124,10 +124,12 @@ operand (`f is decide`), a tested condition, an iterated, awaited, formatted, or
 dict display's key, the class of a class pattern (`case Keys():`), the types of an `except` clause
 an exception may reach, a decorator, a default of a function or lambda, a keyword of a class
 statement, and the cause of `raise ... from`, also through copies and the displays holding it.
-No read: a call, an annotation, evaluated or not (`list[Keys]`), the values Python evaluates only
+A class body or a module binding a name to the target (`model_type = Keys`, `Alias = Keys`) is a
+read too: the uses of a class attribute or a global are not all followed back to the target. No
+read: a call, an annotation, evaluated or not (`list[Keys]`), the values Python evaluates only
 when asked (a `type` statement's value, the bounds and defaults of type parameters), an import, a
-name bound to the target by itself (`Alias = Keys`), whose own uses count, and a value nothing
-uses. A load handing a target on is reported as a hand-on only, and a read is matched as a
+name bound to the target by itself in a function (a local), whose own uses count, and a value
+nothing uses. A load handing a target on is reported as a hand-on only, and a read is matched as a
 construction is.
 
 A call through a value typed with a project `Protocol` that declares the method is judged by the
@@ -293,7 +295,11 @@ No automatic fix.
     subclasses; a class target covers constructing the class and its subclasses; a target
     naming no class (`reset`) covers every project function and method of that name. A target
     may end in an argument list of `parameter=value` entries (`DataType(is_dict=True)`), each
-    value `True`, `False`, `None`, an integer, or a quoted string. A target can also name
+    value `True`, `False`, `None`, an integer, or a quoted string (a glob when it holds `*`, `?`,
+    `[`, or `{`: `module="pkg.backend.*"`). `*` with an argument list names every call passing
+    its constants, whatever it calls (`*(module="pkg.backend.*")`). A target with a module part
+    (`pkg:Kind`, `pkg:*`) also names the names the module imports, read or called through the
+    module object (`pkg.Kind.A`), judged at the access. A target can also name
     functions and classes outside the project by their full name (`sys._getframe`, `os._*`), or
     `<external>.<name>` for the members of every module and class outside the project.
   - `allowed-callers`: functions allowed to call the targets, as dotted names or globs matched

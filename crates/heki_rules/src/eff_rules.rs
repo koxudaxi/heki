@@ -24,7 +24,7 @@ use heki_effect::{
     AccessKind, BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget,
     Construction, Delivery, EffectSummary, EntryKey, ExternalAccess, Facts, FuncKey, HopGap,
     MustGap, PerItem, Runner, SiteEffect, SiteMust, TypeCtx, TypedFieldWriteSite, Unresolved,
-    WriteKind, anchors_call_site, boundary_reports_in, initializes_own_self,
+    anchors_call_site, boundary_reports_in, initializes_own_self,
 };
 use heki_env::EffectBoundaryRule;
 pub(crate) use heki_ir::ItemOrigins;
@@ -1847,17 +1847,18 @@ impl<'a> Reach<'a> {
                 // is handed, so the function handing it over reports the write. The helper's
                 // summary also holds what its callees change, so the write counts only when the
                 // helper changes the argument outside `allowed-callees`.
-                ([hop], WriteKind::IndirectHelper)
-                    if own.iter().any(|(_, site)| {
-                        site.span == hop.span
-                            && site.project_callees().iter().any(|bc| {
-                                bc.callee.fqn() == hop.callee
-                                    && b.counts(cx, site, &bc.callee, Facts::Body).is_some()
-                                    && helper_changes_field(cx, sites, bc, w, |site, callee| {
-                                        b.counts(cx, site, callee, Facts::Body)
-                                    })
-                            })
-                    }) =>
+                ([hop], kind)
+                    if kind.through_helper()
+                        && own.iter().any(|(_, site)| {
+                            site.span == hop.span
+                                && site.project_callees().iter().any(|bc| {
+                                    bc.callee.fqn() == hop.callee
+                                        && b.counts(cx, site, &bc.callee, Facts::Body).is_some()
+                                        && helper_changes_field(cx, sites, bc, w, |site, callee| {
+                                            b.counts(cx, site, callee, Facts::Body)
+                                        })
+                                })
+                        }) =>
                 {
                     vec![CallHop::clone(hop)]
                 }
@@ -2410,6 +2411,27 @@ impl<'a> Reach<'a> {
             if b.forbids_environment(cx, a) {
                 note_environment(&mut self.environment, site, || {
                     (chain(), a.span, a.kind, a.name.clone())
+                });
+            }
+        } // A call heki binds to no project code calls each target naming every callee whose
+        // constants it passes.
+        let unbound = cx.unbound_calls(func).filter(|_| b.calls);
+        for (path, u) in unbound {
+            for t in b.call_targets.called_unbound(u) {
+                let site: SiteId = (func.fqn(), u.span);
+                let nodes = &self.nodes;
+                let chain = || {
+                    let mut chain = chain_to(nodes, i);
+                    chain.push(CallHop {
+                        caller: func.clone(),
+                        callee: b.call_targets.patterns[t].text.clone(),
+                        span: u.span,
+                        path: path.to_path_buf(),
+                    });
+                    chain
+                };
+                note(&mut self.calls, vec![t], site, || {
+                    (chain(), u.span, AccessKind::Call.describe())
                 });
             }
         }

@@ -479,9 +479,21 @@ struct ContractReach {
 /// properties it invalidates (see `Workspace::callee_files`).
 type CallerView = BTreeMap<FuncKey, (Vec<CallSite>, BTreeSet<String>)>;
 
-/// Per function of one file: its ecosystem (Layer 2) call sites and its accesses outside the
-/// project that effect boundaries forbid, without positions.
-type EcosystemView = BTreeMap<FuncKey, (Vec<CallSite>, Vec<heki_effect::ExternalAccess>)>;
+/// Per function of one file: what it calls and accesses outside the project code, without
+/// positions (see `Workspace::affected_by`).
+type EcosystemView = BTreeMap<FuncKey, EcosystemFacts>;
+
+/// What one function calls and accesses outside the project code, without positions.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct EcosystemFacts {
+    /// Its ecosystem (Layer 2) call sites.
+    layer2: Vec<CallSite>,
+    /// Its accesses outside the project that a contract names.
+    accesses: Vec<heki_effect::ExternalAccess>,
+    /// Its calls heki binds to no project code that pass constants for a call target naming
+    /// every callee.
+    unbound: Vec<heki_effect::UnboundCall>,
+}
 
 impl Workspace {
     /// Index every Python file under `paths` (IR is dropped once the files are summarized, before
@@ -855,11 +867,12 @@ impl Workspace {
         out
     }
 
-    /// What the functions of `path` call of the ecosystem and access outside the project
+    /// What the functions of `path` call and access outside the project code
     /// (`EcosystemView`).
     fn ecosystem_view(&self, path: &Path) -> EcosystemView {
         let mut out = EcosystemView::new();
         let file = self.index.files.get(path);
+        let unplaced = heki_ast::Span { start: 0, end: 0 };
         for site in file
             .into_iter()
             .flat_map(|f| &f.call_sites)
@@ -867,15 +880,25 @@ impl Workspace {
         {
             out.entry(site.caller.clone())
                 .or_default()
-                .0
+                .layer2
                 .push(site.unplaced());
         }
         for (func, accesses) in file.into_iter().flat_map(|f| &f.external_accesses) {
-            let unplaced = accesses.iter().map(|a| heki_effect::ExternalAccess {
-                span: heki_ast::Span { start: 0, end: 0 },
+            let accesses = accesses.iter().map(|a| heki_effect::ExternalAccess {
+                span: unplaced,
                 ..a.clone()
             });
-            out.entry(func.clone()).or_default().1.extend(unplaced);
+            out.entry(func.clone())
+                .or_default()
+                .accesses
+                .extend(accesses);
+        }
+        for (func, calls) in file.into_iter().flat_map(|f| &f.unbound_calls) {
+            let calls = calls.iter().map(|u| heki_effect::UnboundCall {
+                span: unplaced,
+                ..u.clone()
+            });
+            out.entry(func.clone()).or_default().unbound.extend(calls);
         }
         out
     }
@@ -1206,7 +1229,10 @@ impl Workspace {
         if self.reach.import_walks && update.imports_changed {
             affected.extend(self.walking_importers());
         }
-        if self.reach.ecosystem_calls {
+        // An effect boundary reads these facts below a scope function, a contract on calls the
+        // calls they hold below a private helper too: the reports above a function calling
+        // differently change while no summary does.
+        if self.reach.ecosystem_calls || self.reach.calls {
             let calling_differently: Vec<&FuncKey> = ecosystem
                 .0
                 .keys()

@@ -851,6 +851,7 @@ fn each_kind_of_entry_is_judged_by_what_its_rule_matches() {
             "`allowed-protocols` entry `pkg.model.Hots` of write-owners `writes` names no class in the analyzed files; `pkg.model.Host` exists",
             "`forbid-cached-property-on` entry `pkg.model.Gone` of write-owners `writes` names no class in the analyzed files",
             "`forbidden-readers` entry `pkg.views.*` of read-owners `reads` names no function or method in the analyzed files",
+            "`targets` entry `pkg.model:helper(x=1)` of call-owners #1 names no function, method, or class taking `x` in the analyzed files",
             "`targets` entry `pkg.model.Field.removed_method` of call-owners #1 names no function, method, or class in the analyzed files",
             "`scopes` entry `pkg.render` of effect-boundaries `pure` names no module, class, or function in the analyzed files",
             "`write-targets` entry `pkg.model.Field.nope` of effect-boundaries `pure` names no attribute, method, or `__dict__` key of `pkg.model.Field` in the analyzed files",

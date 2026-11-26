@@ -899,11 +899,11 @@ const CONSTRUCTIONS_CORE: &str = r#"class ClassScope:
 
 const CONSTRUCTIONS: &str = r#"from pkg.core import ClassScope
 
-Alias = ClassScope
+Alias = ClassScope  # MUT204
 
 
 class Parser:
-    factory = ClassScope
+    factory = ClassScope  # MUT204
 
     def through_self(self) -> object:
         return self.factory("a")  # MUT204

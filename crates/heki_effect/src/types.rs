@@ -79,6 +79,11 @@ pub enum Args {
     /// What calling the value gives (`Callable[..., T]`): an instance of one class or one class
     /// object ([`Args::returns`]).
     Returns(Box<Ty>),
+    /// The type arguments an annotation gives an instance of a project class with type
+    /// parameters (`Site[Schema]`), by position: what its attributes annotated with a parameter
+    /// hold (`crate::resolver::ClassDecl::param_attrs`). An argument that may be `None` is
+    /// unknown.
+    TypeArgs(Vec<Elem>),
 }
 
 /// The type of the items in one slot of a container.
@@ -490,6 +495,15 @@ impl Args {
         }
     }
 
+    /// `TypeArgs(args)`, without tracking arguments that are all unknown.
+    pub(crate) fn type_args(args: Vec<Elem>) -> Self {
+        if args.iter().all(|a| *a == Elem::Unknown) {
+            Args::None
+        } else {
+            Args::TypeArgs(args)
+        }
+    }
+
     /// What the instance holds in its field `name` ([`Args::Fields`]): `None` when it is not
     /// listed.
     pub(crate) fn field(&self, name: &str) -> Option<&Elem> {
@@ -516,6 +530,7 @@ impl Args {
                 Args::Fields(fs.iter().map(|(n, e)| (n.clone(), elem(e))).collect())
             }
             Args::Returns(t) => Args::returns(f(t)),
+            Args::TypeArgs(es) => Args::type_args(es.iter().map(elem).collect()),
         }
     }
 
@@ -523,7 +538,11 @@ impl Args {
     /// which yields itself while it waits).
     pub(crate) fn item(&self) -> Elem {
         match self {
-            Args::None | Args::Result(_) | Args::Fields(_) | Args::Returns(_) => Elem::Unknown,
+            Args::None
+            | Args::Result(_)
+            | Args::Fields(_)
+            | Args::Returns(_)
+            | Args::TypeArgs(_) => Elem::Unknown,
             Args::Items(e) | Args::Map(e, _) => (**e).clone(),
             Args::Tuple(es) => es.iter().fold(Elem::Empty, |acc, e| acc.join(e)),
         }
@@ -542,6 +561,9 @@ impl Args {
             }
             (Args::Result(a), Args::Result(b)) => Args::result(a.join(b)),
             (Args::Returns(a), Args::Returns(b)) => Args::returns(a.join(b)),
+            (Args::TypeArgs(a), Args::TypeArgs(b)) if a.len() == b.len() => {
+                Args::type_args(a.iter().zip(b).map(|(x, y)| x.join(y)).collect())
+            }
             // A field one of them leaves to its declared type is the declared type's.
             (Args::Fields(a), Args::Fields(b)) => {
                 let joined: Box<[(Box<str>, Elem)]> = a
@@ -562,7 +584,7 @@ impl Args {
             Args::None => 0,
             Args::Items(e) | Args::Result(e) => e.depth(),
             Args::Map(k, v) => k.depth().max(v.depth()),
-            Args::Tuple(es) => es.iter().map(Elem::depth).max().unwrap_or(0),
+            Args::Tuple(es) | Args::TypeArgs(es) => es.iter().map(Elem::depth).max().unwrap_or(0),
             Args::Fields(fs) => fs.iter().map(|(_, e)| e.depth()).max().unwrap_or(0),
             Args::Returns(t) => t.depth(),
         }
