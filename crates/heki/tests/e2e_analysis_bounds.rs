@@ -7989,3 +7989,26 @@ fn nested_loops_in_a_callback_spend_the_registration_budget() {
     let near = inspect(&shape(n / SCALE), &[PAGE_STORE]);
     assert_eq!(near["registered"].as_array().unwrap().len(), 1);
 }
+
+/// A factory that doubles a tuple `n` times before it returns the callback: a value is built
+/// only up to a size proportional to the source, so the registration gives no context instead
+/// of allocating `2^n` nodes.
+#[test]
+fn a_value_doubled_in_the_factory_past_its_size_bound_gives_no_context() {
+    let n = 32;
+    let shape = |n: usize| {
+        let doublings: String = (0..n).map(|_| "    seed = (seed, seed)\n").collect();
+        panels_project(
+            &format!("bounds_doubled_{n}"),
+            &[(
+                "adapter.py",
+                "    async def receive(note, emit):\n",
+                &format!("    seed = ()\n{doublings}    async def receive(note, emit):\n"),
+            )],
+        )
+    };
+    let r = past_budgets(n, &[], shape, |p| inspect_counted(p, PAGE_STORE));
+    assert_eq!(r["registered"], json!([]));
+    let near = inspect(&shape(n / SCALE), &[PAGE_STORE]);
+    assert_eq!(near["registered"].as_array().unwrap().len(), 1);
+}

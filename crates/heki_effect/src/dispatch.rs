@@ -28,6 +28,8 @@ use crate::{EffectSummary, FuncKey, ProjectIndex};
 
 /// Most instructions a function's [`Program`] keeps: longer functions are not followed.
 const MAX_PROGRAM: usize = 128;
+/// The most nodes one interpreted value holds, so cloning it is bounded by the source.
+const MAX_VALUE_NODES: usize = 8 * MAX_PROGRAM;
 /// Most nested calls the interpretation of one registration follows.
 const MAX_DEPTH: usize = 16;
 /// Most handlers one lookup by name may find: a class with more is not followed.
@@ -687,7 +689,8 @@ fn hands(cx: &TypeCtx<'_>, f: &IrFunction, shape: &FnShape<'_>) -> Vec<Hand> {
     out
 }
 
-/// `self.<attr> = <param>` and `self.<attr> = <param> or []` in an `__init__`.
+/// `self.<attr> = <param>` and `self.<attr> = <param> or []` in an `__init__` that stores the
+/// attribute once: a later store may replace the table.
 fn keeps(f: &IrFunction, shape: &FnShape<'_>) -> Vec<(String, u8)> {
     let this = f.params.first().map(|p| p.var);
     if f.name != "__init__" {
@@ -711,6 +714,15 @@ fn keeps(f: &IrFunction, shape: &FnShape<'_>) -> Vec<(String, u8)> {
         let p = params.next()?;
         (empty && join.incoming.len() == 2).then_some(p)
     };
+    // An attribute stored again in the constructor may not hold the table at its exit.
+    let stores = |attr: &str| {
+        (f.blocks.iter().flat_map(|b| &b.insts))
+            .filter(|i| {
+                matches!(&i.kind, InstKind::AttrStore { obj, attr: a, .. }
+                if Some(shape.copy_root(*obj)) == this && a == attr)
+            })
+            .count()
+    };
     (f.blocks.iter().flat_map(|b| &b.insts))
         .filter_map(|i| match &i.kind {
             InstKind::AttrStore { obj, attr, value } if Some(*obj) == this => {
@@ -718,6 +730,7 @@ fn keeps(f: &IrFunction, shape: &FnShape<'_>) -> Vec<(String, u8)> {
             }
             _ => None,
         })
+        .filter(|(attr, _)| stores(attr) == 1)
         .collect()
 }
 
@@ -1339,6 +1352,36 @@ impl V {
         }
     }
 
+    /// Whether the value, with every value it holds counted once per place it is held (as Python
+    /// shows it), has at most `*left` nodes. Values are cloned, so one that doubles itself
+    /// (`x = (x, x)`) would allocate exponentially: no value past the bound is built.
+    fn bounded(&self) -> bool {
+        self.fits(&mut { MAX_VALUE_NODES })
+    }
+
+    fn fits(&self, left: &mut usize) -> bool {
+        let Some(rest) = left.checked_sub(1) else {
+            return false;
+        };
+        *left = rest;
+        let holds: Vec<&V> = match self {
+            Self::Tuple(items) => items.iter().collect(),
+            Self::Dict(items) => items.iter().map(|(_, v)| v).collect(),
+            Self::Fn(f) => f.receiver.iter().collect(),
+            Self::Lookup(l) => vec![&l.receiver],
+            Self::Pending(p) => {
+                let receiver = match &p.coroutine {
+                    Coroutine::Run(f) => f.receiver.as_ref(),
+                    Coroutine::Select(l) => Some(&l.receiver),
+                };
+                let held = p.args.iter().chain(p.kwargs.iter().map(|(_, v)| v));
+                held.chain(receiver).collect()
+            }
+            _ => Vec::new(),
+        };
+        holds.into_iter().all(|v| v.fits(left))
+    }
+
     fn func(fqn: String) -> Self {
         Self::Fn(Box::new(FnV {
             fqn,
@@ -1694,6 +1737,8 @@ impl<'i> Run<'_, 'i> {
     }
 
     fn run_body(&mut self, p: &Program, values: Vec<V>, cells: Option<usize>) -> Res<V> {
+        let bound = values.iter().all(V::bounded);
+        bound.then_some(()).ok_or(Open)?;
         let mut vals: FxHashMap<u32, V> = (p.params.iter().map(|p| p.var)).zip(values).collect();
         let mut iters: FxHashMap<u32, (Vec<V>, usize)> = FxHashMap::default();
         let (mut at, mut from) = (0u32, u32::MAX);
@@ -1843,6 +1888,7 @@ impl<'i> Run<'_, 'i> {
             Op::Text(d) => (*d, V::Unknown),
             Op::Other => return Err(Open),
         };
+        value.bounded().then_some(()).ok_or(Open)?;
         vals.insert(dst, value);
         Ok(())
     }

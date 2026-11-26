@@ -257,6 +257,14 @@ fn premises_that_break_give_no_context() {
             )],
         ),
         (
+            "table_overwritten_in_the_constructor",
+            &[(
+                "channel.py",
+                "        self.items = bindings\n",
+                "        self.items = bindings\n        self.items = []\n",
+            )],
+        ),
+        (
             "capture_rebound",
             &[(
                 "adapter.py",
