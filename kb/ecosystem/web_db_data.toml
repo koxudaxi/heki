@@ -6867,3 +6867,30 @@ versions = "typer 0.27.2"
 decorators = ["typeguard.typechecked"]
 reads = "functions"
 versions = "typeguard 4.4.4"
+
+# --- Offloading APIs that run the callable on a worker thread (EFF117) ---
+# Each runs the callable it is handed on a thread of the process, beside the caller's.
+
+[[calls_unawaited]]
+symbol = "anyio.to_thread.run_sync"
+arg = 0
+hands_back = true
+runs_on = "thread"
+
+[[calls_unawaited]]
+symbol = "trio.to_thread.run_sync"
+arg = 0
+hands_back = true
+runs_on = "thread"
+
+[[calls_unawaited]]
+symbol = "starlette.concurrency.run_in_threadpool"
+arg = 0
+hands_back = true
+runs_on = "thread"
+
+[[calls_unawaited]]
+symbol = "fastapi.concurrency.run_in_threadpool"
+arg = 0
+hands_back = true
+runs_on = "thread"

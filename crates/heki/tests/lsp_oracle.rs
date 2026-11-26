@@ -28,7 +28,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "EFF115", "EFF116", "MUT115", "MUT118", "MUT119", "MUT120", "OPT103", "OPT110", "OPT111", "OPT120", "OPT121", "OPT130"]
+extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "EFF115", "EFF116", "EFF117", "MUT115", "MUT118", "MUT119", "MUT120", "OPT103", "OPT110", "OPT111", "OPT120", "OPT121", "OPT130"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -945,6 +945,20 @@ const GEN_SUB: &str = "from pkg.gen_base import Source\n\n\nclass Cached(Source)
 const GEN_SUB_PLAIN: &str = "from pkg.gen_base import Source\n\n\nclass Cached(Source):\n    def rows(self):\n        return [2]\n";
 const GEN_USE: &str = "import threading\n\nfrom pkg.gen_base import Source\nfrom pkg.gen_jobs import rows\n\n\ndef start(n, source: Source):\n    rows(n)\n    threading.Thread(target=rows, args=(n,)).start()\n    source.rows()\n    if not rows(n):\n        return 0\n    return 1\n";
 
+// State a thread writes holding a lock (`EFF117`): the thread's writer, the helper taking the
+// lock, and the start of the thread are in the base class's module; a subclass in another module
+// writes the state.
+const LOCKED_BASE: &str = "import threading\n\n\nclass Counter:\n    def __init__(self):\n        self._lock = threading.Lock()\n        self.count = 0\n\n    def start(self):\n        threading.Thread(target=self._tick).start()\n\n    def _tick(self):\n        with self._lock:\n            self.count += 1\n\n    def _acquire(self):\n        self._lock.acquire()\n\n    def _give(self):\n        self._lock.release()\n";
+const LOCKED_USE: &str = "from pkg.locked_base import Counter\n\n\nclass Resettable(Counter):\n    def reset(self):\n        self.count = 0\n";
+const LOCKED_USE_HELD: &str = "from pkg.locked_base import Counter\n\n\nclass Resettable(Counter):\n    def reset(self):\n        self._acquire()\n        self.count = 0\n        self._give()\n";
+// A module list one module appends to holding a lock and another clears holding none; a third
+// module runs the appending function, directly or on a thread.
+const LOCKED_LIST: &str = "import threading\n\n_lock = threading.Lock()\nseen: list[str] = []\n\n\ndef add(line: str) -> None:\n    with _lock:\n        seen.append(line)\n";
+const LOCKED_LIST_CLEAR: &str =
+    "from pkg import locked_list\n\n\ndef clear() -> None:\n    locked_list.seen.clear()\n";
+const LOCKED_LIST_RUN: &str =
+    "from pkg.locked_list import add\n\n\ndef run(line: str) -> None:\n    add(line)\n";
+
 // `MUT115`: the declarations of a copied class and of the builtin containers' subclasses in
 // other modules, and a helper in another module, decide whether a change below a copy states
 // the exact claim.
@@ -1055,6 +1069,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/rec_walk.py", REC_WALK),
         ("pkg/coro_jobs.py", CORO_JOBS),
         ("pkg/coro_use.py", CORO_USE),
+        ("pkg/locked_base.py", LOCKED_BASE),
+        ("pkg/locked_use.py", LOCKED_USE),
         ("pkg/gen_jobs.py", GEN_JOBS),
         ("pkg/gen_base.py", GEN_BASE),
         ("pkg/gen_sub.py", GEN_SUB),
@@ -4362,6 +4378,55 @@ fn steps_mut111() -> Vec<Step> {
     ]
 }
 
+const ABC_BOARD: &str = "from collections.abc import Mapping\nfrom functools import cached_property\n\n\nclass Board:\n    def __init__(self, raw: dict[str, str]) -> None:\n        self.raw = raw\n\n    @cached_property\n    def title(self) -> str:\n        return self.raw.get(\"k\", \"\")\n\n    def replace(self, raw: dict[str, str], rows: Mapping[str, str]) -> None:\n        self.raw = raw\n        for _ in rows:\n            pass\n";
+const ABC_HEADING: &str = "from pkg.abc_board import Board\n\n\ndef heading(board: Board) -> str:\n    return board.title\n";
+const ABC_ROWS: &str = "class Rows:\n    def __iter__(self):\n        return iter(())\n";
+const ABC_ROWS_MAPPING: &str = "from collections.abc import Mapping\n\n\nclass Rows(Mapping):\n    def __getitem__(self, key):\n        raise KeyError(key)\n\n    def __len__(self):\n        return 0\n\n    def __iter__(self):\n        return iter(())\n";
+const ABC_ROWS_REGISTERED: &str = "from collections.abc import Mapping\n\n\nclass Rows:\n    def __iter__(self):\n        return iter(())\n\n\nMapping.register(Rows)\n";
+
+/// The tier of `MUT101` and of the `MUT111` reader behind it on a value of `Mapping` follows the
+/// classes other files make one (`ProjectDecls::implementers`): the CLI's tier turns heuristic
+/// when another file's class starts deriving from `Mapping` with its own `__iter__`, which the
+/// writer runs after the write, and exact when it stops; then the same when the file registers
+/// the class with `Mapping`, and stops. The server's tier must follow each save.
+fn steps_container_abcs() -> Vec<Step> {
+    const BOTH: &[(&str, &str)] = &[
+        ("pkg/abc_board.py", "MUT101"),
+        ("pkg/abc_heading.py", "MUT111"),
+    ];
+    vec![
+        Step::new(
+            "a writer iterating a `Mapping` after leaving a cached property stale, and its reader",
+            vec![
+                Action::Create("pkg/abc_board.py", ABC_BOARD.to_owned()),
+                Action::Create("pkg/abc_heading.py", ABC_HEADING.to_owned()),
+                Action::Create("pkg/abc_rows.py", ABC_ROWS.to_owned()),
+            ],
+        )
+        .present(BOTH),
+        Step::new(
+            "another file's class derives from `Mapping` and binds `__iter__`",
+            vec![save("pkg/abc_rows.py", ABC_ROWS_MAPPING)],
+        )
+        .present(BOTH),
+        Step::new(
+            "the class derives from nothing again",
+            vec![save("pkg/abc_rows.py", ABC_ROWS)],
+        )
+        .present(BOTH),
+        Step::new(
+            "the file registers the class with `Mapping`",
+            vec![save("pkg/abc_rows.py", ABC_ROWS_REGISTERED)],
+        )
+        .present(BOTH),
+        Step::new(
+            "the `register` call goes",
+            vec![save("pkg/abc_rows.py", ABC_ROWS)],
+        )
+        .present(BOTH),
+    ]
+}
+
 /// `MUT118`: a deep copy follows the sentinel, the class, and the tests in other modules (the
 /// declarations its check reads, and the sentinel tests of each file,
 /// `heki_rules::sentinel_tests_in`): the sentinel becomes one that copies as itself and back,
@@ -4874,6 +4939,94 @@ fn steps_eff115() -> Vec<Step> {
             vec![save("pkg/coro_jobs.py", CORO_JOBS)],
         )
         .absent(&[("pkg/coro_use.py", "EFF115")]),
+    ]
+}
+
+/// `EFF117`: whether the subclass's write is reported comes from the base class's module, whose
+/// thread writes the state holding the lock, whose helper takes the lock, and which starts the
+/// thread; the locked write's line, which the report shows, moves there too. Whether a module
+/// list cleared without the lock is reported comes from a third module, which starts or stops
+/// running the locked writer on a thread: neither the writer nor the guarded states change.
+fn steps_eff117() -> Vec<Step> {
+    let unlocked = LOCKED_BASE.replace(
+        "        with self._lock:\n            self.count += 1\n",
+        "        self.count += 1\n",
+    );
+    let unstarted = LOCKED_BASE.replace(
+        "        threading.Thread(target=self._tick).start()\n",
+        "        self._tick()\n",
+    );
+    let coroutine = LOCKED_BASE.replace("    def _tick(self):", "    async def _tick(self):");
+    let on_thread = format!(
+        "import threading\n\n{}",
+        LOCKED_LIST_RUN.replace(
+            "    add(line)\n",
+            "    threading.Thread(target=add, args=(line,)).start()\n",
+        )
+    );
+    vec![
+        Step::new(
+            "the thread's writer in another module stops holding the lock",
+            vec![save("pkg/locked_base.py", &unlocked)],
+        )
+        .absent(&[("pkg/locked_use.py", "EFF117")]),
+        Step::new(
+            "it holds the lock again",
+            vec![save("pkg/locked_base.py", LOCKED_BASE)],
+        )
+        .present(&[("pkg/locked_use.py", "EFF117")]),
+        Step::new(
+            "the lines above the locked write move",
+            vec![save(
+                "pkg/locked_base.py",
+                &format!("# counters\n{LOCKED_BASE}"),
+            )],
+        )
+        .present(&[("pkg/locked_use.py", "EFF117")]),
+        Step::new(
+            "the subclass takes the lock through the base class's helper",
+            vec![save("pkg/locked_use.py", LOCKED_USE_HELD)],
+        )
+        .absent(&[("pkg/locked_use.py", "EFF117")]),
+        Step::new(
+            "the subclass writes without the lock again",
+            vec![save("pkg/locked_use.py", LOCKED_USE)],
+        )
+        .present(&[("pkg/locked_use.py", "EFF117")]),
+        Step::new(
+            "the thread's target becomes a coroutine function, which a thread only creates",
+            vec![save("pkg/locked_base.py", &coroutine)],
+        )
+        .absent(&[("pkg/locked_use.py", "EFF117")]),
+        Step::new(
+            "it is a plain function again",
+            vec![save("pkg/locked_base.py", LOCKED_BASE)],
+        )
+        .present(&[("pkg/locked_use.py", "EFF117")]),
+        Step::new(
+            "the base class no longer starts the thread",
+            vec![save("pkg/locked_base.py", &unstarted)],
+        )
+        .absent(&[("pkg/locked_use.py", "EFF117")]),
+        Step::new(
+            "a module list is appended to holding a lock, cleared elsewhere, and run directly",
+            vec![
+                Action::Create("pkg/locked_list.py", LOCKED_LIST.to_owned()),
+                Action::Create("pkg/locked_list_clear.py", LOCKED_LIST_CLEAR.to_owned()),
+                Action::Create("pkg/locked_list_run.py", LOCKED_LIST_RUN.to_owned()),
+            ],
+        )
+        .absent(&[("pkg/locked_list_clear.py", "EFF117")]),
+        Step::new(
+            "a third module runs the locked writer on a thread",
+            vec![save("pkg/locked_list_run.py", &on_thread)],
+        )
+        .present(&[("pkg/locked_list_clear.py", "EFF117")]),
+        Step::new(
+            "it runs the writer directly again",
+            vec![save("pkg/locked_list_run.py", LOCKED_LIST_RUN)],
+        )
+        .absent(&[("pkg/locked_list_clear.py", "EFF117")]),
     ]
 }
 
@@ -6631,6 +6784,7 @@ sessions!(editing, Session::start, {
     inherited_writers: steps_inherited_writers,
     hash_writers: steps_hash_writers,
     mut111: steps_mut111,
+    container_abcs: steps_container_abcs,
     mut118: steps_mut118,
     mut119: steps_mut119,
     mut112: steps_mut112,
@@ -6641,6 +6795,7 @@ sessions!(editing, Session::start, {
     eff114: steps_eff114,
     eff115: steps_eff115,
     eff116: steps_eff116,
+    eff117: steps_eff117,
     attribute_types: steps_attribute_types,
     builtin_receivers: steps_builtin_receivers,
     receiver_typing: steps_receiver_typing,

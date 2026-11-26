@@ -11,6 +11,7 @@ use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration
 use crate::decorators::keeps_returned_value;
 use crate::environment::{self, AccessKind, ExternalAccess};
 use crate::fresh;
+use crate::guarded;
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
 use crate::held;
 use crate::imports::{ImportSite, module_imports};
@@ -881,6 +882,8 @@ struct Extractor<'a> {
     around: OnceCell<Vec<Vec<&'a NaturalLoop>>>,
     /// The positions where the function certainly holds a lock ([`Self::lock_held_at`]).
     lock_held: OnceCell<FxHashSet<Position>>,
+    /// Where the function certainly holds thread locks (`EFF117`, [`Self::thread_lock_points`]).
+    thread_locks: OnceCell<guarded::LockPoints>,
     /// The blocks acquiring each lock (`locks::BlockTests::common`).
     lock_blocks: std::collections::BTreeMap<ObjRef, BTreeSet<BlockId>>,
     /// The tests of state on every path to each block (`EFF109`).
@@ -1185,6 +1188,9 @@ impl<'x> CallObjects<'x> {
     }
 }
 
+/// The executor class that runs what it is handed in other processes.
+const PROCESS_POOL: &str = "concurrent.futures.ProcessPoolExecutor";
+
 /// Whether a decorator of `f` is one of `names` ([`ModuleDecls::decorator_is`]).
 /// The builtin and standard library containers whose own methods and item stores change them in
 /// place (`EffectSummary::param_inplace_sites`).
@@ -1313,6 +1319,7 @@ impl<'a> Extractor<'a> {
             around: OnceCell::new(),
             lock_blocks: std::collections::BTreeMap::new(),
             lock_held: OnceCell::new(),
+            thread_locks: OnceCell::new(),
             state_tests: OnceCell::new(),
             guards: LocalGuards::default(),
             summary,
@@ -3007,6 +3014,9 @@ impl<'a> Extractor<'a> {
         }
         self.self_container_changes();
         self.lock_owner_tests();
+        if self.opt_in.guarded {
+            self.guarded_facts();
+        }
         self.resolve_construction();
         if self.opt_in.only_read {
             self.only_read_facts();
@@ -3960,7 +3970,7 @@ impl<'a> Extractor<'a> {
             arguments: None,
             queues: None,
             state_tests: None,
-            under_lock: false,
+            locks: crate::LockHeld::None,
             // Handing a function on does not run it: no must-fact goes through the reference.
             complete: false,
             on_every_return: OnEveryReturn::default(),
@@ -6841,7 +6851,7 @@ impl<'a> Extractor<'a> {
                         is_read: false,
                         arguments,
                         state_tests: None,
-                        under_lock: false,
+                        locks: crate::LockHeld::None,
                         complete: false,
                         on_every_return: crate::OnEveryReturn::default(),
                         made_by: None,
@@ -7425,8 +7435,33 @@ impl<'a> Extractor<'a> {
             callees,
             tests_result: slot.tests_result,
             hands_back: slot.hands_back,
+            runs_on: slot
+                .runs_on
+                .filter(|_| !self.runs_in_process_pool(call, &slot)),
             complete,
         });
+    }
+
+    /// Whether the executor the call `call` names (`UnawaitedCall::executor_arg`) is a process
+    /// pool: it runs the callable in another process, not on a thread of this one.
+    fn runs_in_process_pool(&self, call: &Call<'_>, slot: &heki_kb::UnawaitedCall) -> bool {
+        let Some(executor) = slot.executor_arg.and_then(|arg| {
+            resolver::passed_var(call.args, call.kwargs, call.star_from, (Some(arg), None))
+        }) else {
+            return false;
+        };
+        match self.val(executor) {
+            Some(Val::Inst(class)) => {
+                class == PROCESS_POOL
+                    || self
+                        .cx
+                        .project
+                        .mro_of(class)
+                        .iter()
+                        .any(|c| c == PROCESS_POOL)
+            }
+            _ => false,
+        }
     }
 
     /// What a builtin passes the callable it calls once per item (`Runner::PerItem`): items
@@ -7650,7 +7685,14 @@ impl<'a> Extractor<'a> {
             } else {
                 None
             },
-            under_lock: self.opt_in.exclusive && self.lock_held_at(self.pos),
+            locks: crate::LockHeld::of(
+                self.opt_in.exclusive && self.lock_held_at(self.pos),
+                self.opt_in.guarded
+                    && !self
+                        .thread_lock_points()
+                        .held_at(self.pos.0, self.pos.1)
+                        .is_empty(),
+            ),
             complete,
             on_every_return,
             made_by: None,
@@ -7779,6 +7821,47 @@ impl<'a> Extractor<'a> {
                 never_returns,
                 ..MustExec::default()
             }));
+        }
+    }
+
+    /// The thread locks the function holds, by its own acquisitions and releases: the facts of
+    /// its callees are not known yet ([`guarded::LockPoints::of`]).
+    fn thread_lock_points(&self) -> &guarded::LockPoints {
+        self.thread_locks.get_or_init(|| {
+            guarded::LockPoints::of(self.cx, self.shape, &self.types, &self.live, &|_, _, _| {
+                Vec::new()
+            })
+        })
+    }
+
+    /// `EFF117`: the thread locks the function returns holding, and its writes of shared state
+    /// made holding a named one.
+    fn guarded_facts(&mut self) {
+        let points = self.thread_lock_points();
+        if points.is_empty() {
+            return;
+        }
+        let locked_writes: Vec<guarded::LockedWrite> =
+            guarded::state_writes(self.cx, self.shape, &self.types, &self.live)
+                .into_iter()
+                .filter_map(|w| {
+                    let lock = (points.held_at(w.at.0, w.at.1).iter())
+                        .find(|k| k.name().is_some())?
+                        .clone();
+                    Some(guarded::LockedWrite {
+                        state: w.state,
+                        lock,
+                        kind: w.kind,
+                        span: w.span,
+                    })
+                })
+                .collect();
+        let facts = guarded::GuardFacts {
+            returns_holding: points.returns_holding().clone(),
+            locked_writes,
+        };
+        if !facts.is_empty() {
+            self.summary.guarded = Some(Box::new(facts));
         }
     }
 
@@ -8813,7 +8896,7 @@ fn role_site(
         is_read: false,
         arguments: None,
         state_tests: site.state_tests.clone(),
-        under_lock: site.under_lock,
+        locks: site.locks,
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
         made_by: Some(site.span),

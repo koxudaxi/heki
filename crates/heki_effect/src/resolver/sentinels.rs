@@ -1,6 +1,7 @@
 //! The `object()` sentinels of a module, the attributes its classes bind to one, and the classes
 //! it registers with `copyreg`: what `copy.deepcopy` does to an instance holding a sentinel
-//! ([`super::ProjectDecls::held_sentinels`], [`super::ProjectDecls::copy_of`]).
+//! ([`super::ProjectDecls::held_sentinels`], [`super::ProjectDecls::copy_of`]). Also the classes
+//! it registers with an ABC ([`super::ProjectDecls::implementers`]).
 
 use super::{
     ModuleDecls, NamedAttr, PartialAttr, dataclass_decorator, decorator_parts,
@@ -15,8 +16,8 @@ use heki_ir::{
     BlockId, FunctionId, GlobalStores, InstKind, IrFunction, LastBindings, ModuleIr, VarId,
 };
 use heki_semantic::{NameResolution, ScopeKind};
-use rustc_hash::FxHashMap;
-use std::collections::BTreeSet;
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// [`ModuleDecls::object_sentinels`]: the module body's names stored once, outside a loop, from a
 /// call of the builtin `object` with no argument (through copies). Only such an object is one
@@ -624,6 +625,147 @@ pub(super) fn copy_registrations(input: &ModuleInput<'_>, decls: &ModuleDecls) -
                     .and_then(|c| dotted(*c))
                     .unwrap_or_else(|| "*".to_owned()),
             );
+        }
+    }
+    out
+}
+
+/// [`ModuleDecls::abc_registrations`]: by the fqn of the class registered with, the classes a
+/// `register` call names in any function of the module (`Mapping.register(C)`) and those a
+/// class decorator registers (`@Mapping.register`), `*` for an argument heki cannot name. A
+/// receiver heki names no global or attribute chain for (a local, `self`) is not read.
+pub(super) fn abc_registrations(
+    input: &ModuleInput<'_>,
+    decls: &ModuleDecls,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (qualname, class) in &decls.classes {
+        for (head, _) in &class.decorators {
+            if let Some(receiver) = head.strip_suffix(".register") {
+                (out.entry(receiver.to_owned()).or_default())
+                    .insert(format!("{}.{qualname}", decls.module_name));
+            }
+        }
+    }
+    let bound = register_bindings(input, decls);
+    for f in &input.ir.functions {
+        let mentions = (f.blocks.iter().flat_map(|b| &b.insts)).any(|i| match &i.kind {
+            InstKind::MethodCall { method, .. } => method == "register",
+            InstKind::AttrLoad { attr, .. } => attr == "register",
+            InstKind::LoadGlobal { name, .. } => !register_names(decls, &bound, name).is_empty(),
+            _ => false,
+        });
+        if !mentions {
+            continue;
+        }
+        let shape = FnShape::new(f);
+        let stored_as: FxHashMap<VarId, &str> = (f.blocks.iter().flat_map(|b| &b.insts))
+            .filter_map(|i| match &i.kind {
+                InstKind::StoreGlobal { name, value } => {
+                    Some((shape.copy_root(*value), name.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        let dotted = |var: VarId| dotted_name(&shape, &stored_as, var, decls);
+        let called: FxHashSet<VarId> = (f.blocks.iter().flat_map(|b| &b.insts))
+            .filter_map(|i| match &i.kind {
+                InstKind::Call {
+                    callee_var: Some(callee),
+                    ..
+                } => Some(shape.copy_root(*callee)),
+                _ => None,
+            })
+            .collect();
+        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+            // A module-level alias of a `register` the function passes on instead of calling,
+            // or one the module binds to different methods on different paths: the classes it
+            // registers are not named.
+            if let InstKind::LoadGlobal { name, dst, .. } = &inst.kind {
+                let resolved =
+                    decls.aliases.contains_key(name) && called.contains(&shape.copy_root(*dst));
+                if !resolved {
+                    for receiver in register_names(decls, &bound, name) {
+                        out.entry(receiver).or_default().insert("*".to_owned());
+                    }
+                }
+                continue;
+            }
+            let (receiver, args) = match &inst.kind {
+                InstKind::MethodCall {
+                    recv, method, args, ..
+                } if method == "register" => (dotted(*recv), args),
+                InstKind::Call {
+                    callee_var: Some(callee),
+                    args,
+                    ..
+                } => match dotted(*callee) {
+                    Some(name) if name.ends_with(".register") => (
+                        Some(name[..name.len() - ".register".len()].to_owned()),
+                        args,
+                    ),
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            let Some(receiver) = receiver else { continue };
+            let class = (args.first().and_then(|c| dotted(*c))).unwrap_or_else(|| "*".to_owned());
+            out.entry(receiver).or_default().insert(class);
+        }
+    }
+    out
+}
+
+/// The receivers (`collections.abc.Mapping`) of the `register` methods the module-level `name`
+/// is bound to: by one alias, by every path of a name bound differently on different paths, or
+/// by any store of one of them (`bound`).
+fn register_names(
+    decls: &ModuleDecls,
+    bound: &BTreeMap<String, BTreeSet<String>>,
+    name: &str,
+) -> Vec<String> {
+    let paths = (decls.alias_paths.get(name).into_iter().flatten()).chain(decls.aliases.get(name));
+    let named = paths
+        .filter_map(|target| target.strip_suffix(".register"))
+        .map(str::to_owned);
+    named
+        .chain(bound.get(name).into_iter().flatten().cloned())
+        .collect()
+}
+
+/// The module-level names the module body stores a `register` method of a named receiver in
+/// (`register_mapping = Mapping.register`), by name, with the receivers: a name bound twice is
+/// no alias ([`ModuleDecls::aliases`]), but any function reading it may call that method.
+fn register_bindings(
+    input: &ModuleInput<'_>,
+    decls: &ModuleDecls,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for f in input.ir.functions.iter().filter(|f| f.is_module_body) {
+        let shape = FnShape::new(f);
+        let stored_as: FxHashMap<VarId, &str> = (f.blocks.iter().flat_map(|b| &b.insts))
+            .filter_map(|i| match &i.kind {
+                InstKind::StoreGlobal { name, value } => {
+                    Some((shape.copy_root(*value), name.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+            let InstKind::StoreGlobal { name, value } = &inst.kind else {
+                continue;
+            };
+            let Some(InstKind::AttrLoad { obj, attr, .. }) =
+                shape.inst(shape.copy_root(*value)).map(|i| &i.kind)
+            else {
+                continue;
+            };
+            if attr != "register" {
+                continue;
+            }
+            if let Some(receiver) = dotted_name(&shape, &stored_as, *obj, decls) {
+                out.entry(name.clone()).or_default().insert(receiver);
+            }
         }
     }
     out

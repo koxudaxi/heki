@@ -180,7 +180,7 @@ file is left, and the run says how many were.
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.5.0
+    rev: v0.6.0
     hooks:
       - id: heki
 ```

@@ -17,7 +17,7 @@ use crate::capacity::CapacityOf;
 use crate::decorators;
 use crate::only_read::{LiteralAnnotation, ParamAnnotation};
 use crate::ownership;
-use crate::readonly::{ContainerFamily, ContainerKind, FamilyRole};
+use crate::readonly::{ContainerFamily, ContainerKind, FamilyLevel, FamilyRole};
 use crate::types::{Added, Args, Elem, Generic, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
@@ -72,7 +72,41 @@ struct Indexes {
     getattr_called: FxHashSet<String>,
     changed_paths: BTreeMap<String, PathChange>,
     copy_registered: FxHashSet<String>,
+    families: FxHashMap<(ContainerKind, FamilyLevel), FamilyMembers>,
     setstate_called: bool,
+}
+
+/// The project classes a value of a container family's class may be at one level (R2 over the
+/// family: [`ProjectDecls::implementers`]), and what may make a class outside them one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FamilyMembers {
+    /// Sorted, each once.
+    pub classes: Vec<String>,
+    pub open: Option<FamilyOpen>,
+}
+
+/// What lets a value of a container ABC be of a class heki does not list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FamilyOpen {
+    /// A `register` call registers a class heki cannot name with this class.
+    Register(String),
+    /// This class of the family binds `__subclasshook__`, which may accept any class: an ABC's
+    /// subclass check asks the hooks of its subclasses.
+    SubclassHook(String),
+}
+
+static NO_MEMBERS: FamilyMembers = FamilyMembers {
+    classes: Vec::new(),
+    open: None,
+};
+
+/// The key of the declarations' read log an answer from [`ProjectDecls::implementers`] notes:
+/// the first class of the table read at the level (`builtins.list`, `typing.Sequence`), among
+/// the classes whose project-wide facts were looked up.
+fn family_key(kind: ContainerKind, level: FamilyLevel) -> &'static str {
+    (ContainerFamily::TABLE.iter())
+        .find(|r| r.kind == kind && level.role() == r.role)
+        .map_or("", |r| r.class)
 }
 
 /// Names every class has, which a protocol's body defines without requiring them.
@@ -1158,6 +1192,11 @@ pub struct ModuleDecls {
     /// cannot name ([`ProjectDecls::copy_registered`]).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub copy_registrations: BTreeSet<String>,
+    /// The classes the module registers with another class's `register` (`Mapping.register(C)`,
+    /// `@Mapping.register`), by the fqn the module's names give the class registered with; `*`
+    /// for a class heki cannot name ([`ProjectDecls::implementers`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub abc_registrations: BTreeMap<String, BTreeSet<String>>,
     /// What the module binds its globals to (in its body, and in functions declaring them
     /// `global`), for the globals one binding of which is a queue: the join of every binding
     /// (`crate::capacity`). Any other global has an unknown capacity.
@@ -1691,8 +1730,9 @@ pub enum ParamAccess {
     Mutable,
 }
 
-/// The mutable container types outside the families of `list`, `dict`, and `set`
-/// ([`ContainerFamily`]), which [`param_access`] reads as mutable too.
+/// The mutable container types besides the builtins, the derived classes, and the mutable ABCs of
+/// the families of `list`, `dict`, and `set` ([`ContainerFamily`]), which [`param_access`]
+/// reads as mutable too.
 const OTHER_MUTABLE_TYPES: &[&str] = &["builtins.bytearray", "typing.Deque", "collections.deque"];
 
 /// The access the parameter annotation `text` promises, after `Optional[T]`, `T | None`,
@@ -1706,11 +1746,13 @@ pub(crate) fn param_access(
     match annotated_head(text, resolve)? {
         AnnotatedHead::ReadOnly => Some(ParamAccess::ReadOnly),
         // The read-only ABCs (`typing.AbstractSet` is `collections.abc.Set`; `typing.Set` is
-        // the builtin `set`), and every other class of the families.
+        // the builtin `set`), and the builtins, derived classes, and mutable ABCs of the families.
         AnnotatedHead::Resolved(fqn) => match ContainerFamily::role_of(&fqn) {
             Some(FamilyRole::ReadOnly) => Some(ParamAccess::ReadOnly),
-            Some(_) => Some(ParamAccess::Mutable),
-            None => (OTHER_MUTABLE_TYPES.contains(&fqn.as_str())).then_some(ParamAccess::Mutable),
+            Some(FamilyRole::Builtin | FamilyRole::Derived | FamilyRole::Mutable) => {
+                Some(ParamAccess::Mutable)
+            }
+            _ => (OTHER_MUTABLE_TYPES.contains(&fqn.as_str())).then_some(ParamAccess::Mutable),
         },
         AnnotatedHead::Unresolved(last) => MUTABLE_NAMES
             .contains(&last)
@@ -2207,6 +2249,9 @@ pub struct ProjectDecls {
     /// The canonical fqns of the classes a project module registers with `copyreg`
     /// (`ModuleDecls::copy_registrations`), with `*` when one names a class heki cannot.
     copy_registered: FxHashSet<String>,
+    /// For each family and level of the container families, the project classes a value may be
+    /// (`Self::family_members`).
+    families: FxHashMap<(ContainerKind, FamilyLevel), FamilyMembers>,
     recorder: Recorder,
     /// The C3 linearizations computed so far of classes with multiple inheritance along their
     /// bases (`Self::mro`); cleared with the indexes.
@@ -2495,6 +2540,11 @@ impl ProjectDecls {
             .extend(differ(&before.getattr_called, &self.getattr_called));
         out.class_facts
             .extend(differ(&before.copy_registered, &self.copy_registered));
+        for &(kind, level) in before.families.keys().chain(self.families.keys()) {
+            if before.families.get(&(kind, level)) != self.families.get(&(kind, level)) {
+                out.class_facts.insert(family_key(kind, level).to_owned());
+            }
+        }
         if before.setstate_called != self.setstate_called {
             out.class_facts.insert(stores::SETSTATE_KEY.to_owned());
         }
@@ -2522,6 +2572,7 @@ impl ProjectDecls {
             getattr_called: self.getattr_called.clone(),
             changed_paths: self.changed_paths.clone(),
             copy_registered: self.copy_registered.clone(),
+            families: self.families.clone(),
             setstate_called: self.setstate_called,
         }
     }
@@ -2591,6 +2642,8 @@ impl ProjectDecls {
         self.property_names = property_names;
         self.returning_names = returning_names;
         self.alias_names = alias_names;
+        // Before the indexes below: `Self::value_classes` of a family's class reads it.
+        self.families = self.family_members();
         self.typed_dicts = TYPED_DICT_BASES
             .iter()
             .flat_map(|b| self.subclasses_of(b))
@@ -4088,9 +4141,20 @@ impl ProjectDecls {
     /// under assumption R2 (a value typed `class` is an instance of it or of a project
     /// subclass): the project classes along its MRO, every project subclass, and the project
     /// classes along the MROs of a subclass's other bases (a mixin it also derives from), each
-    /// once.
+    /// once. For a builtin container or a container ABC, those of every class of its family a
+    /// value may be ([`Self::implementers`]): a `dict` may be an instance of a project subclass
+    /// of `OrderedDict`, a `Mapping` one of a project subclass of `UserDict`.
     pub fn value_classes(&self, class: &str) -> Vec<String> {
         let class = self.canonical(class);
+        match ContainerFamily::level_of(&class) {
+            Some((kind, level)) => self.implementers(kind, level).classes.clone(),
+            None => self.own_value_classes(&class),
+        }
+    }
+
+    /// [`Self::value_classes`] of the canonical `class` by its own hierarchy.
+    fn own_value_classes(&self, class: &str) -> Vec<String> {
+        let class = class.to_owned();
         let mut seen = FxHashSet::default();
         let mut out = Vec::new();
         let mut add = |c: String, seen: &mut FxHashSet<String>| {
@@ -4122,21 +4186,131 @@ impl ProjectDecls {
         out
     }
 
-    /// The project classes whose bodies may supply a method of a value of the builtin container
-    /// `class` (`builtins.dict`, or its `typing` alias) under R2: [`Self::value_classes`] of the
-    /// builtin, its alias, and each standard-library class deriving from it
-    /// ([`FamilyRole::Derived`]: `class R(OrderedDict)` is a `dict`), each once. None for
-    /// another class.
-    pub fn implementers(&self, class: &str) -> Vec<String> {
-        let builtin = ContainerFamily::of(class).filter(|r| r.role == FamilyRole::Builtin);
-        let lineage = builtin.into_iter().flat_map(|r| {
-            ContainerFamily::classes(r.kind, &[FamilyRole::Builtin, FamilyRole::Derived])
+    /// The project classes a value of the family `kind` at `level` may be an instance of under
+    /// R2 ([`FamilyMembers`]): those whose declared bases reach, through project classes, a
+    /// class of the family the level admits ([`FamilyLevel::admits`]: the builtin and the
+    /// standard-library classes deriving from it, or also the ABC, the narrower ABCs, and the
+    /// standard-library classes CPython registers with it), or registered with one of those
+    /// classes or with a project class among them (`Mapping.register(C)`, `@Mapping.register`),
+    /// with the project classes along their MROs; `open` when a `register` names a class heki
+    /// cannot, or one of them binds `__subclasshook__`. A base outside the project and the table
+    /// stands for itself.
+    pub fn implementers(&self, kind: ContainerKind, level: FamilyLevel) -> &FamilyMembers {
+        self.read(|k| note(&mut k.class_facts, family_key(kind, level)));
+        self.families.get(&(kind, level)).unwrap_or(&NO_MEMBERS)
+    }
+
+    /// Whether `class` is a nominal container ABC ([`ContainerFamily::nominal_abc`]) whose
+    /// family the project leaves closed: a value of it is an instance of a builtin of the
+    /// family, of another class outside the project that implements it, or of a project
+    /// implementer ([`Self::implementers`]).
+    pub(crate) fn established_abc(&self, class: &str) -> bool {
+        ContainerFamily::nominal_abc(class)
+            .is_some_and(|(kind, level)| self.implementers(kind, level).open.is_none())
+    }
+
+    /// [`Self::implementers`] of every family and level.
+    fn family_members(&self) -> FxHashMap<(ContainerKind, FamilyLevel), FamilyMembers> {
+        // What each class is registered with: the receivers named by a class of the table or
+        // of the project (a `register` of another object is no ABC's).
+        let mut registered: FxHashMap<String, BTreeSet<String>> = FxHashMap::default();
+        for m in self.modules.values() {
+            for (receiver, classes) in &m.abc_registrations {
+                let receiver = self.canonical(receiver);
+                if ContainerFamily::of(&receiver).is_some() || self.is_project_class(&receiver) {
+                    let classes = classes.iter().map(|c| {
+                        if c == "*" {
+                            c.clone()
+                        } else {
+                            self.canonical(c)
+                        }
+                    });
+                    registered.entry(receiver).or_default().extend(classes);
+                }
+            }
+        }
+        let mut out = FxHashMap::default();
+        for kind in [ContainerKind::List, ContainerKind::Dict, ContainerKind::Set] {
+            for level in FamilyLevel::EVERY {
+                let registrations = (level != FamilyLevel::Builtin).then_some(&registered);
+                // A class of the table no project class derives from, and that nothing is
+                // registered with, adds no member.
+                let roots = ContainerFamily::within(kind, level).filter(|c| {
+                    self.subclasses.contains_key(*c)
+                        || registrations.is_some_and(|r| r.contains_key(*c))
+                });
+                let roots = roots.map(str::to_owned);
+                out.insert((kind, level), self.members_from(roots, registrations));
+            }
+        }
+        out
+    }
+
+    /// The project classes a value of one of `roots` may be ([`Self::own_value_classes`]),
+    /// and, with `registered`, those of the classes registered with one of them or with one
+    /// of those. One walk visits each class at most twice: as one whose values it lists (a root
+    /// or a registered class) and as a member.
+    fn members_from(
+        &self,
+        roots: impl Iterator<Item = String>,
+        registered: Option<&FxHashMap<String, BTreeSet<String>>>,
+    ) -> FamilyMembers {
+        let budget = Budget::unmetered("heki_effect::resolver::ProjectDecls::members_from");
+        let mut names: Vec<String> = roots.collect();
+        let mut ids: FxHashMap<String, usize> = (names.iter().cloned())
+            .enumerate()
+            .map(|(i, c)| (c, i))
+            .collect();
+        let starts: Vec<(usize, bool)> = (0..names.len()).map(|i| (i, true)).collect();
+        let mut open = None;
+        let mut members: FxHashSet<usize> = FxHashSet::default();
+        // A node is a class and whether its values are listed from it (a root or a registered
+        // class) or it is a member of the list.
+        let next = |(id, lists): (usize, bool), out: &mut Vec<(usize, bool)>| {
+            let class = names[id].clone();
+            let mut next: Vec<(String, bool)> = Vec::new();
+            if lists {
+                next.extend(
+                    self.own_value_classes(&class)
+                        .into_iter()
+                        .map(|c| (c, false)),
+                );
+            }
+            for r in registered.and_then(|r| r.get(&class)).into_iter().flatten() {
+                if r == "*" {
+                    open.get_or_insert_with(|| FamilyOpen::Register(class.clone()));
+                } else {
+                    next.push((r.clone(), true));
+                }
+            }
+            for (c, lists) in next {
+                let id = *ids.entry(c).or_insert_with_key(|c| {
+                    names.push(c.clone());
+                    names.len() - 1
+                });
+                out.push((id, lists));
+            }
+        };
+        // Unmetered: the walk ends, visiting every class of the family.
+        let _ = reach(&budget, starts, next, |(id, lists)| {
+            if !lists {
+                members.insert(id);
+            }
+            Visit::<()>::Expand
         });
-        let mut seen = FxHashSet::default();
-        lineage
-            .flat_map(|c| self.value_classes(c))
-            .filter(|c| seen.insert(c.clone()))
-            .collect()
+        let mut classes: Vec<String> = members.into_iter().map(|id| names[id].clone()).collect();
+        classes.sort();
+        if registered.is_some() {
+            open = open.or_else(|| {
+                (classes.iter())
+                    .find(|c| {
+                        self.class(c)
+                            .is_some_and(|d| d.members.contains("__subclasshook__"))
+                    })
+                    .map(|c| FamilyOpen::SubclassHook(c.clone()))
+            });
+        }
+        FamilyMembers { classes, open }
     }
 
     /// What reading `attr` on a value of the class `class` may run besides finding it, over
@@ -4516,6 +4690,10 @@ impl ProjectDecls {
     /// the interpreter's own, `object` or a plain base `object`'s (a `NamedTuple` a tuple's),
     /// and any other class outside the project may define it, as heki does not read it. Every
     /// base outside the project of a class the instance may be counts, wherever its MRO puts it.
+    /// An instance of a nominal container ABC that is no project implementer is taken to run what
+    /// the family's builtins run (a `Mapping` a `dict`'s), as R2 takes a `dict` that is a
+    /// `defaultdict`; whether the family is closed is the caller's question
+    /// ([`Self::established_abc`]).
     pub(crate) fn special_method_owner(&self, class: &str, name: &str) -> MethodOwner {
         let outside = |c: &str| {
             if matches!(c, "object" | "builtins.object")
@@ -4531,6 +4709,8 @@ impl ProjectDecls {
         let class = self.canonical(class);
         let mut owner = if self.is_project_class(&class) {
             MethodOwner::Object
+        } else if ContainerFamily::nominal_abc(&class).is_some() {
+            MethodOwner::Builtin
         } else {
             outside(&class)
         };
@@ -6391,6 +6571,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
     sentinels::named_attrs(input, &mut decls);
     fields::init_fields(input, &mut decls);
     decls.copy_registrations = sentinels::copy_registrations(input, &decls);
+    decls.abc_registrations = sentinels::abc_registrations(input, &decls);
     returns::record_return_facts(input, &mut decls, kb);
     decls
 }
@@ -9044,6 +9225,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     file_constants: BTreeSet::new(),
     object_sentinels: BTreeSet::new(),
     copy_registrations: BTreeSet::new(),
+    abc_registrations: BTreeMap::new(),
     global_capacities: BTreeMap::new(),
     unread: false,
 };

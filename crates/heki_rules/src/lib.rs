@@ -4,7 +4,8 @@
 //!   `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT114`, `MUT115`, `MUT118`, `MUT119`, `MUT120`,
 //!   `MUT201`, `MUT202`, `MUT203`, `MUT204`, `MUT205`, `MUT206`, `MUT207`, `MUT208`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
-//!   `EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `DATA101`)
+//!   `EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF117`, `EFF201`,
+//!   `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
 //!   `OPT112`, `OPT113`, `OPT120`, `OPT121`, `OPT130`); `OPT112` / `OPT113` are Advisory-lane
 //!   reports without a rewrite.
@@ -35,7 +36,7 @@ pub use contracts::{
     ContractRoles, MAX_INVALIDATIONS, declares_ownership, import_facts, inspect_facts,
     opt_in_facts, recommend_facts, summary_contracts, typed_writes,
 };
-pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
+pub use eff_rules::{GuardedView, ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
 pub use heki_diagnostics::Certainty;
 pub use imp_rules::{
     circular_failure_files, dependency_report_files, import_cycle_files, judges_imports,
@@ -652,6 +653,19 @@ pub const CORE_RULES: &[RuleMeta] = &[
         auto_fix_default: false,
         summary: "Opt-in: a call of a generator function whose generator nothing iterates (a statement, a value only tested for truth, a function handed to a thread, an `atexit` handler, or a `filter` predicate), so its body does not run.",
         doc: include_str!("../rule-docs/EFF116.md"),
+    },
+    RuleMeta {
+        code: "EFF117",
+        slug: "unlocked-write-of-guarded-state",
+        family: RuleFamily::Eff,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Default,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        unsafe_fix: false,
+        auto_fix_default: false,
+        summary: "State that another writer changes holding a thread lock (`threading.Lock`, `RLock`, `Condition`, `Semaphore`), changed here holding none, where a thread heki resolves can run one of the writes: an update can be lost.",
+        doc: include_str!("../rule-docs/EFF117.md"),
     },
     RuleMeta {
         code: "EFF201",
@@ -1356,10 +1370,16 @@ pub fn check_project(
         }),
         disabled_obligations: Vec::new(),
     };
+    let guarded = selection
+        .is_enabled("EFF117")
+        .then(|| GuardedView::of(index, decls, extras.layout.root));
     let per_unit: Vec<Vec<Diagnostic>> = units
         .par_iter()
         .map(|u| {
             let mut d = Vec::new();
+            if let Some(view) = &guarded {
+                eff_rules::eff117(&cx, view, u, &mut d);
+            }
             mut_rules::mut106(&cx, u, &mut d);
             mut_rules::mut202(&cx, u, &readonly, &mut d);
             mut_rules::mut119(&cx, u, &mut d);
