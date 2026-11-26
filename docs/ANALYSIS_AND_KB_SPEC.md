@@ -415,6 +415,44 @@ resting on them is heuristic, under the open premise "incomplete-targets". The f
 what the class's instances run otherwise (special methods, attribute hooks, stores) read the base
 as a base heki knows nothing of (`ProjectDecls::mro`).
 
+A name no statement of a module binds at run time (one it binds only under `if TYPE_CHECKING:`
+included) is what the module's `__getattr__` (PEP 562) serves under it, where heki follows the
+hook for that literal name (`ModuleDecls::getattr_exports`, pass 1, `resolver::getattr_exports`).
+The hook is the module's only `def __getattr__(name)`, plain and undecorated, which no code of
+the module calls or binds again (`heki_ir::module_getattr_hook`), in a module that binds no name
+behind the IR (`exec`, a change through `globals()`, which a hook caching what it serves makes
+too). A walk over the hook's blocks keeps the names that may reach each block, as the names
+listed or every name but those listed (`resolver::getattr_exports::Reaching`, joined where ways
+meet): every name at the entry; along a branch, the names its test lets take each way (`name ==
+"Base"`, either way round, `name in ("Base", "Model")`, `name in TABLE`, also negated: the
+literals one way, every other name the other; `TABLE.get(name) is None`: only the table's keys
+the way it fails, every name but the keys whose value is a class or a function the way it
+holds); every name reaching a block through its exception edge and through a test of anything
+else (`and` / `or` of tests included). A name is served what every `return` it may reach
+gives, when they agree: a value read from a table of the module by the name (`TABLE[name]`,
+`TABLE.get(name)`; a missing key of a subscript raises, and so does calling the `None` of a
+missing `get`), what calling it, or calling a function of the module by its name, gives by that
+function's declarations (`FunctionDecl::declared_return_as_named`: the named object or class every
+return gives, such as a class it defines in its body, also behind `functools.lru_cache`, else the
+class object its annotation names), or the value any other `return` gives, whatever the name.
+Only a named object (`Ty::Ref`: an import, a class, a function) or a class object that may be a
+subclass (`Ty::Class`, `-> type[Base]`) is served. A bare `return`, a value of no type heki
+knows, different objects on different `return`s, and a factory another module defines (no type
+in pass 1) leave the name unknown, as before.
+
+The chases follow a served name as they follow an import (`ProjectDecls::unbound_name`): a named
+object for every chase, so calling the name, constructing it, and a class based on it are what
+the hook serves (exact targets, as through an import); a class object only for the chases that
+read names as a type checker does, as a `TYPE_CHECKING` import is followed (`Followed::declared_only`),
+so its methods type a call and give heuristic targets. An annotation naming the name reads it as a
+type checker does: its `if TYPE_CHECKING:` import first; a class base, a call, and a value read
+what the hook serves first. Another module storing into the module under a name heki cannot read
+(`setattr(module, key, v)`), or rebinding or storing into a global the hook reads (its table, the
+function it calls, the hook itself; `GetattrExports::globals`), leaves every name it serves
+unknown (`ProjectDecls::getattr_open`, an index of the declarations). The sets of what other
+modules change are emptied before the indexes are built again, so the language server reads a
+served name while it rebuilds them as `heki check` does.
+
 Some receivers have the class the language or the standard library gives them. An instance's
 own namespace (`obj.__dict__`, or `vars(obj)` of the builtin: `resolver::namespace_load`) is a
 builtin `dict`, of keys and values of any class, where reading it runs no code of the classes the

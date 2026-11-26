@@ -20,7 +20,7 @@ pub use dominators::{Dominated, DominatorTree, immediate_dominators};
 pub use facts::{
     Carries, Decided, FnIndex, GlobalStores, InPlaceChanges, ItemOrigin, ItemOrigins, ItemSource,
     LEN_CAP_MAX, LastBindings, ModuleBindings, ModuleConstants, Must, PathReader, Paths, Progress,
-    SMALL_MAX, SmallDisplay, Trips, comprehension_id, is_builtin_name,
+    SMALL_MAX, SmallDisplay, Trips, comprehension_id, is_builtin_name, module_getattr_hook,
 };
 pub use special_methods::SpecialMethods;
 

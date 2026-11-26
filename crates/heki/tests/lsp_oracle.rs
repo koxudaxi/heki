@@ -797,6 +797,15 @@ const LAZY_MODELS: &str = "from typing import TYPE_CHECKING, Any\n\nif TYPE_CHEC
 const LAZY_MODELS_RUNTIME: &str = "from pkg.made_models import Waiter as Waiter\n";
 const LAZY_MODELS_ELSE: &str = "from typing import TYPE_CHECKING, Any\n\nif TYPE_CHECKING:\n    from pkg.made_models import Waiter as Waiter\nelse:\n    Waiter: Any = object\n";
 const LAZY_USE: &str = "from pkg.lazy_models import Waiter\n\n\nclass LazyWaiter(Waiter):\n    pass\n\n\nasync def serve_lazy(w: LazyWaiter) -> None:\n    w.wait()\n";
+// A base another module serves from its `__getattr__` (`ModuleDecls::getattr_exports`): the
+// class a factory read from a table by the name defines, while no other file rebinds the table,
+// and the class object a factory annotated `-> type[Waiter]` gives, whose targets are heuristic.
+const SERVED_MODELS: &str = "from typing import Any\n\n\ndef _waiter() -> type:\n    from pkg.made_models import Waiter\n\n    class _Served(Waiter):\n        pass\n\n    return _Served\n\n\n_EXPORTS = {\"Waiter\": _waiter}\n\n\ndef __getattr__(name: str) -> Any:\n    return _EXPORTS[name]()\n";
+const SERVED_MODELS_DECLARED: &str = "from typing import Any\n\nfrom pkg.made_models import Waiter as _Waiter\n\n\ndef _waiter() -> type[_Waiter]:\n    return _Waiter\n\n\n_EXPORTS = {\"Waiter\": _waiter}\n\n\ndef __getattr__(name: str) -> Any:\n    return _EXPORTS[name]()\n";
+const SERVED_USE: &str = "from pkg.served_models import Waiter\n\n\nclass ServedWaiter(Waiter):\n    pass\n\n\nasync def serve_served(w: ServedWaiter) -> None:\n    w.wait()\n";
+const SERVED_PATCH: &str =
+    "import pkg.served_models\n\n\ndef patch() -> None:\n    pkg.served_models._EXPORTS = {}\n";
+const SERVED_PATCH_NONE: &str = "def patch() -> None:\n    return None\n";
 // A factory function and a class attribute annotated with the callable they hold
 // (`Callable[..., Waiter]`, `FunctionDecl::return_type`, `ClassDecl` attribute types): calling
 // what they hold in other files gives a `Waiter` while the annotation names that one class.
@@ -1903,14 +1912,17 @@ fn steps_returned_types() -> Vec<Step> {
 }
 
 /// A read in another file of an attribute annotated with a type parameter of its class, on an
-/// instance annotated with an argument, while the class's annotation names the parameter; and a
+/// instance annotated with an argument, while the class's annotation names the parameter; a
 /// class based on a name another module binds only under `if TYPE_CHECKING:`, while that module
 /// binds it no other way: the wait its method makes is heuristic until the module imports the
-/// name at run time.
+/// name at run time; and a class based on a name another module's `__getattr__` serves, exact
+/// while no file rebinds what the hook reads and heuristic while it serves a class object.
 fn steps_declared_types() -> Vec<Step> {
     const SITE: &[(&str, &str)] = &[("pkg/generic_site_use.py", "EFF101")];
     const LAZY: &[(&str, &str)] = &[("pkg/lazy_use.py", "EFF101 [heuristic]")];
     const LAZY_EXACT: &[(&str, &str)] = &[("pkg/lazy_use.py", "EFF101")];
+    const SERVED: &[(&str, &str)] = &[("pkg/served_use.py", "EFF101")];
+    const SERVED_HEURISTIC: &[(&str, &str)] = &[("pkg/served_use.py", "EFF101 [heuristic]")];
     vec![
         Step::new(
             "an attribute typed by the class's type parameter holds the waiting class",
@@ -1960,6 +1972,40 @@ fn steps_declared_types() -> Vec<Step> {
         )
         .present(LAZY)
         .absent(LAZY_EXACT),
+        Step::new(
+            "a base another module serves from its __getattr__",
+            vec![
+                Action::Create("pkg/served_models.py", SERVED_MODELS.to_owned()),
+                Action::Create("pkg/served_use.py", SERVED_USE.to_owned()),
+            ],
+        )
+        .present(SERVED),
+        Step::new(
+            "another file rebinds the table the hook reads",
+            vec![Action::Create(
+                "pkg/served_patch.py",
+                SERVED_PATCH.to_owned(),
+            )],
+        )
+        .absent(SERVED)
+        .absent(SERVED_HEURISTIC),
+        Step::new(
+            "that file no longer rebinds it",
+            vec![save("pkg/served_patch.py", SERVED_PATCH_NONE)],
+        )
+        .present(SERVED),
+        Step::new(
+            "the factory is annotated with the class object instead",
+            vec![save("pkg/served_models.py", SERVED_MODELS_DECLARED)],
+        )
+        .present(SERVED_HEURISTIC)
+        .absent(SERVED),
+        Step::new(
+            "the factory defines the class again",
+            vec![save("pkg/served_models.py", SERVED_MODELS)],
+        )
+        .present(SERVED)
+        .absent(SERVED_HEURISTIC),
     ]
 }
 
