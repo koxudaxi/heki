@@ -876,6 +876,8 @@ struct Extractor<'a> {
     uses: FxHashMap<VarId, Vec<&'a InstKind>>,
     /// The variables a phi or a block's terminator reads (`return v`, a branch on `v`).
     flow_uses: OnceCell<FxHashSet<VarId>>,
+    /// The names the function binds itself ([`resolver::TypeCtx::local_names`]).
+    local_names: OnceCell<resolver::LocalNames>,
     self_vars: FxHashSet<VarId>,
     param_alias: FxHashMap<VarId, (u8, Option<String>)>,
     /// One-level slots of parameters: `p.a` / `p["k"]` of parameter `p` itself, through copies
@@ -1347,6 +1349,7 @@ impl<'a> Extractor<'a> {
             live,
             uses,
             flow_uses: OnceCell::new(),
+            local_names: OnceCell::new(),
             self_vars,
             param_alias: FxHashMap::default(),
             param_slot_alias: FxHashMap::default(),
@@ -6052,9 +6055,11 @@ impl<'a> Extractor<'a> {
     /// resolves it: the parameter it is on every path, the local it is bound to, or the
     /// attribute it is read from (along the MRO of the object's class).
     fn declared_type(&self, var: VarId) -> Option<crate::types::Ty> {
-        let resolve = |text: &str| self.cx.module.resolve_annotation_ty(text);
         if let Some((i, None)) = self.param_alias.get(&var) {
-            return resolve(self.f.params.get(usize::from(*i))?.annotation.as_deref()?);
+            return self
+                .cx
+                .module
+                .resolve_annotation_ty(self.f.params.get(usize::from(*i))?.annotation.as_deref()?);
         }
         // The annotated local is any name along the copies the value went through.
         let mut cur = var;
@@ -6067,7 +6072,11 @@ impl<'a> Extractor<'a> {
             let annotated =
                 name.and_then(|name| self.f.local_annotations.iter().find(|a| a.target == name));
             if let Some(local) = annotated {
-                return resolve(&local.annotation);
+                let locals = self.local_names.get_or_init(|| self.cx.local_names(self.f));
+                return self
+                    .cx
+                    .module
+                    .resolve_annotation_ty_in(&local.annotation, locals);
             }
             match self.shape.inst(cur).map(|i| &i.kind) {
                 Some(InstKind::Copy { src, .. }) => cur = *src,

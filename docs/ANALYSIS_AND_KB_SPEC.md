@@ -138,6 +138,9 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   afterwards, and each jump), as CPython compiles it, and the Soundness lane rewrites a
   statement in it only if every copy is proven safe. The copies of a `finally` body nested in
   another `finally` body, or holding a way out itself, multiply with each copy around them. A
+  way out no path takes (a `try` body that cannot raise, or that every path leaves by `return`)
+  gets no copy: a read of a local in a block no path enters binds no value, so such a copy would
+  hold every object it reads as one of unknown class. A
   typed `except` clause's test is opaque (a bare `except:` always matches); every `except*`
   clause may run on part of the group; an exception no clause takes is raised again.
 - **Size budget**: a function's lowering takes at most 4 units per byte of its source (at
@@ -851,6 +854,22 @@ and a property read take the annotation. A module constant the module
 body binds once, outside a loop, to a value that names a file (`ModuleDecls::file_constants`,
 `names_a_file`) names it where a function or another module reads it
 (`TypeCtx::names_file_constant`), unless another module rebinds it.
+
+Every name an annotation reads is looked up in one place (`ModuleDecls::lookup`), in this
+order: the function's own binding of the name, for an annotation of a local
+(`TypeCtx::local_names`); the module's binding; a builtin class. The function's binding names
+what one import statement binds (`import types as local_types`, then
+`module: local_types.ModuleType = ...`), counted once however many copies of the statement the
+lowering makes (a `finally` body); a name the function binds otherwise, or more than once, names
+no object. A module's binding of a builtin's name (`ValueError = make_error_class()`) is that
+binding, of unknown class. A parameter's annotation is read in the scope around the function and
+takes the module's names only. `Optional[...]`, `Annotated[...]`, `Union[...]` and the other
+qualifiers are looked through only when the name reads the `typing` or `typing_extensions`
+object, or nothing binds it (a string annotation that never imports it); a project class named
+`Optional` is that class. The builtin exception and warning classes (`BaseException`,
+`ValueError`, `OSError`, ...) are classes of `builtins` that an annotation names and a call of
+the class builds, as the builtin containers are; `IOError` and `EnvironmentError`, which name
+`OSError`, are not.
 
 A module-level name the module body binds once to a type expression reads as the type it names
 wherever an annotation names it, in its module, imported, or re-exported, also as a member of a

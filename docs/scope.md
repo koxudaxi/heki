@@ -296,6 +296,11 @@ Missed findings close as heki learns more:
   [`MUT207`](rules/unresolved-guarded-call.md).
 - A write in an unannotated helper is still found where a caller passes it an object of a known
   class. A read is not.
+- Typed: builtin classes, the builtin exception and warning classes among them
+  (`error: ValueError`; not `IOError` or `EnvironmentError`, and not a name the module or the
+  function binds itself), what a standard library call the catalog types gives, an annotation
+  of a local that names an import of its own function (not a name the function binds more than
+  once or otherwise), and, in a `finally` body, what the annotations say before the `try`.
 - Not typed: values declared `Any` or `types.ModuleType`, generics substituted through
   unbounded `TypeVar`s (a bounded or constrained one gives its bound or constraints), names a
   module binds to a type expression more than once or with type parameters (a type alias bound
