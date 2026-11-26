@@ -252,3 +252,49 @@ fn report_judges_an_unresolved_call_for_each_target_it_may_reach() {
     );
     assert_eq!(reports(&build("targets_unresolved_allow", both)), vec![]);
 }
+
+#[test]
+fn report_judges_an_outside_call_for_each_target_it_names() {
+    // `helper` runs only inside `vendor.f`, a project method the target `vendor.f` names: that
+    // lets it call the outside `vendor.f`, not the outside `vendor.g`.
+    let keys = KEYS.replace("attribution = \"lexical\"\n", "");
+    let contract = |targets: &[&str], extra: &str| -> String {
+        let listed: Vec<String> = targets.iter().map(|t| format!("\"{t}\"")).collect();
+        format!(
+            "[[tool.heki.call-owners]]\nname = \"{}\"\ntargets = [{}]\n{keys}{extra}",
+            targets.join("+"),
+            listed.join(", ")
+        )
+    };
+    let build = |name: &str, contracts: String| {
+        let p = Project::new(name);
+        p.write("pkg/__init__.py", "");
+        p.write(
+            "pkg/h.py",
+            "import vendor as ven\n\n\ndef helper() -> None:\n    ven.f()\n    ven.g()\n\n\n\
+             class vendor:\n    def f(self) -> None:\n        helper()\n",
+        );
+        p.write(
+            "pyproject.toml",
+            &format!(
+                "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n{contracts}"
+            ),
+        );
+        p
+    };
+    let separate = format!(
+        "{}\n{}",
+        contract(&["vendor.f"], ""),
+        contract(&["vendor.g"], "")
+    );
+    let expected = reports(&build("targets_outside_separate", separate));
+    assert_eq!(expected, vec![at("pkg/h.py", 6, "MUT204")]);
+    let together = contract(
+        &["vendor.f", "vendor.g"],
+        "targets-call-each-other = \"report\"\n",
+    );
+    assert_eq!(
+        reports(&build("targets_outside_report", together)),
+        expected
+    );
+}

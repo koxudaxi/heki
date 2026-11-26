@@ -935,8 +935,17 @@ pub(crate) fn mut204<'c>(
     }
     // A call of a symbol outside the project is judged in the function making it, as a call of
     // a project target is: it has no receiver of the caller, and no class initializes itself
-    // through it.
-    let mut outside: Vec<InsideAllowed> = rules.iter().map(|_| InsideAllowed::default()).collect();
+    // through it. The answers are kept per target: with `targets-call-each-other = "report"`
+    // each target has its own allowance.
+    let mut outside: Vec<Vec<InsideAllowed>> = (rules.iter())
+        .map(|r| {
+            r.targets
+                .patterns
+                .iter()
+                .map(|_| InsideAllowed::default())
+                .collect()
+        })
+        .collect();
     let no_family = FxHashSet::default();
     for (key, _) in cx.defined_functions() {
         let mut access_groups = AccessGroups::new();
@@ -957,7 +966,7 @@ pub(crate) fn mut204<'c>(
                     verb: "calls",
                     callee: &callee,
                 };
-                let inside = &mut outside[c];
+                let inside = &mut outside[c][t];
                 let allowance = rule.allowance_for(&[t]);
                 let walk =
                     || delegated_reports(cx, &sites, (&allowance, &no_family), (key, 0, 0), inside);
