@@ -1050,6 +1050,19 @@ const COPY_USER: &str = "import copy\n\nfrom pkg.copied_node import Node\n\n\nde
 const COPY_HELPER: &str = "def grow(rows):\n    return len(rows)\n";
 const COPY_HELPER_GROWING: &str = "def grow(rows):\n    rows.append(1)\n";
 const COPY_HANDED: &str = "from pkg.copy_helper import grow\n\n\ndef handed(options: dict[str, list[int]]) -> None:\n    result = dict(options)\n    grow(result[\"rows\"])\n";
+// A copy hook bound on the copied class after its body, from another module, and a decorator of
+// another module that reads the class or binds a copy hook on it.
+const COPY_PATCH: &str = "from pkg.copied_node import Node\n\n\ndef _copy(self):\n    return self\n\n\nNode.__copy__ = _copy\n";
+const COPIED_NODE_DECORATED: &str = "from pkg.copy_deco import register\n\n\n@register\nclass Node:\n    def __init__(self) -> None:\n        self.children: list[int] = []\n";
+const COPY_DECO: &str = "def register(cls):\n    print(cls.__name__)\n    return cls\n";
+const COPY_DECO_HOOK: &str = "def _copy(self):\n    return self\n\n\ndef register(cls):\n    cls.__copy__ = _copy\n    return cls\n";
+// A store under a name built at run time through a value that may be a class object: a name
+// that is never a copy hook's, one that may be, and the same one through an instance.
+const COPY_FILL_NO_HOOK: &str =
+    "def fill(target, name, value):\n    setattr(target, f\"_cached_{name}\", value)\n";
+const COPY_FILL_HOOK: &str =
+    "def fill(target, name, value):\n    setattr(target, f\"__{name}__\", value)\n";
+const COPY_FILL_INSTANCE: &str = "import types\n\n\ndef fill(name, value):\n    target = types.SimpleNamespace()\n    setattr(target, f\"__{name}__\", value)\n";
 
 // `MUT202` through summaries of changes below a parameter's items: a helper two modules below
 // changes an item of its own copy of what it is handed, then gives that item a new list first; a
@@ -4500,6 +4513,62 @@ fn steps_mut115() -> Vec<Step> {
             vec![save("pkg/copy_helper.py", COPY_HELPER)],
         )
         .absent(&[("pkg/copy_handed.py", "MUT115")]),
+        Step::new(
+            "a new module binds a `__copy__` on the copied class after its body: the claim is open",
+            vec![Action::Create("pkg/copy_patch.py", COPY_PATCH.to_owned())],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "the module is deleted",
+            vec![Action::Delete("pkg/copy_patch.py")],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "a decorator of a new module that hands the class back decorates the copied class",
+            vec![
+                Action::Create("pkg/copy_deco.py", COPY_DECO.to_owned()),
+                save("pkg/copied_node.py", COPIED_NODE_DECORATED),
+            ],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "the decorator binds a copy hook on the class: the claim is open",
+            vec![save("pkg/copy_deco.py", COPY_DECO_HOOK)],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "the decorator only reads the class again",
+            vec![save("pkg/copy_deco.py", COPY_DECO)],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "the copied class is no longer decorated, and the decorator's module is deleted",
+            vec![
+                save("pkg/copied_node.py", COPIED_NODE),
+                Action::Delete("pkg/copy_deco.py"),
+            ],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "a new module stores under a built name that is never a copy hook's",
+            vec![Action::Create(
+                "pkg/copy_fill.py",
+                COPY_FILL_NO_HOOK.to_owned(),
+            )],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "the built name may be a copy hook's: the claim is open",
+            vec![save("pkg/copy_fill.py", COPY_FILL_HOOK)],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "the store goes through an instance",
+            vec![save("pkg/copy_fill.py", COPY_FILL_INSTANCE)],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new("the module is deleted", vec![Action::Delete("pkg/copy_fill.py")])
+            .present(&[("pkg/copy_user.py", "MUT115")]),
     ]
 }
 
@@ -9900,6 +9969,55 @@ fn lsp_diagnostics_equal_a_full_check_for_class_objects_across_modules() {
             vec![save("pkg/types.py", CLASS_OBJECTS_TYPES)],
         )
         .present(both),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
+// The attribute is annotated in a base class of another module than the subclass calling it.
+const CLASS_OBJECT_ATTRIBUTE_BASE: &str = "from pkg.types import DataType\n\n\nclass Parser:\n    def __init__(self) -> None:\n        self.field_type: type[DataType] = DataType\n";
+const CLASS_OBJECT_ATTRIBUTE_USE: &str = "from pkg.base import Parser\nfrom pkg.types import DataType\n\n\nclass OpenAPIParser(Parser):\n    def build(self) -> DataType:\n        return self.field_type(is_dict=True)\n";
+
+/// A call of a class object an attribute declares constructs its class from the declarations of
+/// another module: the subclass calling it sees the base class's annotation change to one of no
+/// known class and back.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_class_object_attributes_across_modules() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/types.py", CLASS_OBJECTS_TYPES.to_owned()),
+        ("pkg/base.py", CLASS_OBJECT_ATTRIBUTE_BASE.to_owned()),
+        ("pkg/use.py", CLASS_OBJECT_ATTRIBUTE_USE.to_owned()),
+    ];
+    let mut s = Session::start_with(
+        "lsp_oracle_class_object_attributes",
+        CLASS_OBJECTS_CONFIG,
+        files,
+        false,
+    );
+    let constructs: &[(&str, &str)] = &[("pkg/use.py", "MUT204")];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(constructs),
+        Step::new(
+            "the attribute is declared `Any`",
+            vec![save(
+                "pkg/base.py",
+                &format!(
+                    "from typing import Any\n\n{}",
+                    CLASS_OBJECT_ATTRIBUTE_BASE.replace(": type[DataType] =", ": Any =")
+                ),
+            )],
+        )
+        .absent(constructs),
+        Step::new(
+            "it is declared a class object again",
+            vec![save("pkg/base.py", CLASS_OBJECT_ATTRIBUTE_BASE)],
+        )
+        .present(constructs),
     ];
     let mut failures = Vec::new();
     for step in &steps {

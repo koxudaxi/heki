@@ -2676,9 +2676,9 @@ impl<'a> Extractor<'a> {
     }
 
     /// The project class a call constructs: a call of a class object (`Model(...)`,
-    /// `cls(...)`, a property's value `self.model_type(...)`), or of a class reached through a
-    /// module or class (`models.Model(...)`), or an allocation by `object.__new__`
-    /// ([`Self::bare_allocation`]).
+    /// `cls(...)`, a property's or an attribute's value `self.model_type(...)`), or of a class
+    /// reached through a module or class (`models.Model(...)`), or an allocation by
+    /// `object.__new__` ([`Self::bare_allocation`]).
     fn construction(&self, kind: &InstKind) -> Option<String> {
         let project = self.cx.project;
         match kind {
@@ -2737,7 +2737,7 @@ impl<'a> Extractor<'a> {
                 }
                 recv => self
                     .cx
-                    .property_value(recv.recv()?, method)??
+                    .called_member(recv.recv()?, method)??
                     .class_object(project)
                     .map(str::to_owned),
             },
@@ -2925,7 +2925,9 @@ impl<'a> Extractor<'a> {
             AttrName::KeyOf(sources) => {
                 return self.computed_name(&owner, Adds::UnlessKeysOf(sources), kind, span);
             }
-            AttrName::Unknown => return self.computed_name(&owner, Adds::Any, kind, span),
+            AttrName::Built { .. } | AttrName::Unknown => {
+                return self.computed_name(&owner, Adds::Any, kind, span);
+            }
         };
         for attr in attrs {
             if removes && owner.is_self {

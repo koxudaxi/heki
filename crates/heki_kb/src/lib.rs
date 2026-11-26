@@ -2962,6 +2962,30 @@ mod tests {
                     ..entry(&[])
                 },
             ),
+            (unittest_symbols(UNITTEST_PLAIN), entry(&[])),
+            (
+                unittest_symbols(UNITTEST_RAISES),
+                EcosystemEntry {
+                    exit_suppresses: Some(true),
+                    ..entry(&[])
+                },
+            ),
+            (
+                unittest_symbols(UNITTEST_WATCHES),
+                EcosystemEntry {
+                    exit_suppresses: Some(false),
+                    ..entry(&[])
+                },
+            ),
+            (
+                s(&[
+                    "unittest.IsolatedAsyncioTestCase.asyncSetUp",
+                    "unittest.IsolatedAsyncioTestCase.asyncTearDown",
+                    "unittest.IsolatedAsyncioTestCase.addAsyncCleanup",
+                    "unittest.IsolatedAsyncioTestCase.enterAsyncContext",
+                ]),
+                entry(&[]),
+            ),
             (
                 s(&[
                     "builtins.open",
@@ -3140,6 +3164,11 @@ mod tests {
                     &["get_running_loop", "get_event_loop", "new_event_loop"],
                 ),
                 returning("asyncio.AbstractEventLoop", entry(&[])),
+            ),
+            // A module made from a spec: `types.ModuleType` says nothing of the names it binds.
+            (
+                s(&["importlib.util.module_from_spec"]),
+                returning("types.ModuleType", entry(&[])),
             ),
             (
                 with_prefix(
@@ -4572,6 +4601,9 @@ mod tests {
                 "atexit.register",
                 "contextlib.ExitStack.callback",
                 "contextlib.AsyncExitStack.callback",
+                "unittest.TestCase.addCleanup",
+                "unittest.TestCase.addClassCleanup",
+                "unittest.IsolatedAsyncioTestCase.addClassCleanup",
             ],
         ),
         (
@@ -4810,6 +4842,68 @@ mod tests {
 
     /// The classes and factories whose context manager's exit returns a false value on every
     /// path.
+    /// The members of `unittest.TestCase` the catalog lists, which no effect belongs to.
+    const UNITTEST_PLAIN: &[&str] = &[
+        "assertEqual",
+        "assertNotEqual",
+        "assertTrue",
+        "assertFalse",
+        "assertIs",
+        "assertIsNot",
+        "assertIsNone",
+        "assertIsNotNone",
+        "assertIn",
+        "assertNotIn",
+        "assertIsInstance",
+        "assertNotIsInstance",
+        "assertAlmostEqual",
+        "assertNotAlmostEqual",
+        "assertGreater",
+        "assertGreaterEqual",
+        "assertLess",
+        "assertLessEqual",
+        "assertRegex",
+        "assertNotRegex",
+        "assertCountEqual",
+        "assertMultiLineEqual",
+        "assertSequenceEqual",
+        "assertListEqual",
+        "assertTupleEqual",
+        "assertSetEqual",
+        "assertDictEqual",
+        "fail",
+        "skipTest",
+        "id",
+        "shortDescription",
+        "setUp",
+        "tearDown",
+        "setUpClass",
+        "tearDownClass",
+        "subTest",
+        "addCleanup",
+        "addClassCleanup",
+        "enterContext",
+        "enterClassContext",
+    ];
+    /// The context managers of the class whose exit swallows the exception it expects.
+    const UNITTEST_RAISES: &[&str] = &["assertRaises", "assertRaisesRegex"];
+    /// The context managers of the class whose exit lets every exception through.
+    const UNITTEST_WATCHES: &[&str] = &[
+        "assertWarns",
+        "assertWarnsRegex",
+        "assertLogs",
+        "assertNoLogs",
+    ];
+
+    /// `members` of both `unittest.TestCase` and `unittest.IsolatedAsyncioTestCase`, which the
+    /// catalog lists one by one for each.
+    fn unittest_symbols(members: &[&str]) -> Vec<String> {
+        ["TestCase", "IsolatedAsyncioTestCase"]
+            .iter()
+            .flat_map(|class| members.iter().map(move |m| format!("unittest.{class}.{m}")))
+            .collect()
+    }
+
     const EXITS_NEVER_SUPPRESS: &[&str] = &[
         "tempfile.TemporaryFile",
         "tempfile.NamedTemporaryFile",
@@ -5012,6 +5106,9 @@ mod tests {
                         || FUTURE_CLASSES.contains(&class)
                         || THREAD_LOCAL_CLASSES.contains(&class)
                         || class.starts_with("builtins.")
+                        // Any module: the class says nothing of the names a value binds, and a
+                        // call on one is unresolved by design (`resolver::is_any_module`).
+                        || class == "types.ModuleType"
                         || (e.returns_receiver_items_in(None) && class.starts_with("typing.")),
                     "{symbol} -> {class}"
                 );

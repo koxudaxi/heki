@@ -390,6 +390,20 @@ class object (`types::Args::Returns`, Priority 2). A `T` that may be `None` (`T 
 `object` give no class, nor does a bare `Callable`. The call itself stays unresolved: the
 annotation does not say which function the value holds.
 
+A call of a value declared `type[C]` or `typing.Type[C]` constructs a `C` (R2: or a project
+subclass) whatever holds the value: a parameter, a local, an attribute annotated in a method or
+in the class body, read on `self` in the class or a subclass or on another instance, and one
+the class stores from such a value (Priority 2 and 3). `recv.attr(...)` where no class of the
+receiver's MRO defines a method or property `attr` calls the value the attribute holds, as a
+call of a parameter declared alike does: its result type (`infer::Engine::member_call`), its
+targets and whether it constructs its class (`TypeCtx::called_member`, also for a property's
+value) come from the attribute's declared type (`ProjectDecls::member_type`). Keywords unpacked
+into the call (`**kwargs`) change nothing. The call's targets are never every implementation
+it can run, so no exact report rests on them: the instance holds its own value, which only the
+declaration ties to a class, and a class the receiver may be (R2) can define a method of the
+name. A value some store binds to an object of unknown class stays unknown, and a
+`type[A | B]` names no class: a constructed object names one class (`CallSite::constructs`).
+
 A read of an attribute annotated with a type parameter of its class (`obj: T` in the class body
 or `self.obj: T` in a method of a module-level `class Site(Generic[T])`, `Protocol[T]`, or
 `class Site[T]:`; `ClassDecl::param_attrs`) on an instance whose annotation gives type arguments

@@ -1,0 +1,68 @@
+{
+  "$defs": {
+    "BaselineEntry": {
+      "additionalProperties": false,
+      "description": "The entry of a group names no file or function. One written before a group was keyed by its\nmodules names those of the import closing the cycle its report showed.",
+      "properties": {
+        "count": {
+          "description": "How many violation sites the entry allows.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "heuristic": {
+          "description": "How many of `count` were heuristic: left out when none were, and in files written before\nversion 3.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "The file of the report, relative to the project root with forward slashes; left out for a\ngroup of modules.",
+          "type": "string"
+        },
+        "qualname": {
+          "description": "The qualified name of the function the report is in; left out at module level and for a\ngroup of modules.",
+          "type": "string"
+        },
+        "rule_code": {
+          "description": "The code of the rule that reports (`EFF101`).",
+          "type": "string"
+        },
+        "target": {
+          "description": "What the report is about, as the report names it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule_code",
+        "target",
+        "count"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://heki.koxudaxi.dev/schemas/baseline-3.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "On-disk shape: `version`, then `[[entries]]` sorted by key (minimal git diffs).",
+  "properties": {
+    "entries": {
+      "description": "The reports the baseline allows, sorted by path, qualified name, rule code, and target.",
+      "items": {
+        "$ref": "#/$defs/BaselineEntry"
+      },
+      "type": "array"
+    },
+    "version": {
+      "const": 3,
+      "description": "3: the counts are violation sites, and `heuristic` says how many of them were heuristic.",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "entries",
+    "version"
+  ],
+  "title": "heki Ratchet baseline, version 3",
+  "type": "object"
+}

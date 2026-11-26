@@ -9,18 +9,22 @@ user what each one found, and stop where a step says to ask.
    `[tool.heki]` table or `heki.toml`.
 2. Run `heki check` from the project root and read the reports and the closing note. An exact
    error fails the run; warnings and heuristic reports do not.
-3. Run `heki recommend` (experimental). It writes no file. It says which rules would report on
-   the project, what heki could not see, and the contracts the code already keeps, with the keys
-   to add. When it lists no contract candidates (for example because the
+3. Run `heki recommend` (experimental). It writes no file. It says which parameter types and
+   contracts the code already keeps, which rules would report on the project, and what heki could
+   not see, with the keys to add. When it lists no contract candidates (for example because the
    `[tool.heki]` block sets `src` and heki sees nothing under it), write that block first, then run
    `heki recommend` again.
 
-## 2. Propose one or two contracts
+## 2. Propose the types, then one or two contracts
 
-Pick the first one or two contracts from what `heki recommend` lists as kept by the code today,
-and show the user the lines you would add, with the reason. Do not propose the whole list: a
+First propose the exact types under "Types the code already keeps": each is an annotation edit
+(`Sequence`, `Mapping`, `AbstractSet`) for a parameter the code never changes, which the type
+checker and `MUT110` then guard. The edits of a group go together (`--output-format json` has
+them); leave the heuristic groups unless the user asks for them. Then pick the first one or two
+contracts from what `heki recommend` lists as kept by the code today, for what no annotation can
+say, and show the user the lines you would add, with the reason. Do not propose the whole list: a
 contract the team has not agreed on becomes a report nobody reads. Wait for the user's answer
-before writing it.
+before writing either.
 
 ## 3. Write the files
 

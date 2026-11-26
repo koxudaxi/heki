@@ -95,9 +95,24 @@ impl LineIndex {
 }
 
 /// Byte-offset span in the original Python source file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 pub struct Span {
+    /// The offset of the first byte.
     pub start: u32,
+    /// The offset after the last byte.
     pub end: u32,
 }
 
@@ -274,6 +289,30 @@ pub fn fstring_head(expr: &ruff_python_ast::Expr) -> Option<String> {
         }
     }
     Some(head)
+}
+
+/// The text an f-string ends with: its literals after its last replacement field (`_changed`
+/// of `f"{name}_changed"`, implicitly concatenated literals included), all of its text when it
+/// has none. `None` for any other expression.
+pub fn fstring_tail(expr: &ruff_python_ast::Expr) -> Option<String> {
+    use ruff_python_ast::{FStringPartRef, InterpolatedStringElement};
+
+    let fs = expr.as_f_string_expr()?;
+    let mut pieces: Vec<&str> = Vec::new();
+    'parts: for part in fs.value.iter().rev() {
+        match part {
+            FStringPartRef::Literal(lit) => pieces.push(&lit.value),
+            FStringPartRef::FString(f) => {
+                for element in f.elements.iter().rev() {
+                    match element {
+                        InterpolatedStringElement::Literal(lit) => pieces.push(&lit.value),
+                        InterpolatedStringElement::Interpolation(_) => break 'parts,
+                    }
+                }
+            }
+        }
+    }
+    Some(pieces.into_iter().rev().collect())
 }
 
 /// Parse Python source text with Python 3.15 syntax enabled (including PEP 810 `lazy import`).

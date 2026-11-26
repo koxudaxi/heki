@@ -9,7 +9,7 @@ use crate::check::{
     Touched, baseline_path, check_selectors, fail_on, load_and_index, project_wide_files,
     show_paths, shown_dir, shown_errors, shown_text,
 };
-use crate::{CheckArgs, JsonSchemaTarget, OutputFormat};
+use crate::{CheckArgs, OutputFormat};
 use anyhow::Result;
 use heki_diagnostics::{Diagnostic, RatchetBaseline, Stylesheet, render};
 use heki_env::{HekiConfig, Severity};
@@ -72,13 +72,6 @@ const GUIDANCE: &[&str] = &[
     "Answer with the files and functions to change, the change itself, and the `heki check` \
      command that confirms it.",
 ];
-
-/// The JSON Schema `--output-format-json-schema` prints for `target`.
-pub(crate) fn json_schema(target: JsonSchemaTarget) -> &'static str {
-    match target {
-        JsonSchemaTarget::GeneratePrompt => include_str!("generate_prompt.schema.json"),
-    }
-}
 
 #[derive(Serialize)]
 struct Prompt {

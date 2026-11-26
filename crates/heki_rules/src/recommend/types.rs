@@ -35,6 +35,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 /// The kind of [`suggest`]'s groups.
@@ -2512,4 +2513,158 @@ fn edited_file(
     let env = &indexed.project.env;
     let parsed = parse_source(&original.path, &env.root, text, &env.layout, env.runtime)?;
     Ok((parsed, map))
+}
+
+// ------------------------------------------------------------------------------ text
+
+/// What each label means, as the text says it under the groups that carry it.
+const LABELS: &[(&str, &str)] = &[
+    (
+        "public",
+        "a name without a leading underscore along it; callers, overriders, and implementers \
+         outside the checked files are not known",
+    ),
+    (
+        "family",
+        "the same parameter in every definition of an override family",
+    ),
+    ("list[str]", "a `Sequence[str]` also admits a plain `str`"),
+];
+
+/// The section as the text prints it: the exact groups by rank, the first
+/// [`super::MAX_EXAMPLES`] of them, or with `all` every group of `section`, the heuristic ones
+/// last with the premises they leave open.
+pub(super) fn render(out: &mut String, section: &Section, all: bool) {
+    out.push_str("\nTypes the code already keeps\n");
+    let (exact, heuristic) =
+        (section.counts.iter()).fold((0, 0), |(e, h), c| (e + c.exact, h + c.heuristic));
+    if exact + heuristic == 0 {
+        out.push_str("  No read-only parameter to suggest a type for here.\n");
+        return;
+    }
+    let listed_later = if heuristic > 0 && !all {
+        " (heki recommend --all lists them)"
+    } else {
+        ""
+    };
+    let _ = writeln!(
+        out,
+        "  {exact} read-only parameter group(s), exact; {heuristic} heuristic{listed_later}"
+    );
+    match (&section.type_checker.found, &section.type_checker.config) {
+        (Some(found), Some(config)) => {
+            let _ = writeln!(out, "  type checker: {found} ({config})");
+        }
+        _ => out.push_str(
+            "  No type checker configuration found: half of each guard is a type checker's.\n",
+        ),
+    }
+    let shown: Vec<&Group> = if all {
+        section.groups.iter().collect()
+    } else {
+        (section.groups.iter())
+            .filter(|g| g.certainty == SuggestionCertainty::Exact)
+            .take(super::MAX_EXAMPLES)
+            .collect()
+    };
+    let (exact_rows, heuristic_rows): (Vec<&Group>, Vec<&Group>) = shown
+        .iter()
+        .partition(|g| g.certainty == SuggestionCertainty::Exact);
+    rows(out, &exact_rows);
+    if exact > exact_rows.len() {
+        let _ = writeln!(
+            out,
+            "    and {} more exact group(s) (heki recommend --all lists them)",
+            exact - exact_rows.len()
+        );
+    }
+    if !heuristic_rows.is_empty() {
+        out.push_str("  heuristic: a premise of the edit is open, or a label holds it back\n");
+        rows(out, &heuristic_rows);
+    }
+    if shown.is_empty() {
+        return;
+    }
+    out.push_str(
+        "  Each group states that the parameter itself is never changed, in its function and in \
+         every function it is handed to, and that it does not leave them. The edits of a group go \
+         together; --output-format json has them.\n",
+    );
+    guards(out, &shown);
+    for (label, means) in LABELS {
+        if shown.iter().any(|g| g.labels.iter().any(|l| l == label)) {
+            let _ = writeln!(out, "  {label}: {means}");
+        }
+    }
+}
+
+/// One line per group, the columns aligned, and for a heuristic group the premises it leaves
+/// open, each once with its first cause.
+fn rows(out: &mut String, groups: &[&Group]) {
+    let first = |g: &Group| g.items.first().cloned();
+    let cells: Vec<(String, String, String, String)> = groups
+        .iter()
+        .filter_map(|g| {
+            let item = first(g)?;
+            let more = match g.items.len() {
+                1 => String::new(),
+                n => format!(" and {} more in the group", n - 1),
+            };
+            Some((
+                format!("{}:{}", item.path, item.line),
+                format!("{}({}){more}", item.qualname, item.target),
+                format!("{} -> {}", item.current, item.proposed),
+                g.labels.join(", "),
+            ))
+        })
+        .collect();
+    let width = |cell: fn(&(String, String, String, String)) -> &String| {
+        cells
+            .iter()
+            .map(|c| cell(c).len())
+            .max()
+            .unwrap_or_default()
+    };
+    let (at, name, change) = (width(|c| &c.0), width(|c| &c.1), width(|c| &c.2));
+    for (g, (place, param, types, labels)) in groups.iter().zip(&cells) {
+        let line = format!("    {place:<at$}  {param:<name$}  {types:<change$}  {labels}");
+        let _ = writeln!(out, "{}", line.trim_end());
+        let mut seen = BTreeSet::new();
+        for open in g.open.iter().filter(|o| seen.insert(&o.premise)) {
+            let _ = writeln!(
+                out,
+                "      open: {}: {} ({}:{})",
+                open.premise, open.cause, open.path, open.line
+            );
+        }
+    }
+}
+
+/// What reports a later change of the types the groups write: the type checker, and heki's
+/// rules as the groups name them, with their certainty and whether they run.
+fn guards(out: &mut String, groups: &[&Group]) {
+    let rules: BTreeSet<String> = (groups.iter())
+        .flat_map(|g| &g.guards)
+        .filter(|guard| guard.by == "heki")
+        .filter_map(|guard| {
+            let rule = guard.rule.as_deref()?;
+            let certainty = guard.certainty.as_deref().unwrap_or("exact");
+            let runs = if guard.runs == Some(true) {
+                "on"
+            } else {
+                "off"
+            };
+            Some(format!("{rule} ({certainty}, {runs})"))
+        })
+        .collect();
+    let heki: String = (rules.iter())
+        .map(|rule| {
+            format!("; {rule} reports handing it to a function without annotations that changes it")
+        })
+        .collect();
+    let _ = writeln!(
+        out,
+        "  After the edit, a type checker reports a change of the parameter in the function and \
+         handing it to a `list`, `dict`, or `set` parameter{heki}."
+    );
 }

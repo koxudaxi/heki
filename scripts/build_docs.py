@@ -13,6 +13,8 @@
 - `docs/schemas/recommend-3.json`: the JSON Schema of `heki recommend --output-format json`
   (`recommend-1.json` and `recommend-2.json` stay published, unchanged, for the objects of
   versions 1 and 2).
+- `docs/schemas/<name>.json`: the JSON Schema of every other JSON format heki writes
+  (`heki check --output-format-json-schema <name>`), listed in `docs/output-formats.md`.
 - `docs/assets/example-check.svg`: `heki check --color always` on the README's examples, drawn
   as a terminal shows it (`scripts/ansi_svg.py`).
 
@@ -56,6 +58,21 @@ PRECISION_PAGE = DOCS / "precision.md"
 GETTING_STARTED_PAGE = DOCS / "getting-started.md"
 RECOMMEND_PAGE = DOCS / "recommend.md"
 RECOMMEND_SCHEMA = DOCS / "schemas" / "recommend-3.json"
+# The other JSON formats, by the name `heki check --output-format-json-schema` takes and the
+# file of `docs/schemas/` it publishes (`generate-prompt` keeps its schema in the binary).
+JSON_SCHEMAS = (
+    "check-1",
+    "report-suppressed-1",
+    "summary-snapshot-1",
+    "baseline-1",
+    "baseline-2",
+    "baseline-3",
+    "inspect-1",
+    "inspect-imports-1",
+    "rule-1",
+    "assumptions-1",
+    "error-1",
+)
 # The command the example of `docs/recommend.md` runs in the project of its Python blocks.
 RECOMMEND_EXAMPLE = ("recommend", "app")
 README = ROOT / "README.md"
@@ -298,6 +315,13 @@ def experimental_page(registry: dict, rules: list[dict]) -> str:
         "`extend-select` names its code or name, and `heki check` then reports it like any "
         "other rule. `heki rule <CODE>` and the rule's page say that it is experimental.",
         "",
+        "On the way to 1.0, heki keeps these stable: the exit codes `0`, `1`, and `2`, the "
+        "exact rules that run by default, the format of the Ratchet baseline, the contract tables "
+        "`write-owners`, `read-owners`, `call-owners`, `readonly-returns`, `invalidation`, and "
+        "`effect-boundaries` with `fail = true` and `[lint] fail = [...]`, and the `json`, `sarif`, "
+        "and `github` output formats. A change to one of them is listed under \"Breaking changes\" "
+        "in the release notes. See [Adopting heki](adoption.md#stability-on-the-way-to-10).",
+        "",
         "| ID | Kind | Target | Since | Tracking |",
         "| -- | ---- | ------ | ----- | -------- |",
     ]
@@ -429,15 +453,16 @@ def certifications_table(precision: dict, rules: list[dict]) -> str:
     share) says so in its row."""
     experimental = {r["code"] for r in rules if r["experimental"]}
     lines = [
-        "| Rule | Certified | Census: reports / false | Holdout: reports / false |",
-        "| ---- | --------- | ----------------------: | -----------------------: |",
+        "| Rule | Certified | Census: reports / false | Holdout: reports / false | Real bugs |",
+        "| ---- | --------- | ----------------------: | -----------------------: | --------: |",
     ]
     for c in precision["certifications"]:
         census, holdout = c["census"], c["holdout"]
         release = c["release"] + (" (experimental)" if c["rule"] in experimental else "")
         lines.append(
             f"| `{c['rule']}` | {release} | {census['reports']} / {census['false_claims']} "
-            f"| {holdout['reports']} / {holdout['false_claims']} |"
+            f"| {holdout['reports']} / {holdout['false_claims']} "
+            f"| {c.get('real_bugs', '-')} |"
         )
     return "\n".join(lines) + "\n"
 
@@ -526,6 +551,10 @@ def outputs(heki: Path, rules: list[dict], registry: dict, precision: dict) -> d
         RECOMMEND_SCHEMA: run(heki, "recommend", "--output-format-json-schema"),
         EXAMPLE_IMAGE: example_image(heki),
     }
+    for name in JSON_SCHEMAS:
+        files[DOCS / "schemas" / f"{name}.json"] = run(
+            heki, "check", "--output-format-json-schema", name
+        )
     for r in rules:
         files[RULES_DIR / f"{r['slug']}.md"] = rule_page(r, registry["policy"])
     return files
@@ -712,6 +741,40 @@ def stale_experimental_marks(rules: list[dict], registry: dict) -> list[str]:
     return stale
 
 
+# The rules certified before the rare-failure path existed (docs/precision.md, "Rare failures"):
+# they need no recorded real bugs. A rule certified later is not listed here.
+CERTIFIED_BEFORE_RARE_FAILURES = frozenset(
+    {
+        "OPT101", "OPT102", "OPT103", "OPT110", "OPT111", "OPT120", "OPT121", "OPT130", "OPT113",
+        "EFF101", "EFF103", "DATA101", "MUT110", "MUT114", "MUT101", "MUT111", "MUT119",
+    }
+)
+RARE_REPORTS = 10
+REAL_BUGS_NEEDED = 2
+
+
+def rare_failures_without_real_bugs(rules: list[dict]) -> list[str]:
+    """The exact rules in the default set whose census and holdout run have fewer than 10 exact
+    reports and that record fewer than two real bugs, except the rules of consequence
+    `minor-bug` and those certified before the rare-failure path."""
+    missing = []
+    for r in rules:
+        certification = r.get("certification")
+        if r["certainty"] != "exact" or not r["default_enabled"] or certification is None:
+            continue
+        if r["consequence"] == "minor-bug" or r["code"] in CERTIFIED_BEFORE_RARE_FAILURES:
+            continue
+        reports = certification["census"]["reports"] + certification["holdout"]["reports"]
+        bugs = certification.get("real_bugs") or 0
+        if reports < RARE_REPORTS and bugs < REAL_BUGS_NEEDED:
+            missing.append(
+                f"{r['code']}: {reports} exact report(s) in the census and the holdout run "
+                f"(under {RARE_REPORTS}) and {bugs} real bug(s) recorded (needs "
+                f"{REAL_BUGS_NEEDED}, as `real_bugs` in crates/heki_rules/src/precision.rs)"
+            )
+    return missing
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     # Resolved: `subprocess` looks a bare `heki` (what `Path("./heki")` prints) up on `PATH`.
@@ -736,6 +799,9 @@ def main() -> int:
         ),
         "Exact rules lack their certification in crates/heki_rules/src/precision.rs": (
             uncertified_exact_rules(rules)
+        ),
+        "Rare-failure rules lack their real bugs in crates/heki_rules/src/precision.rs": (
+            rare_failures_without_real_bugs(rules)
         ),
         "Rules do not say what a report states": rules_without_claims(rules),
         "Rule pages and the premise table list different premises": premises_disagreeing(rules),

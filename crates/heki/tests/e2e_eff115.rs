@@ -355,3 +355,31 @@ fn heki_rule_explains_it() {
     assert!(stdout.contains("Coroutine function"));
     assert!(stdout.contains("experimental"));
 }
+
+#[test]
+fn an_async_cleanup_is_reported_in_a_test_case_and_not_in_an_async_one() {
+    let p = Project::new("eff115_unittest_cleanups");
+    p.write(
+        "tests/test_close.py",
+        r#"import unittest
+
+
+class Plain(unittest.TestCase):
+    async def async_close(self) -> None:
+        pass
+
+    def setUp(self) -> None:
+        self.addCleanup(self.async_close)
+
+
+class Isolated(unittest.IsolatedAsyncioTestCase):
+    async def async_close(self) -> None:
+        pass
+
+    async def asyncSetUp(self) -> None:
+        self.addCleanup(self.async_close)
+"#,
+    );
+    let diags = diagnostics(&p, &["--select", "EFF115"]);
+    assert_eq!(found(&diags), [("tests/test_close.py".to_owned(), 9)]);
+}

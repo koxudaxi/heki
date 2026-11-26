@@ -11,19 +11,25 @@ nav = [
   { "Scope and Limitations" = "scope.md" },
   { "Installation" = "installation.md" },
   { "Getting Started" = "getting-started.md" },
+  { "Features" = [
+    { "State Ownership and Mutation" = "ownership.md" },
+    { "Async and Execution Effects" = "effects.md" },
+    { "Imports and Module Boundaries" = "imports.md" },
+    { "Proven Rewrites (Performance)" = "fixes.md" },
+    { "Configuration Advice" = "recommend.md" },
+    { "Coding Agent Guardrails" = "coding-agents.md" },
+  ]},
   { "Usage" = [
     { "Configuration" = "configuration.md" },
-    { "Fixes and Safety" = "fixes.md" },
     { "Adopting heki in a Code Base" = "adoption.md" },
-    { "Configuration Advice" = "recommend.md" },
     { "CLI Reference" = "cli-reference.md" },
+    { "Output Formats" = "output-formats.md" },
   ]},
   { "Rules" = "rules/index.md" },
   { "Rule Precision" = "precision.md" },
   { "Experimental Features" = "experimental.md" },
   { "Integrations" = [
     { "Editors (LSP)" = "lsp.md" },
-    { "Coding Agents" = "coding-agents.md" },
   ]},
   { "Development" = "development.md" },
 ]

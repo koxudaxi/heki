@@ -11,6 +11,15 @@ use heki_env::{ConfigError, Explain, Problem};
 use heki_rules::project::{FileError, ProjectError, ProjectOptions};
 use std::path::{Path, PathBuf};
 
+/// What a command writes to stdout, next to the report on stderr, when it fails with
+/// `--output-format json`.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub(crate) struct ErrorOutput {
+    /// What the command could not do, and how to fix it.
+    error: Problem,
+}
+
 /// How a command reports its failure: in its output format, with the configuration values it
 /// is about found in the configuration file it reads.
 pub(crate) struct Failures {
@@ -75,7 +84,9 @@ impl Failures {
         });
         let problem = explain(err).locate(config_file.as_deref());
         if matches!(self.format, OutputFormat::Json) {
-            let error = serde_json::json!({ "error": shown(&problem) });
+            let error = ErrorOutput {
+                error: shown(&problem),
+            };
             println!(
                 "{}",
                 serde_json::to_string_pretty(&error).expect("a problem serializes")

@@ -8440,6 +8440,24 @@ fn a_value_doubled_in_the_factory_past_its_size_bound_gives_no_context() {
     assert_eq!(near["registered"].as_array().unwrap().len(), 1);
 }
 
+/// A chain of classes each declaring its `__call__` attribute as the next one: following a call
+/// down the chain is bounded, so a long chain takes no more steps than its size and gives no
+/// crash.
+#[test]
+fn a_long_chain_of_declared_call_attributes_takes_linear_time() {
+    check_linear(64, |n| {
+        let mut text = String::new();
+        for i in 0..n {
+            text.push_str(&format!("class C{i}:\n    __call__: \"C{}\"\n\n\n", i + 1));
+        }
+        text.push_str(&format!("class C{n}:\n    pass\n\n\n"));
+        text.push_str("def invoke(value: C0):\n    value()\n");
+        let p = Project::new(&format!("bounds_call_chain_{n}"));
+        p.write("m.py", &text);
+        p
+    });
+}
+
 /// A module whose `__getattr__` tests its name against a display of `n` literals, returning the
 /// class a factory of the module defines, then serves `n` more names from a table of factories,
 /// and a module basing a class on each name it serves and calling its waiting method. (The

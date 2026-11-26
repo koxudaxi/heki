@@ -126,6 +126,11 @@ $ uv tool install heki      # or: pipx install heki / pip install heki
 $ uvx heki check            # run without installing
 ```
 
+heki ships prebuilt wheels on PyPI for Linux (x86-64, AArch64, x86-64 musl), macOS (Apple silicon,
+Intel), and Windows (x86-64). `uvx heki`, `pip install heki`, and the pre-commit hook need no Rust
+toolchain and compile nothing. Building from source is for other platforms and for development:
+see [Installation](https://heki.koxudaxi.dev/installation/).
+
 ### Try it in 5 minutes
 
 1. In your project's root (the directory with `pyproject.toml`), run `uvx heki==0.9.0 check`. An
@@ -141,9 +146,14 @@ $ uvx heki check            # run without installing
     $ uvx heki==0.9.0 check
     All checks passed (4 file(s)).
     ...
-    hint: `heki recommend` (experimental) lists the rules and contracts that fit this project, and what heki could not see
+    hint: `heki recommend` (experimental) lists the parameter types and contracts the code already keeps, the rules that fit this project, and what heki could not see
     $ uvx heki==0.9.0 recommend
-    heki recommend (experimental) on .: 4 file(s), 10 function(s)
+    heki recommend (experimental) on .: 4 file(s), 11 function(s)
+    ...
+    Types the code already keeps
+      1 read-only parameter group(s), exact; 0 heuristic
+      No type checker configuration found: half of each guard is a type checker's.
+        app/report.py:8  total(prices)  list[float] -> Sequence[float]  public
     ...
     What heki cannot see (no report either way)
       calls of packages heki's catalog does not cover: 1 call(s) of 1 name(s) in 1 package(s)
@@ -156,9 +166,10 @@ $ uvx heki check            # run without installing
     ...
     ```
 
-    heki's catalog doesn't say what `stripe.Charge.create` does, so heki reports nothing through
-    it. If the call waits on the network, `EFF101` would report it in `async def checkout`. Only
-    `app.store` writes `Order.items`, so the report ends with the keys that make that a contract.
+    `total` only reads `prices`, so its annotation can say so. heki's catalog doesn't say what
+    `stripe.Charge.create` does, so heki reports nothing through it. If the call waits on the
+    network, `EFF101` would report it in `async def checkout`. Only `app.store` writes
+    `Order.items`, so the report ends with the keys that make that a contract.
 
 3. Keep it running with the [pre-commit hook](https://heki.koxudaxi.dev/adoption/#pre-commit) and
    a CI step. If the project has findings today, record them in a
@@ -191,6 +202,17 @@ $ heki server                                   # LSP server for editors
 $ heki inspect app.users.load_user              # what one function does (experimental)
 $ heki recommend                                # configuration advice (experimental)
 ```
+
+## 🧭 What heki can do
+
+| Area | What it covers |
+| --- | --- |
+| [State ownership and mutation](https://heki.koxudaxi.dev/ownership/) | Changes to read-only parameters, `lru_cache` results, and frozen fields, and contracts for who may write, read, or call what |
+| [Async, I/O, and execution effects](https://heki.koxudaxi.dev/effects/) | Blocking calls in `async def`, queries and clients in loops, lock hazards, effect boundaries, and effect snapshots |
+| [Imports and module boundaries](https://heki.koxudaxi.dev/imports/) | Import cycles, import-order crashes, test and development code loaded by a package, and import boundaries (experimental) |
+| [Proven performance rewrites](https://heki.koxudaxi.dev/fixes/) | `OPT` findings, and the rewrites `heki check --fix` applies only after proving them |
+| [Function inspection and configuration advice](https://heki.koxudaxi.dev/recommend/) | What one function does with `heki inspect`, and the rules and contracts that fit a project with `heki recommend` (both experimental) |
+| [Coding-agent architecture walls](https://heki.koxudaxi.dev/coding-agents/) | Contracts, a Stop hook, JSON output, and an Agent Skill that keep an agent inside your architecture |
 
 ## ✅ Exact rules
 
@@ -324,6 +346,17 @@ staged file, and, with a baseline, on every regression. Run the whole project in
 Actions, the reports show up as annotations.
 [Adopting heki](https://heki.koxudaxi.dev/adoption/#continuous-integration) has the SARIF run for
 code-scanning alerts, a local hook, and how to check only the files a pull request changes.
+
+## 🛡️ Stability
+
+On the way to 1.0, heki keeps these stable: the exit codes `0`, `1`, and `2`, the exact rules that
+run by default, the format of the Ratchet baseline, the contract tables `write-owners`,
+`read-owners`, `call-owners`, `readonly-returns`, `invalidation`, and `effect-boundaries` with
+`fail = true` and `[lint] fail = [...]`, and the `json`, `sarif`, and `github` output formats. A
+change to one of them is listed under "Breaking changes" in the release notes. The experimental
+features can change in any release: `heki recommend`, `heki inspect`, `heki skill`,
+`--generate-prompt`, and the rules marked experimental
+([the list](https://heki.koxudaxi.dev/experimental/)).
 
 ## 🎯 Scope
 

@@ -1,0 +1,147 @@
+# Async and Execution Effects
+
+heki finds blocking calls in async code, database queries and clients in loops, and lock and task hazards, keeps scopes free of an effect with `effect-boundaries`, and reports functions that gained an effect with `heki snapshot`.
+
+An effect is what a call does besides returning a value: it waits on the network, sends a query, takes a lock, writes a field. heki follows effects through helper calls and across files, so a report names the function that does the work and the chain of calls that leads to it. [Rules](rules/index.md) has one page per rule, and [Contracts](configuration.md#contracts) has every contract key.
+
+## 🔍 What runs without configuration
+
+Two rules are exact and run by default. Their reports show the call chain, and an error fails `heki check`.
+
+| Rule | Reports | Tier |
+| --- | --- | --- |
+| [`EFF101`](rules/async-blocking-call.md) | a call in an `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop, however many helpers below | exact, default |
+| [`EFF103`](rules/loop-db-query.md) | a loop over data whose every iteration sends a database statement | exact, default |
+
+`EFF103` also has heuristic reports, for a loop that can run a query on every iteration. They appear with `--heuristic`.
+
+Two more rules run by default only when you pass `--heuristic` (or set `lint.heuristic = true`), because they can be wrong about the code:
+
+| Rule | Reports | Tier |
+| --- | --- | --- |
+| [`EFF102`](rules/loop-unpooled-client.md) | an HTTP, database, or RPC client, or a sessionless request, created inside a loop | heuristic, runs with `--heuristic` |
+| [`EFF117`](rules/unlocked-write-of-guarded-state.md) | state that one writer changes holding a thread lock and another changes holding none, where both can run on threads heki resolves | heuristic, runs with `--heuristic` |
+
+The first page of the docs shows [`EFF101` two helpers below an `async def` and `EFF103` one helper below a loop](index.md), with their output.
+
+## 🔧 Rules to switch on
+
+These rules are off by default. Name one in `extend-select` or with `--extend-select EFF106`. A prefix such as `EFF` or `ALL` never enables them.
+
+```toml
+# heki.toml
+[lint]
+extend-select = ["EFF106"]
+```
+
+A function that makes a request while it holds a lock:
+
+```python
+# app/sync.py
+import threading
+
+import requests
+
+_lock = threading.Lock()
+
+
+def refresh(url: str) -> str:
+    with _lock:
+        return requests.get(url, timeout=5).text
+```
+
+```console
+$ heki check
+app/sync.py:10:16: EFF106 (lock-or-tx-held-across-io) [error, heuristic] `refresh` calls `requests.get` (blocking network I/O) while holding the synchronous `threading.Lock` taken at line 9
+   |
+10 |         return requests.get(url, timeout=5).text
+   |                ^
+  = related: app/sync.py:10:16: `refresh` calls `requests.get`
+  = help: make the request before taking the lock and hold it only for the update
+
+Found 1 diagnostic(s) in 2 file(s).
+...
+```
+
+This output is from heki 0.9.0. The other opt-in rules:
+
+| Rule | Reports | Tier |
+| --- | --- | --- |
+| [`EFF105`](rules/async-blocking-fs.md) | blocking local file I/O reached from an `async def` | heuristic, opt-in |
+| [`EFF106`](rules/lock-or-tx-held-across-io.md) | an `await` or blocking network I/O while a `threading` lock or a database transaction is held | heuristic, opt-in |
+| [`EFF107`](rules/unretained-async-task.md) | an `asyncio.create_task` result that is never awaited, returned, or stored | heuristic, opt-in |
+| [`EFF109`](rules/lock-reacquired-while-held.md) | a lock that is not reentrant, taken again while it is held, so the thread or task waits for itself | heuristic, experimental, opt-in |
+| [`EFF110`](rules/exclusive-object-fanout.md) | an object that allows one operation at a time (a stream reader, an asyncpg connection, a WebSocket) used by tasks started together | heuristic, experimental, opt-in |
+| [`EFF112`](rules/set-order-output.md) | the iteration order of a set of strings, which changes between runs, reaching a file, a stream, or a serializer | heuristic, experimental, opt-in |
+| [`EFF114`](rules/recursion-error-as-value.md) | an `except` around a recursion that takes the `RecursionError` and goes on, so the result depends on the stack depth | heuristic, experimental, opt-in |
+| [`EFF115`](rules/async-def-as-sync-callback.md) | an `async def` handed to a library call that does not await it (a thread target, an executor function, a signal handler), so the body never runs | heuristic, experimental, opt-in |
+| [`EFF116`](rules/generator-never-iterated.md) | a call of a generator function whose generator nothing iterates, so its body never runs | heuristic, experimental, opt-in |
+
+Experimental rules can change or go away between releases. [Experimental Features](experimental.md) says why each one is marked.
+
+## 📜 Contracts for execution effects
+
+`effect-boundaries` marks code that must stay free of an effect: a render function that makes no blocking call, a decision pass that writes no model state, a generator that does not read the environment. Any function in scope that reaches the effect, directly or through calls, is reported as [`EFF201`](rules/effect-boundary-violation.md) (heuristic, contract).
+
+```toml
+# heki.toml
+[[effect-boundaries]]
+name = "pure-render"
+scopes = ["app.render.*"]
+forbid = ["blocking"]
+message = "render from data the caller already loaded"
+fail = true
+```
+
+`render_page` in `app/render.py` calls `load_title`, which calls `requests.get`:
+
+```console
+$ heki check
+app/render.py:5:19: EFF201 (effect-boundary-violation) [error, heuristic] `render_page` reaches blocking_net (`requests.get` via `app.loader.load_title`), which effect boundary `pure-render` forbids
+  |
+5 |     return f"<h1>{load_title(page_id)}</h1>"
+  |                   ^
+  = related: app/render.py:5:19: `render_page` calls `app.loader.load_title`
+  = related: app/loader.py:5:12: `load_title` calls `requests.get`
+  = help: render from data the caller already loaded
+
+Found 1 diagnostic(s) in 3 file(s).
+```
+
+The run exits with code 1. `forbid` takes tokens such as `blocking`, `blocking-net`, `blocking-db`, `sleep`, `mutates-params`, `writes-targets`, `reads-targets`, `calls`, and `reads-environment`. [`effect-boundaries`](configuration.md#effect-boundaries) lists them all with their extra keys.
+
+## 📸 Public API effect changes across pull requests
+
+A change in what a public function does is worth a review even when no rule fires: it starts changing an argument, or doing network I/O. `heki snapshot` saves the effect summaries of the project, and `MUT103` ([`summary-effect-regression`](rules/summary-effect-regression.md), heuristic, opt-in) reports each function that gained an effect since.
+
+```console
+$ heki snapshot --write    # writes .heki-summary-snapshot.json
+```
+
+Commit the file. Later, `total` starts to sort its argument, and so does `checkout`, which calls it:
+
+```console
+$ heki check --select MUT103 --fail-on warning
+app/billing.py:1:1: MUT103 (summary-effect-regression) [error, heuristic] `total` gained side effects since the summary snapshot: mutates parameter `prices`
+  |
+1 | def total(prices: list[int]) -> int:
+  | ^
+  = help: if the change is intended, refresh the snapshot with `heki snapshot --write`
+
+app/billing.py:6:1: MUT103 (summary-effect-regression) [error, heuristic] `checkout` gained side effects since the summary snapshot: mutates parameter `prices`
+  |
+6 | def checkout(prices: list[int]) -> int:
+  | ^
+  = help: if the change is intended, refresh the snapshot with `heki snapshot --write`
+
+Found 2 diagnostic(s) in 2 file(s).
+```
+
+The run exits with code 1. When the new effect is intended, refresh the snapshot in the same pull request, so the diff of the JSON file shows reviewers what changed. A pull request can also be compared with a snapshot of its base branch, with `heki check --snapshot PATH`. [Effect snapshots](adoption.md#effect-snapshots-mut103) has both workflows.
+
+## 👉 Next steps
+
+- [Configuration: effect-boundaries](configuration.md#effect-boundaries) lists every key and `forbid` token.
+- [Adopting heki in a code base](adoption.md) shows how to start with a baseline, and has the [blocking and database-write contracts of a web service](adoption.md#an-async-web-or-database-service) to copy.
+- `heki inspect app.render.render_page` (experimental) shows what one function reaches, with the call chains. See [Coding agents](coding-agents.md#what-a-function-does-heki-inspect-experimental).
+- [State Ownership and Mutation](ownership.md) covers the contracts about who may change, read, or call a thing.

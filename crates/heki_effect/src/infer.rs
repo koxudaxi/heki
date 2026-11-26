@@ -32,7 +32,7 @@ use crate::invokes;
 use crate::ownership::CASTS;
 use crate::partial::Partial;
 use crate::resolver::stores::Read;
-use crate::resolver::{self, Callee, CopyMade, LocalNames, ProjectDecls, TypeCtx, Val};
+use crate::resolver::{self, BoundArg, Callee, CopyMade, LocalNames, ProjectDecls, TypeCtx, Val};
 use crate::types::{Added, Args, Change, Container, Elem, Held, Obj, Operands, Ty};
 use heki_ast::Span;
 use heki_ir::walk::{Answer, Budget, Facts, FnShape, Join, Sparse, fixpoint};
@@ -52,6 +52,29 @@ pub(crate) struct Passed<'c> {
     args: &'c [VarId],
     kwargs: &'c [(Option<String>, VarId)],
     star_from: Option<u8>,
+}
+
+impl Passed<'_> {
+    /// What the call binds to the parameter at position `index` that `keyword` also names
+    /// ([`resolver::bound_arg`]).
+    fn bound(&self, index: u8, keyword: Option<&str>) -> BoundArg {
+        resolver::bound_arg(
+            self.args,
+            self.kwargs,
+            self.star_from,
+            (Some(index), keyword),
+        )
+    }
+}
+
+/// What `of` gives of the argument `bound` binds: no item when nothing binds the parameter (a
+/// container built empty, as from an empty display), unknown when unpacking may.
+fn bound_elem(bound: BoundArg, of: impl FnOnce(VarId) -> Elem) -> Elem {
+    match bound {
+        BoundArg::Var(a) => of(a),
+        BoundArg::Unbound => Elem::Empty,
+        BoundArg::Unpacked => Elem::Unknown,
+    }
 }
 
 /// What the fixpoint knows about a variable.
@@ -1085,6 +1108,10 @@ fn awaited(t: &Ty) -> Step {
     }
 }
 
+/// The most calls through `__call__` one call of a value follows, past which its result is
+/// unknown.
+const MAX_CALL_DEPTH: u8 = 16;
+
 /// The join of every type, `None` when one is unknown or none covers them all.
 fn join_all(types: impl IntoIterator<Item = Option<Ty>>) -> Option<Ty> {
     let mut out: Option<Ty> = None;
@@ -1245,6 +1272,10 @@ struct Engine<'e, 'a> {
     /// and depth, while one block is entered: a condition reaches the same phi through many
     /// paths (a loop header's phi is an input of itself on each `continue`).
     implied_memo: RefCell<FxHashMap<(VarId, bool, BlockId, u8), Narrowed>>,
+    /// How many calls of a value through its `__call__` are in progress ([`Self::called`]): a
+    /// class whose `__call__` is declared as itself (or as a class declaring it back) calls
+    /// itself forever.
+    call_depth: Cell<u8>,
     /// The value of the body of each lambda the function makes and calls (by the variable
     /// holding it), as the function's cells hold in this pass: what calling the lambda gives.
     lambda_bodies: RefCell<FxHashMap<VarId, Elem>>,
@@ -1434,6 +1465,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             narrowing: None,
             cur: FxHashMap::default(),
             implied_memo: RefCell::default(),
+            call_depth: Cell::new(0),
             lambda_bodies: RefCell::default(),
             lambdas_called: RefCell::default(),
             own_stores: StoreCells::default(),
@@ -2706,17 +2738,30 @@ impl<'e, 'a> Engine<'e, 'a> {
     /// The result of calling the named object `fqn`: the builtins that wrap an iterable keep
     /// its items, anything else returns what [`TypeCtx::call_result`] says. A container they
     /// build is one whatever it wraps, so an unset argument adds no items yet (as in a display):
-    /// a loop rebinding `items = list(items)` keeps its type.
+    /// a loop rebinding `items = list(items)` keeps its type. An iterable that `*` or `**`
+    /// unpacking may pass leaves the items unknown; `deque` and `enumerate` also take theirs by
+    /// the keyword `iterable`, the others by position only (`list(iterable=xs)` raises
+    /// `TypeError`, and a `**` mapping binds no positional-only parameter); `dict` also takes
+    /// entries by keyword.
     fn call_named(&self, fqn: &str, call: Passed<'_>) -> Step {
         let args = call.args;
-        let items = |i: usize| args.get(i).map_or(Elem::Empty, |a| self.items_of(*a));
+        let items_at = |index: u8, keyword: Option<&str>| {
+            bound_elem(call.bound(index, keyword), |a| self.items_of(a))
+        };
+        let items = |index: u8| items_at(index, None);
         let iterator = |class: &str, item: Elem| Ty::container(class, Args::items(item));
         Ok(Some(match fqn {
-            "builtins.enumerate" => {
-                iterator(fqn, pair(Elem::Of(Ty::inst("builtins.int")), items(0)))
-            }
+            "builtins.enumerate" => iterator(
+                fqn,
+                pair(
+                    Elem::Of(Ty::inst("builtins.int")),
+                    items_at(0, Some("iterable")),
+                ),
+            ),
+            // `*` unpacking passes iterables heki does not count (as for `itertools.chain`).
+            "builtins.zip" if call.star_from.is_some() => iterator(fqn, Elem::Unknown),
             "builtins.zip" => {
-                let columns = (0..args.len()).map(items).collect();
+                let columns = args.iter().map(|a| self.items_of(*a)).collect();
                 iterator(
                     fqn,
                     Elem::Of(Ty::container("builtins.tuple", Args::Tuple(columns))),
@@ -2724,8 +2769,9 @@ impl<'e, 'a> Engine<'e, 'a> {
             }
             "builtins.reversed" | "builtins.iter" if args.len() == 1 => iterator(fqn, items(0)),
             "builtins.filter" => iterator(fqn, items(1)),
+            "itertools.chain" if call.star_from.is_some() => iterator(fqn, Elem::Unknown),
             "itertools.chain" => {
-                let item = (0..args.len()).fold(Elem::Empty, |acc, i| acc.join(&items(i)));
+                let item = (args.iter()).fold(Elem::Empty, |acc, a| acc.join(&self.items_of(*a)));
                 iterator(fqn, item)
             }
             "itertools.chain.from_iterable" => {
@@ -2747,30 +2793,48 @@ impl<'e, 'a> Engine<'e, 'a> {
             "builtins.list" | "builtins.set" | "builtins.frozenset" => {
                 Ty::container(fqn, Args::items(items(0)))
             }
-            "builtins.tuple" if args.is_empty() => Ty::container(fqn, Args::Tuple(Vec::new())),
-            "builtins.tuple" => Ty::container(fqn, Args::items(items(0))),
+            "collections.deque" => Ty::container(fqn, Args::items(items_at(0, Some("iterable")))),
+            "builtins.tuple" => match call.bound(0, None) {
+                BoundArg::Unbound => Ty::container(fqn, Args::Tuple(Vec::new())),
+                BoundArg::Var(_) | BoundArg::Unpacked => Ty::container(fqn, Args::items(items(0))),
+            },
             "builtins.dict" => {
-                let args = match args.first() {
-                    None => Args::map(Elem::Empty, Elem::Empty),
-                    Some(a) => match self.need(*a).map(|t| t.and_then(Ty::obj).map(|o| &o.args)) {
-                        Err(Pending) => Args::map(Elem::Empty, Elem::Empty),
-                        Ok(Some(Args::Map(k, v))) => Args::Map(k.clone(), v.clone()),
-                        // `dict(pairs)` of `(key, value)` tuples.
-                        Ok(Some(other)) => match other.item() {
-                            Elem::Of(Ty::Inst(Obj {
-                                args: Args::Tuple(kv),
-                                ..
-                            })) if kv.len() == 2 => Args::map(kv[0].clone(), kv[1].clone()),
-                            _ => Args::None,
-                        },
-                        Ok(None) => Args::None,
-                    },
+                let mut args = match call.bound(0, None) {
+                    BoundArg::Unbound => Args::map(Elem::Empty, Elem::Empty),
+                    BoundArg::Unpacked => Args::None,
+                    BoundArg::Var(a) => {
+                        match self.need(a).map(|t| t.and_then(Ty::obj).map(|o| &o.args)) {
+                            Err(Pending) => Args::map(Elem::Empty, Elem::Empty),
+                            Ok(Some(Args::Map(k, v))) => Args::Map(k.clone(), v.clone()),
+                            // `dict(pairs)` of `(key, value)` tuples.
+                            Ok(Some(other)) => match other.item() {
+                                Elem::Of(Ty::Inst(Obj {
+                                    args: Args::Tuple(kv),
+                                    ..
+                                })) if kv.len() == 2 => Args::map(kv[0].clone(), kv[1].clone()),
+                                _ => Args::None,
+                            },
+                            Ok(None) => Args::None,
+                        }
+                    }
                 };
+                // A keyword is an entry under its name (`dict(a=x)`), and a `**` mapping adds
+                // its entries, as in a display.
+                for (name, v) in call.kwargs {
+                    let (key, value) = match name {
+                        Some(_) => (Elem::Of(Ty::inst("builtins.str")), self.fact(*v).elem()),
+                        None => self.mapping(*v),
+                    };
+                    args = match args {
+                        Args::Map(keys, values) => Args::map(keys.join(&key), values.join(&value)),
+                        _ => Args::None,
+                    };
+                }
                 Ty::container(fqn, args)
             }
             // `next(it, default)`: a `None` default adds nothing.
             "builtins.next" if !args.is_empty() => {
-                let default = args.get(1).map_or(Elem::Empty, |d| self.fact(*d).elem());
+                let default = bound_elem(call.bound(1, None), |d| self.fact(d).elem());
                 return item_ty(items(0).join(&default));
             }
             "functools.partial" if !args.is_empty() => {
@@ -2790,9 +2854,9 @@ impl<'e, 'a> Engine<'e, 'a> {
                     .declared_or_inferred(value, declared.as_ref())
                     .map(|t| t.cloned());
             }
-            // A library class that copies its argument (`collections.deque(xs)`) makes an
-            // instance of itself.
-            "collections.deque" | "collections.OrderedDict" | "builtins.bytearray" => {
+            // A library class that copies its argument (`collections.OrderedDict(pairs)`) makes
+            // an instance of itself.
+            "collections.OrderedDict" | "builtins.bytearray" => {
                 return Ok(self.cx.call_result(fqn, |i, k| self.passed(call, i, k)));
             }
             // A copy (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`) has its original's
@@ -3121,17 +3185,18 @@ impl<'e, 'a> Engine<'e, 'a> {
                 .map(|t| decl.call_type(t));
         }
         // An attribute of an instance that no class of its MRO defines a method of holds a value
-        // of its declared type: a `Callable[..., T]` gives the `T` it names.
+        // of its declared type, and the call calls that value as a call of a parameter declared
+        // alike does: a `Callable[..., T]` gives the `T` it names, a `type[C]` an instance of `C`
+        // (`TypeCtx::called_member` gives the call's targets).
         if matches!(recv, Ty::Inst(_) | Ty::Super(_))
             && cx.project.is_project_class(class)
             && let Some(result) = self
                 .member(recv, method)
                 .ok()
                 .flatten()
-                .as_ref()
-                .and_then(Ty::returned)
+                .and_then(|value| self.called(&value, call))
         {
-            return Some(result.clone());
+            return Some(result);
         }
         let callee = cx.project.method_targets(class, method, skip_self, cx.kb);
         let entry = match &callee {
@@ -3173,7 +3238,16 @@ impl<'e, 'a> Engine<'e, 'a> {
                 fqns.iter()
                     .map(|fqn| self.cx.call_result(fqn, |i, k| self.passed(call, i, k))),
             ),
-            other => self.member_call(other, "__call__", call),
+            other => {
+                let depth = self.call_depth.get();
+                if depth >= MAX_CALL_DEPTH {
+                    return None;
+                }
+                self.call_depth.set(depth + 1);
+                let result = self.member_call(other, "__call__", call);
+                self.call_depth.set(depth);
+                result
+            }
         }
     }
 
