@@ -893,7 +893,9 @@ Source: https://heki.koxudaxi.dev/installation/
 # Installation
 
 heki is a single executable: its Python package ships only that executable and installs no
-Python dependencies into your environment.
+Python dependencies into your environment. It is published as prebuilt wheels on PyPI for the
+platforms listed below, so `uvx heki`, `pip install heki`, and the pre-commit hook need no Rust
+toolchain and compile nothing.
 
 ## With uv, pipx, or pip
 
@@ -930,16 +932,6 @@ Wheels are published for these platforms:
 | macOS | Apple silicon, Intel |
 | Windows | x86-64 |
 
-## From source
-
-heki needs Rust 1.99 or newer:
-
-```console
-$ git clone https://github.com/koxudaxi/heki
-$ cd heki
-$ cargo install --path crates/heki
-```
-
 ## Check the installation
 
 ```console
@@ -954,6 +946,20 @@ $ heki rule --all
 - The version of the checked code comes from
   [`target-version`](https://heki.koxudaxi.dev/configuration/#top-level-settings), or from `requires-python`; see
   [Scope](https://heki.koxudaxi.dev/scope/#the-target-python-version) for what it changes.
+
+## From source
+
+??? note "Only for a platform without a wheel, or for development on heki"
+
+    heki needs Rust 1.99 or newer:
+
+    ```console
+    $ git clone https://github.com/koxudaxi/heki
+    $ cd heki
+    $ cargo install --path crates/heki
+    ```
+
+    `pip install` of the source distribution builds the same executable with maturin.
 
 
 ---
@@ -1339,6 +1345,7 @@ Without `fail = true` this run exits with code 0, because a heuristic report cou
 
 - [Configuration: contracts](https://heki.koxudaxi.dev/configuration/#contracts) lists every key of the five contracts.
 - [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/) shows how to start with a baseline.
+- [Adoption recipes](https://heki.koxudaxi.dev/adoption/#starter-recipes) have contracts to copy for a web service and a layered application.
 - [Coding agents](https://heki.koxudaxi.dev/coding-agents/) shows how the same contracts keep an agent out of the files it must not change.
 - `heki inspect app.cart.remove` (experimental) shows what one function changes, keeps, and returns.
 
@@ -1491,7 +1498,7 @@ The run exits with code 1. When the new effect is intended, refresh the snapshot
 ## 👉 Next steps
 
 - [Configuration: effect-boundaries](https://heki.koxudaxi.dev/configuration/#effect-boundaries) lists every key and `forbid` token.
-- [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/) shows how to start with a baseline.
+- [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/) shows how to start with a baseline, and has the [blocking and database-write contracts of a web service](https://heki.koxudaxi.dev/adoption/#an-async-web-or-database-service) to copy.
 - `heki inspect app.render.render_page` (experimental) shows what one function reaches, with the call chains. See [Coding agents](https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental).
 - [State Ownership and Mutation](https://heki.koxudaxi.dev/ownership/) covers the contracts about who may change, read, or call a thing.
 
@@ -1645,7 +1652,7 @@ The import is in `total`, so it runs when `total` runs, and loading `app.domain.
 
 - [Configuration: import-boundaries](https://heki.koxudaxi.dev/configuration/#import-boundaries) lists every key of the contract.
 - [Configuration: imports](https://heki.koxudaxi.dev/configuration/#imports-toolhekiimports) lists `cycle-edges` and `module-distributions`.
-- [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/) shows how to start with a baseline.
+- [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/) shows how to start with a baseline, and has a [domain boundary with a read-only settings contract](https://heki.koxudaxi.dev/adoption/#a-layered-application) to copy.
 - [State Ownership and Mutation](https://heki.koxudaxi.dev/ownership/) and [Async and Execution Effects](https://heki.koxudaxi.dev/effects/) cover the other contracts.
 
 
@@ -4464,6 +4471,57 @@ Their reports can be wrong about the code: they are printed, and fail the run on
 it would add on your code ("Rules worth enabling here"). `relax-async-in-tests`, on by default,
 leaves `EFF101`, `EFF105`, and `EFF106` out of test code.
 
+Two contracts keep the rest of the service in line: handlers that never block, and database
+writes that only the repository layer makes. `fail = true` makes their reports fail the run.
+
+```toml
+# heki.toml
+[[effect-boundaries]]
+name = "handlers-do-not-block"
+scopes = ["app.web.*"]
+forbid = ["blocking"]
+message = "await an async client, or move the call to app.repo and run it in a thread"
+fail = true
+
+[[call-owners]]
+name = "db-writes-in-repo"
+targets = ["app.db.Session.add", "app.db.Session.commit"]
+allowed-callers = ["app.repo.*"]
+message = "write through a function of app.repo"
+fail = true
+```
+
+The first reports a `time.sleep` two calls below an `async def` in `app.web` (`EFF201`). The
+second reports a handler that calls `session.add` or `session.commit` itself (`MUT204`). Use
+`write-owners` instead when the rule is about a field, not a call:
+[State Ownership](https://heki.koxudaxi.dev/ownership/#which-contract-do-i-need).
+
+### A layered application
+
+Keep the domain free of the web and infrastructure layers, and keep a shared settings object
+from being changed in place:
+
+```toml
+# heki.toml
+[[import-boundaries]]   # experimental
+name = "domain-is-a-leaf"
+importers = ["app.domain", "app.domain.*"]
+forbidden-imports = ["app.web", "app.web.*", "app.infra", "app.infra.*"]
+message = "pass what the domain needs in as an argument"
+fail = true
+
+[[readonly-returns]]
+name = "shared-settings"
+producers = ["app.settings.get_settings"]
+deep = true
+fail = true
+```
+
+A module of `app.domain` that imports `app.infra` is reported as `IMP201`, and a view that
+assigns to `get_settings().debug` or appends to `get_settings().hosts` as `MUT202`. See
+[Imports](https://heki.koxudaxi.dev/imports/#architecture-import-boundaries) and
+[State Ownership](https://heki.koxudaxi.dev/ownership/#which-contract-do-i-need).
+
 ### Walls for a team or a coding agent
 
 Declare the architecture as contracts, make their reports fail the run with `fail = true`, and give
@@ -4507,6 +4565,10 @@ fail = true
   that wants that can still set. Record today's findings in the baseline first
   (`uvx heki==0.9.0 check --update-baseline`), so that only new ones fail.
 - The `message` is the help of every report of the contract: write it as an instruction.
+- A baseline does not stop a new `# heki: ignore[...]` or `# noqa` from hiding a report. In
+  review and in CI, write `heki check --report-suppressed head.json` for the pull request and for
+  its base and compare them ([Auditing inline suppressions](https://heki.koxudaxi.dev/adoption/#auditing-inline-suppressions)).
+  `CODEOWNERS` covers the contract and baseline files, and this comparison covers the comments.
 - For Claude Code, add the [Stop hook](https://heki.koxudaxi.dev/coding-agents/#a-stop-hook-for-claude-code): it runs
   `heki check`, with the baseline `heki.toml` names, when the agent is about to end its turn,
   and sends a failing report back to it.
@@ -4686,14 +4748,10 @@ repos:
       - id: heki
 ```
 
-[heki-pre-commit](https://github.com/koxudaxi/heki-pre-commit) installs heki from its PyPI wheel, so
-there is no compile and no Rust toolchain. Its tags follow heki releases, so `pre-commit autoupdate`
-moves `rev` to the latest release.
-
-To build heki from source instead, point `repo` at `https://github.com/koxudaxi/heki` with a release
-`rev`. pre-commit then installs the repository as a Python package, which maturin compiles with cargo
-(Rust 1.99 or newer; when cargo is not on `PATH`, the build installs Rust into a cache directory
-first). That takes a few minutes, and pre-commit keeps the installed hook for later runs.
+[heki-pre-commit](https://github.com/koxudaxi/heki-pre-commit) installs heki from its prebuilt PyPI
+wheel (the [platforms](https://heki.koxudaxi.dev/installation/) heki publishes wheels for), so it compiles nothing and needs
+no Rust toolchain. Its tags follow heki releases, so `pre-commit autoupdate` moves `rev` to the
+latest release.
 
 A local hook can run any version of the PyPI wheel, also without a compile or a Rust toolchain:
 
@@ -4747,6 +4805,14 @@ report of its key, so a run with `--touched` compares all of them and shows ever
 grown entry fails the commit wherever its reports are, also in a file the commit left alone, since
 the commit added the report. It judges the stale entries of the touched files and of the reports
 that touch them only: a stale entry elsewhere is left to a run over the whole project.
+
+??? note "Building the hook from source"
+
+    Only a platform without a wheel, or a development version of heki, needs this. Point `repo` at
+    `https://github.com/koxudaxi/heki` with a release `rev`. pre-commit then installs the repository
+    as a Python package, which maturin compiles with cargo (Rust 1.99 or newer; when cargo is not on
+    `PATH`, the build installs Rust into a cache directory first). That takes a few minutes, and
+    pre-commit keeps the installed hook for later runs.
 
 ## Continuous integration
 
@@ -4874,6 +4940,17 @@ The configuration, the baseline, and the CI files that decide this (`pyproject.t
 `heki.toml`, the baseline file, and `.github/workflows/`) belong in `CODEOWNERS`:
 the audit file shows what suppressions hide, and a weakened configuration or baseline is the
 code owners' to review.
+
+## Stability on the way to 1.0
+
+On the way to 1.0, heki keeps these stable: the exit codes `0`, `1`, and `2`, the exact rules that
+run by default, the format of the Ratchet baseline, the contract tables `write-owners`,
+`read-owners`, `call-owners`, `readonly-returns`, `invalidation`, and `effect-boundaries` with
+`fail = true` and `[lint] fail = [...]`, and the `json`, `sarif`, and `github` output formats. A
+change to one of them is listed under "Breaking changes" in the release notes. The experimental
+features can change in any release: `heki recommend`, `heki inspect`, `heki skill`,
+`--generate-prompt`, and the rules marked experimental
+([Experimental Features](https://heki.koxudaxi.dev/experimental/) has the list).
 
 ## Rolling out rules
 
@@ -5902,7 +5979,16 @@ cost estimate such as "(N+1)", and no advice (that goes into the help).
 Exact claims hold in every run consistent with seven assumptions
 ([ARCHITECTURE.md, section 3.4](https://github.com/koxudaxi/heki/blob/main/ARCHITECTURE.md)):
 
-- **R1**: the functions and classes on a call chain are not replaced at run time.
+- **R1**: the functions and classes on a call chain are not replaced at run time. A special
+  method bound on a class after its body (`__setattr__`, `__delattr__`, `__getattribute__`,
+  `__getattr__`, a copy hook) is bound under its own name: a store under a constant name (a
+  string literal, or a module or class name bound once to one), or under a name the storing
+  function builds with constant text that can still spell it, may bind it, and a store under a
+  name of unknown value (a parameter, a loop variable over `dir()`, `vars()`, or a mapping's keys,
+  a value read from data, a module name bound to a built string) is taken to bind none. This
+  gives up `setattr(cls, name, hook)` binding `__setattr__` through such a `name`. Code heki
+  does not read is taken to bind none either: a class decorator outside the project, and a call
+  or a closure the class is handed to, bind on it only what the stores heki reads bind.
 - **R2**: a value annotated `C` is an instance of `C` or of a project subclass. A premise that
   goes through a method call holds only when every implementation in such a subclass has it.
   A value annotated with a nominal container ABC (`Sequence`, `Mapping`, `Set`, and their mutable
@@ -5951,6 +6037,8 @@ reports](https://heki.koxudaxi.dev/precision/#harm-of-the-exact-reports)):
   ([Fixes and Safety](https://heki.koxudaxi.dev/fixes/)), so a report is a fix, not only a line to read.
 - `OPT113` runs by default on its own share: 2 of its 8 census reports, and none of its 6
   holdout reports.
+- A rule with fewer than 10 exact reports in its certification runs by default on the real bugs
+  it found instead: [Rare failures](https://heki.koxudaxi.dev/precision/#rare-failures).
 
 ## How a rule becomes exact
 
@@ -5966,11 +6054,44 @@ A rule is certified exact when all four hold:
    rule was designed or fixed, finds no false claim outside a violation of R1-R7.
 4. **Run-time oracle**: the claimed events (the call that runs, the statement executed on each
    iteration) happen where the code ran, checked with `sys.monitoring` on the differential test
-   suite and on datamodel-code-generator.
+   suite and on datamodel-code-generator and, for a rule whose sites those do not have, on
+   programs its premise table generates: each base program fails as claimed, and no program with
+   a premise stripped does.
 
 Every release then runs the corpus with the release candidate and checks every report it adds
 or changes in an exact rule. A false claim found later is a bug: it is fixed before the next
 release, or the rule becomes heuristic in that release and needs a new certification.
+
+## Rare failures
+
+Some rules report a failure that mature code has already fixed: an import that raises, a lock
+that waits for itself, a function body that never runs. heki reports them where the code is
+written, in the editor and in hooks, so the corpus has few of them, and a share of real harm
+cannot be read from a handful of reports. Such a rule is certified as any other, and runs by
+default when all of these hold:
+
+1. Its consequence is `Bug`, and its claim is a failure a run shows: an exception, a wait that
+   never ends, a body that does not run, or a test that gives the opposite answer.
+2. Its census and its holdout run have fewer than 10 exact reports together, and no false claim.
+   A census or a holdout run without a report counts; packages added for the rule are not
+   required.
+3. The run-time oracle shows both sides on programs its premise table generates: every base
+   program reports and fails as claimed where it runs, and no program with one premise stripped
+   reports or fails.
+4. It found at least two real bugs, in two projects: exact reports that two reviewers class as
+   confirmed, at the parent commit of a merged pull request that fixes the failure (the report
+   is gone at the fix), or in the young repositories of the development corpus.
+
+A false claim found later demotes the rule as for any exact rule. A rule that reaches 10 exact
+reports is judged on its share of real harm. Below 10, one report moves the share by more than 10
+points, so the 10 % bar decides nothing.
+
+The certifications table records the real bugs of such a rule, and `build_docs.py` fails when a
+rule in the default set with fewer than 10 exact reports has none recorded. It exempts the rules
+of consequence `MinorBug` and the rules certified before this section existed (`OPT101`,
+`OPT102`, `OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`, `OPT113`, `EFF101`,
+`EFF103`, `DATA101`, `MUT110`, `MUT114`, `MUT101`, `MUT111`, `MUT119`); a rule certified after it
+is not exempt.
 
 ## Certifications
 
@@ -5983,30 +6104,34 @@ census reports are those of its exact tier with the plain-key premise, all among
 the census of the earlier tier checked by hand. The census of `EFF101` counts its boundaries
 before reports reaching one waiting call are folded together.
 
-| Rule | Certified | Census: reports / false | Holdout: reports / false |
-| ---- | --------- | ----------------------: | -----------------------: |
-| `OPT101` | 0.2.0 | 7 / 0 | 2 / 0 |
-| `OPT102` | 0.2.0 | 1 / 0 | 0 / 0 |
-| `OPT103` | 0.2.0 | 128 / 0 | 188 / 0 |
-| `OPT110` | 0.2.0 | 8 / 0 | 0 / 0 |
-| `OPT111` | 0.2.0 | 7 / 0 | 7 / 0 |
-| `OPT120` | 0.2.0 | 70 / 0 | 33 / 0 |
-| `OPT121` | 0.2.0 | 12 / 0 | 5 / 0 |
-| `OPT130` | 0.2.0 | 1 / 0 | 0 / 0 |
-| `OPT113` | 0.2.0 | 8 / 0 | 6 / 0 |
-| `EFF101` | 0.2.0 | 287 / 0 | 152 / 0 |
-| `EFF103` | 0.2.0 | 103 / 0 | 122 / 0 |
-| `DATA101` | 0.2.0 | 6 / 0 | 0 / 0 |
-| `MUT110` | 0.2.0 | 5 / 0 | 2 / 0 |
-| `MUT114` | 0.2.0 | 5 / 0 | 5 / 0 |
-| `MUT101` | 0.2.4 (experimental) | 26 / 0 | 1 / 0 |
-| `MUT111` | 0.2.4 (experimental) | 60 / 0 | 2 / 0 |
-| `MUT119` | 0.2.5 | 23 / 0 | 2 / 0 |
+| Rule | Certified | Census: reports / false | Holdout: reports / false | Real bugs |
+| ---- | --------- | ----------------------: | -----------------------: | --------: |
+| `OPT101` | 0.2.0 | 7 / 0 | 2 / 0 | - |
+| `OPT102` | 0.2.0 | 1 / 0 | 0 / 0 | - |
+| `OPT103` | 0.2.0 | 128 / 0 | 188 / 0 | - |
+| `OPT110` | 0.2.0 | 8 / 0 | 0 / 0 | - |
+| `OPT111` | 0.2.0 | 7 / 0 | 7 / 0 | - |
+| `OPT120` | 0.2.0 | 70 / 0 | 33 / 0 | - |
+| `OPT121` | 0.2.0 | 12 / 0 | 5 / 0 | - |
+| `OPT130` | 0.2.0 | 1 / 0 | 0 / 0 | - |
+| `OPT113` | 0.2.0 | 8 / 0 | 6 / 0 | - |
+| `EFF101` | 0.2.0 | 287 / 0 | 152 / 0 | - |
+| `EFF103` | 0.2.0 | 103 / 0 | 122 / 0 | - |
+| `DATA101` | 0.2.0 | 6 / 0 | 0 / 0 | - |
+| `MUT110` | 0.2.0 | 5 / 0 | 2 / 0 | - |
+| `MUT114` | 0.2.0 | 5 / 0 | 5 / 0 | - |
+| `MUT101` | 0.2.4 (experimental) | 26 / 0 | 1 / 0 | - |
+| `MUT111` | 0.2.4 (experimental) | 60 / 0 | 2 / 0 | - |
+| `MUT119` | 0.2.5 | 23 / 0 | 2 / 0 | - |
 
 The exact tier of the size-dependent rewrites has since asked that the data decide the loop's trip
 count, which keeps a subset of the reports their census and holdout run checked.
 
 ## Harm of the exact reports
+
+The table below is why the size-dependent `OPT` rewrites are opt-in: almost none of their exact
+reports were of real harm. The bug rules (`EFF`, `MUT`) are a different kind. A report of one names
+a defect, and [Measurements](https://heki.koxudaxi.dev/precision/#measurements) gives the real-harm share of each in its own row.
 
 The certification runs of the `OPT` rules classed the harm of their exact reports. The census
 reused the classes of an earlier pre-check, which classed a sample, so some census reports have
@@ -6085,6 +6210,8 @@ Source: https://heki.koxudaxi.dev/experimental/
 Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. A feature leaves this page when it becomes stable.
 
 An experimental rule is never enabled by default: it runs only when `select` or `extend-select` names its code or name, and `heki check` then reports it like any other rule. `heki rule <CODE>` and the rule's page say that it is experimental.
+
+On the way to 1.0, heki keeps these stable: the exit codes `0`, `1`, and `2`, the exact rules that run by default, the format of the Ratchet baseline, the contract tables `write-owners`, `read-owners`, `call-owners`, `readonly-returns`, `invalidation`, and `effect-boundaries` with `fail = true` and `[lint] fail = [...]`, and the `json`, `sarif`, and `github` output formats. A change to one of them is listed under "Breaking changes" in the release notes. See [Adopting heki](https://heki.koxudaxi.dev/adoption/#stability-on-the-way-to-10).
 
 | ID | Kind | Target | Since | Tracking |
 | -- | ---- | ------ | ----- | -------- |
@@ -7723,9 +7850,13 @@ Its premises:
   run (R2, R5). Established.
 - **Plain write**: the write is one of two kinds. It may rebind or delete the attribute with a
   plain store: no property, descriptor, `__setattr__`, `__delattr__`, or metaclass heki does not
-  know in a class the instance may be, and every base a project class or a plain one. Or it may
-  change in place the builtin list, dict, or set the attribute holds by its type, through a
-  changing method or an item store that no project subclass of the container replaces.
+  know in a class the instance may be, no `__setattr__` or `__delattr__` bound on one after its
+  body by a store heki reads (through a value that may be a class object, under that name or a
+  name built at run time that may be it, also in a class decorator or an `__init_subclass__`,
+  as for `MUT115`; a name of unknown value and code heki does not read binding none under R1),
+  and every base a project class or a plain one. Or it may change in place the builtin list,
+  dict, or set the attribute holds by its type, through a changing method or an item store that
+  no project subclass of the container replaces.
   Established.
 - **Kept to the return**: no point from the write to the method's normal return may remove or
   replace the kept value, exception edges into handlers included. The write's own instruction
@@ -13204,8 +13335,18 @@ Its premises:
   project subclass replaces; `copy.copy` of an instance of a project class no class of which
   (R2) defines `__copy__`, `__reduce__`, `__reduce_ex__`, `__getstate__`, or `__setstate__`, or
   has a metaclass or a base heki does not know; or `model_copy()` without `deep=True` of a
-  pydantic model (R3) whose classes define no `__copy__` or `model_copy`. Open for the other
-  copies (`dataclasses.replace`, `copy.replace`, the catalog's other sanitizers).
+  pydantic model (R3) whose classes define no `__copy__` or `model_copy`. A class defines a
+  name also when a store heki reads binds it on the class after its body: a store through a
+  value that may be a class object (any value heki does not establish as an instance: `self`,
+  what a class call makes, a parameter annotated with a class other than `type`) under the
+  name, or under a name built at run time whose constant text at its ends may be the name's
+  (`Node.__copy__ = f`, `setattr(cls, "__copy__", f)` in a class decorator, an
+  `__init_subclass__`, or another function handed the class; `f"_cached_{name}"` is never
+  `__copy__`). A store under a name of unknown value (a parameter, a key of `vars()` or of a
+  mapping, a value read from data) binds none, and so does code heki does not read: a class
+  decorator outside the project, and a call or a closure the class is handed to, bind only what
+  the stores heki reads bind (R1). Open for the other copies (`dataclasses.replace`,
+  `copy.replace`, the catalog's other sanitizers).
 - **Borrowed original**: on every path the copied value is state that outlives the call: a
   parameter, a global, a variable of an enclosing function, or what a plain attribute or item
   load reads from such state. Open: one path is enough. What a call returns is not followed.
@@ -13221,8 +13362,9 @@ Its premises:
   changing method, or an in-place operator on a builtin `list`, `dict`, or `set` (by
   annotation, R2) that no project subclass replaces, or a plain attribute store or delete on an
   instance of a project class (no property, descriptor, `__setattr__`, or metaclass in a class it
-  may be; pydantic's `BaseModel.__setattr__` stores on the instance, R3). Open: a change made by
-  a helper the object is handed to.
+  may be, also none bound on the class after its body as for **Shallow copy**; pydantic's
+  `BaseModel.__setattr__` stores on the instance, R3). Open: a change made by a helper the
+  object is handed to.
 
 ## Why is this bad?
 The copy suggests the original stays as it was, but the objects below the copy are the

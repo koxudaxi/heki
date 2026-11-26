@@ -412,8 +412,17 @@ first, then a convention the code follows, then a contract.
      plain words. *Rejected*: "data-sized" as part of the exact claim (a complete size evaluator
      does not exist, so every bound heki cannot read would be a false report); reporting a fixed
      count with its count ("on each of 50 iterations"), true but not worth the line.
-  5. **Assumptions R1–R7** ([ARCHITECTURE.md §3.4](../ARCHITECTURE.md)): static bindings,
-     annotations (R2), the catalog, imports as configured, the checked files as the project
+  5. **Assumptions R1–R7** ([ARCHITECTURE.md §3.4](../ARCHITECTURE.md)): static bindings
+     (R1: also a special method bound on a class after its body is bound under its own name, a
+     constant or a name built with constant text that can still spell it; a store under a name
+     of unknown value, such as a parameter or a key of `vars()`, binds none, which gives up
+     `setattr(cls, name, hook)` binding `__setattr__` through such a `name`, and code heki
+     does not read, such as a class decorator outside the project or a call handed the class,
+     binds none either; *rejected*: such a name as any name, which opens every class of a
+     project that has one `setattr(obj, name, value)` through an untyped receiver, a
+     descriptor's `__set__` or a loop over a mapping's items, and such code as binding any
+     name, which opens every class a library decorator decorates or an `__init_subclass__`
+     hands to `vars()` or `issubclass()`), annotations (R2), the catalog, imports as configured, the checked files as the project
      (R5: a receiver typed by a `Protocol` stays unresolved, as its implementers are never a
      complete set), and a library call's argument as a waiting value unless heki establishes
      otherwise (R6: a catalog entry that waits lists the values for which it returns at once),
@@ -566,6 +575,18 @@ first, then a convention the code follows, then a contract.
       `--include-size-dependent` selects the five rules whose rewrites it applies, as if
       `extend-select` named them. *Rejected*: keeping them on with an exception for proven
       rewrites (the published bar and the published default set would disagree).
+      *Amended on 2026-11-27*: a rule with fewer than 10 exact reports in its census and
+      holdout run runs by default on at least two real bugs it found, with no false claim and
+      a run-time oracle that shows both sides on generated programs, instead of on its share
+      of real harm ([docs/precision.md](precision.md#rare-failures)). Rare write-time shapes,
+      such as an import that raises or a lock that waits for itself, are fixed before code
+      matures, so they never reach 100 reports in the corpus, and below 10 one report moves the
+      share by more than 10 points. The certifications already made on 1 to 8 reports
+      (`OPT102`, `OPT130`, `DATA101`, `MUT110`, `MUT114`, `OPT111`, `OPT110`) had no stated
+      rule for it. `MUT110` and `MUT114` stay in the default set on their recorded census, and
+      `build_docs.py` exempts rules of consequence `MinorBug` and the rules certified before
+      this amendment. *Rejected*: adding packages to the census for such a rule (a source scan
+      of 143 packages found no report for a shape mature code no longer has).
 - **Status**: the certainty and activation of every rule, a report's own certainty (the `OPT`
   reports whose rewrite is not proven are heuristic), the `heuristic` key and options, the
   withholding of an exact rule's heuristic reports, the note, the labels in every output, the

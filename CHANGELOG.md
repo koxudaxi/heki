@@ -2,8 +2,10 @@
 
 All notable changes to heki are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
-release can change rules, configuration keys, diagnostics, and output formats.
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0, a release can change rules,
+configuration keys, diagnostics, and output formats, except what the
+[stability policy](docs/adoption.md#stability-on-the-way-to-10) keeps stable; each change is listed
+under "Breaking changes".
 
 ## [0.9.0] - 2026-11-26
 

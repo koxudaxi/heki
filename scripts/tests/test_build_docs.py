@@ -72,12 +72,12 @@ def test_the_tables_are_written_from_the_data() -> None:
     precision = {"certifications": [certification(0, 0)], "measurements": [MEASUREMENT]}
     stable = [{"code": "OPT110", "experimental": None}]
     assert build_docs.certifications_table(precision, stable).splitlines()[2] == (
-        "| `OPT110` | 0.3.0 | 240 / 0 | 31 / 0 |"
+        "| `OPT110` | 0.3.0 | 240 / 0 | 31 / 0 | - |"
     )
     # A certified rule that is still experimental says so in its row.
     experimental = [{"code": "OPT110", "experimental": {"reason": "Opt-in."}}]
     assert build_docs.certifications_table(precision, experimental).splitlines()[2] == (
-        "| `OPT110` | 0.3.0 (experimental) | 240 / 0 | 31 / 0 |"
+        "| `OPT110` | 0.3.0 (experimental) | 240 / 0 | 31 / 0 | - |"
     )
     # The harm of the exact reports, for a certification whose runs classed it.
     classed = certification(0, 0)
@@ -192,3 +192,52 @@ def test_a_pin_in_a_page_the_release_does_not_rewrite_fails(monkeypatch) -> None
         "docs/index.md: pins `heki==`, which a release does not rewrite (add the page to "
         "PACKAGE_PIN_DOCS in scripts/set_release_versions.py)"
     ]
+
+
+def rare_rule(code: str = "EFF120", consequence: str = "bug", reports: int = 4, bugs: int | None = None) -> dict:
+    certified = {
+        "rule": code,
+        "release": "0.3.1",
+        "census": {"reports": reports, "false_claims": 0},
+        "holdout": {"reports": 0, "false_claims": 0},
+    }
+    if bugs is not None:
+        certified["real_bugs"] = bugs
+    return {
+        "code": code,
+        "certainty": "exact",
+        "default_enabled": True,
+        "consequence": consequence,
+        "certification": certified,
+    }
+
+
+def test_a_rare_failure_rule_with_two_real_bugs_passes() -> None:
+    assert build_docs.rare_failures_without_real_bugs([rare_rule(bugs=2)]) == []
+
+
+@pytest.mark.parametrize("bugs", [None, 1])
+def test_a_rare_failure_rule_without_two_real_bugs_fails_and_is_named(bugs: int | None) -> None:
+    [message] = build_docs.rare_failures_without_real_bugs([rare_rule(bugs=bugs)])
+    assert message.startswith("EFF120: 4 exact report(s)")
+    assert f"{bugs or 0} real bug(s) recorded (needs 2" in message
+
+
+def test_a_rule_with_ten_reports_is_judged_on_its_harm_share_instead() -> None:
+    assert build_docs.rare_failures_without_real_bugs([rare_rule(reports=10)]) == []
+
+
+def test_a_rule_outside_the_default_set_or_not_exact_needs_no_real_bugs() -> None:
+    opt_in = rare_rule()
+    opt_in["default_enabled"] = False
+    heuristic = rare_rule()
+    heuristic["certainty"] = "heuristic"
+    assert build_docs.rare_failures_without_real_bugs([opt_in, heuristic]) == []
+
+
+def test_the_exemptions_are_minor_bugs_and_rules_certified_before_the_path() -> None:
+    minor = rare_rule(consequence="minor-bug")
+    old = rare_rule(code="MUT114")
+    assert build_docs.rare_failures_without_real_bugs([minor, old]) == []
+    # A rule certified after the path is not exempt, whatever its code resembles.
+    assert build_docs.rare_failures_without_real_bugs([rare_rule(code="MUT115")]) != []

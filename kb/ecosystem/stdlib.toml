@@ -8,7 +8,7 @@ opaque_packages = [
     "pathlib", "shutil", "sqlite3", "urllib", "http", "logging", "copy", "functools",
     "itertools", "collections", "threading", "multiprocessing", "concurrent", "dataclasses",
     "queue", "contextlib", "importlib", "platform", "sys", "sysconfig", "html", "json",
-    "pprint", "atexit", "signal", "weakref", "typing", "contextvars", "tempfile", "glob", "ftplib",
+    "pprint", "atexit", "signal", "weakref", "typing", "contextvars", "tempfile", "glob", "ftplib", "unittest",
 ]
 
 # --- Sleep ---
@@ -1557,6 +1557,59 @@ result_of = { arg = 1 }
 return_type = "asyncio.Future"
 opaque_to_layer3 = true
 
+# What the unittest methods run of the values they are handed.
+[[invokes]]
+symbol = "unittest.TestCase.assertRaises"
+values = [{ arg = 1, calls = true }]
+
+[[invokes]]
+symbol = "unittest.TestCase.assertRaisesRegex"
+values = [{ arg = 2, calls = true }]
+
+[[invokes]]
+symbol = "unittest.TestCase.assertWarns"
+values = [{ arg = 1, calls = true }]
+
+[[invokes]]
+symbol = "unittest.TestCase.assertWarnsRegex"
+values = [{ arg = 2, calls = true }]
+
+[[invokes]]
+symbol = "unittest.TestCase.enterContext"
+values = [{ arg = 0, param = "cm", methods = ["__enter__"] }]
+
+[[invokes]]
+symbol = "unittest.TestCase.enterClassContext"
+values = [{ arg = 0, param = "cm", methods = ["__enter__"] }]
+
+[[invokes]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertRaises"
+values = [{ arg = 1, calls = true }]
+
+[[invokes]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertRaisesRegex"
+values = [{ arg = 2, calls = true }]
+
+[[invokes]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertWarns"
+values = [{ arg = 1, calls = true }]
+
+[[invokes]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertWarnsRegex"
+values = [{ arg = 2, calls = true }]
+
+[[invokes]]
+symbol = "unittest.IsolatedAsyncioTestCase.enterContext"
+values = [{ arg = 0, param = "cm", methods = ["__enter__"] }]
+
+[[invokes]]
+symbol = "unittest.IsolatedAsyncioTestCase.enterClassContext"
+values = [{ arg = 0, param = "cm", methods = ["__enter__"] }]
+
+[[invokes]]
+symbol = "unittest.IsolatedAsyncioTestCase.enterAsyncContext"
+values = [{ arg = 0, param = "cm", methods = ["__aenter__"] }]
+
 # --- Calls a callable without awaiting it (EFF115, opt-in) ---
 # What each of these calls calls without awaiting it is listed under `[[calls_unawaited]]`.
 
@@ -2468,6 +2521,409 @@ type = "Self"
 symbol = "pathlib.Path.parents"
 type = "typing.Sequence[Self]"
 
+# --- unittest (the members of TestCase and IsolatedAsyncioTestCase) ---
+# The assertion methods and `fail` and `skipTest` raise or return and do nothing else. `setUp`, `tearDown`,
+# `setUpClass`, `tearDownClass`, `asyncSetUp` and `asyncTearDown` do nothing in the base class; a project
+# overrides them, and a call through the project's class reaches its override. `run` and `debug` run the
+# test itself, so they have no row. `assertRaises` and its three siblings call the callable they are
+# handed (the `[[invokes]]` rows below).
+
+[[entries]]
+symbol = "unittest.TestCase.assertEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertNotEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertTrue"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertFalse"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertIs"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertIsNot"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertIsNone"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertIsNotNone"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertIn"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertNotIn"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertIsInstance"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertNotIsInstance"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertAlmostEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertNotAlmostEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertGreater"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertGreaterEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertLess"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertLessEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertRegex"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertNotRegex"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertCountEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertMultiLineEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertSequenceEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertListEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertTupleEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertSetEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertDictEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertLogs"
+exit_suppresses = false
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertNoLogs"
+exit_suppresses = false
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.fail"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.skipTest"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.id"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.shortDescription"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.setUp"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.tearDown"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.setUpClass"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.tearDownClass"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.subTest"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertRaises"
+exit_suppresses = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertRaisesRegex"
+exit_suppresses = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertWarns"
+exit_suppresses = false
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.assertWarnsRegex"
+exit_suppresses = false
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.addCleanup"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.addClassCleanup"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.enterContext"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.TestCase.enterClassContext"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertNotEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertTrue"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertFalse"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertIs"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertIsNot"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertIsNone"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertIsNotNone"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertIn"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertNotIn"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertIsInstance"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertNotIsInstance"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertAlmostEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertNotAlmostEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertGreater"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertGreaterEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertLess"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertLessEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertRegex"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertNotRegex"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertCountEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertMultiLineEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertSequenceEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertListEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertTupleEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertSetEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertDictEqual"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertLogs"
+exit_suppresses = false
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertNoLogs"
+exit_suppresses = false
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.fail"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.skipTest"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.id"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.shortDescription"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.setUp"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.tearDown"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.setUpClass"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.tearDownClass"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.subTest"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertRaises"
+exit_suppresses = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertRaisesRegex"
+exit_suppresses = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertWarns"
+exit_suppresses = false
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertWarnsRegex"
+exit_suppresses = false
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.addCleanup"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.addClassCleanup"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.enterContext"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.enterClassContext"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.asyncSetUp"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.asyncTearDown"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.addAsyncCleanup"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "unittest.IsolatedAsyncioTestCase.enterAsyncContext"
+opaque_to_layer3 = true
+
 # --- What a call runs of the values it is handed (`[[invokes]]`) ---
 # Each entry lists every argument the call runs code of: the special methods it runs on the
 # argument's class (on the metaclass for a class object; "*" for any attribute, read by a name the
@@ -3017,6 +3473,59 @@ functions = ["dataclasses.fields"]
 items = "names"
 versions = "CPython 3.11, 3.15"
 
+# What the unittest methods run of the values they are handed.
+[[invokes]]
+symbol = "unittest.TestCase.assertRaises"
+values = [{ arg = 1, calls = true }]
+
+[[invokes]]
+symbol = "unittest.TestCase.assertRaisesRegex"
+values = [{ arg = 2, calls = true }]
+
+[[invokes]]
+symbol = "unittest.TestCase.assertWarns"
+values = [{ arg = 1, calls = true }]
+
+[[invokes]]
+symbol = "unittest.TestCase.assertWarnsRegex"
+values = [{ arg = 2, calls = true }]
+
+[[invokes]]
+symbol = "unittest.TestCase.enterContext"
+values = [{ arg = 0, param = "cm", methods = ["__enter__"] }]
+
+[[invokes]]
+symbol = "unittest.TestCase.enterClassContext"
+values = [{ arg = 0, param = "cm", methods = ["__enter__"] }]
+
+[[invokes]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertRaises"
+values = [{ arg = 1, calls = true }]
+
+[[invokes]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertRaisesRegex"
+values = [{ arg = 2, calls = true }]
+
+[[invokes]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertWarns"
+values = [{ arg = 1, calls = true }]
+
+[[invokes]]
+symbol = "unittest.IsolatedAsyncioTestCase.assertWarnsRegex"
+values = [{ arg = 2, calls = true }]
+
+[[invokes]]
+symbol = "unittest.IsolatedAsyncioTestCase.enterContext"
+values = [{ arg = 0, param = "cm", methods = ["__enter__"] }]
+
+[[invokes]]
+symbol = "unittest.IsolatedAsyncioTestCase.enterClassContext"
+values = [{ arg = 0, param = "cm", methods = ["__enter__"] }]
+
+[[invokes]]
+symbol = "unittest.IsolatedAsyncioTestCase.enterAsyncContext"
+values = [{ arg = 0, param = "cm", methods = ["__aenter__"] }]
+
 # --- Calls a callable without awaiting it (`[[calls_unawaited]]`, EFF115 and EFF116, opt-in) ---
 # Each entry names the callable argument (position `arg`, the receiver not counted, or the
 # keyword `param`) that the call calls as a plain function, now or later, on this thread or
@@ -3185,6 +3694,18 @@ tests_result = true
 symbol = "itertools.dropwhile"
 arg = 0
 tests_result = true
+
+[[calls_unawaited]]
+symbol = "unittest.TestCase.addCleanup"
+arg = 0
+
+[[calls_unawaited]]
+symbol = "unittest.TestCase.addClassCleanup"
+arg = 0
+
+[[calls_unawaited]]
+symbol = "unittest.IsolatedAsyncioTestCase.addClassCleanup"
+arg = 0
 
 # --- Annotations read at run time ---
 # The functions read the annotations of the function or class passed first: `heki recommend`

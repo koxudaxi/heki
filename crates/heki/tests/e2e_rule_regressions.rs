@@ -599,6 +599,165 @@ fn mut101_and_mut107_stay_quiet_on_classes_a_metaclass_may_give_descriptors() {
     assert_eq!(lines(&p, "MUT107"), vec![at(54, "Plain.turn_on")]);
 }
 
+// ======================================== MUT101: a hook bound on the class after its body
+
+/// A class whose write `MUT101` reports, then what the rest of the project does with it.
+const PLAIN_SWITCH: &str = r#"from functools import cached_property
+
+
+def hook(self, name, value):
+    print(name, value)
+
+
+class Plain:
+    def __init__(self):
+        self._attr_is_on = False
+
+    @cached_property
+    def is_on(self):
+        return self._attr_is_on
+
+    def __hash__(self):
+        return hash(self._attr_is_on)
+
+    def turn_on(self):
+        self._attr_is_on = True
+"#;
+
+/// A `__setattr__` or `__delattr__` bound on a class after its body, through the class object
+/// or a value that may be one, makes the write run code, also under a name built at run time
+/// whose ends may be the hook's; a built name that is never a hook's, a name of unknown value
+/// (R1: a special method is installed under its own name), and a store under any name through
+/// an instance bind nothing Python looks up on the class.
+#[test]
+fn mut101_stays_quiet_once_a_hook_may_be_bound_on_the_class_after_its_body() {
+    let shapes: &[(&str, &str, bool)] = &[
+        ("nothing", "", true),
+        ("store", "\n\nPlain.__setattr__ = hook\n", false),
+        (
+            "concatenated_name",
+            "\n\nsetattr(Plain, \"__del\" + \"attr__\", hook)\n",
+            false,
+        ),
+        (
+            "unknown_name",
+            "\n\ndef install(target, name, f):\n    setattr(target, name, f)\n",
+            true,
+        ),
+        (
+            "descriptor_slot_name",
+            "\n\nclass slot:\n    def __init__(self, name):\n        self.slot_name = name\n\n    def __set__(self, obj, value):\n        setattr(obj, self.slot_name, value)\n",
+            true,
+        ),
+        (
+            "defaults_from_a_mapping",
+            "\n\ndef establish(conninfo, defaults):\n    for name, value in defaults.items():\n        setattr(conninfo, name, value)\n",
+            true,
+        ),
+        (
+            "built_name_of_no_hook",
+            "\n\ndef install(target, name, f):\n    setattr(target, f\"__attr_{name}\", f)\n",
+            true,
+        ),
+        (
+            "unknown_name_on_an_instance",
+            "\n\nimport types\n\n\ndef fill(values):\n    ns = types.SimpleNamespace()\n    for name, value in values.items():\n        setattr(ns, name, value)\n",
+            true,
+        ),
+    ];
+    for (name, after, reported) in shapes {
+        let p = Project::new(&format!("regr_mut101_after_body_{name}"));
+        p.write("switch.py", &format!("{PLAIN_SWITCH}{after}"));
+        let expected = match reported {
+            true => vec![at(20, "Plain.turn_on")],
+            false => Vec::new(),
+        };
+        assert_eq!(lines(&p, "MUT101"), expected, "{name}");
+    }
+}
+
+/// A class decorator or an `__init_subclass__` binds a hook on the class it is handed when heki
+/// reads the store; a decorator outside the project, and a call or a closure handed the class,
+/// are taken to bind none (R1), so the write is still a plain store.
+#[test]
+fn mut101_keeps_reporting_a_class_no_decorator_or_init_subclass_binds_a_hook_on() {
+    let decorated = |prelude: &str, decorator: &str| {
+        let class = PLAIN_SWITCH.replace("class Plain:", &format!("{decorator}\nclass Plain:"));
+        format!("{prelude}\n\n{class}")
+    };
+    let subclassed = |body: &str| {
+        let class = PLAIN_SWITCH.replace("class Plain:", "class Plain(Base):");
+        format!(
+            "import inspect\n\n\nclass Base:\n    def __init_subclass__(cls, **kwargs):\n        super().__init_subclass__(**kwargs)\n{body}\n\n\n{class}"
+        )
+    };
+    let shapes = [
+        (
+            "library_decorator",
+            decorated("import ext", "@ext.auto"),
+            true,
+        ),
+        (
+            "called_library_decorator",
+            decorated(
+                "from ext import deconstructible",
+                "@deconstructible(path=\"switch.Plain\")",
+            ),
+            true,
+        ),
+        (
+            "decorator_reading_the_class_through_calls",
+            decorated(
+                "import inspect\n\n\ndef register(cls):\n    print(vars(cls), inspect.getmro(cls), issubclass(cls, object))\n    return cls",
+                "@register",
+            ),
+            true,
+        ),
+        (
+            "decorator_closure",
+            decorated(
+                "HANDLERS = []\n\n\ndef register(cls):\n    def describe(self):\n        return cls.__name__\n\n    cls.describe = describe\n    HANDLERS.append(lambda: cls)\n    return cls",
+                "@register",
+            ),
+            true,
+        ),
+        (
+            "decorator_storing_the_hook",
+            decorated(
+                "def register(cls):\n    cls.__setattr__ = print\n    return cls",
+                "@register",
+            ),
+            false,
+        ),
+        (
+            "init_subclass_reading_the_class_through_calls",
+            subclassed(
+                "        for name in vars(cls):\n            print(name)\n        print(inspect.getmro(cls), issubclass(cls, Base))",
+            ),
+            true,
+        ),
+        (
+            "init_subclass_storing_the_hook",
+            subclassed("        setattr(cls, \"__delattr__\", print)"),
+            false,
+        ),
+    ];
+    for (name, source, reported) in shapes {
+        let p = Project::new(&format!("regr_mut101_decorated_{name}"));
+        p.write("switch.py", &source);
+        let line = source
+            .lines()
+            .position(|l| l == "        self._attr_is_on = True")
+            .unwrap()
+            + 1;
+        let expected = match reported {
+            true => vec![at(line as u64, "Plain.turn_on")],
+            false => Vec::new(),
+        };
+        assert_eq!(lines(&p, "MUT101"), expected, "{name}");
+    }
+}
+
 // ================================================ MUT101 / MUT107: writes that run code
 
 /// A store or delete of `self.<attr>` that is no plain store: a metaclass given through the bases
