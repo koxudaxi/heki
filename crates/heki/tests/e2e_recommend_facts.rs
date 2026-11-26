@@ -726,3 +726,69 @@ def reader():
         .unwrap();
     assert_eq!(twice["path"], "app/twice.py");
 }
+
+#[test]
+fn unittest_case_members_are_resolved_and_report_nothing() {
+    let p = Project::new("recommend_unittest_members");
+    p.write(
+        "tests/test_parse.py",
+        r#"import unittest
+
+
+class TestParse(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.addClassCleanup(print, "class")
+
+    def setUp(self) -> None:
+        self.addCleanup(print, "test")
+
+    def test_values(self) -> None:
+        self.assertEqual(int("1"), 1)
+        self.assertTrue(True)
+        self.assertIn(1, [1])
+        self.assertIsNone(None)
+        self.assertAlmostEqual(0.1 + 0.2, 0.3)
+        with self.assertRaises(ValueError):
+            int("x")
+        self.assertRaises(ValueError, int, "x")
+        with self.subTest(i=1):
+            self.assertGreater(2, 1)
+        self.enterContext(open("tests/test_parse.py"))
+        if self.id() == "":
+            self.skipTest("never")
+            self.fail("never")
+
+
+class TestAsyncParse(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.addAsyncCleanup(self.asyncTearDown)
+        await self.enterAsyncContext(Context())
+
+    async def asyncTearDown(self) -> None:
+        self.assertEqual(1, 1)
+
+    async def test_values(self) -> None:
+        self.assertIsInstance(1, int)
+        self.assertNotEqual(1, 2)
+
+
+class Context:
+    async def __aenter__(self) -> int:
+        return 1
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+"#,
+    );
+    let spots = blind_spots(&p);
+    assert_eq!(unresolved(&spots), [], "{spots:#}");
+    assert_eq!(
+        counts(&spots["totals"]["unresolved"]),
+        (0, 0, 0, 0),
+        "{spots:#}"
+    );
+    assert_eq!(symbols(&spots), Vec::<String>::new(), "{spots:#}");
+    let (code, out, err) = p.check(&[]);
+    assert_eq!(code, 0, "{out}\n{err}");
+}
