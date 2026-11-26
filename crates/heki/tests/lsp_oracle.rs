@@ -795,13 +795,15 @@ const CALLABLE_ATTRIBUTE_USE: &str = "from pkg.callable_factory import Settings\
 // Functions values hold, defined in one module and called in others: the closure a factory
 // returns (`ReturnFact::ty`), a named tuple's field (`ClassDecl::init_fields`), and a
 // `staticmethod(partial(...))` class attribute (`NamedAttr::body_partial`).
-const HELD_DEFS: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n";
-const HELD_DEFS_QUIET_FACTORY: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    return rest\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n";
-const HELD_DEFS_PLAIN_VIEW: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View:\n    def __init__(self, run: Callable[[], None]) -> None:\n        self.run = run\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n";
-const HELD_DEFS_QUIET_PARTIAL: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(rest))\n";
+const HELD_DEFS: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n\n\ndef doze(seconds: float = 1.0) -> None:\n    time.sleep(seconds)\n\n\nTABLE = {\"doze\": partial(doze)}\n";
+const HELD_DEFS_POSITIONED_TABLE: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n\n\ndef doze(seconds: float = 1.0) -> None:\n    time.sleep(seconds)\n\n\nTABLE = {\"doze\": partial(doze, 2.0)}\n";
+const HELD_DEFS_QUIET_FACTORY: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    return rest\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n\n\ndef doze(seconds: float = 1.0) -> None:\n    time.sleep(seconds)\n\n\nTABLE = {\"doze\": partial(doze)}\n";
+const HELD_DEFS_PLAIN_VIEW: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View:\n    def __init__(self, run: Callable[[], None]) -> None:\n        self.run = run\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n\n\ndef doze(seconds: float = 1.0) -> None:\n    time.sleep(seconds)\n\n\nTABLE = {\"doze\": partial(doze)}\n";
+const HELD_DEFS_QUIET_PARTIAL: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(rest))\n\n\ndef doze(seconds: float = 1.0) -> None:\n    time.sleep(seconds)\n\n\nTABLE = {\"doze\": partial(doze)}\n";
 const HELD_FACTORY: &str = "from pkg.held_defs import make_waiter\n\n\nasync def through_factory() -> None:\n    make_waiter()()\n";
 const HELD_FIELD: &str = "from pkg.held_defs import View, nap\n\n\nasync def through_field() -> None:\n    View(nap).run()\n";
 const HELD_PARTIAL: &str = "from pkg.held_defs import Holder\n\n\nasync def through_partial() -> None:\n    Holder().run()\n";
+const HELD_TABLE: &str = "from pkg.held_defs import TABLE\n\n\nasync def through_table(kind: str) -> None:\n    TABLE[kind]()\n";
 const ROWS_USE: &str = "from pkg.rows_db import authors, book\n\n\ndef each():\n    for r in authors():\n        book(r[0])\n";
 // The third module binds the base's method to another function: the call may run that
 // function instead. The base's class body binds it to another function on every path: the call
@@ -1317,6 +1319,7 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/held_factory.py", HELD_FACTORY),
         ("pkg/held_field.py", HELD_FIELD),
         ("pkg/held_partial.py", HELD_PARTIAL),
+        ("pkg/held_table.py", HELD_TABLE),
         ("pkg/st_client.py", ST_CLIENT),
         ("pkg/st_use.py", ST_USE),
         ("pkg/st_rebind.py", ST_REBIND),
@@ -1950,6 +1953,7 @@ fn steps_held_functions() -> Vec<Step> {
     const FACTORY: &[(&str, &str)] = &[("pkg/held_factory.py", "EFF101")];
     const FIELD: &[(&str, &str)] = &[("pkg/held_field.py", "EFF101 [heuristic]")];
     const PARTIAL: &[(&str, &str)] = &[("pkg/held_partial.py", "EFF101")];
+    const TABLE: &[(&str, &str)] = &[("pkg/held_table.py", "EFF101")];
     const ALL: &[(&str, &str)] = &[
         ("pkg/held_factory.py", "EFF101"),
         ("pkg/held_field.py", "EFF101 [heuristic]"),
@@ -1988,6 +1992,17 @@ fn steps_held_functions() -> Vec<Step> {
             vec![save("pkg/held_defs.py", HELD_DEFS)],
         )
         .present(ALL),
+        Step::new(
+            "the partial object in the table holds a position",
+            vec![save("pkg/held_defs.py", HELD_DEFS_POSITIONED_TABLE)],
+        )
+        .absent(TABLE)
+        .present(ALL),
+        Step::new(
+            "the partial object in the table holds nothing again",
+            vec![save("pkg/held_defs.py", HELD_DEFS)],
+        )
+        .present(TABLE),
     ]
 }
 

@@ -772,6 +772,22 @@ entries): reading it with a key a string constant gives (`HANDLERS["create"]`,
 later entry of the key replacing an earlier one; any other key, and iterating its values, give
 one of its values.
 
+A `functools.partial` object's type keeps what the object holds besides its callable
+(`types::Held`: nothing, keywords only, or positions). A call of a value of such a type, read
+where the function does not make it (an item of a table, `POLICY[kind](x)` of
+`POLICY = {"a": partial(build), "b": partial(other, deep=True)}`, also bound to an attribute),
+whose callable is one or several named objects and which holds no positions, is a call of those
+objects with the call's arguments as written (`Extractor::typed_partial`): their targets, the
+class it constructs, whether they are every implementation it can run, and what each returns,
+a new object only when every one returns one. The keywords the object holds are values the call
+does not show (`Call::unseen_keywords`); when the callable is a library function and the
+object holds keywords, the call stays unresolved, since the catalog selects its case from the
+arguments the call shows. A named object joins a partial object into a partial
+object of one of them (`{"a": f, "b": partial(g)}`), holding what the partial object holds. A
+partial object holding positions, and a table one value of which heki does not know, or that
+something changes in place or binds again with values heki does not know, leave the call
+unresolved.
+
 A function every `return` of which gives what one import binds, an import in the function (`from
 pkg import ops`, then `return ops`, which breaks an import cycle) or one of its module, with no
 decorator but those keeping calls as defined and a `functools` cache, returns that object

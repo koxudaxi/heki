@@ -776,6 +776,16 @@ pub struct PartialAttr {
     pub is_static: bool,
 }
 
+impl PartialAttr {
+    /// What the object holds for its callable: keywords or nothing.
+    pub(crate) fn held(&self) -> crate::types::Held {
+        match self.keywords {
+            true => crate::types::Held::Keywords,
+            false => crate::types::Held::Nothing,
+        }
+    }
+}
+
 /// What reading a class attribute finds when its class body binds it to module-level names
 /// ([`ProjectDecls::class_aliases`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9488,7 +9498,7 @@ impl Ty {
             Ty::Super(c) => Some(Val::Super(c.clone())),
             Ty::Union(os) => Some(Val::Union(os.iter().map(|o| o.class.clone()).collect())),
             Ty::OneOf(fqns) => Some(Val::OneOf(fqns.clone())),
-            Ty::SelfType | Ty::Partial(_) | Ty::Coroutine(_) => None,
+            Ty::SelfType | Ty::Partial(..) | Ty::Coroutine(_) => None,
         }
     }
 }
@@ -10339,7 +10349,7 @@ impl<'a> TypeCtx<'a> {
             .and_then(|a| a.partial)
         {
             let callable = self.partial_attr_callable(partial, true);
-            return Some(callable.map(|c| Ty::Partial(Box::new(self.named(&c)))));
+            return Some(callable.map(|c| Ty::Partial(Box::new(self.named(&c)), partial.held())));
         }
         let (named, is_static) = self.project.class_alias(class, attr)?;
         let named = self.project.object_named(named);
