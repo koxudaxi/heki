@@ -47,6 +47,15 @@
           "$ref": "#/$defs/Checked",
           "description": "Every report of one run on the frozen holdout corpus."
         },
+        "real_bugs": {
+          "description": "The real bugs it found (docs/precision.md, \"Rare failures\"), for a rule with fewer than 10\nexact reports in its census and holdout run.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "release": {
           "description": "The release that certified it.",
           "type": "string"
