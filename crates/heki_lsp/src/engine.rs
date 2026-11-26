@@ -612,7 +612,7 @@ impl Workspace {
             .map_err(EngineError::Rules)?;
         let guarded = selection
             .is_enabled("EFF117")
-            .then(|| heki_rules::GuardedView::of(&index, decls.completed()));
+            .then(|| heki_rules::GuardedView::of(&index, decls.completed(), &env.root));
         let stale_writes = if selection.is_enabled("MUT111") {
             stale_writes_by_file(&index, decls.completed(), |_| true)
         } else {
@@ -1009,7 +1009,7 @@ impl Workspace {
         let Some(before) = &self.guarded else {
             return Vec::new();
         };
-        let now = heki_rules::GuardedView::of(&self.index, self.decls.completed());
+        let now = heki_rules::GuardedView::of(&self.index, self.decls.completed(), &self.env.root);
         let affected: Vec<PathBuf> = if before.guards_differ(&now) {
             self.index.files.keys().cloned().collect()
         } else {

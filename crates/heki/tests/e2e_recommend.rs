@@ -962,6 +962,25 @@ fn a_rarely_harmful_bug_is_listed_without_entering_the_block() {
 }
 
 #[test]
+fn a_bug_without_an_assessed_harm_is_listed_for_review() {
+    let p = shop("recommend_listed_bug");
+    p.write(
+        "app/counter.py",
+        "import threading\n\n\nclass Counter:\n    def __init__(self) -> None:\n        \
+         self._lock = threading.Lock()\n        self.n = 0\n\n    def start(self) -> None:\n        \
+         threading.Thread(target=self._run).start()\n\n    def _run(self) -> None:\n        \
+         with self._lock:\n            self.n += 1\n\n    def reset(self) -> None:\n        \
+         self.n = 0\n",
+    );
+    let (_, report, _) = recommend_json(&p, &[]);
+    let eff117 = rule(&report, "EFF117");
+    assert_eq!(
+        (&eff117["in_block"], &eff117["reports"], &eff117["reason"]),
+        (&json!(false), &json!(1), &json!("listed for review"))
+    );
+}
+
+#[test]
 fn paths_are_written_as_heki_check_writes_them() {
     let p = shop("recommend_below_root");
     p.write("app/sub/__init__.py", "");

@@ -29,7 +29,7 @@ A thread lock is a value whose class the catalog flags `sync-lock-or-tx`: `threa
 - in a function every call of which is made holding a lock, up to two calls above it: a
   generator expression made, or a lambda called (`sorted(xs, key=lambda x: self._rank(x))`),
   inside `with self._lock:` runs holding the lock, and so does a private method only such code
-  calls.
+  calls, until it gives that lock back with a `release()`.
 
 The shared state is an attribute of the instance a method runs on (`self.count`), a module
 global (`global _cache`), or an attribute of a class or module (`Registry.items`), assigned or
@@ -41,10 +41,13 @@ The threads heki resolves are the project functions handed to `threading.Thread(
 `threading.Timer`, `asyncio.to_thread`, `loop.run_in_executor`, the `submit` and `map` of a
 thread pool (or of an executor of unknown kind), `anyio.to_thread.run_sync`,
 `trio.to_thread.run_sync`, and `run_in_threadpool`, and the `run` method of a
-`threading.Thread` subclass, with every function they reach over project calls.
+`threading.Thread` subclass, with every function they reach over project calls. A coroutine
+function or a generator function handed to a thread is no entry (the thread only creates the
+object), nor is a function `loop.run_in_executor` hands to a process pool. A function a thread
+runs is not taken for one that only construction runs, even when a constructor calls it too.
 
-The rule reports the first such write of each state in a function, with the write made holding
-the lock as a related location.
+The rule reports the first such write of each state in a function, with a write made holding
+the lock in another function as a related location.
 
 It does not report:
 
@@ -122,6 +125,6 @@ Use instead:
 No automatic fix.
 
 ## Options
-- `lint.heuristic = true` (or `--heuristic`) runs the rule by default; `--extend-select EFF117`
-  runs it alone.
+- `lint.heuristic = true` (or `--heuristic`) runs the rule by default; `--select EFF117` runs
+  it alone.
 - `[[tool.heki.ecosystem]]` entries with `sync-lock-or-tx = true` add lock classes.

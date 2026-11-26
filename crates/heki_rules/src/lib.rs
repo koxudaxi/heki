@@ -1360,7 +1360,7 @@ pub fn check_project(
     };
     let guarded = selection
         .is_enabled("EFF117")
-        .then(|| GuardedView::of(index, decls));
+        .then(|| GuardedView::of(index, decls, extras.layout.root));
     let per_unit: Vec<Vec<Diagnostic>> = units
         .par_iter()
         .map(|u| {

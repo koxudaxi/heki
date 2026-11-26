@@ -21,7 +21,7 @@ use crate::resolver::{TypeCtx, Val};
 use heki_ast::Span;
 use heki_ir::walk::{And, Budget, Facts, FnShape, Sparse, Visit, fixpoint, reach};
 use heki_ir::{BlockId, Inst, InstKind, IrFunction, Terminator, VarId};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -370,6 +370,9 @@ pub struct LockPoints {
     held: FxHashMap<(BlockId, usize), Vec<LockKey>>,
     /// The named locks the function took itself and holds on every normal return.
     returns_holding: BTreeSet<LockKey>,
+    /// The instructions that run after a `release()` of a lock the function does not take
+    /// itself on every path (one its callers hold), where one is.
+    released_entry: FxHashSet<(BlockId, usize)>,
 }
 
 impl LockPoints {
@@ -429,6 +432,7 @@ impl LockPoints {
             let steps = Budget::unmetered("heki_effect::guarded::released_later");
             released_later(shape, &taken, &changes, &releases, &steps)
         };
+        let released_entry = released_entry(shape, &taken, &releases);
         let mut returns_holding: Option<BTreeSet<LockKey>> = None;
         if !taken.is_empty() {
             let entry = held::at_entry(shape, taken.len(), |b, i| changes.get(&(b, i)));
@@ -467,6 +471,7 @@ impl LockPoints {
         Self {
             held,
             returns_holding: returns_holding.unwrap_or_default(),
+            released_entry,
         }
     }
 
@@ -481,10 +486,45 @@ impl LockPoints {
         self.held.get(&(b, i)).map_or(&[], Vec::as_slice)
     }
 
+    /// Whether instruction `i` of block `b` runs after every path gave back a lock the function
+    /// does not take itself: one its callers hold on entry.
+    pub fn released_entry_at(&self, b: BlockId, i: usize) -> bool {
+        self.released_entry.contains(&(b, i))
+    }
+
     /// The named locks held on every normal return that the function took itself.
     pub fn returns_holding(&self) -> &BTreeSet<LockKey> {
         &self.returns_holding
     }
+}
+
+/// The instructions every path to which passed a `release()` of a lock the function takes
+/// nowhere itself (a forward must-dataflow with one bit, set by those releases).
+fn released_entry(
+    shape: &FnShape<'_>,
+    taken: &Acquisitions<LockKey>,
+    releases: &[((BlockId, usize), LockKey)],
+) -> FxHashSet<(BlockId, usize)> {
+    let foreign: FxHashMap<(BlockId, usize), Change> = (releases.iter())
+        .filter(|(_, key)| taken.released(|k| k == key).is_empty())
+        .map(|(at, _)| (*at, Change::Take(0)))
+        .collect();
+    let mut out = FxHashSet::default();
+    if foreign.is_empty() {
+        return out;
+    }
+    let entry = held::at_entry(shape, 1, |b, i| foreign.get(&(b, i)));
+    for (b, state) in entry.into_iter().enumerate() {
+        let Some(mut state) = state else { continue };
+        let bb = &shape.f.blocks[b];
+        for i in 0..bb.insts.len() {
+            if !state.is_empty() {
+                out.insert((bb.id, i));
+            }
+            state.apply(foreign.get(&(bb.id, i)));
+        }
+    }
+    out
 }
 
 /// The locks given back by `release()` on every path from each instruction of the function

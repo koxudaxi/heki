@@ -548,6 +548,10 @@ pub struct UnawaitedCall {
     pub hands_back: bool,
     /// Where the call runs the callable when that is not the caller's own thread (`EFF117`).
     pub runs_on: Option<RunsOn>,
+    /// The position of the argument naming the executor that runs the callable
+    /// (`loop.run_in_executor(executor, f)`): `runs_on` holds for the default executor and a
+    /// thread pool, not for a process pool.
+    pub executor_arg: Option<u8>,
 }
 
 /// Where a call runs a callable it is handed ([`UnawaitedCall::runs_on`]).
@@ -5142,6 +5146,7 @@ mod tests {
                     tests_result: *tests_result,
                     hands_back: *hands_back,
                     runs_on: (RUNS_ON.iter()).find(|(s, _)| s == symbol).map(|(_, r)| *r),
+                    executor_arg: symbol.ends_with(".run_in_executor").then_some(0),
                 })
             })
             .map(|call| (call.symbol.clone(), call))
@@ -5171,6 +5176,7 @@ mod tests {
                     arg: Some(arg),
                     hands_back: true,
                     runs_on: Some(RunsOn::Thread),
+                    executor_arg: symbol.ends_with(".run_in_executor").then_some(0),
                     ..UnawaitedCall::default()
                 }),
                 "{symbol}"
@@ -5185,6 +5191,7 @@ mod tests {
                 tests_result: false,
                 hands_back: false,
                 runs_on: Some(RunsOn::Thread),
+                executor_arg: None,
             })
         );
         assert_eq!(

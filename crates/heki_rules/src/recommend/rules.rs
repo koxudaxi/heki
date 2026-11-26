@@ -21,8 +21,9 @@ pub enum RulePolicy {
     /// measurement shows real harm below [`MIN_REAL_HARM_PERCENT`]: it reports bugs that can be
     /// critical, whose exact reports stop a run (ADR-019).
     Enable,
-    /// Listed with its reports, never enabled by the block: it reports slower code or a bug
-    /// that is rarely harmful, worth reading but not worth failing a run for.
+    /// Listed with its reports, never enabled by the block: it reports slower code, a bug that
+    /// is rarely harmful, or a bug whose harm is not assessed yet, worth reading but not worth
+    /// failing a run for.
     List,
     /// `MUT103` compares with a summary snapshot the user saves: listed, never counted.
     Snapshot,
@@ -283,6 +284,7 @@ fn decide(
     if policy != RulePolicy::Enable {
         return match rule.consequence {
             Consequence::Slowdown => out("slower code, not a bug"),
+            Consequence::Bug if policy == RulePolicy::List => out("listed for review"),
             Consequence::MinorBug | Consequence::Bug => out("a bug that is rarely harmful"),
         };
     }

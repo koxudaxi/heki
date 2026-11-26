@@ -2963,7 +2963,9 @@ for it. A row's `runs_on` says where the call runs the callable when that is not
 thread (`EFF117`): `"thread"` for another thread of the process (`threading.Thread`, `Timer`, a
 thread pool's or an executor's `submit` and `map`, and the offloading APIs to a thread, which have
 rows of their own for it), `"fork-child"` for the child process after a fork
-(`os.register_at_fork(after_in_child=...)`).
+(`os.register_at_fork(after_in_child=...)`). A row's `executor_arg` names the position of the
+executor argument that decides it (`loop.run_in_executor(executor, f)`): a process pool there
+runs the callable in another process, so the call has no `runs_on`.
 
 `[[declared_fields]]` (`heki_kb::DeclaredFields`) says where a library keeps the fields a class
 declares, the names the bodies of the class and its bases declare as fields: the attributes of

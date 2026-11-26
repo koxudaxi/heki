@@ -4907,6 +4907,7 @@ fn steps_eff117() -> Vec<Step> {
         "        threading.Thread(target=self._tick).start()\n",
         "        self._tick()\n",
     );
+    let coroutine = LOCKED_BASE.replace("    def _tick(self):", "    async def _tick(self):");
     let on_thread = format!(
         "import threading\n\n{}",
         LOCKED_LIST_RUN.replace(
@@ -4941,6 +4942,16 @@ fn steps_eff117() -> Vec<Step> {
         Step::new(
             "the subclass writes without the lock again",
             vec![save("pkg/locked_use.py", LOCKED_USE)],
+        )
+        .present(&[("pkg/locked_use.py", "EFF117")]),
+        Step::new(
+            "the thread's target becomes a coroutine function, which a thread only creates",
+            vec![save("pkg/locked_base.py", &coroutine)],
+        )
+        .absent(&[("pkg/locked_use.py", "EFF117")]),
+        Step::new(
+            "it is a plain function again",
+            vec![save("pkg/locked_base.py", LOCKED_BASE)],
         )
         .present(&[("pkg/locked_use.py", "EFF117")]),
         Step::new(

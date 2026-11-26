@@ -3031,6 +3031,7 @@ param = "fn"
 hands_back = true
 
 # The offloading APIs above run the callable on a worker thread; their rows say so (EFF117).
+# `run_in_executor` runs it in a process when the executor (its first argument) is a process pool.
 [[calls_unawaited]]
 symbol = "asyncio.to_thread"
 arg = 0
@@ -3042,12 +3043,14 @@ symbol = "asyncio.AbstractEventLoop.run_in_executor"
 arg = 1
 hands_back = true
 runs_on = "thread"
+executor_arg = 0
 
 [[calls_unawaited]]
 symbol = "asyncio.BaseEventLoop.run_in_executor"
 arg = 1
 hands_back = true
 runs_on = "thread"
+executor_arg = 0
 
 # A handler `os.register_at_fork` runs in the child after a fork, before any other thread there.
 [[calls_unawaited]]

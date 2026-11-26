@@ -1188,6 +1188,9 @@ impl<'x> CallObjects<'x> {
     }
 }
 
+/// The executor class that runs what it is handed in other processes.
+const PROCESS_POOL: &str = "concurrent.futures.ProcessPoolExecutor";
+
 /// Whether a decorator of `f` is one of `names` ([`ModuleDecls::decorator_is`]).
 /// The builtin and standard library containers whose own methods and item stores change them in
 /// place (`EffectSummary::param_inplace_sites`).
@@ -7432,9 +7435,33 @@ impl<'a> Extractor<'a> {
             callees,
             tests_result: slot.tests_result,
             hands_back: slot.hands_back,
-            runs_on: slot.runs_on,
+            runs_on: slot
+                .runs_on
+                .filter(|_| !self.runs_in_process_pool(call, &slot)),
             complete,
         });
+    }
+
+    /// Whether the executor the call `call` names (`UnawaitedCall::executor_arg`) is a process
+    /// pool: it runs the callable in another process, not on a thread of this one.
+    fn runs_in_process_pool(&self, call: &Call<'_>, slot: &heki_kb::UnawaitedCall) -> bool {
+        let Some(executor) = slot.executor_arg.and_then(|arg| {
+            resolver::passed_var(call.args, call.kwargs, call.star_from, (Some(arg), None))
+        }) else {
+            return false;
+        };
+        match self.val(executor) {
+            Some(Val::Inst(class)) => {
+                class == PROCESS_POOL
+                    || self
+                        .cx
+                        .project
+                        .mro_of(class)
+                        .iter()
+                        .any(|c| c == PROCESS_POOL)
+            }
+            _ => false,
+        }
     }
 
     /// What a builtin passes the callable it calls once per item (`Runner::PerItem`): items

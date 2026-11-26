@@ -14,8 +14,9 @@
 //! `run` method of a `threading.Thread` subclass; the functions it reaches over project calls
 //! can run on that thread. The report needs the unlocked writer or a locked writer to be one.
 
-use crate::{CheckContext, ModuleUnit, SitesBySpan};
+use crate::{CheckContext, ModuleUnit, SitesBySpan, project};
 use heki_diagnostics::Diagnostic;
+use heki_effect::Runner;
 use heki_effect::guarded::{self, LockKey, LockPoints, StateKey, StateWrite, WriteKind};
 use heki_effect::{
     FuncKey, ProjectDecls, ProjectIndex, TypeCtx, anchors_call_site, code_kind, ownership,
@@ -25,6 +26,7 @@ use heki_ir::{Inst, InstKind, IrFunction, VarId};
 use heki_kb::RunsOn;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 /// How many calls above a function [`GuardedView::entry_held`] and
 /// [`GuardedView::setup_only`] look.
@@ -64,21 +66,22 @@ pub struct GuardedView {
     by_attr: BTreeMap<String, Vec<String>>,
 }
 
+/// Whether handing the function to a thread runs its body: a coroutine function or a generator
+/// function only creates the object.
+fn runs_body(index: &ProjectIndex, f: &FuncKey) -> bool {
+    index
+        .summary(f)
+        .is_none_or(|s| !s.is_async && !s.is_generator)
+}
+
 /// Whether the function is a constructor, by its name.
 fn is_constructor(f: &FuncKey) -> bool {
     CONSTRUCTORS.contains(&f.qualname.rsplit('.').next().unwrap_or_default())
 }
 
-/// Whether the function `key` is test code, by its module's path.
-fn in_tests(key: &FuncKey) -> bool {
-    code_kind::is_test_code(
-        &key.qualname,
-        &format!("{}.py", key.module.replace('.', "/")),
-    )
-}
-
 impl GuardedView {
-    pub fn of(index: &ProjectIndex, decls: &ProjectDecls) -> Self {
+    /// The view of the project at `root`, whose files are classified by their paths below it.
+    pub fn of(index: &ProjectIndex, decls: &ProjectDecls, root: &Path) -> Self {
         // Without a write made holding a lock nothing is guarded, and nothing is reported.
         let writes_locked = (index.files.values())
             .flat_map(|file| file.functions.values())
@@ -104,7 +107,9 @@ impl GuardedView {
             }
             for handoff in file.unawaited_handoffs().flat_map(|(_, h)| h) {
                 match handoff.runs_on {
-                    Some(RunsOn::Thread) => entries.extend(&handoff.callees),
+                    Some(RunsOn::Thread) => {
+                        entries.extend(handoff.callees.iter().filter(|c| runs_body(index, c)))
+                    }
                     Some(RunsOn::ForkChild) => forks.extend(&handoff.callees),
                     None => {}
                 }
@@ -112,7 +117,9 @@ impl GuardedView {
             for key in file.functions.keys() {
                 if let Some(class) = key.qualname.strip_suffix(".run") {
                     let fqn = format!("{}.{class}", key.module);
-                    if decls.mro_of(&fqn).iter().any(|c| c == "threading.Thread") {
+                    if decls.mro_of(&fqn).iter().any(|c| c == "threading.Thread")
+                        && runs_body(index, key)
+                    {
                         entries.insert(key);
                     }
                 }
@@ -132,7 +139,7 @@ impl GuardedView {
             },
         );
         let is_setup = |f: &FuncKey| forks.contains(f) || is_constructor(f);
-        let (setup, held) = (Walk::Setup(&is_setup), Walk::Held(&entries));
+        let (setup, held) = (Walk::Setup(&is_setup, &entries), Walk::Held(&entries));
         let (setup_callers, held_callers) = (
             setup.by_callers(&callers, &steps),
             held.by_callers(&callers, &steps),
@@ -151,9 +158,16 @@ impl GuardedView {
         }
         let mut guards: BTreeMap<StateKey, Vec<Guard>> = BTreeMap::new();
         for file in index.files.values() {
+            let mut rel_path = None;
             for (key, s) in &file.functions {
-                let Some(facts) = &s.guarded else { continue };
-                if is_constructor(key) || setup_only.contains(key) || in_tests(key) {
+                let Some(facts) = s.guarded.as_ref().filter(|g| !g.locked_writes.is_empty()) else {
+                    continue;
+                };
+                if is_constructor(key) || setup_only.contains(key) {
+                    continue;
+                }
+                let rel_path = rel_path.get_or_insert_with(|| project::rel_posix(&file.path, root));
+                if code_kind::is_test_code(&key.qualname, rel_path) {
                     continue;
                 }
                 for w in &facts.locked_writes {
@@ -254,8 +268,8 @@ impl GuardedView {
 /// What a walk up the callers of a function asks ([`Walk::by_callers`]).
 enum Walk<'w, 'k> {
     /// Whether it runs only while objects are built: a function `setup` accepts, or one whose
-    /// every caller does so.
-    Setup(&'w dyn Fn(&FuncKey) -> bool),
+    /// every caller does so; a thread entry (among the second) does not, whoever else calls it.
+    Setup(&'w dyn Fn(&FuncKey) -> bool, &'w FxHashSet<&'k FuncKey>),
     /// Whether every call of it is made holding a thread lock, or in a function that runs so;
     /// a thread entry (among these) runs holding nothing of its callers'.
     Held(&'w FxHashSet<&'k FuncKey>),
@@ -265,7 +279,8 @@ impl<'k> Walk<'_, 'k> {
     /// The answer of `f` whatever its callers are.
     fn own(&self, f: &FuncKey) -> Option<bool> {
         match self {
-            Self::Setup(setup) => setup(f).then_some(true),
+            Self::Setup(setup, entries) if entries.contains(f) => Some(false),
+            Self::Setup(setup, _) => setup(f).then_some(true),
             Self::Held(entries) => entries.contains(f).then_some(false),
         }
     }
@@ -314,14 +329,11 @@ pub(super) fn run(
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
     let mut sites = None;
     for f in unit.input.ir.functions.iter() {
-        if f.is_class_body || f.is_module_body || !names_any(f, &names) {
+        if f.is_class_body || f.is_module_body || !names_any(&tcx, f, &names) {
             continue;
         }
         let key = CheckContext::key(unit, f);
-        if view.is_setup_only(&key)
-            || view.entry_held.contains(&key)
-            || code_kind::is_test_code(&key.qualname, &unit.rel_path)
-        {
+        if view.is_setup_only(&key) || code_kind::is_test_code(&key.qualname, &unit.rel_path) {
             continue;
         }
         let defs: FxHashMap<VarId, &Inst> = (f.blocks.iter().flat_map(|b| &b.insts))
@@ -343,10 +355,13 @@ pub(super) fn run(
             continue;
         }
         let threaded = view.threaded.contains(&key);
-        // The first guarding write of each state on a thread, or any when this one runs on one.
+        // The first guarding write of each state in another function, on a thread, or any when
+        // this one runs on one.
         let writes: Vec<(StateWrite, &Guard)> = (writes.into_iter())
             .filter_map(|(w, guards)| {
-                let on_thread = |g: &&&Guard| threaded || view.threaded.contains(&g.writer);
+                let on_thread = |g: &&&Guard| {
+                    g.writer != key && (threaded || view.threaded.contains(&g.writer))
+                };
                 let guard = *guards.iter().find(on_thread)?;
                 Some((w, guard))
             })
@@ -358,8 +373,13 @@ pub(super) fn run(
         let taken = |_, _, inst: &Inst| taken_by_call(cx, sites, &key, f, inst);
         let points = LockPoints::of(&tcx, &shape, &types, &live, &taken);
         let mut reported: FxHashSet<&StateKey> = FxHashSet::default();
+        let entry_held = view.entry_held.contains(&key);
         for (w, guard) in &writes {
-            if points.held_at(w.at.0, w.at.1).is_empty() && reported.insert(&w.state) {
+            let (b, i) = w.at;
+            // Where every call holds a lock, the function holds it until it gives one back.
+            let covered =
+                !points.held_at(b, i).is_empty() || (entry_held && !points.released_entry_at(b, i));
+            if !covered && reported.insert(&w.state) {
                 report(cx, unit, &key, w, guard, threaded, out);
             }
         }
@@ -368,7 +388,14 @@ pub(super) fn run(
 
 /// Whether `f` reads, stores, or deletes an attribute or a global under one of `names`: only
 /// then can it write a guarded state.
-fn names_any(f: &IrFunction, names: &FxHashSet<&str>) -> bool {
+fn names_any(tcx: &TypeCtx<'_>, f: &IrFunction, names: &FxHashSet<&str>) -> bool {
+    // A global is read under the name it has in this module, which an import can rename.
+    let global = |name: &str| {
+        names.contains(name) || {
+            let fqn = tcx.global_fqn(name);
+            names.contains(fqn.rsplit('.').next().unwrap_or(&fqn))
+        }
+    };
     f.blocks
         .iter()
         .flat_map(|b| &b.insts)
@@ -380,7 +407,7 @@ fn names_any(f: &IrFunction, names: &FxHashSet<&str>) -> bool {
             | InstKind::LoadGlobal { name, .. }
             | InstKind::Delete {
                 name, global: true, ..
-            } => names.contains(name.as_str()),
+            } => global(name),
             _ => false,
         })
 }
@@ -399,16 +426,18 @@ fn taken_by_call(
     }
     let mut out = Vec::new();
     for site in sites.at(&key.qualname, inst.span) {
+        // A worker thread takes what the offloaded callee returns holding, not this one.
+        if site.runner == Runner::Worker {
+            continue;
+        }
+        // The locks every target of the call returns holding, in the order of the first.
+        let mut through: Option<Vec<LockKey>> = None;
         for bc in site.project_callees() {
-            let Some(facts) = cx
-                .index
-                .summary(&bc.callee)
+            let returned = (cx.index.summary(&bc.callee))
                 .and_then(|s| s.guarded.as_ref())
-            else {
-                continue;
-            };
-            for lock in &facts.returns_holding {
-                out.push(match lock {
+                .into_iter()
+                .flat_map(|facts| &facts.returns_holding)
+                .map(|lock| match lock {
                     LockKey::SelfAttr(_)
                         if f.owner_class_qualname.is_some()
                             && bc.params.first().and_then(|p| p.param.as_ref())
@@ -418,9 +447,14 @@ fn taken_by_call(
                     }
                     LockKey::Global(_) => lock.clone(),
                     _ => LockKey::Unnamed,
-                });
-            }
+                })
+                .collect::<Vec<_>>();
+            through = Some(match through {
+                Some(held) => held.into_iter().filter(|l| returned.contains(l)).collect(),
+                None => returned,
+            });
         }
+        out.extend(through.unwrap_or_default());
     }
     out
 }
