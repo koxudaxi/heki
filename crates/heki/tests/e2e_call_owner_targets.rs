@@ -207,3 +207,48 @@ fn an_unknown_value_is_a_configuration_error() {
     assert!(stderr.contains("targets-call-each-other"), "{stderr}");
     assert!(stderr.contains("deny"), "{stderr}");
 }
+
+#[test]
+fn report_judges_an_unresolved_call_for_each_target_it_may_reach() {
+    let source = "class A:\n    def reset(self, obj) -> None:\n        obj.reset()\n\n\n\
+                  class B:\n    def reset(self) -> None:\n        pass\n";
+    let contracts = |targets: &[&str], extra: &str| -> String {
+        targets
+            .iter()
+            .map(|t| {
+                format!(
+                    "[[tool.heki.call-owners]]\nname = \"{t}\"\ntargets = [\"{t}\"]\n{KEYS}{extra}"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let build = |name: &str, contracts: String| {
+        let p = Project::new(name);
+        p.write("pkg/__init__.py", "");
+        p.write("pkg/m.py", source);
+        p.write(
+            "pyproject.toml",
+            &format!(
+                "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT207\"]\n\n{contracts}"
+            ),
+        );
+        p
+    };
+    let targets = ["pkg.m.A.reset", "pkg.m.B.reset"];
+    let expected = reports(&build(
+        "targets_unresolved_separate",
+        contracts(&targets, ""),
+    ));
+    assert_eq!(expected, vec![at("pkg/m.py", 3, "MUT207")]);
+    let both = format!(
+        "[[tool.heki.call-owners]]\nname = \"g\"\ntargets = [\"{}\", \"{}\"]\n{KEYS}",
+        targets[0], targets[1]
+    );
+    let report = format!("{both}targets-call-each-other = \"report\"\n");
+    assert_eq!(
+        reports(&build("targets_unresolved_report", report)),
+        expected
+    );
+    assert_eq!(reports(&build("targets_unresolved_allow", both)), vec![]);
+}

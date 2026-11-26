@@ -363,7 +363,7 @@ pub(super) fn mut207(
     let sites = cx.sites_by_caller();
     // An object of unknown class is no class's own `self`.
     let no_class = FxHashSet::default();
-    let mut classified: Classified<'_, &str> = Classified::default();
+    let mut classified: FxHashMap<(usize, &FuncKey, u64, &str), Vec<usize>> = FxHashMap::default();
     // The targets of each rule a method name matches, found once per rule and name.
     let mut matched: FxHashMap<(usize, &str), Vec<usize>> = FxHashMap::default();
     let mut globs = GlobFamilies::default();
@@ -398,26 +398,38 @@ pub(super) fn mut207(
                     });
                     matching.map(|(i, _)| i).collect()
                 });
-                let calls_target = |class: &str| {
-                    hits.iter()
-                        .any(|&i| rule.targets.calls_on(cx, i, class, &a.name))
-                };
                 let access = Unseen {
                     func: key,
                     obj: a.obj_params,
                 };
-                let callers = Callers::LeaveTargetClasses(&calls_target);
-                let allowance = rule.allowance_for(hits);
-                if hits.is_empty()
-                    || !*classified
-                        .entry((r, key, a.obj_params, a.name.as_str()))
-                        .or_insert_with(|| {
-                            access.counts(cx, &sites, &allowance, &no_class, callers)
-                        })
-                {
+                // The targets the call may reach that the contract does not allow it to: each
+                // group is judged on its own, as a contract of just that group would judge it.
+                let counted = classified
+                    .entry((r, key, a.obj_params, a.name.as_str()))
+                    .or_insert_with(|| {
+                        let mut counted = Vec::new();
+                        for group in rule.target_groups(hits) {
+                            let calls_target = |class: &str| {
+                                group
+                                    .iter()
+                                    .any(|&i| rule.targets.calls_on(cx, i, class, &a.name))
+                            };
+                            let callers = Callers::LeaveTargetClasses(&calls_target);
+                            let allowance = rule.allowance_for(group);
+                            if access.counts(cx, &sites, &allowance, &no_class, callers) {
+                                counted.extend_from_slice(group);
+                            }
+                        }
+                        counted
+                    });
+                if counted.is_empty() {
                     continue;
                 }
-                let guarded = listed(hits.iter().map(|&i| rule.targets.patterns[i].text.as_str()));
+                let guarded = listed(
+                    counted
+                        .iter()
+                        .map(|&i| rule.targets.patterns[i].text.as_str()),
+                );
                 let judged = rule.allowance.judged(cx.decls, key);
                 add(
                     cx,

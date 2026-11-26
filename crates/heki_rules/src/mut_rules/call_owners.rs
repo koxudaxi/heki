@@ -782,6 +782,17 @@ pub(super) struct CallOwnerRule<'r> {
 }
 
 impl CallOwnerRule<'_> {
+    /// The groups of matched targets a call is judged for: all together, or, when the targets do
+    /// not call each other, each alone.
+    pub(super) fn target_groups<'h>(&self, hits: &'h [usize]) -> impl Iterator<Item = &'h [usize]> {
+        let size = if self.targets_call_each_other {
+            hits.len().max(1)
+        } else {
+            1
+        };
+        hits.chunks(size)
+    }
+
     /// The allowance a call of the targets `group` is judged by: the contract's own, or, when
     /// its targets do not call each other, one in which only `group` is guarded, as in a
     /// contract of just those targets.
