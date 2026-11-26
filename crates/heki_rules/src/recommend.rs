@@ -87,8 +87,10 @@ pub struct Request<'a> {
     pub snapshot: Option<SummarySnapshot>,
     /// The Ratchet baseline the current configuration compares with.
     pub baseline: Option<RatchetBaseline>,
-    /// The paths given on the command line.
+    /// The paths the run analyzes ([`CommandPaths::analyzed`](crate::project::CommandPaths)).
     pub paths: &'a [PathBuf],
+    /// The words of the `heki check` options that analyze and select as this run did.
+    pub check_options: Vec<String>,
     /// A path as the output writes it: relative to the working directory when inside it, as
     /// `heki check` writes paths.
     pub shown: &'a dyn Fn(&Path) -> String,
@@ -178,8 +180,12 @@ pub struct Analyzed {
     pub functions: usize,
     /// The files that could not be read or parsed, as `heki check` reports them.
     pub errors: Vec<String>,
-    /// The paths given on the command line.
+    /// The paths analyzed.
     pub paths: Vec<String>,
+    /// The `heki check` options the run's own options give: what the command naming the counted
+    /// reports carries.
+    #[serde(skip)]
+    pub check_options: Vec<String>,
     pub left_out: LeftOut,
 }
 
@@ -270,6 +276,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         snapshot,
         baseline,
         paths,
+        check_options,
         shown,
         errors,
         all,
@@ -459,6 +466,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
             functions,
             errors,
             paths: paths.iter().map(|p| shown(p)).collect(),
+            check_options,
             left_out,
         },
         runs,
@@ -749,7 +757,7 @@ fn start_here(report: &RecommendReport) -> Vec<String> {
              the contract candidates come from that run"
         ));
     }
-    if let Some(shown) = rules::shown_by_check(&report.rules, &report.analyzed.paths) {
+    if let Some(shown) = rules::shown_by_check(&report.rules, &report.analyzed) {
         steps.push(format!(
             "{} shows {} report(s) not shown now: {} exact, {} heuristic (heuristic reports can \
              be wrong)",
@@ -818,7 +826,7 @@ pub fn render_text(report: &RecommendReport, text: TextOptions) -> String {
         &mut out,
         &report.rules,
         now.baseline.is_some(),
-        &report.analyzed.paths,
+        &report.analyzed,
         text,
     );
     blind_spots::render(&mut out, &report.blind_spots, &report.root);

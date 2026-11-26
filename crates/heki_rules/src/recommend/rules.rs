@@ -3,7 +3,7 @@
 //! the published measurement of how often its reports are right, and whether the block enables
 //! it ([`RULE_POLICY`]).
 
-use super::{BaselineSplit, printed};
+use super::{Analyzed, BaselineSplit, printed};
 use crate::experimental::experimental_rule;
 use crate::precision::{self, PublishedMeasurement};
 use crate::project::{ParsedFile, regressed};
@@ -314,7 +314,7 @@ pub(super) struct ShownByCheck {
 /// The command naming in `extend-select` every rule with reports here, in the order the section
 /// lists them, but those the configuration ignores; `None` when there is none. A rule's reports do
 /// not depend on the other rules selected, so its count holds among the others.
-pub(super) fn shown_by_check(rules: &[RuleAdvice], paths: &[String]) -> Option<ShownByCheck> {
+pub(super) fn shown_by_check(rules: &[RuleAdvice], analyzed: &Analyzed) -> Option<ShownByCheck> {
     let mut named: Vec<&RuleAdvice> = (rules.iter())
         .filter(|r| r.reports > Some(0) && r.reason != IGNORED)
         .collect();
@@ -324,11 +324,15 @@ pub(super) fn shown_by_check(rules: &[RuleAdvice], paths: &[String]) -> Option<S
     }
     let codes: Vec<&str> = named.iter().map(|r| r.code.as_str()).collect();
     let mut command = "heki check".to_owned();
-    if paths != ["."] {
-        for path in paths {
+    if analyzed.paths != ["."] {
+        for word in &analyzed.paths {
             command.push(' ');
-            command.push_str(&super::command_word(path));
+            command.push_str(&super::command_word(word));
         }
+    }
+    for word in &analyzed.check_options {
+        command.push(' ');
+        command.push_str(&super::command_word(word));
     }
     command.push_str(" --extend-select ");
     command.push_str(&codes.join(","));
@@ -358,14 +362,14 @@ fn measured(measurement: Option<&PublishedMeasurement>) -> (String, String) {
     }
 }
 
-/// The section as the text prints it. `paths` are the paths given, which the command showing the
+/// The section as the text prints it. `analyzed` names the paths and options of the command showing the
 /// reports counted names. The heuristic rules without reports are named with `text.all`, and the
 /// rules not counted (`MUT103`) with `text.all` or when its snapshot is saved.
 pub(super) fn render(
     out: &mut String,
     rules: &[RuleAdvice],
     baseline: bool,
-    paths: &[String],
+    analyzed: &Analyzed,
     text: super::TextOptions,
 ) {
     out.push_str("\nRules worth enabling here\n");
@@ -417,7 +421,7 @@ pub(super) fn render(
             row(out, r);
         }
     }
-    if let Some(shown) = shown_by_check(rules, paths) {
+    if let Some(shown) = shown_by_check(rules, analyzed) {
         let regressions = if baseline {
             format!(", {} regression(s) among them", shown.regressions)
         } else {

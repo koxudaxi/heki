@@ -970,14 +970,47 @@ fn the_command_under_the_rules_shows_every_report_they_count() {
             .map(|r| r["reports"].as_u64().unwrap())
             .sum();
         assert_eq!(counted, 7 - u64::from(!args.is_empty()));
-        // The command, with the options given to `heki recommend`.
-        let mut run: Vec<&str> = command[1..].iter().map(String::as_str).collect();
-        run.extend(args.iter().filter(|a| **a != "app"));
+        // The command carries the options given to `heki recommend`.
+        let run: Vec<&str> = command[1..].iter().map(String::as_str).collect();
         let shown = checked(&p, &run);
         assert_eq!(
             shown.len() as u64,
             report["reports_now"]["shown"].as_u64().unwrap() + counted,
             "{run:?}"
+        );
+    }
+    // Analysis options and a file argument: the command shows the reports the whole analysis
+    // counted, with the configuration it used.
+    let c = shop_with_opt_in("recommend_rules_command_options");
+    c.write("custom.toml", "extend-exclude = [\"app/users.py\"]\n")
+        .write("pyproject.toml", "[project]\nname = \"t\"\n");
+    for args in [
+        vec!["--config", "custom.toml"],
+        vec!["app/opt_in.py"],
+        vec!["app/opt_in.py", "--config", "custom.toml"],
+        vec!["--heuristic"],
+        vec!["--no-heuristic"],
+        vec!["--target-version", "py312"],
+    ] {
+        let (_, report, _) = recommend_json(&c, &args);
+        let command = command_shown(&c, &args);
+        assert_eq!(command[0], "check");
+        assert_eq!(
+            command.iter().any(|w| w == "--config"),
+            args.contains(&"--config"),
+            "{command:?}"
+        );
+        assert!(!command.iter().any(|w| w.ends_with(".py")), "{command:?}");
+        let named: Vec<&str> = command.last().unwrap().split(',').collect();
+        let counted: u64 = (report["rules"].as_array().unwrap().iter())
+            .filter(|r| named.contains(&r["code"].as_str().unwrap()))
+            .map(|r| r["reports"].as_u64().unwrap())
+            .sum();
+        let run: Vec<&str> = command[1..].iter().map(String::as_str).collect();
+        assert_eq!(
+            checked(&c, &run).len() as u64,
+            report["reports_now"]["shown"].as_u64().unwrap() + counted,
+            "{args:?} {run:?}"
         );
     }
     // A path a shell would split is quoted.
@@ -1161,7 +1194,7 @@ fn a_baseline_splits_each_rules_reports() {
         .sum();
     assert!(
         out.contains(&format!(
-            ", {regressions} regression(s) among them: heki check --extend-select "
+            ", {regressions} regression(s) among them: heki check --baseline b.toml --extend-select "
         )),
         "{out}"
     );
