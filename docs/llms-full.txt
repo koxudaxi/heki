@@ -5911,7 +5911,16 @@ cost estimate such as "(N+1)", and no advice (that goes into the help).
 Exact claims hold in every run consistent with seven assumptions
 ([ARCHITECTURE.md, section 3.4](https://github.com/koxudaxi/heki/blob/main/ARCHITECTURE.md)):
 
-- **R1**: the functions and classes on a call chain are not replaced at run time.
+- **R1**: the functions and classes on a call chain are not replaced at run time. A special
+  method bound on a class after its body (`__setattr__`, `__delattr__`, `__getattribute__`,
+  `__getattr__`, a copy hook) is bound under its own name: a store under a constant name (a
+  string literal, or a module or class name bound once to one), or under a name the storing
+  function builds with constant text that can still spell it, may bind it, and a store under a
+  name of unknown value (a parameter, a loop variable over `dir()`, `vars()`, or a mapping's keys,
+  a value read from data, a module name bound to a built string) is taken to bind none. This
+  gives up `setattr(cls, name, hook)` binding `__setattr__` through such a `name`. Code heki
+  does not read is taken to bind none either: a class decorator outside the project, and a call
+  or a closure the class is handed to, bind on it only what the stores heki reads bind.
 - **R2**: a value annotated `C` is an instance of `C` or of a project subclass. A premise that
   goes through a method call holds only when every implementation in such a subclass has it.
   A value annotated with a nominal container ABC (`Sequence`, `Mapping`, `Set`, and their mutable
@@ -7773,9 +7782,13 @@ Its premises:
   run (R2, R5). Established.
 - **Plain write**: the write is one of two kinds. It may rebind or delete the attribute with a
   plain store: no property, descriptor, `__setattr__`, `__delattr__`, or metaclass heki does not
-  know in a class the instance may be, and every base a project class or a plain one. Or it may
-  change in place the builtin list, dict, or set the attribute holds by its type, through a
-  changing method or an item store that no project subclass of the container replaces.
+  know in a class the instance may be, no `__setattr__` or `__delattr__` bound on one after its
+  body by a store heki reads (through a value that may be a class object, under that name or a
+  name built at run time that may be it, also in a class decorator or an `__init_subclass__`,
+  as for `MUT115`; a name of unknown value and code heki does not read binding none under R1),
+  and every base a project class or a plain one. Or it may change in place the builtin list,
+  dict, or set the attribute holds by its type, through a changing method or an item store that
+  no project subclass of the container replaces.
   Established.
 - **Kept to the return**: no point from the write to the method's normal return may remove or
   replace the kept value, exception edges into handlers included. The write's own instruction
@@ -13254,8 +13267,18 @@ Its premises:
   project subclass replaces; `copy.copy` of an instance of a project class no class of which
   (R2) defines `__copy__`, `__reduce__`, `__reduce_ex__`, `__getstate__`, or `__setstate__`, or
   has a metaclass or a base heki does not know; or `model_copy()` without `deep=True` of a
-  pydantic model (R3) whose classes define no `__copy__` or `model_copy`. Open for the other
-  copies (`dataclasses.replace`, `copy.replace`, the catalog's other sanitizers).
+  pydantic model (R3) whose classes define no `__copy__` or `model_copy`. A class defines a
+  name also when a store heki reads binds it on the class after its body: a store through a
+  value that may be a class object (any value heki does not establish as an instance: `self`,
+  what a class call makes, a parameter annotated with a class other than `type`) under the
+  name, or under a name built at run time whose constant text at its ends may be the name's
+  (`Node.__copy__ = f`, `setattr(cls, "__copy__", f)` in a class decorator, an
+  `__init_subclass__`, or another function handed the class; `f"_cached_{name}"` is never
+  `__copy__`). A store under a name of unknown value (a parameter, a key of `vars()` or of a
+  mapping, a value read from data) binds none, and so does code heki does not read: a class
+  decorator outside the project, and a call or a closure the class is handed to, bind only what
+  the stores heki reads bind (R1). Open for the other copies (`dataclasses.replace`,
+  `copy.replace`, the catalog's other sanitizers).
 - **Borrowed original**: on every path the copied value is state that outlives the call: a
   parameter, a global, a variable of an enclosing function, or what a plain attribute or item
   load reads from such state. Open: one path is enough. What a call returns is not followed.
@@ -13271,8 +13294,9 @@ Its premises:
   changing method, or an in-place operator on a builtin `list`, `dict`, or `set` (by
   annotation, R2) that no project subclass replaces, or a plain attribute store or delete on an
   instance of a project class (no property, descriptor, `__setattr__`, or metaclass in a class it
-  may be; pydantic's `BaseModel.__setattr__` stores on the instance, R3). Open: a change made by
-  a helper the object is handed to.
+  may be, also none bound on the class after its body as for **Shallow copy**; pydantic's
+  `BaseModel.__setattr__` stores on the instance, R3). Open: a change made by a helper the
+  object is handed to.
 
 ## Why is this bad?
 The copy suggests the original stays as it was, but the objects below the copy are the
