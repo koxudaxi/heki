@@ -451,6 +451,21 @@ With `fresh-objects = "allow"`, a write is no violation when it constructs the o
 - nothing can hold it yet: no store, `yield`, closure, or call that may keep it ran before the
   write.
 
+New objects stored in one another stay new: an attribute store of a new object into another
+object the function made, of a class whose attribute write runs no code (no `__setattr__`,
+property, or other descriptor of the name; for a pydantic model, no `model_config`, `Config`, or
+class keyword on any class the object may be, since `validate_assignment` runs the model's
+validators), links the two
+(`copied, part = Node(), Node(); part.parent = copied; copied.flag = True` constructs `copied`).
+The group stays new until one of its objects is stored anywhere else, yielded, captured, or
+handed to a call that may keep it, and so does a value read out of one of them (an attribute, an
+item, an iteration step, what a call over it returns), which may be another:
+`old.append(part.parent)` ends `copied`'s freshness, as does a helper handed `part`, which may
+store what it reads out of it. A project function's result that holds itself through the objects
+it links (`made.part = part; part.parent = made`) is new at a call until a value read out of it
+is stored. A store into an object the function did not make, or into one of its own that was
+kept before, still ends the freshness of what it stores.
+
 A shallow copy's containers are the original's: only rebinding its attributes constructs it.
 
 A project function returns a new object at a call when every value it returns is one, or, on

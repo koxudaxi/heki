@@ -14,9 +14,9 @@ use crate::scc::tarjan_scc;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallCycle, CallHop, CallSite, CallTarget, CallTests,
     CellChange, Construction, ContractSharing, Delivery, EffectSummary, EntryKey, Facts, FuncKey,
-    LocalOrigins, MayGiven, NewArg, NewCond, NewKind, Origins, ProjectIndex, ProtectedReturn,
-    ReturnsNew, Runner, Shared, SharedChain, SharedLine, SharedState, SiteRole, Slot,
-    TypedFieldWrite, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind, cache_flow,
+    KeptBy, LocalOrigins, MayGiven, NewArg, NewCond, NewFrom, NewKind, Origins, ProjectIndex,
+    ProtectedReturn, ReturnsNew, Runner, Shared, SharedChain, SharedLine, SharedState, SiteRole,
+    Slot, TypedFieldWrite, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind, cache_flow,
 };
 use heki_ast::Span;
 use heki_kb::ExecEffectKind;
@@ -1041,8 +1041,25 @@ impl Resolver<'_> {
         }
         for keep in cond.keeps() {
             let given = match &keep.by {
-                Some((k, p)) => self.index.summary(k)?.retained_given(*p),
-                None => MayGiven::given(Vec::new()),
+                KeptBy::Callee(k, p) => self.index.summary(k)?.retained_given(*p),
+                KeptBy::Store => MayGiven::given(Vec::new()),
+                // A callee of the SCC has no final `returns_new` yet: its result may hold itself.
+                KeptBy::ReadBack(k) if (self.in_scc)(k) => MayGiven::given(Vec::new()),
+                KeptBy::ReadBack(k) if self.index.summary(k)?.returns_new.linked() => {
+                    MayGiven::given(Vec::new())
+                }
+                KeptBy::ReadBack(_) => MayGiven::default(),
+                // The holder is new at that call: it may have been kept where its function
+                // stores it, in the caller's terms already; otherwise it is old.
+                KeptBy::Holder(from) if !(self.in_scc)(&from.callee) => {
+                    let summary = self.index.summary(&from.callee)?;
+                    if let Some((_, stored)) = summary.returns_new.at_call(from.empty_params) {
+                        kept.join(&given_at_call(stored, &from.at));
+                        continue;
+                    }
+                    MayGiven::given(Vec::new())
+                }
+                KeptBy::Holder(_) => MayGiven::given(Vec::new()),
             };
             kept.join(&given_at_call(&given, &keep.at));
         }
@@ -1140,6 +1157,7 @@ impl Resolver<'_> {
             cond,
             elements_of,
             kept,
+            linked,
         } = &s.returns_new
             && !cond.is_empty()
         {
@@ -1147,11 +1165,16 @@ impl Resolver<'_> {
                 Some((k, stored)) => {
                     let mut kept = kept.clone();
                     kept.join(&stored);
+                    // `holds` found every function the result comes from outside the SCC.
+                    let summary = |f: &NewFrom| self.index.summary(&f.callee);
+                    let through_callee = (cond.returns().iter())
+                        .any(|f| summary(f).is_some_and(|c| c.returns_new.linked()));
                     ReturnsNew::New {
                         kind: (*kind).min(k),
                         cond: NewCond::default(),
                         elements_of: *elements_of,
                         kept,
+                        linked: *linked || through_callee,
                     }
                 }
                 None => ReturnsNew::No,

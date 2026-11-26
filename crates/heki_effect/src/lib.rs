@@ -573,16 +573,31 @@ pub struct CondParts {
     pub keeps: Vec<Keep>,
 }
 
-/// A store that may keep an object ([`CondParts::keeps`]): a hand-over to parameter `.1` of the
-/// project function `.0`, which keeps it when that callee keeps the parameter there
-/// ([`EffectSummary::retains_params`]), or, for `None`, a store that keeps it. `at` tells what
-/// the store's call binds and the tests of the function's inputs that hold where it runs: a
-/// store under `if register:` keeps the object only at the calls of the function leaving
-/// `register` true.
+/// A store that may keep an object ([`CondParts::keeps`]). `at` tells what the store's call binds
+/// and the tests of the function's inputs that hold where it runs: a store under `if register:`
+/// keeps the object only at the calls of the function leaving `register` true.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Keep {
-    pub by: Option<(FuncKey, u8)>,
+    pub by: KeptBy,
     pub at: CallTests,
+}
+
+/// What a [`Keep`] needs to keep the object.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeptBy {
+    /// Nothing: the store keeps it.
+    Store,
+    /// A hand-over to parameter `.1` of the project function `.0`: it keeps the object when that
+    /// callee keeps the parameter there ([`EffectSummary::retains_params`]).
+    Callee(FuncKey, u8),
+    /// A value read out of the result of the project function `.0` and stored: it may be the
+    /// result itself when that function's result holds itself through objects it made
+    /// (`ReturnsNew::New::linked`).
+    ReadBack(FuncKey),
+    /// A link into an object a call of a project function returned (`Escape::Into`): the value
+    /// is as public as its holder, kept unless that call returns a new object there.
+    Holder(NewFrom),
 }
 
 /// What a call tells of the tests its callee makes of its parameters ([`MayGiven`]): the
@@ -787,10 +802,21 @@ pub enum ReturnsNew {
         /// the store ([`Self::at_call`]).
         #[serde(default, skip_serializing_if = "MayGiven::never")]
         kept: MayGiven,
+        /// The result may hold itself through objects the function made and stored in one
+        /// another (`part.parent = copied; copied.part = part`): a value read out of it may be
+        /// the result, so storing that value ends the result's freshness at the call.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        linked: bool,
     },
 }
 
 impl ReturnsNew {
+    /// Whether a value read out of the result may be the result itself
+    /// (`ReturnsNew::New::linked`).
+    pub fn linked(&self) -> bool {
+        matches!(self, Self::New { linked: true, .. })
+    }
+
     /// The kind of a resolved `New` (a final summary's) at every call.
     pub fn kind(&self) -> Option<NewKind> {
         self.kind_at(0)
@@ -813,6 +839,7 @@ impl ReturnsNew {
                 cond,
                 elements_of,
                 kept,
+                ..
             } if cond.is_empty() && elements_of & !empty_params == 0 => Some((*kind, kept)),
             _ => None,
         }

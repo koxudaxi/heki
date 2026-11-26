@@ -980,7 +980,10 @@ EffectSummary(f) = {
                                                            // (FunctionDecl::returns_param) gives the
                                                            // object it hands it; kept: the tests of the
                                                            // inputs under which the function may store
-                                                           // the result first (MayGiven)
+                                                           // the result first (MayGiven); linked: the
+                                                           // result holds itself through new objects
+                                                           // it links, so a value read out of it at a
+                                                           // call may be the result
     return_origins:           Option<Box<ReturnOrigins>>,  // MUT112, absent for most functions: what the
                                                            // returned object may be, path by path (new, held
                                                            // state, parameter i, or an element of parameter i;

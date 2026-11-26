@@ -104,8 +104,8 @@ pub struct ClassInfo {
     /// `Base[int]`), or `None` for another expression (`with_metaclass(Meta)`, `*bases`), whose
     /// class heki cannot name.
     pub bases: Vec<Option<String>>,
-    /// Class keywords with the source text of their value (`metaclass=Meta`, `frozen=False`);
-    /// `**kwargs` is left out.
+    /// Class keywords with the source text of their value (`metaclass=Meta`, `frozen=False`),
+    /// and a mapping of them unpacked (`**options`) under the name `**`.
     pub keywords: Vec<(String, String)>,
     /// The functions defined directly in the class body, by the names the class holds them
     /// under (`_Parser__run` for `def __run`).
@@ -1185,10 +1185,11 @@ impl<'a> Analyzer<'a> {
                 self.visit_expr(arg);
             }
             for kw in &args.keywords {
-                if let Some(name) = &kw.arg {
-                    let value = self.source[kw.value.range()].to_owned();
-                    keywords.push((name.to_string(), value));
-                }
+                let name = kw
+                    .arg
+                    .as_ref()
+                    .map_or_else(|| "**".to_owned(), ToString::to_string);
+                keywords.push((name, self.source[kw.value.range()].to_owned()));
                 self.visit_expr(&kw.value);
             }
         }
