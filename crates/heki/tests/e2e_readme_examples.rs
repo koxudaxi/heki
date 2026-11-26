@@ -1,10 +1,13 @@
 //! The examples at the top of `README.md` and `docs/index.md`, run through the binary: each
 //! example's files are written to a project of their own, and the `heki check` command of the
-//! console block that follows them must print exactly the rest of the block.
+//! console block that follows them must print exactly the rest of the block. The excerpt of
+//! "Try it in 5 minutes" is run on the sample project in `tests/sample_service/`.
 
 mod common;
 
-use common::{Project, repo_file};
+use std::path::Path;
+
+use common::{Project, repo_file, repo_root};
 
 /// The examples: from the first `### ` heading to the sentence after the last one.
 fn examples(doc: &str) -> &str {
@@ -71,8 +74,8 @@ fn the_readme_examples_print_what_the_readme_shows() {
     }
 }
 
-/// The `--diff` example of the `collections.deque` rewrite, shown in the README, docs/index.md,
-/// and docs/fixes.md: its console block, from the command to the end of the output.
+/// The `--diff` example of the `collections.deque` rewrite in docs/fixes.md: its console block,
+/// from the command to the end of the output.
 fn deque_example(doc: &str) -> &str {
     let start = doc
         .find("$ heki check --diff --include-size-dependent jobs.py\n")
@@ -83,12 +86,8 @@ fn deque_example(doc: &str) -> &str {
 
 #[test]
 fn the_deque_example_prints_what_the_pages_show() {
-    let readme = repo_file("README.md");
-    let block = deque_example(&readme);
-    for page in ["docs/index.md", "docs/fixes.md"] {
-        assert_eq!(deque_example(&repo_file(page)), block, "{page}");
-    }
-    let (command, expected) = block.split_once('\n').unwrap();
+    let fixes = repo_file("docs/fixes.md");
+    let (command, expected) = deque_example(&fixes).split_once('\n').unwrap();
     // The file before the rewrite: the diff's context and removed lines (a page may drop the
     // space of an empty context line).
     fn before(line: &str) -> Option<&str> {
@@ -117,4 +116,87 @@ fn the_deque_example_prints_what_the_pages_show() {
     // A diff with something to apply exits with 1.
     assert_eq!(code, 1, "{stderr}");
     assert_eq!(format!("{stdout}{stderr}"), expected);
+}
+
+/// The console block of "Try it in 5 minutes" that runs `heki recommend`, without the indentation
+/// of the list item that holds it.
+fn sample_excerpt(doc: &str) -> String {
+    let command = doc
+        .lines()
+        .position(|line| line.trim_start().starts_with("$ ") && line.ends_with(" recommend"))
+        .expect("the recommend command of the excerpt");
+    let lines: Vec<&str> = doc.lines().collect();
+    let open = (0..command)
+        .rev()
+        .find(|&i| lines[i].trim_start() == "```console")
+        .expect("the console block of the excerpt");
+    let indent = &lines[open][..lines[open].len() - "```console".len()];
+    lines[open + 1..]
+        .iter()
+        .take_while(|line| line.trim_start() != "```")
+        .map(|line| format!("{}\n", line.strip_prefix(indent).unwrap_or(line)))
+        .collect()
+}
+
+/// Every file below `from/rel`, written to `p` at its path below `from`.
+fn copy_project(from: &Path, rel: &Path, p: &Project) {
+    for entry in std::fs::read_dir(from.join(rel)).unwrap() {
+        let name = rel.join(entry.unwrap().file_name());
+        if from.join(&name).is_dir() {
+            copy_project(from, &name, p);
+        } else {
+            let text = std::fs::read_to_string(from.join(&name)).unwrap();
+            p.write(name.to_str().unwrap(), &text);
+        }
+    }
+}
+
+/// The lines of `expected` are an excerpt of `output`: the runs of lines between the `...` lines
+/// are lines of `output` in a row, in the order they come.
+fn assert_excerpt(expected: &str, output: &str, command: &str) {
+    let lines: Vec<&str> = output.lines().collect();
+    let expected: Vec<&str> = expected.lines().collect();
+    let mut from = 0;
+    for run in expected
+        .split(|line| *line == "...")
+        .filter(|run| !run.is_empty())
+    {
+        let at = (from..=lines.len().saturating_sub(run.len()))
+            .find(|&i| lines[i..i + run.len()] == *run)
+            .unwrap_or_else(|| {
+                panic!("`{command}` does not print, after line {from}:\n{run:#?}\n{output}")
+            });
+        from = at + run.len();
+    }
+}
+
+#[test]
+fn the_sample_service_prints_the_excerpt_the_pages_show() {
+    let readme = sample_excerpt(&repo_file("README.md"));
+    assert_eq!(
+        readme,
+        sample_excerpt(&repo_file("docs/index.md")),
+        "README.md and docs/index.md show the same excerpt"
+    );
+    let p = Project::new("readme_sample_service");
+    copy_project(&repo_root().join("tests/sample_service"), Path::new(""), &p);
+    // Each command, with the lines of the block up to the next one.
+    let mut commands: Vec<(&str, String)> = Vec::new();
+    for line in readme.lines() {
+        match (line.strip_prefix("$ "), commands.last_mut()) {
+            (Some(command), _) => commands.push((command, String::new())),
+            (None, Some((_, expected))) => expected.push_str(&format!("{line}\n")),
+            (None, None) => panic!("the excerpt starts with a command: {readme}"),
+        }
+    }
+    assert_eq!(commands.len(), 2, "{readme}");
+    for (command, expected) in &commands {
+        // `uvx heki==<version> check` runs the release the page pins: this build.
+        assert!(command.starts_with("uvx heki=="), "{command}");
+        let args: Vec<&str> = command.split_whitespace().skip(2).collect();
+        let (code, stdout, stderr) = p.heki(&args);
+        // Nothing fails the run on the sample: it is a project `heki check` passes.
+        assert_eq!(code, 0, "{command}: {stderr}");
+        assert_excerpt(expected, &format!("{stdout}{stderr}"), command);
+    }
 }

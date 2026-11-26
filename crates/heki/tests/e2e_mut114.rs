@@ -217,7 +217,9 @@ fn mut114_states_its_claim_only_where_every_premise_holds() {
         at(34)["message"],
         "`use` mutates the shared object returned by cached function `producers.entry_points` through `producers.wrapper`"
     );
-    // A cached method called through a bound-method alias, and a method keyed by `self` alone.
+    // A cached method called through a bound-method alias, whose targets are not established
+    // to be every implementation the call can run (`TypeCtx::inst_targets_complete` judges no
+    // held method), and a method keyed by `self` alone.
     let formatter: Vec<Value> = diags
         .iter()
         .filter(|d| d["path"] == "producers.py")
@@ -225,7 +227,7 @@ fn mut114_states_its_claim_only_where_every_premise_holds() {
         .collect();
     assert_eq!(
         claims(&formatter),
-        vec![(79, true), (80, false)],
+        vec![(79, false), (80, false)],
         "{formatter:#?}"
     );
 }
@@ -554,5 +556,141 @@ def use(name):
         claims(&diags),
         vec![(24, true), (26, true), (27, true)],
         "{diags:#?}"
+    );
+}
+
+/// Each `MUT114` report of the project as (function, certainty, open premises "premise: cause").
+fn open_premise_reports(p: &Project) -> Vec<(String, String, Vec<String>)> {
+    let (code, stdout, stderr) = p.heki(&["dump-open-premises", "--select", "MUT114", "."]);
+    assert_eq!(code, 0, "{stderr}");
+    let out: Value = serde_json::from_str(&stdout).unwrap();
+    out["reports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            let open = r["open_premises"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| {
+                    format!(
+                        "{}: {}",
+                        o["premise"].as_str().unwrap(),
+                        o["cause"].as_str().unwrap()
+                    )
+                })
+                .collect();
+            (
+                r["qualname"].as_str().unwrap().to_owned(),
+                r["certainty"].as_str().unwrap().to_owned(),
+                open,
+            )
+        })
+        .collect()
+}
+
+/// The counterexamples `tests/difftest/cached_result_counterexamples.py` runs on CPython: a call
+/// through a protocol, or on a class that takes the method from a base made at run time, may run
+/// an implementation heki does not see, which caches nothing, so the change is heuristic with
+/// "Every implementation" open; the same change through the cached class stays exact.
+#[test]
+fn mut114_through_a_call_whose_targets_are_not_every_implementation_is_heuristic() {
+    let p = Project::new("mut114_incomplete_targets");
+    let source = std::fs::read_to_string(
+        common::repo_root().join("tests/difftest/cached_result_counterexamples.py"),
+    )
+    .unwrap();
+    p.write("cases.py", &source);
+    let reports = open_premise_reports(&p);
+    let open = vec!["Every implementation: incomplete-targets".to_owned()];
+    assert_eq!(
+        reports,
+        vec![
+            ("add".to_owned(), "heuristic".to_owned(), open.clone()),
+            ("add_listed".to_owned(), "heuristic".to_owned(), open),
+            ("add_cached".to_owned(), "exact".to_owned(), Vec::new()),
+        ]
+    );
+}
+
+/// A value that is the result of a protocol call on one path and a new list on another is not
+/// "the same object on every path", and its protocol call does not have every implementation as
+/// its target: both premises are open, not only the first.
+#[test]
+fn mut114_a_protocol_result_joined_with_a_new_list_leaves_both_premises_open() {
+    let p = Project::new("mut114_incomplete_joined");
+    p.write(
+        "cases.py",
+        r#"import functools
+from typing import Protocol
+
+
+class Repo(Protocol):
+    def items(self, k: str) -> list[str]: ...
+
+
+class CachedRepo:
+    @functools.lru_cache(maxsize=None)
+    def items(self, k: str) -> list[str]:
+        return [k, "id"]
+
+
+def add(repo: Repo, k: str, flag: bool) -> list[str]:
+    xs = repo.items(k) if flag else []
+    xs.append("x")
+    return xs
+"#,
+    );
+    let open = vec![
+        "Same object: not-the-result-on-every-path".to_owned(),
+        "Every implementation: incomplete-targets".to_owned(),
+    ];
+    assert_eq!(
+        open_premise_reports(&p),
+        vec![("add".to_owned(), "heuristic".to_owned(), open)]
+    );
+}
+
+/// A protocol call with two project implementations, one of them cached, has two callees, so no
+/// one function is its result; its targets are still not every implementation, so "Every
+/// implementation" is open next to "Same object".
+#[test]
+fn mut114_a_protocol_call_with_two_implementations_leaves_every_implementation_open() {
+    let p = Project::new("mut114_incomplete_two_callees");
+    p.write(
+        "cases.py",
+        r#"import functools
+from typing import Protocol
+
+
+class Repo(Protocol):
+    def items(self, k: str) -> list[str]: ...
+
+
+class CachedRepo:
+    @functools.lru_cache(maxsize=None)
+    def items(self, k: str) -> list[str]:
+        return [k, "id"]
+
+
+class PlainRepo:
+    def items(self, k: str) -> list[str]:
+        return [k]
+
+
+def add(repo: Repo, k: str) -> list[str]:
+    xs = repo.items(k)
+    xs.append("x")
+    return xs
+"#,
+    );
+    let open = vec![
+        "Same object: not-the-result-on-every-path".to_owned(),
+        "Every implementation: incomplete-targets".to_owned(),
+    ];
+    assert_eq!(
+        open_premise_reports(&p),
+        vec![("add".to_owned(), "heuristic".to_owned(), open)]
     );
 }

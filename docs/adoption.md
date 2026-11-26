@@ -1,7 +1,8 @@
 # Adopting heki in a Code Base
 
-An existing code base usually has findings you cannot fix at once. This page shows how to adopt
-heki step by step:
+An existing code base usually has findings you cannot fix at once. The
+[starter recipes](#starter-recipes) below are the common setups as blocks to copy. The rest of
+this page shows how to adopt heki step by step:
 
 1. Record today's findings in a [Ratchet baseline](#ratchet-baselines), so heki fails only on
    new ones.
@@ -14,6 +15,125 @@ To have a coding agent do this, ask it to adopt heki: the [Agent Skill](coding-a
 carries a playbook that proposes the first one or two contracts, writes `heki.toml` with a
 `CODEOWNERS` line, the baseline, the hook and the CI job, and runs the whole project before it
 finishes.
+
+## Starter recipes
+
+Each recipe is one change to copy, with the version pinned: an upgrade is then a change of the
+pins, reviewed like any other (`pre-commit autoupdate` moves `rev`). Replace `app` with your
+package.
+
+### Add heki to an existing project in one pull request
+
+Record today's findings, so that only new ones fail, and commit `heki-baseline.toml` with the
+configuration, the hook, and the CI step:
+
+```console
+$ uvx heki==0.7.0 check --baseline heki-baseline.toml --update-baseline
+```
+
+```toml
+# pyproject.toml
+[tool.heki]
+baseline = "heki-baseline.toml"
+```
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/koxudaxi/heki-pre-commit
+    rev: v0.7.0
+    hooks:
+      - id: heki   # heki check --touched on the staged files
+```
+
+```yaml
+# A step of the CI job, with uv installed
+- run: uvx heki==0.7.0 check
+```
+
+The hook shows the reports in and through the staged files, and every regression of the
+baseline; the CI step checks the whole project. Both fail on new exact errors.
+
+### An async web or database service
+
+`EFF101` (a blocking call that holds up the event loop) and `EFF103` (a query on every iteration
+of a loop) are exact and run by default. Add the checks that fit the service:
+
+```toml
+# pyproject.toml
+[tool.heki.lint]
+extend-select = [
+  "EFF105",  # blocking file I/O reached from an async def
+  "EFF106",  # an await or network I/O while a threading lock or a transaction is held
+  "EFF107",  # an asyncio task bound to a name and then lost
+]
+```
+
+| Rule | Certainty | Add it when the service |
+| ---- | --------- | ----------------------- |
+| [`EFF105`](rules/async-blocking-fs.md) | heuristic | reads or writes files, templates, or static assets in `async def` handlers |
+| [`EFF106`](rules/lock-or-tx-held-across-io.md) | heuristic | holds a `threading` lock or a database transaction around network I/O or an `await` |
+| [`EFF107`](rules/unretained-async-task.md) | heuristic | starts background work with `asyncio.create_task` |
+| [`EFF109`](rules/lock-reacquired-while-held.md) | heuristic, experimental | takes a `threading.Lock` or an `asyncio.Lock` in a function that a holder of the lock calls |
+| [`EFF110`](rules/exclusive-object-fanout.md) | heuristic, experimental | shares a connection, a stream, or a WebSocket between tasks started with `asyncio.gather` or a task group |
+| [`EFF115`](rules/async-def-as-sync-callback.md) | heuristic, experimental | hands `async def` functions to threads, executors, or signal handlers |
+| [`EFF102`](rules/loop-unpooled-client.md), [`EFF117`](rules/unlocked-write-of-guarded-state.md) | heuristic | creates HTTP or database clients in loops, or changes state its threads share without the lock its other writers hold; these two are not opt-in and run with `--heuristic` |
+
+Their reports can be wrong about the code: they are printed, and fail the run only with
+`fail-on = "warning"`. Before adding a rule, [`heki recommend`](recommend.md) counts the reports
+it would add on your code ("Rules worth enabling here"). `relax-async-in-tests`, on by default,
+leaves `EFF101`, `EFF105`, and `EFF106` out of test code.
+
+### Walls for a team or a coding agent
+
+Declare the architecture as contracts, make their reports fail the run, and give the file an
+owner, so that a wall moves only in a reviewed change:
+
+```toml
+# heki.toml
+baseline = "heki-baseline.toml"
+
+[lint]
+fail-on = "warning"   # contract reports are heuristic: let them fail the run
+
+[[write-owners]]
+name = "order-store"
+targets = ["app.models.Order.items"]
+allowed-writers = ["app.store.*"]
+message = "change Order.items through app.store"
+
+[[effect-boundaries]]
+name = "pure-domain"
+scopes = ["app.domain.*"]
+forbid = ["blocking"]
+
+[[import-boundaries]]   # experimental
+name = "domain-without-web"
+importers = ["app.domain", "app.domain.*"]
+forbidden-imports = ["app.web", "app.web.*"]
+```
+
+```text
+# .github/CODEOWNERS
+/heki.toml           @your-org/maintainers
+/heki-baseline.toml  @your-org/maintainers
+/.github/CODEOWNERS  @your-org/maintainers
+```
+
+- heki reads the first of `heki.toml`, `.heki.toml`, and `pyproject.toml` it finds at the
+  project root, without merging them: move every `[tool.heki]` setting into `heki.toml`.
+- `fail-on = "warning"` makes every warning and heuristic report fail the run, not only the
+  contracts' reports. Record today's findings in the baseline first
+  (`uvx heki==0.7.0 check --update-baseline`), so that only new ones fail.
+- The `message` is the help of every report of the contract: write it as an instruction.
+- For Claude Code, add the [Stop hook](coding-agents.md#a-stop-hook-for-claude-code): it runs
+  `heki check`, with the baseline `heki.toml` names, when the agent is about to end its turn,
+  and sends a failing report back to it.
+
+[Contracts](configuration.md#contracts) has every key, and
+[Coding Agents](coding-agents.md#architecture-rules-with-agents) the instructions for the agent.
+[The whole setup, end to end](coding-agents.md#the-whole-setup-end-to-end) adds the GitHub Actions
+workflow that compares a pull request with its base branch, the Stop hook, and the skill.
 
 ## Ratchet baselines
 
@@ -205,7 +325,7 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
         hooks:
           - id: heki
             name: heki
-            entry: uvx heki check --touched
+            entry: uvx heki==0.7.0 check --touched
             language: system   # needs uv on PATH
             types_or: [python, toml]
             files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
@@ -225,7 +345,7 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
             name: heki
             entry: heki check --touched
             language: python
-            additional_dependencies: [heki]
+            additional_dependencies: [heki==0.7.0]
             types_or: [python, toml]
             files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
             pass_filenames: true
@@ -261,14 +381,14 @@ the run now.
 === "GitHub Actions annotations"
 
     ```yaml
-    - run: uvx heki check --output-format github
+    - run: uvx heki==0.7.0 check --output-format github
     ```
 
 === "Code scanning (SARIF)"
 
     ```yaml
     # The job needs `permissions: security-events: write`.
-    - run: uvx heki check --output-format sarif > heki.sarif || test "$?" -eq 1
+    - run: uvx heki==0.7.0 check --output-format sarif > heki.sarif || test "$?" -eq 1
     - uses: github/codeql-action/upload-sarif@v4
       with:
         sarif_file: heki.sarif
@@ -282,11 +402,16 @@ In GitHub Actions (`GITHUB_ACTIONS=true`), `heki check` writes these annotations
 `--output-format github`. To keep the text output there, pass `--output-format full`, or set
 `HEKI_OUTPUT_FORMAT` (any format) in the job's `env`: it applies whenever the option is not given.
 
+One run is enough: the annotations step fails the job on what fails the run. A run prints one
+output format, so a job that also keeps code-scanning alerts runs heki twice: the annotations
+step is the one that fails the job, and the SARIF step, which keeps the step green on findings,
+uploads them.
+
 On a pull request, a project with old findings can report only what the change touches, as the
 pre-commit hook does (the checkout needs `fetch-depth: 0` for the base branch):
 
 ```yaml
-- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' pyproject.toml heki.toml .heki.toml | xargs -0 -r uvx heki check --touched
+- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' pyproject.toml heki.toml .heki.toml | xargs -0 -r uvx heki==0.7.0 check --touched
   env:
     BASE: ${{ github.base_ref }}
 ```

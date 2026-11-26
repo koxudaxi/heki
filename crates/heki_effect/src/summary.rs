@@ -114,10 +114,10 @@ pub(crate) fn summarize_module(
 ) -> FileSummary {
     let (own_decls, completion_reads) = own;
     let (mut file, reads) = if track {
-        decls.record(|| extract_module(input, decls, kb, soundness, contracts, opt_in))
+        decls.record(|| extract_module(input, decls, kb, soundness, contracts, opt_in, None))
     } else {
         (
-            extract_module(input, decls, kb, soundness, contracts, opt_in),
+            extract_module(input, decls, kb, soundness, contracts, opt_in, None),
             DeclKeys::default(),
         )
     };
@@ -127,6 +127,25 @@ pub(crate) fn summarize_module(
     file
 }
 
+/// [`summarize_module`] with the parameter types `seeded` gives functions of the module (the
+/// one premise of a registration context), recording no reads.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn summarize_module_seeded(
+    input: &ModuleInput<'_>,
+    decls: &ProjectDecls,
+    kb: &EffectiveEcosystemKb,
+    soundness: Option<&EffectiveSoundnessKb>,
+    own: Arc<ModuleDecls>,
+    contracts: Option<&dyn Contracts>,
+    opt_in: OptInFacts,
+    seeded: &crate::resolver::SeededParams,
+) -> FileSummary {
+    let mut file = extract_module(input, decls, kb, soundness, contracts, opt_in, Some(seeded));
+    file.decls = own;
+    file
+}
+
+#[allow(clippy::too_many_arguments)]
 fn extract_module(
     input: &ModuleInput<'_>,
     decls: &ProjectDecls,
@@ -134,8 +153,11 @@ fn extract_module(
     soundness: Option<&EffectiveSoundnessKb>,
     contracts: Option<&dyn Contracts>,
     opt_in: OptInFacts,
+    seeded: Option<&crate::resolver::SeededParams>,
 ) -> FileSummary {
-    let cx = TypeCtx::new(input, decls, kb).with_layer1(soundness);
+    let cx = TypeCtx::new(input, decls, kb)
+        .with_layer1(soundness)
+        .with_seeded(seeded);
     let mut file = FileSummary {
         path: input.path.clone(),
         module_name: input.module_name.clone(),
@@ -194,6 +216,9 @@ fn extract_module(
         .run();
         cell_aliases.extend(cells);
         imported_by_name.extend(by_name);
+        if opt_in.dispatch {
+            summary.dispatch = crate::dispatch::extract(&cx, input.ir, f);
+        }
         // A `class` statement runs its body where it runs, in a function or the module body:
         // the body's effects, calls (a class attribute's value, a decorator, a default
         // argument), and accesses are that code's (its methods run only when they are called).
@@ -483,6 +508,8 @@ fn rebase_origin_nodes(summary: &mut EffectSummary, sites: &mut [CallSite], offs
 }
 
 fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary, func: &FuncKey) {
+    // A name defined twice is not followed by the registration contexts.
+    into.dispatch = None;
     for p in (0..64u8).filter(|p| other.retains_params & (1u64 << p) != 0) {
         into.keep_params(1u64 << p, &other.retained_given(p));
     }

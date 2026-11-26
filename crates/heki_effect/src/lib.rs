@@ -49,6 +49,7 @@ pub use only_read::{
     AnnotationFacts, AnnotationReads, ContainerParams, LiteralAnnotation, ParamAnnotation,
     ReadKinds, ReadOverride, read_override,
 };
+pub mod dispatch;
 pub mod order_flow;
 pub mod ownership;
 mod partial;
@@ -1303,6 +1304,12 @@ pub struct EffectSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_state: Option<Arc<SharedStateFacts>>,
 
+    /// What the function contributes to registration contexts (only with
+    /// `OptInFacts::dispatch`: `heki inspect` and the language server): local, never propagated
+    /// to callers, and read by no rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch: Option<Arc<dispatch::DispatchFacts>>,
+
     /// What iterating the object this plain function returns runs: the bodies of the
     /// generators it returns (directly, through lazy wrappers, or through the functions whose
     /// results it returns), in terms of its own parameters. Never set for a generator
@@ -1817,6 +1824,9 @@ impl EffectSummary {
     /// so an edit that only moves code does not notify callers.
     pub fn without_locations(&self) -> Self {
         let mut out = self.clone();
+        if let Some(d) = &mut out.dispatch {
+            *d = Arc::new(d.without_locations());
+        }
         for chain in out.exec_chains.values_mut() {
             zero_hop_spans(chain);
         }
@@ -1933,6 +1943,16 @@ impl EffectSummary {
         self.without_locations() == other.without_locations()
     }
 
+    /// [`Self::same_facts`] of everything but [`Self::dispatch`], which only the join over the
+    /// whole index reads (`dispatch::contexts`), never a caller.
+    pub fn same_facts_for_callers(&self, other: &Self) -> bool {
+        let without = |s: &Self| Self {
+            dispatch: None,
+            ..s.without_locations()
+        };
+        without(self) == without(other)
+    }
+
     /// Equality of everything callers copy into their own summaries: the facts, and the
     /// positions of call chains and write sites. Only the positions of the function's own read
     /// sites, parameter, container, and global changes, iterations, and unresolved accesses are
@@ -1956,6 +1976,7 @@ impl EffectSummary {
             iterations: s.iterations.as_ref().and_then(|f| f.propagated()),
             unresolved_write_sites: BTreeSet::new(),
             unresolved_access_sites: BTreeSet::new(),
+            dispatch: None,
             ..s.clone()
         };
         without_local(self) == without_local(other) && self.same_facts(other)
@@ -2875,6 +2896,12 @@ impl FinalFacts {
     fn same_facts(&self, other: &Self) -> bool {
         self.summary.same_facts(&other.summary) && self.fresh_return == other.fresh_return
     }
+
+    /// [`Self::same_facts`] of what callers read ([`EffectSummary::same_facts_for_callers`]).
+    fn same_facts_for_callers(&self, other: &Self) -> bool {
+        self.summary.same_facts_for_callers(&other.summary)
+            && self.fresh_return == other.fresh_return
+    }
 }
 
 /// Result of an incremental file update (Early Cutoff indicator for `heki_lsp`).
@@ -2930,7 +2957,7 @@ pub struct SiteEffect {
 }
 
 /// Incremental project-wide summary & reverse call-graph index.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ProjectIndex {
     pub files: FxHashMap<PathBuf, FileSummary>,
     pub reverse_call_graph: FxHashMap<FuncKey, FxHashSet<FuncKey>>,
@@ -3117,11 +3144,14 @@ pub struct OptInFacts {
     /// [`OptInTables::annotation_facts`], and the references handing a project function on
     /// ([`FileSummary::reference_sites`]), its uses as a value.
     pub suggestions: bool,
+    /// [`EffectSummary::dispatch`], which `heki inspect`'s registration contexts read and the
+    /// language server keeps current.
+    pub dispatch: bool,
 }
 
 impl OptInFacts {
     /// Every opt-in fact a rule or `heki inspect` reads. The blind spots, which neither reads,
-    /// are left out.
+    /// are left out, and so are the registration facts, which summary snapshots do not record.
     pub const ALL: Self = Self {
         return_origins: true,
         iterations: true,
@@ -3139,6 +3169,7 @@ impl OptInFacts {
         imports: true,
         only_read: true,
         suggestions: false,
+        dispatch: false,
     };
 
     /// Whether the call sites carry [`CallSite::complete`] and [`CallSite::on_every_return`].
@@ -3490,6 +3521,43 @@ impl ProjectIndex {
         self.update_file(file)
     }
 
+    /// The index under one registration context's premise: parameter `param` of `func`, a
+    /// function of `input`'s module, holds an instance of `class`. The module is summarized again
+    /// with that type and propagated as an edit is; the index itself is left as it is, so no
+    /// unconditional fact, report, or fix reads the premise.
+    pub fn with_param_type(
+        &self,
+        input: &ModuleInput<'_>,
+        kb: &EffectiveEcosystemKb,
+        soundness: Option<&EffectiveSoundnessKb>,
+        func: &FuncKey,
+        param: u8,
+        class: &str,
+    ) -> ProjectIndex {
+        let others: Vec<(PathBuf, Arc<ModuleDecls>)> = (self.files.values())
+            .filter(|f| f.path != input.path)
+            .map(|f| (f.path.clone(), Arc::clone(&f.decls)))
+            .collect();
+        let (decls, own) =
+            resolver::project_decls_for(std::slice::from_ref(input), kb, Some(others), false);
+        let (own, _) = own.into_iter().next().expect("one module in, one out");
+        let key = (func.qualname.clone(), usize::from(param));
+        let seeded = resolver::SeededParams::from_iter([(key, types::Ty::inst(class))]);
+        let file = summary::summarize_module_seeded(
+            input,
+            &decls,
+            kb,
+            soundness,
+            own,
+            self.contracts.as_deref(),
+            self.opt_in,
+            &seeded,
+        );
+        let mut scratch = self.clone();
+        scratch.update_file(file);
+        scratch
+    }
+
     /// [`Self::reanalyze_module`] against cached project declarations (both passes, kept up
     /// to date in place): the edit costs the size of the module unless its declarations
     /// changed. Also returns what changed in the declarations (empty: nothing), which every
@@ -3639,9 +3707,15 @@ impl ProjectIndex {
         let mut changed: BTreeSet<FuncKey> = BTreeSet::new();
         // Same facts, but positions callers copy (call chains, write sites) moved.
         let mut moved: BTreeSet<FuncKey> = BTreeSet::new();
+        // Only facts no caller reads changed (the registration facts): the function's own
+        // record changed, its callers' did not.
+        let mut own_only: BTreeSet<FuncKey> = BTreeSet::new();
         for func in &region {
             match (previous.get(func), self.final_facts(func)) {
-                (Some(old), Some(new)) if old.same_facts(&new) => {
+                (Some(old), Some(new)) if old.same_facts_for_callers(&new) => {
+                    if !old.same_facts(&new) {
+                        own_only.insert(func.clone());
+                    }
                     if !old.summary.same_for_callers(&new.summary) {
                         moved.insert(func.clone());
                     }
@@ -3668,6 +3742,7 @@ impl ProjectIndex {
         let excluded: FxHashSet<FuncKey> = changed.iter().chain(&affected).cloned().collect();
         let relocated = self.callers_closure(&moved, &excluded);
         let summary_changed = !changed.is_empty();
+        changed.extend(own_only);
         let changed: Vec<FuncKey> = changed.into_iter().collect();
         if affected.is_empty() && relocated.is_empty() {
             return IncrementalUpdate {

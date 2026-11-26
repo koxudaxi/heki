@@ -379,6 +379,14 @@ A module global the module body binds to a value of known type, and an instance 
 the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores`,
 `resolver::stores`).
 
+A call of a value annotated `Callable[..., T]` or `Callable[[...], T]` (a parameter, a local,
+a return annotation, an attribute, a property, a global) gives a `T` when `T` is one class or one
+class object (`types::Args::Returns`, Priority 2). A `T` that may be `None` (`T | None`,
+`Optional[T]`, `Union[T, None]`, an alias or a bound type variable of such a type,
+`ModuleDecls::nullable_type_names`), a union of classes, an unbound type variable, `Any`, and
+`object` give no class, nor does a bare `Callable`. The call itself stays unresolved: the
+annotation does not say which function the value holds.
+
 Some receivers have the class the language or the standard library gives them. An instance's
 own namespace (`obj.__dict__`, or `vars(obj)` of the builtin: `resolver::namespace_load`) is a
 builtin `dict`, of keys and values of any class, where reading it runs no code of the classes the
@@ -978,6 +986,11 @@ EffectSummary(f) = {
                                                            // variables whose change stays inside the call:
                                                            // rebound by a nested function, or bound only
                                                            // to new containers (new_cells) (propagated)
+    dispatch:                 Option<DispatchFacts>,       // rows of a table it returns, the table handed
+                                                           // on and kept, calls of a picked row's slot,
+                                                           // the rows it picks, its program when short
+                                                           // (only with OptInFacts::dispatch; local, never
+                                                           // propagated; registration contexts, 2.7)
     capacity_waits:           Vec<CapacityWait>,           // own waits on queues whose capacity the callers
                                                            // of other functions decide (local)
 
@@ -2020,11 +2033,15 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      live return, by its return annotation or by construction), the changed value is that one
      function's result on every path (`MustResult`, an optimistic fixpoint over copies and phis:
      a value starts unset and moves only down, to one cached function, then to anything else),
-     and the instruction changes a container of that kind in place. One decision,
+     each call it is the result of has that function as every implementation it can run
+     (`TypeCtx::inst_targets_complete`: no protocol receiver, no base heki knows nothing of, no
+     unresolved member of a union, no name the project binds to another object), and the
+     instruction changes a container of that kind in place. One decision,
      `Mut202Fn::cached_change_steps`, tells each premise that does not hold, which a heuristic
      report records as open when the run asks (`CheckExtras::open_premises`): "Same object" from
      `MustResult` (over the result of any one project function, so that the cached function's
-     own premises stay apart) or a wrapper on the way, "Cached", "Keyed", and "Container kind"
+     own premises stay apart) or a wrapper on the way, "Every implementation" from a call among
+     them whose targets are not complete, "Cached", "Keyed", and "Container kind"
      together from a missing `CachedResult` (it keeps no reason, so all three are recorded), and
      "Changed in place" from a change through a called function, a line that is no change of the
      kind, or a subclass the annotation admits that replaces the method. Filling a memo of the shared object or initializing one of its attributes
@@ -2669,6 +2686,79 @@ an import itself.
   each loads, and what loading the module loads.
 
 ---
+
+### 2.7 Registration contexts (`heki_effect::dispatch`, ADR-024)
+`heki inspect` shows, for a function that a lookup by name may select, each registration that
+reaches it with one of its parameters bound to the registering object (`registered`). Each step
+is a shape of the code; no framework, method, or HTTP name is part of the model.
+
+1. **Registration** (`DispatchFacts::rows`): a function binds a list display `[]`, appends tuple
+   displays to it directly or through a nested function that appends a tuple of its parameters
+   to the list in its cell, and returns the list, or a list of tuples that copies some of its
+   slots (a comprehension, inline or, before Python 3.12, a function of its own called with the
+   list). A slot holding what a call of a module-level callable returns, with the function's
+   own receiver among the arguments, is a registration, with the fields of the row returned
+   (each kept slot's constant; a computed one is unknown). Any other use of the list (a phi,
+   another method, a nested function that does not only append) gives none, and so does a copy
+   that unpacks a row into another number of targets.
+2. **Table** (`hands`, `keeps`, `row_calls`, `picks`): a method of the registering class passes
+   `self.<registrar>()` to a project class whose `__init__` keeps the parameter the call binds
+   it to (by the constructor's signature) as `self.<attr> = p` or `p or []`, storing `<attr>`
+   once; no other method of the class writes `<attr>`; and exactly one method of the class
+   calls slot `k` of what a helper returns from `self.<attr>`, where every return of the helper
+   gives `None`s or, in slot `k`, the registered slot of the row it picks from that parameter.
+   The helper must be able to give the registered row back: it unpacks rows of the row's width
+   into plain targets, and each return giving the slot is reached from the loop's body through
+   a chain of jumps and branches (not an exception edge). A branch comparing (`==`, `!=`, `is`,
+   `is not`) a field of the row, an argument of the helper's call, or a constant decides for
+   strings and `None` the model knows on both sides; a return whose tests all may hold keeps
+   the row. A test reading a value the model does not know (one the call gets at run time) may
+   hold: like the name the lookup reads, it is a condition of the context.
+3. **Callback** (`program`): the join interprets the factory call with the registering object,
+   then the nested function it returns, called with the values the row's call passes (named by
+   their variables). A function of at most 128 instructions keeps its program: constants,
+   names, cells (a cell its enclosing function binds again is not followed), copies, tuple and
+   list displays, attributes, items of a keyword dictionary, `is None`, `in` a keyword
+   dictionary, `not`, nested functions, calls and displays with starred tuples and lists, awaits
+   (a coroutine runs once: awaiting it again is open), loops over tuples and lists, stores of
+   metadata on functions, and these library calls: `getattr`, `isinstance`
+   against `type` and `types.FunctionType`, `inspect.signature` with its `parameters` and their
+   `keys()`, and `inspect.iscoroutinefunction`. Calling an `async def` gives a coroutine that
+   runs where it is awaited. A class without `__init__`, `__new__`, or a metaclass is
+   constructed when it is called without arguments; a method is read through
+   `ProjectDecls::function_taken` when every class along the MRO is a project class, none binds
+   `__getattr__` or `__getattribute__` (to a method or to any other object), and no decorator
+   wraps it; each decorator of a module-level function must be a project function that returns
+   it. Anything else is open.
+4. **Selection**: awaiting a call of `getattr(<instance>, <name>)` selects each `async def`
+   method along the MRO (every class in the project) that the name may be (only itself for a
+   constant) and the call's arguments bind to, at most 8 of them. A constant name must select
+   one: otherwise the lookup or the call raises, or gives a value the model does not follow,
+   and the path is open. Each gets the condition "the name equals the method's name"
+   (`others_open` when the name is not a constant: other names may select other members, or
+   none), and each of its parameters bound to the registering object gets that object's class.
+
+Each registration is interpreted with a budget of its own (`Budget::of_graph`, owner
+`registration contexts`, 64 steps per operation of all programs and at least 4,096; a step per
+block, operation, and call), at most 16 nested calls (a function counts from its decorators
+on, which run first), values of at most 1,024 nodes, and no call of a function already
+running; past a bound the registration gives no context (`Answer::Open`). The facts are local
+to each function (`EffectSummary::dispatch`, only with `OptInFacts::dispatch`: `heki inspect`
+and the language server), compared without their positions by Early Cutoff, and never
+propagated: an edit changing only them changes the function's own record
+(`IncrementalUpdate::changed`) without propagating its callers again. The join reads the index
+only.
+
+The record of a context comes from the ordinary analysis under its one premise: for each
+parameter and class among a function's contexts, `ProjectIndex::with_param_type` summarizes the
+function's module again with that parameter typed as the class (over its annotation), in a copy
+of the index, and `changes` is the
+parameter's `changes.params` record there (`what`, `slots`, `direct`, `chain`, `at`). The index
+itself is left as it is, so no unconditional fact, report, or fix assumes a context. Each entry
+of `registered` has `param`, `index`, `type`, `registration` (the factory call: `function`,
+`path`, `line`, `column`), `condition` (`selector`, `equals`, `others_open`), `called_at` (the
+call of the row's slot), `selected_at` and `invoked_at` (the lookup and the call of what it
+finds, each in the function it runs in), and `changes`.
 
 ## 3. Soundness / Alias lane (`heki_soundness`): family 3
 

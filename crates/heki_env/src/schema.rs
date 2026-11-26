@@ -3,6 +3,7 @@
 //! wrong type, so that the error can name the table the key belongs in and show a value it
 //! takes.
 
+use crate::defaults::{NOT_DEFAULTED, SUFFIX};
 use crate::problem::{settings_root, table_items, table_name};
 use crate::{
     CallOwnerRule, ConfigError, ConfigLayout, EcosystemOverride, EffectBoundaryRule, HekiConfig,
@@ -40,6 +41,15 @@ fn tables() -> &'static [Table] {
     static TABLES: OnceLock<Vec<Table>> = OnceLock::new();
     TABLES.get_or_init(|| {
         let table = |path, keys| Table { path, keys };
+        // The keys of a contract's defaults table: all but the ones that name one contract.
+        let defaults = |path, keys: Option<Vec<String>>| {
+            let keys = keys.map(|keys| {
+                (keys.into_iter())
+                    .filter(|k| !NOT_DEFAULTED.contains(&k.as_str()))
+                    .collect()
+            });
+            Table { path, keys }
+        };
         vec![
             table("", keys_of::<HekiConfig>()),
             table("lint", keys_of::<LintConfig>()),
@@ -52,6 +62,19 @@ fn tables() -> &'static [Table] {
             table("readonly-returns", keys_of::<ReadOnlyReturnRule>()),
             table("invalidation", keys_of::<InvalidationRule>()),
             table("import-boundaries", keys_of::<ImportBoundaryRule>()),
+            defaults("write-owners-defaults", keys_of::<WriteOwnerRule>()),
+            defaults("read-owners-defaults", keys_of::<ReadOwnerRule>()),
+            defaults("call-owners-defaults", keys_of::<CallOwnerRule>()),
+            defaults(
+                "effect-boundaries-defaults",
+                keys_of::<EffectBoundaryRule>(),
+            ),
+            defaults("readonly-returns-defaults", keys_of::<ReadOnlyReturnRule>()),
+            defaults("invalidation-defaults", keys_of::<InvalidationRule>()),
+            defaults(
+                "import-boundaries-defaults",
+                keys_of::<ImportBoundaryRule>(),
+            ),
             table("imports", keys_of::<ImportsConfig>()),
             table("imports.module-distributions", None),
             table("ecosystem", keys_of::<EcosystemOverride>()),
@@ -204,6 +227,8 @@ const EXAMPLES: &[(&str, &str)] = &[
 /// A line that sets the key `key` of `table` to a value it takes, and what that value is (`a
 /// string`): `select = ["EFF", "MUT101"]`, or the header of a table key (`[tool.heki.lint]`).
 fn example(layout: ConfigLayout, table: &str, key: &str) -> Option<(String, &'static str)> {
+    // A defaults table takes the values of its contract's keys.
+    let table = table.strip_suffix(SUFFIX).unwrap_or(table);
     let path = child(table, key);
     if table.is_empty() && self::table(&path).is_some() {
         let kind = if HekiConfig::CONTRACT_KEYS.contains(&key) || key == "ecosystem" {
@@ -401,6 +426,16 @@ pub(crate) fn explain_unknown_key(
             ))
             .docs(Docs::of_table(new));
     }
+    if let Some(kind) = table.strip_suffix(SUFFIX)
+        && NOT_DEFAULTED.contains(&key)
+    {
+        return problem
+            .help(format!(
+                "`{key}` names one contract and cannot be defaulted: set it in each table of {}",
+                table_name(layout, kind)
+            ))
+            .docs(Docs::of_table(kind));
+    }
     let known = self::table(table)
         .and_then(|t| t.keys.as_deref())
         .unwrap_or_default();
@@ -415,7 +450,7 @@ pub(crate) fn explain_unknown_key(
     }
     let homes: Vec<&Table> = tables()
         .iter()
-        .filter(|t| t.path != table)
+        .filter(|t| t.path != table && !t.path.ends_with(SUFFIX))
         .filter(|t| {
             t.keys
                 .as_ref()
@@ -474,7 +509,9 @@ mod tests {
                     "ecosystem.writes-in-order" => {
                         format!("[[ecosystem]]\n[ecosystem.writes-in-order]\n{line}\n")
                     }
-                    "lint" | "imports" => format!("[{}]\n{line}\n", t.path),
+                    path if path == "lint" || path == "imports" || path.ends_with(SUFFIX) => {
+                        format!("[{path}]\n{line}\n")
+                    }
                     contract => format!("[[{contract}]]\n{line}\n"),
                 };
                 let parsed =

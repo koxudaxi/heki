@@ -2,7 +2,7 @@
 
 | Item | Content |
 |---|---|
-| Status | **Experimental** (pre-release; rules, configuration, and output can still change). Architecture Baseline v4.1, updated on 2026-11-20 for the implemented v1.x rules (46 rules). Based on the Stage 0-A Wave 1/2 measurements (about 19 million lines), a study of datamodel-code-generator's 20,000 lines of in-house checkers, one CLI and configuration with Ruff / `t-linter`, the incremental LSP design, and PEP 810 support verified on `ruff_python_parser` 0.17.5. |
+| Status | **Pre-release** (the default exact rules with a Ratchet baseline are ready for pull request checks; `heki recommend`, `heki inspect`, `heki skill`, and `heki check --generate-prompt` are experimental; rules, configuration, and output can still change). Architecture Baseline v4.1, updated on 2026-11-20 for the implemented v1.x rules (46 rules). Based on the Stage 0-A Wave 1/2 measurements (about 19 million lines), a study of datamodel-code-generator's 20,000 lines of in-house checkers, one CLI and configuration with Ruff / `t-linter`, the incremental LSP design, and PEP 810 support verified on `ruff_python_parser` 0.17.5. |
 | Date | 2026-11-20 |
 | Target language | Python (verified on CPython 3.11–3.15, including PEP 709, PEP 649 `__annotate__`, and PEP 810 `lazy import`) |
 | Implementation language | Rust: a single binary with a CLI and an incremental LSP server, distributed with `maturin`. Only the frontend uses `ruff_python_parser` / `ruff_python_ast` (`tag = "0.17.5"`), isolated in `heki_ast`. |
@@ -15,7 +15,7 @@ else describes the code as it is.
 
 ## 1. Product definition and positioning
 
-**heki** (壁, Japanese for "wall") is an experimental static checker for Python that tracks side
+**heki** (壁, Japanese for "wall") is a static checker for Python that tracks side
 effects and mutations across function calls: a wall where dynamic typing leaves the code unchecked. It checks **what code does, not
 what types it has**: which objects it changes in place, which references it shares, and which
 blocking, network, or database work it reaches. What it adds lasts as the type checkers grow:
@@ -416,6 +416,9 @@ EffectSummary(f) = {
     shared_state:             Option<SharedStateFacts>, // module globals and enclosing functions' closure
                                                     // cells changed, here, in a body run here, or by a
                                                     // callee handed them (heki inspect and the server)
+    dispatch:                 Option<DispatchFacts>, // what it adds to the registration contexts heki
+                                                    // inspect shows: rows of tables, the tables
+                                                    // kept and picked from, short programs (local)
 
     // Metadata: is_async, is_generator, is_cached_property, is_lru_cache, owner class, decorators
     // kept: Option<Box<KeptFacts>> (MUT101 only): must_read_self_attrs (the self.<attr> read on

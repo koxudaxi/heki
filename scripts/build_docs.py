@@ -22,7 +22,9 @@ pages, a table row that names a rule in a cell of its own says "experimental" ex
 rule is, and "heuristic" exactly when it is; the `CHANGELOG.md` section of the release an entry
 names as `since` calls its target experimental), the certifications (every exact rule has one
 whose census and holdout run found no false claim), and the rule documentation (every rule says
-what a report states).
+what a report states). The pins of a heki release in the pages (the pre-commit `rev:` and the
+`heki==` of a command) must be the workspace version, in the pages `set_release_versions.py`
+rewrites at a release.
 
 Usage:
     python scripts/build_docs.py --heki target/release/heki
@@ -620,14 +622,28 @@ def hand_written_pages() -> list[Path]:
     ]
 
 
-def stale_precommit_revs() -> list[str]:
-    """The pre-commit examples whose `rev:` is not the tag of the workspace version."""
+def stale_release_pins() -> list[str]:
+    """The pins of a heki release in the pages that are not the workspace version: the pre-commit
+    examples' `rev:` and the commands' `heki==`, which `set_release_versions.py` rewrites at a
+    release, and every `heki==` of a hand-written page it does not rewrite."""
     version = set_release_versions.manifest_versions(ROOT)[set_release_versions.WORKSPACE_VERSION]
     stale = []
     for name, revs in set_release_versions.precommit_revs(ROOT).items():
         if not revs:
             stale.append(f"{name}: no pre-commit `rev:` line")
         stale += [f"{name}: rev: v{rev}, not v{version}" for rev in revs if rev != version]
+    for name, pins in set_release_versions.package_pins(ROOT).items():
+        if not pins:
+            stale.append(f"{name}: no `heki==` pin")
+        stale += [f"{name}: heki=={pin}, not heki=={version}" for pin in pins if pin != version]
+    rewritten = {ROOT / name for name in set_release_versions.PACKAGE_PIN_DOCS}
+    for page in hand_written_pages():
+        text = page.read_text(encoding="utf-8")
+        if page not in rewritten and set_release_versions.PACKAGE_PIN.search(text):
+            stale.append(
+                f"{shown(page)}: pins `heki==`, which a release does not rewrite "
+                "(add the page to PACKAGE_PIN_DOCS in scripts/set_release_versions.py)"
+            )
     return stale
 
 
@@ -723,9 +739,7 @@ def main() -> int:
         ),
         "Rules do not say what a report states": rules_without_claims(rules),
         "Rule pages and the premise table list different premises": premises_disagreeing(rules),
-        "Pre-commit examples pin another release than the workspace version": (
-            stale_precommit_revs()
-        ),
+        "Pages pin another release than the workspace version": stale_release_pins(),
     }
     if any(disagreements.values()):
         for heading, entries in disagreements.items():

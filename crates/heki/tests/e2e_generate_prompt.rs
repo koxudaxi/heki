@@ -228,8 +228,15 @@ targets = ["app.store.Store.items"]
         "Do not silence a diagnostic",
         "A `heuristic` diagnostic can be wrong about the code",
         "Rely on proven fixes only",
+        "Never make a run pass by weakening or widening a contract",
+        "`allowed-writers`, `allowed-readers`, `allowed-callers`, `allowed`, `forbid`",
+        "adding a suppression, or by growing a baseline",
         "write a contract",
         "https://heki.koxudaxi.dev/configuration/#contracts",
+        "write the thin wall the maintainers intend in `heki.toml`",
+        "`fail-on = \"warning\"` and a `message`",
+        "Do not copy the coupling the code has today into an `allowed-*` list",
+        "`heki check --baseline <file> --update-baseline`",
     ] {
         assert!(guidance.contains(words), "{words}: {guidance}");
     }

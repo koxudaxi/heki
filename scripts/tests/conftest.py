@@ -40,10 +40,12 @@ def github(tmp_path: Path) -> FakeGitHub:
 
 @pytest.fixture
 def checkout(tmp_path: Path) -> Path:
-    """Copies of the repository's manifests and lock file at `CHECKOUT_VERSION`, and a CHANGELOG."""
+    """Copies of the repository's manifests, lock files, and the pages that pin the release, at
+    `CHECKOUT_VERSION`, and a CHANGELOG."""
     for name in MANIFESTS:
         shutil.copy(ROOT / name, tmp_path / name)
-    for name in set_release_versions.PRECOMMIT_DOCS:
+    pinned = {*set_release_versions.PRECOMMIT_DOCS, *set_release_versions.PACKAGE_PIN_DOCS}
+    for name in sorted(pinned):
         (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(ROOT / name, tmp_path / name)
     for member in tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"][

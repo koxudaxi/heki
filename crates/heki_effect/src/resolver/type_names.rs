@@ -44,17 +44,28 @@ pub(super) fn type_names(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
     };
     for (name, value) in bound_once() {
         let annotation = annotations.get(name.as_str()).copied();
-        let ty = alias_value(input, &shape, decls, annotation, value)
-            .and_then(|text| decls.resolve_annotation_ty(&text));
-        if let Some(ty) = ty {
-            decls.type_names.insert(name.clone(), ty);
+        let Some(text) = alias_value(input, &shape, decls, annotation, value) else {
+            continue;
+        };
+        if let Some(ty) = decls.resolve_annotation_ty(&text) {
+            let nullable = decls.admits_none(&text);
+            name_type(decls, name, ty, nullable);
         }
     }
     for (name, value) in bound_once() {
-        if let Some(ty) = type_var_type(&shape, decls, value) {
-            decls.type_names.insert(name.clone(), ty);
+        if let Some((ty, nullable)) = type_var_type(&shape, decls, value) {
+            name_type(decls, name, ty, nullable);
         }
     }
+}
+
+/// Records that the module-level `name` names the type `ty`, which may also be `None` when
+/// `nullable` ([`ModuleDecls::nullable_type_names`]).
+fn name_type(decls: &mut ModuleDecls, name: &str, ty: Ty, nullable: bool) {
+    if nullable {
+        decls.nullable_type_names.insert(name.to_owned());
+    }
+    decls.type_names.insert(name.to_owned(), ty);
 }
 
 /// The text of the type the module-level store of `value` (annotated `annotation`) makes its
@@ -99,10 +110,11 @@ fn alias_value(
 
 /// The type an annotation naming the module-level variable bound to `value` gives, when `value`
 /// is a `TypeVar(...)` call (`typing` or `typing_extensions`) whose `bound=` or constraints the
-/// module's names resolve to classes: the bound, or the union of the constraints. A bound or a
-/// constraint is a type expression ([`type_expression_text`]: `bound="ContextView"`,
+/// module's names resolve to classes: the bound, or the union of the constraints, and whether
+/// one of them may also be `None` ([`ModuleDecls::admits_none`]). A bound or a constraint is a
+/// type expression ([`type_expression_text`]: `bound="ContextView"`,
 /// `bound=views.ContextView`); anything else leaves the variable unbounded.
-fn type_var_type(shape: &FnShape<'_>, decls: &ModuleDecls, value: VarId) -> Option<Ty> {
+fn type_var_type(shape: &FnShape<'_>, decls: &ModuleDecls, value: VarId) -> Option<(Ty, bool)> {
     let text = |var: VarId| type_expression_text(shape, var);
     let (callee, args, kwargs) = match &shape.inst(shape.copy_root(value))?.kind {
         InstKind::Call {
@@ -132,18 +144,17 @@ fn type_var_type(shape: &FnShape<'_>, decls: &ModuleDecls, value: VarId) -> Opti
         .iter()
         .find(|(k, _)| k.as_deref() == Some("bound"))
         .map(|(_, v)| *v);
-    match (bound, args.get(1..).unwrap_or_default()) {
-        (Some(bound), []) => decls.resolve_annotation_ty(&text(bound)?),
-        (None, constraints) if !constraints.is_empty() => {
-            let texts: Vec<String> = constraints
-                .iter()
-                .map(|c| text(*c))
-                .collect::<Option<_>>()?;
-            let parts: Vec<&str> = texts.iter().map(String::as_str).collect();
-            decls.union_annotation(&parts)
-        }
-        _ => None,
-    }
+    let texts: Vec<String> = match (bound, args.get(1..).unwrap_or_default()) {
+        (Some(bound), []) => vec![text(bound)?],
+        (None, constraints) if !constraints.is_empty() => constraints
+            .iter()
+            .map(|c| text(*c))
+            .collect::<Option<_>>()?,
+        _ => return None,
+    };
+    let parts: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let ty = decls.union_annotation(&parts)?;
+    Some((ty, parts.iter().any(|p| decls.admits_none(p))))
 }
 
 /// The text of the type expression `var` spells, as an annotation writes it: the text of a

@@ -51,7 +51,7 @@ const MARKS: &[Mark] = &[
     (
         "# MUT114 heuristic",
         "MUT114",
-        &[("Same object", "not-the-result-on-every-path")],
+        &[("Every implementation", "incomplete-targets")],
     ),
     ("# MUT114 exact", "MUT114", &[]),
     (

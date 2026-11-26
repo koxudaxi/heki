@@ -1243,6 +1243,50 @@ fn a_change_that_is_not_one_of_the_kind_at_the_line() {
     );
 }
 
+/// The project's one class with the cached method `items`, a protocol `Repo` declaring it, and
+/// `add` changing in place what `call` returns, the receiver `repo` typed by `annotation`.
+fn cached_method(annotation: &str, call: &str) -> String {
+    format!(
+        "import functools\nfrom typing import Protocol\n\n\nclass Repo(Protocol):\n    def items(self, k: str) -> list[str]: ...\n\n\nclass CachedRepo:\n    @functools.lru_cache(maxsize=None)\n    def items(self, k: str) -> list[str]:\n        return [k, \"id\"]\n\n\ndef add(repo: {annotation}, other: CachedRepo, k, flag):\n    xs = {call}\n    xs.append(\"x\")\n    return xs\n"
+    )
+}
+
+#[test]
+fn a_call_through_a_protocol_may_run_an_implementation_that_caches_nothing() {
+    // Another class may have the protocol's method without naming it, in the project or outside.
+    let report = heuristic(
+        "op_mut114_protocol",
+        "MUT114",
+        &cached_method("Repo", "repo.items(k)"),
+        "MUT114",
+        &[("Every implementation", "incomplete-targets")],
+    );
+    assert_eq!(
+        closer_line_detail(&report, 0),
+        (
+            "none".to_owned(),
+            None,
+            Some("`app.CachedRepo.items`".to_owned())
+        )
+    );
+    // Through the protocol on one path: the value is the result of that one function on every
+    // path, but not every call of it is established to run it.
+    let either = "repo.items(k) if flag else other.items(k)";
+    heuristic(
+        "op_mut114_protocol_branch",
+        "MUT114",
+        &cached_method("Repo", either),
+        "MUT114",
+        &[("Every implementation", "incomplete-targets")],
+    );
+    for (name, call) in [
+        ("op_mut114_protocol_closed", "repo.items(k)"),
+        ("op_mut114_protocol_branch_closed", either),
+    ] {
+        exact(name, "MUT114", &cached_method("CachedRepo", call), "MUT114");
+    }
+}
+
 #[test]
 fn each_premise_of_a_cached_change_left_open_is_recorded() {
     let open = "def mutate(xs):\n    xs.append(\"x\")\n\n\ndef use(name, flag):\n    result = table(name) if not flag else []\n    mutate(result)\n    return result\n";

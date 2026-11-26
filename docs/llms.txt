@@ -1,6 +1,6 @@
 # heki
 
-> Experimental static checker for Python that tracks side effects and mutations across function calls.
+> Static checker for Python that tracks side effects and mutations across function calls.
 
 
 ## Docs

@@ -411,10 +411,11 @@ def test_the_docs_a_release_deploys_show_the_release_tag(
     checkout: Path, prerelease: str, date_flag: bool
 ) -> None:
     """The docs job writes the release the way the build jobs do, with the script the Release
-    Sync pull request runs, so the pre-commit `rev:` lines of the deployed pages are the tag."""
+    Sync pull request runs, so the pins of the deployed pages (the pre-commit `rev:` lines and
+    the `heki==` of the commands) are the release."""
     docs = load("docs.yml")["jobs"]["build"]
     write = step(
-        docs, "Write the release into the manifests and the pre-commit examples"
+        docs, "Write the release into the manifests and the pages' pins"
     )
     assert write["if"] == "github.event_name == 'release'"
     names = [s.get("name") for s in docs["steps"]]
@@ -450,9 +451,11 @@ def test_the_docs_a_release_deploys_show_the_release_tag(
     result = run_step(write["run"], env, cwd=checkout)
     assert result.returncode == 0, result.stderr
     for page in ("README.md", "docs/adoption.md"):
-        assert re.findall(
-            r"rev: (v\S+)", (checkout / page).read_text(encoding="utf-8")
-        ) == ["v0.1.2"]
+        revs = re.findall(r"rev: (v\S+)", (checkout / page).read_text(encoding="utf-8"))
+        assert revs and set(revs) == {"v0.1.2"}, page
+    for page in ("README.md", "docs/index.md", "docs/adoption.md"):
+        pins = re.findall(r"heki==(\S+?)[\s`\]]", (checkout / page).read_text(encoding="utf-8"))
+        assert pins and set(pins) == {"0.1.2"}, page
     changelog = (checkout / "CHANGELOG.md").read_text(encoding="utf-8")
     assert ("2026-11-25" in changelog) is date_flag
 
@@ -460,7 +463,7 @@ def test_the_docs_a_release_deploys_show_the_release_tag(
 def test_a_docs_release_tag_without_a_version_fails() -> None:
     docs = load("docs.yml")["jobs"]["build"]
     write = step(
-        docs, "Write the release into the manifests and the pre-commit examples"
+        docs, "Write the release into the manifests and the pages' pins"
     )
     result = run_step(write["run"], {**os.environ, "TAG": "v"})
     assert result.returncode == 1

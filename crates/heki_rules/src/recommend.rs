@@ -442,6 +442,11 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
             contracts::SRC_RENAMES
         ));
     }
+    if section.has_candidates() {
+        notes.push(candidates_note(
+            fail_on == Severity::Error && !says_fail_on(&reports_now, fail_on),
+        ));
+    }
     let mut report = RecommendReport {
         schema: SCHEMA_URL.to_owned(),
         kind: ReportKind::HekiRecommend,
@@ -613,10 +618,7 @@ fn reports_now(
 /// What makes `heki check` fail on the reports it judges now, and the keys that change it: a
 /// Ratchet baseline for the reports that fail it, `fail-on = "warning"` for those that do not.
 fn exit_notes(now: &ReportsNow, fail_on: Severity) -> Vec<String> {
-    let (judged, which) = match &now.baseline {
-        Some(split) => (split.regressions, "regression(s)"),
-        None => (now.shown, "report(s) shown now"),
-    };
+    let (judged, which) = judged(now);
     let mut notes = Vec::new();
     if now.failing > 0 && now.baseline.is_none() {
         notes.push(format!(
@@ -626,10 +628,42 @@ fn exit_notes(now: &ReportsNow, fail_on: Severity) -> Vec<String> {
             now.failing
         ));
     }
-    if fail_on == Severity::Error && judged > now.failing {
+    if says_fail_on(now, fail_on) {
         notes.push(not_failing_note(judged - now.failing, which));
     }
     notes
+}
+
+/// How many reports `heki check` judges now, and what they are called: the regressions with a
+/// baseline, the reports shown without one.
+fn judged(now: &ReportsNow) -> (usize, &'static str) {
+    match &now.baseline {
+        Some(split) => (split.regressions, "regression(s)"),
+        None => (now.shown, "report(s) shown now"),
+    }
+}
+
+/// Whether [`exit_notes`] says that `fail-on = "warning"` makes the reports that do not fail the
+/// run fail it.
+fn says_fail_on(now: &ReportsNow, fail_on: Severity) -> bool {
+    fail_on == Severity::Error && judged(now).0 > now.failing
+}
+
+/// What the contract candidates are, and how to adopt them. `set_fail_on` is false when
+/// `fail-on = "warning"` is set, or another note already says that it makes contract reports fail
+/// the run.
+fn candidates_note(set_fail_on: bool) -> String {
+    let fail_on = if set_fail_on {
+        ", and set `fail-on = \"warning\"` so that contract reports fail `heki check`"
+    } else {
+        ""
+    };
+    format!(
+        "the contract candidates are invariants the code keeps today, not architectural intent: \
+         adopt only the boundaries you intend to keep, give each an actionable `message`{fail_on}; \
+         consider a CODEOWNERS-protected heki.toml, and put the legacy violations of a stricter \
+         wall in a Ratchet baseline, not in an `allowed-*` list."
+    )
 }
 
 /// `diags` as `heki check` prints them: reports sharing a root cause folded into one.

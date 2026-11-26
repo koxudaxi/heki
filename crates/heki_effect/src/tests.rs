@@ -674,6 +674,48 @@ fn gate_5_update_file_early_cutoff() {
     );
 }
 
+/// The registration facts (`EffectSummary::dispatch`) are read by the join over the whole index,
+/// never by callers: an edit changing only them changes the function's own record, and its
+/// callers are not propagated again.
+#[test]
+fn an_edit_of_registration_facts_alone_reaches_no_caller() {
+    let files = [
+        ("pkg/__init__.py", ""),
+        (
+            "pkg/a.py",
+            "def helper():\n    key = \"first\"\n    return None\n",
+        ),
+        (
+            "pkg/b.py",
+            "from .a import helper\n\n\ndef caller():\n    return helper()\n",
+        ),
+    ];
+    let built: Vec<Built> = files.iter().map(|(rel, src)| build(rel, src)).collect();
+    let inputs: Vec<ModuleInput<'_>> = built.iter().map(input).collect();
+    let opt_in = OptInFacts {
+        dispatch: true,
+        ..OptInFacts::ALL
+    };
+    let mut index = analyze_project_for(
+        &inputs,
+        &[],
+        &kb(),
+        None,
+        None,
+        TypedWrites::default(),
+        opt_in,
+    );
+    let edited = "def helper():\n    key = \"second\"\n    return None\n";
+    let res = reanalyze(&mut index, "pkg/a.py", edited);
+    assert_eq!(res.changed, vec![key("pkg.a", "helper")]);
+    assert!(res.affected_callers.is_empty(), "{res:?}");
+    assert!(!res.summary_changed);
+    // Without the registration facts the same edit changes nothing.
+    let mut index = project(&files);
+    let res = reanalyze(&mut index, "pkg/a.py", edited);
+    assert!(res.changed.is_empty(), "{res:?}");
+}
+
 /// `sync_driven_only` is decided by a function's callers: re-propagating a function after an
 /// edit of a callee or of its own module keeps what they decided, and an edit that decides it
 /// again unchanged is no change.
