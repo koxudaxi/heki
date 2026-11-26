@@ -846,6 +846,24 @@ pub const SAME_LOCK: Premise = Premise {
     ],
 };
 
+pub const GENERATOR_FUNCTION: Premise = Premise {
+    name: "Generator function",
+    states: "every function the call runs is a generator function (a `def` or an `async def` with `yield` in its body) whose every decorator keeps the call, and the name of each is bound to one definition",
+    decided_in: &[
+        "heki_effect::FunctionDecl::is_generator",
+        "heki_effect::MustExec::bound_twice",
+    ],
+};
+
+pub const NEVER_ITERATED: Premise = Premise {
+    name: "Never iterated",
+    states: "the generator is only the value of the call, with no name, and nothing reads it but a truth test (a branch, `not`, the builtin `bool`); or the library call that runs the function drops what it returns or tests it for truth, as the catalog describes it (R3)",
+    decided_in: &[
+        "heki_rules::eff_rules::never_iterated::unused_calls",
+        "heki_effect::UnawaitedHandoff::tests_result",
+    ],
+};
+
 /// Every premise of the table, once.
 /// The premises of a `readonly-parameter` suggestion of `heki recommend`
 /// ([`crate::recommend::types`]), in order: the claim is the first four ("the function only
@@ -973,6 +991,8 @@ pub const ALL: &[&Premise] = &[
     &NON_REENTRANT,
     &HELD,
     &SAME_LOCK,
+    &GENERATOR_FUNCTION,
+    &NEVER_ITERATED,
 ];
 
 const MUT101_CLAIM: &[&Premise] = &[
@@ -1197,6 +1217,7 @@ pub fn of_rule(code: &str) -> &'static [&'static Premise] {
             &EVERY_IMPLEMENTATION,
             &EVERY_RETURN,
         ],
+        "EFF116" => &[&GENERATOR_FUNCTION, &EVERY_IMPLEMENTATION, &NEVER_ITERATED],
         "EFF103" => &[
             &ORIGIN,
             &EVERY_ITERATION,

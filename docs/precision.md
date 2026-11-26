@@ -15,7 +15,7 @@ open: an `OPT` rewrite heki could not prove safe, a size-dependent `OPT` rewrite
 trip count the data does not decide (the code fixes or caps it, or the loop's items are not a
 parameter, the rows of a query, the lines of a file, or the entries of a directory), an `OPT113`
 join whose rule page premises do not all hold, or
-an `EFF101`, `EFF103`, `EFF109`, `DATA101`, `MUT110`, `MUT114`, or `MUT119` report whose rule page premises are not all established. Only exact reports are shown by
+an `EFF101`, `EFF103`, `EFF109`, `EFF116`, `DATA101`, `MUT110`, `MUT114`, or `MUT119` report whose rule page premises are not all established. Only exact reports are shown by
 default, and only those of the exact rules that are not opt-in.
 
 - A heuristic rule runs when `select` or `extend-select` names its code or name. With
@@ -32,7 +32,7 @@ default, and only those of the exact rules that are not opt-in.
   false heuristic report never stops a CI or a hook that keeps the default.
 
 See [Rule selection](configuration.md#rule-selection-toolhekilint). `EFF101`, `EFF103`,
-`EFF109`, `DATA101`, `MUT101`, `MUT110`, `MUT111`, `MUT114`, `MUT119`, the proven tier of the eight `OPT`
+`EFF109`, `EFF116`, `DATA101`, `MUT101`, `MUT110`, `MUT111`, `MUT114`, `MUT119`, the proven tier of the eight `OPT`
 rewrite rules, and the exact tier of `OPT113` are exact (certified below); the other rules are
 heuristic. `MUT101`, `MUT111`, and the six size-dependent `OPT` rules (`OPT103`, `OPT110`,
 `OPT111`, `OPT120`, `OPT121`, `OPT130`) are exact and opt-in, for their share of real harm

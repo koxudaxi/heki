@@ -646,7 +646,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "EFF116",
         slug: "generator-never-iterated",
         family: RuleFamily::Eff,
-        certainty: Certainty::Heuristic,
+        certainty: Certainty::Exact,
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,

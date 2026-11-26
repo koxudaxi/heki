@@ -469,8 +469,18 @@ fn a_report_names_the_function_and_what_reads_its_generator() {
     let handed = report_at(&diags, "pkg/handoffs.py", 23);
     assert_eq!(handed["qualname"], "runners");
     assert_eq!(handed["target"], "threading.Thread->scan");
-    // An experimental opt-in rule: heuristic until it is certified.
-    assert!(eff116(&diags).iter().all(|d| d["certainty"] == "heuristic"));
+    // Exact where every premise is established; heuristic where a name the call may run is
+    // bound to more than one definition (Generator function open).
+    let heuristic: Vec<(&str, u64)> = eff116(&diags)
+        .iter()
+        .filter(|d| d["certainty"] != "exact")
+        .map(|d| (d["path"].as_str().unwrap(), d["line"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(
+        heuristic,
+        vec![("pkg/possible.py", 54), ("pkg/possible.py", 55)],
+        "{diags:#?}"
+    );
 }
 
 #[test]
@@ -524,4 +534,41 @@ fn heki_rule_explains_it() {
     assert!(stdout.contains("generator-never-iterated"));
     assert!(stdout.contains("Never iterated"));
     assert!(stdout.contains("experimental"));
+}
+
+/// A receiver typed by a protocol leaves Every implementation open: its implementers are never
+/// a complete set, so the report is heuristic; the same call on a class is exact.
+#[test]
+fn a_call_through_a_protocol_is_heuristic() {
+    let p = Project::new("eff116_protocol");
+    p.write("pkg/__init__.py", "").write(
+        "pkg/main.py",
+        r#"from typing import Protocol
+
+
+class Rows(Protocol):
+    def rows(self): ...
+
+
+class Table:
+    def rows(self):
+        yield 1
+
+
+def load(source: Rows, table: Table) -> None:
+    source.rows()
+    table.rows()
+"#,
+    );
+    let diags = diagnostics(&p, &["--select", "EFF116"]);
+    let tiers: Vec<(u64, &str)> = eff116(&diags)
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["certainty"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(tiers, vec![(14, "heuristic"), (15, "exact")], "{diags:#?}");
 }

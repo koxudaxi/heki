@@ -15,10 +15,14 @@
 //! ([`heki_effect::FunctionDecl::is_generator`]), so a change of a function in another module
 //! between a generator and a plain function re-checks its callers' files. The hand-off form reads
 //! the facts `EFF115` reads (`OptInTables::unawaited_handoffs`).
+//!
+//! A report is exact when its premises (`crate::premises::of_rule`) are established: every
+//! function the call runs is a generator function bound once, and they are every implementation
+//! it can run ([`Generators::exact`]). Never iterated holds for every report.
 
 use crate::mut_rules::CallInst;
 use crate::{CheckContext, ModuleUnit};
-use heki_diagnostics::{Certainty, Diagnostic};
+use heki_diagnostics::Diagnostic;
 use heki_effect::{Callee, FuncKey, TypeCtx, UnawaitedHandoff, Val};
 use heki_ir::walk::{FnShape, Use};
 use heki_ir::{Inst, InstKind, Terminator, UnaryOpKind, VarId};
@@ -366,10 +370,5 @@ fn emit(
             &[],
         )
         .expect("the rule runs on the unit");
-    let tier = if exact {
-        Certainty::Exact
-    } else {
-        Certainty::Heuristic
-    };
-    d.certainty = tier.at_most(d.certainty);
+    d.certainty = crate::premises::tier(CODE, exact).at_most(d.certainty);
 }
