@@ -6,7 +6,7 @@
 
 use crate::failure;
 use crate::{AnalysisArgs, CheckArgs, ColorChoice, OutputFormat, SnapshotArgs};
-use anyhow::Result;
+use anyhow::{Result, bail};
 use heki_ast::LineIndex;
 use heki_diagnostics::{
     BASELINE_VERSION, BaselineKey, BaselineVersion, CountUnit, Diagnostic, FileFailure,
@@ -66,12 +66,24 @@ pub(crate) fn any_failing(diags: &[Diagnostic], fail_on: Severity) -> bool {
     diags.iter().any(|d| d.fails_run(fail_on))
 }
 
-/// The saved summary snapshot when `MUT103` is enabled (`None` with a warning if missing).
+/// The summary snapshot `MUT103` compares with: the file `--snapshot` names, which must load
+/// and needs `MUT103` enabled, else the saved one at the project root (`None` with a warning if
+/// missing) when `MUT103` is enabled.
 fn snapshot_for(
     selection: &RuleSelection,
     root: &Path,
+    explicit: Option<&Path>,
     format: OutputFormat,
 ) -> Result<Option<SummarySnapshot>> {
+    if let Some(path) = explicit {
+        if !selection.is_enabled("MUT103") {
+            bail!(
+                "`--snapshot {}` is given but `MUT103` is not enabled; select it with `--select MUT103`",
+                path.display()
+            );
+        }
+        return Ok(Some(SummarySnapshot::load(path)?));
+    }
     if !selection.is_enabled("MUT103") {
         return Ok(None);
     }
@@ -88,7 +100,7 @@ fn snapshot_for(
 }
 
 /// The project at `paths` (with `overrides` in place of files' text), with the rule selection of
-/// `selectors` and the saved summary snapshot `heki check` uses for `analysis`. `format` is the
+/// `selectors` and the summary snapshot `heki check` compares with for `analysis`. `format` is the
 /// output format the run's warnings follow.
 pub(crate) fn load(
     paths: &[PathBuf],
@@ -106,7 +118,12 @@ pub(crate) fn load(
         removed: None,
     })?;
     let selection = selection(selectors, &project)?;
-    let snapshot = snapshot_for(&selection, &project.env.root, format)?;
+    let snapshot = snapshot_for(
+        &selection,
+        &project.env.root,
+        analysis.snapshot.as_deref(),
+        format,
+    )?;
     Ok((project, selection, snapshot))
 }
 

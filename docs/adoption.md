@@ -393,3 +393,24 @@ $ heki check --extend-select MUT103            # reports functions that gained e
 A run that cannot analyze every file (a syntax error, an unreadable file) does not write the
 snapshot: it reports the errors and exits with code 2, so the entries of those files are not
 lost.
+
+### Comparing with the protected base
+
+Instead of committing the snapshot, a pull request can be compared with a snapshot of
+its protected base branch. Generate `base.json` on the base with the same heki version, the same
+knowledge bases, the same `--target-version`, and the same configuration as the check on the
+pull request, then check the whole project against it:
+
+```console
+$ git switch --detach origin/main
+$ heki snapshot > ../base.json
+$ git switch --detach "$PR_HEAD"
+$ heki check --select MUT103 --fail-on warning --snapshot ../base.json
+```
+
+`--snapshot PATH` replaces `.heki-summary-snapshot.json` at the project root. A path that does
+not exist, a file that is not a snapshot, a snapshot of an unsupported version, and a run in
+which `MUT103` is not enabled all exit with code 2: the check never passes without having
+compared. A snapshot at the root is ignored while `--snapshot` is given. Run the whole project,
+not `--touched` on the files of the pull request: a public function gains an effect through a
+private helper in another module, and the report is on the public function.
