@@ -3704,10 +3704,6 @@ symbol = "unittest.TestCase.addClassCleanup"
 arg = 0
 
 [[calls_unawaited]]
-symbol = "unittest.IsolatedAsyncioTestCase.addCleanup"
-arg = 0
-
-[[calls_unawaited]]
 symbol = "unittest.IsolatedAsyncioTestCase.addClassCleanup"
 arg = 0
 

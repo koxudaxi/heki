@@ -4598,7 +4598,6 @@ mod tests {
                 "contextlib.AsyncExitStack.callback",
                 "unittest.TestCase.addCleanup",
                 "unittest.TestCase.addClassCleanup",
-                "unittest.IsolatedAsyncioTestCase.addCleanup",
                 "unittest.IsolatedAsyncioTestCase.addClassCleanup",
             ],
         ),
