@@ -960,9 +960,11 @@ EffectSummary(f) = {
     entry_change_params:      Bitset,                      // the "[]" changes that change an entry as part of
                                                            // the container: in place, or an attribute heki ties
                                                            // to no project class (an attribute of an entry of a
-                                                           // project class is that class's write); with
-                                                           // ArgOrigin::param_entries, which argument is such
-                                                           // an entry; contract-only (IndirectItemMut)
+                                                           // project class is that class's write, also of one
+                                                           // an isinstance check gives it, in the blocks the
+                                                           // check guards); with ArgOrigin::param_entries,
+                                                           // which argument is such an entry; contract-only
+                                                           // (IndirectItemMut)
     changed_param_attrs:      Map<ParamIdx, Set<AttrName>>,// attributes (and "[]") whose objects change (in place
                                                            // or deeper), not just rebound: what a shallow copy
                                                            // shares (MUT202)

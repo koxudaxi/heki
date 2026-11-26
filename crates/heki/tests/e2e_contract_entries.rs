@@ -3,7 +3,8 @@
 //! alias of the entry) writes the target at the call, the entries a loop takes from `values()`
 //! or `items()` of the container are its entries, and an alias of an object's `__dict__` that a
 //! nested function captures keeps its object. An attribute write on an entry of a known class is
-//! that class's write, not one of the container, also in a helper handed the container.
+//! that class's write, not one of the container, also in a helper handed the container, and a
+//! check giving an entry a known class decides that only in the blocks it guards.
 
 mod common;
 
@@ -670,6 +671,121 @@ fn an_attribute_write_on_an_entry_of_a_known_class_is_that_class_write() {
     for line in [93, 94] {
         assert!(
             message_at(&diags, u, line).contains("writes `pkg.model.Model.groups`"),
+            "{diags:#?}"
+        );
+    }
+}
+
+const NARROWED_MODEL: &str = r#"class Field:
+    def __init__(self) -> None:
+        self.tags: list[str] = []
+
+    def get(self, key: str) -> list[str]:
+        return self.tags
+
+
+class Model:
+    def __init__(self, rows: list) -> None:
+        self.rows = rows
+"#;
+
+const NARROWED_HELPERS: &str = r#"from pkg.model import Field, Model
+
+
+def count(tags: list[str]) -> int:
+    return len(tags)
+
+
+def clear_after(rows: list) -> None:
+    row = rows[0]
+    tags = row.tags
+    if isinstance(row, Field):
+        count(tags)
+    tags.clear()
+
+
+def clear_later(rows: list) -> None:
+    row = rows[0]
+    tags = row.tags
+    if isinstance(row, Field):
+        count(tags)
+    if rows:
+        tags.clear()
+
+
+def clear_otherwise(rows: list) -> None:
+    row = rows[0]
+    tags = row.tags
+    if isinstance(row, Field):
+        count(tags)
+    else:
+        tags.clear()
+
+
+def clear_view_later(rows: list) -> None:
+    row = rows[0]
+    tags = row.get("k")
+    if isinstance(row, Field):
+        count(tags)
+    if rows:
+        tags.clear()
+
+
+def clear_checked(rows: list) -> None:
+    row = rows[0]
+    tags = row.tags
+    count(tags)
+    if isinstance(row, Field):
+        tags.clear()
+
+
+def clear_checked_view(rows: list) -> None:
+    row = rows[0]
+    tags = row.get("k")
+    count(tags)
+    if isinstance(row, Field):
+        tags.clear()
+
+
+def use(model: Model) -> None:
+    clear_after(model.rows)
+    clear_later(model.rows)
+    clear_otherwise(model.rows)
+    clear_view_later(model.rows)
+    clear_checked(model.rows)
+    clear_checked_view(model.rows)
+"#;
+
+#[test]
+fn a_check_on_an_entry_decides_only_the_uses_it_guards() {
+    let p = Project::new("entries_narrowed_by_a_check");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n\
+         [[tool.heki.write-owners]]\nname = \"rows\"\ntargets = [\"pkg.model.Model.rows\"]\n\
+         allowed-writers = [\"pkg.model:Model.__init__\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", NARROWED_MODEL)
+    .write("pkg/use.py", NARROWED_HELPERS);
+    let diags = diagnostics(&p);
+    let u = "pkg/use.py";
+    // Outside the check the entry's class is unknown, so changing the object its attribute holds
+    // or its `get` returns changes an entry of the container (lines 60 to 63); inside the check
+    // the attribute is the known class's and `get` is its method (no report at 64 and 65). Each
+    // holds whichever use, inside the check or outside it, is read first.
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(u, 60, "MUT201", "use"),
+            d(u, 61, "MUT201", "use"),
+            d(u, 62, "MUT201", "use"),
+            d(u, 63, "MUT201", "use"),
+        ]
+    );
+    for line in 60..=63 {
+        assert!(
+            message_at(&diags, u, line).contains("writes `pkg.model.Model.rows` (inside an item"),
             "{diags:#?}"
         );
     }

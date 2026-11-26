@@ -47,7 +47,7 @@ use crate::{
     UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
-use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, KeySet, Or, Use};
+use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, Join, KeySet, Or, Use};
 use heki_ir::{
     BasicBlock, BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry,
     FunctionId, FunctionKind, Inst, InstKind, IrFunction, ModuleIr, Must, NaturalLoop, PhiNode,
@@ -987,10 +987,10 @@ struct Extractor<'a> {
     items_changed: OnceCell<FxHashSet<(u8, Option<String>)>>,
     /// The parameters whose items or elements each value may be, or be below
     /// ([`Self::element_paths`]), on the function's tables and budget.
-    elements: Closure<(VarId, ItemStep), KeySet<(u8, String)>>,
+    elements: ElementWalks<KeySet<(u8, String)>>,
     /// The parameters whose entries each value may be as part of the container
     /// ([`Self::entry_params`]), on the function's tables and budget.
-    entries: Closure<(VarId, ItemStep), Or>,
+    entries: ElementWalks<Or>,
     /// Allocations, escapes, and construction queries (`construction`).
     rec: Recorder,
     pending_sites: Vec<PendingSite>,
@@ -1347,6 +1347,7 @@ impl<'a> Extractor<'a> {
             ..EffectSummary::default()
         };
         let live = ownership::Live::of(f, &defs);
+        let scopes = narrowed.scopes();
         let mut ex = Self {
             f,
             shape,
@@ -1407,8 +1408,8 @@ impl<'a> Extractor<'a> {
             walk_budget: Budget::of_function("summary::walks", f),
             rebound: OnceCell::new(),
             items_changed: OnceCell::new(),
-            elements: Closure::new(),
-            entries: Closure::new(),
+            elements: ElementWalks::new(scopes),
+            entries: ElementWalks::new(scopes),
             rec: Recorder::default(),
             pending_sites: Vec::new(),
             pending_args: Vec::new(),
@@ -2067,10 +2068,12 @@ impl<'a> Extractor<'a> {
                 .collect()
         };
         let next = |at, out: &mut Vec<_>| self.element_steps(at, out, |_| true);
-        match self
-            .elements
-            .ask(&self.walk_budget, (var, ItemStep::Below), own, next)
-        {
+        match self.elements.of(self.narrowing_scope()).ask(
+            &self.walk_budget,
+            (var, ItemStep::Below),
+            own,
+            next,
+        ) {
             Answer::Known(paths) => paths.iter().cloned().collect(),
             Answer::Open => Vec::new(),
         }
@@ -2100,9 +2103,15 @@ impl<'a> Extractor<'a> {
             self.element_steps(at, out, |obj| self.project_classes(obj).is_empty());
         };
         self.entries
+            .of(self.narrowing_scope())
             .ask(&self.walk_budget, (var, ItemStep::Below), own, next)
             .map(|mask| mask.0)
             .open_means(0)
+    }
+
+    /// The narrowing scope of the block being read ([`crate::infer::NarrowedVals::scope`]).
+    fn narrowing_scope(&self) -> usize {
+        self.narrowed.scope(self.pos.0)
     }
 
     /// The parameter or the shallow copy of one (`param_alias`, `param_copy_alias`) whose items
@@ -9462,6 +9471,23 @@ fn construction_of(answer: &NewArg, rebinds: bool) -> Construction {
 enum ItemStep {
     Below,
     Items(Option<VarId>),
+}
+
+/// The walks of [`Extractor::element_paths`] or [`Extractor::entry_params`], one per narrowing
+/// scope ([`crate::infer::NarrowedVals::scope`]): their steps read the values of the block being
+/// read (the classes of an attribute's object, the views of a receiver's methods), so an answer
+/// holds only in the blocks where the checks give every value the same types.
+struct ElementWalks<S>(Vec<Closure<(VarId, ItemStep), S>>);
+
+impl<S: Join + Default> ElementWalks<S> {
+    fn new(scopes: usize) -> Self {
+        Self((0..scopes).map(|_| Closure::new()).collect())
+    }
+
+    /// The walk of the narrowing scope `scope`.
+    fn of(&self, scope: usize) -> &Closure<(VarId, ItemStep), S> {
+        &self.0[scope]
+    }
 }
 
 /// What a function may rebind on some object: the attribute names it stores or deletes (also

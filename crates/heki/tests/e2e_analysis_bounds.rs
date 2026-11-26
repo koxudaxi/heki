@@ -1,23 +1,22 @@
-//! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
-//! narrowing through phis, the passes of the type inference and of the classes of merged values,
-//! the closure cells child scopes read, the entries of a contract target's container through
-//! views and aliases, and through items and attributes a helper handed it reaches, the stores of the cells a comprehension's assignment
-//! expressions bind and the reads seeing them, the iterables child scopes receive from the
-//! functions creating them, the fixpoint joining the stores of attributes, the names its
-//! functions store and read, the stores through namespaces and `setattr`, the classes whose code
-//! may store into an instance, the size of the Soundness lane's proof state, the values `EFF107`
-//! follows from a task factory, the walk to the callable a builtin calls once per item, contracts
-//! with many call targets and argument lists, the names offered for contract entries that match
-//! nothing, the
-//! mappings a call unpacks, the walk to the uses handing a reference to a call target on, the
-//! locks `EFF109` follows, the thread locks and guarded writes `EFF117` follows, the values class
-//! statements pass as bases, the bindings the deque
-//! rewrite's candidates check, the star imports a name is bound through, many or nested deep,
-//! the sizes of a thousand lists each extending the next or of one list extending many deep
-//! chains, the walks over the import graph (`heki inspect --imports`), the ends of the handler
-//! bodies around imports, the tests of their arguments that helpers hand on to their callers,
-//! through a long chain of helpers, for many parameters, or from many implementations of one
-//! call, and the type expressions aliases and casts spell.
+//! The cost of the analyses past the IR, end to end through the real binary: `isinstance` narrowing
+//! through phis, the passes of the type inference and of the classes of merged values, the closure
+//! cells child scopes read, the entries of a contract target's container through views and aliases,
+//! and through items and attributes a helper handed it reaches, once per narrowing scope, the
+//! stores of the cells a comprehension's assignment expressions bind and the reads seeing them, the
+//! iterables child scopes receive from the functions creating them, the fixpoint joining the stores
+//! of attributes, the names its functions store and read, the stores through namespaces and
+//! `setattr`, the classes whose code may store into an instance, the size of the Soundness lane's
+//! proof state, the values `EFF107` follows from a task factory, the walk to the callable a builtin
+//! calls once per item, contracts with many call targets and argument lists, the names offered for
+//! contract entries that match nothing, the mappings a call unpacks, the walk to the uses handing a
+//! reference to a call target on, the locks `EFF109` follows, the thread locks and guarded writes
+//! `EFF117` follows, the values class statements pass as bases, the bindings the deque rewrite's
+//! candidates check, the star imports a name is bound through, many or nested deep, the sizes of a
+//! thousand lists each extending the next or of one list extending many deep chains, the walks over
+//! the import graph (`heki inspect --imports`), the ends of the handler bodies around imports, the
+//! tests of their arguments that helpers hand on to their callers, through a long chain of helpers,
+//! for many parameters, or from many implementations of one call, and the type expressions aliases
+//! and casts spell.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -1123,6 +1122,57 @@ fn entries_down_a_long_chain_of_items_and_attributes_are_one_closure() {
         .map(|d| (d["qualname"].as_str().unwrap(), d["line"].as_u64().unwrap()))
         .collect();
     assert_eq!(reported, vec![("use", 2 * links as u64 + 11)], "{found:#?}");
+}
+
+/// The chain of [`entries_down_a_long_chain_of_items_and_attributes_are_one_closure`] with the
+/// attribute of its last value written in many blocks one `isinstance` check guards (`if
+/// flags[i]: e{n}.mark = i`): the checks give every value the same types in those blocks, so
+/// they share one narrowing scope, and the walks of the entries go down the chain once in it,
+/// not once per block.
+#[test]
+fn writes_in_the_blocks_one_check_guards_walk_the_entries_once() {
+    let config = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n\
+                  [[tool.heki.write-owners]]\nname = \"box\"\ntargets = [\"m.Holder.box\"]\n\
+                  allowed-writers = [\"m.Holder.*\"]\n";
+    let links = 800;
+    let found = check_linear(links, |links| {
+        let mut lines = vec![
+            "class Holder:".to_owned(),
+            "    def __init__(self) -> None:".to_owned(),
+            "        self.box: list = []".to_owned(),
+            String::new(),
+            String::new(),
+            "def fill(rows: list, flags: list[bool], other: object) -> None:".to_owned(),
+            "    e0 = rows[0]".to_owned(),
+        ];
+        for i in 0..links {
+            lines.push(format!(
+                "    e{} = e{i}.child if flags[{i}] else e{i}[0]",
+                i + 1
+            ));
+        }
+        lines.push("    if isinstance(other, Holder):".to_owned());
+        for i in 0..links {
+            lines.push(format!("        if flags[{i}]:"));
+            lines.push(format!("            e{links}.mark = {i}"));
+        }
+        lines.extend([
+            String::new(),
+            String::new(),
+            "def use(holder: Holder) -> None:".to_owned(),
+            "    fill(holder.box, [], None)".to_owned(),
+        ]);
+        let p = Project::new(&format!("bounds_entry_scope_writes_{links}"));
+        p.write("pyproject.toml", config)
+            .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    });
+    let reported: Vec<(&str, u64)> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT201")
+        .map(|d| (d["qualname"].as_str().unwrap(), d["line"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(reported, vec![("use", 3 * links as u64 + 12)], "{found:#?}");
 }
 
 /// A function with a long chain of entries of a `write-owners` target's container that a loop
