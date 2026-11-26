@@ -1045,10 +1045,10 @@ fn eff109_leaves_locks_it_cannot_name_or_guarded_helpers() {
 }
 
 /// Helpers that take the lock after branches the rule walks past: a test of a method it cannot
-/// resolve, two tests of one value, an `if` with an acquisition on each side, and a `try` before
-/// the acquisition; and,
-/// not reported, a timed `acquire(True, 1)`, a `locked()` test, and a closure's variable an
-/// unknown call binds.
+/// resolve, two tests of one value, an `if` with an acquisition on each side, a `try` before
+/// the acquisition, and a closure's variable bound to a lock on each binding (`make_lock` has
+/// no return annotation, and its one return is a `threading.Lock()` call); and, not reported, a
+/// timed `acquire(True, 1)` and a `locked()` test.
 const BRANCHES: &str = r#"import threading
 
 
@@ -1100,7 +1100,7 @@ class Branchy:
             self.timed()
 
 
-def unknown_cell():
+def factory_cell():
     lock = make_lock()
     lock = threading.Lock()
 
@@ -1136,6 +1136,12 @@ fn eff109_walks_past_branches_to_the_helper_acquisitions() {
                 48,
                 "Branchy.run",
                 "self._lock->branches.Branchy.after_try"
+            ),
+            d(
+                "branches.py",
+                61,
+                "factory_cell",
+                "lock->branches.factory_cell.<locals>.inner"
             ),
         ]
     );

@@ -746,13 +746,14 @@ const REPORTED_SHAPES: &[&str] = &[
     "read_attr",
     "read_in_generator",
     "dunder_dict_const_name",
+    // `make_untyped` has no return annotation, and its one return constructs a `Model`.
+    "untyped_return",
 ];
 
-/// Silent: an unannotated parameter or return (no class to go by), names computed at run
-/// time, and a lambda handed to `map` (its parameter has no type).
+/// Silent: an unannotated parameter (no class to go by), names computed at run time, and a
+/// lambda handed to `map` (its parameter has no type).
 const SILENT_SHAPES: &[&str] = &[
     "unannotated_param",
-    "untyped_return",
     "dunder_dict_computed_name",
     "lambda_callback",
 ];
@@ -1684,23 +1685,32 @@ fn closure_cells_hold_the_values_the_enclosing_function_binds() {
             // for a binding not computed yet when the generator is made.
             ("declared_bound_before_generator", "MUT203"),
             ("declared_bound_after_generator", "MUT206"),
-            ("rebound_unknown.<locals>.<lambda>", "MUT206"),
+            // `untyped` has no return annotation, and its one return constructs an `object`,
+            // which has no `_given`: the cell holds a `Model` or an `object`.
+            ("rebound_unknown.<locals>.<lambda>", "MUT203"),
             ("nonlocal_store.<locals>.<lambda>", "MUT206"),
             ("nonlocal_store.<locals>.<genexpr>", "MUT206"),
-            ("walrus.<locals>.<lambda>", "MUT206"),
             // `reset` rebinds the function's `model`, not the comprehension's.
             ("shadowed.<locals>.<lambda>", "MUT206"),
             ("unmodeled.<locals>.<lambda>", "MUT206"),
         ]);
-        // The lambda is nested in the comprehension's own scope before 3.12.
-        expected.extend(pairs(&[if version == "py311" {
-            (
-                "iteration_variable.<locals>.<listcomp>.<locals>.<lambda>",
-                "MUT203",
-            )
+        // The lambda is nested in the comprehension's own scope before 3.12. The walrus binds
+        // `found` from the comprehension's own scope before 3.12, a nested scope rebinding it;
+        // from 3.12 the function binds it to a `Model` or the `object` `untyped` constructs.
+        expected.extend(pairs(&if version == "py311" {
+            [
+                (
+                    "iteration_variable.<locals>.<listcomp>.<locals>.<lambda>",
+                    "MUT203",
+                ),
+                ("walrus.<locals>.<lambda>", "MUT206"),
+            ]
         } else {
-            ("iteration_variable.<locals>.<lambda>", "MUT203")
-        }]));
+            [
+                ("iteration_variable.<locals>.<lambda>", "MUT203"),
+                ("walrus.<locals>.<lambda>", "MUT203"),
+            ]
+        }));
         assert_eq!(
             reported(&p, &["--target-version", version], "pkg/cells.py"),
             expected,
