@@ -63,7 +63,7 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error] `app.users.load_user` alwa
   = help: offload it with `asyncio.to_thread`, or use an async client
 
 Found 1 diagnostic(s) in 2 file(s).
-note: 3 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+note: 4 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 EFF101 (async-blocking-call): `heki rule EFF101`, https://heki.koxudaxi.dev/rules/async-blocking-call/
 ```
 
@@ -96,7 +96,7 @@ app/orders.py:11:37: EFF103 (loop-db-query) [warning] every iteration over param
 
 Found 1 diagnostic(s) in 1 file(s).
 heki check does not fail on 1 report(s) shown now: warnings, and heuristic reports, which can be wrong about the code and count as warnings; `fail-on = "warning"` in the lint settings makes them fail it.
-note: 3 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+note: 4 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 EFF103 (loop-db-query): `heki rule EFF103`, https://heki.koxudaxi.dev/rules/loop-db-query/
 ```
 
@@ -331,13 +331,13 @@ it stays quiet where it cannot tell. See [Scope and limitations](https://heki.ko
 
 The hook passes the staged files to `heki check --touched`, so old findings in other files do not
 block a commit. A report in an unstaged file whose call chain passes through a staged file is
-shown and fails it too:
+shown and fails it too, and with a baseline, so is every regression. Run the whole project in CI:
 
 ```yaml
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.5.0
+    rev: v0.6.0
     hooks:
       - id: heki
 ```

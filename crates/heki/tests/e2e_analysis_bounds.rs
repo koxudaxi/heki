@@ -7,7 +7,8 @@
 //! task factory, the walk to the callable a builtin calls once per item, contracts with many call
 //! targets and argument lists, the names offered for contract entries that match nothing, the
 //! mappings a call unpacks, the walk to the uses handing a reference to a call target on, the
-//! locks `EFF109` follows, the values class statements pass as bases, the bindings the deque
+//! locks `EFF109` follows, the thread locks and guarded writes `EFF117` follows, the values class
+//! statements pass as bases, the bindings the deque
 //! rewrite's candidates check, the star imports a name is bound through, many or nested deep,
 //! the sizes of a thousand lists each extending the next or of one list extending many deep
 //! chains, the walks over the import graph (`heki inspect --imports`), the ends of the handler
@@ -4562,6 +4563,122 @@ fn many_locks_held_at_once_keep_a_bit_each() {
     );
 }
 
+/// `n` attributes a thread writes holding a lock; a method taking the lock through a helper,
+/// writing them all with a call each in between and as many private helpers writing them too,
+/// then releasing it at the end; and a method writing them all with no lock.
+fn guarded_writes(n: usize) -> Project {
+    let mut lines = vec![
+        "import threading".to_owned(),
+        String::new(),
+        String::new(),
+        "class C:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self._lock = threading.Lock()".to_owned(),
+        String::new(),
+        "    def start(self):".to_owned(),
+        "        threading.Thread(target=self._tick).start()".to_owned(),
+        String::new(),
+        "    def _acquire(self):".to_owned(),
+        "        self._lock.acquire()".to_owned(),
+        String::new(),
+        "    def _tick(self):".to_owned(),
+        "        with self._lock:".to_owned(),
+    ];
+    lines.extend((0..n).map(|i| format!("            self.a{i} += 1")));
+    lines.extend(
+        [
+            "",
+            "    def flush(self, xs):",
+            "        self._acquire()",
+            "        try:",
+        ]
+        .map(str::to_owned),
+    );
+    for i in 0..n {
+        lines.push(format!("            if xs[{i}]:"));
+        lines.push(format!("                self.a{i} = 0"));
+        lines.push(format!("            self._w{i}()"));
+    }
+    lines.extend(["        finally:", "            self._lock.release()"].map(str::to_owned));
+    for i in 0..n {
+        lines.extend([
+            String::new(),
+            format!("    def _w{i}(self):"),
+            format!("        self.a{i} = 1"),
+        ]);
+    }
+    lines.extend([String::new(), "    def reset(self):".to_owned()]);
+    lines.extend((0..n).map(|i| format!("        self.a{i} = 0")));
+    let p = Project::new(&format!("bounds_guarded_writes_{n}"));
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// Thousands of guarded attributes written in one region held through a helper and released at
+/// the end, with as many calls and branches inside: the locks given back later are one backward
+/// dataflow with a bit per lock released, the locks held at each instruction one pass, the
+/// callers of each private helper one walk, and each write finds its guards by its name.
+#[test]
+fn guarded_writes_in_one_released_region_take_linear_steps() {
+    let n = 2_000;
+    let found = check_linear(n, guarded_writes);
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF117")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["C.reset"; n]);
+}
+
+/// `n` attributes a thread writes holding a lock, each through the next of a chain of `n` names
+/// bound to `self`, and a method writing them the same way holding none.
+fn guarded_alias_writes(n: usize) -> Project {
+    let mut lines = vec![
+        "import threading".to_owned(),
+        String::new(),
+        String::new(),
+        "class C:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self._lock = threading.Lock()".to_owned(),
+        String::new(),
+        "    def start(self):".to_owned(),
+        "        threading.Thread(target=self._tick).start()".to_owned(),
+    ];
+    // The method `def`, binding the chain `name`, then writing through it below `block`.
+    let method = |lines: &mut Vec<String>, def: &str, name: &str, block: &str, value: &str| {
+        lines.extend([String::new(), format!("    def {def}(self):")]);
+        lines.push(format!("        {name}0 = self"));
+        lines.extend((1..n).map(|i| format!("        {name}{i} = {name}{}", i - 1)));
+        let indent = if block.is_empty() {
+            "        "
+        } else {
+            lines.push(format!("        {block}"));
+            "            "
+        };
+        lines.extend((0..n).map(|i| format!("{indent}{name}{i}.a{i} = {value}")));
+    };
+    method(&mut lines, "_tick", "s", "with self._lock:", "1");
+    method(&mut lines, "reset", "r", "", "0");
+    let p = Project::new(&format!("bounds_guarded_alias_writes_{n}"));
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// Thousands of guarded attributes written through a chain of as many names bound to `self`,
+/// holding the lock and holding none: the instance each write's receiver copies is read from
+/// the function's copy-root table, not walked back along the chain per write.
+#[test]
+fn guarded_writes_through_a_long_alias_chain_read_each_copy_root_once() {
+    let n = 8_000;
+    let found = check_linear(n, guarded_alias_writes);
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF117")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["C.reset"; n]);
+}
+
 /// A project selecting `EFF110` with the module `m` of `lines` after a coroutine `load` using a
 /// session one operation at a time.
 fn fanout_module(name: &str, lines: Vec<String>) -> Project {
@@ -7780,4 +7897,69 @@ fn a_store_under_more_tests_than_the_bounds_keeps_whatever_is_passed() {
         assert!(!reported(4, one_if), "{one_if}");
         assert!(reported(5, one_if), "{one_if}");
     }
+}
+
+/// The project classes a value of `Mapping` may be are listed by one walk over the family
+/// (`ProjectDecls::implementers`), each class visited at most twice: a chain of classes each
+/// deriving from the one before, from `Mapping` down, and a chain of classes each registered
+/// with the one before, from `Mapping` too. The last of either binds `__iter__`, which the
+/// writer runs after its write.
+#[test]
+fn the_implementers_of_a_container_abc_are_listed_once_through_long_chains() {
+    let shape = |n: usize| {
+        let mut lines = vec![
+            "from collections.abc import Mapping".to_owned(),
+            "from functools import cached_property".to_owned(),
+            String::new(),
+            String::new(),
+            "class Holder:".to_owned(),
+            "    def __init__(self, raw: dict[str, str]) -> None:".to_owned(),
+            "        self.raw = raw".to_owned(),
+            String::new(),
+            "    @cached_property".to_owned(),
+            "    def features(self) -> str:".to_owned(),
+            "        return self.raw.get(\"k\", \"\")".to_owned(),
+            String::new(),
+            "    def replace(self, raw: dict[str, str], rows: Mapping[str, str]) -> None:"
+                .to_owned(),
+            "        self.raw = raw".to_owned(),
+            "        for _ in rows:".to_owned(),
+            "            pass".to_owned(),
+        ];
+        let mut derived = "Mapping".to_owned();
+        let mut registered = "Mapping".to_owned();
+        for i in 0..n {
+            let iterates = if i + 1 == n {
+                "    def __iter__(self):\n        return iter(())"
+            } else {
+                "    pass"
+            };
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("class D{i}({derived}):\n{iterates}"),
+                String::new(),
+                String::new(),
+                format!("class R{i}:\n{iterates}"),
+                String::new(),
+                String::new(),
+                format!("{registered}.register(R{i})"),
+            ]);
+            derived = format!("D{i}");
+            registered = format!("R{i}");
+        }
+        let p = Project::new(&format!("bounds_abc_implementers_{n}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"MUT101\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let diags = check_linear(1_000, shape);
+    let tiers: Vec<&str> = (diags.iter())
+        .filter(|d| d["rule_code"] == "MUT101")
+        .map(|d| d["certainty"].as_str().unwrap())
+        .collect();
+    assert_eq!(tiers, ["heuristic"]);
 }

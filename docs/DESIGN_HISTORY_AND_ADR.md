@@ -426,7 +426,20 @@ first, then a convention the code follows, then a contract.
      `--fix` never rely on annotations (ADR-004, A4). R2 grants an instance of `C` or of a
      project subclass, so a premise through a method call holds only when every candidate
      implementation has it: an override in a project subclass, of a project class or of a
-     library class, leaves it open. A type fact keeps its provenance (constructed here, or an
+     library class, leaves it open. For a nominal container ABC (`Sequence`, `Mapping`,
+     `collections.abc.Set`, their mutable ABCs, which define no `__subclasshook__`, so an
+     instance derives from the ABC or is registered with it), R2 grants a builtin of its family
+     or another library class implementing it, taken to run what the builtin runs, as a
+     `dict`-typed value that is a `defaultdict` is taken to, or a project implementer: a class
+     whose bases reach, through project classes, the ABC or a class of the family table (the
+     builtins and the standard-library classes CPython registers with the ABC or derives from
+     them, checked on CPython 3.11 to 3.15), or a class registered with one. A `register` heki
+     cannot resolve, or a `__subclasshook__` of such a class, opens the family; a structural ABC
+     (`Iterable`, `Collection`) or a protocol stays open, and a base outside the project and the
+     table stands for itself. *Rejected*: reading every abstract class as open (a function that
+     only iterates its `Sequence` gets no exact fact); following the implementers' overrides as
+     call targets (the effect rules' heuristic tiers stay as they are, as for a `dict`-typed
+     receiver). A type fact keeps its provenance (constructed here, or an
      annotation under R2), so that reports resting on R2 can be dropped where annotations are
      not trusted.
   6. **Rewrite validity is fix safety** (D3): an `OPT` report's cost claim (what runs in the
@@ -469,6 +482,20 @@ first, then a convention the code follows, then a contract.
      old codes are no aliases, as `MUT109` was not in 0.3.0: in a selector, a suppression, or a
      baseline entry they are read like any unknown code. Decision 10 is unchanged: naming
      `EFF101` or `EFF103` shows its heuristic reports.
+     *Amended by baseline version 3*: a baseline entry no longer holds across every change of
+     tier. An entry allows the claims it recorded and no stronger one: it records how many of its
+     sites were heuristic (`heuristic`), and a run regresses when it finds more sites than the
+     entry's `count`, or more exact sites than `count` less `heuristic`. An exact report that
+     turns heuristic passes, and `--update-baseline` shrinks the entry to it; a recorded
+     heuristic report that is exact now fails once, also after an upgrade in which heki proves
+     it, until it is fixed or the baseline is recorded anew. Both tiers of a rule key a report
+     alike, so that a change of tier stays within its entry: `EFF101` and `EFF103` key by the
+     last call of the shortest call chain, also where the exact message names the call every
+     implementation runs. A baseline of version 2 is compared as before, with a note, until
+     `--update-baseline` rewrites it; an older heki refuses version 3 instead of ignoring the
+     count. *Rejected*: an exception for the reports an upgrade proves (it would reopen the hole
+     at every upgrade); keying the exact report by the call it claims (adding a branch on the way
+     would turn its entry into a new one).
   10. **Selecting the heuristic rules and reports** (D6): `[tool.heki.lint] heuristic = true` and
       `--heuristic` / `--no-heuristic` (on `check` and `server`), modelled on Ruff's `preview`:
       prefixes and `ALL` then also select the heuristic `Default` rules, and an exact code or name
@@ -515,6 +542,13 @@ first, then a convention the code follows, then a contract.
       premise defect, fixed as for a rule. A sample is enough here, where it is not for a rule,
       because the mechanical checks cover every group and a suggestion is read before it is
       applied: a false one costs a reviewed edit, not a false report in every run.
+      *Recorded for the values of container ABCs (decision 5)*: the cases they newly establish
+      in `MUT101` and `MUT111` have a counterexample each in `tests/difftest/container_abcs/`,
+      run on CPython, that heki reports heuristic (an implementer through the ABC, through
+      `UserDict`, and through `list`, a registered class, a `register` heki cannot resolve, a
+      `__subclasshook__`, a structural ABC); `lsp_oracle.rs` follows another file's `Mapping`
+      implementer and `register` call; the census of every report the change adds or changes on
+      the corpus and the holdout run are read before the release that ships it.
   13. **The default set**: a rule runs by default when it is exact and its share of real harm
       is worth the line it prints. For 0.2.0 that is `EFF101`, `EFF103`, `OPT113`, and the
       proven tier of the `OPT` rules once each is certified; `MUT107`, `OPT112`, and `EFF102`

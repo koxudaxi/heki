@@ -137,7 +137,7 @@ fn the_three_contracts_of_the_request_give_five_reports() {
         reports(&p),
         [
             "pkg/facts.py:3 IMP201 <module> pkg.model.backend",
-            "pkg/model/shared.py:5 IMP201 uses_the_class pkg.model.backend",
+            "pkg/model/shared.py:5 IMP201 uses_the_class pkg.model.backend.BackendModel",
             "pkg/model/shared.py:11 IMP201 imports_for_its_effect pkg.model.backend",
             "pkg/model/shared.py:15 IMP201 imports_by_name pkg.model.backend",
             "pkg/model/shared.py:19 IMP201 imports_the_root pkg",
@@ -185,7 +185,7 @@ message = "import `app.billing` and use what it exports"
         [
             "app/orders.py:3 IMP201 <module> app.billing.invoice",
             "app/orders.py:4 IMP201 <module> app.billing.invoice",
-            "app/orders.py:5 IMP201 <module> app.billing.invoice",
+            "app/orders.py:5 IMP201 <module> app.billing.invoice.Invoice",
         ]
     );
     let d = &diagnostics(&p)[0];
@@ -334,11 +334,12 @@ class Holder:
         );
         let lines: Vec<String> =
             std::iter::once("pkg/opened.py:2 IMP201 <module> pkg.db".to_owned())
-                .chain(
-                    expected
-                        .iter()
-                        .map(|l| format!("pkg/user.py:{l} IMP201 <module> pkg.db")),
-                )
+                .chain(expected.iter().map(|l| {
+                    format!(
+                        "pkg/user.py:{l} IMP201 <module> pkg.db{}",
+                        if *l == 19 { ".query" } else { "" }
+                    )
+                }))
                 .collect();
         assert_eq!(reports(&p), lines, "{key}");
         assert_eq!(
@@ -449,7 +450,7 @@ forbidden-imports = ["pkg.db", "pkg.cache", "pkg.plugins.*", "yaml.loader", "req
             vec![
                 "app.py:8 IMP201 both pkg.cache|pkg.db",
                 "app.py:28 IMP201 dunder pkg.db",
-                "app.py:47 IMP201 <module> requests",
+                "app.py:47 IMP201 <module> requests.adapters",
             ],
         ),
         (
@@ -464,7 +465,7 @@ forbidden-imports = ["pkg.db", "pkg.cache", "pkg.plugins.*", "yaml.loader", "req
                 "app.py:32 IMP202 gone pkg.db|pkg.gone",
                 "app.py:36 IMP202 entry json|pkg.plugins.*",
                 "app.py:44 IMP202 nearby pkg.db|json.*",
-                "app.py:47 IMP201 <module> requests",
+                "app.py:47 IMP201 <module> requests.adapters",
             ],
         ),
     ] {
@@ -734,6 +735,22 @@ fn invalid_contracts_are_configuration_errors() {
         (
             "relative-imports = [\"<django>\"]",
             "group `<django>` in import-boundaries.relative-imports",
+        ),
+        (
+            "forbidden-imports = [\"pkg.a:B\"]",
+            "invalid name `pkg.a:B` in import-boundaries.forbidden-imports",
+        ),
+        (
+            "relative-imports = [\"pkg.a:B\"]",
+            "invalid name `pkg.a:B` in import-boundaries.relative-imports",
+        ),
+        (
+            "allowed-imports = [\"pkg.a:\"]",
+            "invalid name `pkg.a:` in import-boundaries.allowed-imports",
+        ),
+        (
+            "ignored-imports = [\"pkg.a -> :B\"]",
+            "invalid name `:B` in import-boundaries.ignored-imports",
         ),
     ] {
         let p = project(
@@ -1072,4 +1089,210 @@ fn reach_judges_how_only_the_importer_names_its_imports() {
              only through a relative import"
         );
     }
+}
+
+const NAMES_CONTRACT: &str = r#"
+[[tool.heki.import-boundaries]]
+name = "ref-not-model"
+importers = ["app.ref.*"]
+forbidden-imports = ["app.model.*"]
+"#;
+
+/// A project whose reference layer imports names of a model module, the second one `second`.
+fn names_project(dir: &str, contract: &str, second: &str) -> Project {
+    let p = project(dir, contract);
+    p.write("app/__init__.py", "");
+    p.write("app/ref/__init__.py", "");
+    p.write("app/model/__init__.py", "");
+    p.write(
+        "app/model/names.py",
+        "class A:\n    pass\n\n\nclass B:\n    pass\n\n\nclass C:\n    pass\n",
+    );
+    p.write("app/model/other.py", "class D:\n    pass\n");
+    p.write(
+        "app/ref/use.py",
+        &format!("def f():\n    from app.model.names import A, {second}\n    return A, {second}\n"),
+    );
+    p
+}
+
+/// `heki check --select IMP201 --baseline b.toml <args>`: exit code and stderr.
+fn ratchet(p: &Project, args: &[&str]) -> (i32, String) {
+    let mut all = vec!["--select", "IMP201", "--baseline", "b.toml"];
+    all.extend_from_slice(args);
+    let (code, _, err) = p.check(&all);
+    (code, err)
+}
+
+/// `from m import n` of a name of `m` is a report of `m.n`, and a submodule stays its module.
+#[test]
+fn a_from_import_of_a_name_reports_the_module_and_the_name() {
+    let p = names_project("imp_names_report", NAMES_CONTRACT, "B");
+    p.write(
+        "app/ref/more.py",
+        "from app.model import names, other\nfrom app.model.other import D\n",
+    );
+    assert_eq!(
+        reports(&p),
+        [
+            "app/ref/more.py:1 IMP201 <module> app.model.names",
+            "app/ref/more.py:1 IMP201 <module> app.model.other",
+            "app/ref/more.py:2 IMP201 <module> app.model.other.D",
+            "app/ref/use.py:2 IMP201 f app.model.names.A",
+            "app/ref/use.py:2 IMP201 f app.model.names.B",
+        ]
+    );
+}
+
+/// A baseline entry holds the name: another name of the module is a new report, and an entry of
+/// the module, as older baselines wrote it, keeps covering the names of its module until
+/// `--update-baseline` rewrites it per name.
+#[test]
+fn a_baseline_entry_of_an_import_holds_the_name() {
+    let p = names_project("imp_names_baseline", NAMES_CONTRACT, "B");
+    let (code, err) = ratchet(&p, &["--update-baseline"]);
+    assert_eq!(code, 0, "{err}");
+    let recorded = p.read("b.toml");
+    for name in ["A", "B"] {
+        assert!(
+            recorded.contains(&format!("target = \"app.model.names.{name}\"\ncount = 1\n")),
+            "{recorded}"
+        );
+    }
+    assert_eq!(ratchet(&p, &[]).0, 0);
+    // Another name of the same module is a new report.
+    p.write(
+        "app/ref/use.py",
+        "def f():\n    from app.model.names import A, C\n    return A, C\n",
+    );
+    let (code, err) = ratchet(&p, &[]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("IMP201 `app.model.names.C`"), "{err}");
+
+    // The entry older baselines wrote covers the names of its module.
+    let legacy = "version = 3\n\n[[entries]]\npath = \"app/ref/use.py\"\nqualname = \"f\"\nrule_code = \"IMP201\"\ntarget = \"app.model.names\"\ncount = 2\nheuristic = 2\n";
+    p.write("b.toml", legacy);
+    let (code, err) = ratchet(&p, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!err.contains("note"), "{err}");
+    // A third site of the module is more than it allows.
+    p.write(
+        "app/ref/use.py",
+        "def f():\n    from app.model.names import A, B, C\n    return A, B, C\n",
+    );
+    let (code, err) = ratchet(&p, &[]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("IMP201 `app.model.names`"), "{err}");
+    // Fewer sites than it allows: it can shrink, and `--update-baseline` rewrites it per name.
+    p.write(
+        "app/ref/use.py",
+        "def f():\n    from app.model.names import A\n    return A\n",
+    );
+    let (code, err) = ratchet(&p, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains(
+            "note: baseline entry app/ref/use.py::f IMP201 `app.model.names` can shrink 2 -> 1"
+        ),
+        "{err}"
+    );
+    let (code, err) = ratchet(&p, &["--update-baseline"]);
+    assert_eq!(code, 0, "{err}");
+    let rewritten = p.read("b.toml");
+    assert!(
+        rewritten.contains("target = \"app.model.names.A\""),
+        "{rewritten}"
+    );
+    assert!(
+        !rewritten.contains("target = \"app.model.names\"\n"),
+        "{rewritten}"
+    );
+}
+
+/// `allowed-imports` and the imported side of `ignored-imports` name one name of a module
+/// (`module:name`): the import takes that name, and another name of the module is a report.
+#[test]
+fn a_name_of_a_module_is_allowed_or_ignored_by_itself() {
+    for (key, expected) in [
+        (
+            "allowed-imports = [\"app.model.names:A\"]",
+            vec![
+                "app/ref/use.py:2 IMP201 f app.model.names.B",
+                "app/ref/more.py:1 IMP201 <module> app.model.names",
+            ],
+        ),
+        (
+            "allowed-imports = [\"app.model.*:A\", \"app.model.names:B\"]",
+            vec!["app/ref/more.py:1 IMP201 <module> app.model.names"],
+        ),
+        (
+            "ignored-imports = [\"app.ref.use -> app.model.names:A\"]",
+            vec![
+                "app/ref/use.py:2 IMP201 f app.model.names.B",
+                "app/ref/more.py:1 IMP201 <module> app.model.names",
+            ],
+        ),
+        (
+            "allowed-imports = [\"app.model.names:[AB]\"]\nforbidden-imports = [\"app.model.*\"]",
+            vec!["app/ref/more.py:1 IMP201 <module> app.model.names"],
+        ),
+    ] {
+        let p = names_project(
+            "imp_names_allowed",
+            &format!(
+                "[[tool.heki.import-boundaries]]\nname = \"ref-not-model\"\nimporters = [\"app.ref.*\"]\n{key}\n{}",
+                "forbidden-imports = [\"app.model.*\"]\n"
+                    .repeat(usize::from(!key.contains("forbidden-imports")))
+            ),
+            "B",
+        );
+        p.write("app/ref/more.py", "from app.model import names\n");
+        let mut found = reports(&p);
+        found.sort();
+        let mut expected: Vec<&str> = expected;
+        expected.sort_unstable();
+        assert_eq!(found, expected, "{key}");
+    }
+}
+
+/// An external package the import takes a name of, or a submodule, is allowed by the name too;
+/// another name of it is open (`IMP202`), as before.
+#[test]
+fn a_name_of_an_external_package_is_allowed_by_itself() {
+    let p = project(
+        "imp_names_external",
+        "[[tool.heki.import-boundaries]]\nname = \"few\"\nimporters = [\"app\"]\nallowed-imports = [\"yaml:safe_load\", \"<stdlib>\"]\nunresolved = \"report\"\n",
+    );
+    p.write(
+        "app.py",
+        "from yaml import safe_load\nfrom yaml import load\nimport json\n",
+    );
+    assert_eq!(reports(&p), ["app.py:2 IMP201 <module> yaml.load"]);
+}
+
+/// A chain of imports that `reach` follows is not followed through an import allowed by a name.
+#[test]
+fn reach_does_not_follow_an_import_allowed_by_a_name() {
+    let p = project(
+        "imp_names_reach",
+        "[[tool.heki.import-boundaries]]\nname = \"reach\"\nimporters = [\"app.ref.use\"]\nforbidden-imports = [\"app.model.other\"]\nallowed-imports = [\"app.model.names:A\"]\nreach = \"all\"\n",
+    );
+    p.write("app/__init__.py", "");
+    p.write("app/ref/__init__.py", "");
+    p.write("app/model/__init__.py", "");
+    p.write(
+        "app/model/names.py",
+        "from app.model import other\n\n\nclass A:\n    pass\n",
+    );
+    p.write("app/model/other.py", "");
+    p.write("app/ref/use.py", "from app.model.names import A\n");
+    assert_eq!(reports(&p), Vec::<String>::new());
+    p.write(
+        "app/ref/use.py",
+        "from app.model.names import A\nfrom app.model import names\n",
+    );
+    assert_eq!(
+        reports(&p),
+        ["app/ref/use.py:2 IMP201 <module> app.model.other"]
+    );
 }

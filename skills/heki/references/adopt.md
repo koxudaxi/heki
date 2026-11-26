@@ -45,6 +45,8 @@ Do not add or upgrade heki as a dependency without the user's approval.
 
 ## 4. Run the whole project before finishing
 
-`--touched` is for the loop while editing. Before you say the work is done, run
-`heki check` on the whole project (with the baseline, when there is one) and report its exit
-code. Then run the project's own tests and linters, and say if any of them fails.
+`--touched` is for the loop while editing: a change can add a report in a file it left alone
+without a call chain through it, and a run over touched files only counts such reports in a note.
+Before you say the work is done, run `heki check` on the whole project (with the baseline, when
+there is one) and report its exit code. Then run the project's own tests and linters, and say if
+any of them fails.

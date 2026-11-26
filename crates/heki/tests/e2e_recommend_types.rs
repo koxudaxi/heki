@@ -918,9 +918,13 @@ class Renamed(Base):
         return 2 in items
 
 
+def measure(rows) -> int:
+    return 1
+
+
 class Box:
     def __init__(self, rows: list[int]) -> None:
-        self.n = len(rows)
+        self.n = measure(rows[1:])
 
 
 class Meta(type):
@@ -1686,6 +1690,8 @@ def ordered(rows: list[int]) -> list[int]:
 fn a_read_with_no_list_of_methods_may_run_any_member_of_a_subclass() {
     let builtin = own_reads_of("recommend_types_unlisted_builtin", UNLISTED_CALL, "");
     assert_eq!(builtin.kept, ["encode", "ordered"]);
+    // A `Sequence` no project class implements is handed to `bytes` as a `list` is.
+    assert_eq!(builtin.exact, ["encode", "ordered"]);
     assert!(builtin.causes.is_empty(), "{:?}", builtin.causes);
     // `bytes(rows)` runs `__bytes__`, which no kind lists: a `list` subclass whose
     // `__bytes__` appends to the object leaves `encode` out, not `ordered`.
@@ -1696,7 +1702,7 @@ fn a_read_with_no_list_of_methods_may_run_any_member_of_a_subclass() {
          return b\"\"\n",
     );
     assert_eq!(hook.kept, ["ordered"]);
-    assert_eq!(hook.exact, builtin.exact);
+    assert_eq!(hook.exact, ["ordered"]);
     assert_eq!(
         hook.causes,
         [(
@@ -1749,7 +1755,8 @@ fn an_unpacking_takes_the_length_hint_and_a_target_unpacking_iterates() {
     ];
     let builtin = own_reads_of("recommend_types_unpacked_builtin", UNPACKED_READS, "");
     assert_eq!(builtin.kept, all);
-    assert_eq!(builtin.exact, ["ordered", "printed"]);
+    // A `Sequence` no project class implements unpacks and iterates as a `list` does.
+    assert_eq!(builtin.exact, all);
     assert!(builtin.causes.is_empty(), "{:?}", builtin.causes);
     // CPython takes the length hint of what it extends a list or builds a tuple from: a `list`
     // whose `__len__` appends to itself leaves out each of those, not the target unpacking.
@@ -1760,7 +1767,7 @@ fn an_unpacking_takes_the_length_hint_and_a_target_unpacking_iterates() {
          return 0\n",
     );
     assert_eq!(len.kept, ["pair"]);
-    assert!(len.exact.is_empty(), "{:?}", len.exact);
+    assert_eq!(len.exact, ["pair"]);
     assert_eq!(
         len.causes,
         [(
@@ -2135,4 +2142,60 @@ fn a_project_subclass_of_a_stdlib_class_with_python_methods_opens_every_read() {
         found["app.reads:top:c"]["message"], "`c` itself is never changed in `top`",
         "{report:#}"
     );
+}
+
+/// Reads of a `dict` and of a `list` parameter, whose read-only types are `Mapping` and
+/// `Sequence`.
+const FAMILY_READS: &str = r#"def top(c: dict[str, int]) -> int:
+    return c["a"] + len(c)
+
+
+def first(rows: list[int]) -> int:
+    return rows[0]
+"#;
+
+#[test]
+fn a_project_implementer_of_the_read_only_type_opens_the_reads_it_may_run() {
+    let plain = own_reads_of("recommend_types_family_plain", FAMILY_READS, "");
+    assert_eq!(plain.kept, ["first", "top"]);
+    // The annotation the suggestion writes admits the project classes deriving from
+    // `UserDict`, `UserList`, or `ChainMap`, which CPython derives from the mutable ABCs, whose
+    // methods are Python code calling others by name.
+    for (classes, kept, cause) in [
+        (
+            "from collections import UserDict\n\n\nclass Tally(UserDict):\n    \
+             def __getitem__(self, k):\n        self.data[\"seen\"] = 1\n        return 0\n",
+            &["first"][..],
+            "`app.sub.Tally` binds `__getitem__`, which a read of it runs",
+        ),
+        (
+            "from collections import UserList\n\n\nclass Lines(UserList):\n    \
+             def note(self):\n        self.append(0)\n",
+            &["top"][..],
+            "`app.sub.Lines` binds `note`, and a read of it may run any method",
+        ),
+        (
+            "from collections import ChainMap\n\n\nclass Layers(ChainMap):\n    \
+             def note(self):\n        self[\"seen\"] = 1\n",
+            &["first"][..],
+            "`app.sub.Layers` binds `note`, and a read of it may run any method",
+        ),
+        // A `register` heki cannot resolve, and a `__subclasshook__`, admit any class.
+        (
+            "from collections.abc import Mapping\n\n\ndef make() -> type:\n    \
+             return type(\"R\", (), {})\n\n\nMapping.register(make())\n",
+            &["first"][..],
+            "a `register` call adds a class heki cannot name to `collections.abc.Mapping`",
+        ),
+        (
+            "from collections.abc import Sequence\n\n\nclass Hooked(Sequence):\n    \
+             @classmethod\n    def __subclasshook__(cls, other):\n        return True\n",
+            &["top"][..],
+            "`app.sub.Hooked` binds `__subclasshook__`, which may accept any class",
+        ),
+    ] {
+        let found = own_reads_of("recommend_types_family_implementer", FAMILY_READS, classes);
+        assert_eq!(found.kept, kept, "{classes}");
+        assert_eq!(found.causes, [(cause.to_owned(), 1)], "{classes}");
+    }
 }

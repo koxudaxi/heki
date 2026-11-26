@@ -20,7 +20,11 @@ reaches it through two helpers. To see the diagnostics an edit can have caused, 
 files to `--touched`, or name them as paths: heki still analyzes the project, and shows only the
 diagnostics whose `path` or any `related[].path` is one of them, so the report in `app/api.py`
 stays while `app/users.py` is the only edited file. The summary, the exit code, and every output
-format follow the diagnostics shown.
+format follow the diagnostics shown. A change can also add a report in a file it left alone
+without a call chain through it (a re-export, an annotation another module relied on): such a run
+ends with a note on stderr counting the reports that would fail it and are not shown, also with
+`--output-format json`, and with a baseline it shows every regression. Run the whole project
+before finishing.
 
 ```console
 $ heki check --touched app/users.py --output-format json

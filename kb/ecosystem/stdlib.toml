@@ -199,7 +199,49 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pathlib.Path.resolve"
+return_type = "Self"
 effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+# --- Paths made from a path (`pathlib.Path`) ---
+# A method, an operator, or a property that makes a path from one has the class of the path it is
+# read on (`Self`): in typeshed each of these returns `Self`. `/` and `__rtruediv__` are the
+# operators: `path / "a"` calls `path.__truediv__("a")`, and `"a" / path` calls
+# `path.__rtruediv__("a")`, a `str` having no `__truediv__`. They make no access to the disk.
+
+[[entries]]
+symbol = "pathlib.Path.joinpath"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.with_name"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.with_stem"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.with_suffix"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.relative_to"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.__truediv__"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.__rtruediv__"
+return_type = "Self"
 opaque_to_layer3 = true
 
 # --- File system, by module (EFF105, opt-in; `blocking-fs` boundaries) ---
@@ -533,13 +575,14 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pathlib.Path.iterdir"
+return_type = "typing.Iterator[Self]"
 effects = ["blocking_fs"]
 items = "entries"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pathlib.Path.glob"
-return_type = "pathlib.Path.glob()"
+return_type = "pathlib.Path.glob()[Self]"
 items = "entries"
 opaque_to_layer3 = true
 
@@ -550,7 +593,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pathlib.Path.rglob"
-return_type = "pathlib.Path.rglob()"
+return_type = "pathlib.Path.rglob()[Self]"
 items = "entries"
 opaque_to_layer3 = true
 
@@ -1169,6 +1212,12 @@ sync_lock_or_tx = true
 exit_suppresses = false
 opaque_to_layer3 = true
 
+# Each thread sees its own attributes of a `threading.local` (EFF117: no shared state).
+[[entries]]
+symbol = "threading.local"
+return_type = "threading.local"
+opaque_to_layer3 = true
+
 # --- One operation at a time (EFF110, opt-in) ---
 # A stream reader reads in one task at a time: a second read while another waits raises
 # `RuntimeError` (`readuntil() called while another coroutine is already waiting for incoming
@@ -1517,6 +1566,10 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "threading.Timer"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.register_at_fork"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2322,21 +2375,25 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pathlib.Path.cwd"
+return_type = "pathlib.Path"
 environment = "call"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pathlib.Path.home"
+return_type = "pathlib.Path"
 environment = "call"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pathlib.Path.absolute"
+return_type = "Self"
 environment = "call"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pathlib.Path.expanduser"
+return_type = "Self"
 environment = "call"
 opaque_to_layer3 = true
 
@@ -2402,6 +2459,14 @@ type = "builtins.dict"
 [[attributes]]
 symbol = "contextvars.Token.var"
 type = "contextvars.ContextVar"
+
+[[attributes]]
+symbol = "pathlib.Path.parent"
+type = "Self"
+
+[[attributes]]
+symbol = "pathlib.Path.parents"
+type = "typing.Sequence[Self]"
 
 # --- What a call runs of the values it is handed (`[[invokes]]`) ---
 # Each entry lists every argument the call runs code of: the special methods it runs on the
@@ -2970,6 +3035,7 @@ versions = "CPython 3.11, 3.15"
 symbol = "concurrent.futures.ThreadPoolExecutor.submit"
 arg = 0
 hands_back = true
+runs_on = "thread"
 
 [[calls_unawaited]]
 symbol = "concurrent.futures.ProcessPoolExecutor.submit"
@@ -2980,11 +3046,13 @@ hands_back = true
 symbol = "threading.Thread"
 arg = 1
 param = "target"
+runs_on = "thread"
 
 [[calls_unawaited]]
 symbol = "threading.Timer"
 arg = 1
 param = "function"
+runs_on = "thread"
 
 [[calls_unawaited]]
 symbol = "multiprocessing.Process"
@@ -2995,24 +3063,55 @@ param = "target"
 symbol = "concurrent.futures.Executor.submit"
 arg = 0
 hands_back = true
+runs_on = "thread"
 
 [[calls_unawaited]]
 symbol = "concurrent.futures.Executor.map"
 arg = 0
 param = "fn"
 hands_back = true
+runs_on = "thread"
 
 [[calls_unawaited]]
 symbol = "concurrent.futures.ThreadPoolExecutor.map"
 arg = 0
 param = "fn"
 hands_back = true
+runs_on = "thread"
 
 [[calls_unawaited]]
 symbol = "concurrent.futures.ProcessPoolExecutor.map"
 arg = 0
 param = "fn"
 hands_back = true
+
+# The offloading APIs above run the callable on a worker thread; their rows say so (EFF117).
+# `run_in_executor` runs it in a process when the executor (its first argument) is a process pool.
+[[calls_unawaited]]
+symbol = "asyncio.to_thread"
+arg = 0
+hands_back = true
+runs_on = "thread"
+
+[[calls_unawaited]]
+symbol = "asyncio.AbstractEventLoop.run_in_executor"
+arg = 1
+hands_back = true
+runs_on = "thread"
+executor_arg = 0
+
+[[calls_unawaited]]
+symbol = "asyncio.BaseEventLoop.run_in_executor"
+arg = 1
+hands_back = true
+runs_on = "thread"
+executor_arg = 0
+
+# A handler `os.register_at_fork` runs in the child after a fork, before any other thread there.
+[[calls_unawaited]]
+symbol = "os.register_at_fork"
+param = "after_in_child"
+runs_on = "fork-child"
 
 [[calls_unawaited]]
 symbol = "asyncio.AbstractEventLoop.call_soon"

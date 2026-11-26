@@ -243,6 +243,46 @@ pub enum BinOpKind {
 }
 
 impl BinOpKind {
+    /// The method `x op y` calls on `x`.
+    pub fn method(self) -> &'static str {
+        const METHODS: [&str; 13] = [
+            "__add__",
+            "__sub__",
+            "__mul__",
+            "__truediv__",
+            "__floordiv__",
+            "__mod__",
+            "__pow__",
+            "__or__",
+            "__and__",
+            "__xor__",
+            "__lshift__",
+            "__rshift__",
+            "__matmul__",
+        ];
+        METHODS[self as usize]
+    }
+
+    /// The method `x op y` calls on `y` when `x`'s does not handle it.
+    pub fn reflected_method(self) -> &'static str {
+        const METHODS: [&str; 13] = [
+            "__radd__",
+            "__rsub__",
+            "__rmul__",
+            "__rtruediv__",
+            "__rfloordiv__",
+            "__rmod__",
+            "__rpow__",
+            "__ror__",
+            "__rand__",
+            "__rxor__",
+            "__rlshift__",
+            "__rrshift__",
+            "__rmatmul__",
+        ];
+        METHODS[self as usize]
+    }
+
     /// The method an augmented assignment with this operator calls (`x += y` calls
     /// `x.__iadd__(y)`).
     pub fn in_place_method(self) -> &'static str {

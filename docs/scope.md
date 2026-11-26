@@ -112,7 +112,7 @@ $ heki check --output-format concise
 app/api.py:5:12: EFF101 `app.users.load_user` always runs the waiting call `requests.get` on the event loop (3 calls down, on every path)
 app/models.py:17:5: MUT201 [heuristic] `parse` writes `Model.fields` (through a helper) via `app.models.add_default` outside the write owners of `model-store`
 Found 2 diagnostic(s) in 4 file(s).
-note: 3 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
+note: 4 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 ```
 
 ## Where heki pays off
@@ -538,7 +538,7 @@ The proofs heki can make, on five axes:
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
 | Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT113`, `MUT208`, `EFF102`, `EFF103`, `EFF106`, `EFF109`, `EFF110`, `EFF114`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `MUT103`, `MUT108`, `MUT110`, `MUT120`, `MUT112`, `MUT113`, `MUT119`, `MUT201`–`MUT204`, `MUT208` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF117`, `EFF201`, `MUT103`, `MUT108`, `MUT110`, `MUT120`, `MUT112`, `MUT113`, `MUT119`, `MUT201`–`MUT204`, `MUT208` |
 | Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `MUT120`, `MUT112`, `MUT119`, `EFF107`, `EFF109`, `EFF110`, `EFF112`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
 | State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT110`, `MUT120`, `MUT111`, `MUT112`, `MUT113`, `MUT201`–`MUT204`, `MUT208` |

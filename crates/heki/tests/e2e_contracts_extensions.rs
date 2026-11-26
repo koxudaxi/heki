@@ -1078,7 +1078,7 @@ fn baselines_count_violation_sites() {
     let (code, _, stderr) = p.check(&update);
     assert_eq!(code, 0, "{stderr}");
     let text = p.read("heki-baseline.toml");
-    assert!(text.contains("\nversion = 2\n"), "{text}");
+    assert!(text.contains("\nversion = 3\n"), "{text}");
     assert_eq!(p.check(&args).0, 0);
 
     // Every second violation is a regression, the one inside the private helper too (its report
@@ -1138,7 +1138,7 @@ fn baselines_without_a_version_keep_counting_diagnostics() {
     update.push("--update-baseline");
     assert_eq!(p.check(&update).0, 0);
     // A baseline written before baselines counted sites: no `version`.
-    let old = p.read("heki-baseline.toml").replace("version = 2\n", "");
+    let old = p.read("heki-baseline.toml").replace("version = 3\n", "");
     p.write("heki-baseline.toml", &old);
     let (code, _, stderr) = p.check(&args);
     assert_eq!(code, 0, "{stderr}");
@@ -1179,14 +1179,14 @@ fn baselines_without_a_version_keep_counting_diagnostics() {
     // Without them, it is rewritten to count sites.
     p.write("pkg/m.py", BASELINE_SRC);
     assert_eq!(p.check(&update).0, 0);
-    assert!(p.read("heki-baseline.toml").contains("\nversion = 2\n"));
+    assert!(p.read("heki-baseline.toml").contains("\nversion = 3\n"));
     // A version this heki does not know is an error.
-    p.write("heki-baseline.toml", &format!("version = 3\n{old}"));
+    p.write("heki-baseline.toml", &format!("version = 4\n{old}"));
     let (code, _, stderr) = p.check(&args);
     assert_eq!(code, 2);
     assert!(
         stderr.contains(
-            "error: heki-baseline.toml: the baseline has version 3; this heki reads versions 1 and 2"
+            "error: heki-baseline.toml: the baseline has version 4; this heki reads versions 1 to 3"
         ),
         "{stderr}"
     );

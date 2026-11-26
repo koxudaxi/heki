@@ -1687,9 +1687,20 @@ impl<'e, 'a> Engine<'e, 'a> {
                         let added = Added::of(&Change::Operator(*op, *rhs), self);
                         Some(t.with_added(&added))
                     }
-                    _ => None,
+                    // A project class defining the in-place method runs it, and what it returns
+                    // is not known.
+                    Some(Ty::Inst(o)) if self.defines_in_place(o, *op) => None,
+                    // Without an in-place method (`path /= "a"`) the plain operator runs.
+                    other => return self.operator(*op, other, *rhs),
                 },
             },
+            InstKind::BinOp {
+                op,
+                lhs,
+                rhs,
+                in_place: false,
+                ..
+            } => return self.operator(*op, self.need(*lhs)?, *rhs),
             InstKind::Await { value, .. } => match self.need(*value)? {
                 Some(t) => return awaited(t),
                 None => None,
@@ -2486,12 +2497,67 @@ impl<'e, 'a> Engine<'e, 'a> {
                 .and_then(|t| t.bind_self(Some(&self_ty))));
         }
         Ok(match recv {
-            Ty::Inst(_) => cx
-                .project
-                .catalog_attribute(class, attr, cx.kb)
-                .map(Ty::inst),
+            // A row typing the read `Self` gives the instance's own class (`Path.parent`).
+            Ty::Inst(_) => cx.project.catalog_attribute(class, attr, cx.kb).map(|row| {
+                match heki_kb::split_receiver_items(&row) {
+                    (heki_kb::SELF_RETURN_TYPE, _) => self_ty,
+                    (container, true) => Ty::container(container, Args::items(Elem::Of(self_ty))),
+                    (class, false) => Ty::inst(class),
+                }
+            }),
             _ => None,
         })
+    }
+
+    /// Whether a project class binds the in-place method `x op= y` calls on an instance of
+    /// `o`'s class.
+    fn defines_in_place(&self, o: &Obj, op: BinOpKind) -> bool {
+        let cx = self.cx;
+        let targets = cx
+            .project
+            .method_targets(&o.class, op.in_place_method(), false, cx.kb);
+        matches!(targets, Callee::Project(..) | Callee::TooMany)
+    }
+
+    /// What the operator `op` gives on the operands `lhs` and `rhs`, when the catalog types the
+    /// special method that runs: the left operand's (`path / "a"`), else, the left operand
+    /// being a `str`, which has none of them, the right operand's reflected one (`"a" / path`).
+    /// The left operand's method gives `NotImplemented` for an operand it does not handle, and
+    /// the right operand's reflected method then runs: the left's result is typed only when the
+    /// right operand is a `str` or has the catalogued reflected method itself. A method a
+    /// project class defines is not followed, and an operand of no known class leaves the result
+    /// untyped, whatever the other operand is.
+    fn operator(&self, op: BinOpKind, lhs: Option<&Ty>, rhs: VarId) -> Step {
+        let Some(Ty::Inst(left)) = lhs else {
+            return Ok(None);
+        };
+        let cx = self.cx;
+        let catalogued = |o: &Obj, method: &str| {
+            let targets = cx.project.method_targets(&o.class, method, false, cx.kb);
+            matches!(&targets, Callee::External(symbol) if cx.catalog(symbol).is_some())
+        };
+        if catalogued(left, op.method()) {
+            let handled = match self.need(rhs)? {
+                Some(Ty::Inst(o)) => {
+                    o.class == "builtins.str" || catalogued(o, op.reflected_method())
+                }
+                _ => false,
+            };
+            return Ok(if handled {
+                self.member_call(&Ty::Inst(left.clone()), op.method(), Passed::default())
+            } else {
+                None
+            });
+        }
+        if left.class != "builtins.str" {
+            return Ok(None);
+        }
+        match self.need(rhs)? {
+            Some(right @ Ty::Inst(o)) if catalogued(o, op.reflected_method()) => {
+                Ok(self.member_call(right, op.reflected_method(), Passed::default()))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// What calling method `method` on a value of type `recv` returns: the return annotation of
@@ -2562,6 +2628,13 @@ impl<'e, 'a> Engine<'e, 'a> {
                     || e.returns_receiver_in(e.case_for(|i, k| self.passed(call, i, k))) =>
             {
                 Some(self_ty)
+            }
+            // The call gives a container of instances of the receiver's class (`iterdir`).
+            (_, Some(e))
+                if e.returns_receiver_items_in(e.case_for(|i, k| self.passed(call, i, k))) =>
+            {
+                let class = e.return_type_in(e.case_for(|i, k| self.passed(call, i, k)))?;
+                Some(Ty::container(class, Args::items(Elem::Of(self_ty))))
             }
             _ => cx.callee_result(&callee, |i, k| self.passed(call, i, k)),
         }

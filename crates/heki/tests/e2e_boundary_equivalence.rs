@@ -352,14 +352,11 @@ const GAPS: &[(&str, &str, &str)] = &[
     ("sqlite-file-name-constant", "unannotated-helper", "-"),
     ("sqlite-file-path-constant", "unannotated-helper", "-"),
     ("bounded-queue-put", "unannotated-helper", "-"),
-    // A call's result is typed by what every return of an annotated function gives, but it
-    // carries no literal: a factory without an annotation gives nothing, a queue's capacity is
-    // not known (nothing), and a returned zero or `data:` URL is an argument heki cannot
-    // evaluate, which counts as one the call waits on (assumption R6).
-    ("sqlite-file", "unannotated-factory", "-"),
+    // A call's result is typed by what every return gives, but it carries no literal: a
+    // factory without an annotation gives what a returned call gives and nothing for a returned
+    // global, a queue's capacity is not known (nothing), and a returned zero or `data:` URL is
+    // an argument heki cannot evaluate, which counts as one the call waits on (assumption R6).
     ("sqlite-file-global", "unannotated-factory", "-"),
-    ("sqlite-file-name-constant", "unannotated-factory", "-"),
-    ("sqlite-file-path-constant", "unannotated-factory", "-"),
     ("sleep-zero", "factory", "EFF101"),
     ("sleep-zero", "unannotated-factory", "EFF101"),
     ("sleep-zero", "to-thread", "EFF101"),

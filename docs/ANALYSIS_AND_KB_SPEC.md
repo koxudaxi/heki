@@ -764,7 +764,17 @@ no class (none, `Any`, `object`, `Callable`) returns the named object every retu
 or one of them (`Ty::OneOf`): a `def` or `lambda` it makes (`make_requirer()` returning the
 `requirer` it defines, whose cells a call away from it binds to nothing), or a function or class
 a name binds; a `return` of anything else, `None` included, gives no fact. Only the functions
-every value of which a definition, a module-level name, or a cell gives are inferred for it. A module constant the module
+every value of which a definition, a module-level name, or a cell gives are inferred for it.
+Where the annotation names no class and every returned value is what a call gives, or awaits
+one (`Path(name)`, `Store()`, `Other()` imported from another module, `sqlite3.connect(...)`),
+the function returns the instance of one class those calls give, when they agree: returns of
+two classes, `None` on a path, or a parameter, an attribute, or a display give no fact (an
+instance's attribute holds what the whole project stores there, which pass 1 does not see). A
+class of another module is the name an annotation would name, so `declared_ty` drops it when
+the project binds that name to no class, and the fact says nothing once another module rebinds
+a global the function reads (`ReturnFact::ty_globals`: the class's name). A method call reads
+only the annotation of the definition the receiver's MRO finds, so this types calls of
+functions. A module constant the module
 body binds once, outside a loop, to a value that names a file (`ModuleDecls::file_constants`,
 `names_a_file`) names it where a function or another module reads it
 (`TypeCtx::names_file_constant`), unless another module rebinds it.
@@ -813,7 +823,13 @@ outside the project but builtin types may, allocate an instance of `C` without r
 Layer 2 `return_type` entries type the results of factories (`sqlite3.connect()` →
 `sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`); `"Self"` types
 a builder's result as its receiver (`client.with_options(...)`, an instance of a project subclass
-included). A call that cannot be resolved is not followed (`unknown_calls`); an external function
+included), and `"C[Self]"` types a result `C` whose items are instances of the receiver's class
+(`Path.iterdir()`, `Path.glob()`). The operators run the special methods the same rows type:
+`path / "a"` is `path.__truediv__("a")`, and `"a" / path`, a `str` having no `__truediv__`, is
+`path.__rtruediv__("a")`. `path / x` is typed only when `x` is a `str` or has the same catalogued
+reflected method (`NotImplemented` hands the operation to `x.__rtruediv__`), and `path /= x` only
+when no project class binds `__itruediv__`; a method a project class defines, and an operand of no
+known class, leave the result untyped. A call that cannot be resolved is not followed (`unknown_calls`); an external function
 that Layer 2 does not list has no effect.
 
 Reading an attribute on an instance whose MRO declares no type for it takes the class an
@@ -991,7 +1007,7 @@ EffectSummary(f) = {
                                                            // time on the function's task (EFF110;
                                                            // propagated, never through a call made
                                                            // while a lock is held,
-                                                           // CallSite::under_lock; only with EFF110
+                                                           // CallSite::locks; only with EFF110
                                                            // selected, OptInFacts::exclusive)
 
     // Set orders (EFF112; only with EFF112 selected, OptInFacts::set_order)
@@ -1522,8 +1538,10 @@ which module imports which.
    comparison, and `repr()` run the items' own and whose dict or set lookups compare stored keys
    under an equal hash (strings in an object's `__dict__`, which holds the names of its
    attributes), or a library class's called as a library call handed every operand,
-   R3; a value of an abstract class, a protocol, `object`, or no class heki knows establishes
-   none); an attribute access that may run code of the project besides a getter heki resolves
+   R3; a value of a nominal container ABC establishes what its family's builtins and the project
+   classes implementing it do, `ProjectDecls::implementers`, unless the project opens the family
+   with a `register` heki cannot resolve or a `__subclasshook__`; a value of another abstract
+   class, a protocol, `object`, or no class heki knows establishes none); an attribute access that may run code of the project besides a getter heki resolves
    (`heki_effect::invokes::attribute_access_runs_project_code`: on a project class, a read that
    finds no plain attribute or method, a write that may run a property setter, `__setattr__`,
    `__delattr__`, another descriptor, or code of a base heki does not know,
@@ -2058,7 +2076,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   callers, with the same initializer and allowed-context rules as `MUT201`. Reads through
   parameters without a project-class type are not seen.
 
-### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF117`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
 0. **Must-facts and the exact tier** (`EffectSummary::must_exec`, computed only when `EFF101`,
    `EFF103`, `DATA101`, or `EFF114` runs: `OptInFacts::must_effects`):
    - Per call instruction, the path facts (`heki_ir::Paths`, with the reader of
@@ -2251,7 +2269,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      in its body, in its own names (`ObjRef`, mapped through the arguments as for
      `acquires_locks`); a use while the function certainly holds a lock (`locks::lock_steps`,
      `held::at_entry`), and the uses of a call made while it holds one
-     (`CallSite::under_lock`), are left out.
+     (`CallSite::locks`), are left out.
    - The rule (`eff_rules::fanout_exclusive`) finds the fan-outs of a function: the arguments of
      `asyncio.gather` (also a generator expression or a comprehension unpacked into it, whose
      element is started once per item), the display `asyncio.wait` waits on, and the
@@ -2383,6 +2401,34 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      definition (`MustExec::bound_twice` of its summary). Its tier is exact when no name is bound
      twice and the call is complete; the rule is heuristic until it is certified, which caps the
      tier.
+14. **`EFF117`** (heuristic): shared state a writer changes holding a thread lock, changed
+   elsewhere holding none, where a thread heki resolves runs one of the writes.
+   - The facts (`heki_effect::guarded`, computed only while the rule runs:
+     `OptInFacts::guarded`): `LockPoints` holds, per instruction, the thread locks certainly held
+     (a forward must-dataflow over the acquisitions, `held::at_entry`, with a call of a function
+     returning holding a lock as one more acquisition) and the locks a `release()` gives back on
+     every path from there (a backward must-dataflow over the blocks, a `heki_ir::walk::fixpoint`
+     with a bit per lock released, at most 63). A variable a closure reads is a lock when its
+     type facts say so: the enclosing function binds it to one and no nested scope rebinds it.
+     `EffectSummary::guarded` keeps the named locks a function returns holding and its own writes
+     of shared state made holding one; `CallSite::locks` says whether the caller holds
+     one at the call. A write of shared state is an attribute of the method's instance (also
+     through a nested scope's captured `self`), a global, or an attribute of a class or module,
+     assigned or deleted, or a builtin container such state holds changed in place; the
+     attributes of a `threading.local` are none.
+   - The rule (`eff_rules::unlocked_writes`) builds `GuardedView` once per run from the index:
+     the guarded states (writes outside construction and tests), the functions threads reach
+     (the `[[calls_unawaited]]` handoffs with `runs_on = "thread"` and the `run` of
+     `threading.Thread` subclasses, then every project callee), the functions every call of which
+     is made holding a lock and those only construction or after-fork handlers run, each up to
+     two calls above (found one depth at a time from the deepest, a step per call site and
+     depth). Each function of the checked file naming a guarded attribute or global is typed,
+     its writes found, and a write where `LockPoints` (with its callees' `returns_holding`
+     through the binding of `self`) finds nothing held is reported once per state. The language server keeps the view and re-checks every file when
+     the guarded states, their locked writers, or whether a thread runs those writers change,
+     and the files of the functions whose membership changed otherwise; the locked writes are
+     places other files' reports show.
+
 14. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function (and each module body a scope names as `<module>`,
    `DottedPattern::names_module_bodies`) finds the shortest chain to each forbidden effect,
@@ -2896,8 +2942,10 @@ attribute on an instance of a library class gives (`symbol = "openai.OpenAI.chat
 release its distribution's verified range admits, the value read has the catalogued members of
 that class; it says nothing of its identity or of what the read runs, so a plain attribute, a
 property, and a cached property are alike to it. It is a table of its own because an attribute is
-no method a class takes from its base (`external_defines`). A row of the standard library
-(`typing.NamedTuple._fields`, `contextvars.Token.var`) holds on every interpreter heki supports,
+no method a class takes from its base (`external_defines`). A row's `type` may be `"Self"`, the
+class of the receiver (`pathlib.Path.parent`), or `"C[Self]"`, a `C` of instances of the
+receiver's class (`pathlib.Path.parents`). A row of the standard library
+(`typing.NamedTuple._fields`, `contextvars.Token.var`, `pathlib.Path.parent`) holds on every interpreter heki supports,
 which `tests/sentinel/verify_stdlib_kb.py` checks on CPython 3.11 to 3.15, with the other rows of
 the standard library that type a value (a method's `return_type`, a copy of its receiver,
 `returns_held`) on instances of each class it builds. The synchronous and asynchronous
@@ -2935,7 +2983,13 @@ hands the result back to its caller (`hands_back`: an executor's `submit` and `m
 `weakref.finalize`): `threading.Thread`'s `target`, `atexit.register`, `signal.signal`, `filter`.
 Every `offloads_blocking_arg` API counts as one too, and hands the result back. Each listed call also has an entry; the table
 stands beside the entries so that the entries without such an argument, nearly all, keep no word
-for it.
+for it. A row's `runs_on` says where the call runs the callable when that is not the caller's
+thread (`EFF117`): `"thread"` for another thread of the process (`threading.Thread`, `Timer`, a
+thread pool's or an executor's `submit` and `map`, and the offloading APIs to a thread, which have
+rows of their own for it), `"fork-child"` for the child process after a fork
+(`os.register_at_fork(after_in_child=...)`). A row's `executor_arg` names the position of the
+executor argument that decides it (`loop.run_in_executor(executor, f)`): a process pool there
+runs the callable in another process, so the call has no `runs_on`.
 
 `[[declared_fields]]` (`heki_kb::DeclaredFields`) says where a library keeps the fields a class
 declares, the names the bodies of the class and its bases declare as fields: the attributes of
@@ -2987,12 +3041,18 @@ Lookups are exact, without inheritance or aliases (an entry names the class that
 an annotation, or a constructor call produces), and the `heki_kb` unit tests pin every entry.
 
 ### 4.3 Line-number-independent Ratchet baseline (`heki_diagnostics`)
-- **Key**: `BaselineKey = (relative_posix_path, qualname, rule_id, normalized_target)` → `count`.
-  Without line numbers, unrelated edits and reformatting do not break the baseline.
+- **Key**: `BaselineKey = (relative_posix_path, qualname, rule_id, normalized_target)` → `count`
+  sites, `heuristic` of them heuristic (`Tally`). Without line numbers, unrelated edits and
+  reformatting do not break the baseline. Both tiers of a rule key a report alike.
 - **Rules (shrink only)**:
-  - a key whose current count **exceeds** the baseline **fails** (a new violation);
-  - a key whose current count is **below** the baseline (or has disappeared) prints a note asking
-    to shrink the file with `heki check --update-baseline`.
+  - a key whose current count **exceeds** the baseline, or whose exact sites exceed `count` less
+    `heuristic` (a recorded heuristic report that is exact now), **fails** (a new violation);
+  - a key whose current count is **below** the baseline (or has disappeared), or that has fewer
+    exact sites (an exact report that turned heuristic), prints a note asking to shrink the file
+    with `heki check --update-baseline`.
+- **Versions**: 3 records `heuristic`; 2 does not, and any of its sites may be exact; 1 (or no
+  `version`) counts diagnostics instead of sites. An older file keeps its meaning until
+  `--update-baseline` rewrites it as version 3.
 
 ---
 

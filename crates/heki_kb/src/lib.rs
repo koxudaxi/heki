@@ -184,6 +184,11 @@ pub const FUTURE_CLASSES: &[&str] = &[
     "concurrent.futures.Future",
 ];
 
+/// The classes whose instances keep their attributes per thread (`threading.local`): each
+/// thread sees its own, so they are no state threads share (`EFF117`). The class is the fact: a
+/// `return_type` may name it with no member catalogued.
+pub const THREAD_LOCAL_CLASSES: &[&str] = &["threading.local", "_threading_local.local"];
+
 /// Execution Effect tags owned exclusively by Layer 2 (`heki_effect`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -541,6 +546,24 @@ pub struct UnawaitedCall {
     /// future, `executor.map`'s results, a `weakref.finalize` object called by hand), where it
     /// may still be iterated or awaited (`EFF116`).
     pub hands_back: bool,
+    /// Where the call runs the callable when that is not the caller's own thread (`EFF117`).
+    pub runs_on: Option<RunsOn>,
+    /// The position of the argument naming the executor that runs the callable
+    /// (`loop.run_in_executor(executor, f)`): `runs_on` holds for the default executor and a
+    /// thread pool, not for a process pool.
+    pub executor_arg: Option<u8>,
+}
+
+/// Where a call runs a callable it is handed ([`UnawaitedCall::runs_on`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunsOn {
+    /// On another thread of the process, beside the caller's (`threading.Thread(target=f)`,
+    /// `asyncio.to_thread(f)`, a thread pool's `submit(f)`).
+    Thread,
+    /// In the child process right after a `fork`, before any other thread runs there
+    /// (`os.register_at_fork(after_in_child=f)`).
+    ForkChild,
 }
 
 /// The call whose result a call hands back (`EcosystemEntry::result_of`): of the callable at
@@ -777,6 +800,14 @@ impl EcosystemEntry {
     pub fn return_type_in<'e>(&'e self, case: Option<&'e ArgCase>) -> Option<&'e str> {
         self.declared_return_in(case)
             .filter(|t| *t != SELF_RETURN_TYPE)
+            .map(|t| split_receiver_items(t).0)
+    }
+
+    /// Whether the items of what the call returns are instances of its receiver's class
+    /// ([`SELF_ITEMS_SUFFIX`]).
+    pub fn returns_receiver_items_in(&self, case: Option<&ArgCase>) -> bool {
+        self.declared_return_in(case)
+            .is_some_and(|t| split_receiver_items(t).1)
     }
 
     /// Whether the method returns an instance of its receiver's class ([`SELF_RETURN_TYPE`]).
@@ -794,6 +825,20 @@ impl EcosystemEntry {
 /// builder (`openai.OpenAI.with_options`) called on an instance of a project subclass returns
 /// one of that subclass.
 pub const SELF_RETURN_TYPE: &str = "Self";
+
+/// What a `return_type` or an `[[attributes]]` `type` ends with when the items of the value are
+/// instances of the receiver's class: `typing.Iterator[Self]` (`Path.iterdir`),
+/// `typing.Sequence[Self]` (`Path.parents`).
+pub const SELF_ITEMS_SUFFIX: &str = "[Self]";
+
+/// The class a `return_type` or an attribute `type` names, and whether its items are instances
+/// of the receiver's class ([`SELF_ITEMS_SUFFIX`]).
+pub fn split_receiver_items(class: &str) -> (&str, bool) {
+    match class.strip_suffix(SELF_ITEMS_SUFFIX) {
+        Some(container) => (container, true),
+        None => (class, false),
+    }
+}
 
 /// A validated `[[tool.heki.ecosystem]]` entry: the keys it sets on the entry for `symbol`
 /// (`None`: left out, the built-in value stays).
@@ -2241,7 +2286,6 @@ mod tests {
                     "pathlib.Path.is_mount",
                     "pathlib.Path.is_socket",
                     "pathlib.Path.is_symlink",
-                    "pathlib.Path.iterdir",
                     "pathlib.Path.lchmod",
                     "pathlib.Path.lstat",
                     "pathlib.Path.mkdir",
@@ -2474,14 +2518,24 @@ mod tests {
                     "os.path.expanduser",
                     "os.path.expandvars",
                     "os.path.relpath",
-                    "pathlib.Path.absolute",
-                    "pathlib.Path.cwd",
-                    "pathlib.Path.expanduser",
-                    "pathlib.Path.home",
                 ]),
                 EcosystemEntry {
                     environment: Some(EnvironmentAccess::Call),
                     ..entry(&[])
+                },
+            ),
+            (
+                s(&["pathlib.Path.absolute", "pathlib.Path.expanduser"]),
+                EcosystemEntry {
+                    environment: Some(EnvironmentAccess::Call),
+                    ..returning(SELF_RETURN_TYPE, entry(&[]))
+                },
+            ),
+            (
+                s(&["pathlib.Path.cwd", "pathlib.Path.home"]),
+                EcosystemEntry {
+                    environment: Some(EnvironmentAccess::Call),
+                    ..returning("pathlib.Path", entry(&[]))
                 },
             ),
             (
@@ -2554,11 +2608,45 @@ mod tests {
             "ftplib.FTP_TLS.mlsd",
             "fsspec.AbstractFileSystem.walk",
         ] {
-            rows.push((s(&[call]), returning(&format!("{call}()"), entry(&[]))));
+            // The items of `glob` and `rglob` are paths of the receiver's class.
+            let items = if call.starts_with("pathlib.Path.") && call.ends_with("glob") {
+                SELF_ITEMS_SUFFIX
+            } else {
+                ""
+            };
+            rows.push((
+                s(&[call]),
+                returning(&format!("{call}(){items}"), entry(&[])),
+            ));
         }
+        rows.push((
+            s(&["pathlib.Path.iterdir"]),
+            returning(
+                &format!("typing.Iterator{SELF_ITEMS_SUFFIX}"),
+                entry(&[BlockingFs]),
+            ),
+        ));
+        // A path made from a path has the receiver's class, and reads no file.
+        rows.push((
+            s(&[
+                "pathlib.Path.joinpath",
+                "pathlib.Path.with_name",
+                "pathlib.Path.with_stem",
+                "pathlib.Path.with_suffix",
+                "pathlib.Path.relative_to",
+                "pathlib.Path.__truediv__",
+                "pathlib.Path.__rtruediv__",
+            ]),
+            returning(SELF_RETURN_TYPE, entry(&[])),
+        ));
         rows.push((
             s(&["fsspec.open"]),
             returning("fsspec.core.OpenFile", entry(&[])),
+        ));
+        // An instance keeping its attributes per thread (`EFF117`).
+        rows.push((
+            s(&["threading.local"]),
+            returning("threading.local", entry(&[])),
         ));
         rows
     }
@@ -2882,10 +2970,13 @@ mod tests {
                     "pathlib.Path.stat",
                     "pathlib.Path.is_file",
                     "pathlib.Path.is_dir",
-                    "pathlib.Path.resolve",
                     "starlette.staticfiles.StaticFiles.lookup_path",
                 ]),
                 entry(&[BlockingFs]),
+            ),
+            (
+                s(&["pathlib.Path.resolve"]),
+                returning(SELF_RETURN_TYPE, entry(&[BlockingFs])),
             ),
             (s(&["socket.getfqdn"]), entry(&[BlockingNet])),
             (
@@ -4382,6 +4473,27 @@ mod tests {
 
     /// `EFF115`, `EFF116`: the callable argument each call calls without awaiting what it
     /// returns.
+    /// The calls of [`UNAWAITED_CALLS`] that run the callable off the caller's thread.
+    const RUNS_ON: &[(&str, RunsOn)] = &[
+        ("threading.Thread", RunsOn::Thread),
+        ("threading.Timer", RunsOn::Thread),
+        ("concurrent.futures.Executor.submit", RunsOn::Thread),
+        ("concurrent.futures.Executor.map", RunsOn::Thread),
+        (
+            "concurrent.futures.ThreadPoolExecutor.submit",
+            RunsOn::Thread,
+        ),
+        ("concurrent.futures.ThreadPoolExecutor.map", RunsOn::Thread),
+        ("asyncio.to_thread", RunsOn::Thread),
+        ("asyncio.AbstractEventLoop.run_in_executor", RunsOn::Thread),
+        ("asyncio.BaseEventLoop.run_in_executor", RunsOn::Thread),
+        ("anyio.to_thread.run_sync", RunsOn::Thread),
+        ("trio.to_thread.run_sync", RunsOn::Thread),
+        ("starlette.concurrency.run_in_threadpool", RunsOn::Thread),
+        ("fastapi.concurrency.run_in_threadpool", RunsOn::Thread),
+        ("os.register_at_fork", RunsOn::ForkChild),
+    ];
+
     const UNAWAITED_CALLS: &[UnawaitedCallRow] = &[
         (
             Some(1),
@@ -4406,7 +4518,29 @@ mod tests {
                 "concurrent.futures.Executor.submit",
                 "concurrent.futures.ThreadPoolExecutor.submit",
                 "concurrent.futures.ProcessPoolExecutor.submit",
+                "asyncio.to_thread",
+                "anyio.to_thread.run_sync",
+                "trio.to_thread.run_sync",
+                "starlette.concurrency.run_in_threadpool",
+                "fastapi.concurrency.run_in_threadpool",
             ],
+        ),
+        (
+            Some(1),
+            None,
+            false,
+            true,
+            &[
+                "asyncio.AbstractEventLoop.run_in_executor",
+                "asyncio.BaseEventLoop.run_in_executor",
+            ],
+        ),
+        (
+            None,
+            Some("after_in_child"),
+            false,
+            false,
+            &["os.register_at_fork"],
         ),
         (
             Some(0),
@@ -4464,9 +4598,17 @@ mod tests {
 
     /// `EFF115`: the calls of [`UNAWAITED_CALLS`] with no other fact.
     fn unawaited_calls() -> Vec<(Vec<String>, EcosystemEntry)> {
+        // Their entries carry other facts: the executors' `submit`, and the offloading APIs.
         let others = [
             "concurrent.futures.ThreadPoolExecutor.submit",
             "concurrent.futures.ProcessPoolExecutor.submit",
+            "asyncio.to_thread",
+            "asyncio.AbstractEventLoop.run_in_executor",
+            "asyncio.BaseEventLoop.run_in_executor",
+            "anyio.to_thread.run_sync",
+            "trio.to_thread.run_sync",
+            "starlette.concurrency.run_in_threadpool",
+            "fastapi.concurrency.run_in_threadpool",
         ];
         let symbols = UNAWAITED_CALLS
             .iter()
@@ -4851,7 +4993,9 @@ mod tests {
                     kb.entries.keys().any(|k| k.starts_with(&methods))
                         || kb.attributes.keys().any(|k| k.starts_with(&methods))
                         || FUTURE_CLASSES.contains(&class)
-                        || class.starts_with("builtins."),
+                        || THREAD_LOCAL_CLASSES.contains(&class)
+                        || class.starts_with("builtins.")
+                        || (e.returns_receiver_items_in(None) && class.starts_with("typing.")),
                     "{symbol} -> {class}"
                 );
                 let name = symbol.rsplit('.').next().unwrap_or(symbol);
@@ -5065,6 +5209,8 @@ mod tests {
                     param: param.map(Into::into),
                     tests_result: *tests_result,
                     hands_back: *hands_back,
+                    runs_on: (RUNS_ON.iter()).find(|(s, _)| s == symbol).map(|(_, r)| *r),
+                    executor_arg: symbol.ends_with(".run_in_executor").then_some(0),
                 })
             })
             .map(|call| (call.symbol.clone(), call))
@@ -5093,6 +5239,8 @@ mod tests {
                     symbol: symbol.to_owned(),
                     arg: Some(arg),
                     hands_back: true,
+                    runs_on: Some(RunsOn::Thread),
+                    executor_arg: symbol.ends_with(".run_in_executor").then_some(0),
                     ..UnawaitedCall::default()
                 }),
                 "{symbol}"
@@ -5106,7 +5254,13 @@ mod tests {
                 param: Some("target".into()),
                 tests_result: false,
                 hands_back: false,
+                runs_on: Some(RunsOn::Thread),
+                executor_arg: None,
             })
+        );
+        assert_eq!(
+            unawaited("anyio.to_process.run_sync").and_then(|c| c.runs_on),
+            None
         );
         assert_eq!(unawaited("builtins.map"), None);
     }
@@ -5482,11 +5636,14 @@ mod tests {
                 .is_some_and(|rest| rest.starts_with('.'))
         };
         for (symbol, class) in &kb.attributes {
+            let (class, _) = split_receiver_items(class);
             let members = format!("{class}.");
             assert!(
-                kb.entries.keys().any(|k| k.starts_with(&members))
+                class == SELF_RETURN_TYPE
+                    || kb.entries.keys().any(|k| k.starts_with(&members))
                     || kb.attributes.keys().any(|k| k.starts_with(&members))
-                    || class.starts_with("builtins."),
+                    || class.starts_with("builtins.")
+                    || class.starts_with("typing."),
                 "{symbol} -> {class}"
             );
             assert_eq!(kb.lookup(symbol), None, "{symbol}");
@@ -5536,7 +5693,7 @@ mod tests {
                 if !symbol.starts_with(&members) {
                     break;
                 }
-                reached.push(t.clone());
+                reached.push(split_receiver_items(t).0.to_owned());
             }
         }
     }

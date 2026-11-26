@@ -168,7 +168,9 @@ mod tests {
         let path = std::env::temp_dir()
             .join("heki-block-parse-back")
             .join(name);
-        ConfigLayout::of(&path).parse(&path, text).unwrap()
+        ConfigLayout::of(&path)
+            .parse(&path, text, path.parent().unwrap())
+            .unwrap()
     }
 
     /// `text` with `block` merged in as a user would: keys before the first table go first, a

@@ -977,3 +977,283 @@ fn cached_property_stripped_by_a_subclass() {
         vec![report("MUT101", 15, true), report("MUT111", 35, false)]
     );
 }
+
+/// `(rule, exact)` of every `MUT101` and `MUT111` report of `source` as the project's one file.
+fn abc_tiers(name: &str, source: &str) -> Vec<(String, bool)> {
+    let p = project(name, source);
+    (tiers(&p).into_iter())
+        .map(|(rule, _, exact)| (rule, exact))
+        .collect()
+}
+
+fn both(exact: bool) -> Vec<(String, bool)> {
+    vec![("MUT101".to_owned(), exact), ("MUT111".to_owned(), exact)]
+}
+
+#[test]
+fn kept_to_the_return_stripped_the_classes_a_container_abc_value_may_be() {
+    // Each counterexample of `tests/difftest/container_abcs/`, which
+    // `container_abc_counterexamples.py` runs on CPython: a class a value of the ABC may be
+    // (deriving from the ABC, from `UserDict`, or from `list`; registered; behind a `register`
+    // heki cannot resolve or a `__subclasshook__`; any class, for a structural ABC) removes the
+    // cached value while the writer iterates the value.
+    let dir = common::repo_root().join("tests/difftest/container_abcs");
+    let mut cases: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    cases.sort();
+    assert_eq!(cases.len(), 8, "{cases:?}");
+    for path in cases {
+        let case = path.file_stem().unwrap().to_str().unwrap().to_owned();
+        let source = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(abc_tiers("mut101_abc_case", &source), both(false), "{case}");
+        // Without the classes that make the case, every premise is established; a structural
+        // ABC establishes none.
+        let base = format!(
+            "{}def forget() -> None:\n    return None\n",
+            &source[..source.find("def forget").unwrap()]
+        );
+        let exact = case != "structural_abc";
+        assert_eq!(abc_tiers("mut101_abc_base", &base), both(exact), "{case}");
+    }
+}
+
+/// A writer that leaves the cached property stale and then uses `rows`, annotated `annotation`
+/// (imported by `import`), as `using` says; a reader of the property; and `classes`.
+fn abc_writer(import: &str, annotation: &str, using: &str, classes: &str) -> String {
+    format!(
+        r#"{import}
+from functools import cached_property
+
+
+class Holder:
+    def __init__(self, raw: dict[str, str]) -> None:
+        self.raw = raw
+
+    @cached_property
+    def features(self) -> str:
+        return self.raw.get("k", "")
+
+    def replace(self, raw: dict[str, str], rows: {annotation}) -> None:
+        self.raw = raw
+        {using}
+
+
+def read(holder: Holder) -> str:
+    return holder.features
+{classes}"#
+    )
+}
+
+const ITERATES: &str = "for _ in rows:\n            pass";
+
+#[test]
+fn kept_to_the_return_established_on_values_of_nominal_container_abcs() {
+    // A value of a nominal ABC of a family the project leaves closed is one of the family's
+    // builtins, or of a class outside the project taken to run what they run: iterating it,
+    // measuring it, testing it, indexing it, and calling a method of the ABC run nothing of
+    // the project. So do the classes of the project that bind none of what the use runs.
+    let uses = [
+        (
+            "from collections.abc import Mapping",
+            "Mapping[str, str]",
+            ITERATES,
+        ),
+        (
+            "from typing import Mapping",
+            "Mapping[str, str]",
+            "unused = len(rows)",
+        ),
+        (
+            "from typing import MutableMapping",
+            "MutableMapping[str, str]",
+            "if rows:\n            pass",
+        ),
+        (
+            "from collections.abc import Mapping",
+            "Mapping[str, str]",
+            "unused = rows.keys()",
+        ),
+        (
+            "from collections.abc import Sequence",
+            "Sequence[str]",
+            "unused = rows[0]",
+        ),
+        (
+            "from collections.abc import Sequence",
+            "Sequence[str]",
+            ITERATES,
+        ),
+        (
+            "from collections.abc import MutableSequence",
+            "MutableSequence[str]",
+            "unused = len(rows)",
+        ),
+        (
+            "from typing import AbstractSet",
+            "AbstractSet[str]",
+            ITERATES,
+        ),
+        (
+            "from collections.abc import MutableSet",
+            "MutableSet[str]",
+            "unused = len(rows)",
+        ),
+    ];
+    let bystanders = [
+        "",
+        "\n\nclass Table(dict):\n    def total(self) -> int:\n        return 0\n",
+        "\n\nclass Pair(tuple):\n    def total(self) -> int:\n        return 0\n",
+        "\n\nfrom typing import NamedTuple\n\n\nclass Point(NamedTuple):\n    x: int\n",
+    ];
+    for (import, annotation, using) in uses {
+        for classes in bystanders {
+            let source = abc_writer(import, annotation, using, classes);
+            assert_eq!(
+                abc_tiers("mut101_abc_kept", &source),
+                both(true),
+                "{annotation} / {using} / {classes}"
+            );
+        }
+    }
+}
+
+#[test]
+fn kept_to_the_return_stripped_where_an_implementer_may_run_the_use() {
+    let mapping = "from collections.abc import Mapping";
+    let cases = [
+        // A project class deriving from the ABC inherits its `get`, Python code that runs
+        // `__getitem__` of the class.
+        (
+            mapping,
+            "Mapping[str, str]",
+            r#"unused = rows.get("k")"#,
+            "\n\nclass Rows(Mapping):\n    def __getitem__(self, key):\n        return 1\n\n    \
+             def __len__(self):\n        return 0\n\n    def __iter__(self):\n        \
+             return iter(())\n",
+        ),
+        // Through `UserDict`, `UserList`, and `ChainMap`, whose methods CPython derives from the
+        // mutable ABCs; and a `list` subclass is a `Sequence`.
+        (
+            "from collections import UserDict\nfrom collections.abc import Mapping",
+            "Mapping[str, str]",
+            "unused = len(rows)",
+            "\n\nclass Rows(UserDict):\n    def __len__(self):\n        return 0\n",
+        ),
+        (
+            "from collections import UserList\nfrom collections.abc import Sequence",
+            "Sequence[str]",
+            ITERATES,
+            "\n\nclass Rows(UserList):\n    pass\n",
+        ),
+        (
+            "from collections import ChainMap\nfrom collections.abc import MutableMapping",
+            "MutableMapping[str, str]",
+            ITERATES,
+            "\n\nclass Rows(ChainMap):\n    pass\n",
+        ),
+        (
+            "from collections.abc import Sequence",
+            "Sequence[str]",
+            "unused = rows[0]",
+            "\n\nclass Rows(list):\n    def __getitem__(self, i):\n        return 0\n",
+        ),
+        // A class registered by a decorator, or with a project subclass of the ABC.
+        (
+            mapping,
+            "Mapping[str, str]",
+            ITERATES,
+            "\n\n@Mapping.register\nclass Rows:\n    def __iter__(self):\n        \
+             return iter(())\n",
+        ),
+        (
+            mapping,
+            "Mapping[str, str]",
+            ITERATES,
+            "\n\nclass Base(Mapping):\n    pass\n\n\nclass Rows:\n    def __iter__(self):\n        \
+             return iter(())\n\n\nBase.register(Rows)\n",
+        ),
+        // A `register` reached through a module path, and one bound to a name first.
+        (
+            "import collections.abc",
+            "collections.abc.Mapping[str, str]",
+            ITERATES,
+            "\n\nclass Rows:\n    def __iter__(self):\n        return iter(())\n\n\n\
+             collections.abc.Mapping.register(Rows)\n",
+        ),
+        (
+            mapping,
+            "Mapping[str, str]",
+            ITERATES,
+            "\n\nclass Rows:\n    def __iter__(self):\n        return iter(())\n\n\n\
+             def setup() -> None:\n    register = Mapping.register\n    register(Rows)\n",
+        ),
+        // A `register` bound to a module-level name and called by another function, passed on
+        // as a value, or bound differently on two paths.
+        (
+            mapping,
+            "Mapping[str, str]",
+            ITERATES,
+            "\n\nclass Rows:\n    def __iter__(self):\n        return iter(())\n\n\n\
+             register_mapping = Mapping.register\n\n\ndef setup() -> None:\n    \
+             register_mapping(Rows)\n",
+        ),
+        (
+            mapping,
+            "Mapping[str, str]",
+            ITERATES,
+            "\n\nregister_mapping = Mapping.register\n\n\ndef setup(call) -> None:\n    \
+             call(register_mapping)\n",
+        ),
+        (
+            mapping,
+            "Mapping[str, str]",
+            ITERATES,
+            "\n\nif __debug__:\n    register_mapping = Mapping.register\nelse:\n    \
+             register_mapping = print\n\n\ndef setup(rows) -> None:\n    \
+             register_mapping(rows)\n",
+        ),
+        // A class registered with the mutable ABC is a value of the read-only one too.
+        (
+            mapping,
+            "Mapping[str, str]",
+            ITERATES,
+            "\n\nfrom collections.abc import MutableMapping\n\n\nclass Rows:\n    \
+             def __iter__(self):\n        return iter(())\n\n\nMutableMapping.register(Rows)\n",
+        ),
+    ];
+    for (import, annotation, using, classes) in cases {
+        let source = abc_writer(import, annotation, using, classes);
+        assert_eq!(
+            abc_tiers("mut101_abc_strip", &source),
+            both(false),
+            "{annotation} / {using} / {classes}"
+        );
+    }
+    // A class registered with the read-only ABC is no value of the mutable one, and a class of
+    // another family is none of this one's.
+    for (annotation, classes) in [
+        (
+            "MutableMapping[str, str]",
+            "\n\nclass Rows:\n    def __iter__(self):\n        return iter(())\n\n\n\
+             Mapping.register(Rows)\n",
+        ),
+        (
+            "MutableMapping[str, str]",
+            "\n\nclass Rows(list):\n    def __iter__(self):\n        return iter(())\n",
+        ),
+    ] {
+        let source = abc_writer(
+            "from collections.abc import Mapping, MutableMapping",
+            annotation,
+            ITERATES,
+            classes,
+        );
+        assert_eq!(
+            abc_tiers("mut101_abc_other", &source),
+            both(true),
+            "{annotation} / {classes}"
+        );
+    }
+}

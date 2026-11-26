@@ -165,7 +165,10 @@ struct CheckArgs {
     /// Show and fail on only the diagnostics in one of these files or with a hop of their call
     /// chain (`related`) in one, such as the files a commit or a pull request changed, and let
     /// `--fix` and `--diff` rewrite only these files; the analysis still covers PATHS (put PATHS
-    /// before the option). A path that is not an analyzed file is named in a warning.
+    /// before the option). With a baseline, every Ratchet regression is shown, wherever it is;
+    /// without one, a note counts the diagnostics that would fail the run and are not shown. A
+    /// configuration file (`pyproject.toml`, `heki.toml`, the baseline) shows every diagnostic.
+    /// Another path that is not an analyzed file is named in a warning.
     #[arg(
         long,
         value_name = "FILE",

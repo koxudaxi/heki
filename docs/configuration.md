@@ -164,8 +164,10 @@ the same file is `services.api.app` and the import is not resolved. Put a `pypro
 ### The default target version
 
 Without `target-version`, heki reads `requires-python` from the `pyproject.toml` that holds the
-configuration, or from the one next to `heki.toml` or the `--config` file. It takes the oldest
-supported version that every clause admits:
+configuration, or, for `heki.toml` or a `--config` file that is not a `pyproject.toml`, from the
+`pyproject.toml` at the project root. The same applies to the project name, the declared
+dependencies, and the workspace tables: where the configuration file sits does not change them.
+It takes the oldest supported version that every clause admits:
 
 | `requires-python` | Target |
 | ----------------- | ------ |
@@ -436,7 +438,8 @@ namespace of an object of a class a target covers (`field.__dict__[KEY] = v`,
 class names the key, in this contract or in any other `write-owners` contract, so a new cache key
 needs a target first. A target names the keys its attribute pattern matches (`Field._*` names
 `_cache`), and an entry target names its container. A key another contract names is that
-contract's to guard: its writes are judged by that contract's allowance alone. The contract's
+contract's to guard: its writes are judged by that contract's allowance alone. A contract with only
+`forbidden-writers` allows no writer, so it names no key. The contract's
 allowance applies to an unlisted key as to a target write. A key a loop takes from a tuple,
 list, or set of string constants, or from a module's tuple of them, writes each of them, and so
 does the key of each pair a generator of them gives `update`. A key computed at run time has no
@@ -939,10 +942,10 @@ or a glob whose `*` spans dots, never a suffix (`pkg.*` names `pkg.facts` and
 | `name` | `""` | The contract's name in reports. |
 | `importers` | every module | The modules judged. |
 | `exempt-importers` | `[]` | Modules of `importers` that are not judged. |
-| `allowed-imports` | `[]` | The modules the importers may import: every other import is reported, but those of `relative-imports`. |
+| `allowed-imports` | `[]` | The modules the importers may import: every other import is reported, but those of `relative-imports`. `"pkg.db:Session"` allows one name of a module: only `from pkg.db import Session` imports it (a glob may stand in either part), and another name of `pkg.db` is still reported. |
 | `forbidden-imports` | `[]` | When set, only imports of these modules are reported, less the allowed ones, as in [Allowed and forbidden functions](#allowed-and-forbidden-functions). A contract setting none of `allowed-imports`, `forbidden-imports`, and `relative-imports` allows no imports. |
 | `relative-imports` | `[]` | The modules the importers may import only through a relative import ([Relative imports only](#relative-imports-only)). |
-| `ignored-imports` | `[]` | `"importer -> imported"` pairs of module patterns whose imports the contract accepts (`"pkg.cli -> pkg.db"`). |
+| `ignored-imports` | `[]` | `"importer -> imported"` pairs of module patterns whose imports the contract accepts (`"pkg.cli -> pkg.db"`; `"pkg.cli -> pkg.db:Session"` accepts one name of the module, as in `allowed-imports`). With `reach`, an import accepted or allowed by a name is not followed. |
 | `type-checking` | `"ignore"` | `"ignore"` or `"report"`: whether the imports under `if TYPE_CHECKING:`, which never run, count. |
 | `reach` | `"statement"` | `"statement"`: each import of an importer is judged. `"import-time"`: every module loading an importer loads while it loads. `"all"`: every module a chain of imports that run leads to. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the imports whose module heki cannot name are reported under [`IMP202`](rules/unresolved-guarded-import.md). |
@@ -1153,8 +1156,8 @@ warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-ca
 - A `Class.attr` entry needs a project class, and an attribute the class family has: a name its
   class body binds (a method, an annotation, an assignment), one its methods or its module set
   on its instances, one of a project base, an attribute or a constant `__dict__` key the code
-  writes or reads on an object typed with the class or a subclass, or one written on an object
-  heki cannot type. A key a loop takes from a tuple, list, or set of string constants
+  writes on an object typed with the class or a subclass (a `__dict__` key only read does not
+  exist, except for a `read-owners` target, which guards the reads), or one written on an object heki cannot type. A key a loop takes from a tuple, list, or set of string constants
   (`for key in ("_a", "_b")`), or from a module's tuple of them (`for key in RECORDS`), names
   each of them, a list or set only while no code changes it, and so does the key of each pair a
   generator of them gives `update` (`ns.update((key, v) for key in RECORDS)`). A module
@@ -1270,7 +1273,7 @@ excluded = true               # never reported
 | `copy-sanitizer` | Returns a copy of its first argument (or receiver), ending `MUT202` protection: `"deep"` copies everything below it too; `"shallow"` (or `true`) copies only the object itself, so the values below it stay protected. |
 | `return-type` | The class of the objects the call returns (a factory: `mypkg.db.open` returning `sqlite3.Connection`), whose methods are then looked up in the catalog. `"Self"`: an object of the receiver's class (a builder method such as `with_options`, also on a project subclass of the library class). |
 | `attribute-type` | The class of what reading the attribute `symbol` names (`package.module.Client.chat`) on an instance of a library class gives, whose members are then looked up in the catalog: `client.chat.completions.create(...)` reaches the catalog's `create`. It takes no other key. The read is typed only where nothing in the project may change it: no project subclass of the class binds the name or defines `__getattribute__`, and no base heki knows nothing of comes before the library class. |
-| `sync-lock-or-tx` | A `with` over an instance of this class, or over the result of this call, holds a synchronous lock or a database transaction (`EFF106`). |
+| `sync-lock-or-tx` | A `with` over an instance of this class, or over the result of this call, holds a synchronous lock or a database transaction (`EFF106`); an instance of such a class is a thread lock for `EFF117`. |
 | `non-reentrant-lock` | An instance of this class is a lock its holder cannot take again: acquiring it while the same thread or task holds it waits forever (`EFF109`). |
 | `one-at-a-time` | Tasks may not be inside this method on one object at once (`EFF110`): `"always"` (a second task's call raises), `"when_unbound"` (only while the object holds no connection, as an `AsyncSession`), or `"unbinds"` (as `"when_unbound"`, and the object holds no connection after the call: `commit`). |
 | `writes-in-order` | The call writes an argument to a file or a stream, or serializes it into text, in the order of its elements (`EFF112`): a mapping's keys and a sequence's items in their iteration order. `{ arg = 0, param = "data" }` names the argument (a position not counting the receiver, or a keyword; `{}`: every positional argument, as `print`), `sorted-by = "sort_keys"` the keyword argument that sorts mapping keys first, and `sorted-by-default = true` a call that sorts them unless told otherwise. |
