@@ -772,6 +772,18 @@ const HELD_ATTR_SUBCLASS: &str = "from pkg.held_attr import Holder\nfrom pkg.mad
 const HELD_ATTR_SWAP: &str = "from pkg.held_attr import Holder\nfrom pkg.made_models import Waiter\n\n\ndef renew(h: Holder) -> None:\n    h._waiter = Waiter()\n";
 const HELD_ATTR_UNTYPED: &str = "def clear(h) -> None:\n    h._waiter = None\n";
 const HELD_ATTR_UNNAMED: &str = "from pkg.made_models import Quiet\n\n\ndef replace(h, name) -> None:\n    setattr(h, name, Quiet())\n";
+// An attribute a class's type parameter types (`ClassDecl::param_attrs`), read in another file
+// on an instance whose annotation gives the argument (`Site[Waiter]`), and a base another
+// module binds only under `if TYPE_CHECKING:` (`ModuleDecls::type_checking_only`): the class
+// holds while those declarations say so, and a method found through that base is no exact
+// target while the module binds the name only there.
+const GENERIC_SITE: &str = "from typing import Generic, TypeVar\n\nT = TypeVar(\"T\")\n\n\nclass Site(Generic[T]):\n    obj: T\n";
+const GENERIC_SITE_OBJECT: &str = "from typing import Generic, TypeVar\n\nT = TypeVar(\"T\")\n\n\nclass Site(Generic[T]):\n    obj: object\n";
+const GENERIC_SITE_USE: &str = "from pkg.generic_site import Site\nfrom pkg.made_models import Waiter\n\n\nasync def serve_site(site: Site[Waiter]) -> None:\n    site.obj.wait()\n";
+const LAZY_MODELS: &str = "from typing import TYPE_CHECKING, Any\n\nif TYPE_CHECKING:\n    from pkg.made_models import Waiter as Waiter\n\n\ndef __getattr__(name: str) -> Any:\n    from pkg import made_models\n\n    return getattr(made_models, name)\n";
+const LAZY_MODELS_RUNTIME: &str = "from pkg.made_models import Waiter as Waiter\n";
+const LAZY_MODELS_ELSE: &str = "from typing import TYPE_CHECKING, Any\n\nif TYPE_CHECKING:\n    from pkg.made_models import Waiter as Waiter\nelse:\n    Waiter: Any = object\n";
+const LAZY_USE: &str = "from pkg.lazy_models import Waiter\n\n\nclass LazyWaiter(Waiter):\n    pass\n\n\nasync def serve_lazy(w: LazyWaiter) -> None:\n    w.wait()\n";
 // A factory function and a class attribute annotated with the callable they hold
 // (`Callable[..., Waiter]`, `FunctionDecl::return_type`, `ClassDecl` attribute types): calling
 // what they hold in other files gives a `Waiter` while the annotation names that one class.
@@ -1866,6 +1878,67 @@ fn steps_returned_types() -> Vec<Step> {
             vec![save("pkg/callable_factory.py", CALLABLE_FACTORY)],
         )
         .present(CALLABLE_BOTH),
+    ]
+}
+
+/// A read in another file of an attribute annotated with a type parameter of its class, on an
+/// instance annotated with an argument, while the class's annotation names the parameter; and a
+/// class based on a name another module binds only under `if TYPE_CHECKING:`, while that module
+/// binds it no other way: the wait its method makes is heuristic until the module imports the
+/// name at run time.
+fn steps_declared_types() -> Vec<Step> {
+    const SITE: &[(&str, &str)] = &[("pkg/generic_site_use.py", "EFF101")];
+    const LAZY: &[(&str, &str)] = &[("pkg/lazy_use.py", "EFF101 [heuristic]")];
+    const LAZY_EXACT: &[(&str, &str)] = &[("pkg/lazy_use.py", "EFF101")];
+    vec![
+        Step::new(
+            "an attribute typed by the class's type parameter holds the waiting class",
+            vec![
+                Action::Create("pkg/generic_site.py", GENERIC_SITE.to_owned()),
+                Action::Create("pkg/generic_site_use.py", GENERIC_SITE_USE.to_owned()),
+            ],
+        )
+        .present(SITE),
+        Step::new(
+            "the attribute is annotated with object",
+            vec![save("pkg/generic_site.py", GENERIC_SITE_OBJECT)],
+        )
+        .absent(SITE),
+        Step::new(
+            "the type parameter again",
+            vec![save("pkg/generic_site.py", GENERIC_SITE)],
+        )
+        .present(SITE),
+        Step::new(
+            "a base bound only under TYPE_CHECKING in another module",
+            vec![
+                Action::Create("pkg/lazy_models.py", LAZY_MODELS.to_owned()),
+                Action::Create("pkg/lazy_use.py", LAZY_USE.to_owned()),
+            ],
+        )
+        .present(LAZY),
+        Step::new(
+            "that module also binds the name at run time",
+            vec![save("pkg/lazy_models.py", LAZY_MODELS_ELSE)],
+        )
+        .absent(LAZY),
+        Step::new(
+            "only the TYPE_CHECKING import again",
+            vec![save("pkg/lazy_models.py", LAZY_MODELS)],
+        )
+        .present(LAZY),
+        Step::new(
+            "that module imports the name at run time",
+            vec![save("pkg/lazy_models.py", LAZY_MODELS_RUNTIME)],
+        )
+        .present(LAZY_EXACT)
+        .absent(LAZY),
+        Step::new(
+            "the import only under TYPE_CHECKING once more",
+            vec![save("pkg/lazy_models.py", LAZY_MODELS)],
+        )
+        .present(LAZY)
+        .absent(LAZY_EXACT),
     ]
 }
 
@@ -7335,6 +7408,7 @@ sessions!(editing, Session::start, {
     exact_effects: steps_exact_effects,
     returned_rows: steps_returned_rows,
     returned_types: steps_returned_types,
+    declared_types: steps_declared_types,
     held_functions: steps_held_functions,
     store_types: steps_store_types,
     unused_suppressions: steps_unused_suppressions,
