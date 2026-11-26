@@ -164,8 +164,10 @@ the same file is `services.api.app` and the import is not resolved. Put a `pypro
 ### The default target version
 
 Without `target-version`, heki reads `requires-python` from the `pyproject.toml` that holds the
-configuration, or from the one next to `heki.toml` or the `--config` file. It takes the oldest
-supported version that every clause admits:
+configuration, or, for `heki.toml` or a `--config` file that is not a `pyproject.toml`, from the
+`pyproject.toml` at the project root. The same applies to the project name, the declared
+dependencies, and the workspace tables: where the configuration file sits does not change them.
+It takes the oldest supported version that every clause admits:
 
 | `requires-python` | Target |
 | ----------------- | ------ |
