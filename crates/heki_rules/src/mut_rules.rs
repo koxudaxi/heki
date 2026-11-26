@@ -12,10 +12,10 @@ use heki_diagnostics::{Certainty, Diagnostic, OpenPremise, OpenRecord};
 use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
     AccessKind, AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite, CallTarget,
-    Callee, Construction, ContractClass, Delivery, EffectSummary, Facts, FuncKey, ProjectDecls,
-    ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx, TypedFieldReadSite,
-    TypedFieldWriteSite, Unresolved, Val, WriteKind, attr_writes, container_mutator,
-    initializes_own_self, is_initializer, self_attr_writes,
+    Callee, Construction, ContractClass, ContractSharing, Delivery, EffectSummary, Facts, FuncKey,
+    ProjectDecls, ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx,
+    TypedFieldReadSite, TypedFieldWriteSite, Unresolved, Val, WriteKind, attr_writes,
+    container_mutator, initializes_own_self, is_initializer, self_attr_writes,
 };
 use heki_env::HekiConfig;
 use heki_ir::walk::{Answer, Budget, FnShape, Visit, reach};
@@ -3314,31 +3314,36 @@ mod unresolved;
 /// `readonly-returns` producers from the configuration.
 #[derive(Debug)]
 pub(crate) struct ReadOnlyProducers {
-    rules: Vec<(DottedPattern, bool)>,
+    /// Each producer pattern with its contract's place and `deep`.
+    rules: Vec<(DottedPattern, u32, bool)>,
 }
 
 impl ReadOnlyProducers {
     pub fn new(config: &HekiConfig) -> Result<Self, RuleConfigError> {
         let mut rules = Vec::new();
-        for r in &config.readonly_returns {
+        for (place, r) in config.readonly_returns.iter().enumerate() {
+            let place = u32::try_from(place).unwrap_or(u32::MAX);
             for p in &r.producers {
-                rules.push((DottedPattern::new(p, "readonly-returns.producers")?, r.deep));
+                let pattern = DottedPattern::new(p, "readonly-returns.producers")?;
+                rules.push((pattern, place, r.deep));
             }
         }
         Ok(Self { rules })
     }
 
-    /// Whether a producer names a project function (`fqn` and its `qualname`), an attribute of a
-    /// class ([`ContractClass::member`]), or an external symbol (the symbol twice), and then
-    /// whether one of those naming it is deep.
-    pub(crate) fn deep_for(&self, fqn: &str, qualname: &str) -> Option<bool> {
-        let mut found = None;
-        for (p, deep) in &self.rules {
-            if p.matches_def(fqn, qualname) {
-                found = Some(found.unwrap_or(false) || *deep);
-            }
-        }
-        found
+    /// What the result of a project function (`fqn` and its `qualname`), an attribute of a
+    /// class ([`ContractClass::member`]), or an external symbol (the symbol twice) shares under
+    /// each contract whose producers name it, when one does.
+    pub(crate) fn protecting(&self, fqn: &str, qualname: &str) -> Option<ContractSharing> {
+        let naming = (self.rules.iter())
+            .filter(|(p, ..)| p.matches_def(fqn, qualname))
+            .map(|&(_, place, deep)| (place, deep));
+        Some(ContractSharing::produced(naming)).filter(|c| !c.is_empty())
+    }
+
+    /// Whether a producer names the function, attribute, or symbol, as for [`Self::protecting`].
+    pub(crate) fn names(&self, fqn: &str, qualname: &str) -> bool {
+        (self.rules.iter()).any(|(p, ..)| p.matches_def(fqn, qualname))
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -3347,7 +3352,7 @@ impl ReadOnlyProducers {
 
     /// Whether a producer has a module part.
     pub(crate) fn names_modules(&self) -> bool {
-        self.rules.iter().any(|(p, _)| p.module().is_some())
+        self.rules.iter().any(|(p, ..)| p.module().is_some())
     }
 }
 
@@ -3379,7 +3384,7 @@ impl ReadOnlyReturns {
             .filter(|(k, s)| {
                 s.returns_protected.is_some()
                     || s.is_lru_cache
-                    || producers.deep_for(&k.fqn(), &k.qualname).is_some() && property(k, s)
+                    || producers.names(&k.fqn(), &k.qualname) && property(k, s)
             })
             .map(|(k, _)| {
                 k.qualname
@@ -3407,17 +3412,32 @@ struct Ro {
     /// `producer` is declared in `readonly-returns` (`MUT202`), not an `@lru_cache` function
     /// (`MUT114`).
     declared: bool,
+    /// What the value shares under each `readonly-returns` contract (the sharing above also
+    /// counts an `@lru_cache` function's result).
+    contracts: ContractSharing,
 }
 
 impl Ro {
-    fn new(producer: String, declared: bool, shared: Shared, via: Vec<CallHop>) -> Option<Self> {
+    fn new(
+        producer: String,
+        declared: bool,
+        shared: Shared,
+        contracts: ContractSharing,
+        via: Vec<CallHop>,
+    ) -> Option<Self> {
         shared.any().then_some(Self {
             producer,
             deep: shared.elements,
             shallow_copy: !shared.object,
             via,
             declared,
+            contracts,
         })
+    }
+
+    /// The value a declared producer returns.
+    fn produced(producer: String, contracts: ContractSharing, via: Vec<CallHop>) -> Option<Self> {
+        Self::new(producer, true, contracts.shared(), contracts, via)
     }
 
     fn shared(&self) -> Shared {
@@ -3442,6 +3462,7 @@ impl Ro {
             shallow_copy: !shared.object,
             via: named.via.clone(),
             declared: named.declared,
+            contracts: self.contracts.join(&other.contracts),
         }
     }
 
@@ -3451,6 +3472,7 @@ impl Ro {
             self.producer.clone(),
             self.declared,
             step.apply(self.shared()),
+            self.contracts.apply(step),
             self.via.clone(),
         )
     }
@@ -3957,18 +3979,16 @@ impl<'a> Mut202Fn<'a> {
     /// `@lru_cache` function, or a project function that returns one's value (its summary's
     /// `returns_protected`), reached through the call at `span`.
     fn producer(&self, callee: &Callee, span: Span) -> Option<Ro> {
-        let direct = |producer: String, declared: bool, deep: bool| {
-            Ro::new(producer, declared, Shared::produced(deep), vec![])
-        };
         match callee {
             Callee::Project(keys, _) => keys.iter().find_map(|k| {
                 let fqn = k.fqn();
                 let summary = self.cx.index.summary(k);
                 if summary.is_some_and(|s| s.is_lru_cache) {
-                    return direct(fqn, false, true);
+                    let cached = ContractSharing::default();
+                    return Ro::new(fqn, false, Shared::produced(true), cached, vec![]);
                 }
-                if let Some(d) = self.returns.producers.deep_for(&fqn, &k.qualname) {
-                    return direct(fqn, true, d);
+                if let Some(c) = self.returns.producers.protecting(&fqn, &k.qualname) {
+                    return Ro::produced(fqn, c, vec![]);
                 }
                 let r = summary?.returns_protected.as_ref()?;
                 let mut via = vec![CallHop {
@@ -3978,13 +3998,11 @@ impl<'a> Mut202Fn<'a> {
                     path: self.unit.input.path.clone(),
                 }];
                 via.extend(heki_effect::owned_chain(&r.chain));
-                Ro::new(r.producer.clone(), r.declared, r.shared, via)
+                let contracts = r.contracts.clone();
+                Ro::new(r.producer.clone(), r.declared, r.shared, contracts, via)
             }),
-            Callee::External(sym) => self
-                .returns
-                .producers
-                .deep_for(sym, sym)
-                .and_then(|d| direct(sym.clone(), true, d)),
+            Callee::External(sym) => (self.returns.producers.protecting(sym, sym))
+                .and_then(|c| Ro::produced(sym.clone(), c, vec![])),
             Callee::TooMany | Callee::Unresolved => None,
         }
     }
@@ -4010,8 +4028,8 @@ impl<'a> Mut202Fn<'a> {
                 if let Some(Val::Inst(class)) = self.types.get(obj) {
                     let class = ContractClass::with_qualname(self.cx.decls, class.clone());
                     let (fqn, qualname) = class.member(attr);
-                    if let Some(deep) = self.returns.producers.deep_for(&fqn, &qualname) {
-                        return Ro::new(fqn, true, Shared::produced(deep), vec![]);
+                    if let Some(c) = self.returns.producers.protecting(&fqn, &qualname) {
+                        return Ro::produced(fqn, c, vec![]);
                     }
                 }
                 // A property getter that returns a read-only producer's value.
@@ -4146,27 +4164,26 @@ impl<'a> Mut202Fn<'a> {
                 if memo_fills.contains(&at) {
                     continue;
                 }
-                let (hit, chain) = self.violation(inst);
-                if let Some((r, changed)) = hit
+                if let Some(change) = self.violation(inst)
                     && reported.insert(inst.span)
                 {
-                    self.report(out, inst, changed, &r, chain);
+                    self.report(out, inst, change);
                 }
             }
         }
     }
 
-    /// Report the change `inst` makes to `changed`, the shared value `r` (through the helper
-    /// calls `chain`): under `MUT202` for a declared producer, else under `MUT114`, exact when
-    /// its narrowed claim holds ([`Self::cached_change_steps`]).
-    fn report(
-        &self,
-        out: &mut Vec<Diagnostic>,
-        inst: &'a Inst,
-        changed: VarId,
-        r: &Ro,
-        chain: Vec<CallHop>,
-    ) {
+    /// Report the change `inst` makes to a shared value: under `MUT202` for a declared
+    /// producer, of the contracts under whose sharing it is a change, else under `MUT114`,
+    /// exact when its narrowed claim holds ([`Self::cached_change_steps`]).
+    fn report(&self, out: &mut Vec<Diagnostic>, inst: &'a Inst, change: SharedChange) {
+        let SharedChange {
+            origin,
+            changed,
+            chain,
+            contracts,
+        } = change;
+        let r = &origin;
         // A value from a wrapper: the wrapper called here, then the hops down to the producer,
         // then the hop to the mutating helper.
         let through = r
@@ -4177,7 +4194,7 @@ impl<'a> Mut202Fn<'a> {
         let mut related = r.via.clone();
         related.extend(chain.iter().cloned());
         if r.declared {
-            self.cx.emit(
+            let d = self.cx.emit(
                 out,
                 "MUT202",
                 self.unit,
@@ -4191,6 +4208,9 @@ impl<'a> Mut202Fn<'a> {
                 Some("change a copy (`copy.deepcopy(...)`) instead".to_owned()),
                 &related,
             );
+            if let Some(d) = d {
+                d.contracts = contracts;
+            }
             return;
         }
         let exact =
@@ -4241,9 +4261,9 @@ impl<'a> Mut202Fn<'a> {
         }
     }
 
-    /// The shared value `inst` changes, and the value it holds it in, with the call that hands
-    /// it to a project function changing it (empty: `inst` changes it itself).
-    fn violation(&self, inst: &Inst) -> (Option<(Ro, VarId)>, Vec<CallHop>) {
+    /// The change `inst` makes to a shared value, itself or through a project function it
+    /// hands the value to.
+    fn violation(&self, inst: &Inst) -> Option<SharedChange> {
         let changed = match &inst.kind {
             InstKind::AttrStore { obj, .. }
             | InstKind::AttrDelete { obj, .. }
@@ -4260,16 +4280,18 @@ impl<'a> Mut202Fn<'a> {
             _ => None,
         };
         if let Some((v, r)) = changed.and_then(|v| Some((v, self.guarded(v)?))) {
-            return (Some((r.clone(), v)), Vec::new());
+            return Some(SharedChange {
+                origin: r.clone(),
+                changed: v,
+                chain: Vec::new(),
+                contracts: r.contracts.places(|s| s.object),
+            });
         }
         // Passing a read-only value to a project function that mutates that parameter, also
         // through an offloading API that calls it on a worker thread.
         let def = |v| self.ix.shape.inst(v);
-        let Some(call) = site_call(&def, self.sites, inst, false)
-            .or_else(|| site_call(&def, self.sites, inst, true))
-        else {
-            return (None, Vec::new());
-        };
+        let call = site_call(&def, self.sites, inst, false)
+            .or_else(|| site_call(&def, self.sites, inst, true))?;
         for (key, _, pos, var) in call.bound_arguments(self.cx) {
             let Some(r) = self.ro.get(&var) else {
                 continue;
@@ -4280,32 +4302,50 @@ impl<'a> Mut202Fn<'a> {
             // object itself, not what it holds as items. Filling a memo of the shared object,
             // or initializing one of its attributes lazily, leaves what it computes as it was.
             let p = u8::try_from(pos).ok().filter(|p| *p < 64);
-            let mutates = self.facts_run_by_call(inst.span, key).iter().any(|facts| {
-                p.is_some_and(|p| {
-                    if r.shallow_copy {
-                        facts
-                            .changed_param_attrs
-                            .get(&p)
-                            .is_some_and(|attrs| facts.changes_param_state(p, Some(attrs)))
-                    } else if r.deep {
-                        facts.changes_param_state(p, None)
-                    } else {
-                        facts.changes_param_object(p)
-                    }
+            let run = self.facts_run_by_call(inst.span, key);
+            let mutates = |shared: Shared| {
+                run.iter().any(|facts| {
+                    p.is_some_and(|p| {
+                        if !shared.object {
+                            facts
+                                .changed_param_attrs
+                                .get(&p)
+                                .is_some_and(|attrs| facts.changes_param_state(p, Some(attrs)))
+                        } else if shared.elements {
+                            facts.changes_param_state(p, None)
+                        } else {
+                            facts.changes_param_object(p)
+                        }
+                    })
                 })
-            });
-            if mutates {
+            };
+            if mutates(r.shared()) {
                 let hop = CallHop {
                     caller: self.key.clone(),
                     callee: key.fqn(),
                     span: inst.span,
                     path: self.unit.input.path.clone(),
                 };
-                return (Some((r.clone(), var)), vec![hop]);
+                return Some(SharedChange {
+                    origin: r.clone(),
+                    changed: var,
+                    chain: vec![hop],
+                    contracts: r.contracts.places(mutates),
+                });
             }
         }
-        (None, Vec::new())
+        None
     }
+}
+
+/// A change of a shared value: the value's origin, the variable holding it, the call handing it
+/// to the project function that changes it (empty: the instruction changes it itself), and the
+/// places of the `readonly-returns` contracts under whose sharing it is a change.
+struct SharedChange {
+    origin: Ro,
+    changed: VarId,
+    chain: Vec<CallHop>,
+    contracts: Vec<u32>,
 }
 
 // ==================================================================================== MUT115

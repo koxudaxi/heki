@@ -169,6 +169,68 @@ impl Shared {
     }
 }
 
+/// What a value shares under each `readonly-returns` contract that protects it, by the
+/// contract's place in the configuration's array, sorted; a contract under which nothing of the
+/// value is shared is left out. A producer's result is the object itself under every contract
+/// naming the producer, and the values below it under the deep ones; a step or a join applies
+/// to each contract's sharing as to [`Shared`], so a report can name the contracts its change
+/// breaks.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ContractSharing(Vec<(u32, Shared)>);
+
+impl ContractSharing {
+    /// The result of a producer that the contracts `naming` name, each given by its place and
+    /// its `deep`.
+    pub fn produced(naming: impl IntoIterator<Item = (u32, bool)>) -> Self {
+        let mut out = Self::default();
+        for (place, deep) in naming {
+            out.add(place, Shared::produced(deep));
+        }
+        out
+    }
+
+    fn add(&mut self, place: u32, shared: Shared) {
+        match self.0.binary_search_by_key(&place, |(p, _)| *p) {
+            Ok(i) => self.0[i].1 = self.0[i].1.join(shared),
+            Err(i) => self.0.insert(i, (place, shared)),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// What the value shares under any of the contracts.
+    pub fn shared(&self) -> Shared {
+        (self.0.iter()).fold(Shared::default(), |all, (_, s)| all.join(*s))
+    }
+
+    /// The sharing of the value derived by `step`.
+    #[must_use]
+    pub fn apply(&self, step: ReturnStep) -> Self {
+        let derived = self.0.iter().map(|&(p, s)| (p, step.apply(s)));
+        Self(derived.filter(|(_, s)| s.any()).collect())
+    }
+
+    /// A value that may be either: what either shares under each contract.
+    #[must_use]
+    pub fn join(&self, other: &Self) -> Self {
+        let mut out = self.clone();
+        for &(place, shared) in &other.0 {
+            out.add(place, shared);
+        }
+        out
+    }
+
+    /// The places of the contracts under whose sharing `breaks` holds.
+    pub fn places(&self, breaks: impl Fn(Shared) -> bool) -> Vec<u32> {
+        (self.0.iter())
+            .filter(|(_, s)| breaks(*s))
+            .map(|(p, _)| *p)
+            .collect()
+    }
+}
+
 /// How a value derived from another keeps that value's sharing: the derived object is shared
 /// when the source object is (`from_object`) or when the values below the source are
 /// (`from_elements`); the values below stay shared as they were.
@@ -1131,41 +1193,39 @@ pub struct ProtectedReturn {
     /// (`MUT114`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub declared: bool,
+    /// What the returned value shares under each `readonly-returns` contract, joined over the
+    /// paths that return such a value (`shared` also counts an `@lru_cache` function's result).
+    #[serde(default, skip_serializing_if = "ContractSharing::is_empty")]
+    pub contracts: ContractSharing,
 }
 
 impl ProtectedReturn {
     /// Join the value another path returns: what either shares, named by the shorter chain.
     pub fn join(&mut self, other: Self) {
         let shared = self.shared.join(other.shared);
+        let contracts = self.contracts.join(&other.contracts);
         if other.chain.len() < self.chain.len() {
             *self = other;
         }
         self.shared = shared;
+        self.contracts = contracts;
     }
 
-    /// Record in `slot` that the function returns, through `step`, a value of `producer` that
-    /// shares `produced`, reached through `chain` (nothing when the step shares nothing of it).
-    pub fn add(
-        slot: &mut Option<Self>,
-        producer: String,
-        declared: bool,
-        produced: Shared,
-        step: ReturnStep,
-        chain: SharedChain,
-    ) {
-        let shared = step.apply(produced);
+    /// Record in `slot` that the function returns, through `step`, the value `produced`
+    /// describes (nothing when the step shares nothing of it).
+    pub fn add(slot: &mut Option<Box<Self>>, produced: Self, step: ReturnStep) {
+        let shared = step.apply(produced.shared);
         if !shared.any() {
             return;
         }
         let found = Self {
-            producer,
             shared,
-            chain,
-            declared,
+            contracts: produced.contracts.apply(step),
+            ..produced
         };
         match slot {
             Some(r) => r.join(found),
-            None => *slot = Some(found),
+            None => *slot = Some(Box::new(found)),
         }
     }
 }
@@ -1330,16 +1390,23 @@ mod tests {
             shared: shared(false, true),
             chain: vec![hop("m.a"), hop("m.deep")],
             declared: true,
+            contracts: ContractSharing::produced([(1, true)]).apply(ReturnStep::SHALLOW_COPY),
         };
         long.join(ProtectedReturn {
             producer: "m.flat".into(),
             shared: shared(true, false),
             chain: vec![hop("m.flat")],
             declared: false,
+            contracts: ContractSharing::produced([(1, true), (0, false)]),
         });
         assert_eq!(long.producer, "m.flat");
         assert!(!long.declared);
         assert_eq!(long.shared, shared(true, true));
         assert_eq!(long.chain.len(), 1);
+        assert_eq!(
+            long.contracts,
+            ContractSharing(vec![(0, shared(true, false)), (1, shared(true, true))])
+        );
+        assert_eq!(long.contracts.places(|s| !s.elements), [0]);
     }
 }

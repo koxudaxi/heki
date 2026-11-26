@@ -914,8 +914,9 @@ EffectSummary(f) = {
     deep_copies:              Option<Set<DeepCopySite>>,   // own `copy.deepcopy(x)` (one argument, no
                                                            // memo) of a project-class object, with its
                                                            // classes; never propagated (MUT118)
-    returns_protected:        Option<ProtectedReturn>,     // may return a protected value: producer, depth,
-                                                           // call chain (MUT202)
+    returns_protected:        Option<Box<ProtectedReturn>>, // may return a protected value: producer, depth,
+                                                           // call chain, the sharing under each
+                                                           // readonly-returns contract (MUT202)
     must_invalidate:          Bitset,                      // invalidation contracts announced on every
                                                            // normal path (MUT208)
     unmet_invalidation:       Set<UnmetWrite>,             // target writes, own or passed up by private
@@ -2050,6 +2051,10 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      it). A callee that is a producer, an `@lru_cache` function, or `returns_protected` makes
      the caller `returns_protected`, so a wrapper returning a producer's result is a producer
      itself, across modules. The join is "protected if any path returns it", and the shortest chain is kept.
+     What the value shares is also kept per `readonly-returns` contract (`ContractSharing`: the
+     result itself under every contract naming the producer, the values below it under the deep
+     ones), so a report is of the contracts under whose sharing its change is one
+     (`Diagnostic::contracts`), and `fail = true` gates exactly those.
      Only plain functions are followed: a generator's `return` value is not what calling it
      returns.
 

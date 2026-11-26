@@ -372,3 +372,123 @@ fn a_producer_with_a_module_part_gates_its_reports() {
         assert_eq!(code, expected, "{producer}: {out}{err}");
     }
 }
+
+/// Two `readonly-returns` tables over `store.load`: `shallow`, and `deep` with `deep = true`;
+/// `fail` names the one with `fail = true` (`"none"`: neither).
+fn two_readonly_tables(fail: &str) -> String {
+    let line = |name: &str| if name == fail { "fail = true\n" } else { "" };
+    format!(
+        "[project]\nname = \"t\"\n\n[[tool.heki.readonly-returns]]\nname = \"shallow\"\nproducers = [\"store.load\"]\n{}\n[[tool.heki.readonly-returns]]\nname = \"deep\"\nproducers = [\"store.load\"]\ndeep = true\n{}",
+        line("shallow"),
+        line("deep"),
+    )
+}
+
+const STORE: &str = r#"def load() -> dict[str, list[int]]:
+    return {}
+
+
+def find() -> dict[str, list[int]]:
+    return load()
+
+
+def items() -> list[int]:
+    return load()["items"]
+
+
+def put(d: dict[str, list[int]]) -> None:
+    d["x"] = [1]
+
+
+def fill(d: dict[str, list[int]]) -> None:
+    d["items"].append(1)
+"#;
+
+/// A change of the shared result, which both tables protect, and one below it, which only the
+/// deep table does: directly, through a wrapper in another module, and through a helper the
+/// value is handed to.
+const CHANGES: &[(&str, bool)] = &[
+    ("d = load()\n    d[\"x\"] = [1]", true),
+    ("d = load()\n    d[\"items\"].append(1)", false),
+    ("d = find()\n    d[\"x\"] = [1]", true),
+    ("d = find()\n    d[\"items\"].append(1)", false),
+    ("xs = items()\n    xs.append(1)", false),
+    ("put(load())", true),
+    ("fill(load())", false),
+];
+
+#[test]
+fn a_readonly_report_fails_the_run_only_for_the_tables_whose_depth_covers_the_change() {
+    for (change, at_the_top) in CHANGES {
+        for failing in ["none", "shallow", "deep"] {
+            let p = Project::new("fail_readonly_depth");
+            p.write("pyproject.toml", &two_readonly_tables(failing))
+                .write("store.py", STORE)
+                .write(
+                    "use.py",
+                    &format!(
+                        "from store import fill, find, items, load, put\n\n\ndef change() -> None:\n    {change}\n"
+                    ),
+                );
+            let (code, out, err) = check(&p, &["--output-format", "json"]);
+            let found = reports(&out);
+            assert!(
+                found
+                    .iter()
+                    .any(|d| d["rule_code"] == "MUT202" && d["path"] == "use.py"),
+                "{change}: {out}{err}"
+            );
+            let expected = i32::from(failing == "deep" || failing == "shallow" && *at_the_top);
+            assert_eq!(code, expected, "{change} ({failing} fails): {out}{err}");
+        }
+    }
+}
+
+#[test]
+fn a_producer_in_a_submodule_is_not_one_of_a_pattern_naming_its_package() {
+    let p = Project::new("fail_readonly_submodule");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.readonly-returns]]\nname = \"package\"\nproducers = [\"pkg:*\"]\nfail = true\n\n[[tool.heki.readonly-returns]]\nname = \"sub\"\nproducers = [\"pkg.sub:load\"]\n",
+    )
+    .write(
+        "pkg/__init__.py",
+        "def load_top() -> dict[str, int]:\n    return {}\n",
+    )
+    .write("pkg/sub.py", "def load() -> dict[str, int]:\n    return {}\n")
+    .write(
+        "use.py",
+        "from pkg.sub import load\n\n\ndef change() -> None:\n    d = load()\n    d[\"x\"] = 1\n",
+    );
+    let (code, out, err) = check(&p, &["--output-format", "json"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(reports(&out).len(), 1, "{out}");
+    p.write(
+        "use.py",
+        "from pkg import load_top\n\n\ndef change() -> None:\n    d = load_top()\n    d[\"x\"] = 1\n",
+    );
+    let (code, out, err) = check(&p, &["--output-format", "json"]);
+    assert_eq!(code, 1, "{out}{err}");
+}
+
+#[test]
+fn a_value_from_either_of_two_producers_fails_the_run_when_either_table_says_so() {
+    const APP: &str = "def load_a() -> dict[str, int]:\n    return {}\n\n\ndef load_b() -> dict[str, int]:\n    return {}\n\n\ndef change(flag: bool) -> None:\n    if flag:\n        d = load_a()\n    else:\n        d = load_b()\n    d[\"x\"] = 1\n";
+    for (fail_a, fail_b, expected) in [
+        ("", "", 0),
+        ("fail = true\n", "", 1),
+        ("", "fail = true\n", 1),
+    ] {
+        let p = Project::new("fail_readonly_either");
+        p.write(
+            "pyproject.toml",
+            &format!(
+                "[project]\nname = \"t\"\n\n[[tool.heki.readonly-returns]]\nname = \"a\"\nproducers = [\"app.load_a\"]\n{fail_a}\n[[tool.heki.readonly-returns]]\nname = \"b\"\nproducers = [\"app.load_b\"]\n{fail_b}"
+            ),
+        )
+        .write("app.py", APP);
+        let (code, out, err) = check(&p, &["--output-format", "json"]);
+        assert_eq!(reports(&out).len(), 1, "{out}");
+        assert_eq!(code, expected, "{fail_a:?} {fail_b:?}: {out}{err}");
+    }
+}

@@ -1114,6 +1114,10 @@ fail = true
 - Other warnings and heuristic reports stay advisory: `fail = true` does not change `fail-on`,
   the rules' severities, or the tier of a report. The outputs (text, JSON, SARIF, GitHub
   annotations) are the same with and without it.
+- A report that several contracts find stands for each of them, and fails the run when one of
+  them has `fail = true`. A `MUT202` report is of the `readonly-returns` tables naming a producer
+  the changed value may come from: all of them when the change reaches the producer's result
+  itself, and only those with `deep = true` when it changes a value below it.
 - A report that a [baseline](adoption.md#ratchet-baselines) records, or that an inline
   [suppression](#inline-suppressions) hides, does not fail the run. With `--touched`, the reports
   the run shows decide; the note about the ones it does not show says how many would fail it.
