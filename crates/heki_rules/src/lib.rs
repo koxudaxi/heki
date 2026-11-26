@@ -1036,7 +1036,7 @@ pub enum RuleConfigError {
     Glob {
         pattern: String,
         context: &'static str,
-        cause: globset::Error,
+        cause: heki_env::glob::Error,
     },
     /// An entry naming `<external>` other than as `<external>.<name>`.
     #[error(

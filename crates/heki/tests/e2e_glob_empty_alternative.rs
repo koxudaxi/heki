@@ -222,3 +222,28 @@ fn module_patterns_and_paths_take_an_empty_alternative() {
         Vec::<String>::new()
     );
 }
+
+/// Each group with an empty alternative doubles the globs a pattern stands for, so a pattern of
+/// many such groups is a configuration error instead of an expansion that fills the memory.
+#[test]
+fn a_pattern_standing_for_too_many_globs_is_a_configuration_error() {
+    let many = "{,a}".repeat(20);
+    for (name, config) in [
+        (
+            "glob_alternatives_contract",
+            call_owners(
+                &format!("allowed-callers = [\"pkg.run:outer{many}\"]"),
+                "lexical",
+            ),
+        ),
+        (
+            "glob_alternatives_exclude",
+            format!("[tool.heki]\nexclude = [\"pkg/{many}.py\"]\n"),
+        ),
+    ] {
+        let p = project(name, &config);
+        let (code, _, stderr) = p.check(&["--output-format", "concise", "pkg"]);
+        assert_eq!(code, 2, "{stderr}");
+        assert!(stderr.contains("more than 256 globs"), "{stderr}");
+    }
+}

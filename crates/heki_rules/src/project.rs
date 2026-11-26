@@ -69,7 +69,7 @@ pub enum ProjectError {
     Glob {
         pattern: String,
         what: &'static str,
-        cause: globset::Error,
+        cause: heki_env::glob::Error,
     },
     #[error("path `{0}` does not exist")]
     MissingPath(PathBuf),
@@ -346,7 +346,7 @@ fn glob_set(patterns: &[String], what: &'static str) -> Result<GlobSet, ProjectE
     b.build().map_err(|cause| ProjectError::Glob {
         pattern: patterns.join(", "),
         what,
-        cause,
+        cause: cause.into(),
     })
 }
 

@@ -35,7 +35,7 @@ pub enum SelectionError {
     #[error("invalid glob `{pattern}` in `lint.per-file-ignores`: {cause}")]
     Glob {
         pattern: String,
-        cause: globset::Error,
+        cause: heki_env::glob::Error,
     },
 }
 
