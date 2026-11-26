@@ -302,7 +302,7 @@ against them. Replace `app` with your package.
               fetch-depth: 0   # the base branch is compared below
           - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
           - name: Walls
-            run: uvx heki==0.8.0 check
+            run: uvx heki==0.9.0 check
           - name: Compare with the base branch
             shell: bash
             env:
@@ -311,12 +311,12 @@ against them. Replace `app` with your package.
             run: |
               git worktree add ../base "origin/$BASE"
               keys() { jq -r '.suppressed[] | [.file, .function, .code, .target] | @tsv' "$1" | sort; }
-              uvx heki==0.8.0 check --report-suppressed "$RUNNER_TEMP/head.json" > /dev/null || test "$?" -eq 1
-              (cd ../base && uvx heki==0.8.0 check --report-suppressed "$RUNNER_TEMP/base.json" > /dev/null || test "$?" -eq 1)
+              uvx heki==0.9.0 check --report-suppressed "$RUNNER_TEMP/head.json" > /dev/null || test "$?" -eq 1
+              (cd ../base && uvx heki==0.9.0 check --report-suppressed "$RUNNER_TEMP/base.json" > /dev/null || test "$?" -eq 1)
               new=$(diff <(keys "$RUNNER_TEMP/base.json") <(keys "$RUNNER_TEMP/head.json") | grep '^>' || true)
               test -z "$new" || { echo "New inline suppressions:"; echo "$new"; exit 1; }
-              (cd ../base && uvx heki==0.8.0 snapshot --config "$GITHUB_WORKSPACE/heki.toml" --target-version "$TARGET" > "$RUNNER_TEMP/base-summary.json")
-              uvx heki==0.8.0 check --select MUT103 --fail-on warning --target-version "$TARGET" --snapshot "$RUNNER_TEMP/base-summary.json" \
+              (cd ../base && uvx heki==0.9.0 snapshot --config "$GITHUB_WORKSPACE/heki.toml" --target-version "$TARGET" > "$RUNNER_TEMP/base-summary.json")
+              uvx heki==0.9.0 check --select MUT103 --fail-on warning --target-version "$TARGET" --snapshot "$RUNNER_TEMP/base-summary.json" \
                 --report-suppressed "$RUNNER_TEMP/mut103.json"
               hidden=$(keys "$RUNNER_TEMP/mut103.json")
               test -z "$hidden" || { echo "Effect changes hidden by inline suppressions:"; echo "$hidden"; exit 1; }
