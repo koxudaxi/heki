@@ -234,13 +234,17 @@ fn takes_cancellation(
     if clause.types.is_empty() {
         return Takes::Yes;
     }
+    // A name the clause reads without an instruction (a parameter) is of no class heki knows.
+    let Some(root) = type_expression(shape.f, clause.test) else {
+        return Takes::Unknown;
+    };
     let classes: Vec<VarId> = match type_expression_inst(shape.f, clause.test) {
         Some(InstKind::AllocBuiltin {
             kind: BuiltinKind::Tuple,
             elems,
             ..
         }) => elems.clone(),
-        _ => type_expression(shape.f, clause.test).into_iter().collect(),
+        _ => vec![root],
     };
     let named = |v: VarId| class_named(shape, tcx, decls, clause.test, v);
     let mut takes = Takes::No;

@@ -121,7 +121,7 @@ fn scope_shield<'i>(
         && let Callee::External(symbol) = resolve_inst(tcx, types, &inst.kind)
         && let Some(slot) = tcx.catalog(&symbol).and_then(|e| e.cancel_scope.as_ref())
     {
-        return match passed_shield(def, (args, kwargs, *star_from), slot) {
+        return match passed_shield(def, args, kwargs, *star_from, slot) {
             Some(true) => Some(ShieldAt::Shielded),
             Some(false) if !sets_shield => None,
             _ => Some(ShieldAt::Open),
@@ -142,7 +142,9 @@ fn scope_shield<'i>(
 /// pass it.
 fn passed_shield<'i>(
     def: &dyn Fn(VarId) -> Option<&'i Inst>,
-    (args, kwargs, star_from): (&[VarId], &[(Option<String>, VarId)], Option<u8>),
+    args: &[VarId],
+    kwargs: &[(Option<String>, VarId)],
+    star_from: Option<u8>,
     slot: &ArgSlot,
 ) -> Option<bool> {
     let unpacked = star_from.is_some() || kwargs.iter().any(|(k, _)| k.is_none());

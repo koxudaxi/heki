@@ -393,7 +393,8 @@ fn a_call_through_an_override_decides_the_report() {
     );
 }
 
-/// The cancellation's classes named by a call, by an imported call, or in a tuple; a timeout
+/// The cancellation's classes named by a call, by an imported call, in a tuple, or by a bare
+/// `except`; a timeout
 /// scope that does not shield; a re-delivery that something runs after.
 const HANDLERS: &str = r#"import anyio
 from anyio import get_cancelled_exc_class
@@ -423,6 +424,14 @@ async def in_a_tuple() -> None:
         raise
 
 
+async def bare() -> None:
+    try:
+        await anyio.sleep(1)
+    except:
+        await anyio.sleep(0.1)
+        raise
+
+
 async def under_a_timeout() -> None:
     try:
         pass
@@ -442,7 +451,7 @@ async def redelivered_too_early() -> None:
 
 /// Scopes that shield (a constructor imported by name) or may shield (a `shield` set on the
 /// scope, options unpacked, a scope made elsewhere), and clauses whose classes heki cannot tell
-/// (a parameter, `except*`).
+/// (a parameter, an attribute, `except*`).
 const SCOPES: &str = r#"import anyio
 from anyio import CancelScope
 
@@ -450,6 +459,7 @@ from anyio import CancelScope
 class Holder:
     def __init__(self) -> None:
         self._scope = anyio.CancelScope()
+        self.errors: type[BaseException] = BaseException
 
     async def close(self, options: dict[str, bool], errors: type[BaseException]) -> None:
         try:
@@ -467,6 +477,10 @@ class Holder:
         try:
             await anyio.sleep(1)
         except errors:
+            await anyio.sleep(0.1)
+        try:
+            await anyio.sleep(1)
+        except self.errors:
             await anyio.sleep(0.1)
 
 
@@ -486,11 +500,32 @@ fn reads_the_cancellation_classes_and_the_scopes_that_may_shield() {
     assert_eq!(
         found(&diagnostics(&p, SELECT)),
         vec![
-            d("pkg/handlers.py", 9, "by_method", "anyio.sleep->anyio.sleep"),
+            d(
+                "pkg/handlers.py",
+                9,
+                "by_method",
+                "anyio.sleep->anyio.sleep"
+            ),
             d("pkg/handlers.py", 17, "by_name", "anyio.sleep->anyio.sleep"),
-            d("pkg/handlers.py", 25, "in_a_tuple", "anyio.sleep->anyio.sleep"),
-            d("pkg/handlers.py", 34, "under_a_timeout", "anyio.sleep->anyio.sleep"),
-            d("pkg/handlers.py", 42, "redelivered_too_early", "anyio.lowlevel.checkpoint->anyio.lowlevel.checkpoint"),
+            d(
+                "pkg/handlers.py",
+                25,
+                "in_a_tuple",
+                "anyio.sleep->anyio.sleep"
+            ),
+            d("pkg/handlers.py", 33, "bare", "anyio.sleep->anyio.sleep"),
+            d(
+                "pkg/handlers.py",
+                42,
+                "under_a_timeout",
+                "anyio.sleep->anyio.sleep"
+            ),
+            d(
+                "pkg/handlers.py",
+                50,
+                "redelivered_too_early",
+                "anyio.lowlevel.checkpoint->anyio.lowlevel.checkpoint"
+            ),
         ]
     );
 }
