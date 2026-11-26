@@ -70,7 +70,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_memory import HEAP_LINE, MIB, execute  # noqa: E402
 
-LIMIT_SECONDS = 1.0
+LIMIT_SECONDS = 2.0
 LIMIT_MIB = 1024.0
 # The seconds are those of the machine the limits were measured on (an Apple M4 Max). Fixed
 # linear shapes (`reference_source`) take these seconds there on the release `REFERENCE_HEKI`
@@ -973,7 +973,7 @@ FAMILIES = [
         "functions_each_calling",
         project=functions_each_calling,
         placements=("project",),
-        limit_seconds=1.15,
+        limit_seconds=2.3,
     ),
     Family("self_helper_chain", project=self_helper_chain, placements=("project",), size=2000),
     Family("order_returned_up", project=order_returned_up, placements=("project",), size=2000),

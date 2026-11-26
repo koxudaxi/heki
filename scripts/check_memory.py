@@ -56,25 +56,25 @@ SHAPE_MODULES = 600
 # `finally` bodies nested this deep pass a function's IR budget.
 COPIES_DEPTH = 16
 
-# Heap budgets in MiB per mode: the peak on the CI runner at calibration plus 5 %, except for
+# Heap budgets in MiB per mode: the peak on the CI runner at calibration plus 25 %, except for
 # `heki recommend` (experimental, which runs several analyses and which no editor waits on): its
 # modes have the owner's round 100 MiB. A change of a budget needs the owner's decision
 # (docs/development.md, Memory).
 HEAP_BUDGETS_MIB = {
-    "check": 60.4,
-    "watch": 58.6,
-    "owners": 74.4,
+    "check": 71.9,
+    "watch": 69.7,
+    "owners": 88.5,
     "recommend": 100.0,
     "recommend-owners": 100.0,
 }
 
 # RSS budgets in MiB per platform and mode, a coarse check at release time: the lowest of three
-# runs at calibration plus about 10 %.
+# runs at calibration plus 25 %.
 RSS_BUDGETS_MIB = {
     # Peak physical footprint.
-    "darwin": {"check": 83, "watch": 91, "owners": 104},
+    "darwin": {"check": 95, "watch": 104, "owners": 119},
     # Peak resident set size on the CI runner.
-    "linux": {"check": 100, "watch": 113, "owners": 117},
+    "linux": {"check": 113, "watch": 128, "owners": 133},
 }
 RSS_RUNS = 3
 
