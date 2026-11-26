@@ -745,6 +745,12 @@ const MADE_FACTORY: &str =
 const MADE_FACTORY_EITHER: &str = "from pkg.made_models import Quiet, Waiter\n\n\ndef make(flag=False):\n    if flag:\n        return Quiet()\n    return Waiter()\n";
 const MADE_USE: &str =
     "from pkg.made_factory import make\n\n\nasync def serve() -> None:\n    make().wait()\n";
+// The same factory constructing the class by a member of its module (`made_models.Waiter()`):
+// another file rebinding that member drops the class.
+const MADE_MEMBER_FACTORY: &str =
+    "from pkg import made_models\n\n\ndef make_member():\n    return made_models.Waiter()\n";
+const MADE_MEMBER_USE: &str = "from pkg.made_member import make_member\n\n\nasync def serve_member() -> None:\n    make_member().wait()\n";
+const MADE_MEMBER_REBINDING: &str = "from pkg import made_models\n\n\ndef swap() -> None:\n    made_models.Waiter = made_models.Quiet\n";
 // Functions values hold, defined in one module and called in others: the closure a factory
 // returns (`ReturnFact::ty`), a named tuple's field (`ClassDecl::init_fields`), and a
 // `staticmethod(partial(...))` class attribute (`NamedAttr::body_partial`).
@@ -1635,6 +1641,7 @@ fn steps_exact_effects() -> Vec<Step> {
 /// while every return constructs that one and it is a class.
 fn steps_returned_types() -> Vec<Step> {
     const MADE: &[(&str, &str)] = &[("pkg/made_use.py", "EFF101")];
+    const MEMBER: &[(&str, &str)] = &[("pkg/made_member_use.py", "EFF101")];
     const EXACT: &[(&str, &str)] = &[("pkg/factory_use.py", "EFF101")];
     const HEURISTIC: &[(&str, &str)] = &[("pkg/factory_use.py", "EFF101 [heuristic]")];
     const NEITHER: &[(&str, &str)] = &[
@@ -1688,6 +1695,27 @@ fn steps_returned_types() -> Vec<Step> {
             vec![save("pkg/made_models.py", MADE_MODELS)],
         )
         .present(MADE),
+        Step::new(
+            "a factory constructs the class by a member of its module",
+            vec![
+                Action::Create("pkg/made_member.py", MADE_MEMBER_FACTORY.to_owned()),
+                Action::Create("pkg/made_member_use.py", MADE_MEMBER_USE.to_owned()),
+            ],
+        )
+        .present(MEMBER),
+        Step::new(
+            "another file rebinds that member",
+            vec![Action::Create(
+                "pkg/made_member_rebinding.py",
+                MADE_MEMBER_REBINDING.to_owned(),
+            )],
+        )
+        .absent(MEMBER),
+        Step::new(
+            "the rebinding is removed",
+            vec![Action::Delete("pkg/made_member_rebinding.py")],
+        )
+        .present(MEMBER),
     ]
 }
 

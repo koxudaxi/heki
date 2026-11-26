@@ -435,3 +435,58 @@ fn a_function_without_a_return_annotation_gives_the_class_every_returned_call_gi
         .collect();
     assert_eq!(effects, ["blocking_fs"]);
 }
+
+const MEMBER_FACTORY: &str = r#"from pkg import models
+
+
+def make():
+    return models.Other()
+"#;
+
+const MEMBER_CALLER: &str = r#"from pkg.member_factory import make
+
+
+def serve() -> None:
+    make().save()
+"#;
+
+const MEMBER_REBINDING: &str = r#"from pkg import models
+
+
+class Quiet:
+    def save(self) -> None:
+        pass
+
+
+def swap() -> None:
+    models.Other = Quiet
+"#;
+
+/// A function returning `models.Other()` gives callers the instance of `pkg.models.Other` only
+/// while no module rebinds that member, not only the module `pkg.models` it loads.
+#[test]
+fn a_rebinding_of_the_member_a_factory_calls_drops_the_class_it_returns() {
+    let p = Project::new("return_facts_called_member");
+    p.write("pyproject.toml", FS_BOUNDARY)
+        .write("pkg/__init__.py", "")
+        .write("pkg/models.py", MODELS)
+        .write("pkg/member_factory.py", MEMBER_FACTORY)
+        .write("pkg/app.py", MEMBER_CALLER);
+    let messages = |p: &Project| -> Vec<String> {
+        let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
+        assert!(code == 0 || code == 1, "exit {code}: {stdout}{stderr}");
+        let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+        diags
+            .iter()
+            .map(|d| d["message"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        messages(&p),
+        [
+            "`serve` reaches blocking_fs (`pathlib.Path.write_text` via `pkg.models.Other.save`), which effect boundary `fs` forbids"
+        ]
+    );
+    p.write("pkg/swapping.py", MEMBER_REBINDING);
+    assert_eq!(messages(&p), Vec::<String>::new());
+}

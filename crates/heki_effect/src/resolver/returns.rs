@@ -432,7 +432,7 @@ pub(super) fn record_return_facts(
         if let Some(ty) = facts.returned_type(definitions) {
             let fact = decided.entry(qualname).or_default();
             fact.ty = Some(ty);
-            fact.ty_globals = globals_read(decls, definitions);
+            fact.ty_globals = facts.globals_read(decls, definitions);
         }
     }
     for (qualname, fact) in decided {
@@ -440,23 +440,6 @@ pub(super) fn record_return_facts(
             d.returns = Some(Box::new(fact));
         }
     }
-}
-
-/// The module globals `definitions` read, by the fqn each name reads ([`ReturnFact::ty_globals`]):
-/// what an import binds, or the module's own global.
-fn globals_read(decls: &ModuleDecls, definitions: &[TypedReturns<'_>]) -> Vec<String> {
-    let mut out: Vec<String> = definitions
-        .iter()
-        .flat_map(|d| d.f.blocks.iter().flat_map(|b| &b.insts))
-        .filter_map(|i| match &i.kind {
-            InstKind::LoadGlobal { name, .. } => Some(name.as_str()),
-            _ => None,
-        })
-        .map(|name| decls.global_read(name))
-        .collect();
-    out.sort();
-    out.dedup();
-    out
 }
 
 /// One definition whose returned values may say more than its annotation: the values, and what
@@ -760,6 +743,39 @@ impl<'f> ReturnFacts<'_, 'f> {
             return Ty::one_of(named);
         }
         each.all(|t| t.as_ref() == Some(&first)).then_some(first)
+    }
+
+    /// The module globals `definitions` read, by the fqn each name reads ([`ReturnFact::ty_globals`]):
+    /// what an import binds, or the module's own global; and the member of a module they load
+    /// (`pkg.models.Other` of `models.Other()`), which another module may rebind.
+    fn globals_read(&self, decls: &ModuleDecls, definitions: &[TypedReturns<'_>]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for d in definitions {
+            let inferred = self.inferred(d.f);
+            for i in d.f.blocks.iter().flat_map(|b| &b.insts) {
+                match &i.kind {
+                    InstKind::LoadGlobal { name, .. } => out.push(decls.global_read(name)),
+                    InstKind::MethodCall {
+                        recv: owner,
+                        method: member,
+                        ..
+                    }
+                    | InstKind::AttrLoad {
+                        obj: owner,
+                        attr: member,
+                        ..
+                    } => {
+                        if let Some(Ty::Ref(module)) = inferred.ty(*owner) {
+                            out.push(format!("{module}.{member}"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// The types of `f`, inferred once.
