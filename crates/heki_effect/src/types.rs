@@ -366,6 +366,17 @@ impl Ty {
         .unwrap_or_else(|| self.clone())
     }
 
+    /// Whether the type is a list, deque, set, or dict that says nothing of its items (`list`
+    /// as annotated, not `list[Handler]`).
+    pub(crate) fn is_bare_container(&self) -> bool {
+        matches!(self, Ty::Inst(o) if o.args == Args::None && Container::of_class(&o.class).is_some())
+    }
+
+    /// Whether the type is an instance of the class of `declared`.
+    pub(crate) fn keeps_class_of(&self, declared: &Ty) -> bool {
+        matches!((self, declared), (Ty::Inst(a), Ty::Inst(b)) if a.class == b.class)
+    }
+
     /// The type with the items of every instance unknown: what a container holds once code
     /// heki does not follow item by item adds to it.
     pub(crate) fn without_items(&self) -> Ty {

@@ -426,17 +426,13 @@ impl Joins {
             }
         }
         for target in &self.in_place {
-            if let StoreTarget::Attr(class, attr) = target {
-                let declared = decls
-                    .classes
-                    .get(class)
-                    .is_none_or(|c| c.attr_types.contains_key(attr));
-                if !declared {
-                    out.in_place
-                        .entry(class.clone())
-                        .or_default()
-                        .insert(attr.clone());
-                }
+            if let StoreTarget::Attr(class, attr) = target
+                && !declares_items(decls, class, attr)
+            {
+                out.in_place
+                    .entry(class.clone())
+                    .or_default()
+                    .insert(attr.clone());
             }
         }
         for (target, joined) in &self.every {
@@ -451,8 +447,21 @@ impl Joins {
                     let declared = decls
                         .classes
                         .get(class)
-                        .is_none_or(|c| c.attr_types.contains_key(attr));
-                    if declared {
+                        .and_then(|c| c.attr_types.get(attr));
+                    if declares_items(decls, class, attr) {
+                        continue;
+                    }
+                    // A bare container annotation takes its items from the stores.
+                    if let (Some(d), Some(t)) = (declared, &established) {
+                        if t.keeps_class_of(d) {
+                            out.itemised
+                                .entry(class.clone())
+                                .or_default()
+                                .insert(attr.clone(), t.clone());
+                        }
+                        continue;
+                    }
+                    if declared.is_some() {
                         continue;
                     }
                     let store = match (established, joined) {
@@ -483,6 +492,18 @@ struct Decided {
     restoring: BTreeSet<String>,
     in_place: BTreeMap<String, BTreeSet<String>>,
     unowned: BTreeMap<String, BTreeSet<String>>,
+    /// The bare container annotations of attributes, with the items the stores give them.
+    itemised: BTreeMap<String, BTreeMap<String, Ty>>,
+}
+
+/// Whether the annotation of `attr` of `class` is not one a store may refine: the class is not
+/// the module's, or the annotation says more than its class (`list[Handler]`, not `list`).
+fn declares_items(decls: &ModuleDecls, class: &str, attr: &str) -> bool {
+    decls.classes.get(class).is_none_or(|c| {
+        c.attr_types
+            .get(attr)
+            .is_some_and(|t| !t.is_bare_container())
+    })
 }
 
 impl Decided {
@@ -495,6 +516,11 @@ impl Decided {
                     .iter()
                     .map(|(attr, store)| (Box::from(attr.as_str()), store.clone()))
                     .collect();
+            }
+        }
+        for (qualname, attrs) in self.itemised {
+            if let Some(class) = decls.classes.get_mut(&qualname) {
+                class.attr_types.extend(attrs);
             }
         }
         for qualname in self.any {
@@ -1260,7 +1286,12 @@ impl Deciding<'_> {
             restoring |= joins.restoring.contains(qualname);
             in_place |= joins.in_place.contains(&target);
             match self.decls.classes[qualname].attr_types.get(attr) {
-                Some(t) => out.add(Some(Some(t))),
+                Some(t) if !t.is_bare_container() => out.add(Some(Some(t))),
+                // A bare container annotation gives the class; the stores give the items.
+                Some(t) => match joins.every.get(&target) {
+                    Some(Stored::Of(s)) if s.keeps_class_of(t) => out.add(Some(Some(s))),
+                    _ => out.add(Some(Some(t))),
+                },
                 None => match joins
                     .every
                     .get(&StoreTarget::Attr(qualname.to_owned(), attr.to_owned()))
@@ -1341,20 +1372,27 @@ impl Deciding<'_> {
             if project.property_at(c, attr) {
                 return None;
             }
-            if let Some(t) = self.decls.classes[qualname].attr_types.get(attr) {
+            let declared = self.decls.classes[qualname].attr_types.get(attr);
+            if let Some(t) = declared.filter(|t| !t.is_bare_container()) {
                 return Some(Read::Of(t.clone()));
             }
+            let bare = declared.map(|t| Read::Of(t.clone()));
             let target = StoreTarget::Attr(qualname.to_owned(), attr.to_owned());
             if !self.establishable.contains(&target) {
+                if bare.is_some() {
+                    return bare;
+                }
                 continue;
             }
             let mut consulted = self.consulted.borrow_mut();
             consulted.push(Key::Name(target.clone()));
             consulted.push(Key::Class(qualname.to_owned()));
             drop(consulted);
-            let family = self.family(class)?;
+            let Some(family) = self.family(class) else {
+                return bare;
+            };
             let joins = self.joins.borrow();
-            return match joins.establishing.get(&target) {
+            let read = match joins.establishing.get(&target) {
                 None | Some(Stored::Nothing) => {
                     self.pending.borrow_mut().insert(target);
                     Some(Read::Pending)
@@ -1362,6 +1400,12 @@ impl Deciding<'_> {
                 Some(Stored::Open) => None,
                 Some(Stored::Of(_)) if joins.any.contains(qualname) => None,
                 Some(Stored::Of(_)) => self.join_family(&joins, &family, attr).map(Read::Of),
+            };
+            // The annotation's class with the items the stores give it.
+            return match (declared, read) {
+                (Some(d), Some(Read::Of(t))) if t.keeps_class_of(d) => Some(Read::Of(t)),
+                (Some(_), Some(Read::Of(_)) | None) => bare,
+                (_, read) => read,
             };
         }
         None

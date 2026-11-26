@@ -2744,7 +2744,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                 return Ok(self.need(args[0])?.and_then(|t| self.class_of(t)));
             }
             "builtins.sorted" => Ty::container("builtins.list", Args::items(items(0))),
-            "builtins.list" | "builtins.set" | "builtins.frozenset" => {
+            "builtins.list" | "builtins.set" | "builtins.frozenset" | "collections.deque" => {
                 Ty::container(fqn, Args::items(items(0)))
             }
             "builtins.tuple" if args.is_empty() => Ty::container(fqn, Args::Tuple(Vec::new())),
@@ -2790,9 +2790,9 @@ impl<'e, 'a> Engine<'e, 'a> {
                     .declared_or_inferred(value, declared.as_ref())
                     .map(|t| t.cloned());
             }
-            // A library class that copies its argument (`collections.deque(xs)`) makes an
-            // instance of itself.
-            "collections.deque" | "collections.OrderedDict" | "builtins.bytearray" => {
+            // A library class that copies its argument (`collections.OrderedDict(pairs)`) makes
+            // an instance of itself.
+            "collections.OrderedDict" | "builtins.bytearray" => {
                 return Ok(self.cx.call_result(fqn, |i, k| self.passed(call, i, k)));
             }
             // A copy (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`) has its original's
