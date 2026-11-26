@@ -832,6 +832,50 @@ fn reads_of_cells_a_comprehension_stores_stay_within_its_budget() {
     );
 }
 
+/// A list comprehension that stores `names` variables with assignment expressions in its
+/// element, and the function reads each one: a single block in the comprehension's scope, so the
+/// walks over its cells grow with the number of cells alone.
+fn walrus_stores_in_one_element(names: usize) -> String {
+    let stores: Vec<String> = (0..names).map(|k| format!("(v{k} := make())")).collect();
+    let reads: Vec<String> = (0..names).map(|k| format!("v{k}._given")).collect();
+    let lines = [
+        "class Model:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self._given = 1".to_owned(),
+        String::new(),
+        String::new(),
+        "def make() -> Model:".to_owned(),
+        "    return Model()".to_owned(),
+        String::new(),
+        String::new(),
+        "def shape(xs):".to_owned(),
+        format!("    out = [({},) for _ in xs]", stores.join(", ")),
+        format!("    return out, {}", reads.join(", ")),
+    ];
+    lines.join("\n") + "\n"
+}
+
+/// The facts a comprehension stores in the cells of its function are collected in one pass over
+/// its instructions, charged to the budget of the cell stores: the steps grow with the
+/// comprehension, not with its instructions times its variables.
+#[test]
+fn the_cells_a_comprehension_stores_are_collected_in_one_pass() {
+    let config = "[project]\nname = \"t\"\nrequires-python = \">=3.11\"\n\n\
+                  [tool.heki.lint]\nselect = [\"MUT203\"]\n\n[[tool.heki.read-owners]]\n\
+                  name = \"given\"\ntargets = [\"m.Model._given\"]\nforbidden-readers = [\"m:*\"]\n";
+    let names = 400;
+    let found = check_linear(names, |names| {
+        let p = Project::new(&format!("bounds_walrus_one_pass_{names}"));
+        p.write("pyproject.toml", config)
+            .write("m.py", &walrus_stores_in_one_element(names));
+        p
+    });
+    assert_eq!(
+        found.iter().filter(|d| d["rule_code"] == "MUT203").count(),
+        names
+    );
+}
+
 /// A nested function an initializer calls writes a name chosen at run time on the last of a long
 /// chain of copies (`s1 = s0`, `s2 = s1`, ...) of each of two closure cells: the initializer's
 /// `self`, and another of its parameters. The parameter each chain holds is read from the copy

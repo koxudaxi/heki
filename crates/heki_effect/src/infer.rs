@@ -976,19 +976,16 @@ impl<'a> TypeCtx<'a> {
             returns.fold(Elem::Empty, |acc, e| acc.join(&e))
         };
         let creator = child.passed_from.map(|(creator, _)| creator);
-        let stored = (creator.into_iter())
+        let wanted: Vec<_> = (creator.into_iter())
             .flat_map(|creator| self.nesting().stored_for(id, creator))
+            .collect();
+        let found = child_cell_stores(child, &inferred.facts, &wanted);
+        let stored = (wanted.iter())
             .map(|(name, (_, there))| {
-                let stores = child.blocks.iter().flat_map(|b| &b.insts);
-                let fact = stores
-                    .filter_map(|i| match &i.kind {
-                        InstKind::StoreDeref { name: n, value } if n == name => {
-                            Some(&inferred.facts[value.0 as usize])
-                        }
-                        _ => None,
-                    })
-                    .fold(Fact::Unset, |acc, f| acc.join(f));
-                (there.clone(), fact)
+                let fact = (found.as_ref())
+                    .map(|found| found.get(name.as_str()).cloned().unwrap_or(Fact::Unset))
+                    .open_means(Fact::Unknown);
+                ((*there).clone(), fact)
             })
             .filter(|(_, fact)| *fact != Fact::Unset)
             .collect();
@@ -999,6 +996,37 @@ impl<'a> TypeCtx<'a> {
         self.scopes.outputs.borrow_mut().insert(key, out.clone());
         out
     }
+}
+
+/// What scope `child` stores in the cells `wanted` (by the name `child` reads each with), joined
+/// per cell, from the facts of its variables: one pass over its instructions, charged to the
+/// budget of the "cell stores" owner. Open past the budget.
+fn child_cell_stores<'a>(
+    child: &'a IrFunction,
+    facts: &[Fact],
+    wanted: &[(&String, &CellKey)],
+) -> Answer<FxHashMap<&'a str, Fact>> {
+    if wanted.is_empty() {
+        return Answer::Known(FxHashMap::default());
+    }
+    let names: FxHashSet<&str> = wanted.iter().map(|(name, _)| name.as_str()).collect();
+    let stores = || child.blocks.iter().flat_map(|b| &b.insts);
+    let pass = || {
+        let mut joined: FxHashMap<&str, Fact> = FxHashMap::default();
+        for inst in stores() {
+            if let InstKind::StoreDeref { name, value } = &inst.kind
+                && names.contains(name.as_str())
+            {
+                let slot = joined.entry(name.as_str()).or_insert(Fact::Unset);
+                *slot = slot.join(&facts[value.0 as usize]);
+            }
+        }
+        joined
+    };
+    Budget::of_function("cell stores", child)
+        .take(stores().count())
+        .then(pass)
+        .map_or(Answer::Open, Answer::Known)
 }
 
 /// The builtin sequences a slice of which is a new sequence of their class.
