@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Analysis-cost gate: run heki on generated shapes at the largest size it still models, and fail
-when one costs more than 1 s or 1 GiB beyond an empty module (docs/development.md, "Analysis
+when one costs more than 2 s or 1 GiB beyond an empty module (docs/development.md, "Analysis
 cost").
 
 Each family is a source shape that grows with n: a chain of calls each handed the previous
