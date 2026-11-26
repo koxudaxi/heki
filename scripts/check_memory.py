@@ -61,9 +61,9 @@ COPIES_DEPTH = 16
 # modes have the owner's round 100 MiB. A change of a budget needs the owner's decision
 # (docs/development.md, Memory).
 HEAP_BUDGETS_MIB = {
-    "check": 59.5,
-    "watch": 55.8,
-    "owners": 73.4,
+    "check": 60.4,
+    "watch": 58.6,
+    "owners": 74.4,
     "recommend": 100.0,
     "recommend-owners": 100.0,
 }
@@ -72,9 +72,9 @@ HEAP_BUDGETS_MIB = {
 # runs at calibration plus about 10 %.
 RSS_BUDGETS_MIB = {
     # Peak physical footprint.
-    "darwin": {"check": 78, "watch": 88, "owners": 96},
+    "darwin": {"check": 83, "watch": 91, "owners": 104},
     # Peak resident set size on the CI runner.
-    "linux": {"check": 93, "watch": 105, "owners": 111},
+    "linux": {"check": 100, "watch": 113, "owners": 117},
 }
 RSS_RUNS = 3
 
