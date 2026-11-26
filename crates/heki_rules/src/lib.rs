@@ -74,12 +74,18 @@ use std::borrow::Cow;
 use std::path::Path;
 use thiserror::Error;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// The family a rule belongs to, which its code starts with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum RuleFamily {
+    /// Changes of objects other code holds.
     Mut,
+    /// Effects: blocking calls and what a function runs.
     Eff,
+    /// Data and its types.
     Data,
+    /// Slower code that computes the right result.
     Opt,
+    /// Imports.
     Imp,
 }
 
@@ -122,20 +128,27 @@ impl Activation {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// What `heki rule` knows about a rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct RuleMeta {
+    /// The code of the rule (`EFF101`).
     pub code: &'static str,
+    /// The name of the rule (`async-blocking-call`), which also names its page.
     pub slug: &'static str,
     pub family: RuleFamily,
+    /// The certainty of the rule's reports at most: heuristic until the rule is certified.
     pub certainty: Certainty,
     pub activation: Activation,
     pub consequence: Consequence,
+    /// Whether `--fix` applies the rule's fix by default.
     pub auto_fix_default: bool,
     /// A proven-safe rewrite that `--fix` applies only with `--include-size-dependent`.
     pub size_dependent_fix: bool,
     /// A fix that may change what the program does: `--fix` and `--diff` apply it only with
     /// `--unsafe-fixes`, and the language server offers it as a quick fix that is not preferred.
     pub unsafe_fix: bool,
+    /// One line saying what the rule reports.
     pub summary: &'static str,
     /// Ruff-style documentation (`crates/heki_rules/rule-docs/<CODE>.md`): printed by
     /// `heki rule <CODE>` and published as the rule's page.

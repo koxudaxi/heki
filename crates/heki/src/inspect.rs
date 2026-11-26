@@ -19,8 +19,8 @@ use heki_rules::inspect::{
 };
 use heki_rules::project::{CommandPaths, Facts, Indexed, ParsedFile, canonical, regressed};
 use rustc_hash::{FxHashMap, FxHashSet};
+use schemars::JsonSchema;
 use serde::Serialize;
-use serde_json::json;
 use std::cell::OnceCell;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -68,11 +68,11 @@ const SYMBOL_FORMS: &str = "name a function as `module.function`, `module.Class.
 type Outcome = std::result::Result<Vec<(FuncKey, Option<&'static str>)>, Failure>;
 
 /// One element of the JSON output: a report, or the error object of a symbol.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 #[serde(untagged)]
-enum Entry {
+pub(crate) enum Entry {
     Report(Box<InspectReport>),
-    Error(serde_json::Value),
+    Error(Box<InspectError>),
 }
 
 pub(crate) fn run(args: &InspectArgs) -> Result<ExitCode> {
@@ -253,7 +253,9 @@ fn print(
                 failed = true;
                 let listed = listed(files, failure);
                 if json {
-                    entries.push(Entry::Error(error_object(query, failure, &listed, errors)));
+                    entries.push(Entry::Error(Box::new(error_object(
+                        query, failure, &listed, errors,
+                    ))));
                 }
                 print_failure(failure, &listed);
             }
@@ -393,7 +395,7 @@ fn named(query: &str, resolution: Resolution) -> Outcome {
 }
 
 /// The functions a failure lists, as many as it shows.
-fn listed(files: Option<&Files<'_>>, failure: &Failure) -> Vec<serde_json::Value> {
+fn listed(files: Option<&Files<'_>>, failure: &Failure) -> Vec<Candidate> {
     failure
         .listed
         .iter()
@@ -402,45 +404,122 @@ fn listed(files: Option<&Files<'_>>, failure: &Failure) -> Vec<serde_json::Value
         .collect()
 }
 
+/// The object `heki inspect --output-format json` prints for a symbol that names no single
+/// function (an array of reports and these objects for `-`).
+#[derive(Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub(crate) struct InspectError {
+    // The fields of a JSON object are written in alphabetical order, as they always were.
+    /// Why the symbol names no function.
+    error: ErrorBody,
+    /// The symbol, as it was given.
+    query: String,
+    /// The version of this object: 1.
+    #[schemars(extend("const" = 1))]
+    version: u32,
+}
+
+/// What a symbol that names no single function got instead.
+#[derive(Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+struct ErrorBody {
+    /// With `kind` `ambiguous`: the functions the symbol may name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    candidates: Option<Vec<Candidate>>,
+    /// The page of the documentation that explains it.
+    docs: Option<heki_env::Docs>,
+    /// With `kind` `unknown`: the files heki could not analyze.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    errors: Option<Vec<String>>,
+    /// With `kind` `module`: the top-level functions of the module.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    functions: Option<Vec<Candidate>>,
+    /// What to do about it, one step per entry.
+    help: Vec<String>,
+    /// `invalid` (the symbol does not parse), `outside_project` (it names a file heki did not
+    /// check), `unknown`, `ambiguous`, `class`, or `module`.
+    #[schemars(extend("enum" = ["invalid", "outside_project", "unknown", "ambiguous", "class", "module"]))]
+    kind: &'static str,
+    /// What is wrong with the symbol.
+    message: String,
+    /// With `kind` `class`: the methods of the class.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    methods: Option<Vec<Candidate>>,
+    /// With `kind` `unknown`: the functions with similar names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suggestions: Option<Vec<Candidate>>,
+    /// Whether the list the failure carries is cut short.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    truncated: Option<bool>,
+}
+
 /// The JSON object of a symbol that names no single function.
 fn error_object(
     query: &str,
     failure: &Failure,
-    listed: &[serde_json::Value],
+    listed: &[Candidate],
     errors: &[String],
-) -> serde_json::Value {
+) -> InspectError {
     let problem = failure.problem();
-    let mut error = json!({
-        "kind": failure.kind,
-        "message": failure.message,
-        "help": problem.help,
-        "docs": problem.docs,
-    });
+    let mut error = ErrorBody {
+        candidates: None,
+        docs: problem.docs,
+        errors: (failure.kind == "unknown").then(|| errors.to_vec()),
+        functions: None,
+        help: problem.help,
+        kind: failure.kind,
+        message: failure.message.clone(),
+        methods: None,
+        suggestions: None,
+        truncated: None,
+    };
     if let Some((name, keys)) = &failure.listed {
-        error[*name] = json!(listed);
-        error["truncated"] = json!(keys.len() > MAX_CANDIDATES);
+        let list = Some(listed.to_vec());
+        match *name {
+            "candidates" => error.candidates = list,
+            "functions" => error.functions = list,
+            "methods" => error.methods = list,
+            _ => error.suggestions = list,
+        }
+        error.truncated = Some(keys.len() > MAX_CANDIDATES);
     }
-    if failure.kind == "unknown" {
-        error["errors"] = json!(errors);
+    InspectError {
+        error,
+        query: query.to_owned(),
+        version: heki_rules::inspect::INSPECT_VERSION,
     }
-    json!({ "version": heki_rules::inspect::INSPECT_VERSION, "query": query, "error": error })
 }
 
 /// Print why a symbol names no single function, and the functions to choose from.
-fn print_failure(failure: &Failure, listed: &[serde_json::Value]) {
+fn print_failure(failure: &Failure, listed: &[Candidate]) {
     crate::failure::print(OutputFormat::Full, &failure.problem());
     for c in listed {
         eprintln!(
             "  {}  {}:{}",
-            c["fqn"].as_str().unwrap_or_default(),
-            c["path"].as_str().unwrap_or_default(),
-            c["line"]
+            c.fqn,
+            c.path.as_deref().unwrap_or_default(),
+            c.line
+                .map_or_else(|| "null".to_owned(), |line| line.to_string())
         );
     }
 }
 
 /// A function to choose from: its name, where it is defined, and its kind.
-fn candidate(files: Option<&Files<'_>>, key: &FuncKey) -> serde_json::Value {
+#[derive(Clone, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+struct Candidate {
+    /// The fully qualified name.
+    fqn: String,
+    /// The kind of function: `method` (the name has a class) or `function`.
+    #[schemars(extend("enum" = ["method", "function"]))]
+    kind: &'static str,
+    /// The line of its definition; none when heki could not find it.
+    line: Option<u32>,
+    /// The file, relative to the project root; none when no file of the project defines it.
+    path: Option<String>,
+}
+
+fn candidate(files: Option<&Files<'_>>, key: &FuncKey) -> Candidate {
     let file = files.and_then(|files| files.of(key));
     let line = file.and_then(|f| {
         let lines = heki_ast::LineIndex::from_source(&f.source);
@@ -454,12 +533,12 @@ fn candidate(files: Option<&Files<'_>>, key: &FuncKey) -> serde_json::Value {
     } else {
         "function"
     };
-    json!({
-        "fqn": key.fqn(),
-        "path": file.map(|f| f.rel.clone()),
-        "line": line,
-        "kind": kind,
-    })
+    Candidate {
+        fqn: key.fqn(),
+        kind,
+        line,
+        path: file.map(|f| f.rel.clone()),
+    }
 }
 
 /// A function to report on: the text naming it, the function, and how the text named it.

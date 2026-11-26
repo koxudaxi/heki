@@ -367,6 +367,9 @@ $ printf '%s\n' app.users.load_user 'app.orders.*' | heki inspect - --output-for
 
 | Field | Content |
 | ----- | ------- |
+| `version`, `heki`, `root`, `query`, `resolved_from` | the version of the object, the heki release, the project root, the symbol as given, and how it named the function (`name`, `glob`, `suffix`, or `line`; `null` for an exact full name) |
+| `complete`, `errors` | `complete` is false when `errors` lists the files heki could not read or parse |
+| `function` | the function: full name, module, kind, definition lines, `async`, `generator`, `abstract`, `stub`, class, decorators, parameters, the call that offloads it to a thread or process pool, and whether a caller drives it without an event loop |
 | `effects` | the network, database, file, subprocess, sleep, and lock waits it reaches, and the clients and queries it creates, each with the shortest call chain |
 | `changes` | the parameters, `self` attributes, other objects' attributes, module globals, and closure cells it changes, directly or through calls, with the call chain to the change |
 | `retains` | the parameters it stores where they outlive the call |

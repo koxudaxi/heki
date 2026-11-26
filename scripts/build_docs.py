@@ -13,6 +13,8 @@
 - `docs/schemas/recommend-3.json`: the JSON Schema of `heki recommend --output-format json`
   (`recommend-1.json` and `recommend-2.json` stay published, unchanged, for the objects of
   versions 1 and 2).
+- `docs/schemas/<name>.json`: the JSON Schema of every other JSON format heki writes
+  (`heki check --output-format-json-schema <name>`), listed in `docs/output-formats.md`.
 - `docs/assets/example-check.svg`: `heki check --color always` on the README's examples, drawn
   as a terminal shows it (`scripts/ansi_svg.py`).
 
@@ -56,6 +58,21 @@ PRECISION_PAGE = DOCS / "precision.md"
 GETTING_STARTED_PAGE = DOCS / "getting-started.md"
 RECOMMEND_PAGE = DOCS / "recommend.md"
 RECOMMEND_SCHEMA = DOCS / "schemas" / "recommend-3.json"
+# The other JSON formats, by the name `heki check --output-format-json-schema` takes and the
+# file of `docs/schemas/` it publishes (`generate-prompt` keeps its schema in the binary).
+JSON_SCHEMAS = (
+    "check-1",
+    "report-suppressed-1",
+    "summary-snapshot-1",
+    "baseline-1",
+    "baseline-2",
+    "baseline-3",
+    "inspect-1",
+    "inspect-imports-1",
+    "rule-1",
+    "assumptions-1",
+    "error-1",
+)
 # The command the example of `docs/recommend.md` runs in the project of its Python blocks.
 RECOMMEND_EXAMPLE = ("recommend", "app")
 README = ROOT / "README.md"
@@ -526,6 +543,10 @@ def outputs(heki: Path, rules: list[dict], registry: dict, precision: dict) -> d
         RECOMMEND_SCHEMA: run(heki, "recommend", "--output-format-json-schema"),
         EXAMPLE_IMAGE: example_image(heki),
     }
+    for name in JSON_SCHEMAS:
+        files[DOCS / "schemas" / f"{name}.json"] = run(
+            heki, "check", "--output-format-json-schema", name
+        )
     for r in rules:
         files[RULES_DIR / f"{r['slug']}.md"] = rule_page(r, registry["policy"])
     return files

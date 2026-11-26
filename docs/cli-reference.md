@@ -152,9 +152,21 @@ Options:
           Write the reports that inline suppressions hid (`# heki: ignore[...]`, `# noqa`) to this JSON file, next to any `--output-format`, so CI can compare it with the file of the protected base branch and find the suppressions a change adds. It lists the reports of the files the run shows (`--touched`, PATHS that are files); a baseline changes nothing in it. Each entry names the report (`code`, `file`, `function`, `target` as its baseline key, `line`, `column`) and the `directive` that hid it (`kind`, `file`, `line`, `column`); the entries are sorted, and the same project gives the same bytes. Exits with 2 when the file cannot be written
 
       --output-format-json-schema <TARGET>
-          Print the JSON Schema of a JSON output and exit: `generate-prompt`, the object of `--generate-prompt --output-format json`
-          
-          [possible values: generate-prompt]
+          Print the JSON Schema of a JSON format heki writes and exit: `generate-prompt` (the object of `--generate-prompt --output-format json`), or a published schema by its name and version, such as `check-1` or `baseline-3` (docs/output-formats.md lists them)
+
+          Possible values:
+          - generate-prompt:     The object of `heki check --generate-prompt --output-format json`
+          - check-1:             The array of `heki check --output-format json`
+          - report-suppressed-1: The file `heki check --report-suppressed` writes
+          - summary-snapshot-1:  The summary snapshot file `heki snapshot --write` writes
+          - baseline-1:          A Ratchet baseline file, version 1 (counts diagnostics)
+          - baseline-2:          A Ratchet baseline file, version 2 (counts violation sites)
+          - baseline-3:          A Ratchet baseline file, version 3 (counts sites and the heuristic ones)
+          - inspect-1:           The output of `heki inspect --output-format json`
+          - inspect-imports-1:   The output of `heki inspect --imports --output-format json`
+          - rule-1:              The output of `heki rule --output-format json`
+          - assumptions-1:       The output of `heki assumptions --json`
+          - error-1:             What a failed command writes to stdout with `--output-format json`
 
   -h, --help
           Print help (see a summary with '-h')

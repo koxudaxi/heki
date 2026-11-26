@@ -4,12 +4,14 @@ mod declared;
 mod defaults;
 pub mod glob;
 pub mod problem;
+mod published;
 mod schema;
 mod stdlib;
 
 pub use declared::{Declared, EntryPoint, normalize_distribution, requirement_name};
 pub use defaults::with_defaults;
 pub use problem::{Docs, Explain, Problem, Setting};
+pub use published::{SCHEMA_SITE, published_schema};
 pub use stdlib::is_stdlib_module;
 
 use serde::{Deserialize, Serialize};
@@ -99,7 +101,7 @@ impl From<PythonVersion> for RuntimeProfile {
 }
 
 /// Diagnostic severity override (matches `t-linter` / `ty`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     Error,

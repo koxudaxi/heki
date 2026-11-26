@@ -95,9 +95,24 @@ impl LineIndex {
 }
 
 /// Byte-offset span in the original Python source file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 pub struct Span {
+    /// The offset of the first byte.
     pub start: u32,
+    /// The offset after the last byte.
     pub end: u32,
 }
 

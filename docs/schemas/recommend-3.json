@@ -1301,6 +1301,7 @@
           "type": "integer"
         },
         "rule": {
+          "description": "The code of the measured rule.",
           "type": "string"
         },
         "sample": {

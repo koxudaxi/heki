@@ -16,6 +16,7 @@ mod inspect;
 mod open_premises;
 mod prompt;
 mod recommend;
+mod schemas;
 mod skill;
 mod suppressed;
 mod version;
@@ -64,10 +65,44 @@ enum ColorChoice {
     Never,
 }
 
-/// `--output-format-json-schema`: the JSON output whose JSON Schema `heki check` prints.
+/// `--output-format-json-schema`: the JSON format whose JSON Schema `heki check` prints.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum JsonSchemaTarget {
+    /// The object of `heki check --generate-prompt --output-format json`.
     GeneratePrompt,
+    /// The array of `heki check --output-format json`.
+    #[value(name = "check-1")]
+    Check1,
+    /// The file `heki check --report-suppressed` writes.
+    #[value(name = "report-suppressed-1")]
+    ReportSuppressed1,
+    /// The summary snapshot file `heki snapshot --write` writes.
+    #[value(name = "summary-snapshot-1")]
+    SummarySnapshot1,
+    /// A Ratchet baseline file, version 1 (counts diagnostics).
+    #[value(name = "baseline-1")]
+    Baseline1,
+    /// A Ratchet baseline file, version 2 (counts violation sites).
+    #[value(name = "baseline-2")]
+    Baseline2,
+    /// A Ratchet baseline file, version 3 (counts sites and the heuristic ones).
+    #[value(name = "baseline-3")]
+    Baseline3,
+    /// The output of `heki inspect --output-format json`.
+    #[value(name = "inspect-1")]
+    Inspect1,
+    /// The output of `heki inspect --imports --output-format json`.
+    #[value(name = "inspect-imports-1")]
+    InspectImports1,
+    /// The output of `heki rule --output-format json`.
+    #[value(name = "rule-1")]
+    Rule1,
+    /// The output of `heki assumptions --json`.
+    #[value(name = "assumptions-1")]
+    Assumptions1,
+    /// What a failed command writes to stdout with `--output-format json`.
+    #[value(name = "error-1")]
+    Error1,
 }
 
 /// `--fail-on`: the least severity whose reports make `heki check` fail.
@@ -235,8 +270,9 @@ struct CheckArgs {
         ]
     )]
     report_suppressed: Option<PathBuf>,
-    /// Print the JSON Schema of a JSON output and exit: `generate-prompt`, the object of
-    /// `--generate-prompt --output-format json`.
+    /// Print the JSON Schema of a JSON format heki writes and exit: `generate-prompt` (the object
+    /// of `--generate-prompt --output-format json`), or a published schema by its name and
+    /// version, such as `check-1` or `baseline-3` (docs/output-formats.md lists them).
     #[arg(long, value_enum, value_name = "TARGET")]
     output_format_json_schema: Option<JsonSchemaTarget>,
     /// Internal: write the steps each owner's walks took per function to this JSON file
@@ -381,20 +417,27 @@ enum ReportFormat {
 }
 
 /// A rule as `heki rule --output-format json` prints it.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 struct RuleRecord {
     #[serde(flatten)]
     rule: &'static RuleMeta,
     /// Whether the rule runs with no configuration.
     default_enabled: bool,
+    /// What a heuristic rule's reports mean and how the rule is selected; none for an exact
+    /// rule.
     heuristic_note: Option<String>,
+    /// Why the rule is experimental; none for a stable rule.
     experimental: Option<&'static ExperimentalFeature>,
+    /// The severity the rule's reports have unless the configuration overrides it.
     default_severity: heki_env::Severity,
     /// The premises of the rule's exact claim (`heki_rules::premises`), empty for a rule
     /// without one.
     premises: &'static [&'static heki_rules::premises::Premise],
+    /// How the rule became exact; none for a rule that is not certified.
     certification: Option<Certification>,
     /// The latest measurement of how often its reports are right about the code.
+    #[schemars(with = "Option<heki_rules::precision::PublishedMeasurement>")]
     measurement: Option<Measurement>,
 }
 
@@ -672,12 +715,20 @@ fn parse_file(file: &Path) -> Result<(String, heki_ast::ParsedModule)> {
     Ok((src, parsed))
 }
 
-#[derive(serde::Serialize)]
+/// One hazard of Assumption A1, as `heki assumptions --json` lists it.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 struct AssumptionRecord {
+    /// The file, as `heki check` prints paths.
     path: String,
+    /// The line of the hazard.
     line: u32,
+    /// The byte column of the hazard.
     column: u32,
+    /// The qualified name of the function it is in.
     qualname: String,
+    /// What the hazard is (`eval`, `exec`, `locals()`, a frame introspection, or a function too
+    /// large to model).
     kind: String,
 }
 

@@ -5,7 +5,9 @@
 //! object, and the language server in its log, so all of them say the same thing.
 
 use crate::{ConfigLayout, HekiConfig};
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Serialize, Serializer};
+use std::borrow::Cow;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -129,6 +131,22 @@ impl Serialize for Docs {
     }
 }
 
+/// The URL of one of the pages and sections of [`Docs::ALL`].
+impl JsonSchema for Docs {
+    fn schema_name() -> Cow<'static, str> {
+        "Docs".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        let urls: Vec<String> = Self::ALL.iter().map(|d| d.url()).collect();
+        json_schema!({
+            "description": "The page of the documentation, or the section of one, that explains it.",
+            "type": "string",
+            "enum": urls,
+        })
+    }
+}
+
 /// The page of the rule named `slug`.
 pub fn rule_page(slug: &str) -> String {
     format!("{SITE}rules/{slug}/")
@@ -143,6 +161,40 @@ pub struct Location {
 }
 
 /// `path`, and `line` and `column` when there is a position.
+impl JsonSchema for Location {
+    fn schema_name() -> Cow<'static, str> {
+        "Location".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "title": Self::schema_name(),
+            "description": "A file, and a position in it.",
+            "type": "object",
+            "properties": {
+                "path": {
+                    "description": "The file, as `heki check` prints paths.",
+                    "type": "string",
+                },
+                "line": {
+                    "description": "The 1-based line, when the cause is at a position.",
+                    "type": "integer",
+                    "minimum": 0,
+                    "format": "uint32",
+                },
+                "column": {
+                    "description": "The 1-based byte column; written with `line`.",
+                    "type": "integer",
+                    "minimum": 0,
+                    "format": "uint32",
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": false,
+        })
+    }
+}
+
 impl Serialize for Location {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap as _;
@@ -182,20 +234,25 @@ impl Setting {
 }
 
 /// What a command could not do, and how to fix it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, thiserror::Error)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema, thiserror::Error)]
 #[error("{message}")]
+#[schemars(deny_unknown_fields)]
 pub struct Problem {
+    /// What went wrong.
     pub message: String,
-    /// Where the cause is, when it is in a file.
+    /// Where the cause is, when it is in a file: `path`, and `line` and `column` when it is at
+    /// a position.
     #[serde(flatten)]
     pub location: Option<Location>,
     /// What to do about it, one step per line.
     pub help: Vec<String>,
+    /// The page of the documentation that explains it.
     pub docs: Option<Docs>,
     /// The names it might have meant, the closest first.
     pub candidates: Vec<String>,
     /// The value of the configuration it is about, until [`Problem::locate`] finds it.
     #[serde(skip)]
+    #[schemars(skip)]
     pub setting: Option<Setting>,
 }
 

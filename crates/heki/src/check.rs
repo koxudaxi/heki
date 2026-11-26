@@ -650,7 +650,7 @@ fn not_touched_note(not_touched: usize) -> String {
 
 pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
     if let Some(target) = args.output_format_json_schema {
-        print!("{}", crate::prompt::json_schema(target));
+        print!("{}", crate::schemas::json_schema(target));
         return Ok(ExitCode::SUCCESS);
     }
     if let Some(question) = &args.generate_prompt {
