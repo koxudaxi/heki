@@ -997,7 +997,7 @@ EffectSummary(f) = {
                                                            // time on the function's task (EFF110;
                                                            // propagated, never through a call made
                                                            // while a lock is held,
-                                                           // CallSite::under_lock; only with EFF110
+                                                           // CallSite::locks; only with EFF110
                                                            // selected, OptInFacts::exclusive)
 
     // Set orders (EFF112; only with EFF112 selected, OptInFacts::set_order)
@@ -2064,7 +2064,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   callers, with the same initializer and allowed-context rules as `MUT201`. Reads through
   parameters without a project-class type are not seen.
 
-### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF117`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
 0. **Must-facts and the exact tier** (`EffectSummary::must_exec`, computed only when `EFF101`,
    `EFF103`, `DATA101`, or `EFF114` runs: `OptInFacts::must_effects`):
    - Per call instruction, the path facts (`heki_ir::Paths`, with the reader of
@@ -2257,7 +2257,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      in its body, in its own names (`ObjRef`, mapped through the arguments as for
      `acquires_locks`); a use while the function certainly holds a lock (`locks::lock_steps`,
      `held::at_entry`), and the uses of a call made while it holds one
-     (`CallSite::under_lock`), are left out.
+     (`CallSite::locks`), are left out.
    - The rule (`eff_rules::fanout_exclusive`) finds the fan-outs of a function: the arguments of
      `asyncio.gather` (also a generator expression or a comprehension unpacked into it, whose
      element is started once per item), the display `asyncio.wait` waits on, and the
@@ -2389,6 +2389,34 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      definition (`MustExec::bound_twice` of its summary). Its tier is exact when no name is bound
      twice and the call is complete; the rule is heuristic until it is certified, which caps the
      tier.
+14. **`EFF117`** (heuristic): shared state a writer changes holding a thread lock, changed
+   elsewhere holding none, where a thread heki resolves runs one of the writes.
+   - The facts (`heki_effect::guarded`, computed only while the rule runs:
+     `OptInFacts::guarded`): `LockPoints` holds, per instruction, the thread locks certainly held
+     (a forward must-dataflow over the acquisitions, `held::at_entry`, with a call of a function
+     returning holding a lock as one more acquisition) and the locks a `release()` gives back on
+     every path from there (a backward must-dataflow over the blocks, a `heki_ir::walk::fixpoint`
+     with a bit per lock released, at most 63). A variable a closure reads is a lock when its
+     type facts say so: the enclosing function binds it to one and no nested scope rebinds it.
+     `EffectSummary::guarded` keeps the named locks a function returns holding and its own writes
+     of shared state made holding one; `CallSite::locks` says whether the caller holds
+     one at the call. A write of shared state is an attribute of the method's instance (also
+     through a nested scope's captured `self`), a global, or an attribute of a class or module,
+     assigned or deleted, or a builtin container such state holds changed in place; the
+     attributes of a `threading.local` are none.
+   - The rule (`eff_rules::unlocked_writes`) builds `GuardedView` once per run from the index:
+     the guarded states (writes outside construction and tests), the functions threads reach
+     (the `[[calls_unawaited]]` handoffs with `runs_on = "thread"` and the `run` of
+     `threading.Thread` subclasses, then every project callee), the functions every call of which
+     is made holding a lock and those only construction or after-fork handlers run, each up to
+     two calls above (found one depth at a time from the deepest, a step per call site and
+     depth). Each function of the checked file naming a guarded attribute or global is typed,
+     its writes found, and a write where `LockPoints` (with its callees' `returns_holding`
+     through the binding of `self`) finds nothing held is reported once per state. The language server keeps the view and re-checks every file when
+     the guarded states, their locked writers, or whether a thread runs those writers change,
+     and the files of the functions whose membership changed otherwise; the locked writes are
+     places other files' reports show.
+
 14. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function (and each module body a scope names as `<module>`,
    `DottedPattern::names_module_bodies`) finds the shortest chain to each forbidden effect,
@@ -2941,7 +2969,13 @@ hands the result back to its caller (`hands_back`: an executor's `submit` and `m
 `weakref.finalize`): `threading.Thread`'s `target`, `atexit.register`, `signal.signal`, `filter`.
 Every `offloads_blocking_arg` API counts as one too, and hands the result back. Each listed call also has an entry; the table
 stands beside the entries so that the entries without such an argument, nearly all, keep no word
-for it.
+for it. A row's `runs_on` says where the call runs the callable when that is not the caller's
+thread (`EFF117`): `"thread"` for another thread of the process (`threading.Thread`, `Timer`, a
+thread pool's or an executor's `submit` and `map`, and the offloading APIs to a thread, which have
+rows of their own for it), `"fork-child"` for the child process after a fork
+(`os.register_at_fork(after_in_child=...)`). A row's `executor_arg` names the position of the
+executor argument that decides it (`loop.run_in_executor(executor, f)`): a process pool there
+runs the callable in another process, so the call has no `runs_on`.
 
 `[[declared_fields]]` (`heki_kb::DeclaredFields`) says where a library keeps the fields a class
 declares, the names the bodies of the class and its bases declare as fields: the attributes of

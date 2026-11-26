@@ -205,8 +205,8 @@ fn a_text_run_says_how_many_heuristic_rules_and_reports_it_left_off() {
     }
     // Only the rules a selection would run with `lint.heuristic` count, not the ignored ones.
     let (_, _, stderr) = p.heki(&["check", "--select", "EFF"]);
-    assert!(stderr.ends_with(&note(&rules_and_report(1))), "{stderr}");
-    let (_, _, stderr) = p.heki(&["check", "--select", "EFF", "--ignore", "EFF102"]);
+    assert!(stderr.ends_with(&note(&rules_and_report(2))), "{stderr}");
+    let (_, _, stderr) = p.heki(&["check", "--select", "EFF", "--ignore", "EFF102,EFF117"]);
     assert!(
         stderr.ends_with(&note("1 heuristic report(s) are not shown")),
         "{stderr}"

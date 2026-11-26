@@ -7,7 +7,8 @@
 //! task factory, the walk to the callable a builtin calls once per item, contracts with many call
 //! targets and argument lists, the names offered for contract entries that match nothing, the
 //! mappings a call unpacks, the walk to the uses handing a reference to a call target on, the
-//! locks `EFF109` follows, the values class statements pass as bases, the bindings the deque
+//! locks `EFF109` follows, the thread locks and guarded writes `EFF117` follows, the values class
+//! statements pass as bases, the bindings the deque
 //! rewrite's candidates check, the star imports a name is bound through, many or nested deep,
 //! the sizes of a thousand lists each extending the next or of one list extending many deep
 //! chains, the walks over the import graph (`heki inspect --imports`), the ends of the handler
@@ -4560,6 +4561,122 @@ fn many_locks_held_at_once_keep_a_bit_each() {
         found.iter().filter(|d| d["rule_code"] == "EFF109").count(),
         n
     );
+}
+
+/// `n` attributes a thread writes holding a lock; a method taking the lock through a helper,
+/// writing them all with a call each in between and as many private helpers writing them too,
+/// then releasing it at the end; and a method writing them all with no lock.
+fn guarded_writes(n: usize) -> Project {
+    let mut lines = vec![
+        "import threading".to_owned(),
+        String::new(),
+        String::new(),
+        "class C:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self._lock = threading.Lock()".to_owned(),
+        String::new(),
+        "    def start(self):".to_owned(),
+        "        threading.Thread(target=self._tick).start()".to_owned(),
+        String::new(),
+        "    def _acquire(self):".to_owned(),
+        "        self._lock.acquire()".to_owned(),
+        String::new(),
+        "    def _tick(self):".to_owned(),
+        "        with self._lock:".to_owned(),
+    ];
+    lines.extend((0..n).map(|i| format!("            self.a{i} += 1")));
+    lines.extend(
+        [
+            "",
+            "    def flush(self, xs):",
+            "        self._acquire()",
+            "        try:",
+        ]
+        .map(str::to_owned),
+    );
+    for i in 0..n {
+        lines.push(format!("            if xs[{i}]:"));
+        lines.push(format!("                self.a{i} = 0"));
+        lines.push(format!("            self._w{i}()"));
+    }
+    lines.extend(["        finally:", "            self._lock.release()"].map(str::to_owned));
+    for i in 0..n {
+        lines.extend([
+            String::new(),
+            format!("    def _w{i}(self):"),
+            format!("        self.a{i} = 1"),
+        ]);
+    }
+    lines.extend([String::new(), "    def reset(self):".to_owned()]);
+    lines.extend((0..n).map(|i| format!("        self.a{i} = 0")));
+    let p = Project::new(&format!("bounds_guarded_writes_{n}"));
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// Thousands of guarded attributes written in one region held through a helper and released at
+/// the end, with as many calls and branches inside: the locks given back later are one backward
+/// dataflow with a bit per lock released, the locks held at each instruction one pass, the
+/// callers of each private helper one walk, and each write finds its guards by its name.
+#[test]
+fn guarded_writes_in_one_released_region_take_linear_steps() {
+    let n = 2_000;
+    let found = check_linear(n, guarded_writes);
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF117")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["C.reset"; n]);
+}
+
+/// `n` attributes a thread writes holding a lock, each through the next of a chain of `n` names
+/// bound to `self`, and a method writing them the same way holding none.
+fn guarded_alias_writes(n: usize) -> Project {
+    let mut lines = vec![
+        "import threading".to_owned(),
+        String::new(),
+        String::new(),
+        "class C:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self._lock = threading.Lock()".to_owned(),
+        String::new(),
+        "    def start(self):".to_owned(),
+        "        threading.Thread(target=self._tick).start()".to_owned(),
+    ];
+    // The method `def`, binding the chain `name`, then writing through it below `block`.
+    let method = |lines: &mut Vec<String>, def: &str, name: &str, block: &str, value: &str| {
+        lines.extend([String::new(), format!("    def {def}(self):")]);
+        lines.push(format!("        {name}0 = self"));
+        lines.extend((1..n).map(|i| format!("        {name}{i} = {name}{}", i - 1)));
+        let indent = if block.is_empty() {
+            "        "
+        } else {
+            lines.push(format!("        {block}"));
+            "            "
+        };
+        lines.extend((0..n).map(|i| format!("{indent}{name}{i}.a{i} = {value}")));
+    };
+    method(&mut lines, "_tick", "s", "with self._lock:", "1");
+    method(&mut lines, "reset", "r", "", "0");
+    let p = Project::new(&format!("bounds_guarded_alias_writes_{n}"));
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// Thousands of guarded attributes written through a chain of as many names bound to `self`,
+/// holding the lock and holding none: the instance each write's receiver copies is read from
+/// the function's copy-root table, not walked back along the chain per write.
+#[test]
+fn guarded_writes_through_a_long_alias_chain_read_each_copy_root_once() {
+    let n = 8_000;
+    let found = check_linear(n, guarded_alias_writes);
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF117")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["C.reset"; n]);
 }
 
 /// A project selecting `EFF110` with the module `m` of `lines` after a coroutine `load` using a
