@@ -87,8 +87,11 @@ pub struct Request<'a> {
     pub snapshot: Option<SummarySnapshot>,
     /// The Ratchet baseline the current configuration compares with.
     pub baseline: Option<RatchetBaseline>,
-    /// The paths the run analyzes ([`CommandPaths::analyzed`](crate::project::CommandPaths)).
+    /// The paths given on the command line.
     pub paths: &'a [PathBuf],
+    /// The paths the run analyzes ([`CommandPaths::analyzed`](crate::project::CommandPaths)):
+    /// what the command naming the counted reports has to carry.
+    pub analyzed_paths: &'a [PathBuf],
     /// The words of the `heki check` options that analyze and select as this run did.
     pub check_options: Vec<String>,
     /// A path as the output writes it: relative to the working directory when inside it, as
@@ -180,8 +183,11 @@ pub struct Analyzed {
     pub functions: usize,
     /// The files that could not be read or parsed, as `heki check` reports them.
     pub errors: Vec<String>,
-    /// The paths analyzed.
+    /// The paths given on the command line.
     pub paths: Vec<String>,
+    /// The paths the run analyzes, as the command naming the counted reports writes them.
+    #[serde(skip)]
+    pub check_paths: Vec<String>,
     /// The `heki check` options the run's own options give: what the command naming the counted
     /// reports carries.
     #[serde(skip)]
@@ -276,6 +282,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         snapshot,
         baseline,
         paths,
+        analyzed_paths,
         check_options,
         shown,
         errors,
@@ -466,6 +473,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
             functions,
             errors,
             paths: paths.iter().map(|p| shown(p)).collect(),
+            check_paths: analyzed_paths.iter().map(|p| shown(p)).collect(),
             check_options,
             left_out,
         },
@@ -758,11 +766,21 @@ fn start_here(report: &RecommendReport) -> Vec<String> {
         ));
     }
     if let Some(shown) = rules::shown_by_check(&report.rules, &report.analyzed) {
-        steps.push(format!(
-            "{} shows {} report(s) not shown now: {} exact, {} heuristic (heuristic reports can \
-             be wrong)",
-            shown.command, shown.reports, shown.exact, shown.heuristic
-        ));
+        let counted = format!(
+            "{} exact, {} heuristic (heuristic reports can be wrong)",
+            shown.exact, shown.heuristic
+        );
+        steps.push(if now.baseline.is_some() {
+            format!(
+                "{} shows {} regression(s) among {} report(s) not shown now: {counted}",
+                shown.command, shown.regressions, shown.reports
+            )
+        } else {
+            format!(
+                "{} shows {} report(s) not shown now: {counted}",
+                shown.command, shown.reports
+            )
+        });
     }
     let exact: usize = report.suggestions.counts.iter().map(|c| c.exact).sum();
     if exact > 0 {

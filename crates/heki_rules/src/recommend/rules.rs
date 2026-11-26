@@ -324,8 +324,8 @@ pub(super) fn shown_by_check(rules: &[RuleAdvice], analyzed: &Analyzed) -> Optio
     }
     let codes: Vec<&str> = named.iter().map(|r| r.code.as_str()).collect();
     let mut command = "heki check".to_owned();
-    if analyzed.paths != ["."] {
-        for word in &analyzed.paths {
+    if analyzed.check_paths != ["."] {
+        for word in &analyzed.check_paths {
             command.push(' ');
             command.push_str(&super::command_word(word));
         }

@@ -994,6 +994,15 @@ fn the_command_under_the_rules_shows_every_report_they_count() {
     ] {
         let (_, report, _) = recommend_json(&c, &args);
         let command = command_shown(&c, &args);
+        // `analyzed.paths` keeps the paths given, as in version 3; the command names the
+        // directory analyzed.
+        let mut given: Vec<&str> = (args.iter().copied())
+            .filter(|a| a.ends_with(".py"))
+            .collect();
+        if given.is_empty() {
+            given.push(".");
+        }
+        assert_eq!(report["analyzed"]["paths"], json!(given), "{args:?}");
         assert_eq!(command[0], "check");
         assert_eq!(
             command.iter().any(|w| w == "--config"),
@@ -1100,10 +1109,10 @@ fn start_here_repeats_the_first_steps_the_report_has() {
     ]);
     assert_eq!(code, 0, "{err}");
     let with_baseline = steps(&p, &["--baseline", "b.toml"]);
-    assert!(
-        with_baseline[0]
-            .ends_with(" not shown now: 0 exact, 7 heuristic (heuristic reports can be wrong)")
-    );
+    assert!(with_baseline[0].ends_with(
+        " shows 0 regression(s) among 7 report(s) not shown now: 0 exact, 7 heuristic \
+             (heuristic reports can be wrong)"
+    ));
     assert_eq!(
         with_baseline[1],
         "1 exact read-only parameter type(s) to write (Types the code already keeps)"
