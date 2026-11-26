@@ -793,10 +793,8 @@ impl ReturnsNew {
     /// The kind of a resolved `New` at a call binding the parameters `empty_params` to values
     /// that have no elements ([`NewFrom::empty_params`]).
     pub fn kind_at(&self, empty_params: u64) -> Option<NewKind> {
-        match self.at_call(empty_params)? {
-            (kind, kept) if kept.never() => Some(kind),
-            _ => None,
-        }
+        let (kind, kept) = self.at_call(empty_params)?;
+        kept.never().then_some(kind)
     }
 
     /// The kind of a resolved `New` at a call binding `empty_params` as [`Self::kind_at`] says,
@@ -1632,10 +1630,8 @@ impl EffectSummary {
     /// The tests under which the function keeps its parameter `p` ([`Self::retains_given`]):
     /// never, for a parameter it does not keep.
     pub fn retained_given(&self, p: u8) -> MayGiven {
-        if p >= 64 {
-            return MayGiven::given(Vec::new());
-        }
-        if self.retains_params & (1u64 << p) == 0 {
+        // A parameter past the 64 the mask holds is taken to be kept whatever is passed.
+        if (self.retains_params.checked_shr(p.into())).is_some_and(|rest| rest & 1 == 0) {
             return MayGiven::default();
         }
         (self.retains_given.as_deref().and_then(|g| g.get(&p)))
