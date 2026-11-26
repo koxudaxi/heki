@@ -16,7 +16,7 @@ use crate::{ShieldAt, consumption::resolve_inst, held};
 use heki_ir::walk::{Answer, Budget, FnShape, Visit, reach};
 use heki_ir::{BlockId, ConstLiteral, Inst, InstKind, VarId};
 use heki_kb::{ArgSlot, EcosystemEntry};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 /// The catalog checkpoints that do no work of their own: awaiting one only lets a cancellation
 /// in, which a cleanup does on purpose as its last step.
@@ -43,7 +43,6 @@ impl ShieldPoints {
         live: &crate::ownership::Live,
     ) -> Self {
         let f = shape.f;
-        let def = |v: VarId| shape.defining(v).map(|(_, i)| i);
         let sets_shield = f
             .blocks
             .iter()
@@ -56,7 +55,7 @@ impl ShieldPoints {
             for (i, inst) in bb.insts.iter().enumerate() {
                 match &inst.kind {
                     InstKind::EnterWith { mgr, .. } => {
-                        if let Some(shield) = scope_shield(tcx, types, &def, *mgr, sets_shield) {
+                        if let Some(shield) = scope_shield(tcx, types, shape, *mgr, sets_shield) {
                             let k = taken.add(inst.span, Some(*mgr), shield);
                             changes.insert((bb.id, i), held::Change::Take(k));
                         }
@@ -97,15 +96,15 @@ impl ShieldPoints {
 
 /// What a `with` over `mgr` shields, when `mgr` is a cancel scope: the scope the catalog call
 /// defining it makes, or (open) a scope made elsewhere.
-fn scope_shield<'i>(
+fn scope_shield(
     tcx: &TypeCtx<'_>,
     types: &FxHashMap<VarId, Val>,
-    def: &dyn Fn(VarId) -> Option<&'i Inst>,
+    shape: &FnShape<'_>,
     mgr: VarId,
     sets_shield: bool,
 ) -> Option<ShieldAt> {
-    let mgr = through_copies(def, mgr);
-    if let Some(inst) = def(mgr)
+    let mgr = shape.copy_root(mgr);
+    if let Some(inst) = shape.inst(mgr)
         && let InstKind::Call {
             args,
             kwargs,
@@ -121,7 +120,7 @@ fn scope_shield<'i>(
         && let Callee::External(symbol) = resolve_inst(tcx, types, &inst.kind)
         && let Some(slot) = tcx.catalog(&symbol).and_then(|e| e.cancel_scope.as_ref())
     {
-        return match passed_shield(def, args, kwargs, *star_from, slot) {
+        return match passed_shield(shape, args, kwargs, *star_from, slot) {
             Some(true) => Some(ShieldAt::Shielded),
             Some(false) if !sets_shield => None,
             _ => Some(ShieldAt::Open),
@@ -140,8 +139,8 @@ fn scope_shield<'i>(
 /// The constant a call (its arguments, keywords, and first `*` position) passes at `slot`:
 /// nothing passed is the default, `False`. `None` for another value, or when an unpacking may
 /// pass it.
-fn passed_shield<'i>(
-    def: &dyn Fn(VarId) -> Option<&'i Inst>,
+fn passed_shield(
+    shape: &FnShape<'_>,
     args: &[VarId],
     kwargs: &[(Option<String>, VarId)],
     star_from: Option<u8>,
@@ -151,7 +150,7 @@ fn passed_shield<'i>(
     match crate::resolver::passed_var(args, kwargs, star_from, (slot.arg, slot.param.as_deref())) {
         None if unpacked => None,
         None => Some(false),
-        Some(var) => match def(through_copies(def, var)).map(|i| &i.kind) {
+        Some(var) => match shape.inst(shape.copy_root(var)).map(|i| &i.kind) {
             Some(InstKind::Const {
                 literal: ConstLiteral::Bool(shield),
                 ..
@@ -159,17 +158,6 @@ fn passed_shield<'i>(
             _ => None,
         },
     }
-}
-
-fn through_copies<'i>(def: &dyn Fn(VarId) -> Option<&'i Inst>, mut var: VarId) -> VarId {
-    let mut seen = FxHashSet::default();
-    while seen.insert(var) {
-        match def(var).map(|i| &i.kind) {
-            Some(InstKind::Copy { src, .. }) => var = *src,
-            _ => break,
-        }
-    }
-    var
 }
 
 /// Whether nothing runs after instruction `index` of block `bb` on a normal path: every

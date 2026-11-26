@@ -4953,6 +4953,35 @@ fn shielded_cleanups_take_linear_steps() {
     assert_eq!(reported, n);
 }
 
+/// A shielded cancel scope bound once and copied through a chain of `n` names, entered once per
+/// name in a `finally` body.
+fn aliased_cancel_scope_entries(n: usize) -> Project {
+    let mut lines = vec![
+        "import anyio".to_owned(),
+        String::new(),
+        String::new(),
+        "async def close() -> None:".to_owned(),
+        "    scope0 = anyio.CancelScope(shield=True)".to_owned(),
+    ];
+    lines.extend((1..n).map(|i| format!("    scope{i} = scope{}", i - 1)));
+    lines.extend(["    try:", "        pass", "    finally:"].map(str::to_owned));
+    for i in 0..n {
+        lines.push(format!("        with scope{i}:"));
+        lines.push("            await anyio.sleep(0)".to_owned());
+    }
+    let p = Project::new(&format!("bounds_aliased_cancel_scope_entries_{n}"));
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// Thousands of entries of one cancel scope, each through the next of a chain of as many names:
+/// the copy root of each name is read from the function's shared table, not walked per entry.
+#[test]
+fn aliased_cancel_scope_entries_take_linear_steps() {
+    let found = check_linear(2_000, aliased_cancel_scope_entries);
+    assert!(found.iter().all(|d| d["rule_code"] != "EFF118"));
+}
+
 /// `n` attributes a thread writes holding a lock, each through the next of a chain of `n` names
 /// bound to `self`, and a method writing them the same way holding none.
 fn guarded_alias_writes(n: usize) -> Project {
