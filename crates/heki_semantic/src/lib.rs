@@ -104,8 +104,20 @@ pub struct ClassInfo {
     /// `Base[int]`), or `None` for another expression (`with_metaclass(Meta)`, `*bases`), whose
     /// class heki cannot name.
     pub bases: Vec<Option<String>>,
-    /// Class keywords with the source text of their value (`metaclass=Meta`, `frozen=False`);
-    /// `**kwargs` is left out.
+    /// The bases a subscript passes names only (`Generic[K, T]`): the index of the base among
+    /// `bases`, and the dotted names in order. A subscript holding another expression
+    /// (`Generic[*Ts]`, `Base[list[T]]`) is left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_type_args: Vec<(usize, Vec<String>)>,
+    /// The names of the class statement's type parameter list (`class Site[K, T]:`), in order;
+    /// empty without one, and for a list holding a `TypeVarTuple`, after which an argument's
+    /// position names no one parameter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub type_params: Vec<String>,
+    /// Class keywords with the source text of their value (`metaclass=Meta`, `frozen=False`),
+    /// the entries of an unpacked dict display with string keys among them
+    /// (`**{"metaclass": Meta}`), and any other mapping unpacked (`**options`) under the name
+    /// `**`.
     pub keywords: Vec<(String, String)>,
     /// The functions defined directly in the class body, by the names the class holds them
     /// under (`_Parser__run` for `def __run`).
@@ -1178,16 +1190,24 @@ impl<'a> Analyzer<'a> {
             self.push_type_params_scope(cls.type_params.as_deref(), cls.name.as_str(), line);
 
         let mut bases = Vec::new();
+        let mut base_type_args = Vec::new();
         let mut keywords = Vec::new();
         if let Some(args) = &cls.arguments {
             for arg in &args.args {
+                if let Some(names) = subscript_names(arg) {
+                    base_type_args.push((bases.len(), names));
+                }
                 bases.push(expr_dotted_name(arg));
                 self.visit_expr(arg);
             }
             for kw in &args.keywords {
-                if let Some(name) = &kw.arg {
-                    let value = self.source[kw.value.range()].to_owned();
-                    keywords.push((name.to_string(), value));
+                let text = |e: &Expr| self.source[e.range()].to_owned();
+                match (&kw.arg, string_keyed_entries(&kw.value)) {
+                    (Some(name), _) => keywords.push((name.to_string(), text(&kw.value))),
+                    (None, Some(entries)) => {
+                        keywords.extend(entries.into_iter().map(|(k, v)| (k.to_owned(), text(v))))
+                    }
+                    (None, None) => keywords.push(("**".to_owned(), text(&kw.value))),
                 }
                 self.visit_expr(&kw.value);
             }
@@ -1205,6 +1225,8 @@ impl<'a> Analyzer<'a> {
             qualname,
             parent_class,
             bases,
+            base_type_args,
+            type_params: type_param_names(cls.type_params.as_deref()),
             keywords,
             methods: Vec::new(),
             span: Span::from(cls.range),
@@ -1838,6 +1860,29 @@ fn expr_dotted_name(expr: &Expr) -> Option<String> {
     }
 }
 
+/// The dotted names a subscript passes (`Generic[K, T]`), when it passes names only.
+fn subscript_names(expr: &Expr) -> Option<Vec<String>> {
+    let Expr::Subscript(s) = expr else {
+        return None;
+    };
+    match &*s.slice {
+        Expr::Tuple(t) => t.elts.iter().map(expr_dotted_name).collect(),
+        one => Some(vec![expr_dotted_name(one)?]),
+    }
+}
+
+/// The names of a type parameter list, by position ([`ClassInfo::type_params`]).
+fn type_param_names(type_params: Option<&ast::TypeParams>) -> Vec<String> {
+    let params = type_params.map_or(&[][..], |tp| &tp.type_params[..]);
+    if params
+        .iter()
+        .any(|p| matches!(p, TypeParam::TypeVarTuple(_)))
+    {
+        return Vec::new();
+    }
+    params.iter().map(|p| p.name().to_string()).collect()
+}
+
 /// Build the lexical scope, binding, import, and CHA model for a parsed Python module.
 pub fn analyze_module(
     module: &ParsedModule,
@@ -1853,6 +1898,19 @@ pub fn analyze_module(
 
 /// The module global listing the modules whose imports are lazy (PEP 810).
 const LAZY_MODULES: &str = "__lazy_modules__";
+
+/// The entries of a dict display whose every key is a string literal, by key.
+fn string_keyed_entries(value: &Expr) -> Option<Vec<(&str, &Expr)>> {
+    let Expr::Dict(d) = value else {
+        return None;
+    };
+    (d.items.iter())
+        .map(|item| match &item.key {
+            Some(Expr::StringLiteral(k)) => Some((k.value.to_str(), &item.value)),
+            _ => None,
+        })
+        .collect()
+}
 
 /// The strings of a list, tuple, or set display of string literals only.
 fn string_literals(value: &Expr) -> Option<Vec<String>> {

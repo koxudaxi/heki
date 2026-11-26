@@ -143,6 +143,7 @@ impl FileSummary {
             flows,
             cache_flows,
             external_accesses,
+            unbound_calls,
             opt_in_tables,
         } = edited;
         let mut changes = Changes::default();
@@ -173,6 +174,7 @@ impl FileSummary {
             external_accesses,
             map,
         );
+        changes.tables("unbound_calls", &self.unbound_calls, unbound_calls, map);
         changes.decls(&self.decls, decls, restated, map);
         let none = OptInTables::default();
         let tables = |t: &Option<Box<OptInTables>>| t.as_deref().unwrap_or(&none).clone();

@@ -152,8 +152,8 @@ allowed-writers = ["pkg.rack_ops.empty"]
 
 [[tool.heki.effect-boundaries]]
 name = "copy-pass"
-scopes = ["pkg.copy_pass", "pkg.guarded_build"]
-write-universe = ["Ticket.flag"]
+scopes = ["pkg.copy_pass", "pkg.guarded_build", "pkg.link_pass", "pkg.link_model_pass", "pkg.link_neg_pass"]
+write-universe = ["Ticket.flag", "Part.flag"]
 "#;
 
 // An `async def` two modules above a sync helper (`EFF101` with its chain).
@@ -341,6 +341,19 @@ const GUARDED_BUILD: &str = "import copy\n\nfrom pkg.copy_ops import Ticket, mar
 // its parameter, and one returning its parameter, in another module than the boundary's scope
 // using them on copies.
 const COPY_OPS: &str = "import copy\n\nKEPT = []\n\n\nclass Ticket:\n    def __init__(self):\n        self.flag = False\n\n\ndef copy_or_reuse(t: Ticket, reuse: dict[int, Ticket] | None = None) -> Ticket:\n    if reuse and (hit := reuse.get(id(t))) is not None:\n        return hit\n    return copy.copy(t)\n\n\ndef mark(t: Ticket) -> None:\n    t.flag = True\n\n\ndef stamp(t: Ticket) -> Ticket:\n    return t\n";
+// A factory in another module returning a new ticket it links a new part into: a pass keeping
+// the part it reads out of the result before marking the result (`ReturnsNew::New::linked`).
+const LINK_OPS: &str = "from pkg.copy_ops import Ticket\n\n\ndef make() -> Ticket:\n    made, part = Ticket(), Ticket()\n    made.part = part\n    return made\n";
+const LINK_PASS: &str = "from pkg.copy_ops import KEPT, Ticket\nfrom pkg.link_ops import make\n\n\ndef run() -> Ticket:\n    made = make()\n    KEPT.append(made.part)\n    made.flag = True\n    return made\n";
+// A pass keeping the negation of a new ticket it links another new one into: the result holds
+// nothing of the ticket while no class the ticket may be defines `__neg__`.
+const LINK_NEG_PASS: &str = "from pkg.copy_ops import KEPT, Ticket\n\n\ndef run() -> Ticket:\n    copied, part = Ticket(), Ticket()\n    part.part = copied\n    KEPT.append(-part)\n    copied.flag = True\n    return copied\n";
+// A pydantic model of another module that two new objects of a pass link: a write of it stores
+// the value itself only while no class it may be configures the model
+// (`ProjectDecls::attr_write_stores_value`).
+const LINK_MODEL: &str = "from typing import Any\n\nfrom pydantic import BaseModel\n\n\nclass Part(BaseModel):\n    flag: bool = False\n    parent: Any = None\n";
+const LINK_MODEL_SUB: &str = "from pydantic import ConfigDict\n\nfrom pkg.link_model import Part\n\n\nclass Validated(Part):\n    model_config = ConfigDict(validate_assignment=True)\n";
+const LINK_MODEL_PASS: &str = "from pkg.link_model import Part\n\n\ndef run() -> Part:\n    copied, part = Part(), Part()\n    part.parent = copied\n    copied.flag = True\n    return copied\n";
 const COPY_PASS: &str = "from pkg.copy_ops import Ticket, copy_or_reuse, mark, stamp\n\n\ndef run(t: Ticket) -> Ticket:\n    copied = stamp(copy_or_reuse(t))\n    copied.flag = True\n    mark(copied)\n    return copied\n";
 const STRICT_OPS: &str = "def _reset(r):\n    r.entries = []\n";
 // The strict reads and calls: helpers that type nothing read and call a guarded attribute and
@@ -772,6 +785,18 @@ const HELD_ATTR_SUBCLASS: &str = "from pkg.held_attr import Holder\nfrom pkg.mad
 const HELD_ATTR_SWAP: &str = "from pkg.held_attr import Holder\nfrom pkg.made_models import Waiter\n\n\ndef renew(h: Holder) -> None:\n    h._waiter = Waiter()\n";
 const HELD_ATTR_UNTYPED: &str = "def clear(h) -> None:\n    h._waiter = None\n";
 const HELD_ATTR_UNNAMED: &str = "from pkg.made_models import Quiet\n\n\ndef replace(h, name) -> None:\n    setattr(h, name, Quiet())\n";
+// An attribute a class's type parameter types (`ClassDecl::param_attrs`), read in another file
+// on an instance whose annotation gives the argument (`Site[Waiter]`), and a base another
+// module binds only under `if TYPE_CHECKING:` (`ModuleDecls::type_checking_only`): the class
+// holds while those declarations say so, and a method found through that base is no exact
+// target while the module binds the name only there.
+const GENERIC_SITE: &str = "from typing import Generic, TypeVar\n\nT = TypeVar(\"T\")\n\n\nclass Site(Generic[T]):\n    obj: T\n";
+const GENERIC_SITE_OBJECT: &str = "from typing import Generic, TypeVar\n\nT = TypeVar(\"T\")\n\n\nclass Site(Generic[T]):\n    obj: object\n";
+const GENERIC_SITE_USE: &str = "from pkg.generic_site import Site\nfrom pkg.made_models import Waiter\n\n\nasync def serve_site(site: Site[Waiter]) -> None:\n    site.obj.wait()\n";
+const LAZY_MODELS: &str = "from typing import TYPE_CHECKING, Any\n\nif TYPE_CHECKING:\n    from pkg.made_models import Waiter as Waiter\n\n\ndef __getattr__(name: str) -> Any:\n    from pkg import made_models\n\n    return getattr(made_models, name)\n";
+const LAZY_MODELS_RUNTIME: &str = "from pkg.made_models import Waiter as Waiter\n";
+const LAZY_MODELS_ELSE: &str = "from typing import TYPE_CHECKING, Any\n\nif TYPE_CHECKING:\n    from pkg.made_models import Waiter as Waiter\nelse:\n    Waiter: Any = object\n";
+const LAZY_USE: &str = "from pkg.lazy_models import Waiter\n\n\nclass LazyWaiter(Waiter):\n    pass\n\n\nasync def serve_lazy(w: LazyWaiter) -> None:\n    w.wait()\n";
 // A factory function and a class attribute annotated with the callable they hold
 // (`Callable[..., Waiter]`, `FunctionDecl::return_type`, `ClassDecl` attribute types): calling
 // what they hold in other files gives a `Waiter` while the annotation names that one class.
@@ -783,13 +808,15 @@ const CALLABLE_ATTRIBUTE_USE: &str = "from pkg.callable_factory import Settings\
 // Functions values hold, defined in one module and called in others: the closure a factory
 // returns (`ReturnFact::ty`), a named tuple's field (`ClassDecl::init_fields`), and a
 // `staticmethod(partial(...))` class attribute (`NamedAttr::body_partial`).
-const HELD_DEFS: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n";
-const HELD_DEFS_QUIET_FACTORY: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    return rest\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n";
-const HELD_DEFS_PLAIN_VIEW: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View:\n    def __init__(self, run: Callable[[], None]) -> None:\n        self.run = run\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n";
-const HELD_DEFS_QUIET_PARTIAL: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(rest))\n";
+const HELD_DEFS: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n\n\ndef doze(seconds: float = 1.0) -> None:\n    time.sleep(seconds)\n\n\nTABLE = {\"doze\": partial(doze)}\n";
+const HELD_DEFS_POSITIONED_TABLE: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n\n\ndef doze(seconds: float = 1.0) -> None:\n    time.sleep(seconds)\n\n\nTABLE = {\"doze\": partial(doze, 2.0)}\n";
+const HELD_DEFS_QUIET_FACTORY: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    return rest\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n\n\ndef doze(seconds: float = 1.0) -> None:\n    time.sleep(seconds)\n\n\nTABLE = {\"doze\": partial(doze)}\n";
+const HELD_DEFS_PLAIN_VIEW: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View:\n    def __init__(self, run: Callable[[], None]) -> None:\n        self.run = run\n\n\nclass Holder:\n    run = staticmethod(partial(nap))\n\n\ndef doze(seconds: float = 1.0) -> None:\n    time.sleep(seconds)\n\n\nTABLE = {\"doze\": partial(doze)}\n";
+const HELD_DEFS_QUIET_PARTIAL: &str = "import time\nfrom collections.abc import Callable\nfrom functools import partial\nfrom typing import NamedTuple\n\n\ndef nap() -> None:\n    time.sleep(1)\n\n\ndef rest() -> None:\n    pass\n\n\ndef make_waiter() -> Callable[[], None]:\n    def waiter() -> None:\n        time.sleep(1)\n\n    return waiter\n\n\nclass View(NamedTuple):\n    run: Callable[[], None]\n\n\nclass Holder:\n    run = staticmethod(partial(rest))\n\n\ndef doze(seconds: float = 1.0) -> None:\n    time.sleep(seconds)\n\n\nTABLE = {\"doze\": partial(doze)}\n";
 const HELD_FACTORY: &str = "from pkg.held_defs import make_waiter\n\n\nasync def through_factory() -> None:\n    make_waiter()()\n";
 const HELD_FIELD: &str = "from pkg.held_defs import View, nap\n\n\nasync def through_field() -> None:\n    View(nap).run()\n";
 const HELD_PARTIAL: &str = "from pkg.held_defs import Holder\n\n\nasync def through_partial() -> None:\n    Holder().run()\n";
+const HELD_TABLE: &str = "from pkg.held_defs import TABLE\n\n\nasync def through_table(kind: str) -> None:\n    TABLE[kind]()\n";
 const ROWS_USE: &str = "from pkg.rows_db import authors, book\n\n\ndef each():\n    for r in authors():\n        book(r[0])\n";
 // The third module binds the base's method to another function: the call may run that
 // function instead. The base's class body binds it to another function on every path: the call
@@ -1287,6 +1314,11 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/guarded_build.py", GUARDED_BUILD),
         ("pkg/copy_ops.py", COPY_OPS),
         ("pkg/copy_pass.py", COPY_PASS),
+        ("pkg/link_ops.py", LINK_OPS),
+        ("pkg/link_pass.py", LINK_PASS),
+        ("pkg/link_neg_pass.py", LINK_NEG_PASS),
+        ("pkg/link_model.py", LINK_MODEL),
+        ("pkg/link_model_pass.py", LINK_MODEL_PASS),
         ("pkg/strict_ops.py", STRICT_OPS),
         ("pkg/strict_use.py", STRICT_USE),
         ("pkg/q_telemetry.py", Q_TELEMETRY),
@@ -1319,6 +1351,7 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/held_factory.py", HELD_FACTORY),
         ("pkg/held_field.py", HELD_FIELD),
         ("pkg/held_partial.py", HELD_PARTIAL),
+        ("pkg/held_table.py", HELD_TABLE),
         ("pkg/st_client.py", ST_CLIENT),
         ("pkg/st_use.py", ST_USE),
         ("pkg/st_rebind.py", ST_REBIND),
@@ -1883,6 +1916,67 @@ fn steps_returned_types() -> Vec<Step> {
     ]
 }
 
+/// A read in another file of an attribute annotated with a type parameter of its class, on an
+/// instance annotated with an argument, while the class's annotation names the parameter; and a
+/// class based on a name another module binds only under `if TYPE_CHECKING:`, while that module
+/// binds it no other way: the wait its method makes is heuristic until the module imports the
+/// name at run time.
+fn steps_declared_types() -> Vec<Step> {
+    const SITE: &[(&str, &str)] = &[("pkg/generic_site_use.py", "EFF101")];
+    const LAZY: &[(&str, &str)] = &[("pkg/lazy_use.py", "EFF101 [heuristic]")];
+    const LAZY_EXACT: &[(&str, &str)] = &[("pkg/lazy_use.py", "EFF101")];
+    vec![
+        Step::new(
+            "an attribute typed by the class's type parameter holds the waiting class",
+            vec![
+                Action::Create("pkg/generic_site.py", GENERIC_SITE.to_owned()),
+                Action::Create("pkg/generic_site_use.py", GENERIC_SITE_USE.to_owned()),
+            ],
+        )
+        .present(SITE),
+        Step::new(
+            "the attribute is annotated with object",
+            vec![save("pkg/generic_site.py", GENERIC_SITE_OBJECT)],
+        )
+        .absent(SITE),
+        Step::new(
+            "the type parameter again",
+            vec![save("pkg/generic_site.py", GENERIC_SITE)],
+        )
+        .present(SITE),
+        Step::new(
+            "a base bound only under TYPE_CHECKING in another module",
+            vec![
+                Action::Create("pkg/lazy_models.py", LAZY_MODELS.to_owned()),
+                Action::Create("pkg/lazy_use.py", LAZY_USE.to_owned()),
+            ],
+        )
+        .present(LAZY),
+        Step::new(
+            "that module also binds the name at run time",
+            vec![save("pkg/lazy_models.py", LAZY_MODELS_ELSE)],
+        )
+        .absent(LAZY),
+        Step::new(
+            "only the TYPE_CHECKING import again",
+            vec![save("pkg/lazy_models.py", LAZY_MODELS)],
+        )
+        .present(LAZY),
+        Step::new(
+            "that module imports the name at run time",
+            vec![save("pkg/lazy_models.py", LAZY_MODELS_RUNTIME)],
+        )
+        .present(LAZY_EXACT)
+        .absent(LAZY),
+        Step::new(
+            "the import only under TYPE_CHECKING once more",
+            vec![save("pkg/lazy_models.py", LAZY_MODELS)],
+        )
+        .present(LAZY)
+        .absent(LAZY_EXACT),
+    ]
+}
+
 /// The function a value holds, decided in the module defining it: a factory returning a function
 /// that does not wait, a class that is no named tuple (whose attribute holds what a parameter
 /// declares), and a partial class attribute of a function that does not wait each take the wait
@@ -1891,6 +1985,7 @@ fn steps_held_functions() -> Vec<Step> {
     const FACTORY: &[(&str, &str)] = &[("pkg/held_factory.py", "EFF101")];
     const FIELD: &[(&str, &str)] = &[("pkg/held_field.py", "EFF101 [heuristic]")];
     const PARTIAL: &[(&str, &str)] = &[("pkg/held_partial.py", "EFF101")];
+    const TABLE: &[(&str, &str)] = &[("pkg/held_table.py", "EFF101")];
     const ALL: &[(&str, &str)] = &[
         ("pkg/held_factory.py", "EFF101"),
         ("pkg/held_field.py", "EFF101 [heuristic]"),
@@ -1929,6 +2024,17 @@ fn steps_held_functions() -> Vec<Step> {
             vec![save("pkg/held_defs.py", HELD_DEFS)],
         )
         .present(ALL),
+        Step::new(
+            "the partial object in the table holds a position",
+            vec![save("pkg/held_defs.py", HELD_DEFS_POSITIONED_TABLE)],
+        )
+        .absent(TABLE)
+        .present(ALL),
+        Step::new(
+            "the partial object in the table holds nothing again",
+            vec![save("pkg/held_defs.py", HELD_DEFS)],
+        )
+        .present(TABLE),
     ]
 }
 
@@ -2603,6 +2709,140 @@ fn steps_argument_lists() -> Vec<Step> {
             ],
         )
         .absent(&[("pkg/pure.py", "EFF201")]),
+    ]
+}
+
+/// A call target naming every callee by its argument list: a call of a parameter passing a
+/// `Final` string of another module is reported while the string matches the target's glob,
+/// until that module binds the name to another string, and again when it binds it back.
+fn steps_callee_globs() -> Vec<Step> {
+    let config = format!(
+        "{CONFIG}\n[[tool.heki.call-owners]]\nname = \"backend-module\"\ntargets = ['*(module=\"pkg.backend.*\")']\nforbidden-callers = [\"pkg.glob_use:*\"]\n"
+    );
+    let names = |value: &str| format!("from typing import Final\n\nBACKEND: Final = \"{value}\"\n");
+    let using = "from pkg.backend_names import BACKEND\n\n\ndef build(factory):\n    return factory(module=BACKEND)\n";
+    vec![
+        Step::new(
+            "a call of a parameter passes a string the glob matches",
+            vec![
+                Action::Configure(config),
+                Action::Create("pkg/backend_names.py", names("pkg.backend.dataclass")),
+                Action::Create("pkg/glob_use.py", using.to_owned()),
+            ],
+        )
+        .present(&[("pkg/glob_use.py", "MUT204")]),
+        Step::new(
+            "the other module binds the name to another string",
+            vec![save("pkg/backend_names.py", &names("pkg.frontend"))],
+        )
+        .absent(&[("pkg/glob_use.py", "MUT204")]),
+        Step::new(
+            "it binds a string the glob matches again",
+            vec![save("pkg/backend_names.py", &names("pkg.backend.msgspec"))],
+        )
+        .present(&[("pkg/glob_use.py", "MUT204")]),
+        Step::new(
+            "the files and the contracts are restored",
+            vec![
+                Action::Delete("pkg/glob_use.py"),
+                Action::Delete("pkg/backend_names.py"),
+                Action::Configure(CONFIG.to_owned()),
+            ],
+        )
+        .absent(&[("pkg/glob_use.py", "MUT204")]),
+    ]
+}
+
+/// A call target naming every callee, below a boundary scope and a private helper's caller in
+/// another module: editing only the string a helper passes to a parameter's call changes no
+/// summary, yet the scope's `EFF201` and the caller's `MUT204` follow it.
+fn steps_unbound_helpers() -> Vec<Step> {
+    let config = format!(
+        "{CONFIG}\n[[tool.heki.effect-boundaries]]\nname = \"no-backend\"\nscopes = [\"pkg.ub_scope.run\"]\nforbid = [\"calls\"]\ncall-targets = ['*(module=\"pkg.backend.*\")']\n\n[[tool.heki.call-owners]]\nname = \"backend-calls\"\ntargets = ['*(module=\"pkg.backend.*\")']\nforbidden-callers = [\"pkg.ub_scope:*\"]\n"
+    );
+    let helper = |value: &str| {
+        format!(
+            "def _make(factory):\n    return factory(module=\"{value}\")\n\n\ndef build(factory):\n    return factory(module=\"{value}\")\n"
+        )
+    };
+    let scope = "from pkg.ub_helper import _make, build\n\n\ndef run(factory):\n    return build(factory)\n\n\ndef make(factory):\n    return _make(factory)\n";
+    const REPORTS: &[(&str, &str)] =
+        &[("pkg/ub_scope.py", "EFF201"), ("pkg/ub_scope.py", "MUT204")];
+    vec![
+        Step::new(
+            "helpers of another module pass a string the glob matches",
+            vec![
+                Action::Configure(config),
+                Action::Create("pkg/ub_helper.py", helper("pkg.backend.dataclass")),
+                Action::Create("pkg/ub_scope.py", scope.to_owned()),
+            ],
+        )
+        .present(REPORTS),
+        Step::new(
+            "the helpers pass another string",
+            vec![save("pkg/ub_helper.py", &helper("pkg.frontend"))],
+        )
+        .absent(REPORTS),
+        Step::new(
+            "they pass a string the glob matches again",
+            vec![save("pkg/ub_helper.py", &helper("pkg.backend.msgspec"))],
+        )
+        .present(REPORTS),
+        Step::new(
+            "the files and the contracts are restored",
+            vec![
+                Action::Delete("pkg/ub_scope.py"),
+                Action::Delete("pkg/ub_helper.py"),
+                Action::Configure(CONFIG.to_owned()),
+            ],
+        )
+        .absent(REPORTS),
+    ]
+}
+
+/// A call target with a module part naming a name the package binds to a class of another
+/// module: a read of it through the package object is reported while the package imports the
+/// class, not once the package stops binding it, and again when it binds it back.
+fn steps_module_members() -> Vec<Step> {
+    let config = format!(
+        "{CONFIG}\n[[tool.heki.call-owners]]\nname = \"root-kind\"\ntargets = [\"pkg.rexp:Kind\"]\nforbidden-callers = [\"pkg.rexp_use:*\"]\nreferences = \"reads\"\n"
+    );
+    let reexport = "from pkg.rexp.enums import Kind as Kind\n";
+    let using = "import pkg.rexp\n\n\ndef first():\n    return pkg.rexp.Kind.A\n";
+    vec![
+        Step::new(
+            "a function reads the package's name through the package object",
+            vec![
+                Action::Configure(config),
+                Action::Create("pkg/rexp/__init__.py", reexport.to_owned()),
+                Action::Create(
+                    "pkg/rexp/enums.py",
+                    "import enum\n\n\nclass Kind(enum.Enum):\n    A = 1\n".to_owned(),
+                ),
+                Action::Create("pkg/rexp_use.py", using.to_owned()),
+            ],
+        )
+        .present(&[("pkg/rexp_use.py", "MUT204")]),
+        Step::new(
+            "the package stops binding the name",
+            vec![save("pkg/rexp/__init__.py", "")],
+        )
+        .absent(&[("pkg/rexp_use.py", "MUT204")]),
+        Step::new(
+            "it imports the class again",
+            vec![save("pkg/rexp/__init__.py", reexport)],
+        )
+        .present(&[("pkg/rexp_use.py", "MUT204")]),
+        Step::new(
+            "the files and the contracts are restored",
+            vec![
+                Action::Delete("pkg/rexp_use.py"),
+                Action::Delete("pkg/rexp/enums.py"),
+                Action::Delete("pkg/rexp/__init__.py"),
+                Action::Configure(CONFIG.to_owned()),
+            ],
+        )
+        .absent(&[("pkg/rexp_use.py", "MUT204")]),
     ]
 }
 
@@ -3381,7 +3621,11 @@ fn steps_small_displays() -> Vec<Step> {
 /// becomes a `dataclass_transform` (a project-wide fact); whether a helper keeps the object its caller hands it is a summary fact
 /// of the helper, and so are the tests of its parameters under which a helper keeps that object
 /// or the one it returns, and whether a copy helper returns an element of an optional table only
-/// where the table defaults to a value without elements; whether a helper returns its parameter
+/// where the table defaults to a value without elements, and whether a factory's result holds
+/// itself through the new objects it links; whether a model's write validates the value (its
+/// class keywords, or a configuration in a subclass of another module), and whether an operator
+/// on a linked object runs project code that may return what it reads out of it, is a
+/// declaration of the modules of its classes; whether a helper returns its parameter
 /// is a declaration of its module; whether a parameter is typed, and with which class, is a fact of
 /// the callers the strict modes walk (`MUT205` writes, `MUT206` reads, `MUT207` calls), and
 /// whether that class defines a method a call target naming no class names is a declaration of
@@ -3796,6 +4040,64 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
             vec![save("pkg/guarded_keeps.py", GUARDED_KEEPS)],
         )
         .absent(&[("pkg/guarded_build.py", "EFF201")]),
+        Step::new(
+            "the factory of another module links its part back to the result",
+            vec![Action::Save(
+                "pkg/link_ops.py",
+                LINK_OPS.replace(
+                    "    made.part = part\n",
+                    "    made.part = part\n    part.part = made\n",
+                ),
+            )],
+        )
+        .present(&[("pkg/link_pass.py", "EFF201")]),
+        Step::new(
+            "the factory links only the part into the result again",
+            vec![save("pkg/link_ops.py", LINK_OPS)],
+        )
+        .absent(&[("pkg/link_pass.py", "EFF201")]),
+        Step::new(
+            "the linked model of another module validates assignments by a class keyword",
+            vec![Action::Save(
+                "pkg/link_model.py",
+                LINK_MODEL.replace("(BaseModel)", "(BaseModel, validate_assignment=True)"),
+            )],
+        )
+        .present(&[("pkg/link_model_pass.py", "EFF201")]),
+        Step::new(
+            "the keyword is gone again",
+            vec![save("pkg/link_model.py", LINK_MODEL)],
+        )
+        .absent(&[("pkg/link_model_pass.py", "EFF201")]),
+        Step::new(
+            "a subclass in a new module configures the model",
+            vec![Action::Create(
+                "pkg/link_model_sub.py",
+                LINK_MODEL_SUB.to_owned(),
+            )],
+        )
+        .present(&[("pkg/link_model_pass.py", "EFF201")]),
+        Step::new(
+            "the subclass is deleted",
+            vec![Action::Delete("pkg/link_model_sub.py")],
+        )
+        .absent(&[("pkg/link_model_pass.py", "EFF201")]),
+        Step::new(
+            "the linked ticket's negation returns what the ticket holds",
+            vec![Action::Save(
+                "pkg/copy_ops.py",
+                COPY_OPS.replace(
+                    "        self.flag = False\n",
+                    "        self.flag = False\n\n    def __neg__(self):\n        return self.part\n",
+                ),
+            )],
+        )
+        .present(&[("pkg/link_neg_pass.py", "EFF201")]),
+        Step::new(
+            "the ticket has no negation again",
+            vec![save("pkg/copy_ops.py", COPY_OPS)],
+        )
+        .absent(&[("pkg/link_neg_pass.py", "EFF201")]),
     ]
 }
 
@@ -7405,6 +7707,7 @@ sessions!(editing, Session::start, {
     exact_effects: steps_exact_effects,
     returned_rows: steps_returned_rows,
     returned_types: steps_returned_types,
+    declared_types: steps_declared_types,
     held_functions: steps_held_functions,
     store_types: steps_store_types,
     unused_suppressions: steps_unused_suppressions,
@@ -7419,6 +7722,9 @@ sessions!(editing, Session::start, {
     class_bodies: steps_class_bodies,
     bases_and_attribution: steps_bases_and_attribution,
     argument_lists: steps_argument_lists,
+    callee_globs: steps_callee_globs,
+    unbound_helpers: steps_unbound_helpers,
+    module_members: steps_module_members,
     environment: steps_environment,
     outside_targets: steps_outside_targets,
     glob_members: steps_glob_members,

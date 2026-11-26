@@ -2413,6 +2413,27 @@ impl<'a> Reach<'a> {
                     (chain(), a.span, a.kind, a.name.clone())
                 });
             }
+        } // A call heki binds to no project code calls each target naming every callee whose
+        // constants it passes.
+        let unbound = cx.unbound_calls(func).filter(|_| b.calls);
+        for (path, u) in unbound {
+            for t in b.call_targets.called_unbound(u) {
+                let site: SiteId = (func.fqn(), u.span);
+                let nodes = &self.nodes;
+                let chain = || {
+                    let mut chain = chain_to(nodes, i);
+                    chain.push(CallHop {
+                        caller: func.clone(),
+                        callee: b.call_targets.patterns[t].text.clone(),
+                        span: u.span,
+                        path: path.to_path_buf(),
+                    });
+                    chain
+                };
+                note(&mut self.calls, vec![t], site, || {
+                    (chain(), u.span, AccessKind::Call.describe())
+                });
+            }
         }
     }
 

@@ -138,6 +138,9 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   afterwards, and each jump), as CPython compiles it, and the Soundness lane rewrites a
   statement in it only if every copy is proven safe. The copies of a `finally` body nested in
   another `finally` body, or holding a way out itself, multiply with each copy around them. A
+  way out no path takes (a `try` body that cannot raise, or that every path leaves by `return`)
+  gets no copy: a read of a local in a block no path enters binds no value, so such a copy would
+  hold every object it reads as one of unknown class. A
   typed `except` clause's test is opaque (a bare `except:` always matches); every `except*`
   clause may run on part of the group; an exception no clause takes is raised again.
 - **Size budget**: a function's lowering takes at most 4 units per byte of its source (at
@@ -386,6 +389,31 @@ class object (`types::Args::Returns`, Priority 2). A `T` that may be `None` (`T 
 `ModuleDecls::nullable_type_names`), a union of classes, an unbound type variable, `Any`, and
 `object` give no class, nor does a bare `Callable`. The call itself stays unresolved: the
 annotation does not say which function the value holds.
+
+A read of an attribute annotated with a type parameter of its class (`obj: T` in the class body
+or `self.obj: T` in a method of a module-level `class Site(Generic[T])`, `Protocol[T]`, or
+`class Site[T]:`; `ClassDecl::param_attrs`) on an instance whose annotation gives type arguments
+(`site: Site[Schema]`, also through a type alias; `types::Args::TypeArgs`) has the argument at
+the parameter's position (Priority 2; `ProjectDecls::type_argument`). An argument that may be
+`None`, a parameter given no argument, an annotation wrapping the parameter (`Optional[T]`,
+`list[T]`), an attribute a base class declares, and a class whose parameters come from the
+arguments of other bases give no class. A class method the catalog says returns `Self`
+(`return_type = "Self"`: pydantic's `model_construct` and `model_validate`) called on a project
+class gives an instance of that class, as one a project class annotates `-> Self` does.
+
+A name another module binds only under `if TYPE_CHECKING:` (no other statement of it stores or
+deletes the name, `ModuleDecls::type_checking_only`) is what that import names for the chases
+that read names as a type checker does (`resolver::Chase::reads_type_checking`): an annotation
+naming it (`ProjectDecls::declared_ty`), a type name, and a base of a class
+(`ProjectDecls::declared_mro`). At run time a module `__getattr__` may serve another object
+under it, or none, so the chases that decide what a name holds or runs (`ProjectDecls::canonical`,
+`object_named`, `canonical_value`) stop at it: calling it, or reading a value through it, is no
+call or value heki knows. A method call on a class based on such a name finds the method along
+the MRO a type checker reads, which types the call (`model_copy()` has the receiver's class) and
+gives its targets, but those are never every target (`ProjectDecls::lookup_rebound`): a report
+resting on them is heuristic, under the open premise "incomplete-targets". The facts that decide
+what the class's instances run otherwise (special methods, attribute hooks, stores) read the base
+as a base heki knows nothing of (`ProjectDecls::mro`).
 
 Some receivers have the class the language or the standard library gives them. An instance's
 own namespace (`obj.__dict__`, or `vars(obj)` of the builtin: `resolver::namespace_load`) is a
@@ -747,6 +775,22 @@ entries): reading it with a key a string constant gives (`HANDLERS["create"]`,
 later entry of the key replacing an earlier one; any other key, and iterating its values, give
 one of its values.
 
+A `functools.partial` object's type keeps what the object holds besides its callable
+(`types::Held`: nothing, keywords only, or positions). A call of a value of such a type, read
+where the function does not make it (an item of a table, `POLICY[kind](x)` of
+`POLICY = {"a": partial(build), "b": partial(other, deep=True)}`, also bound to an attribute),
+whose callable is one or several named objects and which holds no positions, is a call of those
+objects with the call's arguments as written (`Extractor::typed_partial`): their targets, the
+class it constructs, whether they are every implementation it can run, and what each returns,
+a new object only when every one returns one. The keywords the object holds are values the call
+does not show (`Call::unseen_keywords`); when the callable is a library function and the
+object holds keywords, the call stays unresolved, since the catalog selects its case from the
+arguments the call shows. A named object joins a partial object into a partial
+object of one of them (`{"a": f, "b": partial(g)}`), holding what the partial object holds. A
+partial object holding positions, and a table one value of which heki does not know, or that
+something changes in place or binds again with values heki does not know, leave the call
+unresolved.
+
 A function every `return` of which gives what one import binds, an import in the function (`from
 pkg import ops`, then `return ops`, which breaks an import cycle) or one of its module, with no
 decorator but those keeping calls as defined and a `functools` cache, returns that object
@@ -810,6 +854,22 @@ and a property read take the annotation. A module constant the module
 body binds once, outside a loop, to a value that names a file (`ModuleDecls::file_constants`,
 `names_a_file`) names it where a function or another module reads it
 (`TypeCtx::names_file_constant`), unless another module rebinds it.
+
+Every name an annotation reads is looked up in one place (`ModuleDecls::lookup`), in this
+order: the function's own binding of the name, for an annotation of a local
+(`TypeCtx::local_names`); the module's binding; a builtin class. The function's binding names
+what one import statement binds (`import types as local_types`, then
+`module: local_types.ModuleType = ...`), counted once however many copies of the statement the
+lowering makes (a `finally` body); a name the function binds otherwise, or more than once, names
+no object. A module's binding of a builtin's name (`ValueError = make_error_class()`) is that
+binding, of unknown class. A parameter's annotation is read in the scope around the function and
+takes the module's names only. `Optional[...]`, `Annotated[...]`, `Union[...]` and the other
+qualifiers are looked through only when the name reads the `typing` or `typing_extensions`
+object, or nothing binds it (a string annotation that never imports it); a project class named
+`Optional` is that class. The builtin exception and warning classes (`BaseException`,
+`ValueError`, `OSError`, ...) are classes of `builtins` that an annotation names and a call of
+the class builds, as the builtin containers are; `IOError` and `EnvironmentError`, which name
+`OSError`, are not.
 
 A module-level name the module body binds once to a type expression reads as the type it names
 wherever an annotation names it, in its module, imported, or re-exported, also as a member of a
@@ -980,7 +1040,10 @@ EffectSummary(f) = {
                                                            // (FunctionDecl::returns_param) gives the
                                                            // object it hands it; kept: the tests of the
                                                            // inputs under which the function may store
-                                                           // the result first (MayGiven)
+                                                           // the result first (MayGiven); linked: the
+                                                           // result holds itself through new objects
+                                                           // it links, so a value read out of it at a
+                                                           // call may be the result
     return_origins:           Option<Box<ReturnOrigins>>,  // MUT112, absent for most functions: what the
                                                            // returned object may be, path by path (new, held
                                                            // state, parameter i, or an element of parameter i;

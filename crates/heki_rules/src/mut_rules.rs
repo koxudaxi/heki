@@ -1307,12 +1307,13 @@ struct GuardedTargets {
 
 impl GuardedTargets {
     fn any(&self, key: &FuncKey) -> bool {
-        match &self.only {
-            None => self.matchers.any(key),
-            Some(only) => {
-                (self.matchers.matching(key).iter()).any(|i| only.binary_search(i).is_ok())
-            }
-        }
+        (self.matchers.matching(key).iter()).any(|&i| {
+            self.matchers.guards(i)
+                && self
+                    .only
+                    .as_ref()
+                    .is_none_or(|o| o.binary_search(&i).is_ok())
+        })
     }
 }
 
@@ -1336,6 +1337,10 @@ pub(crate) struct FunctionMatcher {
     /// The text names nothing outside the project ([`Self::names_external`]): the target had an
     /// argument list, which heki binds only for project functions.
     project_only: bool,
+    /// The functions the text names are part of the operation a `call-owners` contract guards,
+    /// and may call its targets ([`GuardedTargets`]); not for a target naming every callee
+    /// (`*(module="pkg.*")`), which names calls, not functions.
+    guards: bool,
 }
 
 /// The holder standing for every module and class outside the project (`<external>._*`).
@@ -1391,6 +1396,7 @@ impl FunctionMatcher {
                 method: None,
                 outside: Some(DottedPattern::new(last, context)?),
                 project_only: false,
+                guards: true,
             });
         }
         let (holder, last) = match split_last_dot(text) {
@@ -1408,7 +1414,23 @@ impl FunctionMatcher {
             method: None,
             outside: None,
             project_only: false,
+            guards: true,
         })
+    }
+
+    /// The same matcher, naming calls only: no function it names is part of the guarded
+    /// operation ([`Self::guards`]).
+    pub(crate) fn naming_calls_only(self) -> Self {
+        Self {
+            guards: false,
+            ..self
+        }
+    }
+
+    /// Whether the functions the text names are part of the operation a `call-owners`
+    /// contract guards ([`GuardedTargets`]).
+    pub(crate) fn guards(&self) -> bool {
+        self.guards
     }
 
     /// The same matcher, naming project functions and classes only.
@@ -5274,6 +5296,6 @@ pub(crate) fn delegated_reports<'k>(
 mod call_owners;
 
 pub(crate) use call_owners::{
-    CallTargets, FunctionMatchers, Subclasses, call_verb, group_texts, mut204, parse_call_targets,
-    site_callee, split_arguments,
+    CallTargets, FunctionMatchers, Subclasses, call_verb, group_texts, mut204, names_every_callee,
+    parse_call_targets, site_callee, split_arguments,
 };

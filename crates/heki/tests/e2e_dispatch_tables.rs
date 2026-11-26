@@ -4,7 +4,9 @@
 //! library, a `staticmethod` or a class (through the class, `cls`, or an instance), a function
 //! or a method returning a module it imports (a local import breaking a cycle, with a
 //! `functools` cache), a name bound to one of two modules, and a value typed by a `TypeVar` with
-//! a bound or constraints. A dict or list something changes in place keeps the items of its own
+//! a bound or constraints. A table of `functools.partial` objects holding no positions calls
+//! their callables, and what such a call returns is new when every callable returns a new
+//! object. A dict or list something changes in place keeps the items of its own
 //! and of what the changes add, or none when a change adds what heki cannot type. A
 //! module-level function or a method its body binds again on some paths may be either object.
 //!
@@ -1689,4 +1691,454 @@ fn class_aliases_of_more_than_eight_functions_are_too_many() {
         let found = reported_codes(&p, &["EFF101", "EFF101 [heuristic]"]);
         assert_eq!(found.len(), reports, "{n}: {found:?}");
     }
+}
+
+/// A table whose values are `functools.partial` objects of project functions holding keywords
+/// or nothing calls those functions, with the call's positions as written, beside named
+/// functions, in a list, or bound to an attribute; a partial object holding positions keeps the
+/// call unresolved.
+const PARTIAL_TABLES: &str = r#"from __future__ import annotations
+
+from functools import partial
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pkg.model import Field
+
+
+def _noop(field: Field) -> None:
+    pass
+
+
+def _require(field: Field, *, deep: bool = False) -> None:
+    field.required = True
+
+
+def _set(value: bool, field: Field) -> None:
+    field.required = value
+
+
+PARTIALS = {"require": partial(_require), "noop": partial(_noop)}
+KEYWORDS = {"require": partial(_require, deep=True)}
+MIXED = {"require": partial(_require), "noop": _noop}
+LISTED = [partial(_noop), partial(_require)]
+NOOPS = {"noop": partial(_noop), "other": partial(_noop)}
+POSITIONS = {"require": partial(_set, True)}
+
+
+class Pass:
+    def __init__(self) -> None:
+        self._policy = {"require": partial(_require)}
+
+    def run(self, kind: str, field: Field) -> None:
+        self._policy[kind](field)
+"#;
+
+const PARTIAL_TABLE_CALLS: &str = r#"from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from pkg.tables import KEYWORDS, LISTED, MIXED, NOOPS, PARTIALS, POSITIONS, Pass
+
+if TYPE_CHECKING:
+    from pkg.model import Field
+
+
+def by_key(field: Field) -> None:
+    PARTIALS["require"](field)  # EFF201
+
+
+def by_other_key(field: Field) -> None:
+    PARTIALS["noop"](field)
+
+
+def by_any_key(field: Field, kind: str) -> None:
+    PARTIALS[kind](field)  # EFF201
+
+
+def holding_keywords(field: Field, kind: str) -> None:
+    KEYWORDS[kind](field)  # EFF201
+
+
+def beside_a_function(field: Field, kind: str) -> None:
+    MIXED[kind](field)  # EFF201
+
+
+def by_position(field: Field, i: int) -> None:
+    LISTED[i](field)  # EFF201
+
+
+def every_value_writes_nothing(field: Field, kind: str) -> None:
+    NOOPS[kind](field)
+
+
+def holding_positions(field: Field, kind: str) -> None:
+    POSITIONS[kind](field)
+
+
+def through_an_attribute(p: Pass, field: Field, kind: str) -> None:
+    p.run(kind, field)  # EFF201
+"#;
+
+#[test]
+fn a_table_of_partial_objects_calls_their_callables() {
+    check_marks(
+        "dispatch_partial_tables",
+        &[
+            ("pkg/tables.py", PARTIAL_TABLES),
+            ("pkg/passes.py", PARTIAL_TABLE_CALLS),
+        ],
+    );
+}
+
+const FRESH_TABLE_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["EFF201"]
+
+[[tool.heki.effect-boundaries]]
+name = "pass"
+scopes = ["pkg.passes:*"]
+write-universe = ["Field.flag"]
+allow-writes = []
+fresh-objects = "allow"
+"#;
+
+/// The tables of the passes below, in another module: what a call of one of their values
+/// returns is new when every value it may be makes a new object.
+const FRESH_TABLES: &str = r#"from __future__ import annotations
+
+from functools import partial
+from typing import Any
+
+KEPT: list[Any] = []
+
+
+class Field:
+    def __init__(self, data_type: Any = None) -> None:
+        self.data_type = data_type
+        self.flag = False
+
+
+def make_field(data_type: Any) -> Field:
+    return Field(data_type)
+
+
+def other_field(data_type: Any) -> Field:
+    return Field(data_type)
+
+
+def kept_field(data_type: Any) -> Field:
+    field = Field(data_type)
+    KEPT.append(field)
+    return field
+
+
+def unknown_factory() -> Any:
+    return KEPT[0]
+
+
+PARTIALS = {"made": partial(make_field), "other": partial(other_field)}
+KEYWORDS = {"row": partial(Field, data_type=None)}
+MIXED = {"made": make_field, "other": partial(other_field)}
+LISTED = [partial(make_field), partial(other_field)]
+POSITIONS = {"row": partial(Field, None)}
+ONE_KEPT = {"made": partial(make_field), "kept": partial(kept_field)}
+ONE_UNKNOWN = {"row": partial(Field), "other": unknown_factory()}
+CHANGED = {"row": partial(Field)}
+
+
+def register(name: str, factory: Any) -> None:
+    CHANGED[name] = factory
+
+
+class Parser:
+    def __init__(self) -> None:
+        self._policy = {"row": partial(Field)}
+
+    def build(self, row: str, data_type: Any) -> Field:
+        return self._policy[row](data_type=data_type)
+
+
+class OpenParser:
+    def __init__(self) -> None:
+        self._policy = {"row": partial(Field)}
+
+    def add(self, name: str, factory: Any) -> None:
+        self._policy[name] = factory
+
+    def build(self, row: str, data_type: Any) -> Field:
+        return self._policy[row](data_type=data_type)
+
+
+class ReboundParser:
+    def __init__(self) -> None:
+        self._policy = {"row": partial(Field)}
+
+    def rebind(self, policy: Any) -> None:
+        self._policy = policy
+
+    def build(self, row: str, data_type: Any) -> Field:
+        return self._policy[row](data_type=data_type)
+"#;
+
+/// A table changed in place, rebound, or holding a value heki does not know, and a partial
+/// object holding positions, keep the call unresolved: its result may be an older object. The
+/// annotations type the results, so that every write is one of `Field.flag`.
+const FRESH_TABLE_PASSES: &str = r#"from __future__ import annotations
+
+from typing import Any
+
+from pkg.tables import (
+    CHANGED,
+    Field,
+    KEYWORDS,
+    LISTED,
+    MIXED,
+    ONE_KEPT,
+    ONE_UNKNOWN,
+    PARTIALS,
+    POSITIONS,
+    OpenParser,
+    Parser,
+    ReboundParser,
+)
+
+
+def through_partials(row: str, data_type: Any) -> None:
+    built: Field = PARTIALS[row](data_type)
+    built.flag = True
+
+
+def holding_keywords(row: str) -> None:
+    built: Field = KEYWORDS[row]()
+    built.flag = True
+
+
+def beside_a_function(row: str, data_type: Any) -> None:
+    built: Field = MIXED[row](data_type)
+    built.flag = True
+
+
+def by_position(i: int, data_type: Any) -> None:
+    built: Field = LISTED[i](data_type)
+    built.flag = True
+
+
+def through_an_attribute(parser: Parser, data_type: Any) -> None:
+    built: Field = parser.build("row", data_type)
+    built.flag = True
+
+
+def holding_positions(row: str) -> None:
+    built: Field = POSITIONS[row]()
+    built.flag = True  # EFF201
+
+
+def one_value_keeps_it(row: str, data_type: Any) -> None:
+    built: Field = ONE_KEPT[row](data_type)
+    built.flag = True  # EFF201
+
+
+def one_value_unknown(row: str, data_type: Any) -> None:
+    built: Field = ONE_UNKNOWN[row](data_type)
+    built.flag = True  # EFF201
+
+
+def changed_in_place(row: str, data_type: Any) -> None:
+    built: Field = CHANGED[row](data_type)
+    built.flag = True  # EFF201
+
+
+def an_open_attribute(parser: OpenParser, data_type: Any) -> None:
+    built: Field = parser.build("row", data_type)
+    built.flag = True  # EFF201
+
+
+def a_rebound_attribute(parser: ReboundParser, data_type: Any) -> None:
+    built: Field = parser.build("row", data_type)
+    built.flag = True  # EFF201
+"#;
+
+#[test]
+fn a_call_of_a_table_value_returns_new_objects_when_every_value_makes_one() {
+    let files = [
+        ("pkg/tables.py", FRESH_TABLES),
+        ("pkg/passes.py", FRESH_TABLE_PASSES),
+    ];
+    let p = Project::new("dispatch_fresh_tables");
+    p.write("pyproject.toml", FRESH_TABLE_CONFIG);
+    p.write("pkg/__init__.py", "");
+    for (path, text) in files {
+        p.write(path, text);
+    }
+    assert_eq!(reported(&p), marked(&files));
+}
+
+const REQUEST_FIELD_CONFIG: &str = r#"[project]
+name = "t"
+version = "0"
+requires-python = ">=3.11"
+dependencies = ["pydantic>=2"]
+
+[tool.heki.lint]
+select = ["EFF201"]
+
+[[tool.heki.effect-boundaries]]
+name = "pass"
+scopes = ["pkg.passes:*"]
+write-universe = ["DataType.flag", "DataType.data_types", "Field._nullable_without_default", "Field._alias_scope"]
+allow-writes = []
+fresh-objects = "allow"
+"#;
+
+const REQUEST_FIELD_MODEL: &str = r#"from __future__ import annotations
+
+from functools import partial
+from typing import Any, Self
+
+from pydantic import BaseModel
+
+
+class Reference(BaseModel):
+    children: list[Any] = []
+
+
+class DataType(BaseModel):
+    flag: bool = False
+    data_types: list[DataType] = []
+    parent: Any = None
+    reference: Reference | None = None
+
+    def register_reference(self) -> None:
+        if self.reference:
+            self.reference.children.append(self)
+
+    @property
+    def all_data_types(self):
+        for data_type in self.data_types:
+            yield from data_type.all_data_types
+        yield self
+
+
+def copy_tree(data_type: DataType, *, link_parents: bool) -> DataType:
+    """Copy a tree; nothing is registered, so the copy is new."""
+    copied = data_type.model_copy()
+    copied.parent = None
+    copied.data_types = [copy_tree(child, link_parents=link_parents) for child in data_type.data_types]
+    if link_parents:
+        for child in copied.data_types:
+            child.parent = copied
+    return copied
+
+
+class Field(BaseModel):
+    data_type: DataType
+    parent: Any = None
+
+    def copy_owning(self, *, data_type: DataType) -> Self:
+        copied = self.model_copy(update={"data_type": data_type, "parent": None})
+        data_type.parent = copied
+        return copied
+
+
+class Model(BaseModel):
+    fields: list[Field] = []
+
+
+class Builder:
+    def record_nullable_without_default(self, field: Field, value: bool | None) -> None:
+        field.__dict__["_nullable_without_default"] = value
+
+    def record_alias_scope(self, field: Field, scope: str) -> None:
+        field.__dict__["_alias_scope"] = scope
+
+    def append_field(self, model: Model, field: Field) -> None:
+        field.parent = model
+        model.fields.append(field)
+
+
+class Parser:
+    def __init__(self) -> None:
+        self._field_policy = {"row": partial(Field)}
+
+    def build_field(self, row: str, data_type: DataType) -> Field:
+        return self._field_policy[row](data_type=data_type)
+
+    def build_field_directly(self, data_type: DataType) -> Field:
+        return Field(data_type=data_type)
+"#;
+
+/// A field built directly and one built through a table of `functools.partial` objects are
+/// both new: the writes through the builder change objects the pass made.
+const REQUEST_FIELD_PASSES: &str = r#"from __future__ import annotations
+
+from pkg.model import Builder, DataType, Model, Parser
+
+
+def d_control_field_built_directly(parser: Parser, builder: Builder, model: Model, data_type: DataType) -> None:
+    built = parser.build_field_directly(data_type.model_copy())
+    builder.record_alias_scope(built, "Model")
+    builder.append_field(model, built)
+
+
+def e_field_built_through_a_table_value(parser: Parser, builder: Builder, model: Model, data_type: DataType) -> None:
+    built = parser.build_field("row", data_type.model_copy())
+    builder.record_alias_scope(built, "Model")
+    builder.append_field(model, built)
+"#;
+
+#[test]
+fn a_field_the_request_builds_through_a_table_value_is_new() {
+    let p = Project::new("dispatch_request_field_table");
+    p.write("pyproject.toml", REQUEST_FIELD_CONFIG);
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/model.py", REQUEST_FIELD_MODEL);
+    p.write("pkg/passes.py", REQUEST_FIELD_PASSES);
+    assert_eq!(reported(&p), Vec::<(String, u64)>::new());
+}
+
+const LIBRARY_PARTIAL_TABLES: &str = r#"import socket
+from functools import partial
+
+KEYWORD = {"lookup": partial(socket.getaddrinfo, flags=socket.AI_NUMERICHOST)}
+BARE = {"lookup": partial(socket.getaddrinfo)}
+"#;
+
+const LIBRARY_PARTIAL_CALLS: &str = r#"from pkg.tables import BARE, KEYWORD
+
+
+async def keyword_decides_the_case() -> None:
+    KEYWORD["lookup"]("example.com", 80)
+
+
+async def nothing_held() -> None:
+    BARE["lookup"]("example.com", 80)
+"#;
+
+/// `(line, rule)` of every `EFF101` report of `pkg/calls.py`.
+fn blocking_lines(p: &Project) -> Vec<u64> {
+    let (code, stdout, stderr) = p.check(&["--output-format", "json", "--select", "EFF101"]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let mut lines: Vec<u64> = diags
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF101")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect();
+    lines.sort_unstable();
+    lines
+}
+
+#[test]
+fn a_library_partial_holding_keywords_is_not_resolved_by_the_visible_arguments() {
+    let p = Project::new("dispatch_library_partial_tables");
+    p.write("pyproject.toml", "[project]\nname = \"t\"\n");
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/tables.py", LIBRARY_PARTIAL_TABLES);
+    p.write("pkg/calls.py", LIBRARY_PARTIAL_CALLS);
+    // Only the object holding nothing is the library call it wraps: `AI_NUMERICHOST` held by
+    // the other decides the case, and the call shows no flag.
+    assert_eq!(blocking_lines(&p), vec![9]);
 }

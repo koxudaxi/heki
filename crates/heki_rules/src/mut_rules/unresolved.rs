@@ -382,19 +382,20 @@ pub(super) fn mut207(
                 let hits = matched.entry((r, a.name.as_str())).or_insert_with(|| {
                     let patterns = rule.targets.patterns.iter().enumerate();
                     let matching = patterns.filter(|(i, p)| {
-                        p.name.matches_on_unknown(&a.name, || {
-                            // A text naming no class names members of any.
-                            let family: Box<dyn Iterator<Item = &str>> = if p.name.names_any_class()
-                            {
-                                let every = every_class.get_or_insert_with(|| {
-                                    project_classes(cx).into_iter().map(|c| c.fqn).collect()
-                                });
-                                Box::new(every.iter().map(String::as_str))
-                            } else {
-                                Box::new(p.family().iter().map(String::as_str))
-                            };
-                            globs.of(cx, (r, *i), family).has(&a.name)
-                        })
+                        !p.names_every_callee()
+                            && p.name.matches_on_unknown(&a.name, || {
+                                // A text naming no class names members of any.
+                                let family: Box<dyn Iterator<Item = &str>> =
+                                    if p.name.names_any_class() {
+                                        let every = every_class.get_or_insert_with(|| {
+                                            project_classes(cx).into_iter().map(|c| c.fqn).collect()
+                                        });
+                                        Box::new(every.iter().map(String::as_str))
+                                    } else {
+                                        Box::new(p.family().iter().map(String::as_str))
+                                    };
+                                globs.of(cx, (r, *i), family).has(&a.name)
+                            })
                     });
                     matching.map(|(i, _)| i).collect()
                 });
