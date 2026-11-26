@@ -124,10 +124,12 @@ operand (`f is decide`), a tested condition, an iterated, awaited, formatted, or
 dict display's key, the class of a class pattern (`case Keys():`), the types of an `except` clause
 an exception may reach, a decorator, a default of a function or lambda, a keyword of a class
 statement, and the cause of `raise ... from`, also through copies and the displays holding it.
-No read: a call, an annotation, evaluated or not (`list[Keys]`), the values Python evaluates only
+A class body or a module binding a name to the target (`model_type = Keys`, `Alias = Keys`) is a
+read too: the uses of a class attribute or a global are not all followed back to the target. No
+read: a call, an annotation, evaluated or not (`list[Keys]`), the values Python evaluates only
 when asked (a `type` statement's value, the bounds and defaults of type parameters), an import, a
-name bound to the target by itself (`Alias = Keys`), whose own uses count, and a value nothing
-uses. A load handing a target on is reported as a hand-on only, and a read is matched as a
+name bound to the target by itself in a function (a local), whose own uses count, and a value
+nothing uses. A load handing a target on is reported as a hand-on only, and a read is matched as a
 construction is.
 
 A call through a value typed with a project `Protocol` that declares the method is judged by the

@@ -529,8 +529,8 @@ unresolved = "report"
 ```
 
 The read side of `write-owners`. A read is `ref.children`, a read through a local alias,
-`getattr(ref, "children")`, or `ref.__dict__["children"]`, also through a class object, which
-reads the class attribute (`Reference.children`, `cls.children`, a value typed
+`getattr(ref, "children")`, `hasattr(ref, "children")`, or `ref.__dict__["children"]`, also
+through a class object, which reads the class attribute (`Reference.children`, `cls.children`, a value typed
 `type[Reference]`).
 
 A read, or a call (`call-owners`, and an effect boundary's `call-targets` and
@@ -674,9 +674,11 @@ The call side of `write-owners`.
   (`isinstance(value, (Keys, Code))`, a test of a module-level display holding it). No read: a
   call (a call of its own), an annotation, evaluated or not (`list[Keys]`, `Keys | None`), the
   values Python evaluates only when asked (a `type` statement's value, the bounds and defaults of
-  type parameters), an import, a name bound to the target by itself (`Alias = Keys`, a local, a
+  type parameters), an import, a name bound to the target by itself in a function (a local, a
   `nonlocal` cell), whose own uses count, and a value nothing uses (`Keys` as an expression
-  statement). A load handing a target on is reported as a hand-on only. A read is matched as a
+  statement). A class body or a module binding a name to the target is a read of it
+  (`model_type = Keys`, `Alias = Keys`), because the uses of a class attribute or a global are not
+  all followed back to the target. A load handing a target on is reported as a hand-on only. A read is matched as a
   construction is, so a subclass counts unless `subclasses = false`; an instance of the class is
   no read of it.
 

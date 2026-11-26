@@ -8165,6 +8165,16 @@ impl<'a> Extractor<'a> {
             }
             return;
         }
+        if symbol == "builtins.hasattr" {
+            if let (Some(obj), Some(attr)) = (
+                args.first(),
+                args.get(1).and_then(|a| self.resolved_str(*a)),
+            ) {
+                let owner = self.owner_of(*obj);
+                self.typed_read(owner, &attr, ReadKind::HasAttr, span);
+            }
+            return;
+        }
         let Some(entry) = self.cx.catalog(&symbol) else {
             return;
         };
