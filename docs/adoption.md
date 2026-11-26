@@ -85,6 +85,57 @@ Their reports can be wrong about the code: they are printed, and fail the run on
 it would add on your code ("Rules worth enabling here"). `relax-async-in-tests`, on by default,
 leaves `EFF101`, `EFF105`, and `EFF106` out of test code.
 
+Two contracts keep the rest of the service in line: handlers that never block, and database
+writes that only the repository layer makes. `fail = true` makes their reports fail the run.
+
+```toml
+# heki.toml
+[[effect-boundaries]]
+name = "handlers-do-not-block"
+scopes = ["app.web.*"]
+forbid = ["blocking"]
+message = "await an async client, or move the call to app.repo and run it in a thread"
+fail = true
+
+[[call-owners]]
+name = "db-writes-in-repo"
+targets = ["app.db.Session.add", "app.db.Session.commit"]
+allowed-callers = ["app.repo.*"]
+message = "write through a function of app.repo"
+fail = true
+```
+
+The first reports a `time.sleep` two calls below an `async def` in `app.web` (`EFF201`). The
+second reports a handler that calls `session.add` or `session.commit` itself (`MUT204`). Use
+`write-owners` instead when the rule is about a field, not a call:
+[State Ownership](ownership.md#which-contract-do-i-need).
+
+### A layered application
+
+Keep the domain free of the web and infrastructure layers, and keep a shared settings object
+from being changed in place:
+
+```toml
+# heki.toml
+[[import-boundaries]]   # experimental
+name = "domain-is-a-leaf"
+importers = ["app.domain", "app.domain.*"]
+forbidden-imports = ["app.web", "app.web.*", "app.infra", "app.infra.*"]
+message = "pass what the domain needs in as an argument"
+fail = true
+
+[[readonly-returns]]
+name = "shared-settings"
+producers = ["app.settings.get_settings"]
+deep = true
+fail = true
+```
+
+A module of `app.domain` that imports `app.infra` is reported as `IMP201`, and a view that
+assigns to `get_settings().debug` or appends to `get_settings().hosts` as `MUT202`. See
+[Imports](imports.md#architecture-import-boundaries) and
+[State Ownership](ownership.md#which-contract-do-i-need).
+
 ### Walls for a team or a coding agent
 
 Declare the architecture as contracts, make their reports fail the run with `fail = true`, and give
@@ -128,6 +179,10 @@ fail = true
   that wants that can still set. Record today's findings in the baseline first
   (`uvx heki==0.9.0 check --update-baseline`), so that only new ones fail.
 - The `message` is the help of every report of the contract: write it as an instruction.
+- A baseline does not stop a new `# heki: ignore[...]` or `# noqa` from hiding a report. In
+  review and in CI, write `heki check --report-suppressed head.json` for the pull request and for
+  its base and compare them ([Auditing inline suppressions](#auditing-inline-suppressions)).
+  `CODEOWNERS` covers the contract and baseline files, and this comparison covers the comments.
 - For Claude Code, add the [Stop hook](coding-agents.md#a-stop-hook-for-claude-code): it runs
   `heki check`, with the baseline `heki.toml` names, when the agent is about to end its turn,
   and sends a failing report back to it.

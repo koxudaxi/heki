@@ -142,6 +142,6 @@ The run exits with code 1. When the new effect is intended, refresh the snapshot
 ## 👉 Next steps
 
 - [Configuration: effect-boundaries](configuration.md#effect-boundaries) lists every key and `forbid` token.
-- [Adopting heki in a code base](adoption.md) shows how to start with a baseline.
+- [Adopting heki in a code base](adoption.md) shows how to start with a baseline, and has the [blocking and database-write contracts of a web service](adoption.md#an-async-web-or-database-service) to copy.
 - `heki inspect app.render.render_page` (experimental) shows what one function reaches, with the call chains. See [Coding agents](coding-agents.md#what-a-function-does-heki-inspect-experimental).
 - [State Ownership and Mutation](ownership.md) covers the contracts about who may change, read, or call a thing.
