@@ -82,15 +82,16 @@ pub use ownership::{LocalOrigins, Origins, ResultOf, ReturnOrigins};
 pub use query::{CallerSite, Callers, CallsByCaller, ChangeChain, HandedChange, ParamChange};
 pub use readonly::container_mutator;
 pub use readonly::{
-    CacheDecorator, CachedResult, ContainerFamily, ContainerKind, FamilyRole, ProtectedReturn,
-    ReturnStep, Shared,
+    CacheDecorator, CachedResult, ContainerFamily, ContainerKind, FamilyLevel, FamilyRole,
+    ProtectedReturn, ReturnStep, Shared,
 };
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
-    Callee, CapturedParams, ClassDecl, CopyMade, DeclKeys, DeclPasses, FunctionDecl, HeldSentinel,
-    ModuleDecls, ModuleLayout, NamedAttr, ProjectDecls, ReadOnlyAttr, ReadOnlyKind, StrConstant,
-    StrValue, TypeCtx, Val, aliases_of, detect_source_roots, func_qualname, is_source_dir,
-    module_name_for_path, module_prefix, resolve_relative_module, self_aliases,
+    Callee, CapturedParams, ClassDecl, CopyMade, DeclKeys, DeclPasses, FamilyMembers, FamilyOpen,
+    FunctionDecl, HeldSentinel, ModuleDecls, ModuleLayout, NamedAttr, ProjectDecls, ReadOnlyAttr,
+    ReadOnlyKind, StrConstant, StrValue, TypeCtx, Val, aliases_of, detect_source_roots,
+    func_qualname, is_source_dir, module_name_for_path, module_prefix, resolve_relative_module,
+    self_aliases,
 };
 pub use summary::{BLOCKING_EFFECTS, offloaded_callable};
 

@@ -62,8 +62,10 @@ $ python3 tests/symtable_verify/verify_symtable.py --heki target/debug/heki test
 $ python3 tests/import_verify/verify_imports.py --heki target/debug/heki tests/import_verify/fixtures/
 $ python3 tests/sentinel/verify_soundness_kb.py
 $ python3 tests/sentinel/verify_stdlib_kb.py
+$ python3 tests/sentinel/verify_container_families.py
 $ python3 tests/difftest/counterexamples.py
 $ python3 tests/difftest/soundness_e2e_counterexamples.py
+$ python3 tests/difftest/container_abc_counterexamples.py
 $ python3.15 tests/difftest/ir_counterexamples.py
 ```
 
@@ -75,9 +77,11 @@ CI runs them on CPython 3.11 to 3.15 (`ir_counterexamples.py` on 3.15 only).
 | `verify_imports.py` | heki's import facts (`heki inspect --imports`) against CPython: each fixture module is imported first in a fresh interpreter that records the imports the module bodies run, and the `body` edges are compared both ways (every recorded import is one of heki's `body` sites, and every unconditional one heki lists that no `ImportError` handler guards is recorded); an `ast` reader checks the function, `TYPE_CHECKING`, and `lazy` classes. The fixtures under `py315` need CPython 3.15. |
 | `verify_soundness_kb.py` | every claim of the Layer 1 knowledge base (`kb/soundness/builtins.toml`), on the running interpreter |
 | `verify_stdlib_kb.py` | the Layer 2 rows of the standard library that type a value (`kb/ecosystem/stdlib.toml`: attribute rows, the class a method returns, a method's copy of its receiver, the value a holder's method returns), on instances it builds of each class, subclasses too |
+| `verify_container_families.py` | the container family table (`ContainerFamily::TABLE`): each row's class is in its family as the row says, every public class of the standard library that a class can derive from and that implements a family's read-only ABC has a row, the ABCs of the rows are nominal, and what opens a family (a registration, a subclass's `__subclasshook__`) |
 | `counterexamples.py` | that the naive rewrites heki refuses really change behavior |
 | `soundness_e2e_counterexamples.py` | that the rewrites earlier versions of heki made of these shapes change behavior; the end-to-end tests check that heki now blocks or disproves each |
 | `ir_counterexamples.py` | that the rewrites heki made before the IR modeled a shape (a binding, an alias, a path) change behavior; needs CPython 3.15 |
+| `container_abc_counterexamples.py` | that a value of a container ABC may be of a class that runs project code when the writer iterates it (a project implementer through the ABC, `UserDict`, or `list`, a registered class, a `register` heki cannot resolve, a `__subclasshook__`, a structural ABC); `e2e_mut101_exact.rs` checks that heki reports each heuristic |
 
 The Layer 2 rows of the distributions the catalog lists (`[[distributions]]`) are checked against
 releases of each distribution:

@@ -741,6 +741,14 @@ fn claim(cx: &Cx<'_>, c: &Candidate<'_>) -> Vec<Unmet> {
             "The builtin's own reads",
             &format!("`{class}` binds `{member}`, and a read of it may run any method"),
         )],
+        Some(ReadOverride::Open(heki_effect::FamilyOpen::Register(with))) => vec![unmet(
+            "The builtin's own reads",
+            &format!("a `register` call adds a class heki cannot name to `{with}`"),
+        )],
+        Some(ReadOverride::Open(heki_effect::FamilyOpen::SubclassHook(class))) => vec![unmet(
+            "The builtin's own reads",
+            &format!("`{class}` binds `__subclasshook__`, which may accept any class"),
+        )],
         Some(ReadOverride::Metaclass { class }) => vec![unmet(
             "The builtin's own reads",
             &format!("a metaclass heki does not know creates `{class}`"),

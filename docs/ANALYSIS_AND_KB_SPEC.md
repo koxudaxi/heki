@@ -1518,8 +1518,10 @@ which module imports which.
    comparison, and `repr()` run the items' own and whose dict or set lookups compare stored keys
    under an equal hash (strings in an object's `__dict__`, which holds the names of its
    attributes), or a library class's called as a library call handed every operand,
-   R3; a value of an abstract class, a protocol, `object`, or no class heki knows establishes
-   none); an attribute access that may run code of the project besides a getter heki resolves
+   R3; a value of a nominal container ABC establishes what its family's builtins and the project
+   classes implementing it do, `ProjectDecls::implementers`, unless the project opens the family
+   with a `register` heki cannot resolve or a `__subclasshook__`; a value of another abstract
+   class, a protocol, `object`, or no class heki knows establishes none); an attribute access that may run code of the project besides a getter heki resolves
    (`heki_effect::invokes::attribute_access_runs_project_code`: on a project class, a read that
    finds no plain attribute or method, a write that may run a property setter, `__setattr__`,
    `__delattr__`, another descriptor, or code of a base heki does not know,

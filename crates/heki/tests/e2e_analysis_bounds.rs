@@ -7830,3 +7830,68 @@ fn type_expressions_are_spelled_once_each() {
     });
     assert_eq!(found, Vec::<Value>::new());
 }
+
+/// The project classes a value of `Mapping` may be are listed by one walk over the family
+/// (`ProjectDecls::implementers`), each class visited at most twice: a chain of classes each
+/// deriving from the one before, from `Mapping` down, and a chain of classes each registered
+/// with the one before, from `Mapping` too. The last of either binds `__iter__`, which the
+/// writer runs after its write.
+#[test]
+fn the_implementers_of_a_container_abc_are_listed_once_through_long_chains() {
+    let shape = |n: usize| {
+        let mut lines = vec![
+            "from collections.abc import Mapping".to_owned(),
+            "from functools import cached_property".to_owned(),
+            String::new(),
+            String::new(),
+            "class Holder:".to_owned(),
+            "    def __init__(self, raw: dict[str, str]) -> None:".to_owned(),
+            "        self.raw = raw".to_owned(),
+            String::new(),
+            "    @cached_property".to_owned(),
+            "    def features(self) -> str:".to_owned(),
+            "        return self.raw.get(\"k\", \"\")".to_owned(),
+            String::new(),
+            "    def replace(self, raw: dict[str, str], rows: Mapping[str, str]) -> None:"
+                .to_owned(),
+            "        self.raw = raw".to_owned(),
+            "        for _ in rows:".to_owned(),
+            "            pass".to_owned(),
+        ];
+        let mut derived = "Mapping".to_owned();
+        let mut registered = "Mapping".to_owned();
+        for i in 0..n {
+            let iterates = if i + 1 == n {
+                "    def __iter__(self):\n        return iter(())"
+            } else {
+                "    pass"
+            };
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("class D{i}({derived}):\n{iterates}"),
+                String::new(),
+                String::new(),
+                format!("class R{i}:\n{iterates}"),
+                String::new(),
+                String::new(),
+                format!("{registered}.register(R{i})"),
+            ]);
+            derived = format!("D{i}");
+            registered = format!("R{i}");
+        }
+        let p = Project::new(&format!("bounds_abc_implementers_{n}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"MUT101\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let diags = check_linear(1_000, shape);
+    let tiers: Vec<&str> = (diags.iter())
+        .filter(|d| d["rule_code"] == "MUT101")
+        .map(|d| d["certainty"].as_str().unwrap())
+        .collect();
+    assert_eq!(tiers, ["heuristic"]);
+}
