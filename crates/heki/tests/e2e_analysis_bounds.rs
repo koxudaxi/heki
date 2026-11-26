@@ -1,6 +1,7 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
 //! narrowing through phis, the passes of the type inference and of the classes of merged values,
-//! the closure cells child scopes read, the stores of the cells a comprehension's assignment
+//! the closure cells child scopes read, the entries of a contract target's container through
+//! views and aliases, the stores of the cells a comprehension's assignment
 //! expressions bind and the reads seeing them, the iterables child scopes receive from the
 //! functions creating them, the fixpoint joining the stores of attributes, the names its
 //! functions store and read, the stores through namespaces and `setattr`, the classes whose code
@@ -1075,6 +1076,63 @@ fn a_long_chain_of_in_place_operators_gives_the_display_back() {
         .map(|d| d["qualname"].as_str().unwrap())
         .collect();
     assert_eq!(reported, vec!["extend"], "{found:#?}");
+}
+
+/// A function with a long chain of entries of a `write-owners` target's container that a loop
+/// over `values()` carries in reverse (`e{i} = e{i + 1}`, the last one the loop's entry), then
+/// many aliases of the container, each with a loop over its `values()` or `items()` that may
+/// rebind the first entry, and a change of the first entry (`MUT201`): the entries are decided
+/// by one fixpoint that visits a value again only when a fact it reads grows, not by a pass over
+/// the function per link.
+#[test]
+fn entries_down_a_long_chain_of_views_and_aliases_are_found_in_one_fixpoint() {
+    let config = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n\
+                  [[tool.heki.write-owners]]\nname = \"box\"\ntargets = [\"m.Holder.box\"]\n\
+                  allowed-writers = [\"m.Holder.*\"]\n";
+    // The largest chain whose function the IR budget still models.
+    let links = 800;
+    let found = check_linear(links, |links| {
+        let mut lines = vec![
+            "class Holder:".to_owned(),
+            "    def __init__(self) -> None:".to_owned(),
+            "        self.box: dict[str, set[str]] = {}".to_owned(),
+            String::new(),
+            String::new(),
+            "def scan(holder: Holder) -> None:".to_owned(),
+        ];
+        for i in 0..=links {
+            lines.push(format!("    e{i} = holder.box[\"k\"]"));
+        }
+        lines.push("    for v in holder.box.values():".to_owned());
+        for i in 0..links {
+            lines.push(format!("        e{i} = e{}", i + 1));
+        }
+        lines.push(format!("        e{links} = v"));
+        for i in 0..links {
+            lines.push(format!("    c{i} = holder.box"));
+            if i % 2 == 0 {
+                lines.push(format!("    for v{i} in c{i}.values():"));
+            } else {
+                lines.push(format!("    for _k{i}, v{i} in c{i}.items():"));
+            }
+            lines.push(format!("        e0 = v{i} if v{i} else e0"));
+        }
+        lines.push("    e0.discard(\"v\")".to_owned());
+        let p = Project::new(&format!("bounds_entry_view_chain_{links}"));
+        p.write("pyproject.toml", config)
+            .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    });
+    let reported: Vec<(&str, u64)> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT201")
+        .map(|d| (d["qualname"].as_str().unwrap(), d["line"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(
+        reported,
+        vec![("scan", 5 * links as u64 + 10)],
+        "{found:#?}"
+    );
 }
 
 /// A function creating `children` child scopes, each over a value it binds just before and

@@ -986,6 +986,11 @@ pub enum WriteKind {
     /// (`obj.attr["k"][name] = v`, `obj.attr["k"].append(v)`): `TypedFieldWriteSite::key` is the
     /// first key.
     ItemMut,
+    /// An entry of the container a typed field holds changed in place by a helper the field is
+    /// handed to, which does not see its class (`helper(obj.attr)` doing `box["k"].add(v)`): the
+    /// [`Self::IndirectHelper`] write of an entry, kept apart from it as [`Self::ItemMut`] is
+    /// from [`Self::ContainerMut`].
+    IndirectItemMut,
 }
 
 impl WriteKind {
@@ -995,6 +1000,12 @@ impl WriteKind {
             self,
             Self::DirectAttr | Self::AttrDelete | Self::SetAttr | Self::DictDirect
         )
+    }
+
+    /// A write made at a call by a helper that does not see the written object's class: the
+    /// function handing the object over makes it.
+    pub fn through_helper(self) -> bool {
+        matches!(self, Self::IndirectHelper | Self::IndirectItemMut)
     }
 }
 
@@ -1017,6 +1028,7 @@ impl WriteKind {
             Self::DictDirect => "dict_direct",
             Self::IndirectHelper => "indirect_helper",
             Self::ItemMut => "item_mut",
+            Self::IndirectItemMut => "indirect_item_mut",
         }
     }
 }
@@ -1033,6 +1045,7 @@ impl WriteKind {
             Self::DictDirect => "as a `__dict__` item",
             Self::IndirectHelper => "through a helper",
             Self::ItemMut => "in place inside an item",
+            Self::IndirectItemMut => "inside an item, through a helper",
         }
     }
 }

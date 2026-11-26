@@ -24,7 +24,7 @@ use heki_effect::{
     AccessKind, BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget,
     Construction, Delivery, EffectSummary, EntryKey, ExternalAccess, Facts, FuncKey, HopGap,
     MustGap, PerItem, Runner, SiteEffect, SiteMust, TypeCtx, TypedFieldWriteSite, Unresolved,
-    WriteKind, anchors_call_site, boundary_reports_in, initializes_own_self,
+    anchors_call_site, boundary_reports_in, initializes_own_self,
 };
 use heki_env::EffectBoundaryRule;
 pub(crate) use heki_ir::ItemOrigins;
@@ -1847,17 +1847,18 @@ impl<'a> Reach<'a> {
                 // is handed, so the function handing it over reports the write. The helper's
                 // summary also holds what its callees change, so the write counts only when the
                 // helper changes the argument outside `allowed-callees`.
-                ([hop], WriteKind::IndirectHelper)
-                    if own.iter().any(|(_, site)| {
-                        site.span == hop.span
-                            && site.project_callees().iter().any(|bc| {
-                                bc.callee.fqn() == hop.callee
-                                    && b.counts(cx, site, &bc.callee, Facts::Body).is_some()
-                                    && helper_changes_field(cx, sites, bc, w, |site, callee| {
-                                        b.counts(cx, site, callee, Facts::Body)
-                                    })
-                            })
-                    }) =>
+                ([hop], kind)
+                    if kind.through_helper()
+                        && own.iter().any(|(_, site)| {
+                            site.span == hop.span
+                                && site.project_callees().iter().any(|bc| {
+                                    bc.callee.fqn() == hop.callee
+                                        && b.counts(cx, site, &bc.callee, Facts::Body).is_some()
+                                        && helper_changes_field(cx, sites, bc, w, |site, callee| {
+                                            b.counts(cx, site, callee, Facts::Body)
+                                        })
+                                })
+                        }) =>
                 {
                     vec![CallHop::clone(hop)]
                 }

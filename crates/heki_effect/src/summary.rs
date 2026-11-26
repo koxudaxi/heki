@@ -61,6 +61,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
+mod entries;
 mod imports;
 mod keywords;
 mod reads;
@@ -669,6 +670,9 @@ struct Owner {
     reach: Reach,
     /// The variable holding the object (`TypedFieldWriteSite::construction`).
     var: Option<VarId>,
+    /// Heki knows nothing of the object's class ([`Extractor::unknown_class`] of `var`): a write
+    /// heki cannot name is unresolved.
+    unknown_class: bool,
 }
 
 /// Which classes a write under a name heki cannot read may add an attribute to
@@ -733,11 +737,13 @@ struct ItemOf {
 
 /// What every value a function binds to one of its closure cells is, as its alias maps join
 /// them (a read of the cell in a nested scope is a phi of the bindings): the container an
-/// attribute of an object holds, of a project class or of unknown class, or an entry of one. The
-/// object is none of the nested scope's own: no parameter of it, constructed nowhere in it.
+/// attribute of an object holds, of a project class or of unknown class, an entry of one, or the
+/// namespace of an object (`obj.__dict__`). The object is none of the nested scope's own: no
+/// parameter of it, constructed nowhere in it.
 struct CellAlias {
     attr: Option<ObjAttr>,
     item: Option<ItemOf>,
+    dict: Option<Owner>,
     /// The attribute of an object of unknown class whose container (or an entry of it, `true`)
     /// every binding holds ([`Extractor::untyped_container`]).
     untyped: Option<(String, bool)>,
@@ -879,7 +885,8 @@ struct Extractor<'a> {
     cell_aliases: &'a CellAliases,
     /// `x.__dict__` -> owner of `x`.
     dict_of: FxHashMap<VarId, Owner>,
-    /// Entries of the containers that project-class attributes hold (`WriteKind::ItemMut`).
+    /// Entries of the containers that project-class attributes hold (`WriteKind::ItemMut`),
+    /// decided by [`Self::build_entry_aliases`].
     item_alias: FxHashMap<VarId, ItemOf>,
     /// Parameters (bit `i`: parameter `i < 64`) each variable may be, through copies and phis
     /// (any input): the may-alias counterpart of `param_alias`'s `(i, None)` entries.
@@ -1868,7 +1875,8 @@ impl<'a> Extractor<'a> {
     /// Alias maps through `AttrLoad`, copies and in-place container operators
     /// ([`Self::same_object`]), agreeing phis, the calls and property reads that return an
     /// attribute of what they are handed, and the closure cells of enclosing functions (iterated
-    /// to a fixpoint).
+    /// to a fixpoint); then the entries of the containers the attributes hold, which none of
+    /// these maps reads ([`Self::build_entry_aliases`]).
     fn build_aliases(&mut self) {
         for (i, p) in self.f.params.iter().enumerate() {
             if let Ok(i) = u8::try_from(i)
@@ -1898,7 +1906,6 @@ impl<'a> Extractor<'a> {
                 self.self_attr_alias.len(),
                 self.obj_attr_alias.len(),
                 self.dict_of.len(),
-                self.item_alias.len(),
             );
             for bb in &self.f.blocks {
                 self.pos = (bb.id, 0);
@@ -1914,9 +1921,6 @@ impl<'a> Extractor<'a> {
                     merge_phi(&mut self.param_copy_alias, phi.dst, &inputs, |a| a.clone());
                     merge_phi(&mut self.self_attr_alias, phi.dst, &inputs, |a| a.clone());
                     merge_obj_attr_phi(&mut self.obj_attr_alias, phi.dst, &inputs);
-                    if !self.item_alias.is_empty() {
-                        merge_item_phi(&mut self.item_alias, phi.dst, &inputs);
-                    }
                 }
                 for inst in &bb.insts {
                     if let Some((dst, src)) = self.same_object(&inst.kind) {
@@ -1939,7 +1943,6 @@ impl<'a> Extractor<'a> {
                         InstKind::SubscriptLoad {
                             dst,
                             obj,
-                            index,
                             key_const,
                             is_slice,
                             ..
@@ -1977,34 +1980,6 @@ impl<'a> Extractor<'a> {
                                     self.obj_attr_alias.insert(*dst, load);
                                 }
                             }
-                            // An entry of a container a project-class attribute holds (a slice
-                            // is a new container).
-                            // (Only below a typed attribute: most functions have none.)
-                            if !is_slice
-                                && self.ownership
-                                && !(self.obj_attr_alias.is_empty() && self.item_alias.is_empty())
-                                && !self.item_alias.contains_key(dst)
-                            {
-                                let item = match (
-                                    self.obj_attr_alias.get(obj),
-                                    self.item_alias.get(obj),
-                                ) {
-                                    (_, Some(outer)) => Some(outer.clone()),
-                                    (Some(a), None) => Some(ItemOf {
-                                        classes: a.classes.clone(),
-                                        attr: a.attr.clone(),
-                                        key: self.key_of(key_const.as_deref(), *index),
-                                        obj_params: a.obj_params,
-                                        fresh: a.fresh,
-                                        reach: a.reach,
-                                        holder: a.holder,
-                                    }),
-                                    (None, None) => None,
-                                };
-                                if let Some(item) = item {
-                                    self.item_alias.insert(*dst, item);
-                                }
-                            }
                         }
                         _ => {}
                     }
@@ -2024,13 +1999,13 @@ impl<'a> Extractor<'a> {
                 self.self_attr_alias.len(),
                 self.obj_attr_alias.len(),
                 self.dict_of.len(),
-                self.item_alias.len(),
             );
             if after == before {
                 break;
             }
         }
         let _ = self.rebound.set(rebound);
+        self.build_entry_aliases();
     }
 
     /// The parameters whose items or elements the object `var` holds may be, or be below, each
@@ -2203,11 +2178,6 @@ impl<'a> Extractor<'a> {
         if let Some(o) = self.dict_of.get(&src).cloned() {
             self.dict_of.insert(dst, o);
         }
-        if !self.item_alias.is_empty()
-            && let Some(i) = self.item_alias.get(&src).cloned()
-        {
-            self.item_alias.insert(dst, i);
-        }
     }
 
     /// The alias maps of `dst`, a read of the closure cell `name` of an enclosing function: the
@@ -2227,6 +2197,9 @@ impl<'a> Extractor<'a> {
         }
         if let Some(i) = &alias.item {
             self.item_alias.insert(dst, ItemOf { reach, ..i.clone() });
+        }
+        if let Some(o) = &alias.dict {
+            self.dict_of.insert(dst, Owner { reach, ..o.clone() });
         }
     }
 
@@ -2800,6 +2773,7 @@ impl<'a> Extractor<'a> {
             fresh: self.is_fresh(var),
             reach: self.reach_of(var),
             var: Some(var),
+            unknown_class: self.unknown_class(var),
         }
     }
 
@@ -3913,10 +3887,20 @@ impl<'a> Extractor<'a> {
                 holder: None,
                 ..i
             });
-            if attr.is_some() || item.is_some() || untyped.is_some() {
+            let dict = joined_owner(vars.iter().map(|v| self.dict_of.get(v)));
+            let dict = dict.map(|o| Owner {
+                is_self: false,
+                param: None,
+                may_params: 0,
+                fresh: false,
+                var: None,
+                ..o
+            });
+            if attr.is_some() || item.is_some() || dict.is_some() || untyped.is_some() {
                 let alias = CellAlias {
                     attr,
                     item,
+                    dict,
                     untyped,
                 };
                 out.push(((self.f.id, name.to_owned()), alias));
@@ -5932,8 +5916,8 @@ impl<'a> Extractor<'a> {
         for class in owner.typed_classes {
             self.typed_site(class, attr, (None, EntryKey::Written), kind, span, written);
         }
-        if let Some(var) = owner.var.filter(|v| self.unknown_class(*v)) {
-            self.unresolved(Unresolved::Receiver(attr.to_owned()), Some(var), kind, span);
+        if owner.unknown_class {
+            self.unresolved(Unresolved::Receiver(attr.to_owned()), owner.var, kind, span);
         }
     }
 
@@ -6054,18 +6038,19 @@ impl<'a> Extractor<'a> {
     /// knows nothing of its class. `adds` tells which of the classes it may add an attribute
     /// to.
     fn computed_name(&mut self, owner: &Owner, adds: Adds<'_>, kind: WriteKind, span: Span) {
-        let Some(var) = owner.var else { return };
-        self.change_object(var, span);
+        if let Some(var) = owner.var {
+            self.change_object(var, span);
+        }
         for class in &owner.typed_classes {
             let what = if adds.to(self.cx.project, class) {
                 Unresolved::Name(class.clone())
             } else {
                 Unresolved::Existing(class.clone())
             };
-            self.unresolved(what, Some(var), kind, span);
+            self.unresolved(what, owner.var, kind, span);
         }
-        if owner.typed_classes.is_empty() && self.unknown_class(var) {
-            self.unresolved(Unresolved::Anything, Some(var), kind, span);
+        if owner.typed_classes.is_empty() && owner.unknown_class {
+            self.unresolved(Unresolved::Anything, owner.var, kind, span);
         }
     }
 
@@ -9237,19 +9222,28 @@ fn joined_obj_attr<'m>(inputs: impl IntoIterator<Item = Option<&'m ObjAttr>>) ->
     found
 }
 
-/// [`merge_phi`] for container entries: the inputs must name entries of one class attribute
-/// (of differing keys: an entry heki cannot name); the objects' parameters are united, as in
-/// [`merge_obj_attr_phi`].
-fn merge_item_phi(map: &mut FxHashMap<VarId, ItemOf>, dst: VarId, inputs: &[VarId]) {
-    if map.contains_key(&dst) {
-        return;
+/// The object every input is the namespace of (`obj.__dict__`), when all are one of the same
+/// classes; `None` when one is no namespace.
+fn joined_owner<'m>(inputs: impl IntoIterator<Item = Option<&'m Owner>>) -> Option<Owner> {
+    let mut found: Option<Owner> = None;
+    for o in inputs {
+        let o = o?;
+        match &mut found {
+            None => found = Some(o.clone()),
+            Some(f) => {
+                if f.typed_classes != o.typed_classes || f.unknown_class != o.unknown_class {
+                    return None;
+                }
+                f.reach = f.reach.join(o.reach);
+            }
+        }
     }
-    if let Some(a) = joined_item(inputs.iter().map(|v| map.get(v))) {
-        map.insert(dst, a);
-    }
+    found
 }
 
-/// The entry alias of a value that is one of `inputs` ([`merge_item_phi`]).
+/// The entry alias of a value that is one of `inputs`: `None` when one has none, or when they
+/// name entries of different class attributes (of differing keys: an entry heki cannot name);
+/// the objects' parameters are united, as in [`merge_obj_attr_phi`].
 fn joined_item<'m>(inputs: impl IntoIterator<Item = Option<&'m ItemOf>>) -> Option<ItemOf> {
     let mut found: Option<ItemOf> = None;
     for a in inputs {
