@@ -3661,11 +3661,27 @@ enum MustResult<'k> {
     /// when each such call has as its targets every implementation it can run
     /// ([`Mut202Fn::single_callee`]).
     Of { callee: &'k FuncKey, complete: bool },
-    /// Something else on some path.
-    Other,
+    /// Something else on some path; `complete` is false when a path is the result of a call that
+    /// does not have every implementation as its targets, so a join with another value keeps
+    /// "Every implementation" open apart from "Same object".
+    Other { complete: bool },
 }
 
 impl MustResult<'_> {
+    /// A value that is no result of a call, so nothing about it is open but "Same object".
+    const OTHER: Self = Self::Other { complete: true };
+
+    /// Whether every call this value is the result of has every implementation as its targets.
+    fn complete(self) -> bool {
+        !matches!(
+            self,
+            Self::Of {
+                complete: false,
+                ..
+            } | Self::Other { complete: false }
+        )
+    }
+
     fn join(self, other: Self) -> Self {
         match (self, other) {
             (Self::Unset, x) | (x, Self::Unset) => x,
@@ -3679,7 +3695,9 @@ impl MustResult<'_> {
                 callee,
                 complete: complete && c,
             },
-            _ => Self::Other,
+            _ => Self::Other {
+                complete: self.complete() && other.complete(),
+            },
         }
     }
 }
@@ -3753,7 +3771,7 @@ impl<'a> Mut202Fn<'a> {
                     let value = match &inst.kind {
                         InstKind::Copy { .. } => MustResult::Unset,
                         _ => self.single_callee(inst).map_or(
-                            MustResult::Other,
+                            MustResult::OTHER,
                             |(callee, complete)| MustResult::Of { callee, complete },
                         ),
                     };
@@ -3761,7 +3779,7 @@ impl<'a> Mut202Fn<'a> {
                 }
             }
             let get = |state: &FxHashMap<VarId, MustResult<'a>>, v: VarId| {
-                state.get(&v).copied().unwrap_or(MustResult::Other)
+                state.get(&v).copied().unwrap_or(MustResult::OTHER)
             };
             let rpo = self.shape().rpo();
             let converged = (0..MUST_RESULT_PASSES).any(|_| {
@@ -3828,6 +3846,7 @@ impl<'a> Mut202Fn<'a> {
             Some(MustResult::Of { callee, complete }) if r.via.is_empty() => {
                 (Some(callee), complete)
             }
+            Some(MustResult::Other { complete }) if r.via.is_empty() => (None, complete),
             _ => (None, true),
         };
         if let Some(wrapper) = r.via.first() {

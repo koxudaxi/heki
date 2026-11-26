@@ -559,22 +559,12 @@ def use(name):
     );
 }
 
-/// The counterexamples `tests/difftest/cached_result_counterexamples.py` runs on CPython: a call
-/// through a protocol, or on a class that takes the method from a base made at run time, may run
-/// an implementation heki does not see, which caches nothing, so the change is heuristic with
-/// "Every implementation" open; the same change through the cached class stays exact.
-#[test]
-fn mut114_through_a_call_whose_targets_are_not_every_implementation_is_heuristic() {
-    let p = Project::new("mut114_incomplete_targets");
-    let source = std::fs::read_to_string(
-        common::repo_root().join("tests/difftest/cached_result_counterexamples.py"),
-    )
-    .unwrap();
-    p.write("cases.py", &source);
+/// Each `MUT114` report of the project as (function, certainty, open premises "premise: cause").
+fn open_premise_reports(p: &Project) -> Vec<(String, String, Vec<String>)> {
     let (code, stdout, stderr) = p.heki(&["dump-open-premises", "--select", "MUT114", "."]);
     assert_eq!(code, 0, "{stderr}");
     let out: Value = serde_json::from_str(&stdout).unwrap();
-    let reports: Vec<(String, String, Vec<String>)> = out["reports"]
+    out["reports"]
         .as_array()
         .unwrap()
         .iter()
@@ -597,7 +587,22 @@ fn mut114_through_a_call_whose_targets_are_not_every_implementation_is_heuristic
                 open,
             )
         })
-        .collect();
+        .collect()
+}
+
+/// The counterexamples `tests/difftest/cached_result_counterexamples.py` runs on CPython: a call
+/// through a protocol, or on a class that takes the method from a base made at run time, may run
+/// an implementation heki does not see, which caches nothing, so the change is heuristic with
+/// "Every implementation" open; the same change through the cached class stays exact.
+#[test]
+fn mut114_through_a_call_whose_targets_are_not_every_implementation_is_heuristic() {
+    let p = Project::new("mut114_incomplete_targets");
+    let source = std::fs::read_to_string(
+        common::repo_root().join("tests/difftest/cached_result_counterexamples.py"),
+    )
+    .unwrap();
+    p.write("cases.py", &source);
+    let reports = open_premise_reports(&p);
     let open = vec!["Every implementation: incomplete-targets".to_owned()];
     assert_eq!(
         reports,
@@ -606,5 +611,43 @@ fn mut114_through_a_call_whose_targets_are_not_every_implementation_is_heuristic
             ("add_listed".to_owned(), "heuristic".to_owned(), open),
             ("add_cached".to_owned(), "exact".to_owned(), Vec::new()),
         ]
+    );
+}
+
+/// A value that is the result of a protocol call on one path and a new list on another is not
+/// "the same object on every path", and its protocol call does not have every implementation as
+/// its target: both premises are open, not only the first.
+#[test]
+fn mut114_a_protocol_result_joined_with_a_new_list_leaves_both_premises_open() {
+    let p = Project::new("mut114_incomplete_joined");
+    p.write(
+        "cases.py",
+        r#"import functools
+from typing import Protocol
+
+
+class Repo(Protocol):
+    def items(self, k: str) -> list[str]: ...
+
+
+class CachedRepo:
+    @functools.lru_cache(maxsize=None)
+    def items(self, k: str) -> list[str]:
+        return [k, "id"]
+
+
+def add(repo: Repo, k: str, flag: bool) -> list[str]:
+    xs = repo.items(k) if flag else []
+    xs.append("x")
+    return xs
+"#,
+    );
+    let open = vec![
+        "Same object: not-the-result-on-every-path".to_owned(),
+        "Every implementation: incomplete-targets".to_owned(),
+    ];
+    assert_eq!(
+        open_premise_reports(&p),
+        vec![("add".to_owned(), "heuristic".to_owned(), open)]
     );
 }
