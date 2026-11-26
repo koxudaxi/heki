@@ -250,6 +250,28 @@ def other_container(holder: Holder, other: dict[str, set[str]]) -> None:
         names.clear()
     for names in holder.box.values():
         print(len(names))
+
+
+def by_either_view(first: Holder, second: Holder, flag: bool) -> None:
+    names_view = first.box.values() if flag else second.box.values()
+    for names in names_view:
+        names.clear()
+
+
+def by_rounds(holder: Holder, rounds: list[int]) -> None:
+    names = holder.box["k"]
+    for _ in rounds:
+        for entry in holder.box.values():
+            names = entry if entry else names
+    names.discard("v")
+
+
+def mixed_rounds(holder: Holder, rounds: list[int], other: set[str]) -> None:
+    names = holder.box["k"]
+    for _ in rounds:
+        for entry in holder.box.values():
+            names = other if entry else entry
+    names.discard("v")
 "#;
 
 #[test]
@@ -271,7 +293,11 @@ fn the_entries_a_loop_takes_from_values_or_items_are_entries_of_the_target() {
             d(u, 20, "MUT201", "by_pair"),
             d(u, 26, "MUT201", "by_view"),
             d(u, 30, "MUT201", "by_get"),
-            // Keys, another container's entries, and reads of the entries are no writes.
+            // A view of either object's container, and an entry nested loops carry round.
+            d(u, 50, "MUT201", "by_either_view"),
+            d(u, 58, "MUT201", "by_rounds"),
+            // Keys, another container's entries, reads of the entries, and a value that is an
+            // entry on some paths only are no writes.
         ]
     );
     assert!(
