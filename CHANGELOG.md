@@ -5,6 +5,131 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
+## [0.8.0] - Unreleased
+
+### Breaking changes
+
+- `MUT114` no longer states its exact claim through a call that may run another implementation
+  than the cached one: a method called on a value typed by a protocol whose one implementation in
+  the project is cached, a class that may take the method from a base heki knows nothing of, or a
+  name the project binds to another object. The report is heuristic with "Every implementation"
+  open (`incomplete-targets`), as for `EFF101`, and the rule page lists that premise. A cached
+  method called through a name bound to the bound method (`parts = self.parts; parts(v)`) is
+  heuristic too. An exact report that turns heuristic is not a new finding for a Ratchet baseline,
+  but it no longer fails the run by itself: a heuristic report counts as a warning. (#504)
+- A method without a return annotation whose every return gives one class gives a call on an
+  instance that class, as an unannotated function has since 0.7.0: a construction (`return
+  Store()`), or an attribute of `self` (`return self._db`, also awaited of an `async def`) that only
+  the class's own methods bind, through `self`, to instances of one class. A store through
+  another receiver or from another module, a store of `None` or of another class, an annotation
+  allowing `None`, a store of the attribute through a receiver of no known class anywhere in the
+  project, and a subclass binding another class keep the call open. Overrides count: the call
+  takes the class only when every definition it may run agrees, and otherwise the annotation of
+  the definition the class finds, as before. Calls through `super()` and property reads are
+  unchanged. Reports that follow from these calls now appear, so a rule that was
+  silent on code of this shape (`EFF101`, `EFF103`, a `blocking-fs` boundary, `MUT201`) may report. (#486)
+- A call of a value annotated `Callable[..., T]` or `Callable[[...], T]` gives a `T` when `T` is
+  one class (or one class object): a parameter, a local, a return annotation of a function or a
+  method, an attribute, a property, and a global, also in another module than the call. Receiver
+  typing follows the result, so calls and writes on it resolve and contracts judge them
+  (`self.resolver = self._resolver_class()()`, then `self.resolver.resolve(...)`). A `T` that may
+  be `None` (`T | None`, `Optional[T]`, `Union[T, None]`, an alias or a bound type variable of such
+  a type), a union of classes, an unbound type variable, `Any`, `object`, and a bare `Callable`
+  give no class. The call of the callable itself stays unresolved. Reports that follow from these calls now
+  appear, so a rule that was silent on code of this shape (`EFF101`, `EFF103`, `MUT201`, a
+  `blocking-fs` boundary) may report. (#513)
+- `isinstance` narrows a value under every name of it: the target of an assignment expression
+  the test reads (`isinstance(v := x.source, Model)`) and a copy of the value are of the tested
+  class in the code the test guards, whatever class the value had before. A read of a contract
+  target through such a name that was `MUT206` (an object of unknown class) is now `MUT203` /
+  `MUT204`, and one on a value of an unrelated known class that reported nothing now reports.
+  (#522)
+- An assignment expression in a comprehension or generator expression binds the enclosing
+  function's variable with the class of its value (PEP 572), where the comprehension has a scope
+  of its own (a list comprehension before Python 3.12, a generator expression in every version):
+  a read of it in the comprehension after the store, the items built from it, and a read in the
+  function after the comprehension ran have that class, also as an `isinstance` check in the
+  comprehension narrows it. A variable another nested function stores too (`nonlocal`) stays
+  unknown. Reads that were `MUT206` become `MUT203` / `MUT204`. A project whose configuration file
+  sits outside the project root reads `requires-python` from the root's `pyproject.toml` since
+  0.7.0 (#491), so it may target 3.11 where it took the default version before: that is how a list
+  comprehension of this shape lost its class between 0.6.0 and 0.7.0. (#523)
+
+### Added
+
+- `heki inspect` (experimental) shows `registered`: for a function that a lookup by name (`getattr(self, <name>)`) may select, each registration that reaches it through a table of callbacks and an adapter that fills arguments by signature, with the parameter bound to the registering object and its class, the condition on the name, the sites on the way, and what the function changes of that parameter under the context. The contexts are advisory: no other fact, report, or fix assumes them. The language server keeps the facts they are joined from current.
+- `fail = true` on a contract table (`write-owners`, `read-owners`, `call-owners`, `effect-boundaries`, `readonly-returns`, `invalidation`, `import-boundaries`) makes the reports of that contract fail `heki check` and `--watch` (exit code 1), whatever their tier and severity. Other warnings and heuristic reports stay advisory, so a project can gate CI on its architecture walls without `fail-on = "warning"` and a baseline holding every other report. A report the baseline records or an inline suppression hides does not fail the run. A `MUT202` report is of the `readonly-returns` tables naming a producer the changed value may come from: all of them when the change reaches the producer's result itself, only the ones with `deep = true` for a change below it. Without the key (or with `fail = false`) nothing changes; the outputs, the rules' severities, and their tiers are the same. (#509)
+- A defaults table per contract kind: `[tool.heki.call-owners-defaults]` (`[call-owners-defaults]`
+  in `heki.toml`), and one for `write-owners`, `read-owners`, `effect-boundaries`,
+  `readonly-returns`, `invalidation`, and `import-boundaries`. Its keys apply to every table of
+  that kind that does not set them, so a configuration of hundreds of tables writes a repeated
+  value once. A table's own key overrides the default, a list replaces it whole, and `name` and
+  `targets` cannot be defaulted. The reports are those of the expanded tables, and `heki
+  inspect` and `heki recommend` read the effective values. See
+  [Defaults for the tables of a kind](https://heki.koxudaxi.dev/configuration/#defaults-for-the-tables-of-a-kind). (#511)
+- `heki check --snapshot PATH` makes `MUT103` compare with the summary snapshot at `PATH` instead of `.heki-summary-snapshot.json` at the project root, so CI can compare a pull request with a snapshot generated on its protected base branch without committing snapshot JSON. A path that is missing or unreadable, a file that is not valid JSON or not a snapshot, a snapshot of an unsupported version, and a run in which `MUT103` is not enabled exit with code 2. `--snapshot` cannot be combined with `--watch`. Without the option, the file at the project root is read as before. (#507)
+- The Agent Skill has a reference, `references/contracts.md`, for drafting and changing
+  contracts: keep walls thin, start from `heki recommend` and `heki inspect`, declare the wall the
+  team wants with `fail = true` on the table and an actionable `message`, record the code that already
+  crosses it in a Ratchet baseline rather than in `allowed-*`, and never weaken a wall without the
+  maintainer's approval. `heki skill install` installs it.
+- `heki check --generate-prompt` tells the model never to make a run pass by widening a contract,
+  adding a suppression, or growing a baseline, and to draft a thin wall with a baseline for old
+  violations. The Coding Agents page has the workflow and a review checklist for contract changes
+  from agents.
+- `heki recommend` adds a note when it lists contract candidates: they are invariants the code
+  keeps today, not architectural intent, to adopt only where the team wants the wall. (#510)
+- `heki check --report-suppressed <PATH>` writes the reports that inline suppressions
+  (`# heki: ignore[...]`, `# noqa: ...`, a bare `# noqa`) hid to a JSON file, next to any
+  `--output-format`. Each entry names the hidden report (rule, file, function, the target of its
+  baseline key, position) and the suppression that hid it (kind and position), so CI can diff the
+  file against a protected base ref and fail on a newly hidden report. It covers what the run shows
+  (`--touched`, files in PATHS), and a baseline changes nothing in it. See
+  [Continuous integration](https://heki.koxudaxi.dev/adoption/#auditing-inline-suppressions). (#506)
+
+### Fixed
+
+- A glob alternative may be empty, as in a shell's brace expansion: `pkg.run:outer{,.*}` names
+  `outer` and every scope nested in it, where `outer` names `outer` alone. It works wherever a
+  configured text is a glob (contract patterns, `exclude`, `per-file-ignores`). The configuration
+  page now says which keys need a function's nested scopes named at all: `scopes` and
+  `allowed-callees` cover them already, and `allowed-*` covers the ones `attribution` attributes
+  to the function. (#512)
+
+### Documentation
+
+- The README and the site's home page have "Try it in 5 minutes": `uvx heki==VERSION check`, then
+  `heki recommend` with an excerpt of its report on a sample project where `heki check` finds
+  nothing (`tests/sample_service/`, checked by `e2e_readme_examples.rs` so the excerpt cannot go
+  stale), then the hook, CI, and a Ratchet baseline. The pre-release note now says how to start
+  safely: pin the version, record a baseline, use `--touched` in the hook.
+- The contract example says that contract reports are heuristic, so a broken contract does not fail
+  the run unless `fail-on = "warning"` is set, and shows the run's last line saying so. A new
+  section, "Architecture walls for teams and coding agents", shows a `heki.toml` with `fail-on`, a
+  contract with a `message`, a `CODEOWNERS` entry, the Claude Code Stop hook, and `heki inspect`.
+  The `OPT` rewrite section is shorter and links Fixes and Safety for the `collections.deque`
+  example.
+- Adopting heki starts with three starter recipes: adding heki to an existing project in one pull
+  request (a pinned version, a Ratchet baseline, the pre-commit hook, a CI step), an async web or
+  database service (the default `EFF101` and `EFF103`, and how to choose among `EFF105`, `EFF106`,
+  `EFF107`, `EFF109`, `EFF110`, `EFF115`, `EFF102`, and `EFF117`), and walls for a team or a coding
+  agent (`write-owners`, `effect-boundaries`, and `import-boundaries` in `heki.toml` with `fail-on =
+  "warning"` and `CODEOWNERS`). The CI section pins the version and says why code-scanning alerts
+  take a second run.
+- The pages' `heki==VERSION` pins (README, home page, Adopting heki) are rewritten at each release
+  by `scripts/set_release_versions.py`, as the pre-commit `rev:` lines are, and
+  `scripts/build_docs.py --check` fails on a pin that differs from the workspace version or sits in
+  a page the release does not rewrite. Every `rev:` of a heki hook repository is rewritten, not only
+  a page's single one, and another hook's `rev:` stays. (#508)
+- The README and the site's home page are shorter and plainer (README 441 to 359 lines, home page
+  368 to 311), and each point is made once: the comparison with Ruff and the type checkers, the
+  contracts, the setup for teams and coding agents, and one pre-release note that covers exact,
+  heuristic, and experimental features. Installation comes right after the examples. The
+  contracts section shows one `heki.toml` with `fail-on` and a `message`, and the report it gives.
+  "Why heki?" and "Fast, quiet, and easy to adopt" are folded into the other sections.
+- The Coding Agents page has "The whole setup, end to end": a `heki.toml` with `fail-on = "warning"`, today's findings in a Ratchet baseline, `CODEOWNERS` for the files that decide the checks, a GitHub Actions workflow that runs the walls and compares the pull request with its protected base branch (`--report-suppressed` for new inline suppressions, `--snapshot` for `MUT103`), the Claude Code Stop hook, and `heki skill install`. The Adopting heki page links it.
+- The README and the home page say where heki sits next to Ruff, ty, mypy, and Pyright and what it adds for coding agents, and their pre-release note names what is ready for pull request checks (the default exact rules with a Ratchet baseline) and what is experimental (`heki recommend`, `heki inspect`, `heki skill`, `heki check --generate-prompt`). The package classifier is `Development Status :: 3 - Alpha`, and the package description no longer calls the whole tool experimental.
+
 ## [0.7.0] - 2026-11-26
 
 ### Breaking changes
@@ -2473,6 +2598,7 @@ The first public preview.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
+[0.8.0]: https://github.com/koxudaxi/heki/compare/v0.7.0...HEAD
 [0.7.0]: https://github.com/koxudaxi/heki/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/koxudaxi/heki/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/koxudaxi/heki/compare/v0.4.0...v0.5.0
