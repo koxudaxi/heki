@@ -122,6 +122,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("call-owners.allowed-callers", r#"["pkg.db.*"]"#),
     ("call-owners.forbidden-callers", r#"["pkg.views.*"]"#),
     ("call-owners.subclasses", "false"),
+    ("call-owners.targets-call-each-other", r#""report""#),
     ("effect-boundaries.scopes", r#"["*.render"]"#),
     (
         "effect-boundaries.forbid",
