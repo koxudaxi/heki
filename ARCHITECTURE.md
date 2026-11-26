@@ -416,6 +416,9 @@ EffectSummary(f) = {
     shared_state:             Option<SharedStateFacts>, // module globals and enclosing functions' closure
                                                     // cells changed, here, in a body run here, or by a
                                                     // callee handed them (heki inspect and the server)
+    dispatch:                 Option<DispatchFacts>, // what it adds to the registration contexts heki
+                                                    // inspect shows: rows of tables, the tables
+                                                    // kept and picked from, short programs (local)
 
     // Metadata: is_async, is_generator, is_cached_property, is_lru_cache, owner class, decorators
     // kept: Option<Box<KeptFacts>> (MUT101 only): must_read_self_attrs (the self.<attr> read on

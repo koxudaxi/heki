@@ -515,6 +515,7 @@ fn build<'p>(
         index,
         decls,
         kb: &env.kb,
+        soundness: Some(&env.soundness_kb),
         root: &root,
         ownership: heki_rules::declares_ownership(&env.cfg),
         units: &units,

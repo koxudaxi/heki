@@ -1,7 +1,7 @@
 //! The text form of an [`InspectReport`]: at most one line per fact, a chain longer than four
 //! hops shown by its first two and last two hops.
 
-use super::{Hop, InspectReport, Location};
+use super::{Hop, InspectReport, Location, ParamChangeInfo};
 use std::fmt::Write;
 
 /// The last component of a path (`pkg/mod.py` -> `mod.py`).
@@ -162,6 +162,31 @@ pub fn render_text(r: &InspectReport) -> String {
         };
         let _ = writeln!(out, "only reads {only}");
     }
+    for c in &r.registered {
+        let cond = &c.condition;
+        let others = if cond.others_open {
+            ", other names not followed"
+        } else {
+            ""
+        };
+        let at = &c.registration;
+        let _ = writeln!(
+            out,
+            "registered {} as {} by {} ({}:{}), when {} == {:?}{others}",
+            c.param,
+            c.class,
+            at.function,
+            file_name(&at.path),
+            at.line,
+            cond.selector,
+            cond.equals,
+        );
+        for p in &c.changes {
+            for (name, how) in param_change_lines(p, |_| false) {
+                let _ = writeln!(out, "  then changes {name}: {how}");
+            }
+        }
+    }
     let ret = &r.returns;
     let origins = match &ret.origins {
         None => "a constant or a value of unknown origin".to_owned(),
@@ -314,36 +339,47 @@ fn guards_text(e: &super::EffectInfo) -> String {
     }
 }
 
+/// `(what, how)` of each object a parameter's change record names, but those `listed`
+/// elsewhere: the paths below the parameter, then the containers held in its items.
+fn param_change_lines(
+    p: &ParamChangeInfo,
+    listed: impl Fn(&String) -> bool,
+) -> Vec<(String, String)> {
+    let how = if p.direct {
+        p.at.as_ref().map_or_else(
+            || "directly".to_owned(),
+            |at| format!("directly: {}:{}", file_name(&at.path), at.line),
+        )
+    } else {
+        inline_chain(&p.chain, p.at.as_ref())
+    };
+    let mut lines = Vec::new();
+    for what in p.what.iter().filter(|w| !listed(w)) {
+        let name = if what.is_empty() {
+            p.param.clone()
+        } else if what == heki_effect::ELEMENTS_PATH {
+            format!("{}[...]", p.param)
+        } else {
+            format!("{}.{what}", p.param)
+        };
+        lines.push((name, how.clone()));
+    }
+    // A container held in an item of the parameter, changed in place.
+    for slot in p.slots.iter().filter(|s| s.starts_with('[')) {
+        lines.push((format!("{}{slot}", p.param), format!("in place, {how}")));
+    }
+    lines
+}
+
 fn changes_text(out: &mut String, r: &InspectReport) {
     let c = &r.changes;
     let mut lines: Vec<(String, String)> = Vec::new();
     let method = r.function.class.is_some() && r.function.kind == "method";
     for p in &c.params {
-        let how = if p.direct {
-            p.at.as_ref().map_or_else(
-                || "directly".to_owned(),
-                |at| format!("directly: {}:{}", file_name(&at.path), at.line),
-            )
-        } else {
-            inline_chain(&p.chain, p.at.as_ref())
-        };
         // A method's own `self` attributes are listed below, each with its chain.
         let listed =
             |what: &String| method && p.index == 0 && c.self_attrs.iter().any(|a| &a.attr == what);
-        for what in p.what.iter().filter(|w| !listed(w)) {
-            let name = if what.is_empty() {
-                p.param.clone()
-            } else if what == heki_effect::ELEMENTS_PATH {
-                format!("{}[...]", p.param)
-            } else {
-                format!("{}.{what}", p.param)
-            };
-            lines.push((name, how.clone()));
-        }
-        // A container held in an item of the parameter, changed in place.
-        for slot in p.slots.iter().filter(|s| s.starts_with('[')) {
-            lines.push((format!("{}{slot}", p.param), format!("in place, {how}")));
-        }
+        lines.extend(param_change_lines(p, listed));
     }
     for a in &c.self_attrs {
         let name = match &a.key {

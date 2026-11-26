@@ -1512,6 +1512,12 @@ impl Workspace {
     }
 }
 
+// The `panels` project of the end-to-end tests, which `lsp_oracle`'s `registrations` group
+// edits through the server.
+#[cfg(test)]
+#[path = "../../heki/tests/common/panels.rs"]
+mod panels;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1606,6 +1612,78 @@ mod tests {
             errors[1].message.starts_with("syntax error: "),
             "{errors:?}"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The registration contexts of the live index follow the edits of `lsp_oracle`'s
+    /// `registrations` group (a registration, the signature the adapter fills, the final write)
+    /// and their restores, as the server applies them: after each, they and the summary of the
+    /// final write equal those of a workspace loaded from the files. The server's diagnostics
+    /// and `heki inspect` (a fresh process) show neither.
+    #[test]
+    fn registration_facts_of_the_live_index_equal_a_fresh_load() {
+        let dir =
+            std::env::temp_dir().join(format!("heki_lsp_registrations_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("panels")).unwrap();
+        std::fs::write(dir.join("pyproject.toml"), "[project]\nname = \"t\"\n").unwrap();
+        std::fs::write(dir.join("panels/__init__.py"), "").unwrap();
+        let shared = ("owners.py", "capture(Deck, self)", "capture(Page, self)");
+        let keyword_only = (
+            "views.py",
+            "async def choose(self, owner, event):",
+            "async def choose(self, owner, *, event):",
+        );
+        let read = (
+            "owners.py",
+            "self.journal.append(1)",
+            "self.journal.count(1)",
+        );
+        let write = |edits: &[(&str, &str, &str)]| -> Vec<(PathBuf, String)> {
+            (panels::files(edits).into_iter())
+                .map(|(file, text)| (dir.join("panels").join(file), text))
+                .filter(|(path, text)| std::fs::read_to_string(path).ok().as_ref() != Some(text))
+                .inspect(|(path, text)| std::fs::write(path, text).unwrap())
+                .collect()
+        };
+        write(&[shared]);
+        let paths = [dir.clone()];
+        let opts = ProjectOptions {
+            paths: &paths,
+            ..ProjectOptions::default()
+        };
+        let load = || {
+            let (ws, errors) =
+                Workspace::load(&opts, &Selectors::default(), None, Facts::Inspect).unwrap();
+            assert!(errors.is_empty(), "{errors:?}");
+            ws
+        };
+        let stamp = FuncKey {
+            module: "panels.owners".to_owned(),
+            qualname: "Left.stamp".to_owned(),
+        };
+        let facts = |ws: &Workspace| {
+            let contexts = heki_effect::dispatch::contexts(&ws.index, ws.decls.completed());
+            let stamp = ws.index.summary(&stamp).unwrap().without_locations();
+            (contexts, stamp)
+        };
+        let mut live = load();
+        // Each owner's registration reaches the three members of the view the lookup may find.
+        assert_eq!(facts(&live).0.len(), 6);
+        let steps: [&[(&str, &str, &str)]; 6] = [
+            &[],
+            &[shared],
+            &[shared, keyword_only],
+            &[shared],
+            &[shared, read],
+            &[shared],
+        ];
+        for edits in steps {
+            for (path, text) in write(edits) {
+                let outcome = live.edit(&path, &text);
+                live.refresh_all(outcome.affected, &Source::read);
+            }
+            assert!(facts(&live) == facts(&load()), "{edits:?}");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

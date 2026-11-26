@@ -7963,3 +7963,163 @@ fn the_implementers_of_a_container_abc_are_listed_once_through_long_chains() {
         .collect();
     assert_eq!(tiers, ["heuristic"]);
 }
+
+/// The project of `common::panels`, with the edits applied.
+fn panels_project(name: &str, edits: &[(&str, &str, &str)]) -> Project {
+    let p = Project::new(name);
+    p.write("panels/__init__.py", "");
+    for (file, text) in common::panels::files(edits) {
+        p.write(&format!("panels/{file}"), &text);
+    }
+    p
+}
+
+const PAGE_STORE: &str = "panels.views.Page.store";
+
+/// `n` registrations of one handler by one owner: each registration is followed with a budget of
+/// its own (the other owner's registration too), and the handler's change record under the
+/// owner's class is computed once.
+#[test]
+fn many_registrations_of_one_handler_are_followed_one_at_a_time() {
+    let n = 160;
+    let shape = |n: usize| {
+        let rows: String = (0..n)
+            .map(|i| format!("        save(\"k{i}\", capture(Page, self))\n"))
+            .collect();
+        let old = "        save(\"first\", capture(Page, self))\n";
+        panels_project(
+            &format!("bounds_registrations_{n}"),
+            &[("owners.py", old, rows.as_str())],
+        )
+    };
+    let (r, budgets) = past_budgets(n, &[], shape, |p| {
+        let (r, steps) = inspect_counted(p, PAGE_STORE);
+        let records: Vec<Value> =
+            serde_json::from_str(&std::fs::read_to_string(p.dir.join(".walk-steps.json")).unwrap())
+                .unwrap();
+        let budgets = (records.iter())
+            .filter(|r| r["owner"] == "registration contexts")
+            .count();
+        ((r, budgets), steps)
+    });
+    assert_eq!(r["registered"].as_array().unwrap().len(), n);
+    assert_eq!(budgets, n + 1);
+}
+
+/// A callback reaching the dispatching method through `n` coroutines, each awaiting the next:
+/// past the nesting the interpretation follows, the registration gives no context.
+#[test]
+fn a_chain_of_forwarding_coroutines_past_the_nesting_gives_no_context() {
+    let n = 40;
+    let shape = |n: usize| {
+        let mut hops: String = (0..n)
+            .map(|i| {
+                let next = i + 1;
+                format!("\n\nasync def hop{i}(cb, a, b):\n    return await hop{next}(cb, a, b)\n")
+            })
+            .collect();
+        hops.push_str(&format!(
+            "\n\nasync def hop{n}(cb, a, b):\n    return await cb(b, a)\n"
+        ));
+        let call = "spread(worker.choose, event=note, owner=resource, output=emit)";
+        panels_project(
+            &format!("bounds_hops_{n}"),
+            &[
+                ("adapter.py", call, "hop0(worker.choose, note, resource)"),
+                (
+                    "adapter.py",
+                    "    return receive\n",
+                    &format!("    return receive\n{hops}"),
+                ),
+            ],
+        )
+    };
+    let owner = "registration contexts";
+    let r = past_budgets(n, &[owner], shape, |p| inspect_counted(p, PAGE_STORE));
+    assert_eq!(r["registered"], json!([]));
+    let near = inspect(&shape(n / SCALE), &[PAGE_STORE]);
+    assert_eq!(near["registered"].as_array().unwrap().len(), 1);
+}
+
+/// An adapter decorated by the last of `n` decorators, each decorated by the one before it: the
+/// decorators run nested, and past the nesting the interpretation follows the registration
+/// gives no context.
+#[test]
+fn a_chain_of_decorated_decorators_past_the_nesting_gives_no_context() {
+    let n = 40;
+    let shape = |n: usize| {
+        let mut marks = "def mark0(fn):\n    return fn\n\n\n".to_owned();
+        for i in 1..n {
+            let before = i - 1;
+            marks.push_str(&format!(
+                "@mark{before}\ndef mark{i}(fn):\n    return fn\n\n\n"
+            ));
+        }
+        let last = n - 1;
+        let decorated = format!("{marks}@mark{last}\nasync def spread(callback, **items):");
+        panels_project(
+            &format!("bounds_decorators_{n}"),
+            &[(
+                "adapter.py",
+                "async def spread(callback, **items):",
+                decorated.as_str(),
+            )],
+        )
+    };
+    let owner = "registration contexts";
+    let r = past_budgets(n, &[owner], shape, |p| inspect_counted(p, PAGE_STORE));
+    assert_eq!(r["registered"], json!([]));
+    let near = inspect(&shape(n / SCALE), &[PAGE_STORE]);
+    assert_eq!(near["registered"].as_array().unwrap().len(), 1);
+}
+
+/// A callback that loops over three nested tuples of `n` constants before it forwards: the
+/// iterations outgrow the registration's budget, which grows with the code the programs hold,
+/// and the registration gives no context.
+#[test]
+fn nested_loops_in_a_callback_spend_the_registration_budget() {
+    let n = 24;
+    let shape = |n: usize| {
+        let items: Vec<String> = (0..n).map(|i| i.to_string()).collect();
+        let items = items.join(", ");
+        let loops = format!(
+            "        for a in ({items},):\n            for b in ({items},):\n                for c in ({items},):\n                    pass\n        worker = component()\n"
+        );
+        panels_project(
+            &format!("bounds_loops_{n}"),
+            &[(
+                "adapter.py",
+                "        worker = component()\n",
+                loops.as_str(),
+            )],
+        )
+    };
+    let owner = "registration contexts";
+    let r = past_budgets(n, &[owner], shape, |p| inspect_counted(p, PAGE_STORE));
+    assert_eq!(r["registered"], json!([]));
+    let near = inspect(&shape(n / SCALE), &[PAGE_STORE]);
+    assert_eq!(near["registered"].as_array().unwrap().len(), 1);
+}
+
+/// A factory that doubles a tuple `n` times before it returns the callback: a value is built
+/// only up to a size proportional to the source, so the registration gives no context instead
+/// of allocating `2^n` nodes.
+#[test]
+fn a_value_doubled_in_the_factory_past_its_size_bound_gives_no_context() {
+    let n = 32;
+    let shape = |n: usize| {
+        let doublings: String = (0..n).map(|_| "    seed = (seed, seed)\n").collect();
+        panels_project(
+            &format!("bounds_doubled_{n}"),
+            &[(
+                "adapter.py",
+                "    async def receive(note, emit):\n",
+                &format!("    seed = ()\n{doublings}    async def receive(note, emit):\n"),
+            )],
+        )
+    };
+    let r = past_budgets(n, &[], shape, |p| inspect_counted(p, PAGE_STORE));
+    assert_eq!(r["registered"], json!([]));
+    let near = inspect(&shape(n / SCALE), &[PAGE_STORE]);
+    assert_eq!(near["registered"].as_array().unwrap().len(), 1);
+}

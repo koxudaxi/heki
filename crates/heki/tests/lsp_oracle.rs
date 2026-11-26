@@ -1349,7 +1349,12 @@ struct Step {
     /// `(function, parameter, kinds)`: the kinds of read `heki inspect` says reach the
     /// parameter's object after the step.
     reads: Option<(&'static str, &'static str, &'static [&'static str])>,
+    /// `(function, [(type, records)])`: the registration contexts `heki inspect` gives the
+    /// function after the step, with the slots of each change record under it.
+    registered: Option<(&'static str, Registered)>,
 }
+
+type Registered = &'static [(&'static str, &'static [&'static str])];
 
 impl Step {
     fn new(name: &'static str, actions: Vec<Action>) -> Self {
@@ -1362,7 +1367,13 @@ impl Step {
             propagates: false,
             only_reads: None,
             reads: None,
+            registered: None,
         }
+    }
+
+    fn registered(mut self, function: &'static str, contexts: Registered) -> Self {
+        self.registered = Some((function, contexts));
+        self
     }
 
     fn present(mut self, codes: &'static [(&'static str, &'static str)]) -> Self {
@@ -5442,6 +5453,105 @@ const READS_LOW: &str = "def tally(values):\n    return len(values)\n";
 
 const READS_TOP: &str = "from pkg.reads.low import tally\n\n\ndef total(items: list[int]) -> int:\n    return tally(items)\n";
 
+/// The file `file` of `common::panels` with `edits`.
+fn panels_file(file: &str, edits: &[(&str, &str, &str)]) -> String {
+    (common::panels::files(edits).into_iter())
+        .find_map(|(f, text)| (f == file).then_some(text))
+        .unwrap()
+}
+
+/// The second owner registers the first owner's view too.
+const SHARED: (&str, &str, &str) = ("owners.py", "capture(Deck, self)", "capture(Page, self)");
+const BOTH_OWNERS: Registered = &[
+    ("pkg.reg.owners.Left", &["journal"]),
+    ("pkg.reg.owners.Right", &["audit"]),
+];
+const DISPATCHED: &str = "pkg.reg.views.Page.store";
+
+/// Registration contexts (`EffectSummary::dispatch`), which no diagnostic shows: callbacks two
+/// owners register in one file reach a handler of another through a table kept in a third, an
+/// adapter, and a lookup by name, and `heki inspect` gives one context per owner. A registration,
+/// the signature the adapter fills, and the final write are edited across files and restored:
+/// each owner's context follows its own registration only, every file's diagnostics stay equal
+/// to `heki check`'s, and a comment keeps the facts (Early Cutoff).
+fn steps_registrations() -> Vec<Step> {
+    let owners = |edits: &[(&str, &str, &str)]| panels_file("owners.py", edits);
+    let keyword_only = (
+        "views.py",
+        "async def choose(self, owner, event):",
+        "async def choose(self, owner, *, event):",
+    );
+    let read = (
+        "owners.py",
+        "self.journal.append(1)",
+        "self.journal.count(1)",
+    );
+    vec![
+        Step::new(
+            "two owners register callbacks for one view",
+            vec![
+                Action::Create("pkg/reg/__init__.py", String::new()),
+                Action::Create("pkg/reg/views.py", panels_file("views.py", &[])),
+                Action::Create("pkg/reg/channel.py", panels_file("channel.py", &[])),
+                Action::Create("pkg/reg/adapter.py", panels_file("adapter.py", &[])),
+                Action::Create("pkg/reg/owners.py", owners(&[SHARED])),
+            ],
+        )
+        .registered(DISPATCHED, BOTH_OWNERS),
+        Step::new(
+            "the second owner registers another view",
+            vec![save("pkg/reg/owners.py", &owners(&[]))],
+        )
+        .registered(DISPATCHED, &[("pkg.reg.owners.Left", &["journal"])]),
+        Step::new(
+            "it registers the first view again",
+            vec![save("pkg/reg/owners.py", &owners(&[SHARED]))],
+        )
+        .registered(DISPATCHED, BOTH_OWNERS),
+        Step::new(
+            "the dispatching method takes the event by keyword only",
+            vec![save(
+                "pkg/reg/views.py",
+                &panels_file("views.py", &[keyword_only]),
+            )],
+        )
+        .registered(DISPATCHED, &[]),
+        Step::new(
+            "it takes the event by position again",
+            vec![save("pkg/reg/views.py", &panels_file("views.py", &[]))],
+        )
+        .registered(DISPATCHED, BOTH_OWNERS),
+        Step::new(
+            "the first owner's final write becomes a read",
+            vec![save("pkg/reg/owners.py", &owners(&[SHARED, read]))],
+        )
+        .registered(
+            DISPATCHED,
+            &[
+                ("pkg.reg.owners.Left", &[]),
+                ("pkg.reg.owners.Right", &["audit"]),
+            ],
+        ),
+        Step::new(
+            "it writes again",
+            vec![save("pkg/reg/owners.py", &owners(&[SHARED]))],
+        )
+        .registered(DISPATCHED, BOTH_OWNERS),
+        Step::new(
+            "a comment above the adapter",
+            vec![save(
+                "pkg/reg/adapter.py",
+                &format!(
+                    "# Orders the arguments.\n{}",
+                    panels_file("adapter.py", &[])
+                ),
+            )],
+        )
+        .cutoff()
+        .registered(DISPATCHED, BOTH_OWNERS),
+    ]
+}
+
 /// The parameters a function only reads (`EffectSummary::only_read_params`), which no
 /// diagnostic shows: a callee in another file starts changing its parameter, or keeping it,
 /// and the caller's fact goes after the save, in the server's index (it re-analyzes the
@@ -6774,6 +6884,42 @@ impl Session {
                 ));
             }
         }
+        if let Some((function, expected)) = step.registered {
+            let (code, json, err) = self
+                .p
+                .heki(&["inspect", function, "--output-format", "json"]);
+            assert_eq!(code, 0, "step `{}`: {err}", step.name);
+            let report: Value = serde_json::from_str(&json).unwrap();
+            let text = |v: &Value| v.as_str().unwrap().to_owned();
+            let mut found: Vec<(String, Vec<String>)> = (report["registered"].as_array().unwrap())
+                .iter()
+                .map(|c| {
+                    // One entry per change record: a context that changes nothing has none.
+                    let changes = c["changes"].as_array().unwrap().iter();
+                    let records = changes.map(|ch| {
+                        let slots: Vec<String> =
+                            ch["slots"].as_array().unwrap().iter().map(text).collect();
+                        slots.join(", ")
+                    });
+                    (text(&c["type"]), records.collect())
+                })
+                .collect();
+            found.sort();
+            let want: Vec<(String, Vec<String>)> = (expected.iter())
+                .map(|(t, slots)| {
+                    (
+                        (*t).to_owned(),
+                        slots.iter().map(|s| (*s).to_owned()).collect(),
+                    )
+                })
+                .collect();
+            if found != want {
+                out.push(format!(
+                    "step `{}`: `heki inspect {function}` gives the contexts {found:?}, not {want:?}",
+                    step.name
+                ));
+            }
+        }
         if let Some((function, expected)) = step.only_reads {
             let (code, json, err) = self
                 .p
@@ -6868,6 +7014,7 @@ sessions!(editing, Session::start, {
     mut108: steps_mut108,
     mut110: steps_mut110,
     only_read: steps_only_read,
+    registrations: steps_registrations,
     mut120: steps_mut120,
     aliases_and_getters: steps_aliases_and_getters,
     protocol_reads: steps_protocol_reads,
