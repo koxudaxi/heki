@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "heki"
-version = "0.7.0"
+version = "0.8.0"
 description = "Static checker for Python that tracks side effects and mutations across function calls"
 readme = "README.md"
 license = "MIT"
