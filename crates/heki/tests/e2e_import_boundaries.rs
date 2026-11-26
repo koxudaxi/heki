@@ -737,8 +737,8 @@ fn invalid_contracts_are_configuration_errors() {
             "group `<django>` in import-boundaries.relative-imports",
         ),
         (
-            "forbidden-imports = [\"pkg.a:B\"]",
-            "invalid name `pkg.a:B` in import-boundaries.forbidden-imports",
+            "forbidden-imports = [\"pkg.a:\"]",
+            "invalid name `pkg.a:` in import-boundaries.forbidden-imports",
         ),
         (
             "relative-imports = [\"pkg.a:B\"]",
@@ -1295,4 +1295,297 @@ fn reach_does_not_follow_an_import_allowed_by_a_name() {
         reports(&p),
         ["app/ref/use.py:2 IMP201 <module> app.model.other"]
     );
+}
+
+/// A project whose `pkg.use` imports a private name of a parser module, a public name, and a
+/// public submodule.
+fn parser_project(dir: &str, contract: &str) -> Project {
+    let p = project(dir, contract);
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/parser/__init__.py", "");
+    p.write("pkg/parser/jsonschema.py", "X = 1\n");
+    p.write(
+        "pkg/parser/base.py",
+        "class Parser:\n    pass\n\n\ndef _helper():\n    return 1\n",
+    );
+    p.write(
+        "pkg/use.py",
+        "from pkg.parser import jsonschema\nfrom pkg.parser.base import Parser\nfrom pkg.parser.base import _helper\n",
+    );
+    p
+}
+
+/// `forbidden-imports` takes `module:name` with a glob in either part: only the import of a
+/// matching name of a matching module is reported, not the module's public names or submodules.
+#[test]
+fn a_forbidden_import_names_a_module_and_a_name_of_it() {
+    for forbidden in [
+        "[\"pkg.parser:_*\", \"pkg.parser.*:_*\"]",
+        "[\"pkg.parser.*:_helper\"]",
+        "[\"pkg.*:[_]*\"]",
+    ] {
+        let p = parser_project(
+            "imp_forbidden_name",
+            &format!(
+                "[[tool.heki.import-boundaries]]\nname = \"private\"\nimporters = [\"pkg.use\"]\nforbidden-imports = {forbidden}\n"
+            ),
+        );
+        assert_eq!(
+            reports(&p),
+            ["pkg/use.py:3 IMP201 <module> pkg.parser.base._helper"],
+            "{forbidden}"
+        );
+    }
+}
+
+/// A module the contract allows whole, an `ignored-imports` pair, and a name allowed by itself
+/// carve out of a forbidden name; a by-name import takes no name, so it breaks none.
+#[test]
+fn a_forbidden_name_is_carved_out_like_a_forbidden_module() {
+    let contract = |extra: &str| {
+        format!(
+            "[[tool.heki.import-boundaries]]\nname = \"private\"\nimporters = [\"pkg.use\"]\nforbidden-imports = [\"pkg.parser.*:_*\"]\nunresolved = \"report\"\n{extra}"
+        )
+    };
+    let kept = vec!["pkg/use.py:2 IMP201 <module> pkg.parser.base._helper"];
+    for (extra, expected) in [
+        ("", kept),
+        ("allowed-imports = [\"pkg.parser.base\"]\n", vec![]),
+        ("allowed-imports = [\"pkg.parser.base:_helper\"]\n", vec![]),
+        (
+            "ignored-imports = [\"pkg.use -> pkg.parser.base:_*\"]\n",
+            vec![],
+        ),
+    ] {
+        let p = parser_project("imp_forbidden_name_carved", &contract(extra));
+        p.write(
+            "pkg/use.py",
+            "import importlib\nfrom pkg.parser.base import _helper\n\n\ndef f(name):\n    return importlib.import_module(name)\n\n\ndef g():\n    return importlib.import_module(\"pkg.parser.base\")\n\n\ndef h(name):\n    return importlib.import_module(\"pkg.parser.\" + name)\n",
+        );
+        assert_eq!(reports(&p), expected, "{extra}");
+    }
+}
+
+/// `from package import name` may import the submodule `package.name`, which a forbidden name
+/// does not name: exact only where heki knows the name is not a submodule, otherwise `IMP202`
+/// under `unresolved = "report"`, and nothing without it.
+#[test]
+fn a_forbidden_name_that_may_be_a_submodule_is_not_exact() {
+    let contract = |forbidden: &str, unresolved: &str| {
+        format!(
+            "[[tool.heki.import-boundaries]]\nname = \"private\"\nimporters = [\"pkg.use\"]\nforbidden-imports = [\"{forbidden}\"]\nunresolved = \"{unresolved}\"\n"
+        )
+    };
+    let p = project(
+        "imp_forbidden_name_external",
+        &contract("xml:etree", "report"),
+    );
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/use.py", "from xml import etree\n");
+    assert_eq!(reports(&p), ["pkg/use.py:1 IMP202 <module> xml.etree"]);
+    let p = project(
+        "imp_forbidden_name_external_ignored",
+        &contract("xml:etree", "ignore"),
+    );
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/use.py", "from xml import etree\n");
+    assert_eq!(reports(&p), Vec::<String>::new());
+
+    // A project package: a module file is the submodule, a plain function is the name.
+    let p = project(
+        "imp_forbidden_name_project",
+        &contract("pkg.parser:_*", "report"),
+    );
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/parser/__init__.py", "def _helper():\n    return 1\n");
+    p.write("pkg/parser/_private.py", "X = 1\n");
+    p.write(
+        "pkg/use.py",
+        "from pkg.parser import _private\nfrom pkg.parser import _helper\n",
+    );
+    assert_eq!(
+        reports(&p),
+        ["pkg/use.py:2 IMP201 <module> pkg.parser._helper"]
+    );
+}
+
+/// A by-name import takes no name, so a forbidden name never breaks it; the other restrictions
+/// of the contract (`relative-imports`) still may, so the call is `IMP202`.
+#[test]
+fn a_by_name_import_is_judged_by_the_other_restrictions_of_a_forbidden_name_contract() {
+    let p = project(
+        "imp_forbidden_name_by_name_relative",
+        "[[tool.heki.import-boundaries]]\nname = \"private\"\nimporters = [\"pkg.use\"]\nforbidden-imports = [\"pkg.api:_*\"]\nrelative-imports = [\"pkg.runtime\"]\nunresolved = \"report\"\n",
+    );
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/runtime.py", "");
+    p.write(
+        "pkg/use.py",
+        "import importlib\n\n\ndef f(name):\n    return importlib.import_module(name)\n",
+    );
+    assert_eq!(reports(&p), ["pkg/use.py:5 IMP202 f *"]);
+}
+
+/// With `reach`, a forbidden name is judged where the chain imports it, and a module reached
+/// by another import is not a reason.
+#[test]
+fn reach_judges_a_forbidden_name_where_a_chain_imports_it() {
+    let p = project(
+        "imp_forbidden_name_reach",
+        "[[tool.heki.import-boundaries]]\nname = \"private\"\nimporters = [\"pkg.use\"]\nforbidden-imports = [\"pkg.parser.base:_*\"]\nreach = \"all\"\n",
+    );
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/parser/__init__.py", "");
+    p.write(
+        "pkg/parser/base.py",
+        "def _helper():\n    return 1\n\n\nclass Parser:\n    pass\n",
+    );
+    p.write("pkg/mid.py", "from pkg.parser.base import Parser\n");
+    p.write("pkg/use.py", "from pkg.mid import Parser\n");
+    assert_eq!(reports(&p), Vec::<String>::new());
+    p.write("pkg/mid.py", "from pkg.parser.base import _helper\n");
+    assert_eq!(
+        reports(&p),
+        ["pkg/use.py:1 IMP201 <module> pkg.parser.base._helper"]
+    );
+    p.write("pkg/use.py", "from pkg.parser.base import _helper\n");
+    assert_eq!(
+        reports(&p),
+        ["pkg/use.py:1 IMP201 <module> pkg.parser.base._helper"]
+    );
+}
+
+/// A relative import that climbs past the top-level package names no module and raises when it
+/// runs: `unresolved = "report"` reports it as `IMP202`.
+#[test]
+fn a_relative_import_beyond_the_top_package_is_unresolved() {
+    let contract = |unresolved: &str| {
+        format!(
+            "[[tool.heki.import-boundaries]]\nname = \"any\"\nimporters = [\"pkg\", \"pkg.*\"]\nforbidden-imports = [\"pkg.never\"]\nunresolved = \"{unresolved}\"\n"
+        )
+    };
+    let p = project("imp_beyond_top", &contract("report"));
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/sub/__init__.py", "");
+    p.write(
+        "pkg/sub/use.py",
+        "from .. import fine\nfrom ... import outside\n\n\ndef f():\n    from ...other import name\n",
+    );
+    p.write("pkg/fine.py", "");
+    assert_eq!(
+        reports(&p),
+        [
+            "pkg/sub/use.py:2 IMP202 <module> *",
+            "pkg/sub/use.py:6 IMP202 f *"
+        ]
+    );
+    assert_eq!(
+        message(&p, "pkg/sub/use.py:2"),
+        "`<module>` imports a module above the top-level package while `pkg.sub.use` loads, which may be a forbidden import of `any`"
+    );
+    // Without the key, and for a contract that allows every import, nothing is reported.
+    let p2 = project("imp_beyond_top_ignored", &contract("ignore"));
+    p2.write("pkg/__init__.py", "");
+    p2.write("pkg/sub/__init__.py", "");
+    p2.write("pkg/sub/use.py", "from ... import outside\n");
+    assert_eq!(reports(&p2), Vec::<String>::new());
+}
+
+/// A call heki cannot rule out as `importlib.import_module` or `__import__` may import a
+/// module: `unresolved = "report"` reports it as `IMP202`.
+#[test]
+fn a_call_that_may_import_a_module_by_name_is_unresolved() {
+    let p = project(
+        "imp_maybe_by_name",
+        "[[tool.heki.import-boundaries]]\nname = \"backend-import\"\nimporters = [\"pkg.parser\"]\nforbidden-imports = [\"pkg.backend\", \"pkg.backend.*\"]\nunresolved = \"report\"\n",
+    );
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/backend.py", "X = 1\n");
+    p.write(
+        "pkg/parser.py",
+        r#"import importlib
+from builtins import __import__ as raw_import
+
+
+def direct():
+    return importlib.import_module("pkg.backend")
+
+
+def through_other_object(loader):
+    return loader.import_module("pkg.backend")
+
+
+def through_conditional_alias(flag):
+    load = importlib.import_module if flag else print
+    return load("pkg.backend")
+
+
+def through_either_import(flag):
+    load = importlib.import_module if flag else raw_import
+    return load("pkg.backend")
+
+
+def through_dunder_method(loader):
+    return loader.__import__("pkg.backend")
+
+
+def a_print_is_not_an_import(flag):
+    show = print if flag else repr
+    return show("pkg.backend")
+
+
+def another_method(loader):
+    return loader.load("pkg.backend")
+
+
+from importlib import *  # noqa: E402,F403
+
+
+def through_star():
+    return import_module("pkg.backend")
+"#,
+    );
+    assert_eq!(
+        reports(&p),
+        [
+            "pkg/parser.py:6 IMP201 direct pkg.backend",
+            "pkg/parser.py:10 IMP202 through_other_object *",
+            "pkg/parser.py:15 IMP202 through_conditional_alias *",
+            "pkg/parser.py:20 IMP202 through_either_import *",
+            "pkg/parser.py:24 IMP202 through_dunder_method *",
+            "pkg/parser.py:40 IMP202 through_star *",
+        ]
+    );
+    assert_eq!(
+        message(&p, "pkg/parser.py:10"),
+        "`through_other_object` imports a module through a call that may be `importlib.import_module` or `__import__` when it runs, which may be a forbidden import of `backend-import`"
+    );
+}
+
+/// The same calls are no report without `unresolved = "report"`, and a project class with its
+/// own `import_module` method is a call of that method.
+#[test]
+fn a_method_named_import_module_of_a_known_class_is_no_import() {
+    let p = project(
+        "imp_maybe_by_name_known",
+        "[[tool.heki.import-boundaries]]\nname = \"backend-import\"\nimporters = [\"pkg.parser\"]\nforbidden-imports = [\"pkg.backend\"]\nunresolved = \"report\"\n",
+    );
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/backend.py", "X = 1\n");
+    p.write(
+        "pkg/parser.py",
+        "class Loader:\n    def import_module(self, name):\n        return name\n\n\ndef f():\n    return Loader().import_module(\"pkg.backend\")\n",
+    );
+    assert_eq!(reports(&p), Vec::<String>::new());
+    let ignoring = project(
+        "imp_maybe_by_name_ignored",
+        "[[tool.heki.import-boundaries]]\nname = \"backend-import\"\nimporters = [\"pkg.parser\"]\nforbidden-imports = [\"pkg.backend\"]\n",
+    );
+    ignoring.write("pkg/__init__.py", "");
+    ignoring.write("pkg/backend.py", "X = 1\n");
+    ignoring.write(
+        "pkg/parser.py",
+        "def f(loader):\n    return loader.import_module(\"pkg.backend\")\n",
+    );
+    assert_eq!(reports(&ignoring), Vec::<String>::new());
 }

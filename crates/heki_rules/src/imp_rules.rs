@@ -103,7 +103,7 @@ fn taken_name<'s>(site: &'s ImportSite, module: &str) -> Option<&'s str> {
 }
 
 /// A module pattern: a whole module name or a glob (`*` spans dots), or a group, or a name of
-/// a module (`module:name`), which only `from module import name` imports.
+/// a module (`module:name`, a glob in either part), which only `from module import name` imports.
 #[derive(Debug, Clone)]
 enum ImportPattern {
     Module(NamePart),
@@ -112,7 +112,7 @@ enum ImportPattern {
 }
 
 impl ImportPattern {
-    /// `names`: the list may name a name of a module (`allowed-imports`, `ignored-imports`).
+    /// `names`: the list may name a name of a module (every list but `relative-imports`).
     fn new(text: &str, context: &'static str, names: bool) -> Result<Self, RuleConfigError> {
         if let Some((module, name)) = text.split_once(':') {
             if !names || module.is_empty() || name.is_empty() || name.contains(':') {
@@ -166,8 +166,9 @@ impl ImportPattern {
                     literal.starts_with(head) || head.starts_with(literal)
                 }
             },
-            // A name of a module that starts with `head` may be imported.
-            Self::Group(_) | Self::Name { .. } => true,
+            Self::Group(_) => true,
+            // A by-name import takes no name of a module.
+            Self::Name { .. } => false,
         }
     }
 
@@ -208,6 +209,16 @@ struct Imports {
 impl Imports {
     fn is_set(&self) -> bool {
         !self.patterns.is_empty()
+    }
+
+    /// Whether some pattern is a name of a module.
+    fn names(&self) -> bool {
+        (self.patterns.iter()).any(|p| matches!(p, ImportPattern::Name { .. }))
+    }
+
+    /// Whether every pattern is a name of a module, and there is one.
+    fn only_names(&self) -> bool {
+        self.is_set() && (self.patterns.iter()).all(|p| matches!(p, ImportPattern::Name { .. }))
     }
 
     fn groups(&self) -> impl Iterator<Item = Group> + '_ {
@@ -409,7 +420,7 @@ impl<'c> ImportContracts<'c> {
                             context,
                         });
                     }
-                    let pattern = ImportPattern::new(text, context, side == Side::Allowed)?;
+                    let pattern = ImportPattern::new(text, context, side != Side::Relative)?;
                     if let ImportPattern::Module(part) = &pattern {
                         imports.push((part.clone(), (c, side)));
                     }
@@ -504,27 +515,47 @@ impl<'c> ImportContracts<'c> {
         ids.into_iter().map(|i| owners[i]).collect()
     }
 
+    /// Whether contract `c` allows `module` by what it lists as allowed (`allowed-imports`,
+    /// `relative-imports`), by the module patterns it `matched`.
+    fn allows(&self, c: usize, module: Imported<'_>, matched: &[(usize, Side)]) -> bool {
+        let contract = &self.contracts[c];
+        let allowed = &contract.allowed;
+        (allowed.is_set()
+            && (allowed.groups().any(|g| g == Group::of(module))
+                || matched.contains(&(c, Side::Allowed))
+                || allowed.patterns.iter().any(|p| p.names(module))))
+            || matched.contains(&(c, Side::Relative))
+    }
+
     /// Why importing `module` breaks contract `c`, by the module patterns it `matched`; `None`
     /// when the contract allows it. A module of `relative-imports` is allowed here: how an import
     /// names it is judged apart ([`Self::judge`]).
     fn violates(&self, c: usize, module: Imported<'_>, matched: &[(usize, Side)]) -> Option<Why> {
         let contract = &self.contracts[c];
         let group = Group::of(module);
-        let named = |imports: &Imports, side: Side| {
-            imports.is_set()
-                && (imports.groups().any(|g| g == group)
-                    || matched.contains(&(c, side))
-                    || imports.patterns.iter().any(|p| p.names(module)))
-        };
-        let allowed =
-            named(&contract.allowed, Side::Allowed) || matched.contains(&(c, Side::Relative));
-        match (contract.lists_allowed(), contract.forbidden.is_set()) {
+        let forbidden = &contract.forbidden;
+        let forbids = forbidden.is_set()
+            && (forbidden.groups().any(|g| g == group)
+                || matched.contains(&(c, Side::Forbidden))
+                || forbidden.patterns.iter().any(|p| p.names(module)));
+        match (contract.lists_allowed(), forbidden.is_set()) {
             (false, false) => Some(Why::AllowsNone),
-            (_, true) => {
-                (named(&contract.forbidden, Side::Forbidden) && !allowed).then_some(Why::Forbidden)
-            }
-            (true, false) => (!allowed).then_some(Why::NotAllowed),
+            (_, true) => (forbids && !self.allows(c, module, matched)).then_some(Why::Forbidden),
+            (true, false) => (!self.allows(c, module, matched)).then_some(Why::NotAllowed),
         }
+    }
+
+    /// Why the name that the import of `module` takes breaks contract `c` by a forbidden name
+    /// alone (`forbidden-imports = ["pkg.db:_*"]`), unless the contract allows it.
+    fn forbids_taken(
+        &self,
+        c: usize,
+        module: Imported<'_>,
+        matched: &[(usize, Side)],
+    ) -> Option<Why> {
+        let forbidden = &self.contracts[c].forbidden;
+        (forbidden.patterns.iter().any(|p| p.names(module)) && !self.allows(c, module, matched))
+            .then_some(Why::Forbidden)
     }
 
     /// Whether contract `c` accepts the import of `module` by `importer` (`ignored-imports`).
@@ -557,7 +588,8 @@ impl<'c> ImportContracts<'c> {
     /// Why an import of `module` written in `importer` breaks contract `c`, unless it accepts
     /// it. `absolute`: the judged importer names the module by its full name, which a module of
     /// `relative-imports` must not be. `loading`: whether the contract allows the module is
-    /// judged here (a walk judges it where it reaches the module).
+    /// judged here (a walk judges it where it reaches the module, and here only the forbidden
+    /// names the site takes of it).
     fn judge(
         &self,
         c: usize,
@@ -573,9 +605,11 @@ impl<'c> ImportContracts<'c> {
         if matched.contains(&(c, Side::Relative)) {
             return absolute.then_some(Why::Absolute);
         }
-        loading
-            .then(|| self.violates(c, module, &matched))
-            .flatten()
+        if loading {
+            self.violates(c, module, &matched)
+        } else {
+            self.forbids_taken(c, module, &matched)
+        }
     }
 
     /// Every reason for which importing some module whose name starts with `head` may break
@@ -619,6 +653,10 @@ enum OpenImport {
     AnyOf(Vec<String>),
     /// `from package import name`: the submodule, or only the package.
     Submodule { package: String, submodule: String },
+    /// A relative import that climbs past the top-level package.
+    BeyondTop,
+    /// A call that may be `importlib.import_module` or `__import__` ([`ImportForm::MaybeByName`]).
+    MaybeByName,
 }
 
 impl OpenImport {
@@ -629,6 +667,7 @@ impl OpenImport {
             Self::Under(head) => format!("{head}*"),
             Self::AnyOf(names) => names.join("|"),
             Self::Submodule { submodule, .. } => submodule.clone(),
+            Self::BeyondTop | Self::MaybeByName => "*".to_owned(),
         }
     }
 
@@ -639,6 +678,11 @@ impl OpenImport {
             Self::AnyOf(names) => quoted(names, "or"),
             Self::Submodule { package, submodule } => {
                 format!("`{submodule}`, or only `{package}`")
+            }
+            Self::BeyondTop => "a module above the top-level package".to_owned(),
+            Self::MaybeByName => {
+                "a module through a call that may be `importlib.import_module` or `__import__`"
+                    .to_owned()
             }
         }
     }
@@ -810,8 +854,14 @@ impl<'r, 'g> Run<'r, '_, 'g> {
                 None => Verdict::Fine,
             },
             Target::PackageOrSubmodule { package, submodule } => {
+                // The name the import takes may be the submodule, which a forbidden name does not
+                // name: that break alone is open, not exact.
+                let mut whys = Vec::new();
                 if let Some(why) = one(*package, 0, !walked) {
-                    return Verdict::Breaks(vec![(graph.name(*package).to_owned(), why)]);
+                    if judge(Imported::of(graph, *package), 0, !walked).is_some() {
+                        return Verdict::Breaks(vec![(graph.name(*package).to_owned(), why)]);
+                    }
+                    whys.push(why);
                 }
                 let imported = Imported {
                     name: submodule,
@@ -822,16 +872,21 @@ impl<'r, 'g> Run<'r, '_, 'g> {
                 if contracts.names_taken(c, importer, Imported::of(graph, *package).at(site)) {
                     return Verdict::Fine;
                 }
-                match judge(imported, 0, true) {
-                    Some(why) => Verdict::Open(
-                        OpenImport::Submodule {
-                            package: graph.name(*package).to_owned(),
-                            submodule: submodule.clone(),
-                        },
-                        vec![why],
-                    ),
-                    None => Verdict::Fine,
+                if let Some(why) = judge(imported, 0, true)
+                    && !whys.contains(&why)
+                {
+                    whys.push(why);
                 }
+                if whys.is_empty() {
+                    return Verdict::Fine;
+                }
+                Verdict::Open(
+                    OpenImport::Submodule {
+                        package: graph.name(*package).to_owned(),
+                        submodule: submodule.clone(),
+                    },
+                    whys,
+                )
             }
             Target::AnyOf(targets) => {
                 let parts: Vec<Part> = (targets.iter().enumerate())
@@ -896,7 +951,23 @@ impl<'r, 'g> Run<'r, '_, 'g> {
                 }
                 Verdict::Open(OpenImport::Under(head.clone()), whys)
             }
+            // A by-name import takes no name, so a forbidden name never breaks; the rest of the
+            // contract (a module of `relative-imports` written in full) may.
+            Target::Open if site.form.is_by_name() && contract.forbidden.only_names() => {
+                let whys = contracts.may_break_under(c, "", absolute(0));
+                if whys.is_empty() {
+                    return Verdict::Fine;
+                }
+                Verdict::Open(OpenImport::Unknown, whys)
+            }
+            Target::Open if site.form == ImportForm::MaybeByName => {
+                Verdict::Open(OpenImport::MaybeByName, vec![contract.open_why()])
+            }
             Target::Open => Verdict::Open(OpenImport::Unknown, vec![contract.open_why()]),
+            // A relative import climbing past its top-level package names no module and raises.
+            Target::Missing(name) if name.is_empty() => {
+                Verdict::Open(OpenImport::BeyondTop, vec![contract.open_why()])
+            }
             Target::Missing(_) => Verdict::Fine,
         }
     }
@@ -986,10 +1057,20 @@ impl<'r, 'g> Run<'r, '_, 'g> {
             };
             let own = r == m;
             for (_, site, target) in self.counted(c, r) {
-                if matches!(target, Target::Module(_)) && !own {
+                // A module a step imports is judged where the walk reaches it, unless the
+                // contract forbids names: only the site says which name it takes.
+                if matches!(target, Target::Module(_)) && !own && !contract.forbidden.names() {
                     continue;
                 }
-                let verdict = self.verdict(c, r, site, target, own, true);
+                let mut verdict = self.verdict(c, r, site, target, own, true);
+                // A step names the name it takes of a module, as the importer's own sites do.
+                if let Verdict::Breaks(broken) = &mut verdict
+                    && !own
+                    && let [(module, _)] = &mut broken[..]
+                    && let Some(taken) = taken_name(site, module)
+                {
+                    *module = format!("{module}.{taken}");
+                }
                 let what = match &verdict {
                     Verdict::Breaks(broken) => {
                         let names: Vec<String> = broken.iter().map(|(n, _)| n.clone()).collect();

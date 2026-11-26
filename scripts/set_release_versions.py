@@ -73,7 +73,7 @@ PRECOMMIT_REV = re.compile(
 )
 """The ``rev:`` of a heki repository's entry: a page may show other hooks with their own tags."""
 
-PACKAGE_PIN_DOCS = ("README.md", "docs/index.md", "docs/adoption.md")
+PACKAGE_PIN_DOCS = ("README.md", "docs/index.md", "docs/adoption.md", "docs/coding-agents.md")
 """The pages whose commands pin the release on PyPI (`uvx heki==0.6.0 check`)."""
 PACKAGE_PIN = re.compile(r"(?<![\w.-])heki==(?P<value>[0-9][0-9A-Za-z.+-]*[0-9A-Za-z])")
 """A ``heki==`` requirement; the version ends with a letter or digit, not a sentence's period."""

@@ -453,7 +453,7 @@ def test_the_docs_a_release_deploys_show_the_release_tag(
     for page in ("README.md", "docs/adoption.md"):
         revs = re.findall(r"rev: (v\S+)", (checkout / page).read_text(encoding="utf-8"))
         assert revs and set(revs) == {"v0.1.2"}, page
-    for page in ("README.md", "docs/index.md", "docs/adoption.md"):
+    for page in ("README.md", "docs/index.md", "docs/adoption.md", "docs/coding-agents.md"):
         pins = re.findall(r"heki==(\S+?)[\s`\]]", (checkout / page).read_text(encoding="utf-8"))
         assert pins and set(pins) == {"0.1.2"}, page
     changelog = (checkout / "CHANGELOG.md").read_text(encoding="utf-8")

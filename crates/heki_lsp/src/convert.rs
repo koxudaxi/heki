@@ -304,7 +304,7 @@ mod tests {
             group: false,
             key_target: None,
             key_module: None,
-            fails_run_by_contract: false,
+            fails_run_by_config: false,
         };
         let uri = Url::parse("file:///a.py").unwrap();
         let target = EditTarget {

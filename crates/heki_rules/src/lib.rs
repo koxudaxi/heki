@@ -1021,7 +1021,7 @@ pub enum RuleConfigError {
     },
     /// A `module:name` in an import contract list that takes none, or with an empty part.
     #[error(
-        "invalid name `{pattern}` in {context} (a module and a name of it, `module:name`, only in `allowed-imports` and the imported side of `ignored-imports`)"
+        "invalid name `{pattern}` in {context} (a module and a name of it, `module:name`, only in `allowed-imports`, `forbidden-imports` and the imported side of `ignored-imports`)"
     )]
     ImportName {
         pattern: String,
@@ -1415,7 +1415,7 @@ pub fn check_project(
         }
         same
     });
-    gates::mark_failing_reports(config, &mut out);
+    gates::mark_failing_reports(config, selection, &mut out);
     Ok(out)
 }
 
@@ -1746,7 +1746,7 @@ impl<'a> CheckContext<'a> {
             group: reports_groups(meta.code),
             key_target: None,
             key_module: None,
-            fails_run_by_contract: false,
+            fails_run_by_config: false,
         });
         out.last_mut()
     }

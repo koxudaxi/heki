@@ -235,6 +235,7 @@ the installed release changed, and the changelog on GitHub lists every release.
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF105`, and `EFF106` in test code as pytest finds it: `test_*` functions and the functions nested in them, `test_*.py` and `*_test.py` files, and files under `test/` or `tests/`. |
 | `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
 | `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. A heuristic report counts as a warning, whatever its severity: it can be wrong about the code, so at `"error"` only exact errors fail the run. Warnings and heuristic reports are reported either way, and the language server shows them. `--fail-on` overrides it. A report of a contract with [`fail = true`](#failing-on-a-contract) fails the run at either value. |
+| `fail` | `[]` | Rules whose reports fail `heki check` (and `--watch`) with exit code 1 whatever their tier and severity, named as `select` names them (`["IMP101", "EFF"]`). A rule that is not selected reports nothing, so nothing fails on it. Like [`fail = true`](#failing-on-a-contract) on a contract, it leaves `fail-on`, the severities, and the tiers as they are, and a report a [baseline](adoption.md#ratchet-baselines) records or an inline [suppression](#inline-suppressions) hides does not fail the run. An unknown rule is a configuration error. |
 | `report-unused-suppressions` | `false` | Report the codes of suppression comments that suppressed no report, and the baseline entries that matched none. See [Unused suppressions](#unused-suppressions). |
 | `require-suppression-codes` | `false` | Report the `# heki: ignore` comments that name no rule. See [Suppressions that name no rule](#suppressions-that-name-no-rule). |
 | `unmatched-contract-entries` | a warning, in a run over the whole project | `"warning"`, `"error"`, or `"ignore"`: what `heki check` does with a contract entry that matches nothing in the analyzed files. An error fails the run. See [Entries that match nothing](#entries-that-match-nothing). |
@@ -1045,12 +1046,12 @@ or a glob whose `*` spans dots, never a suffix (`pkg.*` names `pkg.facts` and
 | `importers` | every module | The modules judged. |
 | `exempt-importers` | `[]` | Modules of `importers` that are not judged. |
 | `allowed-imports` | `[]` | The modules the importers may import: every other import is reported, but those of `relative-imports`. `"pkg.db:Session"` allows one name of a module: only `from pkg.db import Session` imports it (a glob may stand in either part), and another name of `pkg.db` is still reported. |
-| `forbidden-imports` | `[]` | When set, only imports of these modules are reported, less the allowed ones, as in [Allowed and forbidden functions](#allowed-and-forbidden-functions). A contract setting none of `allowed-imports`, `forbidden-imports`, and `relative-imports` allows no imports. |
+| `forbidden-imports` | `[]` | When set, only imports of these modules are reported, less the allowed ones, as in [Allowed and forbidden functions](#allowed-and-forbidden-functions). `"pkg.parser:_*"` forbids the names of a module that match: `from pkg.parser.base import _helper` is reported through `"pkg.parser.*:_*"`, and `from pkg.parser import jsonschema` (a submodule) and `from pkg.parser.base import Parser` are not (a glob may stand in either part). A contract setting none of `allowed-imports`, `forbidden-imports`, and `relative-imports` allows no imports. |
 | `relative-imports` | `[]` | The modules the importers may import only through a relative import ([Relative imports only](#relative-imports-only)). |
 | `ignored-imports` | `[]` | `"importer -> imported"` pairs of module patterns whose imports the contract accepts (`"pkg.cli -> pkg.db"`; `"pkg.cli -> pkg.db:Session"` accepts one name of the module, as in `allowed-imports`). With `reach`, an import accepted or allowed by a name is not followed. |
 | `type-checking` | `"ignore"` | `"ignore"` or `"report"`: whether the imports under `if TYPE_CHECKING:`, which never run, count. |
 | `reach` | `"statement"` | `"statement"`: each import of an importer is judged. `"import-time"`: every module loading an importer loads while it loads. `"all"`: every module a chain of imports that run leads to. |
-| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the imports whose module heki cannot name are reported under [`IMP202`](rules/unresolved-guarded-import.md). |
+| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the imports whose module heki cannot name are reported under [`IMP202`](rules/unresolved-guarded-import.md): a name the code does not fix, a call that may be `importlib.import_module` or `__import__` (a method of that name on an object of unknown class, a name bound to one on some path), and a relative import that climbs past the top-level package. |
 | `message` | none | The help of every report of the contract. |
 | `fail` | `false` | `true`: the reports of this contract make `heki check` (and `--watch`) exit with code 1, whatever their tier and severity; see [Failing on a contract](#failing-on-a-contract). |
 
@@ -1175,7 +1176,8 @@ fail = true
 - `fail = true` in a [`<kind>-defaults` table](#defaults-for-the-tables-of-a-kind) applies to
   every table of the kind that does not set `fail` itself.
 - `fail-on = "warning"` is still there for a project that wants every warning and heuristic
-  report to fail the run.
+  report to fail the run. To fail the run on the reports of single rules that belong to no
+  contract (`IMP101`), list them in [`lint.fail`](#rule-selection-toolhekilint).
 
 ### How contracts report
 

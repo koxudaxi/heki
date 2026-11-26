@@ -37,7 +37,7 @@ change a field or reach I/O.
 [![CI](https://github.com/koxudaxi/heki/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/koxudaxi/heki/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/koxudaxi/heki/blob/main/LICENSE)
 
-⚡ Try it in your project's root, without installing: `uvx heki==0.7.0 check`. Then follow
+⚡ Try it in your project's root, without installing: `uvx heki==0.8.0 check`. Then follow
 [Try it in 5 minutes](https://heki.koxudaxi.dev/#try-it-in-5-minutes).
 
 ---
@@ -132,7 +132,7 @@ enforce.
 
 ### Try it in 5 minutes
 
-1. In your project's root (the directory with `pyproject.toml`), run `uvx heki==0.7.0 check`. An
+1. In your project's root (the directory with `pyproject.toml`), run `uvx heki==0.8.0 check`. An
    exact error, like the first example above, fails the run (exit code 1). Warnings, like the
    second, are printed but don't fail it unless you pass `--fail-on warning`.
 
@@ -142,11 +142,11 @@ enforce.
    tests:
 
     ```console
-    $ uvx heki==0.7.0 check
+    $ uvx heki==0.8.0 check
     All checks passed (4 file(s)).
     ...
     hint: `heki recommend` (experimental) lists the rules and contracts that fit this project, and what heki could not see
-    $ uvx heki==0.7.0 recommend
+    $ uvx heki==0.8.0 recommend
     heki recommend (experimental) on .: 4 file(s), 10 function(s)
     ...
     What heki cannot see (no report either way)
@@ -166,14 +166,14 @@ enforce.
 
 3. Keep it running with the [pre-commit hook](https://heki.koxudaxi.dev/adoption/#pre-commit) and a CI step. If the project
    has findings today, record them in a [Ratchet baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) so only
-   new ones fail: `uvx heki==0.7.0 check --baseline heki-baseline.toml --update-baseline`, then
+   new ones fail: `uvx heki==0.8.0 check --baseline heki-baseline.toml --update-baseline`, then
    `baseline = "heki-baseline.toml"` in `[tool.heki]`. The
    [starter recipes](https://heki.koxudaxi.dev/adoption/#starter-recipes) have these setups ready to copy.
 
 !!! warning "Pre-release"
 
     Rules, configuration keys, diagnostics, and output formats can change between releases without a
-    deprecation period, and the release notes list every change. Pin the version (`heki==0.7.0`, and
+    deprecation period, and the release notes list every change. Pin the version (`heki==0.8.0`, and
     the hook's `rev`) so upgrades happen only when you choose. The default rules are exact and ready
     for pull request checks. Heuristic rules, including the contract rules, can be wrong about the
     code. Every output labels their reports, and they count as warnings. `heki recommend`,
@@ -1383,6 +1383,7 @@ the installed release changed, and the changelog on GitHub lists every release.
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF105`, and `EFF106` in test code as pytest finds it: `test_*` functions and the functions nested in them, `test_*.py` and `*_test.py` files, and files under `test/` or `tests/`. |
 | `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
 | `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. A heuristic report counts as a warning, whatever its severity: it can be wrong about the code, so at `"error"` only exact errors fail the run. Warnings and heuristic reports are reported either way, and the language server shows them. `--fail-on` overrides it. A report of a contract with [`fail = true`](https://heki.koxudaxi.dev/configuration/#failing-on-a-contract) fails the run at either value. |
+| `fail` | `[]` | Rules whose reports fail `heki check` (and `--watch`) with exit code 1 whatever their tier and severity, named as `select` names them (`["IMP101", "EFF"]`). A rule that is not selected reports nothing, so nothing fails on it. Like [`fail = true`](https://heki.koxudaxi.dev/configuration/#failing-on-a-contract) on a contract, it leaves `fail-on`, the severities, and the tiers as they are, and a report a [baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) records or an inline [suppression](https://heki.koxudaxi.dev/configuration/#inline-suppressions) hides does not fail the run. An unknown rule is a configuration error. |
 | `report-unused-suppressions` | `false` | Report the codes of suppression comments that suppressed no report, and the baseline entries that matched none. See [Unused suppressions](https://heki.koxudaxi.dev/configuration/#unused-suppressions). |
 | `require-suppression-codes` | `false` | Report the `# heki: ignore` comments that name no rule. See [Suppressions that name no rule](https://heki.koxudaxi.dev/configuration/#suppressions-that-name-no-rule). |
 | `unmatched-contract-entries` | a warning, in a run over the whole project | `"warning"`, `"error"`, or `"ignore"`: what `heki check` does with a contract entry that matches nothing in the analyzed files. An error fails the run. See [Entries that match nothing](https://heki.koxudaxi.dev/configuration/#entries-that-match-nothing). |
@@ -2193,12 +2194,12 @@ or a glob whose `*` spans dots, never a suffix (`pkg.*` names `pkg.facts` and
 | `importers` | every module | The modules judged. |
 | `exempt-importers` | `[]` | Modules of `importers` that are not judged. |
 | `allowed-imports` | `[]` | The modules the importers may import: every other import is reported, but those of `relative-imports`. `"pkg.db:Session"` allows one name of a module: only `from pkg.db import Session` imports it (a glob may stand in either part), and another name of `pkg.db` is still reported. |
-| `forbidden-imports` | `[]` | When set, only imports of these modules are reported, less the allowed ones, as in [Allowed and forbidden functions](https://heki.koxudaxi.dev/configuration/#allowed-and-forbidden-functions). A contract setting none of `allowed-imports`, `forbidden-imports`, and `relative-imports` allows no imports. |
+| `forbidden-imports` | `[]` | When set, only imports of these modules are reported, less the allowed ones, as in [Allowed and forbidden functions](https://heki.koxudaxi.dev/configuration/#allowed-and-forbidden-functions). `"pkg.parser:_*"` forbids the names of a module that match: `from pkg.parser.base import _helper` is reported through `"pkg.parser.*:_*"`, and `from pkg.parser import jsonschema` (a submodule) and `from pkg.parser.base import Parser` are not (a glob may stand in either part). A contract setting none of `allowed-imports`, `forbidden-imports`, and `relative-imports` allows no imports. |
 | `relative-imports` | `[]` | The modules the importers may import only through a relative import ([Relative imports only](https://heki.koxudaxi.dev/configuration/#relative-imports-only)). |
 | `ignored-imports` | `[]` | `"importer -> imported"` pairs of module patterns whose imports the contract accepts (`"pkg.cli -> pkg.db"`; `"pkg.cli -> pkg.db:Session"` accepts one name of the module, as in `allowed-imports`). With `reach`, an import accepted or allowed by a name is not followed. |
 | `type-checking` | `"ignore"` | `"ignore"` or `"report"`: whether the imports under `if TYPE_CHECKING:`, which never run, count. |
 | `reach` | `"statement"` | `"statement"`: each import of an importer is judged. `"import-time"`: every module loading an importer loads while it loads. `"all"`: every module a chain of imports that run leads to. |
-| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the imports whose module heki cannot name are reported under [`IMP202`](https://heki.koxudaxi.dev/rules/unresolved-guarded-import/). |
+| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the imports whose module heki cannot name are reported under [`IMP202`](https://heki.koxudaxi.dev/rules/unresolved-guarded-import/): a name the code does not fix, a call that may be `importlib.import_module` or `__import__` (a method of that name on an object of unknown class, a name bound to one on some path), and a relative import that climbs past the top-level package. |
 | `message` | none | The help of every report of the contract. |
 | `fail` | `false` | `true`: the reports of this contract make `heki check` (and `--watch`) exit with code 1, whatever their tier and severity; see [Failing on a contract](https://heki.koxudaxi.dev/configuration/#failing-on-a-contract). |
 
@@ -2323,7 +2324,8 @@ fail = true
 - `fail = true` in a [`<kind>-defaults` table](https://heki.koxudaxi.dev/configuration/#defaults-for-the-tables-of-a-kind) applies to
   every table of the kind that does not set `fail` itself.
 - `fail-on = "warning"` is still there for a project that wants every warning and heuristic
-  report to fail the run.
+  report to fail the run. To fail the run on the reports of single rules that belong to no
+  contract (`IMP101`), list them in [`lint.fail`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint).
 
 ### How contracts report
 
@@ -2857,7 +2859,7 @@ Record today's findings, so that only new ones fail, and commit `heki-baseline.t
 configuration, the hook, and the CI step:
 
 ```console
-$ uvx heki==0.7.0 check --baseline heki-baseline.toml --update-baseline
+$ uvx heki==0.8.0 check --baseline heki-baseline.toml --update-baseline
 ```
 
 ```toml
@@ -2870,14 +2872,14 @@ baseline = "heki-baseline.toml"
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.7.0
+    rev: v0.8.0
     hooks:
       - id: heki   # heki check --touched on the staged files
 ```
 
 ```yaml
 # A step of the CI job, with uv installed
-- run: uvx heki==0.7.0 check
+- run: uvx heki==0.8.0 check
 ```
 
 The hook shows the reports in and through the staged files, and every regression of the
@@ -2910,7 +2912,7 @@ extend-select = [
 
 Their reports can be wrong about the code: they are printed, and fail the run only with
 `fail-on = "warning"`. A [contract](https://heki.koxudaxi.dev/configuration/#contracts) can make its own reports fail it with
-`fail = true`. Before adding a rule, [`heki recommend`](https://heki.koxudaxi.dev/recommend/) counts the reports
+`fail = true`, and `fail = ["IMP101"]` in `[tool.heki.lint]` does so for the reports of the rules it lists. Before adding a rule, [`heki recommend`](https://heki.koxudaxi.dev/recommend/) counts the reports
 it would add on your code ("Rules worth enabling here"). `relax-async-in-tests`, on by default,
 leaves `EFF101`, `EFF105`, and `EFF106` out of test code.
 
@@ -2955,7 +2957,7 @@ fail = true
 - `fail = true` makes the reports of that contract fail the run and leaves every other warning
   and heuristic report advisory. `fail-on = "warning"` would fail on all of them, which a project
   that wants that can still set. Record today's findings in the baseline first
-  (`uvx heki==0.7.0 check --update-baseline`), so that only new ones fail.
+  (`uvx heki==0.8.0 check --update-baseline`), so that only new ones fail.
 - The `message` is the help of every report of the contract: write it as an instruction.
 - For Claude Code, add the [Stop hook](https://heki.koxudaxi.dev/coding-agents/#a-stop-hook-for-claude-code): it runs
   `heki check`, with the baseline `heki.toml` names, when the agent is about to end its turn,
@@ -3131,7 +3133,7 @@ file is left, and the run says how many were.
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.7.0
+    rev: v0.8.0
     hooks:
       - id: heki
 ```
@@ -3156,7 +3158,7 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
         hooks:
           - id: heki
             name: heki
-            entry: uvx heki==0.7.0 check --touched
+            entry: uvx heki==0.8.0 check --touched
             language: system   # needs uv on PATH
             types_or: [python, toml]
             files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
@@ -3176,7 +3178,7 @@ A local hook can run any version of the PyPI wheel, also without a compile or a 
             name: heki
             entry: heki check --touched
             language: python
-            additional_dependencies: [heki==0.7.0]
+            additional_dependencies: [heki==0.8.0]
             types_or: [python, toml]
             files: '(\.py|^(pyproject|heki|\.heki)\.toml)$'
             pass_filenames: true
@@ -3213,14 +3215,14 @@ the run now.
 === "GitHub Actions annotations"
 
     ```yaml
-    - run: uvx heki==0.7.0 check --output-format github
+    - run: uvx heki==0.8.0 check --output-format github
     ```
 
 === "Code scanning (SARIF)"
 
     ```yaml
     # The job needs `permissions: security-events: write`.
-    - run: uvx heki==0.7.0 check --output-format sarif > heki.sarif || test "$?" -eq 1
+    - run: uvx heki==0.8.0 check --output-format sarif > heki.sarif || test "$?" -eq 1
     - uses: github/codeql-action/upload-sarif@v4
       with:
         sarif_file: heki.sarif
@@ -3243,7 +3245,7 @@ On a pull request, a project with old findings can report only what the change t
 pre-commit hook does (the checkout needs `fetch-depth: 0` for the base branch):
 
 ```yaml
-- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' pyproject.toml heki.toml .heki.toml | xargs -0 -r uvx heki==0.7.0 check --touched
+- run: git diff -z --name-only --diff-filter=d "origin/$BASE...HEAD" -- '*.py' pyproject.toml heki.toml .heki.toml | xargs -0 -r uvx heki==0.8.0 check --touched
   env:
     BASE: ${{ github.base_ref }}
 ```
@@ -5448,7 +5450,7 @@ Each diagnostic has:
 A text run ends with one line per reported rule: `heki rule <CODE>` and the rule's page.
 
 The run exits with 1 when it shows an exact `error`, a bug that can be critical, a report of a
-contract with `fail = true`, or with `fail-on = "warning"` any report: a heuristic report counts
+contract with `fail = true`, a report of a rule `lint.fail` lists, or with `fail-on = "warning"` any report: a heuristic report counts
 as a warning, whatever its `severity`.
 
 When the run cannot check (exit code 2: a configuration, path, or file error), the error says
@@ -5669,7 +5671,7 @@ against them. Replace `app` with your package.
               fetch-depth: 0   # the base branch is compared below
           - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
           - name: Walls
-            run: uvx heki check
+            run: uvx heki==0.8.0 check
           - name: Compare with the base branch
             shell: bash
             env:
@@ -5678,12 +5680,12 @@ against them. Replace `app` with your package.
             run: |
               git worktree add ../base "origin/$BASE"
               keys() { jq -r '.suppressed[] | [.file, .function, .code, .target] | @tsv' "$1" | sort; }
-              uvx heki check --report-suppressed "$RUNNER_TEMP/head.json" > /dev/null || test "$?" -eq 1
-              (cd ../base && uvx heki check --report-suppressed "$RUNNER_TEMP/base.json" > /dev/null || test "$?" -eq 1)
+              uvx heki==0.8.0 check --report-suppressed "$RUNNER_TEMP/head.json" > /dev/null || test "$?" -eq 1
+              (cd ../base && uvx heki==0.8.0 check --report-suppressed "$RUNNER_TEMP/base.json" > /dev/null || test "$?" -eq 1)
               new=$(diff <(keys "$RUNNER_TEMP/base.json") <(keys "$RUNNER_TEMP/head.json") | grep '^>' || true)
               test -z "$new" || { echo "New inline suppressions:"; echo "$new"; exit 1; }
-              (cd ../base && uvx heki snapshot --config "$GITHUB_WORKSPACE/heki.toml" --target-version "$TARGET" > "$RUNNER_TEMP/base-summary.json")
-              uvx heki check --select MUT103 --fail-on warning --target-version "$TARGET" --snapshot "$RUNNER_TEMP/base-summary.json" \
+              (cd ../base && uvx heki==0.8.0 snapshot --config "$GITHUB_WORKSPACE/heki.toml" --target-version "$TARGET" > "$RUNNER_TEMP/base-summary.json")
+              uvx heki==0.8.0 check --select MUT103 --fail-on warning --target-version "$TARGET" --snapshot "$RUNNER_TEMP/base-summary.json" \
                 --report-suppressed "$RUNNER_TEMP/mut103.json"
               hidden=$(keys "$RUNNER_TEMP/mut103.json")
               test -z "$hidden" || { echo "Effect changes hidden by inline suppressions:"; echo "$hidden"; exit 1; }
@@ -5696,9 +5698,9 @@ against them. Replace `app` with your package.
     the settings does not make unchanged code look different. The settings change itself is a
     change to a protected file. `MUT103` is opt-in, so the first audit does not see a
     `# heki: ignore[MUT103]`; the last run writes its own audit file, and any entry in it fails the
-    step, since the base compared with its own snapshot has no `MUT103` report to hide. `--report-suppressed` and `--snapshot` came after heki 0.7.0, so a pinned
-    `uvx heki==<version>` here needs a later release. The base checkout sits next to the project
-    (`../base`), not inside it, so that heki does not analyze it too.
+    step, since the base compared with its own snapshot has no `MUT103` report to hide.
+    The base checkout sits next to the project (`../base`), not inside it, so that heki does not
+    analyze it too.
 
 5. For Claude Code, add the [Stop hook](https://heki.koxudaxi.dev/coding-agents/#a-stop-hook-for-claude-code) and register it in
    `.claude/settings.json`: the agent then sees a failing report before it ends its turn, not
@@ -9296,10 +9298,15 @@ A module pattern is a whole module name or a glob whose `*` spans dots (`pkg.bac
 every module below `pkg.backend`, not `pkg.backend` itself), or a group: `<stdlib>`,
 `<project>`, `<third-party>`.
 
-`allowed-imports` and the imported side of an `ignored-imports` pair also take one name of a
-module, `module:name` (`"pkg.model.names:Resolver"`; a glob may stand in either part). Only
-`from pkg.model.names import Resolver` is that import; another name of the module is reported as
-before. With `reach`, an import allowed or accepted by a name is not followed.
+`allowed-imports`, `forbidden-imports` and the imported side of an `ignored-imports` pair also
+take one name of a module, `module:name` (`"pkg.model.names:Resolver"`; a glob may stand in
+either part). Only `from pkg.model.names import Resolver` is that import; another name of the
+module is reported as before. A forbidden name (`forbidden-imports = ["pkg.parser.*:_*"]`)
+reports `from pkg.parser.base import _helper` and not `from pkg.parser import jsonschema` (a
+submodule) or `from pkg.parser.base import Parser`; an allowed module, an allowed name, or an
+`ignored-imports` pair still carves it out. A by-name import takes no name, so it never breaks
+a forbidden name. With `reach`, an import allowed or accepted by a name is not followed, and a
+forbidden name is judged at the import of any module the walk reaches.
 
 A module of `relative-imports` is allowed when the import names it relative to the importer
 (`from . import b`, `from .b import f`, `importlib.import_module(".b", __package__)`), and
@@ -12989,6 +12996,12 @@ the module they load, when that module may be one the contract does not allow:
   forbidden pattern can match a module under it, or an allowed glob covers every one
   (`pkg.plugins.*`); a full name may also be one of a module `relative-imports` allows only
   through a relative import;
+- a call that may be a by-name import: a method named `import_module` or `__import__` on an
+  object of unknown class (`loader.import_module("pkg.backend")`), or a call of a name that may be
+  bound to one of them on some path (`load = importlib.import_module if flag else print`). The
+  call may be another function, so its modules are not read and the report says it may be one;
+- a relative import that climbs past the top-level package (`from ... import x` in
+  `pkg/sub/use.py`): it names no module and raises `ImportError` when it runs;
 - a by-name import of one of several names, some breaking the contract and some not;
   the report gives every reason one of them may break it for;
 - `from a import c` where heki cannot tell whether `c` is the submodule `a.c`: a package outside
@@ -12997,6 +13010,10 @@ the module they load, when that module may be one the contract does not allow:
   import takes the submodule instead of while the package is still loading, or one that binds no
   `c` while the project has no module `a.c`, which Python then looks for outside the project's
   files (a compiled extension module). The package `a` loads either way, and `IMP201` judges it.
+  A forbidden name (`forbidden-imports = ["xml:etree"]`) is exact only where heki knows `c` is
+  not a submodule; otherwise `from xml import etree` is reported here, as it may be the submodule.
+  A by-name import takes no forbidden name, but it is still reported for the rest of the contract
+  (`relative-imports`).
 
 With `reach`, the sites of the modules a walk reaches are judged too, and reported at the import
 of the importer that starts the chain to them.

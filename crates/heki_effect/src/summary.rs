@@ -6742,6 +6742,9 @@ impl<'a> Extractor<'a> {
         if self.opt_in.blind_spots {
             self.note_blind(bb, name, &callee, call);
         }
+        if self.opt_in.imports && matches!(callee, Callee::Unresolved | Callee::TooMany) {
+            self.maybe_import_by_name(bb, name, call);
+        }
         let sites_before = self.sites.len();
         let made = self.call(bb, &callee, call);
         if self.sites.len() > sites_before {
