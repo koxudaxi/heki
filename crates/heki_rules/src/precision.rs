@@ -19,6 +19,10 @@ pub struct Certification {
     pub census: Checked,
     /// Every report of one run on the frozen holdout corpus.
     pub holdout: Checked,
+    /// The real bugs it found (docs/precision.md, "Rare failures"), for a rule with fewer than 10
+    /// exact reports in its census and holdout run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub real_bugs: Option<u32>,
 }
 
 /// Reports checked by hand, the false claims found among them, and the harm of the right ones
@@ -193,6 +197,10 @@ const CERTIFIED_HARM: &[(&str, [u32; 4], [u32; 4])] = &[
     ("OPT113", [0, 2, 6, 0], [0, 0, 6, 0]),
 ];
 
+/// The real bugs a rule with fewer than 10 exact reports found, as the number of bugs two
+/// reviewers class as confirmed (docs/precision.md, "Rare failures").
+const REAL_BUGS: &[(&str, u32)] = &[];
+
 /// The latest measurement of each measured rule, in the order the table lists them: the round,
 /// the date of the build it measured, and the sampled reports as confirmed, plausible, benign,
 /// and false (docs/precision.md says how the reviewers of each round classed them).
@@ -236,6 +244,10 @@ pub fn certifications() -> impl Iterator<Item = Certification> {
             release,
             census: checked(census, harm.map(|h| h.1)),
             holdout: checked(holdout, harm.map(|h| h.2)),
+            real_bugs: REAL_BUGS
+                .iter()
+                .find(|(code, _)| *code == rule)
+                .map(|&(_, bugs)| bugs),
         }
     })
 }

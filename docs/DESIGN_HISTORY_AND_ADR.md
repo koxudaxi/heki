@@ -566,6 +566,18 @@ first, then a convention the code follows, then a contract.
       `--include-size-dependent` selects the five rules whose rewrites it applies, as if
       `extend-select` named them. *Rejected*: keeping them on with an exception for proven
       rewrites (the published bar and the published default set would disagree).
+      *Amended on 2026-11-27*: a rule with fewer than 10 exact reports in its census and
+      holdout run runs by default on at least two real bugs it found, with no false claim and
+      a run-time oracle that shows both sides on generated programs, instead of on its share
+      of real harm ([docs/precision.md](precision.md#rare-failures)). Rare write-time shapes,
+      such as an import that raises or a lock that waits for itself, are fixed before code
+      matures, so they never reach 100 reports in the corpus, and below 10 one report moves the
+      share by more than 10 points. The certifications already made on 1 to 8 reports
+      (`OPT102`, `OPT130`, `DATA101`, `MUT110`, `MUT114`, `OPT111`, `OPT110`) had no stated
+      rule for it. `MUT110` and `MUT114` stay in the default set on their recorded census, and
+      `build_docs.py` exempts rules of consequence `MinorBug` and the rules certified before
+      this amendment. *Rejected*: adding packages to the census for such a rule (a source scan
+      of 143 packages found no report for a shape mature code no longer has).
 - **Status**: the certainty and activation of every rule, a report's own certainty (the `OPT`
   reports whose rewrite is not proven are heuristic), the `heuristic` key and options, the
   withholding of an exact rule's heuristic reports, the note, the labels in every output, the
