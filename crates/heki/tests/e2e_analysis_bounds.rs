@@ -8442,8 +8442,8 @@ fn a_value_doubled_in_the_factory_past_its_size_bound_gives_no_context() {
 
 /// A module whose `__getattr__` tests its name against a display of `n` literals, returning the
 /// class a factory of the module defines, then serves `n` more names from a table of factories,
-/// and a module basing a class on each name it serves and calling its waiting method. (A chain
-/// of `n` tests each followed by a `return` is the shape of #279.)
+/// and a module basing a class on each name it serves and calling its waiting method. (The
+/// hook is a chain of `n` tests each followed by a `return`.)
 fn served_names(n: usize) -> Project {
     let p = Project::new(&format!("bounds_getattr_{n}"));
     p.write("pkg/__init__.py", "");

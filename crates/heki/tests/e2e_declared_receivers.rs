@@ -925,6 +925,55 @@ fn a_followed_module_getattr_decides_what_a_call_runs() {
     );
 }
 
+const REPLACE_HOOK_CODE: &str = r#"import pkg.lazy_served
+from asyncio import sleep
+
+
+def replacement(name):
+    return sleep
+
+
+pkg.lazy_served.__getattr__.__code__ = replacement.__code__
+"#;
+
+const REPLACE_FACTORY_CODE: &str = r#"import pkg.lazy_served
+
+
+def replacement():
+    return None
+
+
+pkg.lazy_served._declared.__code__ = replacement.__code__
+"#;
+
+/// Another module replacing the code of the hook, or of a factory the hook calls, leaves what
+/// the module serves open: no exact report through the served name.
+#[test]
+fn replacing_the_code_of_a_getattr_hook_or_its_factory_leaves_its_names_open() {
+    let hook = project(
+        "getattr_code_hook",
+        &[
+            ("lazy_served.py", LAZY_SERVED),
+            ("use.py", LAZY_SERVED_USE),
+            ("replace.py", REPLACE_HOOK_CODE),
+        ],
+    );
+    assert!(
+        eff101_reports(&hook)
+            .iter()
+            .all(|(_, kind)| kind.contains("[heuristic]"))
+    );
+    let factory = project(
+        "getattr_code_factory",
+        &[
+            ("lazy_served.py", LAZY_SERVED),
+            ("use.py", LAZY_SERVED_USE),
+            ("replace.py", REPLACE_FACTORY_CODE),
+        ],
+    );
+    assert!(!eff101_reports(&factory).contains(&(22, "EFF101".to_owned())));
+}
+
 const LAZY_TESTS: &str = r#"import os
 import sys
 from typing import Any

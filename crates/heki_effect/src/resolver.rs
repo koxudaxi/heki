@@ -3889,11 +3889,13 @@ impl ProjectDecls {
         let touched = |fqn: &str| {
             self.rebound_elsewhere.contains(fqn)
                 || self.rebound_by_getattr(fqn)
+                || self.call_rebound(fqn)
                 || (self.split_module(fqn))
                     .is_some_and(|(m, _)| self.global_stored_elsewhere(m, fqn))
         };
-        // The hook's own name is among its globals, and a store under a name heki cannot read
-        // touches every global of the module.
+        // The hook's own name and the factories it calls are among its globals (another module
+        // may replace their code), and a store under a name heki cannot read touches every
+        // global of the module.
         (self.modules.values())
             .filter(|m| {
                 (m.getattr_exports.as_deref())
