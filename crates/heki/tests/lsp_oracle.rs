@@ -4684,6 +4684,40 @@ fn steps_mut119() -> Vec<Step> {
     ]
 }
 
+const TABLE_BASE: &str = "class Base:\n    pass\n";
+const TABLE_BASE_UNKNOWN: &str = "from unknown_lib import Base\n";
+const TABLES: &str = "import functools\n\nfrom pkg.table_base import Base\n\n\nclass Listed(Base):\n    pass\n\n\nclass CachedListed(Listed):\n    @functools.lru_cache(maxsize=None)\n    def rows(self, k: str) -> list[str]:\n        return [k, \"id\"]\n";
+const TABLE_USER: &str = "from pkg.tables import Listed\n\n\ndef add(table: Listed, k):\n    xs = table.rows(k)\n    xs.append(\"x\")\n    return xs\n";
+
+/// `MUT114`: the targets of a call decided by a module the caller does not import: the
+/// receiver's class defines no such method and its base is a project class, so the call runs
+/// the cached method of the one subclass with it; once that module imports the base from a
+/// module heki knows nothing of, the base may define the method, and the server changes the
+/// report's certainty with the CLI.
+fn steps_mut114_targets() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a change of what a cached method of a subclass returns",
+            vec![
+                Action::Create("pkg/table_base.py", TABLE_BASE.to_owned()),
+                Action::Create("pkg/tables.py", TABLES.to_owned()),
+                Action::Create("pkg/table_user.py", TABLE_USER.to_owned()),
+            ],
+        )
+        .present(&[("pkg/table_user.py", "MUT114")]),
+        Step::new(
+            "the base of the receiver's class becomes one heki knows nothing of",
+            vec![save("pkg/table_base.py", TABLE_BASE_UNKNOWN)],
+        )
+        .present(&[("pkg/table_user.py", "MUT114")]),
+        Step::new(
+            "the base is a project class again",
+            vec![save("pkg/table_base.py", TABLE_BASE)],
+        )
+        .present(&[("pkg/table_user.py", "MUT114")]),
+    ]
+}
+
 /// The blocking helper of `pkg/low.py` with a module-level cache that it reads (`False`) or
 /// clears (`True`) after its blocking call, so that the call keeps its position.
 fn low_with_cache(clears: bool) -> String {
@@ -7023,6 +7057,7 @@ sessions!(editing, Session::start, {
     small_displays: steps_small_displays,
     queue_capacity: steps_queue_capacity,
     mut114_mut202_mut208: steps_mut114_mut202_mut208,
+    mut114_targets: steps_mut114_targets,
     mut115: steps_mut115,
     item_changes: steps_item_changes,
     module_patterns: steps_module_patterns,
