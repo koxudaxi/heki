@@ -957,6 +957,7 @@ fn the_command_under_the_rules_shows_every_report_they_count() {
 /// The sections of the text, in the order it prints them.
 const SECTIONS: &[&str] = &[
     "\nReports now  ",
+    "\nStart here\n",
     "\nTypes the code already keeps\n",
     "\nRules worth enabling here\n",
     "\nWhat heki cannot see (no report either way)\n",
@@ -975,6 +976,83 @@ fn the_sections_come_in_their_order() {
         .map(|s| out.find(s).unwrap_or_else(|| panic!("{s:?}: {out}")))
         .collect();
     assert!(at.is_sorted(), "{at:?}: {out}");
+}
+
+/// The steps of "Start here" in `heki recommend <args>`, without their dash.
+fn steps(p: &Project, args: &[&str]) -> Vec<String> {
+    let mut all = vec!["recommend"];
+    all.extend_from_slice(args);
+    let (_, out, _) = p.heki(&all);
+    (out.lines())
+        .skip_while(|l| *l != "Start here")
+        .skip(1)
+        .map_while(|l| l.strip_prefix("  - "))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn start_here_repeats_the_first_steps_the_report_has() {
+    let p = shop_with_opt_in("recommend_start_here");
+    let (_, report, _) = recommend_json(&p, &[]);
+    let (_, out, _) = p.heki(&["recommend"]);
+    let command = (out.lines())
+        .find_map(|l| l.strip_prefix("  see the 7 report(s): "))
+        .unwrap_or_else(|| panic!("{out}"));
+    let failing = report["reports_now"]["failing"].as_u64().unwrap();
+    assert!(failing > 0);
+    // The failing reports first, then the command of "Rules worth enabling here"; three at most.
+    assert_eq!(
+        steps(&p, &[]),
+        [
+            format!(
+                "heki check fails on {failing} report(s) now: a Ratchet baseline records them, so \
+                 that it fails only on new ones (Notes)"
+            ),
+            format!("{command} shows 7 report(s) not shown now: 0 exact, 7 heuristic (heuristic reports can be wrong)"),
+            "1 contract block(s) in the keys at the end: the code keeps them today; adopt only the \
+             boundaries you intend to keep (Notes)"
+                .to_owned(),
+        ]
+    );
+    // With a baseline holding every report, nothing fails; the exact types come before the
+    // contract blocks.
+    p.write(
+        "app/core.py",
+        "def total(rows: list[int]) -> int:\n    return sum(rows)\n",
+    );
+    let (code, _, err) = p.heki(&[
+        "check",
+        "--select",
+        &every_rule(),
+        "--baseline",
+        "b.toml",
+        "--update-baseline",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let with_baseline = steps(&p, &["--baseline", "b.toml"]);
+    assert!(
+        with_baseline[0]
+            .ends_with(" not shown now: 0 exact, 7 heuristic (heuristic reports can be wrong)")
+    );
+    assert_eq!(
+        with_baseline[1],
+        "1 exact read-only parameter type(s) to write (Types the code already keeps)"
+    );
+    // A source root the block adds: the contract candidates wait for a run with it.
+    let q = subdirectory_app("recommend_start_here_src");
+    assert_eq!(
+        steps(&q, &[]),
+        [
+            "add src = [\"backend\"] (keys at the end), then run heki recommend again: it renames \
+         modules, and the contract candidates come from that run"
+        ]
+    );
+    // Nothing to start with: no section.
+    let r = Project::new("recommend_start_here_none");
+    r.write("app.py", "def f():\n    return 1\n");
+    let (_, out, _) = r.heki(&["recommend"]);
+    assert!(!out.contains("Start here"), "{out}");
 }
 
 #[test]

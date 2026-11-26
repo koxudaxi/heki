@@ -305,6 +305,8 @@ fn decide(
 pub(super) struct ShownByCheck {
     pub command: String,
     pub reports: usize,
+    pub exact: usize,
+    pub heuristic: usize,
     /// With a baseline: the regressions among them, which a run with the baseline prints.
     pub regressions: usize,
 }
@@ -333,6 +335,8 @@ pub(super) fn shown_by_check(rules: &[RuleAdvice], paths: &[String]) -> Option<S
     Some(ShownByCheck {
         command,
         reports: named.iter().map(|r| r.reports.unwrap_or_default()).sum(),
+        exact: named.iter().map(|r| r.exact).sum(),
+        heuristic: named.iter().map(|r| r.heuristic).sum(),
         regressions: (named.iter())
             .filter_map(|r| r.baseline.as_ref())
             .map(|b| b.regressions)

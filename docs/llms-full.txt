@@ -3505,6 +3505,11 @@ suggestion group, the heuristic ones too, where the text lists the first 3 exact
   reports (reports sharing a root cause count once, as `heki check` folds them), the heuristic
   reports of exact rules that `lint.heuristic = false` withholds, and the heuristic rules it
   leaves off. With a baseline, the reports it allows and the regressions.
+- **Start here**: up to three first steps, each repeating what a later part says: the reports
+  that fail `heki check` now (the baseline that records them is in the notes), a source root
+  the block adds (the contract candidates come from a run with it), the command that shows the
+  reports the rules count, the exact types, and the contract blocks in the keys. It is left out
+  when there is none.
 - **Types the code already keeps**: the [suggestions](https://heki.koxudaxi.dev/recommend/#suggestions), counted exact and
   heuristic, and whether heki found a type checker's configuration (without one, half of each
   guard is missing). The first 3 exact groups by rank are listed, each on one line with its
@@ -3821,6 +3826,11 @@ $ heki recommend app
 heki recommend (experimental) on .: 4 file(s), 13 function(s)
 
 Reports now  1 shown (1 exact, 0 heuristic), 0 heuristic withheld, 4 heuristic rule(s) off
+
+Start here
+  - heki check fails on 1 report(s) now: a Ratchet baseline records them, so that it fails only on new ones (Notes)
+  - heki check app --extend-select MUT106,OPT110 shows 2 report(s) not shown now: 0 exact, 2 heuristic (heuristic reports can be wrong)
+  - 2 exact read-only parameter type(s) to write (Types the code already keeps)
 
 Types the code already keeps
   2 read-only parameter group(s), exact; 2 heuristic (heki recommend --all lists them)

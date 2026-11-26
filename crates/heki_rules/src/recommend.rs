@@ -719,6 +719,53 @@ fn left_out_note(left_out: &LeftOut) -> String {
     )
 }
 
+/// The most steps "Start here" lists.
+const MAX_STEPS: usize = 3;
+
+/// The first steps the report points to, each a field it already has, the first
+/// [`MAX_STEPS`] of: the reports that fail `heki check` now, a source root the block adds (the
+/// contract candidates wait for a run with it), the command showing the reports the rules count,
+/// the exact types, and the contract blocks.
+fn start_here(report: &RecommendReport) -> Vec<String> {
+    let mut steps = Vec::new();
+    let now = &report.reports_now;
+    if now.failing > 0 && now.baseline.is_none() {
+        steps.push(format!(
+            "heki check fails on {} report(s) now: a Ratchet baseline records them, so that it \
+             fails only on new ones (Notes)",
+            now.failing
+        ));
+    }
+    if let Some(src) = (report.config_toml.lines()).find(|l| l.starts_with("src = ")) {
+        steps.push(format!(
+            "add {src} (keys at the end), then run heki recommend again: it renames modules, and \
+             the contract candidates come from that run"
+        ));
+    }
+    if let Some(shown) = rules::shown_by_check(&report.rules, &report.analyzed.paths) {
+        steps.push(format!(
+            "{} shows {} report(s) not shown now: {} exact, {} heuristic (heuristic reports can \
+             be wrong)",
+            shown.command, shown.reports, shown.exact, shown.heuristic
+        ));
+    }
+    let exact: usize = report.suggestions.counts.iter().map(|c| c.exact).sum();
+    if exact > 0 {
+        steps.push(format!(
+            "{exact} exact read-only parameter type(s) to write (Types the code already keeps)"
+        ));
+    }
+    if !report.contracts.is_empty() {
+        steps.push(format!(
+            "{} contract block(s) in the keys at the end: the code keeps them today; adopt only \
+             the boundaries you intend to keep (Notes)",
+            report.contracts.len()
+        ));
+    }
+    steps.truncate(MAX_STEPS);
+    steps
+}
+
 /// The report as the text output prints it; `all` lists every suggestion group, as the JSON
 /// object holds them with `--all`.
 pub fn render_text(report: &RecommendReport, all: bool) -> String {
@@ -742,6 +789,13 @@ pub fn render_text(report: &RecommendReport, all: bool) -> String {
             "  with the baseline: {} allowed, {} regression(s)",
             split.allowed, split.regressions
         );
+    }
+    let steps = start_here(report);
+    if !steps.is_empty() {
+        out.push_str("\nStart here\n");
+        for step in steps {
+            let _ = writeln!(out, "  - {step}");
+        }
     }
     types::render(&mut out, &report.suggestions, all);
     rules::render(
