@@ -981,6 +981,35 @@ first, then a convention the code follows, then a contract.
 
 ---
 
+### ADR-024: Registration contexts: the argument a registration hands a callback, carried to the handler a lookup by name selects
+- **Background**: web and command frameworks register a callback per view or command with the
+  object that owns them, and the callback calls the handler `getattr(self, <name>)` finds. The
+  handler's parameter for the owner is unannotated, so `heki inspect` showed no change through
+  it. On an open-source web application, two handlers of this kind write a list of the owner
+  through two and three calls; annotating the parameter reproduced the full record, and a
+  prototype that derived the owner's class from the registration reproduced it without the
+  annotation.
+- **Decision**:
+  1. A context belongs to one registration and one name: the handler gets the condition "the
+     name equals its name", and only that registration's owner class. Two owners registering
+     one handler keep two contexts.
+  2. Each function's part (rows of a table it returns, the table handed to a class and kept in
+     an attribute, the call of a row's slot, the row a helper picks, and the program of a short
+     function) is extracted while its IR exists, into `EffectSummary::dispatch`, which Early
+     Cutoff compares without positions. The join runs over the index at query time, with one
+     budget per registration, a nesting limit, and a cycle stop (ARCHITECTURE section 8,
+     docs/development.md "Analysis cost").
+  3. The record under a context comes from the existing summaries and chains: the handler's
+     module is summarized again with the one parameter type, in a copy of the index. The
+     contexts are advisory and shown only by `heki inspect` (`registered`).
+- **Alternatives rejected**: typing the parameter from every registration of the handler, which
+  is wrong when two owners register it and turns a conditional fact into an unconditional one;
+  keeping IR for the join, which ADR-017 forbids; a list of framework names or HTTP methods,
+  which breaks on renames and other frameworks.
+- **Consequences**: no rule, exact report, or fix reads a context. A registration shape the
+  model does not follow gives no context, never a guess; each new shape is a fact of its own
+  with true-positive and true-negative tests.
+
 ## 5. Open items
 
 - The design, name, license (MIT), interface, and Stage 0-A measurements (Waves 1 and 2) are

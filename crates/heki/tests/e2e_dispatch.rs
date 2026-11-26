@@ -11,6 +11,9 @@ mod common;
 use common::Project;
 use serde_json::Value;
 
+/// `(file, old, new)`: `old` replaced once in the file.
+type Edit<'e> = (&'e str, &'e str, &'e str);
+
 /// The `panels` project, each file with the edits `(file, old, new)` applied once.
 fn panels(name: &str, edits: &[(&str, &str, &str)]) -> Project {
     let p = Project::new(name);
@@ -181,7 +184,7 @@ fn a_registration_without_its_owner_gives_no_context() {
 /// Each edit breaks a premise of the chain the first owner's registration takes.
 #[test]
 fn premises_that_break_give_no_context() {
-    let cases: &[(&str, &[(&str, &str, &str)])] = &[
+    let cases: &[(&str, &[Edit])] = &[
         (
             "missing_keyword",
             &[("adapter.py", "owner=resource", "absent=resource")],
@@ -394,6 +397,37 @@ fn premises_that_break_give_no_context() {
                 "    async def extra0(self, packet, ledger):\n        pass\n\n    async def extra1(self, packet, ledger):\n        pass\n\n    async def extra2(self, packet, ledger):\n        pass\n\n    async def extra3(self, packet, ledger):\n        pass\n\n    async def extra4(self, packet, ledger):\n        pass\n\n    async def extra5(self, packet, ledger):\n        pass\n\n    async def extra6(self, packet, ledger):\n        pass\n\n    async def extra7(self, packet, ledger):\n        pass\n\n    async def noop(",
             )],
         ),
+        (
+            "isinstance_of_another_type",
+            &[(
+                "adapter.py",
+                "        worker = component()\n",
+                "        if isinstance(component, int):\n            pass\n        worker = component()\n",
+            )],
+        ),
+        (
+            "decorated_dispatcher",
+            &[
+                (
+                    "views.py",
+                    "class Commands:\n",
+                    "from typing import final\n\n\nclass Commands:\n",
+                ),
+                (
+                    "views.py",
+                    "    async def choose(",
+                    "    @final\n    async def choose(",
+                ),
+            ],
+        ),
+        (
+            "item_of_a_list",
+            &[(
+                "adapter.py",
+                "values.append(options[field])",
+                "values.append(values[field])",
+            )],
+        ),
     ];
     for (name, edits) in cases {
         let p = panels(&format!("dispatch_{name}"), edits);
@@ -420,7 +454,7 @@ def listed(fn=None, *, label=None):
 
 
 def kinds():
-    return {"a", "b"}
+    return {"a", "b", 1.5}
 "#;
 
 const WIRING: &str = r#"import inspect
@@ -446,6 +480,8 @@ def attach_function(fn, hub):
 
 def attach_class(cls, hub):
     async def run(request, send):
+        debug = False
+        ratio = 1.5
         screen = cls()
         if inspect.iscoroutinefunction(screen.__call__):
             return await call_async(screen.__call__, request=request, send=send, hub=hub)
@@ -528,13 +564,15 @@ class Hub:
     def _table(self):
         table = []
         for extra in self.extras():
-            table.append(("extra", attach(extra, self)))
+            table.append(("extra", attach(extra, self, 0)))
 
         def add(target, pattern):
             table.append((pattern, target))
 
         add(attach(Overview, self, None), r"/overview$")
-        add(attach(Search, self, label="search"), r"/search$")
+        add(target=attach(Search, self, label="search"), pattern=r"/search$")
+        for extra in self.extras():
+            add(extra(Search, self), r"/extra$")
         return [((re.compile(p) if isinstance(p, str) else p), target, len(p)) for p, target in table]
 
     def app(self):

@@ -1,5 +1,5 @@
 //! Registration contexts: the argument a registration hands a callback, carried to the handler
-//! the callback selects by name (ADR-023). A registration stores what a factory returns in a
+//! the callback selects by name (ADR-024). A registration stores what a factory returns in a
 //! slot of the rows of a table; the table is kept by an attribute, a row is picked from it and
 //! its slot called; the callback builds an object of the class it captured and calls a method
 //! of it through an adapter that orders the arguments by the method's signature; the method
@@ -507,34 +507,42 @@ fn appended(
             continue;
         }
         for u in shape.readers(v) {
-            let heki_ir::walk::Use::Inst(b, i) = u else {
-                continue;
-            };
-            let InstKind::Call {
-                callee_var: Some(c),
-                args,
-                kwargs,
-                star_from: None,
-                ..
-            } = &f.blocks[b.0 as usize].insts[*i as usize].kind
-            else {
-                continue;
-            };
-            if *c != v {
-                continue;
-            }
-            let by_name = kwargs.iter().filter_map(|(k, a)| {
-                let j = n.params.iter().position(|p| Some(&p.name) == k.as_ref())?;
-                Some((j, *a))
-            });
-            for (j, a) in args.iter().copied().enumerate().chain(by_name) {
-                if let Some(Some(s)) = slots.get(j) {
-                    out.push((*s, a));
-                }
+            // Each call of the nested function (it may also be handed on, which adds rows the
+            // model does not follow).
+            if let heki_ir::walk::Use::Inst(b, i) = u
+                && let InstKind::Call {
+                    callee_var: Some(c),
+                    args,
+                    kwargs,
+                    star_from: None,
+                    ..
+                } = &f.blocks[b.0 as usize].insts[*i as usize].kind
+                && *c == v
+            {
+                stored_by(n, &slots, args, kwargs, &mut out);
             }
         }
     }
     Some(out)
+}
+
+/// The values a call with `args` and `kwargs` hands the appender `n`, by the slot each fills.
+fn stored_by(
+    n: &IrFunction,
+    slots: &[Option<u8>],
+    args: &[VarId],
+    kwargs: &[(Option<String>, VarId)],
+    out: &mut Vec<(u8, VarId)>,
+) {
+    let by_name = kwargs.iter().filter_map(|(k, a)| {
+        let j = n.params.iter().position(|p| Some(&p.name) == k.as_ref())?;
+        Some((j, *a))
+    });
+    for (j, a) in args.iter().copied().enumerate().chain(by_name) {
+        if let Some(Some(s)) = slots.get(j) {
+            out.push((*s, a));
+        }
+    }
 }
 
 /// The returned values of `f`, through copies.
@@ -598,15 +606,17 @@ fn copied_slots(
     iterated: &[VarId],
 ) -> Option<Vec<u8>> {
     let appends: Vec<&[VarId]> = (shape.readers(value).iter())
-        .filter_map(|u| match u {
-            heki_ir::walk::Use::Inst(b, i) => match &f.blocks[b.0 as usize].insts[*i as usize].kind
-            {
-                InstKind::MethodCall {
+        .filter_map(|u| {
+            if let heki_ir::walk::Use::Inst(b, i) = u
+                && let InstKind::MethodCall {
                     recv, method, args, ..
-                } if *recv == value && method == "append" => Some(args.as_slice()),
-                _ => None,
-            },
-            _ => None,
+                } = &f.blocks[b.0 as usize].insts[*i as usize].kind
+                && *recv == value
+                && method == "append"
+            {
+                return Some(args.as_slice());
+            }
+            None
         })
         .collect();
     let item = appends
@@ -1223,13 +1233,13 @@ fn consumer<'i>(
         for (attr, _) in kept.filter(|(_, p)| *p == param) {
             let methods = decls.methods_of(&hand.class);
             let writers = (methods.iter())
-                .filter_map(|m| entry(m))
+                .filter_map(&entry)
                 .filter(|m| m.local.mutates_self_attrs.iter().any(|a| a.attr == *attr))
                 .count();
             if writers != 1 {
                 continue;
             }
-            for reader in methods.iter().filter_map(|m| entry(m)) {
+            for reader in methods.iter().filter_map(&entry) {
                 for call in reader.facts.row_calls.iter().filter(|c| c.attr == *attr) {
                     let picked = entry(&call.helper).into_iter().flat_map(|h| &h.facts.picks);
                     let picked = picked.filter(|p| {
@@ -1280,6 +1290,15 @@ struct LookupV {
     at: Span,
 }
 
+/// The coroutine a call of an `async def` returns, with its arguments and the call site.
+#[derive(Debug, Clone, PartialEq)]
+struct PendingV {
+    coroutine: Coroutine,
+    args: Vec<V>,
+    kwargs: Vec<(String, V)>,
+    site: Span,
+}
+
 /// What awaiting a coroutine does: run a function, or call what a lookup selects.
 #[derive(Debug, Clone, PartialEq)]
 enum Coroutine {
@@ -1308,8 +1327,7 @@ enum V {
     Dict(Vec<(String, V)>),
     Signature(Vec<String>),
     Lookup(Box<LookupV>),
-    /// The coroutine a call of an `async def` returns, with its arguments and the call site.
-    Pending(Box<(Coroutine, Vec<V>, Vec<(String, V)>, Span)>),
+    Pending(Box<PendingV>),
 }
 
 impl V {
@@ -1617,7 +1635,14 @@ impl<'i> Run<'_, 'i> {
         site: Span,
     ) -> Res<V> {
         self.step()?;
-        let pending = |c: Coroutine, args, kwargs| V::Pending(Box::new((c, args, kwargs, site)));
+        let pending = |coroutine, args, kwargs| {
+            V::Pending(Box::new(PendingV {
+                coroutine,
+                args,
+                kwargs,
+                site,
+            }))
+        };
         match callee {
             V::Fn(f) if self.program_of(&f.fqn)?.is_async => {
                 Ok(pending(Coroutine::Run(*f), args, kwargs))
@@ -1635,10 +1660,11 @@ impl<'i> Run<'_, 'i> {
         let V::Pending(p) = value else {
             return Err(Open);
         };
-        let (coroutine, args, kwargs, site) = *p;
-        match coroutine {
-            Coroutine::Select(l) => self.select(l, site, args, kwargs).map(|()| V::Unknown),
-            Coroutine::Run(f) => self.enter_body(f, args, kwargs),
+        match p.coroutine {
+            Coroutine::Select(l) => self
+                .select(l, p.site, p.args, p.kwargs)
+                .map(|()| V::Unknown),
+            Coroutine::Run(f) => self.enter_body(f, p.args, p.kwargs),
         }
     }
 
