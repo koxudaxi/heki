@@ -954,6 +954,8 @@ pub enum ReadKind {
     DirectAttr,
     /// `getattr(obj, "attr"[, default])` / `object.__getattribute__(obj, "attr")`.
     GetAttr,
+    /// `hasattr(obj, "attr")`, which evaluates the attribute.
+    HasAttr,
     /// `obj.__dict__["attr"]` / `obj.__dict__.get("attr")`.
     DictDirect,
 }
@@ -964,6 +966,7 @@ impl ReadKind {
         match self {
             Self::DirectAttr => "by attribute",
             Self::GetAttr => "with `getattr`",
+            Self::HasAttr => "with `hasattr`",
             Self::DictDirect => "as a `__dict__` item",
         }
     }

@@ -19,8 +19,9 @@ the allowed readers:
 - through a class object, which reads the class attribute: the class itself
   (`Reference.children`), `cls` in a class method, `type(ref)`, or a value typed
   `type[Reference]` / `typing.Type[Reference]`;
-- through `getattr(ref, "children"[, default])` or `object.__getattribute__(ref, "children")`
-  with a constant name: a string literal or a string constant, as for `MUT201`;
+- through `getattr(ref, "children"[, default])`, `object.__getattribute__(ref, "children")`, or
+  `hasattr(ref, "children")` (which evaluates the attribute) with a constant name: a string
+  literal or a string constant, as for `MUT201`;
 - through `ref.__dict__["children"]` or `ref.__dict__.get("children")` (also on `vars(ref)`),
   also with a string constant for the key.
 
@@ -117,7 +118,7 @@ with their files as `allowed_examples` (`fqn`, `path`).
 ## What a report states
 
 A report states that the function reads a target of a `read-owners` contract outside the contract's
-read owners, directly, through an alias, `getattr`, or `__dict__`, or through the helpers shown.
+read owners, directly, through an alias, `getattr`, `hasattr`, or `__dict__`, or through the helpers shown.
 
 Its premises:
 
