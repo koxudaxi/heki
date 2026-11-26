@@ -33,9 +33,10 @@ use crate::resolver::{
 };
 use crate::{
     Access, ArgBinding, ArgOrigin, ArgTargets, ArgValue, AttrKeyPath, BoundCallee, CallHop,
-    CallSite, CallTarget, CellChange, Construction, ContainerParams, ContractClass, Contracts,
-    Dispatch, EffectSummary, EntryKey, FileSummary, FuncKey, GuardSubject, HandedState,
-    Implementers, Items, KeptFacts, ListedCache, ModuleInput, MustExec, NewArg, NewCond, NewFrom,
+    CallSite, CallTarget, CallTests, CellChange, Construction, ContainerParams, ContractClass,
+    Contracts, Dispatch, EffectSummary, EntryKey, FileSummary, FuncKey, GuardSubject, HandedState,
+    Implementers, InputGuard, Items, KeptFacts, ListedCache, MayGiven, ModuleInput, MustExec,
+    NewArg, NewCond, NewFrom,
     NewKind, OnEveryReturn, OptInFacts, PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner,
     SharedLine, SharedState, SharedStateFacts, SiteRole, Slot, TypedFieldReadSite,
     TypedFieldWriteSite, UnawaitedHandoff, Unresolved, UnresolvedAccessSite, UnresolvedWriteSite,
@@ -482,6 +483,9 @@ fn rebase_origin_nodes(summary: &mut EffectSummary, sites: &mut [CallSite], offs
 }
 
 fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary, func: &FuncKey) {
+    for p in (0..64u8).filter(|p| other.retains_params & (1u64 << p) != 0) {
+        into.keep_params(1u64 << p, &other.retained_given(p));
+    }
     // A must-fact: only read where both definitions only read it.
     into.only_read_params &= other.only_read_params;
     into.join_read_kinds(&other);
@@ -591,7 +595,6 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary, func: &FuncKe
             chain,
         );
     }
-    into.retains_params |= other.retains_params;
     // A must-fact: a new object only when both definitions return one.
     into.returns_new = match (std::mem::take(&mut into.returns_new), other.returns_new) {
         (
@@ -599,16 +602,22 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary, func: &FuncKe
                 kind: a,
                 cond: c,
                 elements_of: x,
+                kept: mut k,
             },
             ReturnsNew::New {
                 kind: b,
                 cond: d,
                 elements_of: y,
+                kept: l,
             },
         ) => ReturnsNew::New {
             kind: a.min(b),
             cond: c.and(&d),
             elements_of: x | y,
+            kept: {
+                k.join(&l);
+                k
+            },
         },
         _ => ReturnsNew::No,
     };
@@ -4745,10 +4754,9 @@ impl<'a> Extractor<'a> {
             && !self.summary.decorator_may_replace;
         let sites = &self.sites;
         // Hand-overs are to project callees of the function's own call sites.
-        let callee_of = |site: u32, callee: u16| {
-            sites[site as usize].project_callees()[usize::from(callee)]
-                .callee
-                .clone()
+        let handed_to = |site: u32, callee: u16, known: &[InputGuard]| {
+            let bc = &sites[site as usize].project_callees()[usize::from(callee)];
+            (bc.callee.clone(), CallTests::of_call(&bc.params, known))
         };
         let element_of = |v: VarId| self.element_of_params(v);
         let (answers, returned) = rec.resolve(
@@ -4756,7 +4764,7 @@ impl<'a> Extractor<'a> {
             &self.may_params,
             &param_of,
             &element_of,
-            &callee_of,
+            &handed_to,
             returns,
         );
         for p in std::mem::take(&mut self.pending_sites) {
@@ -4816,13 +4824,19 @@ impl<'a> Extractor<'a> {
     /// parameter keeps it (`EffectSummary::retains_params`). Only reached when an ownership
     /// contract is declared ([`Self::store_escapes`], [`Self::call_escapes`]).
     fn escape(&mut self, var: VarId, how: Escape) {
-        if how == Escape::Definite {
-            self.summary.retains_params |= self.may_params.get(&var).copied().unwrap_or(0);
+        let params = self.may_params.get(&var).copied().unwrap_or(0);
+        let recorded = self.track && (params != 0 || self.may_be_new(var));
+        let keeps_params = how == Escape::Definite && params != 0;
+        if !recorded && !keeps_params {
+            return;
         }
-        if self.track
-            && (self.may_params.get(&var).is_some_and(|p| *p != 0) || self.may_be_new(var))
-        {
-            self.rec.escape(self.at(), var, how);
+        let known = self.guards.facts_at(&self.guard_inputs(), self.pos.0);
+        if keeps_params {
+            self.summary
+                .keep_params(params, &MayGiven::given(known.clone()));
+        }
+        if recorded {
+            self.rec.escape(self.at(), var, how, known);
         }
     }
 
@@ -7044,9 +7058,11 @@ impl<'a> Extractor<'a> {
                         ));
                     }
                     if self.ownership {
+                        let known = self.guards.facts_at(&self.guard_inputs(), bb);
                         returns.push(NewFrom {
                             callee: key.clone(),
                             empty_params: params_without_elements(&params),
+                            at: CallTests::of_call(&params, &known),
                         });
                     }
                     // A copy of the exact length; the buffer keeps its room for the next call.

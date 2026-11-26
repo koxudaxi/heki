@@ -7713,3 +7713,70 @@ fn type_expressions_are_spelled_once_each() {
     });
     assert_eq!(found, Vec::<Value>::new());
 }
+
+/// A helper storing its copy where tests of `flags` flags pass, each under an `if` of its own
+/// (`one_if` false: one alternative per flag) or all under one `if ... and ...` (one alternative
+/// needing every test), and a scope function writing the copy it makes with every flag false.
+fn copy_stored_under_flags(flags: usize, one_if: bool) -> String {
+    let names: Vec<String> = (0..flags).map(|i| format!("f{i}")).collect();
+    let typed: Vec<String> = names.iter().map(|n| format!("{n}: bool = True")).collect();
+    let mut out = vec![
+        "import copy".to_owned(),
+        String::new(),
+        String::new(),
+        "class Node:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.flag = False".to_owned(),
+        String::new(),
+        String::new(),
+        "KEPT: list[Node] = []".to_owned(),
+        String::new(),
+        String::new(),
+        format!("def copy_kept(node: Node, *, {}) -> Node:", typed.join(", ")),
+        "    copied = copy.deepcopy(node)".to_owned(),
+    ];
+    if one_if {
+        out.push(format!("    if {}:", names.join(" and ")));
+        out.push("        KEPT.append(copied)".to_owned());
+    } else {
+        for name in &names {
+            out.push(format!("    if {name}:"));
+            out.push("        KEPT.append(copied)".to_owned());
+        }
+    }
+    let falses: Vec<String> = names.iter().map(|n| format!("{n}=False")).collect();
+    out.extend([
+        "    return copied".to_owned(),
+        String::new(),
+        String::new(),
+        "def scope(node: Node) -> Node:".to_owned(),
+        format!("    copied = copy_kept(node, {})", falses.join(", ")),
+        "    copied.flag = True".to_owned(),
+        "    return copied".to_owned(),
+    ]);
+    out.join("\n") + "\n"
+}
+
+/// A store a function makes only where tests of its parameters pass keeps a bounded record: past
+/// `heki_effect::MAX_GIVEN_CHAINS` alternatives, or `heki_effect::MAX_GIVEN_TESTS` tests in
+/// one, the function keeps the object whatever it is passed, and the write after the call is
+/// reported.
+#[test]
+fn a_store_under_more_tests_than_the_bounds_keeps_whatever_is_passed() {
+    let reported = |flags: usize, one_if: bool| {
+        let p = Project::new(&format!("bounds_guarded_keeps_{flags}_{one_if}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[[tool.heki.effect-boundaries]]\nname = \"b\"\n\
+             scopes = [\"m:scope\"]\nwrite-universe = [\"Node.flag\"]\n",
+        )
+        .write("m.py", &copy_stored_under_flags(flags, one_if));
+        check(&p)
+            .iter()
+            .any(|d| d["rule_code"] == "EFF201")
+    };
+    for one_if in [false, true] {
+        assert!(!reported(4, one_if), "{one_if}");
+        assert!(reported(5, one_if), "{one_if}");
+    }
+}

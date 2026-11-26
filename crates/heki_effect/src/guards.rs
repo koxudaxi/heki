@@ -33,8 +33,9 @@
 use crate::capacity::{ParamCapacities, bound_capacity};
 use crate::resolver::{ProjectDecls, Val, aliases_of};
 use crate::{
-    ArgBinding, BoundCallee, CallSite, ConstArg, ConstClass, EffectGuards, EffectSummary,
-    GuardSubject, GuardTest, InputGuard, SiteRole, Slot, ValueTest,
+    ArgBinding, ArgOrigin, ArgView, BoundCallee, CallSite, CallTests, ConstArg, ConstClass,
+    EffectGuards, EffectSummary, GuardSubject, GuardTest, InputGuard, MayGiven, SiteRole, Slot,
+    ValueTest,
 };
 use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, Or, Visit, reach};
 use heki_ir::{
@@ -453,6 +454,99 @@ fn known_outcome(known: &[InputGuard], subject: &GuardSubject, test: &GuardTest)
         })
 }
 
+/// What a callee's test of one of its inputs comes to at a call.
+enum TestAtCall {
+    Holds,
+    Fails,
+    /// A test of the caller's own input, in its terms.
+    Caller(InputGuard),
+    /// A test of a value the caller cannot tell: it may pass.
+    Open,
+}
+
+/// [`TestAtCall`] of the callee's test `g` at a call binding its subject's parameter to a value
+/// whose own outcome of the test is `outcome` (when the value decides it), or to the caller's
+/// input `input`, where the caller's tests `known` hold.
+fn test_at_call(
+    g: &InputGuard,
+    outcome: Option<bool>,
+    input: Option<&GuardSubject>,
+    known: &[InputGuard],
+) -> TestAtCall {
+    if g.subject.attr.is_none()
+        && let Some(outcome) = outcome
+    {
+        return if outcome == g.holds {
+            TestAtCall::Holds
+        } else {
+            TestAtCall::Fails
+        };
+    }
+    let subject = match (input, &g.subject.attr) {
+        (Some(GuardSubject { param, attr: None }), attr) => GuardSubject {
+            param: *param,
+            attr: attr.clone(),
+        },
+        (Some(input), None) => input.clone(),
+        _ => return TestAtCall::Open,
+    };
+    match known_outcome(known, &subject, &g.test) {
+        Some(outcome) if outcome != g.holds => TestAtCall::Fails,
+        Some(_) => TestAtCall::Holds,
+        None => TestAtCall::Caller(InputGuard {
+            subject,
+            test: g.test.clone(),
+            holds: g.holds,
+        }),
+    }
+}
+
+impl CallTests {
+    /// What a call binding `params` tells, where the caller's tests `known` hold.
+    pub(crate) fn of_call(params: &[ArgOrigin], known: &[InputGuard]) -> Self {
+        let args = (params.iter().enumerate().take(64))
+            .filter_map(|(p, o)| {
+                let b = o.binding.as_ref()?;
+                let view = match (b.constant(), &b.input) {
+                    (Some(c), _) => ArgView::Const(c),
+                    (None, Some(input)) => ArgView::Input(input.clone()),
+                    (None, None) => return None,
+                };
+                Some((u8::try_from(p).ok()?, view))
+            })
+            .collect();
+        Self {
+            args,
+            known: known.to_vec(),
+        }
+    }
+}
+
+/// What a fact the callee may have where tests of its inputs pass (`given`) comes to at a call
+/// that `at` describes: each alternative's tests in the caller's terms, with the tests holding
+/// where the call runs, and without the alternatives the call decides against.
+pub(crate) fn given_at_call(given: &MayGiven, at: &CallTests) -> MayGiven {
+    let mut out = MayGiven::default();
+    'alternatives: for alternative in given.alternatives() {
+        let mut tests = at.known.clone();
+        for g in alternative {
+            let arg = (at.args.iter()).find_map(|(p, a)| (*p == g.subject.param).then_some(a));
+            let (outcome, input) = match arg {
+                Some(ArgView::Const(c)) => (c.decide(&g.test), None),
+                Some(ArgView::Input(input)) => (None, Some(input)),
+                None => (None, None),
+            };
+            match test_at_call(g, outcome, input, &at.known) {
+                TestAtCall::Fails => continue 'alternatives,
+                TestAtCall::Caller(t) => tests.push(t),
+                TestAtCall::Holds | TestAtCall::Open => {}
+            }
+        }
+        out.add(tests);
+    }
+    out
+}
+
 /// What a callee's effect becomes in the caller at one call site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Through {
@@ -496,32 +590,15 @@ pub(crate) fn through_call(
         let Some(b) = binding(usize::from(g.subject.param)) else {
             continue;
         };
-        if g.subject.attr.is_none()
-            && let Some(outcome) = b.fact.as_deref().and_then(|f| fact_outcome(f, &g.test))
-        {
-            if outcome != g.holds {
-                return None;
+        let outcome = (b.fact.as_deref())
+            .filter(|_| g.subject.attr.is_none())
+            .and_then(|f| fact_outcome(f, &g.test));
+        match test_at_call(g, outcome, b.input.as_ref(), &site.guards) {
+            TestAtCall::Fails => return None,
+            TestAtCall::Caller(t) => {
+                guards.inputs.insert(t);
             }
-            continue;
-        }
-        let subject = match (&b.input, &g.subject.attr) {
-            (Some(GuardSubject { param, attr: None }), attr) => GuardSubject {
-                param: *param,
-                attr: attr.clone(),
-            },
-            (Some(input), None) => input.clone(),
-            _ => continue,
-        };
-        match known_outcome(&site.guards, &subject, &g.test) {
-            Some(outcome) if outcome != g.holds => return None,
-            Some(_) => {}
-            None => {
-                guards.inputs.insert(InputGuard {
-                    subject,
-                    test: g.test.clone(),
-                    holds: g.holds,
-                });
-            }
+            TestAtCall::Holds | TestAtCall::Open => {}
         }
     }
     if let Some(roots) = callee.once_per {

@@ -11,12 +11,19 @@
 //! each question with a [`NewArg`]: whether the variable holds a new object (or a parameter) that
 //! nothing kept so far, under conditions on the callees, which propagation resolves.
 //!
+//! Each escape comes with the tests of the function's inputs that hold where it runs: a store
+//! under `if register:` may keep the object only where `register` is true, a condition the
+//! answer carries ([`Keep`]) and propagation turns into a fact of the function that each of its
+//! calls decides (`MayGiven`).
+//!
 //! A returned value may also be an element of a parameter (an item, `get`, an iteration step of
 //! it) on some paths: the function returns a new object at the calls binding such a parameter to
 //! a value with no elements, where those paths raise or never reach their `return`
 //! (`elements_of` of [`ReturnsNew::New`]).
 
-use crate::{FuncKey, NewArg, NewCond, NewFrom, NewKind, ReturnsNew};
+use crate::{
+    CallTests, FuncKey, InputGuard, Keep, MayGiven, NewArg, NewCond, NewFrom, NewKind, ReturnsNew,
+};
 use heki_ir::walk::{Answer, Budget, Closure, Def, Facts, FnShape, Join, Or, Sparse, fixpoint};
 use heki_ir::{InstKind, VarId};
 use rustc_hash::FxHashMap;
@@ -50,7 +57,8 @@ pub(crate) struct Recorder {
     /// The results of calls that hand back the object they are handed (a project function
     /// returning its parameter), by the argument's variable: the same object.
     handed_back: FxHashMap<VarId, VarId>,
-    escapes: Vec<(Pos, VarId, Escape)>,
+    /// Each escape with the tests of the function's inputs that hold where it runs.
+    escapes: Vec<(Pos, VarId, Escape, Vec<InputGuard>)>,
     /// The points asked about, by query id.
     queries: Vec<(Pos, VarId)>,
 }
@@ -61,7 +69,8 @@ pub(crate) struct Recorder {
 struct State {
     allocs: u64,
     params: u64,
-    /// By hand-over id: (allocation roots, parameters).
+    /// By the id of a store that may keep what it is handed ([`Keep`]): (allocation roots,
+    /// parameters).
     handed: Vec<(u64, u64)>,
 }
 
@@ -134,8 +143,9 @@ impl Recorder {
         self.handed_back.insert(dst, arg);
     }
 
-    pub(crate) fn escape(&mut self, pos: Pos, var: VarId, how: Escape) {
-        self.escapes.push((pos, var, how));
+    /// An escape at `pos`, where the tests `known` of the function's inputs hold.
+    pub(crate) fn escape(&mut self, pos: Pos, var: VarId, how: Escape, known: Vec<InputGuard>) {
+        self.escapes.push((pos, var, how, known));
     }
 
     /// Ask about `var` just before the instruction at `pos`; returns the query id.
@@ -146,14 +156,15 @@ impl Recorder {
 
     /// Answer every query, and the returns of the function of `shape` (`returns`: whether the
     /// function's result is a new object at every `return` with a value). `element_of` gives the
-    /// parameters a value is an element of by its definition (`0`: none).
+    /// parameters a value is an element of by its definition (`0`: none); `handed_to` the
+    /// callee of a hand-over and what its call tells, where the tests given hold.
     pub(crate) fn resolve(
         self,
         shape: &FnShape<'_>,
         may_params: &FxHashMap<VarId, u64>,
         param_of: &dyn Fn(VarId) -> Option<u8>,
         element_of: &dyn Fn(VarId) -> u64,
-        callee_of: &dyn Fn(u32, u16) -> FuncKey,
+        handed_to: &dyn Fn(u32, u16, &[InputGuard]) -> (FuncKey, CallTests),
         returns: bool,
     ) -> (Vec<NewArg>, ReturnsNew) {
         // Without an allocation, only parameters can be asked about, and nothing is returned
@@ -177,7 +188,7 @@ impl Recorder {
         };
         let asked = (self.queries.iter().map(|(_, v)| *v))
             .chain(returned.iter().map(|(_, v)| *v))
-            .chain(self.escapes.iter().map(|(_, v, _)| *v));
+            .chain(self.escapes.iter().map(|(_, v, _, _)| *v));
         let budget = Budget::of_function("construction::Recorder", f);
         let returned_vars: Vec<VarId> = returned.iter().map(|(_, v)| *v).collect();
         let found = self.roots(
@@ -198,24 +209,40 @@ impl Recorder {
         if !self.queries.iter().any(|(_, v)| trackable(*v)) && !any_return_new {
             return (vec![NewArg::Old; self.queries.len()], ReturnsNew::No);
         }
-        // Hand-over ids, one per callee and parameter: the answers name only those, so the
-        // calls of one helper share a hand-over.
-        let mut handed_ids: FxHashMap<(FuncKey, u8), usize> = FxHashMap::default();
-        let mut handed_keys: Vec<(FuncKey, u8)> = Vec::new();
+        // The ids of the stores that may keep what they are handed: a hand-over, one per callee,
+        // parameter, and what its call tells, and a definite store under tests of the
+        // function's inputs, one per tests. The answers name only those, so the calls of one
+        // helper binding alike share a hand-over.
+        let mut handed_ids: FxHashMap<Keep, usize> = FxHashMap::default();
+        let mut handed_keys: Vec<Keep> = Vec::new();
         let mut escape_ids: Vec<Option<usize>> = Vec::with_capacity(self.escapes.len());
-        for (_, _, how) in &self.escapes {
-            escape_ids.push(match how {
-                Escape::Definite => None,
-                Escape::Handed(s, c, p) => {
-                    let key = (callee_of(*s, *c), *p);
-                    let next = handed_keys.len();
-                    let id = *handed_ids.entry(key.clone()).or_insert(next);
-                    if id == next {
-                        handed_keys.push(key);
-                    }
-                    Some(id)
+        for (_, _, how, known) in &self.escapes {
+            let key = match how {
+                Escape::Definite if known.is_empty() => {
+                    escape_ids.push(None);
+                    continue;
                 }
-            });
+                Escape::Definite => Keep {
+                    by: None,
+                    at: CallTests {
+                        args: Vec::new(),
+                        known: known.clone(),
+                    },
+                },
+                Escape::Handed(s, c, p) => {
+                    let (callee, at) = handed_to(*s, *c, known);
+                    Keep {
+                        by: Some((callee, *p)),
+                        at,
+                    }
+                }
+            };
+            let next = handed_keys.len();
+            let id = *handed_ids.entry(key.clone()).or_insert(next);
+            if id == next {
+                handed_keys.push(key);
+            }
+            escape_ids.push(Some(id));
         }
         // Every action in position order (queries, escapes, kills at one position), and the
         // range of each block's actions.
@@ -229,7 +256,7 @@ impl Recorder {
         for (i, (pos, _)) in returned.iter().enumerate() {
             actions.push((*pos, 0, Action::Query(self.queries.len() + i)));
         }
-        for ((pos, var, _), id) in self.escapes.iter().zip(escape_ids) {
+        for ((pos, var, _, _), id) in self.escapes.iter().zip(escape_ids) {
             actions.push((*pos, 1, Action::Escape(*var, id)));
         }
         for (r, a) in self.allocs.iter().enumerate() {
@@ -374,6 +401,7 @@ impl Recorder {
                 kind,
                 cond,
                 elements_of,
+                kept: MayGiven::default(),
             }
         };
         (answers, returns_new())
@@ -493,7 +521,7 @@ impl Recorder {
         &self,
         roots: &Roots<'_>,
         state: &State,
-        handed_keys: &[(FuncKey, u8)],
+        handed_keys: &[Keep],
         var: VarId,
         of_return: bool,
     ) -> NewArg {

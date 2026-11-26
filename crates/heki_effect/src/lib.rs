@@ -566,9 +566,104 @@ pub struct CondParts {
     /// The object comes from calls of these project functions: each must return a new object
     /// at its call (`EffectSummary::returns_new`).
     pub returns: Vec<NewFrom>,
-    /// Earlier calls handed the object to these `(callee, parameter)`: none may keep it
-    /// (`EffectSummary::retains_params`).
-    pub keeps: Vec<(FuncKey, u8)>,
+    /// Earlier stores of the object: each may keep it.
+    pub keeps: Vec<Keep>,
+}
+
+/// A store that may keep an object ([`CondParts::keeps`]): a hand-over to parameter `.1` of the
+/// project function `.0`, which keeps it when that callee keeps the parameter there
+/// ([`EffectSummary::retains_params`]), or, for `None`, a store that keeps it. `at` tells what
+/// the store's call binds and the tests of the function's inputs that hold where it runs: a
+/// store under `if register:` keeps the object only at the calls of the function leaving
+/// `register` true.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Keep {
+    pub by: Option<(FuncKey, u8)>,
+    pub at: CallTests,
+}
+
+/// What a call tells of the tests its callee makes of its parameters ([`MayGiven`]): the
+/// arguments that decide such a test or hand it on to the caller, by parameter, and the tests of
+/// the caller's inputs that hold where the call runs (`CallSite::guards`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct CallTests {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<(u8, ArgView)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known: Vec<InputGuard>,
+}
+
+/// An argument of [`CallTests`]: a constant, which decides a test of the parameter by its class
+/// and truthiness, or the caller's own input, to which a test of the parameter is handed on.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArgView {
+    Const(ConstArg),
+    Input(GuardSubject),
+}
+
+/// A fact a function may have only where tests of its inputs pass: the alternatives, each the
+/// tests ([`InputGuard`], sorted) that hold where the fact arises. A call that decides a test of
+/// every alternative against it does not get the fact; the tests it leaves to the caller's own
+/// inputs are the caller's (`guards::given_at_call`). Without alternatives the fact never
+/// arises; with an alternative of no tests it arises whatever is passed, as it does past
+/// [`MAX_GIVEN_TESTS`] tests in an alternative or [`MAX_GIVEN_CHAINS`] alternatives (the bounds
+/// of [`GivenChains`]). One pointer: most facts have none.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MayGiven(Option<Box<Vec<Vec<InputGuard>>>>);
+
+impl MayGiven {
+    /// The fact arises where the tests `tests` hold.
+    pub fn given(tests: Vec<InputGuard>) -> Self {
+        let mut out = Self::default();
+        out.add(tests);
+        out
+    }
+
+    pub fn alternatives(&self) -> &[Vec<InputGuard>] {
+        self.0.as_deref().map_or(&[], Vec::as_slice)
+    }
+
+    /// The fact never arises.
+    pub fn never(&self) -> bool {
+        self.0.is_none()
+    }
+
+    /// The fact arises whatever is passed.
+    pub fn always(&self) -> bool {
+        self.alternatives().iter().any(Vec::is_empty)
+    }
+
+    /// Add the alternative `tests`, unless one needing some of them is there; it replaces the
+    /// alternatives needing more.
+    pub fn add(&mut self, mut tests: Vec<InputGuard>) {
+        tests.sort();
+        tests.dedup();
+        if tests.len() > MAX_GIVEN_TESTS {
+            tests.clear();
+        }
+        let within = |small: &[InputGuard], large: &[InputGuard]| {
+            small.iter().all(|t| large.contains(t))
+        };
+        let all = self.0.get_or_insert_with(Box::default);
+        if all.iter().any(|a| within(a, &tests)) {
+            return;
+        }
+        all.retain(|a| !within(&tests, a));
+        all.push(tests);
+        all.sort();
+        if all.len() > MAX_GIVEN_CHAINS {
+            **all = vec![Vec::new()];
+        }
+    }
+
+    /// The fact arises where it does in either.
+    pub fn join(&mut self, other: &Self) {
+        for tests in other.alternatives() {
+            self.add(tests.clone());
+        }
+    }
 }
 
 /// A project function whose result an object is, at one call of it ([`CondParts::returns`]).
@@ -580,11 +675,15 @@ pub struct NewFrom {
     /// nothing there ([`ReturnsNew::kind_at`]).
     #[serde(default)]
     pub empty_params: u64,
+    /// What the call binds, for the stores of the result the callee makes only under tests of
+    /// its parameters (`ReturnsNew::New::kept`).
+    #[serde(default)]
+    pub at: CallTests,
 }
 
 impl NewCond {
     /// The conditions, sorted and without duplicates.
-    pub fn new(mut returns: Vec<NewFrom>, mut keeps: Vec<(FuncKey, u8)>) -> Self {
+    pub fn new(mut returns: Vec<NewFrom>, mut keeps: Vec<Keep>) -> Self {
         returns.sort();
         returns.dedup();
         keeps.sort();
@@ -603,7 +702,7 @@ impl NewCond {
         self.0.as_ref().map_or(&[], |c| &c.returns)
     }
 
-    pub fn keeps(&self) -> &[(FuncKey, u8)] {
+    pub fn keeps(&self) -> &[Keep] {
         self.0.as_ref().map_or(&[], |c| &c.keeps)
     }
 
@@ -673,6 +772,11 @@ pub enum ReturnsNew {
         /// them to a value that has no elements, where those returns return nothing.
         #[serde(default)]
         elements_of: u64,
+        /// The function may store the result before it returns it where these tests of its
+        /// inputs pass (final summaries): the result is new only at a call deciding them against
+        /// the store ([`Self::at_call`]).
+        #[serde(default, skip_serializing_if = "MayGiven::never")]
+        kept: MayGiven,
     },
 }
 
@@ -685,12 +789,23 @@ impl ReturnsNew {
     /// The kind of a resolved `New` at a call binding the parameters `empty_params` to values
     /// that have no elements ([`NewFrom::empty_params`]).
     pub fn kind_at(&self, empty_params: u64) -> Option<NewKind> {
+        match self.at_call(empty_params)? {
+            (kind, kept) if kept.never() => Some(kind),
+            _ => None,
+        }
+    }
+
+    /// The kind of a resolved `New` at a call binding `empty_params` as [`Self::kind_at`] says,
+    /// and the tests under which the function may have stored the result
+    /// (`ReturnsNew::New::kept`), for the call to decide.
+    pub fn at_call(&self, empty_params: u64) -> Option<(NewKind, &MayGiven)> {
         match self {
             Self::New {
                 kind,
                 cond,
                 elements_of,
-            } if cond.is_empty() && elements_of & !empty_params == 0 => Some(*kind),
+                kept,
+            } if cond.is_empty() && elements_of & !empty_params == 0 => Some((*kind, kept)),
             _ => None,
         }
     }
@@ -1102,7 +1217,13 @@ pub struct EffectSummary {
     /// global, or a closure cell, yielded, captured by a closure, handed to code heki does not
     /// follow, or to a project function that keeps them. Reading, writing, or passing a
     /// parameter to project functions that do not keep it keeps nothing (`fresh-objects`).
+    /// Changed through [`Self::keep_params`].
     pub retains_params: u64,
+    /// The parameters of [`Self::retains_params`] the function keeps only where tests of its
+    /// inputs pass, with those tests; one without an entry is kept whatever is passed. `None`
+    /// without any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retains_given: Option<Box<BTreeMap<u8, MayGiven>>>,
     /// The positions (bit `i`: parameter `i`, then the captured values of
     /// `FunctionDecl::captured_params`) whose object the function only reads, leaving changes of
     /// the object itself to [`Self::mutated_param_paths`] ([`Self::only_read_mask`] joins the
@@ -1388,7 +1509,7 @@ pub struct EffectGuards {
 
 /// The exact class of a value a function knows: a constant, a display or comprehension, or a
 /// buffer it constructs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConstClass {
     None,
@@ -1412,7 +1533,7 @@ pub enum ConstClass {
 /// An argument (or a literal default) whose class the caller knows: its class and, where the
 /// value decides it, its truthiness (`False`, `None`, `0`, `""`, and empty displays are falsy)
 /// and, for an integer, whether it is above zero (a default may be negative: `size=-1`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ConstArg {
     pub class: ConstClass,
     pub truthy: Option<bool>,
@@ -1504,6 +1625,44 @@ impl ArgBinding {
 }
 
 impl EffectSummary {
+    /// The tests under which the function keeps its parameter `p` ([`Self::retains_given`]):
+    /// never, for a parameter it does not keep.
+    pub fn retained_given(&self, p: u8) -> MayGiven {
+        if p >= 64 {
+            return MayGiven::given(Vec::new());
+        }
+        if self.retains_params & (1u64 << p) == 0 {
+            return MayGiven::default();
+        }
+        (self.retains_given.as_deref().and_then(|g| g.get(&p)))
+            .map_or_else(|| MayGiven::given(Vec::new()), Clone::clone)
+    }
+
+    /// Keep the parameters of `mask` where `given` holds, besides where they are kept already.
+    pub(crate) fn keep_params(&mut self, mask: u64, given: &MayGiven) {
+        if given.never() {
+            return;
+        }
+        for p in (0..64u8).filter(|p| mask & (1u64 << p) != 0) {
+            let had = self.retained_given(p);
+            let mut now = had.clone();
+            now.join(given);
+            self.retains_params |= 1u64 << p;
+            if now == had {
+                continue;
+            }
+            let entries = self.retains_given.get_or_insert_with(Box::default);
+            if now.always() {
+                entries.remove(&p);
+            } else {
+                entries.insert(p, now);
+            }
+            if entries.is_empty() {
+                self.retains_given = None;
+            }
+        }
+    }
+
     /// [`KeptFacts::must_read_self_attrs`] (none while the facts are not computed).
     pub fn must_read_self_attrs(&self) -> &BTreeSet<AttrKeyPath> {
         static NONE: BTreeSet<AttrKeyPath> = BTreeSet::new();

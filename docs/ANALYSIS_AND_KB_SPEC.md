@@ -905,6 +905,8 @@ EffectSummary(f) = {
     unmet_invalidation:       Set<UnmetWrite>,             // target writes, own or passed up by private
                                                            // helpers, some normal path leaves unannounced
     retains_params:           Bitset,                      // parameters the function keeps (stores, returns)
+    retains_given:            Option<Map<u8, MayGiven>>,   // those kept only where tests of the inputs pass
+                                                           // (`if keep:`), with the tests (MayGiven)
     only_read_params:         Bitset,                      // OptInFacts::only_read (heki inspect, the language
                                                            // server): no value that may be parameter i's object,
                                                            // or a view of it, is stored, captured, yielded,
@@ -927,7 +929,9 @@ EffectSummary(f) = {
                                                            // without elements (None, a number, ""); a call
                                                            // of a function returning its parameter
                                                            // (FunctionDecl::returns_param) gives the
-                                                           // object it hands it
+                                                           // object it hands it; kept: the tests of the
+                                                           // inputs under which the function may store
+                                                           // the result first (MayGiven)
     return_origins:           Option<Box<ReturnOrigins>>,  // MUT112, absent for most functions: what the
                                                            // returned object may be, path by path (new, held
                                                            // state, parameter i, or an element of parameter i;

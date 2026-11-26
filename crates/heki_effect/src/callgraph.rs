@@ -10,10 +10,12 @@ use crate::fresh::FreshReturn;
 use crate::guards;
 use crate::iterations;
 use crate::scc::tarjan_scc;
+use crate::guards::given_at_call;
 use crate::{
-    ArgOrigin, AttrKeyPath, BoundCallee, CallCycle, CallHop, CallSite, CallTarget, CellChange,
-    Construction, Delivery, EffectSummary, EntryKey, Facts, FuncKey, LocalOrigins, NewArg, NewCond,
-    NewKind, Origins, ProjectIndex, ProtectedReturn, ReturnsNew, Runner, Shared, SharedChain,
+    ArgOrigin, AttrKeyPath, BoundCallee, CallCycle, CallHop, CallSite, CallTarget, CallTests,
+    CellChange, Construction, Delivery, EffectSummary, EntryKey, Facts, FuncKey, LocalOrigins,
+    MayGiven, NewArg, NewCond, NewKind, Origins, ProjectIndex, ProtectedReturn, ReturnsNew, Runner,
+    Shared, SharedChain,
     SharedLine, SharedState, SiteRole, Slot, TypedFieldWrite, TypedFieldWriteSite,
     UnresolvedWriteSite, WriteKind, cache_flow,
 };
@@ -1019,28 +1021,38 @@ struct Resolver<'i> {
 }
 
 impl Resolver<'_> {
-    /// Whether `cond` holds (for `own`, the new object must own its containers), and the
-    /// least kind of the objects its project functions return.
-    fn holds(&self, cond: &NewCond, own: bool) -> Option<NewKind> {
+    /// Whether `cond` holds (for `own`, the new object must own its containers): the least kind
+    /// of the objects its project functions return, and the tests of the function's inputs
+    /// under which a store, its own or one of those functions', may have kept the object
+    /// (`None` when one may keep it whatever the function is passed).
+    fn holds(&self, cond: &NewCond, own: bool) -> Option<(NewKind, MayGiven)> {
         let mut kind = NewKind::Own;
+        let mut kept = MayGiven::default();
         for from in cond.returns() {
             let k = &from.callee;
             if (self.in_scc)(k) {
                 return None;
             }
-            let r = (self.index.summary(k)?.returns_new).kind_at(from.empty_params)?;
+            let (r, stored) = (self.index.summary(k)?.returns_new).at_call(from.empty_params)?;
             if own && r == NewKind::Copy {
                 return None;
             }
             kind = kind.min(r);
+            kept.join(&given_at_call(stored, &from.at));
         }
-        for (k, p) in cond.keeps() {
-            let s = self.index.summary(k)?;
-            if *p >= 64 || s.retains_params & (1u64 << p) != 0 {
-                return None;
-            }
+        for keep in cond.keeps() {
+            let given = match &keep.by {
+                Some((k, p)) => self.index.summary(k)?.retained_given(*p),
+                None => MayGiven::given(Vec::new()),
+            };
+            kept.join(&given_at_call(&given, &keep.at));
         }
-        Some(kind)
+        (!kept.always()).then_some((kind, kept))
+    }
+
+    /// Whether `cond` holds whatever the function is passed.
+    fn holds_always(&self, cond: &NewCond, own: bool) -> bool {
+        self.holds(cond, own).is_some_and(|(_, kept)| kept.never())
     }
 
     /// The construction, in the caller, of a write a callee makes to the object bound to its
@@ -1048,11 +1060,11 @@ impl Resolver<'_> {
     fn through_arg(&self, arg: Option<&ArgOrigin>, own: bool) -> Construction {
         match arg.map(|o| &o.new_object) {
             Some(NewArg::New { kind, cond })
-                if !(own && *kind == NewKind::Copy) && self.holds(cond, own).is_some() =>
+                if !(own && *kind == NewKind::Copy) && self.holds_always(cond, own) =>
             {
                 Construction::Yes
             }
-            Some(NewArg::Param { param, cond }) if self.holds(cond, own).is_some() => {
+            Some(NewArg::Param { param, cond }) if self.holds_always(cond, own) => {
                 Construction::Param {
                     param: *param,
                     own,
@@ -1086,17 +1098,18 @@ impl Resolver<'_> {
     /// A local construction with its conditions resolved (`None`: it has none to resolve).
     fn resolved(&self, construction: &Construction) -> Option<Construction> {
         Some(match construction {
-            Construction::Pending { cond, own } if self.holds(cond, *own).is_some() => {
+            Construction::Pending { cond, own } if self.holds_always(cond, *own) => {
                 Construction::Yes
             }
             Construction::Param { param, own, cond } if !cond.is_empty() => {
-                match self.holds(cond, *own) {
-                    Some(_) => Construction::Param {
+                if self.holds_always(cond, *own) {
+                    Construction::Param {
                         param: *param,
                         own: *own,
                         cond: NewCond::default(),
-                    },
-                    None => Construction::No,
+                    }
+                } else {
+                    Construction::No
                 }
             }
             Construction::Pending { .. } => Construction::No,
@@ -1127,15 +1140,21 @@ impl Resolver<'_> {
             kind,
             cond,
             elements_of,
+            kept,
         } = &s.returns_new
             && !cond.is_empty()
         {
             s.returns_new = match self.holds(cond, false) {
-                Some(k) => ReturnsNew::New {
-                    kind: (*kind).min(k),
-                    cond: NewCond::default(),
-                    elements_of: *elements_of,
-                },
+                Some((k, stored)) => {
+                    let mut kept = kept.clone();
+                    kept.join(&stored);
+                    ReturnsNew::New {
+                        kind: (*kind).min(k),
+                        cond: NewCond::default(),
+                        elements_of: *elements_of,
+                        kept,
+                    }
+                }
                 None => ReturnsNew::No,
             };
         }
@@ -1367,14 +1386,7 @@ fn apply_edge(
     path: &Path,
     resolver: &Resolver<'_>,
 ) -> u64 {
-    // A callee keeping a parameter keeps the caller's objects bound to it; a generator or a
-    // coroutine created without running keeps every argument.
-    let kept = if runs_at_call(callee, site) {
-        callee.retains_params
-    } else {
-        u64::MAX
-    };
-    s.retains_params |= bound_params(kept, bc);
+    keep_bound(s, site, bc, callee);
     let Some(d) = delivery(|k| index.summary(k), site, callee) else {
         return 0;
     };
@@ -1750,7 +1762,7 @@ fn transfer_typed_writes(
         // A new object the caller hands over and the helper does not keep is under
         // construction.
         let construction = match (w.through, here) {
-            (Through::Instance, Some(r)) if facts.retains_params & (1u64 << w.param) == 0 => {
+            (Through::Instance, Some(r)) if !may_keep_at_call(facts, w.param, site, bc) => {
                 r.through_arg(Some(w.origin), true)
             }
             _ => Construction::No,
@@ -2077,6 +2089,35 @@ fn records_write(bc: &BoundCallee, facts: &EffectSummary, w: &IndirectWrite<'_>)
 }
 
 /// The caller parameters the objects bound to the callee parameters in `mask` may be.
+/// Keep in `s` the caller's parameters the call keeps: those bound to a parameter the callee
+/// keeps, under the tests the call leaves to the caller ([`EffectSummary::retained_given`]), and
+/// those it hands a generator or a coroutine created without running, which keeps every
+/// argument; in either case where the call runs.
+fn keep_bound(s: &mut EffectSummary, site: &CallSite, bc: &BoundCallee, callee: &EffectSummary) {
+    let runs = runs_at_call(callee, site);
+    let kept = if runs { callee.retains_params } else { u64::MAX };
+    if (callee.retains_given.is_none() || !runs) && site.guards.is_empty() {
+        s.keep_params(bound_params(kept, bc), &MayGiven::given(Vec::new()));
+        return;
+    }
+    let at = CallTests::of_call(&bc.params, &site.guards);
+    for (p, o) in (bc.params.iter().enumerate().take(64)).filter(|(p, _)| kept & (1u64 << p) != 0)
+    {
+        let given = match u8::try_from(p) {
+            Ok(p) if runs => callee.retained_given(p),
+            _ => MayGiven::given(Vec::new()),
+        };
+        s.keep_params(o.may_params, &given_at_call(&given, &at));
+    }
+}
+
+/// Whether the callee whose facts are `facts` may keep, at the call `site`, the object bound to
+/// its parameter `p`.
+fn may_keep_at_call(facts: &EffectSummary, p: u8, site: &CallSite, bc: &BoundCallee) -> bool {
+    let given = facts.retained_given(p);
+    !given.never() && !given_at_call(&given, &CallTests::of_call(&bc.params, &site.guards)).never()
+}
+
 pub(crate) fn bound_params(mask: u64, bc: &BoundCallee) -> u64 {
     if mask == 0 {
         return 0;

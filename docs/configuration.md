@@ -413,6 +413,17 @@ shared by every call (`memo={}`). A call of a function every `return` of which r
 parameters (`def with_origin(field, kind): ...; return field`) gives the object it hands that
 parameter: a new one stays new, and the input stays the input.
 
+A store a function makes only where tests of its parameters pass (`if register:`,
+`if registry is not None:`, also inside `and`, `or`, and `not`) keeps nothing at a call whose
+arguments fail them: a constant, the literal default of a parameter the call leaves out, or a test
+the caller has already made of the same input. `copy_tree(node, register=False)` of
+`def copy_tree(node, *, register=True)` that calls `copied.register()` under `if register:` gives
+a new object, and `attach(copied, keep=False)` of a helper storing its parameter under `if keep:`
+leaves `copied` new; `copy_tree(node)` does not. A test of the caller's own parameter is decided at
+the calls of the caller. A function records at most four sets of at most four tests for each such
+store; past them it keeps the object whatever it is passed. A write a helper makes to its own
+parameter after such a store still counts the store.
+
 In an effect boundary, a write a reached function makes to the object one of its parameters
 holds constructs that object when every call reaching the function hands it a new object that
 nothing kept yet, as the same write in the caller would: `set_flag(copy.copy(node))` with
