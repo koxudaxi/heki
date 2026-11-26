@@ -451,7 +451,7 @@ mod tests {
             group: false,
             key_target: None,
             key_module: None,
-            fails_run_by_contract: false,
+            fails_run_by_config: false,
         }
     }
 

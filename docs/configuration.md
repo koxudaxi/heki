@@ -235,6 +235,7 @@ the installed release changed, and the changelog on GitHub lists every release.
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF105`, and `EFF106` in test code as pytest finds it: `test_*` functions and the functions nested in them, `test_*.py` and `*_test.py` files, and files under `test/` or `tests/`. |
 | `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
 | `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. A heuristic report counts as a warning, whatever its severity: it can be wrong about the code, so at `"error"` only exact errors fail the run. Warnings and heuristic reports are reported either way, and the language server shows them. `--fail-on` overrides it. A report of a contract with [`fail = true`](#failing-on-a-contract) fails the run at either value. |
+| `fail` | `[]` | Rules whose reports fail `heki check` (and `--watch`) with exit code 1 whatever their tier and severity, named as `select` names them (`["IMP101", "EFF"]`). A rule that is not selected reports nothing, so nothing fails on it. Like [`fail = true`](#failing-on-a-contract) on a contract, it leaves `fail-on`, the severities, and the tiers as they are, and a report a [baseline](adoption.md#ratchet-baselines) records or an inline [suppression](#inline-suppressions) hides does not fail the run. An unknown rule is a configuration error. |
 | `report-unused-suppressions` | `false` | Report the codes of suppression comments that suppressed no report, and the baseline entries that matched none. See [Unused suppressions](#unused-suppressions). |
 | `require-suppression-codes` | `false` | Report the `# heki: ignore` comments that name no rule. See [Suppressions that name no rule](#suppressions-that-name-no-rule). |
 | `unmatched-contract-entries` | a warning, in a run over the whole project | `"warning"`, `"error"`, or `"ignore"`: what `heki check` does with a contract entry that matches nothing in the analyzed files. An error fails the run. See [Entries that match nothing](#entries-that-match-nothing). |
@@ -1147,7 +1148,8 @@ fail = true
 - `fail = true` in a [`<kind>-defaults` table](#defaults-for-the-tables-of-a-kind) applies to
   every table of the kind that does not set `fail` itself.
 - `fail-on = "warning"` is still there for a project that wants every warning and heuristic
-  report to fail the run.
+  report to fail the run. To fail the run on the reports of single rules that belong to no
+  contract (`IMP101`), list them in [`lint.fail`](#rule-selection-toolhekilint).
 
 ### How contracts report
 

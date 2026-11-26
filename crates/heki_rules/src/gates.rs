@@ -1,12 +1,17 @@
-//! The contracts with `fail = true`: their reports fail the run whatever their tier and
-//! severity ([`Diagnostic::fails_run`]).
+//! The reports that fail the run whatever their tier and severity ([`Diagnostic::fails_run`]):
+//! those of the contracts with `fail = true`, and those of the rules `lint.fail` names.
 
+use crate::selection::RuleSelection;
 use heki_diagnostics::Diagnostic;
 use heki_env::HekiConfig;
 
-/// Mark the reports of the contracts with `fail = true`. Run once the reports of a project are
-/// final: a report standing for several contracts fails the run when one of them says so.
-pub(crate) fn mark_failing_reports(config: &HekiConfig, diags: &mut [Diagnostic]) {
+/// Mark the reports that fail the run by the configuration. Run once the reports of a project
+/// are final: a report standing for several contracts fails the run when one of them says so.
+pub(crate) fn mark_failing_reports(
+    config: &HekiConfig,
+    selection: &RuleSelection,
+    diags: &mut [Diagnostic],
+) {
     let failing = |fail: &Option<bool>| fail.unwrap_or(false);
     // `fail` per contract of each kind, by place in the kind's array; nothing to do without one.
     let places = |fails: Vec<bool>| fails.contains(&true).then_some(fails);
@@ -60,6 +65,7 @@ pub(crate) fn mark_failing_reports(config: &HekiConfig, diags: &mut [Diagnostic]
             .collect(),
     );
     for d in diags {
+        d.fails_run_by_config = selection.fails_run(&d.rule_code);
         let kind = match d.rule_code.as_str() {
             "MUT201" | "MUT205" => &write,
             "MUT203" | "MUT206" => &read,
@@ -71,7 +77,7 @@ pub(crate) fn mark_failing_reports(config: &HekiConfig, diags: &mut [Diagnostic]
             _ => continue,
         };
         if let Some(fails) = kind {
-            d.fails_run_by_contract = d
+            d.fails_run_by_config |= d
                 .contracts
                 .iter()
                 .any(|&c| fails.get(c as usize).copied().unwrap_or(false));

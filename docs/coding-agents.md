@@ -81,7 +81,7 @@ Each diagnostic has:
 A text run ends with one line per reported rule: `heki rule <CODE>` and the rule's page.
 
 The run exits with 1 when it shows an exact `error`, a bug that can be critical, a report of a
-contract with `fail = true`, or with `fail-on = "warning"` any report: a heuristic report counts
+contract with `fail = true`, a report of a rule `lint.fail` lists, or with `fail-on = "warning"` any report: a heuristic report counts
 as a warning, whatever its `severity`.
 
 When the run cannot check (exit code 2: a configuration, path, or file error), the error says
