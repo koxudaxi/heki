@@ -83,8 +83,8 @@ pub use ownership::{LocalOrigins, Origins, ResultOf, ReturnOrigins};
 pub use query::{CallerSite, Callers, CallsByCaller, ChangeChain, HandedChange, ParamChange};
 pub use readonly::container_mutator;
 pub use readonly::{
-    CacheDecorator, CachedResult, ContainerFamily, ContainerKind, FamilyLevel, FamilyRole,
-    ProtectedReturn, ReturnStep, Shared,
+    CacheDecorator, CachedResult, ContainerFamily, ContainerKind, ContractSharing, FamilyLevel,
+    FamilyRole, ProtectedReturn, ReturnStep, Shared,
 };
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
@@ -1213,8 +1213,8 @@ pub struct EffectSummary {
     pub private_calls: BTreeSet<String>,
     /// The function may return a value shared with a read-only producer's other callers: it is a
     /// producer itself (`MUT202`; seeded by the declared producers it returns from, propagated
-    /// from the project callees whose result it returns).
-    pub returns_protected: Option<ProtectedReturn>,
+    /// from the project callees whose result it returns). Boxed: few functions have one.
+    pub returns_protected: Option<Box<ProtectedReturn>>,
     /// `invalidation` contracts (bits) whose invalidators every normal path of the function
     /// reaches, directly or through calls (`MUT208`; propagated).
     pub must_invalidate: u64,

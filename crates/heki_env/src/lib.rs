@@ -2,6 +2,7 @@
 
 mod declared;
 mod defaults;
+pub mod glob;
 pub mod problem;
 mod schema;
 mod stdlib;
@@ -207,6 +208,10 @@ pub struct WriteOwnerRule {
     /// object of a target's class (`obj.__dict__[KEY] = v`, `vars(obj)`) that no target of any
     /// `write-owners` contract covering the class names; `"ignore"` (default) does not.
     pub unlisted_dict_keys: Option<String>,
+    /// `true`: the reports of this contract make `heki check` fail (exit code 1) whatever their
+    /// tier and severity, apart from the ones a baseline or a suppression hides; `false`
+    /// (default): they fail the run only as `lint.fail-on` says.
+    pub fail: Option<bool>,
 }
 
 /// `[[tool.heki.read-owners]]` contract for `MUT203` (the read side of `write-owners`).
@@ -234,6 +239,10 @@ pub struct ReadOwnerRule {
     pub allowed_protocols: Vec<String>,
     /// Whether `allowed-protocols` covers subprotocols, as for `WriteOwnerRule`.
     pub protocol_subclasses: Option<bool>,
+    /// `true`: the reports of this contract make `heki check` fail (exit code 1) whatever their
+    /// tier and severity, apart from the ones a baseline or a suppression hides; `false`
+    /// (default): they fail the run only as `lint.fail-on` says.
+    pub fail: Option<bool>,
 }
 
 /// `[[tool.heki.call-owners]]` contract for `MUT204`: who may call a function or method, or
@@ -279,6 +288,10 @@ pub struct CallOwnerRule {
     pub allowed_protocols: Vec<String>,
     /// Whether `allowed-protocols` covers subprotocols, as for `WriteOwnerRule`.
     pub protocol_subclasses: Option<bool>,
+    /// `true`: the reports of this contract make `heki check` fail (exit code 1) whatever their
+    /// tier and severity, apart from the ones a baseline or a suppression hides; `false`
+    /// (default): they fail the run only as `lint.fail-on` says.
+    pub fail: Option<bool>,
 }
 
 /// `[[tool.heki.import-boundaries]]` contract for `IMP201`: which modules the modules of
@@ -312,6 +325,10 @@ pub struct ImportBoundaryRule {
     pub unresolved: Option<String>,
     /// The help of every `IMP201` report of this contract.
     pub message: Option<String>,
+    /// `true`: the reports of this contract make `heki check` fail (exit code 1) whatever their
+    /// tier and severity, apart from the ones a baseline or a suppression hides; `false`
+    /// (default): they fail the run only as `lint.fail-on` says.
+    pub fail: Option<bool>,
 }
 
 /// `[tool.heki.imports]`: which imports the import rules count, and which distributions
@@ -373,6 +390,10 @@ pub struct EffectBoundaryRule {
     pub unresolved: Option<String>,
     /// The help of every `EFF201` report of this contract.
     pub message: Option<String>,
+    /// `true`: the reports of this contract make `heki check` fail (exit code 1) whatever their
+    /// tier and severity, apart from the ones a baseline or a suppression hides; `false`
+    /// (default): they fail the run only as `lint.fail-on` says.
+    pub fail: Option<bool>,
 }
 
 /// `[[tool.heki.readonly-returns]]` contract for `MUT202`.
@@ -382,6 +403,10 @@ pub struct ReadOnlyReturnRule {
     pub name: String,
     pub producers: Vec<String>,
     pub deep: bool,
+    /// `true`: the reports of this contract make `heki check` fail (exit code 1) whatever their
+    /// tier and severity, apart from the ones a baseline or a suppression hides; `false`
+    /// (default): they fail the run only as `lint.fail-on` says.
+    pub fail: Option<bool>,
 }
 
 /// `[[tool.heki.invalidation]]` contract for `MUT208`: a write to one of `targets` must be
@@ -399,6 +424,10 @@ pub struct InvalidationRule {
     pub exempt_writers: Vec<String>,
     /// The help of every `MUT208` report of this contract.
     pub message: Option<String>,
+    /// `true`: the reports of this contract make `heki check` fail (exit code 1) whatever their
+    /// tier and severity, apart from the ones a baseline or a suppression hides; `false`
+    /// (default): they fail the run only as `lint.fail-on` says.
+    pub fail: Option<bool>,
 }
 
 /// `[[tool.heki.ecosystem]]` user addition / override of a Layer 2 ecosystem KB entry.
@@ -1200,6 +1229,7 @@ allowed-writers = ["pkg.parser.generation.*"]
 forbidden-writers = ["pkg.render.*"]
 exempt-methods = ["__deepcopy__"]
 message = "use Store.set_fields() instead"
+fail = true
 fresh-objects = "report"
 unresolved = "report"
 attribution = "lexical"
@@ -1277,6 +1307,7 @@ import-probes = "report"
             cfg.write_owners[0].message.as_deref(),
             Some("use Store.set_fields() instead")
         );
+        assert_eq!(cfg.write_owners[0].fail, Some(true));
         assert_eq!(
             cfg.read_owners[0],
             ReadOwnerRule {
@@ -1291,6 +1322,7 @@ import-probes = "report"
                 own_receiver: Some("allow".into()),
                 allowed_protocols: vec!["*Host".into()],
                 protocol_subclasses: Some(false),
+                fail: None,
             }
         );
         assert_eq!(
@@ -1310,6 +1342,7 @@ import-probes = "report"
                 targets_call_each_other: Some("report".into()),
                 allowed_protocols: Vec::new(),
                 protocol_subclasses: None,
+                fail: None,
             }
         );
         assert_eq!(
@@ -1334,6 +1367,7 @@ import-probes = "report"
                 references: Some("calls".into()),
                 import_probes: Some("report".into()),
                 unresolved: None,
+                fail: None,
             }
         );
         assert!(cfg.readonly_returns[0].deep);
@@ -1345,6 +1379,7 @@ import-probes = "report"
                 invalidators: vec!["GenerationStore.note_changed_models".into()],
                 exempt_writers: vec!["pkg.parser.generation.*".into()],
                 message: Some("announce the change to the store".into()),
+                fail: None,
             }
         );
         assert!(cfg.ecosystem.is_empty());

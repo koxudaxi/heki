@@ -18,7 +18,9 @@ use crate::{
     CheckContext, DottedPattern, RuleConfigError, RuleSelection, last_name, split_last_dot,
 };
 use heki_diagnostics::Diagnostic;
-use heki_effect::{BLOCKING_EFFECTS, ContractClass, Contracts, FuncKey, OptInFacts, TypedWrites};
+use heki_effect::{
+    BLOCKING_EFFECTS, ContractClass, ContractSharing, Contracts, FuncKey, OptInFacts, TypedWrites,
+};
 use heki_env::HekiConfig;
 use heki_kb::{EffectiveEcosystemKb, EnvironmentAccess};
 use heki_semantic::mangling;
@@ -348,8 +350,8 @@ impl Contracts for ConfigContracts {
         self.class_modules
     }
 
-    fn readonly_producer(&self, fqn: &str, qualname: &str) -> Option<bool> {
-        self.producers.deep_for(fqn, qualname)
+    fn readonly_producer(&self, fqn: &str, qualname: &str) -> Option<ContractSharing> {
+        self.producers.protecting(fqn, qualname)
     }
 
     fn invalidations(&self) -> usize {

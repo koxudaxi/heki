@@ -18,6 +18,7 @@ mod contracts;
 mod data_rules;
 mod eff_rules;
 pub mod experimental;
+mod gates;
 mod imp_rules;
 pub mod import_view;
 pub mod inspect;
@@ -54,7 +55,6 @@ pub use selection::{
 };
 pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};
 
-use globset::{Glob, GlobMatcher};
 use heki_ast::{LineIndex, Span};
 use heki_diagnostics::{Diagnostic, RelatedLocation};
 use heki_effect::code_kind::CodeKind;
@@ -62,6 +62,7 @@ use heki_effect::{
     CallHop, CallSite, ContractClass, EffectSummary, FileSummary, FuncKey, ModuleInput,
     ProjectDecls, ProjectIndex,
 };
+use heki_env::glob::AnyGlob;
 use heki_env::{Docs, Explain, HekiConfig, Problem, RuntimeProfile, Setting, Severity};
 use heki_ir::{IrFunction, ModuleConstants};
 use heki_kb::{EffectiveEcosystemKb, EffectiveSoundnessKb};
@@ -1036,7 +1037,7 @@ pub enum RuleConfigError {
     Glob {
         pattern: String,
         context: &'static str,
-        cause: globset::Error,
+        cause: heki_env::glob::Error,
     },
     /// An entry naming `<external>` other than as `<external>.<name>`.
     #[error(
@@ -1414,6 +1415,7 @@ pub fn check_project(
         }
         same
     });
+    gates::mark_failing_reports(config, &mut out);
     Ok(out)
 }
 
@@ -1730,6 +1732,7 @@ impl<'a> CheckContext<'a> {
             group: reports_groups(meta.code),
             key_target: None,
             key_module: None,
+            fails_run_by_contract: false,
         });
         out.last_mut()
     }
@@ -1757,7 +1760,7 @@ pub(crate) fn names_module_literally(module: &str) -> bool {
 pub(crate) struct NamePart {
     text: String,
     /// `None` for a literal name, compared as a string.
-    glob: Option<GlobMatcher>,
+    glob: Option<AnyGlob>,
 }
 
 impl NamePart {
@@ -1771,13 +1774,11 @@ impl NamePart {
                 glob: None,
             });
         }
-        let glob = Glob::new(text)
-            .map_err(|cause| RuleConfigError::Glob {
-                pattern: pattern.to_owned(),
-                context,
-                cause,
-            })?
-            .compile_matcher();
+        let glob = AnyGlob::new(text).map_err(|cause| RuleConfigError::Glob {
+            pattern: pattern.to_owned(),
+            context,
+            cause,
+        })?;
         Ok(Self {
             text: text.to_owned(),
             glob: has_glob_syntax(text).then_some(glob),
@@ -1789,8 +1790,8 @@ impl NamePart {
     }
 
     /// The glob of a part with glob syntax (`None`: a literal name, [`Self::text`]).
-    pub fn glob(&self) -> Option<&Glob> {
-        self.glob.as_ref().map(GlobMatcher::glob)
+    pub fn glob(&self) -> Option<&AnyGlob> {
+        self.glob.as_ref()
     }
 
     fn is_match(&self, name: &str) -> bool {

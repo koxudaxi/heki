@@ -17,8 +17,8 @@
 //!   `extend-select` named them.
 
 use crate::{CORE_RULES, Certainty, RuleMeta, find_rule};
-use globset::{Glob, GlobMatcher};
 use heki_diagnostics::Diagnostic;
+use heki_env::glob::AnyGlob;
 use heki_env::{Docs, Explain, LintConfig, Problem, Setting};
 use std::collections::BTreeSet;
 use thiserror::Error;
@@ -35,7 +35,7 @@ pub enum SelectionError {
     #[error("invalid glob `{pattern}` in `lint.per-file-ignores`: {cause}")]
     Glob {
         pattern: String,
-        cause: globset::Error,
+        cause: heki_env::glob::Error,
     },
 }
 
@@ -146,7 +146,7 @@ pub struct Selectors {
 #[derive(Debug, Clone)]
 pub struct RuleSelection {
     enabled: BTreeSet<&'static str>,
-    per_file: Vec<(GlobMatcher, BTreeSet<&'static str>)>,
+    per_file: Vec<(AnyGlob, BTreeSet<&'static str>)>,
     /// The rules `lint.heuristic` would add to `enabled`.
     heuristic_off: BTreeSet<&'static str>,
     /// The enabled rules whose heuristic reports are withheld: exact rules that run without
@@ -326,12 +326,10 @@ impl RuleSelection {
             .collect();
         let mut per_file = Vec::new();
         for (pattern, rules) in &lint.per_file_ignores {
-            let glob = Glob::new(pattern)
-                .map_err(|cause| SelectionError::Glob {
-                    pattern: pattern.clone(),
-                    cause,
-                })?
-                .compile_matcher();
+            let glob = AnyGlob::new(pattern).map_err(|cause| SelectionError::Glob {
+                pattern: pattern.clone(),
+                cause,
+            })?;
             per_file.push((glob, codes((rules, "lint.per-file-ignores"), &any_rule)?));
         }
         if let Some(key) = lint.severity.keys().find(|k| find_rule(k).is_none()) {
@@ -565,6 +563,7 @@ mod tests {
             group: false,
             key_target: None,
             key_module: None,
+            fails_run_by_contract: false,
         };
         let selection = RuleSelection {
             enabled: BTreeSet::from(["OPT110", "OPT111"]),

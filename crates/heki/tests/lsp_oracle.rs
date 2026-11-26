@@ -457,6 +457,7 @@ const CATALOG: &str = "from functools import lru_cache\n\n\nclass Catalog:\n    
 const LOOKUP: &str = "from pkg.catalog import Catalog, defaults\n\n\ndef find(c: Catalog, key) -> dict:\n    return c.fresh(key)\n";
 const LOOKUP_SHARED: &str = "from pkg.catalog import Catalog, defaults\n\n\ndef find(c: Catalog, key) -> dict:\n    return c.entry(key)\n";
 const LOOKUP_CACHED: &str = "from pkg.catalog import Catalog, defaults\n\n\ndef find(c: Catalog, key) -> dict:\n    return defaults()\n";
+const LOOKUP_SHARED_ITEM: &str = "from pkg.catalog import Catalog, defaults\n\n\ndef find(c: Catalog, key) -> dict:\n    return c.entry(key)[\"inner\"]\n";
 // `MUT114`: a method of a cached object in another module fills the object's own memo, then
 // changes its state instead.
 const GLYPHS: &str = "from functools import lru_cache\n\n\nclass Glyphs:\n    def __init__(self):\n        self._width_cache = {}\n        self.seen = []\n\n    def width(self, ch):\n        if ch not in self._width_cache:\n            self._width_cache[ch] = len(ch)\n        return self._width_cache[ch]\n\n\n@lru_cache\ndef shared_glyphs() -> Glyphs:\n    return Glyphs()\n";
@@ -4222,6 +4223,62 @@ fn steps_mut114_mut202_mut208() -> Vec<Step> {
     ]
 }
 
+/// The configuration with a second, shallow `readonly-returns` table over `Catalog.entry`,
+/// with `fail` as given.
+fn two_catalog_tables(fail: bool) -> String {
+    format!(
+        "{CONFIG}\n[[tool.heki.readonly-returns]]\nname = \"catalog-gate\"\nproducers = [\"pkg.catalog.Catalog.entry\"]\nfail = {fail}\n"
+    )
+}
+
+/// `MUT202` per contract: which `readonly-returns` tables protect what a wrapper in another
+/// module returns is a fact of the wrapper's summary, though the caller's report reads the same
+/// with either: returning an item of the producer's value leaves it to the deep table.
+fn steps_readonly_contracts() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a wrapper in another module returns a declared producer's value",
+            vec![save("pkg/lookup.py", LOOKUP_SHARED)],
+        )
+        .present(&[("pkg/tagger.py", "MUT202")]),
+        Step::new(
+            "a shallow table over the producer that fails the run is added",
+            vec![Action::Configure(two_catalog_tables(true))],
+        )
+        .present(&[("pkg/tagger.py", "MUT202")]),
+        Step::new(
+            "the wrapper returns an item of the producer's value, which only the deep table protects",
+            vec![save("pkg/lookup.py", LOOKUP_SHARED_ITEM)],
+        )
+        .present(&[("pkg/tagger.py", "MUT202")])
+        .propagates(),
+        Step::new(
+            "the wrapper returns the producer's value itself again",
+            vec![save("pkg/lookup.py", LOOKUP_SHARED)],
+        )
+        .present(&[("pkg/tagger.py", "MUT202")])
+        .propagates(),
+        Step::new(
+            "the shallow table stops failing the run",
+            vec![Action::Configure(two_catalog_tables(false))],
+        )
+        .present(&[("pkg/tagger.py", "MUT202")]),
+        Step::new(
+            "the shallow table fails the run again",
+            vec![Action::Configure(two_catalog_tables(true))],
+        )
+        .present(&[("pkg/tagger.py", "MUT202")]),
+        Step::new(
+            "the shallow table is removed and the wrapper returns a fresh value",
+            vec![
+                Action::Configure(CONFIG.to_owned()),
+                save("pkg/lookup.py", LOOKUP),
+            ],
+        )
+        .absent(&[("pkg/tagger.py", "MUT202")]),
+    ]
+}
+
 /// An `invalidation` target names a class by its module (`pkg.dials:*.level`): the writes of a
 /// class that moves to another module behind a re-export are no longer its target, directly or
 /// through a helper (`MUT208`).
@@ -7110,6 +7167,7 @@ sessions!(editing, Session::start, {
     small_displays: steps_small_displays,
     queue_capacity: steps_queue_capacity,
     mut114_mut202_mut208: steps_mut114_mut202_mut208,
+    readonly_contracts: steps_readonly_contracts,
     mut114_targets: steps_mut114_targets,
     mut115: steps_mut115,
     item_changes: steps_item_changes,

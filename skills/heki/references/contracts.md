@@ -24,20 +24,19 @@ the walls the maintainer wants enforced, and say why each one matters.
 
 ## 3. Declare the ideal wall, and put the old violations in a baseline
 
-Write the wall as the team wants it to hold: `fail-on = "warning"` (contract reports are
-heuristic, so only this makes `heki check` fail on them) and a `message` that tells the reader
-what to do instead.
+Write the wall as the team wants it to hold: `fail = true` on the table (contract reports are
+heuristic, so without it `heki check` does not fail on them) and a `message` that tells the
+reader what to do instead. `fail-on = "warning"` would also make every other warning fail the
+run; use it only when you want that.
 
 ```toml
 # heki.toml
-[lint]
-fail-on = "warning"
-
 [[write-owners]]
 name = "generation-store"
 targets = ["pkg.model.DataModel.fields"]
 allowed-writers = ["Store.*"]
 message = "use GenerationStore.set_fields() instead"
+fail = true
 ```
 
 When `heki check` then reports code that already crosses the wall, record those reports once:

@@ -4,6 +4,7 @@
 
 use crate::{NamePart, RuleConfigError};
 use globset::{GlobSet, GlobSetBuilder};
+use heki_env::glob::AnyGlob;
 use rustc_hash::FxHashMap;
 
 /// Parts of the matchers' texts ([`NamePart`]): the literal ones, with the matchers of each, and
@@ -27,9 +28,11 @@ impl PartIndex {
         let mut glob_matchers = Vec::new();
         for (i, part) in parts {
             match part.glob() {
-                Some(glob) => {
-                    globs.add(glob.clone());
-                    glob_matchers.push(i);
+                Some(any) => {
+                    for glob in any.globs() {
+                        globs.add(glob.clone());
+                        glob_matchers.push(i);
+                    }
                 }
                 None => literal.entry(part.text().to_owned()).or_default().push(i),
             }
@@ -72,7 +75,7 @@ impl ModuleIndex {
         context: &'static str,
     ) -> Result<Self, RuleConfigError> {
         let mut literal: FxHashMap<&str, Vec<(usize, &NamePart)>> = FxHashMap::default();
-        let mut globbed: Vec<(&globset::Glob, Vec<(usize, &NamePart)>)> = Vec::new();
+        let mut globbed: Vec<(&AnyGlob, Vec<(usize, &NamePart)>)> = Vec::new();
         let mut glob_at: FxHashMap<&str, usize> = FxHashMap::default();
         for (i, module, qualname) in parts {
             match module.glob() {
@@ -91,9 +94,11 @@ impl ModuleIndex {
         }
         let mut globs = GlobSetBuilder::new();
         let mut glob_parts = Vec::new();
-        for (glob, qualnames) in globbed {
-            globs.add(glob.clone());
-            glob_parts.push(PartIndex::new(qualnames.into_iter(), context)?);
+        for (any, qualnames) in globbed {
+            for glob in any.globs() {
+                globs.add(glob.clone());
+                glob_parts.push(PartIndex::new(qualnames.iter().copied(), context)?);
+            }
         }
         let literal = literal
             .into_iter()

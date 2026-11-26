@@ -43,7 +43,7 @@ Documentation:
 
 Exit codes:
   0  no diagnostic fails the run
-  1  a diagnostic at the `fail-on` severity (an exact `error` by default; a heuristic one counts as a `warning`), a refused `--update-baseline`, or pending `--diff` changes
+  1  a diagnostic at the `fail-on` severity (an exact `error` by default; a heuristic one counts as a `warning`), a report of a contract with `fail = true`, a refused `--update-baseline`, or pending `--diff` changes
   2  a configuration, path, read, or syntax error; the error says what to do and links the documentation
 
 Examples:
@@ -124,7 +124,7 @@ Options:
           Summary snapshot (`heki snapshot` output) that `MUT103` compares with, in place of `.heki-summary-snapshot.json` at the project root. A file that is missing, unreadable, malformed or of an unsupported version is an error (exit code 2), and so is a run in which `MUT103` is not enabled
 
       --fail-on <FAIL_ON>
-          Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`). A heuristic report counts as a warning
+          Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`). A heuristic report counts as a warning. A report of a contract with `fail = true` fails the run at either
           
           [possible values: error, warning]
 
@@ -171,7 +171,7 @@ Documentation:
 
 Exit codes:
   0  no diagnostic fails the run
-  1  a diagnostic at the `fail-on` severity (an exact `error` by default; a heuristic one counts as a `warning`), a refused `--update-baseline`, or pending `--diff` changes
+  1  a diagnostic at the `fail-on` severity (an exact `error` by default; a heuristic one counts as a `warning`), a report of a contract with `fail = true`, a refused `--update-baseline`, or pending `--diff` changes
   2  a configuration, path, read, or syntax error; the error says what to do and links the documentation
 
 Examples:

@@ -14,8 +14,9 @@ interpreter to run.
 
 ## What the exit code says
 
-`0`: nothing fails the run. `1`: a diagnostic fails it (an exact `error`, or any diagnostic with
-`--fail-on warning`: a heuristic one counts as a warning); the output lists it. `2`: a configuration, I/O, or syntax error (below).
+`0`: nothing fails the run. `1`: a diagnostic fails it (an exact `error`, a report of a contract
+with `fail = true`, or any diagnostic with `--fail-on warning`: a heuristic one counts as a
+warning); the output lists it. `2`: a configuration, I/O, or syntax error (below).
 
 ## The whole project reports what `--touched` did not show
 

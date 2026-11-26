@@ -7,7 +7,7 @@ use crate::{
     CheckExtras, ModuleUnit, ProjectLayout, RuleConfigError, RuleSelection, SummarySnapshot,
     check_project, find_rule,
 };
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::{GlobSet, GlobSetBuilder};
 use heki_ast::{LineIndex, Span};
 use heki_diagnostics::{
     BaselineKey, Certainty, Diagnostic, InlineIgnores, RatchetBaseline, Suppression,
@@ -69,7 +69,7 @@ pub enum ProjectError {
     Glob {
         pattern: String,
         what: &'static str,
-        cause: globset::Error,
+        cause: heki_env::glob::Error,
     },
     #[error("path `{0}` does not exist")]
     MissingPath(PathBuf),
@@ -336,17 +336,17 @@ fn glob_set(patterns: &[String], what: &'static str) -> Result<GlobSet, ProjectE
     for p in patterns {
         // `generated` also excludes everything below it.
         for pat in [p.clone(), format!("{p}/**")] {
-            b.add(Glob::new(&pat).map_err(|cause| ProjectError::Glob {
+            heki_env::glob::add_to_set(&mut b, &pat).map_err(|cause| ProjectError::Glob {
                 pattern: p.clone(),
                 what,
                 cause,
-            })?);
+            })?;
         }
     }
     b.build().map_err(|cause| ProjectError::Glob {
         pattern: patterns.join(", "),
         what,
-        cause,
+        cause: cause.into(),
     })
 }
 
@@ -1504,6 +1504,7 @@ fn suppression_report(
         group: false,
         key_target: None,
         key_module: None,
+        fails_run_by_contract: false,
     })
 }
 

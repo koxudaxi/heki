@@ -234,7 +234,7 @@ the installed release changed, and the changelog on GitHub lists every release.
 | `severity` | `"warning"` for the rules that report slower code (`EFF102`, `EFF103`, `EFF105`, `DATA101`, and the `OPT` rules) and for `MUT110`, which reports a bug that is rarely harmful; `"error"` for the others, which report bugs that can be critical (`EFF101`: a blocked event loop holds up every other task) | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level. By default only exact errors make `heki check` fail: a heuristic report counts as a warning, whatever its severity; `fail-on = "warning"` makes warnings and heuristic reports fail it too. |
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF105`, and `EFF106` in test code as pytest finds it: `test_*` functions and the functions nested in them, `test_*.py` and `*_test.py` files, and files under `test/` or `tests/`. |
 | `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
-| `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. A heuristic report counts as a warning, whatever its severity: it can be wrong about the code, so at `"error"` only exact errors fail the run. Warnings and heuristic reports are reported either way, and the language server shows them. `--fail-on` overrides it. |
+| `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. A heuristic report counts as a warning, whatever its severity: it can be wrong about the code, so at `"error"` only exact errors fail the run. Warnings and heuristic reports are reported either way, and the language server shows them. `--fail-on` overrides it. A report of a contract with [`fail = true`](#failing-on-a-contract) fails the run at either value. |
 | `report-unused-suppressions` | `false` | Report the codes of suppression comments that suppressed no report, and the baseline entries that matched none. See [Unused suppressions](#unused-suppressions). |
 | `require-suppression-codes` | `false` | Report the `# heki: ignore` comments that name no rule. See [Suppressions that name no rule](#suppressions-that-name-no-rule). |
 | `unmatched-contract-entries` | a warning, in a run over the whole project | `"warning"`, `"error"`, or `"ignore"`: what `heki check` does with a contract entry that matches nothing in the analyzed files. An error fails the run. See [Entries that match nothing](#entries-that-match-nothing). |
@@ -288,13 +288,17 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   `functools.cache` functions are checked without one by `MUT114` (`cached-result-mutation`).
 - Declaring a contract selects its rule, whatever its certainty.
 - Their reports are heuristic, so they count as warnings for
-  [`fail-on`](#rule-selection-toolhekilint): to make a broken contract fail `heki check`, the
-  pre-commit hook, and CI, set `fail-on = "warning"` next to the contracts (with a
-  [baseline](adoption.md#ratchet-baselines), only new reports fail).
+  [`fail-on`](#rule-selection-toolhekilint) and do not fail the run by default: to make a broken
+  contract fail `heki check`, the pre-commit hook, and CI, set `fail = true` in its table
+  ([below](#failing-on-a-contract)).
 - Every name in a contract but `import-boundaries`, whose names are
   [module patterns](#import-boundaries), is a dotted pattern. It matches the full name or any dotted suffix
   (`DataModel.fields` matches `pkg.model.DataModel.fields`, not `pkg.BigModel.fields`), and it
-  may be a glob (`*`, `?`, `[...]`, `{a,b}`).
+  may be a glob (`*`, `?`, `[...]`, `{a,b}`). An alternative may be empty, as in a shell's brace
+  expansion: `pkg.run:outer{,.*}` names `outer` and every scope nested in it (`outer.<locals>.inner`,
+  a class defined in it, their methods), where `pkg.run:outer` names `outer` alone. It works
+  wherever a configured text is a glob, module patterns, `exclude`, and `per-file-ignores`
+  included.
 - A glob's `*` spans dots (`pkg.parser.*` covers the functions of every module under
   `pkg.parser`), except in the last segment of a target, which names the attribute, function,
   method, or class: `pkg.*._*` names the private members of everything in `pkg`, and no function
@@ -382,7 +386,9 @@ references = "ignore"
 - A table's own key overrides the default, an empty list too (`allowed-callers = []` is a list
   of no callers). A list is replaced whole, never merged with the default's.
 - `name` and `targets` name one contract, so they are errors in a defaults table. Any other key
-  of the kind may be defaulted.
+  of the kind may be defaulted, `fail` among them: `fail = true` in `[tool.heki.call-owners-defaults]`
+  makes the reports of every `call-owners` table fail the run, and a table with `fail = false`
+  keeps its reports advisory.
 - A defaults table is one table, not an array of tables. With no table of its kind it changes
   nothing. In a file that is not a `pyproject.toml` it is written without the `tool.heki`
   prefix (`[call-owners-defaults]`).
@@ -413,6 +419,7 @@ unresolved = "report"
 | `exempt-methods` | `[]` | Construction and copy methods allowed to write the targets. A plain name (`__deepcopy__`) matches any method of that name; a name with a dot or a glob (`DataModel.copy_deep`, `create_*`) is a pattern, as in `allowed-writers`. |
 | `forbid-cached-property-on` | `[]` | Classes on which defining a `@cached_property` is itself reported. |
 | `message` | none | The help of every report of the contract: where to write instead. |
+| `fail` | `false` | `true`: the reports of this contract make `heki check` (and `--watch`) exit with code 1, whatever their tier and severity; see [Failing on a contract](#failing-on-a-contract). |
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes is reported. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the writes the contract cannot tie to a class are reported under [`MUT205`](rules/unresolved-guarded-write.md). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`: which function a write is judged in. See [How contracts report](#how-contracts-report). |
@@ -542,6 +549,7 @@ protocol (see [How contracts report](#how-contracts-report)).
 | `forbidden-readers` | `[]` | When set, only reads by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to read the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
+| `fail` | `false` | `true`: the reports of this contract make `heki check` (and `--watch`) exit with code 1, whatever their tier and severity; see [Failing on a contract](#failing-on-a-contract). |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the reads of a target's attribute name on an object of unknown class are reported under [`MUT206`](rules/unresolved-guarded-read.md). A target ending in a glob (`Context._*`) matches only the names a class it names, or a project subclass, has from project code ([below](#globs-on-objects-of-unknown-class)). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 | `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
@@ -575,6 +583,7 @@ The call side of `write-owners`.
 | `forbidden-callers` | `[]` | When set, only calls by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to call the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
+| `fail` | `false` | `true`: the reports of this contract make `heki check` (and `--watch`) exit with code 1, whatever their tier and severity; see [Failing on a contract](#failing-on-a-contract). |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the calls of a method named like a target (its last name) on an object of unknown class are reported under [`MUT207`](rules/unresolved-guarded-call.md). A target ending in a glob matches only the names a class it names, or a project subclass, has from project code ([below](#globs-on-objects-of-unknown-class)). |
 | `references` | `"ignore"` | `"ignore"`, `"calls"`, `"calls-and-bases"`, or `"reads"`: whether a reference handing a target on to be called later counts as a call of it (`[decide]`, `return decide`, `partial(decide)`, `field(default_factory=Rule)`, `obj.callback = self.decide`), with `"calls-and-bases"` a class statement naming a class target among its bases too (`class Derived(Base)`), and with `"reads"` every other use of a target's value as well (`Keys.of(...)`, `Code.OK`, `isinstance(x, Keys)`, `case Keys():`, `tuple[Keys, int]`). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
@@ -756,6 +765,23 @@ allowed-readers = ["pkg.parser.index.*"]
 | unset | set | accesses by the forbidden functions |
 | set | set | accesses by the forbidden functions, except the allowed ones |
 
+- Which keys need a function's nested scopes named:
+  - `scopes` and `allowed-callees` of an effect boundary name a function, class, or module and
+    everything nested in it: `pkg.run:outer` covers `outer.<locals>.inner`, and `outer{,.*}` adds
+    nothing.
+  - `allowed-writers`, `allowed-readers`, `allowed-callers`, `forbidden-*`, `exempt-methods`, and
+    the `invalidation` functions name the functions they match and no others. With `attribution =
+    "call-graph"` (the default) a lambda, a comprehension, a generator expression, and a nested
+    `def` that only runs inside the function are judged where the function is, so `allowed-*`
+    naming `outer` covers them; a nested `def` that is handed on (returned, stored, passed) is a
+    function of its own and needs its own entry, and `forbidden-*` names only the functions it
+    matches. With `attribution = "lexical"` a lambda, comprehension, or generator expression
+    still belongs to its function, and every nested `def` is judged by itself.
+  - `targets` name the function, method, or class they match; a nested function is a target only
+    where an entry names it.
+
+  So `outer{,.*}` is needed in `allowed-*` and `forbidden-*` only for nested `def`s that
+  `attribution` does not attribute to `outer`, and in `targets` for nested definitions.
 - An access counts as one by a forbidden function when the function that is reported, a private
   helper it hands the access through, or the function making the access is forbidden (with
   `attribution = "lexical"`, the function holding the access).
@@ -809,6 +835,7 @@ import-probes = "report"
 | `import-probes` | `"allow"` | `"allow"` or `"report"`: whether `reads-environment` also forbids an import probe, an `import` inside a `try` with an `except` clause naming `ImportError` or `ModuleNotFoundError`. `"report"` without `reads-environment` is a configuration error. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the boundary also reports, under `EFF201`, what it cannot judge in its scopes' reach: a call heki resolves to no function, a function it does not model (`eval`, a body too large) or whose body only a stub declares, and a write of an attribute `write-targets` or `write-universe` names on an object of unknown class or under a name computed at run time. Each kind is one report per scope function, at the first one with its chain. |
 | `message` | none | The help of every report of the boundary. |
+| `fail` | `false` | `true`: the reports of this contract make `heki check` (and `--watch`) exit with code 1, whatever their tier and severity; see [Failing on a contract](#failing-on-a-contract). |
 
 | `forbid` token | Forbids |
 | -------------- | ------- |
@@ -912,6 +939,7 @@ deep = true
 | `name` | `""` | The contract's name. |
 | `producers` | `[]` | Functions, methods, external symbols, or attributes (`Class.attr`) whose result every caller shares. |
 | `deep` | `false` | Protect the values below the result too: its attributes, items, and elements. |
+| `fail` | `false` | `true`: the reports of this contract make `heki check` (and `--watch`) exit with code 1, whatever their tier and severity; see [Failing on a contract](#failing-on-a-contract). |
 
 - Functions decorated with `@lru_cache` / `@cache` are protected without configuration, also
   through an import alias, but not a `cache` decorator the module defines itself.
@@ -936,6 +964,7 @@ message = "tell the store which models changed"
 | `invalidators` | `[]` | Functions or methods whose call announces the change. |
 | `exempt-writers` | `[]` | Functions whose writes need no announcement of their own: the owner's operations, which announce or batch the change themselves, and construction methods. |
 | `message` | none | The help of every report of the contract. |
+| `fail` | `false` | `true`: the reports of this contract make `heki check` (and `--watch`) exit with code 1, whatever their tier and severity; see [Failing on a contract](#failing-on-a-contract). |
 
 An invalidator call counts when it runs on every path from the write to the function's normal
 return:
@@ -995,6 +1024,7 @@ or a glob whose `*` spans dots, never a suffix (`pkg.*` names `pkg.facts` and
 | `reach` | `"statement"` | `"statement"`: each import of an importer is judged. `"import-time"`: every module loading an importer loads while it loads. `"all"`: every module a chain of imports that run leads to. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the imports whose module heki cannot name are reported under [`IMP202`](rules/unresolved-guarded-import.md). |
 | `message` | none | The help of every report of the contract. |
+| `fail` | `false` | `true`: the reports of this contract make `heki check` (and `--watch`) exit with code 1, whatever their tier and severity; see [Failing on a contract](#failing-on-a-contract). |
 
 - An import counts wherever it runs: in the module body, a class body, a function, or lazily,
   with or without an `ImportError` handler around it. `importlib.import_module` and
@@ -1086,6 +1116,38 @@ from pkg._runtime import c  # IMP201: allowed only through a relative import
   run while it loads): how the modules on a chain import each other is theirs, and a module of the
   key that a chain reaches is allowed.
 - A report's target is the module imported, as for the other reports of the contract.
+
+### Failing on a contract
+
+`fail = true` in a contract table makes every report of that contract fail `heki check` (and
+`--watch`): exit code 1, whatever the report's tier and severity. A contract without the key, or
+with `fail = false`, keeps the default: its reports are warnings, and fail the run only as
+`fail-on` says. Every kind of contract has the key.
+
+```toml
+[[tool.heki.write-owners]]
+name = "generation-store"
+targets = ["pkg.model.DataModel.fields"]
+allowed-writers = ["Store.*"]
+fail = true
+```
+
+- Other warnings and heuristic reports stay advisory: `fail = true` does not change `fail-on`,
+  the rules' severities, or the tier of a report. The outputs (text, JSON, SARIF, GitHub
+  annotations) are the same with and without it.
+- A report that several contracts find stands for each of them, and fails the run when one of
+  them has `fail = true`. A `MUT202` report is of the `readonly-returns` tables naming a producer
+  the changed value may come from: all of them when the change reaches the producer's result
+  itself, and only those with `deep = true` when it changes a value below it.
+- A report that a [baseline](adoption.md#ratchet-baselines) records, or that an inline
+  [suppression](#inline-suppressions) hides, does not fail the run. With `--touched`, the reports
+  the run shows decide; the note about the ones it does not show says how many would fail it.
+- The closing note of a text run, which counts the reports that do not fail the run, leaves these
+  reports out.
+- `fail = true` in a [`<kind>-defaults` table](#defaults-for-the-tables-of-a-kind) applies to
+  every table of the kind that does not set `fail` itself.
+- `fail-on = "warning"` is still there for a project that wants every warning and heuristic
+  report to fail the run.
 
 ### How contracts report
 

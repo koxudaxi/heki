@@ -204,14 +204,12 @@ in tests. With heki you write them down as contracts, in `heki.toml` or under `[
 
 ```toml
 # heki.toml
-[lint]
-fail-on = "warning"   # contract reports are heuristic: let them fail the run
-
 [[write-owners]]
 name = "order-store"
 targets = ["app.models.Order.items"]
 allowed-writers = ["app.store.*"]
 message = "change Order.items through app.store"
+fail = true   # a report of this contract fails the run
 ```
 
 A function in `app/api.py` that appends to `order.items` through a helper breaks it:
@@ -223,15 +221,17 @@ app/api.py:9:5: MUT201 (write-owner-violation) [error, heuristic] `add_gift_wrap
 9 |     _append(order.items, "gift-wrap")
   |     ^
   = related: app/api.py:9:5: `add_gift_wrap` calls `app.api._append`
-  = help: change Order.items through app.store; allowed writers of `app.models.Order.items`: `app.store.add_item`
+  = help: change Order.items through app.store
 
 Found 1 diagnostic(s) in 3 file(s).
 ```
 
+The run exits with code 1.
+
 heki follows aliases, helpers, and subclasses, with no decorators and nothing added at run time. The
-contract rules aren't [certified](precision.md#certifications) yet, so without `fail-on = "warning"`
-their reports are warnings and the run passes. With it, every warning fails the run, so record
-today's findings in a [Ratchet baseline](adoption.md#ratchet-baselines) first.
+contract rules aren't [certified](precision.md#certifications) yet, so their reports are warnings.
+`fail = true` makes that table's reports fail the run. Record today's findings in a
+[Ratchet baseline](adoption.md#ratchet-baselines) first.
 
 There is a contract for each kind of rule:
 
