@@ -582,6 +582,12 @@ pub struct ClassDecl {
     /// The declared instance attribute types, `attr -> type`: annotations in the class body or
     /// on `self` in a method, which type every store of the attribute.
     pub attr_types: BTreeMap<String, Ty>,
+    /// The attributes annotated with one of the class's type parameters (`obj: T` in `class
+    /// Site(Generic[T])` or `class Site[T]:`), sorted, each with the parameter's position: an
+    /// instance an annotation gives arguments (`Site[Schema]`, [`Args::TypeArgs`]) holds the
+    /// argument there ([`ProjectDecls::type_argument`]). Only classes of the module body.
+    #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
+    pub param_attrs: Box<[(Box<str>, u8)]>,
     /// What the module's code stores in the attributes of the class's instances it does not
     /// annotate, through `self` or another receiver of the class, sorted by attribute
     /// (`stores::record`). A slice rather than a map: most classes store a few, and a map's
@@ -1049,8 +1055,13 @@ pub struct ModuleDecls {
     pub is_package: bool,
     /// Module-scope runtime imports: `bound name -> fqn`.
     pub imports: BTreeMap<String, String>,
-    /// `if TYPE_CHECKING:` imports, usable for annotation resolution only.
+    /// `if TYPE_CHECKING:` imports: for annotation resolution, and for another module's import
+    /// of a name the module binds no other way ([`Self::type_checking_binding`]).
     pub type_checking_imports: BTreeMap<String, String>,
+    /// The names of [`Self::type_checking_imports`] that no other statement of the module
+    /// stores or deletes: at run time the module does not bind them.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub type_checking_only: BTreeSet<String>,
     /// Class qualname -> declaration. Boxed, like `functions`: a map node has room for eleven
     /// entries and most modules define a few, so a declaration kept in the node would cost
     /// eleven times its size.
@@ -1359,6 +1370,14 @@ impl ModuleDecls {
             || self.unknown_globals.contains(name)
     }
 
+    /// What the `if TYPE_CHECKING:` import of `name` binds when no statement of the module binds
+    /// the name at run time: a type checker reads `from module import name` elsewhere as that.
+    pub(crate) fn type_checking_binding(&self, name: &str) -> Option<&String> {
+        self.type_checking_imports
+            .get(name)
+            .filter(|_| self.type_checking_only.contains(name))
+    }
+
     /// The declarations of a module heki could not read or parse: none. A name under it is
     /// unresolved ([`ProjectDecls::outside`]), never looked up in the catalog: the module may
     /// shadow a module the catalog lists, as any project module does.
@@ -1516,7 +1535,16 @@ impl ModuleDecls {
         let args = split_top_level(inner, ',');
         let elem = |i: usize| Elem::of(args.get(i).and_then(|a| self.resolve_annotation_ty(a)));
         let args = match generic(&class) {
-            None => Args::None,
+            // Whether the class is a project class with type parameters is decided across the
+            // project (`ProjectDecls::declared_ty`).
+            None => Args::type_args(
+                args.iter()
+                    .map(|a| match self.admits_none(a) {
+                        true => Elem::Unknown,
+                        false => Elem::of(self.resolve_annotation_ty(a)),
+                    })
+                    .collect(),
+            ),
             Some(Generic::Items) => Args::items(elem(0)),
             Some(Generic::Map) => Args::map(elem(0), elem(1)),
             Some(Generic::Pairs) => Args::items(Elem::Of(Ty::container(
@@ -3451,7 +3479,10 @@ impl ProjectDecls {
                             target
                         }
                         Some(_) => break,
-                        // A name the module binds no other way is what its star imports bind.
+                        // A name the module binds no other way is what its star imports bind,
+                        // else, for a type checker, what its `if TYPE_CHECKING:` import binds
+                        // (a module `__getattr__` may serve it at run time); a value read
+                        // through it is no value heki knows.
                         None => match self.star_binding(m, first) {
                             StarBinding::Bound { target, .. } => {
                                 aliased_in = None;
@@ -3459,6 +3490,12 @@ impl ProjectDecls {
                                 &star
                             }
                             StarBinding::Open if values => return None,
+                            StarBinding::Unbound
+                                if !values && let Some(target) = m.type_checking_binding(first) =>
+                            {
+                                aliased_in = None;
+                                target
+                            }
                             StarBinding::Open | StarBinding::Unbound => break,
                         },
                     }
@@ -5089,6 +5126,21 @@ impl ProjectDecls {
             .map(Box::as_ref)
     }
 
+    /// What the attribute `attr` of the instance `obj` holds when the class annotates it with a
+    /// type parameter (`obj: T` in `class Site(Generic[T])`) and the instance's annotation gives
+    /// the argument at its position (`Site[Schema]`, [`Args::TypeArgs`]).
+    pub(crate) fn type_argument(&self, obj: &crate::types::Obj, attr: &str) -> Option<Ty> {
+        let Args::TypeArgs(args) = &obj.args else {
+            return None;
+        };
+        let decl = self.class(&obj.class)?;
+        let (_, at) = decl.param_attrs.iter().find(|(a, _)| &**a == attr)?;
+        match args.get(usize::from(*at))? {
+            Elem::Of(t) => Some(t.clone()),
+            Elem::Empty | Elem::Unknown => None,
+        }
+    }
+
     /// The declared type of reading `attr` on an instance of `class`, from the first class along
     /// the MRO (past `class` itself with `skip_self`, for `super()`) that declares it: the
     /// return annotation of a property getter (with or without a setter; another function of a
@@ -5256,6 +5308,14 @@ impl ProjectDecls {
             let args = match &o.args {
                 // A result of a type an import names that may also be `None`.
                 Args::Returns(r) if r.obj().is_some_and(|r| self.nullable_type_name(&r.class)) => {
+                    Args::None
+                }
+                // Arguments of a class no attribute of which a type parameter types.
+                Args::TypeArgs(_)
+                    if self
+                        .class(&class)
+                        .is_none_or(|decl| decl.param_attrs.is_empty()) =>
+                {
                     Args::None
                 }
                 args => args.map_elems(|t| self.declared_ty_with(t, names)),
@@ -6307,6 +6367,23 @@ fn module_read(
     }
 }
 
+/// The type parameters of the module-body class `class`, whose resolved bases are `bases`, by
+/// name in order: those of its type parameter list (`class Site[T]:`), else those its
+/// `Generic[...]` base names, else its `Protocol[...]` base's. `None` for a class whose
+/// parameters come from its other bases' arguments, which heki does not follow.
+fn class_type_params<'c>(class: &'c ClassInfo, bases: &[String]) -> Option<&'c [String]> {
+    if !class.type_params.is_empty() {
+        return Some(&class.type_params);
+    }
+    let passed_to = |names: &[&str]| {
+        (class.base_type_args.iter())
+            .find(|(i, _)| bases.get(*i).is_some_and(|b| names.contains(&b.as_str())))
+            .map(|(_, args)| args.as_slice())
+    };
+    passed_to(&["typing.Generic", "typing_extensions.Generic"])
+        .or_else(|| passed_to(&["typing.Protocol", "typing_extensions.Protocol"]))
+}
+
 /// Whether the module body runs the `class` statement `class` itself: the nearest block around
 /// it, past a PEP 695 type-parameter scope, is the module's. A class named as a module-level one
 /// may be made by a function declaring its name `global` ([`ModuleDecls::made_in`]).
@@ -6362,6 +6439,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
     type_names::type_names(input, &mut decls);
     let stores = GlobalStores::of(&input.ir.functions);
     decls.unknown_globals = unknown_globals(&stores, &decls);
+    decls.type_checking_only = type_checking_only(semantic, &stores, &decls);
     let rebound = rebound_imports(input, &stores, &decls);
     decls.rebound_imports = (!rebound.is_empty()).then(|| Box::new(rebound));
     decls.rebound_definitions = rebound_definitions(input, &stores, &decls, &bindings);
@@ -6400,6 +6478,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
         })
     };
     let scoped = scoped_bases(input, &|text| module_base(&decls, text));
+    let mut type_params: FxHashMap<&str, &[String]> = FxHashMap::default();
     // Resolve bases, class keywords, and annotations now that local names are known.
     for class in &semantic.classes {
         // A module-level class statement evaluates its bases before it binds its own name: a
@@ -6413,7 +6492,8 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
                 .map(|(_, target, _, _)| target)
         };
         let mut bases: Vec<String> = Vec::new();
-        if statement_in_module_body(semantic, class) {
+        let in_module_body = statement_in_module_body(semantic, class);
+        if in_module_body {
             // The module body names its bases through the module's names; an expression
             // (`with_metaclass(Meta)`, `*bases`) is an unknown base.
             bases.extend(class.bases.iter().filter_map(|b| {
@@ -6470,6 +6550,9 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
         let is_protocol = bases
             .iter()
             .any(|b| matches!(b.as_str(), "typing.Protocol" | "typing_extensions.Protocol"));
+        if in_module_body && let Some(params) = class_type_params(class, &bases) {
+            type_params.insert(&class.qualname, params);
+        }
         let mut members: BTreeSet<String> = class.methods.iter().cloned().collect();
         // A name the body declares `global` / `nonlocal` is no member, even when assigned.
         let body = semantic
@@ -6494,15 +6577,36 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
         }
     }
     // Class-body annotations without a value, and what methods set or annotate on `self`.
+    let mut param_attrs: FxHashMap<&str, BTreeMap<Box<str>, Option<u8>>> = FxHashMap::default();
+    let mut note_param = |class: &str, attr: &str, annotation: &str| {
+        let Some((class, params)) = type_params.get_key_value(class) else {
+            return;
+        };
+        let Some(at) = params.iter().position(|p| p == unquote(annotation)) else {
+            return;
+        };
+        let at = u8::try_from(at).ok();
+        let attrs = param_attrs.entry(class).or_default();
+        attrs
+            .entry(Box::from(attr))
+            .and_modify(|seen| {
+                if *seen != at {
+                    *seen = None;
+                }
+            })
+            .or_insert(at);
+    };
     for f in &input.ir.functions {
         if f.is_class_body {
             if let Some(c) = decls.classes.get_mut(&f.qualname) {
-                c.members.extend(
-                    f.local_annotations
-                        .iter()
-                        .filter(|a| !a.target.contains('.'))
-                        .map(|a| a.target.clone()),
-                );
+                for a in f
+                    .local_annotations
+                    .iter()
+                    .filter(|a| !a.target.contains('.'))
+                {
+                    note_param(&f.qualname, &a.target, &a.annotation);
+                    c.members.insert(a.target.clone());
+                }
             }
             continue;
         }
@@ -6516,10 +6620,15 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
             continue;
         };
         let prefix = format!("{}.", first.name);
-        c.members.extend(f.local_annotations.iter().filter_map(|a| {
-            let attr = a.target.strip_prefix(&prefix)?;
-            (!attr.contains('.')).then(|| attr.to_owned())
-        }));
+        for a in &f.local_annotations {
+            let Some(attr) = a.target.strip_prefix(&prefix) else {
+                continue;
+            };
+            if !attr.contains('.') {
+                note_param(owner, attr, &a.annotation);
+                c.members.insert(attr.to_owned());
+            }
+        }
         let self_vars = self_aliases(f, first.var);
         for inst in f.blocks.iter().flat_map(|b| &b.insts) {
             if let InstKind::AttrStore { obj, attr, .. } = &inst.kind
@@ -6527,6 +6636,13 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
             {
                 c.members.insert(attr.clone());
             }
+        }
+    }
+    for (qualname, c) in &mut decls.classes {
+        if let Some(attrs) = param_attrs.remove(qualname.as_str()) {
+            c.param_attrs = (attrs.into_iter())
+                .filter_map(|(attr, at)| Some((attr, at?)))
+                .collect();
         }
     }
     class_properties(input, &mut decls);
@@ -6915,8 +7031,9 @@ fn ty_classes(ty: &Ty, out: &mut Vec<String>) {
         out.push(obj.class.clone());
         let items: Vec<&Elem> = match &obj.args {
             // The named objects a field holds are no classes of instances, nor is what calling
-            // a callable gives.
-            Args::None | Args::Fields(_) | Args::Returns(_) => Vec::new(),
+            // a callable gives, nor are the arguments of a class with type parameters, which only
+            // the reads of its attributes take.
+            Args::None | Args::Fields(_) | Args::Returns(_) | Args::TypeArgs(_) => Vec::new(),
             Args::Items(e) | Args::Result(e) => vec![e.as_ref()],
             Args::Map(k, v) => vec![k.as_ref(), v.as_ref()],
             Args::Tuple(es) => es.iter().collect(),
@@ -7414,6 +7531,29 @@ fn keeps_body_result(f: &IrFunction, decls: &ModuleDecls) -> bool {
                 Some("functools.cache" | "functools.lru_cache")
             )
     })
+}
+
+/// [`ModuleDecls::type_checking_only`]: the names whose every module-level store is one of the
+/// module's `if TYPE_CHECKING:` imports, each of which stores the name once.
+fn type_checking_only(
+    semantic: &SemanticModel,
+    stores: &GlobalStores<'_>,
+    decls: &ModuleDecls,
+) -> BTreeSet<String> {
+    let module_scope = module_scope(semantic);
+    let mut imported: BTreeMap<&str, u32> = BTreeMap::new();
+    for imp in &semantic.imports {
+        if imp.in_type_checking && Some(imp.scope) == module_scope {
+            *imported.entry(&imp.bound_name).or_default() += 1;
+        }
+    }
+    imported
+        .into_iter()
+        .filter(|(name, times)| {
+            decls.type_checking_imports.contains_key(*name) && stores.exactly(name, *times)
+        })
+        .map(|(name, _)| name.to_owned())
+        .collect()
 }
 
 fn unknown_globals(stores: &GlobalStores<'_>, decls: &ModuleDecls) -> BTreeSet<String> {
@@ -9365,6 +9505,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     is_package: false,
     imports: BTreeMap::new(),
     type_checking_imports: BTreeMap::new(),
+    type_checking_only: BTreeSet::new(),
     classes: BTreeMap::new(),
     functions: BTreeMap::new(),
     private_members: false,

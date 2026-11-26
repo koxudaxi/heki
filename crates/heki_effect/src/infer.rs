@@ -2380,11 +2380,25 @@ impl<'e, 'a> Engine<'e, 'a> {
             return Ok(None);
         };
         let item = match (&o.args, is_slice) {
-            (Args::None | Args::Result(_) | Args::Fields(_) | Args::Returns(_), false) => {
+            (
+                Args::None
+                | Args::Result(_)
+                | Args::Fields(_)
+                | Args::Returns(_)
+                | Args::TypeArgs(_),
+                false,
+            ) => {
                 return Ok(self.dunder(o, "__getitem__"));
             }
             // A slice of a builtin sequence is one of its class, whatever its items.
-            (Args::None | Args::Result(_) | Args::Fields(_) | Args::Returns(_), true) => {
+            (
+                Args::None
+                | Args::Result(_)
+                | Args::Fields(_)
+                | Args::Returns(_)
+                | Args::TypeArgs(_),
+                true,
+            ) => {
                 return Ok(SLICED_SEQUENCES
                     .contains(&o.class.as_str())
                     .then(|| Ty::inst(o.class.as_str())));
@@ -2950,6 +2964,11 @@ impl<'e, 'a> Engine<'e, 'a> {
             && let Some(value) = cx.instance_alias(class, attr)
         {
             return Ok(value);
+        }
+        if let Ty::Inst(obj) = recv
+            && let Some(t) = cx.project.type_argument(obj, attr)
+        {
+            return Ok(Some(t));
         }
         let t = match cx.store_read_member(class, attr, skip_self) {
             Some(Read::Pending) => return Err(Pending),

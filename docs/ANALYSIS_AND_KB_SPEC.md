@@ -387,6 +387,23 @@ class object (`types::Args::Returns`, Priority 2). A `T` that may be `None` (`T 
 `object` give no class, nor does a bare `Callable`. The call itself stays unresolved: the
 annotation does not say which function the value holds.
 
+A read of an attribute annotated with a type parameter of its class (`obj: T` in the class body
+or `self.obj: T` in a method of a module-level `class Site(Generic[T])`, `Protocol[T]`, or
+`class Site[T]:`; `ClassDecl::param_attrs`) on an instance whose annotation gives type arguments
+(`site: Site[Schema]`, also through a type alias; `types::Args::TypeArgs`) has the argument at
+the parameter's position (Priority 2; `ProjectDecls::type_argument`). An argument that may be
+`None`, a parameter given no argument, an annotation wrapping the parameter (`Optional[T]`,
+`list[T]`), an attribute a base class declares, and a class whose parameters come from the
+arguments of other bases give no class. A class method the catalog says returns `Self`
+(`return_type = "Self"`: pydantic's `model_construct` and `model_validate`) called on a project
+class gives an instance of that class, as one a project class annotates `-> Self` does.
+
+A name another module binds only under `if TYPE_CHECKING:` (no other statement of it stores or
+deletes the name, `ModuleDecls::type_checking_only`, so a module `__getattr__` may serve it at
+run time) is what that import names, as for a type checker: an import of it, an annotation
+naming it, and a class based on it follow it (`ProjectDecls::canonical`). A value read through
+it is no value heki knows (`ProjectDecls::canonical_value`).
+
 Some receivers have the class the language or the standard library gives them. An instance's
 own namespace (`obj.__dict__`, or `vars(obj)` of the builtin: `resolver::namespace_load`) is a
 builtin `dict`, of keys and values of any class, where reading it runs no code of the classes the

@@ -2735,7 +2735,7 @@ mod tests {
                         keywords: true,
                         ..FieldValues::default()
                     }),
-                    ..entry(&[])
+                    ..returning(SELF_RETURN_TYPE, entry(&[]))
                 },
             ),
             (
@@ -2747,7 +2747,7 @@ mod tests {
                         only_from_dict: true,
                         ..FieldValues::default()
                     }),
-                    ..entry(&[])
+                    ..returning(SELF_RETURN_TYPE, entry(&[]))
                 },
             ),
         ]

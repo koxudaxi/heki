@@ -104,6 +104,16 @@ pub struct ClassInfo {
     /// `Base[int]`), or `None` for another expression (`with_metaclass(Meta)`, `*bases`), whose
     /// class heki cannot name.
     pub bases: Vec<Option<String>>,
+    /// The bases a subscript passes names only (`Generic[K, T]`): the index of the base among
+    /// `bases`, and the dotted names in order. A subscript holding another expression
+    /// (`Generic[*Ts]`, `Base[list[T]]`) is left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_type_args: Vec<(usize, Vec<String>)>,
+    /// The names of the class statement's type parameter list (`class Site[K, T]:`), in order;
+    /// empty without one, and for a list holding a `TypeVarTuple`, after which an argument's
+    /// position names no one parameter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub type_params: Vec<String>,
     /// Class keywords with the source text of their value (`metaclass=Meta`, `frozen=False`);
     /// `**kwargs` is left out.
     pub keywords: Vec<(String, String)>,
@@ -1178,9 +1188,13 @@ impl<'a> Analyzer<'a> {
             self.push_type_params_scope(cls.type_params.as_deref(), cls.name.as_str(), line);
 
         let mut bases = Vec::new();
+        let mut base_type_args = Vec::new();
         let mut keywords = Vec::new();
         if let Some(args) = &cls.arguments {
             for arg in &args.args {
+                if let Some(names) = subscript_names(arg) {
+                    base_type_args.push((bases.len(), names));
+                }
                 bases.push(expr_dotted_name(arg));
                 self.visit_expr(arg);
             }
@@ -1205,6 +1219,8 @@ impl<'a> Analyzer<'a> {
             qualname,
             parent_class,
             bases,
+            base_type_args,
+            type_params: type_param_names(cls.type_params.as_deref()),
             keywords,
             methods: Vec::new(),
             span: Span::from(cls.range),
@@ -1836,6 +1852,29 @@ fn expr_dotted_name(expr: &Expr) -> Option<String> {
         Expr::Subscript(s) => expr_dotted_name(&s.value),
         _ => None,
     }
+}
+
+/// The dotted names a subscript passes (`Generic[K, T]`), when it passes names only.
+fn subscript_names(expr: &Expr) -> Option<Vec<String>> {
+    let Expr::Subscript(s) = expr else {
+        return None;
+    };
+    match &*s.slice {
+        Expr::Tuple(t) => t.elts.iter().map(expr_dotted_name).collect(),
+        one => Some(vec![expr_dotted_name(one)?]),
+    }
+}
+
+/// The names of a type parameter list, by position ([`ClassInfo::type_params`]).
+fn type_param_names(type_params: Option<&ast::TypeParams>) -> Vec<String> {
+    let params = type_params.map_or(&[][..], |tp| &tp.type_params[..]);
+    if params
+        .iter()
+        .any(|p| matches!(p, TypeParam::TypeVarTuple(_)))
+    {
+        return Vec::new();
+    }
+    params.iter().map(|p| p.name().to_string()).collect()
 }
 
 /// Build the lexical scope, binding, import, and CHA model for a parsed Python module.
