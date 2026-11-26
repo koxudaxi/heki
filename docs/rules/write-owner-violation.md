@@ -95,7 +95,10 @@ The written object's class is the one heki infers for it, with annotations as hi
 parameter, local, attribute, or return annotation, including the items of `list[...]`,
 `Sequence[...]`, `Iterable[...]`, `Iterator[...]`, `Generator[...]`, `dict[...]`,
 `Mapping[...]`, `tuple[...]`, and `set[...]`, and a type alias naming one (`Models: TypeAlias =
-list[Model]`); a constructor call; and what the object comes
+list[Model]`); a constructor call, also of a value declared `type[Model]` wherever it is held (a
+parameter, or an attribute annotated in `__init__` or the class body); a standard library call
+by its declared return type (`importlib.util.module_from_spec(spec)` gives a `types.ModuleType`,
+though a custom loader may return another object); and what the object comes
 from: a loop over such a container (`for model in models`), a subscript (`models[0]`,
 `by_name["a"]`), unpacking (`model, _ = pair`), `dict` views and `get` / `pop`, `enumerate`,
 `zip`, `reversed`, `sorted`, `iter`, `next`, `list` / `tuple` / `set`, `itertools.chain`, a

@@ -9931,3 +9931,52 @@ fn lsp_diagnostics_equal_a_full_check_for_class_objects_across_modules() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
     s.lsp.stop(true);
 }
+
+// The attribute is annotated in a base class of another module than the subclass calling it.
+const CLASS_OBJECT_ATTRIBUTE_BASE: &str = "from pkg.types import DataType\n\n\nclass Parser:\n    def __init__(self) -> None:\n        self.field_type: type[DataType] = DataType\n";
+const CLASS_OBJECT_ATTRIBUTE_USE: &str = "from pkg.base import Parser\nfrom pkg.types import DataType\n\n\nclass OpenAPIParser(Parser):\n    def build(self) -> DataType:\n        return self.field_type(is_dict=True)\n";
+
+/// A call of a class object an attribute declares constructs its class from the declarations of
+/// another module: the subclass calling it sees the base class's annotation change to one of no
+/// known class and back.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_class_object_attributes_across_modules() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/types.py", CLASS_OBJECTS_TYPES.to_owned()),
+        ("pkg/base.py", CLASS_OBJECT_ATTRIBUTE_BASE.to_owned()),
+        ("pkg/use.py", CLASS_OBJECT_ATTRIBUTE_USE.to_owned()),
+    ];
+    let mut s = Session::start_with(
+        "lsp_oracle_class_object_attributes",
+        CLASS_OBJECTS_CONFIG,
+        files,
+        false,
+    );
+    let constructs: &[(&str, &str)] = &[("pkg/use.py", "MUT204")];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(constructs),
+        Step::new(
+            "the attribute is declared `Any`",
+            vec![save(
+                "pkg/base.py",
+                &format!(
+                    "from typing import Any\n\n{}",
+                    CLASS_OBJECT_ATTRIBUTE_BASE.replace(": type[DataType] =", ": Any =")
+                ),
+            )],
+        )
+        .absent(constructs),
+        Step::new(
+            "it is declared a class object again",
+            vec![save("pkg/base.py", CLASS_OBJECT_ATTRIBUTE_BASE)],
+        )
+        .present(constructs),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}

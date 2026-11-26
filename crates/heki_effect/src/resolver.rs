@@ -10344,10 +10344,16 @@ impl<'a> TypeCtx<'a> {
     /// [`Self::method_targets_complete`] on a receiver of one class. A call of a property's value
     /// runs what calling the value runs, whatever class the getter is found in (the getter's run
     /// is a read of its own): it is complete when calling a value of the type the getter
-    /// declares is ([`Self::call_targets_complete`]).
+    /// declares is ([`Self::call_targets_complete`]). A call of an attribute's value
+    /// ([`Self::attribute_value`]) never is: the instance holds its own value of the name, which
+    /// only the declaration ties to a class, and a class the receiver may be (R2) can define a
+    /// method of the name.
     fn targets_complete_on(&self, recv: Recv<'_>, method: &str, callee: &Callee) -> bool {
         if let Some(value) = self.property_value(recv, method) {
             return self.call_targets_complete(value.as_ref(), callee);
+        }
+        if self.attribute_value(recv, method).is_some() {
+            return false;
         }
         match recv {
             Recv::Inst(class) => self
@@ -10499,8 +10505,9 @@ impl<'a> TypeCtx<'a> {
             Some(recv @ (Recv::Inst(class) | Recv::Super(class))) => {
                 let skip_self = matches!(recv, Recv::Super(_));
                 // `obj.prop(...)` runs the getter as a read of `obj.prop` does (where the summary
-                // records it), then calls the value it gives.
-                match self.property_value(recv, method) {
+                // records it), then calls the value it gives; `obj.kind(...)` calls the value
+                // the attribute holds.
+                match self.called_member(recv, method) {
                     Some(value) => self.resolve_call(value.as_ref()),
                     None => self
                         .project
@@ -10706,6 +10713,41 @@ impl<'a> TypeCtx<'a> {
                 .and_then(|t| t.bind_self(Some(&Ty::inst(class))))
                 .and_then(|t| t.val()),
         )
+    }
+
+    /// The value reading `attr` on the instance `recv` (or on `super()`) of a project class gives
+    /// when no class of its MRO defines a method or a property of the name: the attribute's
+    /// declared type ([`ProjectDecls::member_type`]: its annotation along the MRO, or what the
+    /// project stores there), `typing.Self` bound to the instance. Calling it calls that value,
+    /// as a call of a parameter declared alike does: `self.kind(...)` of `self.kind:
+    /// type[Model]` constructs a `Model` (R2: or a subclass).
+    fn attribute_value(&self, recv: Recv<'_>, attr: &str) -> Option<Val> {
+        let (class, skip_self) = match recv {
+            Recv::Inst(class) => (class, false),
+            Recv::Super(class) => (class, true),
+            Recv::Ref(_) | Recv::Class(_) => return None,
+        };
+        if !self.project.is_project_class(class)
+            || self
+                .project
+                .mro_definition(class, attr, skip_self)
+                .is_some()
+        {
+            return None;
+        }
+        self.project
+            .member_type(class, attr, skip_self)
+            .and_then(|t| self.project.declared_ty(&t))
+            .and_then(|t| t.bind_self(Some(&Ty::inst(class))))
+            .and_then(|t| t.val())
+    }
+
+    /// What `recv.attr(...)` calls when `attr` names no method: the value of a property
+    /// ([`Self::property_value`]) or of an attribute ([`Self::attribute_value`]); `None` when
+    /// neither gives one.
+    pub(crate) fn called_member(&self, recv: Recv<'_>, attr: &str) -> Option<Option<Val>> {
+        self.property_value(recv, attr)
+            .or_else(|| self.attribute_value(recv, attr).map(Some))
     }
 
     /// The targets of calling `method` through a class object, from its definitions `callee`:
