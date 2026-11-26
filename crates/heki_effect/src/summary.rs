@@ -669,6 +669,9 @@ struct Owner {
     reach: Reach,
     /// The variable holding the object (`TypedFieldWriteSite::construction`).
     var: Option<VarId>,
+    /// Heki knows nothing of the object's class ([`Extractor::unknown_class`] of `var`): a write
+    /// heki cannot name is unresolved.
+    unknown_class: bool,
 }
 
 /// Which classes a write under a name heki cannot read may add an attribute to
@@ -731,13 +734,27 @@ struct ItemOf {
     holder: Option<VarId>,
 }
 
+/// What a value hands out of the entries of a container a project-class attribute holds
+/// ([`Extractor::entry_views`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryView {
+    /// `values()`, or an iterator over it: each step is an entry.
+    Values,
+    /// `items()`, or an iterator over it: each step is a `(key, entry)` pair.
+    Items,
+    /// One such pair: its second item is the entry.
+    Pair,
+}
+
 /// What every value a function binds to one of its closure cells is, as its alias maps join
 /// them (a read of the cell in a nested scope is a phi of the bindings): the container an
-/// attribute of an object holds, of a project class or of unknown class, or an entry of one. The
-/// object is none of the nested scope's own: no parameter of it, constructed nowhere in it.
+/// attribute of an object holds, of a project class or of unknown class, an entry of one, or the
+/// namespace of an object (`obj.__dict__`). The object is none of the nested scope's own: no
+/// parameter of it, constructed nowhere in it.
 struct CellAlias {
     attr: Option<ObjAttr>,
     item: Option<ItemOf>,
+    dict: Option<Owner>,
     /// The attribute of an object of unknown class whose container (or an entry of it, `true`)
     /// every binding holds ([`Extractor::untyped_container`]).
     untyped: Option<(String, bool)>,
@@ -881,6 +898,9 @@ struct Extractor<'a> {
     dict_of: FxHashMap<VarId, Owner>,
     /// Entries of the containers that project-class attributes hold (`WriteKind::ItemMut`).
     item_alias: FxHashMap<VarId, ItemOf>,
+    /// Views and iterators of the entries of such a container, and the pairs a loop takes from
+    /// its `items()`, each with the entry they hand out ([`EntryView`]).
+    entry_views: FxHashMap<VarId, (ItemOf, EntryView)>,
     /// Parameters (bit `i`: parameter `i < 64`) each variable may be, through copies and phis
     /// (any input): the may-alias counterpart of `param_alias`'s `(i, None)` entries.
     may_params: FxHashMap<VarId, u64>,
@@ -1335,6 +1355,7 @@ impl<'a> Extractor<'a> {
             cell_aliases,
             dict_of: FxHashMap::default(),
             item_alias: FxHashMap::default(),
+            entry_views: FxHashMap::default(),
             may_params: FxHashMap::default(),
             same_objects: FxHashMap::default(),
             retyped: FxHashSet::default(),
@@ -1899,6 +1920,7 @@ impl<'a> Extractor<'a> {
                 self.obj_attr_alias.len(),
                 self.dict_of.len(),
                 self.item_alias.len(),
+                self.entry_views.len(),
             );
             for bb in &self.f.blocks {
                 self.pos = (bb.id, 0);
@@ -1981,32 +2003,41 @@ impl<'a> Extractor<'a> {
                             // is a new container).
                             // (Only below a typed attribute: most functions have none.)
                             if !is_slice
-                                && self.ownership
-                                && !(self.obj_attr_alias.is_empty() && self.item_alias.is_empty())
+                                && self.follows_entries()
                                 && !self.item_alias.contains_key(dst)
                             {
-                                let item = match (
-                                    self.obj_attr_alias.get(obj),
-                                    self.item_alias.get(obj),
-                                ) {
-                                    (_, Some(outer)) => Some(outer.clone()),
-                                    (Some(a), None) => Some(ItemOf {
-                                        classes: a.classes.clone(),
-                                        attr: a.attr.clone(),
-                                        key: self.key_of(key_const.as_deref(), *index),
-                                        obj_params: a.obj_params,
-                                        fresh: a.fresh,
-                                        reach: a.reach,
-                                        holder: a.holder,
-                                    }),
-                                    (None, None) => None,
-                                };
+                                let item = self
+                                    .entry_of(*obj, || self.key_of(key_const.as_deref(), *index))
+                                    .or_else(|| self.pair_entry(*obj, *index));
                                 if let Some(item) = item {
                                     self.item_alias.insert(*dst, item);
                                 }
                             }
                         }
+                        InstKind::MakeIter { dst, iterable, .. } if self.follows_entries() => {
+                            if let Some(view) = self.entry_views.get(iterable).cloned() {
+                                self.entry_views.insert(*dst, view);
+                            }
+                        }
+                        InstKind::IterNext { dst, iter, .. } if self.follows_entries() => {
+                            match self.entry_views.get(iter).cloned() {
+                                Some((item, EntryView::Values)) => {
+                                    self.item_alias.insert(*dst, item);
+                                }
+                                Some((item, EntryView::Items)) => {
+                                    self.entry_views.insert(*dst, (item, EntryView::Pair));
+                                }
+                                Some((_, EntryView::Pair)) | None => {}
+                            }
+                        }
                         _ => {}
+                    }
+                    if let InstKind::MethodCall {
+                        dst, recv, method, ..
+                    } = &inst.kind
+                        && self.follows_entries()
+                    {
+                        self.alias_entry_access(&inst.kind, *dst, *recv, method);
                     }
                     // What a getter returns is the attribute it reads (after the property's own
                     // load above, which it replaces).
@@ -2025,12 +2056,80 @@ impl<'a> Extractor<'a> {
                 self.obj_attr_alias.len(),
                 self.dict_of.len(),
                 self.item_alias.len(),
+                self.entry_views.len(),
             );
             if after == before {
                 break;
             }
         }
         let _ = self.rebound.set(rebound);
+    }
+
+    /// Whether the alias maps follow the entries of the containers project-class attributes
+    /// hold: only with an ownership contract, and only below a typed attribute (most functions
+    /// have none).
+    fn follows_entries(&self) -> bool {
+        self.ownership && !(self.obj_attr_alias.is_empty() && self.item_alias.is_empty())
+    }
+
+    /// The entry under `key` of the container `container` is, or holds as an entry
+    /// ([`ItemOf`]): an entry of an entry is one of the attribute's container, under its first
+    /// key.
+    fn entry_of(&self, container: VarId, key: impl FnOnce() -> Option<String>) -> Option<ItemOf> {
+        if let Some(outer) = self.item_alias.get(&container) {
+            return Some(outer.clone());
+        }
+        let a = self.obj_attr_alias.get(&container)?;
+        Some(ItemOf {
+            classes: a.classes.clone(),
+            attr: a.attr.clone(),
+            key: key(),
+            obj_params: a.obj_params,
+            fresh: a.fresh,
+            reach: a.reach,
+            holder: a.holder,
+        })
+    }
+
+    /// The entry the second item of `pair[index]` is, of a `(key, entry)` pair a loop takes
+    /// from `items()` ([`EntryView::Pair`]); the key is no entry.
+    fn pair_entry(&self, pair: VarId, index: VarId) -> Option<ItemOf> {
+        match self.entry_views.get(&pair)? {
+            (item, EntryView::Pair) if matches!(self.shape.int_const(index), Some(1 | -1)) => {
+                Some(item.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// The aliases of `dst = recv.method(...)` when the call hands out entries of a container
+    /// held in a project-class attribute: the methods outside the project that return an
+    /// element or a view of the elements ([`crate::readonly::ELEMENT_ACCESSORS`], as
+    /// [`Self::element_view`] reads them for parameters): `get` and `__getitem__` its entry
+    /// under the key they are given, `values()` a view of the entries, `items()` one of the
+    /// `(key, entry)` pairs.
+    fn alias_entry_access(&mut self, kind: &InstKind, dst: VarId, recv: VarId, method: &str) {
+        if self.item_alias.contains_key(&dst) || self.entry_views.contains_key(&dst) {
+            return;
+        }
+        let Some((_, ItemStep::Items(index))) = self.element_view(kind) else {
+            return;
+        };
+        let key = || index.and_then(|i| self.key_of(None, i));
+        let Some(item) = self.entry_of(recv, key) else {
+            return;
+        };
+        match method {
+            "values" => {
+                self.entry_views.insert(dst, (item, EntryView::Values));
+            }
+            "items" => {
+                self.entry_views.insert(dst, (item, EntryView::Items));
+            }
+            _ => {
+                self.item_alias.insert(dst, item);
+            }
+        }
     }
 
     /// The parameters whose items or elements the object `var` holds may be, or be below, each
@@ -2208,6 +2307,9 @@ impl<'a> Extractor<'a> {
         {
             self.item_alias.insert(dst, i);
         }
+        if let Some(v) = self.entry_views.get(&src).cloned() {
+            self.entry_views.insert(dst, v);
+        }
     }
 
     /// The alias maps of `dst`, a read of the closure cell `name` of an enclosing function: the
@@ -2227,6 +2329,9 @@ impl<'a> Extractor<'a> {
         }
         if let Some(i) = &alias.item {
             self.item_alias.insert(dst, ItemOf { reach, ..i.clone() });
+        }
+        if let Some(o) = &alias.dict {
+            self.dict_of.insert(dst, Owner { reach, ..o.clone() });
         }
     }
 
@@ -2800,6 +2905,7 @@ impl<'a> Extractor<'a> {
             fresh: self.is_fresh(var),
             reach: self.reach_of(var),
             var: Some(var),
+            unknown_class: self.unknown_class(var),
         }
     }
 
@@ -3913,10 +4019,20 @@ impl<'a> Extractor<'a> {
                 holder: None,
                 ..i
             });
-            if attr.is_some() || item.is_some() || untyped.is_some() {
+            let dict = joined_owner(vars.iter().map(|v| self.dict_of.get(v)));
+            let dict = dict.map(|o| Owner {
+                is_self: false,
+                param: None,
+                may_params: 0,
+                fresh: false,
+                var: None,
+                ..o
+            });
+            if attr.is_some() || item.is_some() || dict.is_some() || untyped.is_some() {
                 let alias = CellAlias {
                     attr,
                     item,
+                    dict,
                     untyped,
                 };
                 out.push(((self.f.id, name.to_owned()), alias));
@@ -5932,8 +6048,8 @@ impl<'a> Extractor<'a> {
         for class in owner.typed_classes {
             self.typed_site(class, attr, (None, EntryKey::Written), kind, span, written);
         }
-        if let Some(var) = owner.var.filter(|v| self.unknown_class(*v)) {
-            self.unresolved(Unresolved::Receiver(attr.to_owned()), Some(var), kind, span);
+        if owner.unknown_class {
+            self.unresolved(Unresolved::Receiver(attr.to_owned()), owner.var, kind, span);
         }
     }
 
@@ -6054,18 +6170,19 @@ impl<'a> Extractor<'a> {
     /// knows nothing of its class. `adds` tells which of the classes it may add an attribute
     /// to.
     fn computed_name(&mut self, owner: &Owner, adds: Adds<'_>, kind: WriteKind, span: Span) {
-        let Some(var) = owner.var else { return };
-        self.change_object(var, span);
+        if let Some(var) = owner.var {
+            self.change_object(var, span);
+        }
         for class in &owner.typed_classes {
             let what = if adds.to(self.cx.project, class) {
                 Unresolved::Name(class.clone())
             } else {
                 Unresolved::Existing(class.clone())
             };
-            self.unresolved(what, Some(var), kind, span);
+            self.unresolved(what, owner.var, kind, span);
         }
-        if owner.typed_classes.is_empty() && self.unknown_class(var) {
-            self.unresolved(Unresolved::Anything, Some(var), kind, span);
+        if owner.typed_classes.is_empty() && owner.unknown_class {
+            self.unresolved(Unresolved::Anything, owner.var, kind, span);
         }
     }
 
@@ -9237,6 +9354,25 @@ fn merge_item_phi(map: &mut FxHashMap<VarId, ItemOf>, dst: VarId, inputs: &[VarI
 }
 
 /// The entry alias of a value that is one of `inputs` ([`merge_item_phi`]).
+/// The object every input is the namespace of (`obj.__dict__`), when all are one of the same
+/// classes; `None` when one is no namespace.
+fn joined_owner<'m>(inputs: impl IntoIterator<Item = Option<&'m Owner>>) -> Option<Owner> {
+    let mut found: Option<Owner> = None;
+    for o in inputs {
+        let o = o?;
+        match &mut found {
+            None => found = Some(o.clone()),
+            Some(f) => {
+                if f.typed_classes != o.typed_classes || f.unknown_class != o.unknown_class {
+                    return None;
+                }
+                f.reach = f.reach.join(o.reach);
+            }
+        }
+    }
+    found
+}
+
 fn joined_item<'m>(inputs: impl IntoIterator<Item = Option<&'m ItemOf>>) -> Option<ItemOf> {
     let mut found: Option<ItemOf> = None;
     for a in inputs {

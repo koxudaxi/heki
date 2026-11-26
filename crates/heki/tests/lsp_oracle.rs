@@ -4413,10 +4413,28 @@ fn steps_captured_parameters() -> Vec<Step> {
 
 /// A helper handed a typed field starts changing it itself, besides through the allowed
 /// callee, while its final summary stays the same: the writes the boundary and the owner
-/// contract count are decided from the helpers' own changes (`EFF201`, `MUT201`).
+/// contract count are decided from the helpers' own changes (`EFF201`, `MUT201`). A change of
+/// an entry of the field's value is one of the field too, unless only the allowed callee makes
+/// it.
 fn steps_indirect_helpers() -> Vec<Step> {
     let changing = RACK_OPS.replace("    empty(xs)\n", "    xs.append(1)\n    empty(xs)\n");
+    let entry = RACK_OPS.replace("    empty(xs)\n", "    xs[0].append(1)\n    empty(xs)\n");
+    let allowed_entry = RACK_OPS.replace("    xs.clear()\n", "    xs[0].clear()\n");
+    let writes = &[
+        ("pkg/rack_view.py", "EFF201"),
+        ("pkg/rack_view.py", "MUT201"),
+    ];
     vec![
+        Step::new(
+            "a helper handed a field changes an entry of it outside the allowed callee",
+            vec![Action::Save("pkg/rack_ops.py", entry)],
+        )
+        .present(writes),
+        Step::new(
+            "only the allowed callee changes an entry of the field",
+            vec![Action::Save("pkg/rack_ops.py", allowed_entry)],
+        )
+        .absent(writes),
         Step::new(
             "a helper handed a field also changes it outside the allowed callee",
             vec![Action::Save("pkg/rack_ops.py", changing)],

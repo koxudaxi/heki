@@ -13391,7 +13391,8 @@ allowed writers:
 - through `setattr(model, "fields", ...)` / `object.__setattr__` (also through a module-level
   name bound once to it: `_set = object.__setattr__`) or `model.__dict__["fields"]` (also
   `vars(model)["fields"]`, `model.__dict__.setdefault("fields", v)`, and a local alias of the
-  namespace),
+  namespace, also one a nested scope reads from it: `namespace = model.__dict__`, then
+  `def fill(): namespace["fields"] = v`),
   also with a string constant for the name (`model.__dict__[FIELDS_KEY]`, imported or not):
   a module-level name declared `Final` or bound once in its module and rebound by no other (a
   module `__getattr__` caching what it serves, `globals()[name] = value`, leaves the names the
@@ -13413,11 +13414,16 @@ allowed writers:
   each pair a generator gives `__dict__.update`
   (`copy.__dict__.update((key, src.__dict__[key]) for key in RECORDS)`);
 - into the entries of the container the attribute holds (`model.meta["kw"][name] = v`,
-  `model.meta["kw"].append(v)`, through a local alias of the entry): an `item_mut` write;
+  `model.meta["kw"].append(v)`, through a local alias of the entry, an entry `get` returns, and
+  the entries a loop takes from `values()` or `items()`: `for names in model.meta.values():
+  names.clear()`): an `item_mut` write;
 - through a helper that mutates the container or object it receives (`helper(model.fields)`),
-  reported once at the outermost call site. A helper that sees the object's class (an annotated
-  parameter, `self` of a method) reports its own write instead, so a write it routes through
-  the allowed writers stays allowed for its callers; a helper handed the value of an attribute
+  reported once at the outermost call site; a helper changing an entry of the container it is
+  handed (`box["k"].add(v)`, also through a local alias of the entry) writes it too, an
+  `indirect_item_mut` write, and so does a method of the container changing an entry of its
+  own `self`, called on the attribute's value (an `item_mut` write at the call). A helper that
+  sees the object's class (an annotated parameter, `self` of a method) reports its own write
+  instead, so a write it routes through the allowed writers stays allowed for its callers; a helper handed the value of an attribute
   (`helper(field.data_type)`) writes that attribute only when it changes the value in place,
   and otherwise writes the value's own attributes. A helper that does not see the class and
   only hands the value on to an allowed writer or an exempt method writes inside the owner.
@@ -13438,7 +13444,8 @@ the writes of that key (`field.extras["init"] = v`, `field.extras[INIT]` with a 
 `field.extras.pop("init")`, `del field.extras["init"]`, `field.extras["init"].append(v)`, and a
 store operation called with the key, `set_extra(field, "init", v)` writing `field.extras[key]`,
 reported at the call), not a write of the whole container (`field.extras = {}`, `field.extras.update(...)`) or with a computed
-key, which are writes of `Class.attr`. When a contract names both a container and one of its
+key, which are writes of `Class.attr`, as are the entries a loop takes from `values()` or
+`items()` and an entry a helper changes. When a contract names both a container and one of its
 entries, a write of the entry is reported once, under the entry.
 
 The written object's class is the one heki infers for it, with annotations as hints: a

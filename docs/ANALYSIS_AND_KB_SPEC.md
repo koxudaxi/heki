@@ -1098,7 +1098,7 @@ declaring the name `global`), and all of them when a star import, `exec`, or `gl
 rebind its names. `TypeCtx::global_literal` and `TypeCtx::global_str` read through it, and so do
 re-exports (`ProjectDecls::canonical_value`, which `literal_constant`, `str_constant`, and
 `small_global` follow). Contract-only facts
-(container entries and `WriteKind::ItemMut`, construction through `ArgOrigin::new_object` and
+(container entries, `WriteKind::ItemMut`, and a helper's `WriteKind::IndirectItemMut`, construction through `ArgOrigin::new_object` and
 `TypedFieldWriteSite::construction`, `unresolved_write_sites`) are computed only when
 `Contracts::ownership()` is true, that is when write-owners, read-owners, effect-boundaries, or
 invalidation contracts are declared. `TypedFieldWriteSite::key` names the entry a write goes to.

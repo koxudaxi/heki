@@ -1975,10 +1975,11 @@ pub(crate) struct IndirectWrite<'a> {
     /// The caller parameters the written object may be, as itself (for [`Through::Field`] the
     /// object holding the attribute: `p` when the argument is `p.attr`).
     pub obj_params: u64,
-    /// [`WriteKind::IndirectHelper`], a write through the callee reached by the `lead` hops; or
-    /// [`WriteKind::ContainerMut`] when the call is made on the field's value and the callee
-    /// changes that receiver in place ([`changes_receiver`]): the caller's own change at the
-    /// call, with no hops, as a builtin container's changing method makes it.
+    /// [`WriteKind::IndirectHelper`] (or [`WriteKind::IndirectItemMut`] when the callee changes
+    /// only entries of the value), a write through the callee reached by the `lead` hops; or
+    /// [`WriteKind::ContainerMut`] (or [`WriteKind::ItemMut`]) when the call is made on the
+    /// field's value and the callee changes that receiver in place: the caller's own change at
+    /// the call, with no hops, as a builtin container's changing method makes it.
     pub kind: WriteKind,
 }
 
@@ -1986,9 +1987,10 @@ impl IndirectWrite<'_> {
     /// The calls down to the write: `lead` for a write through the callee, none for the
     /// caller's own.
     pub fn via_chain(&self, lead: &[Arc<CallHop>]) -> SharedChain {
-        match self.kind {
-            WriteKind::IndirectHelper => lead.to_vec(),
-            _ => Vec::new(),
+        if self.kind.through_helper() {
+            lead.to_vec()
+        } else {
+            Vec::new()
         }
     }
 }
@@ -2005,12 +2007,19 @@ pub(crate) fn changes_receiver(
     bc: &BoundCallee,
     facts: &EffectSummary,
 ) -> bool {
+    facts
+        .mutated_param_paths
+        .get(&0)
+        .is_some_and(|paths| paths.contains(""))
+        && binds_existing_receiver(index, site, bc)
+}
+
+/// Whether `bc`'s callee, called at `site`, is an instance method bound to a receiver that
+/// exists before the call: no constructor, class method, or static method, which bind no such
+/// receiver to their first parameter.
+fn binds_existing_receiver(index: &ProjectIndex, site: &CallSite, bc: &BoundCallee) -> bool {
     site.binds_recv
         && site.constructs.is_none()
-        && facts
-            .mutated_param_paths
-            .get(&0)
-            .is_some_and(|paths| paths.contains(""))
         && index
             .function_decl(&bc.callee)
             .is_some_and(|d| d.is_method && !d.is_staticmethod && !d.is_classmethod)
@@ -2029,35 +2038,49 @@ pub(crate) fn indirect_writes<'a>(
     lead: &[Arc<CallHop>],
 ) -> Vec<IndirectWrite<'a>> {
     let mut out = Vec::new();
+    let ownership = index.contracts.as_deref().is_some_and(|c| c.ownership());
     for (&param, paths) in &facts.mutated_param_paths {
         let Some(origin) = bc.params.get(usize::from(param)).filter(|_| param < 64) else {
             continue;
         };
-        if let Some((class, attr)) = &origin.typed_field
-            && paths.contains("")
-        {
-            // A helper writing the value's own attributes writes those, as `obj.attr.x = v`
-            // does.
+        // A change of the value itself, and one of the entries it holds (`box["k"].add(v)`,
+        // through an alias of the entry or the calls it is handed to; a contract-only fact, as
+        // `WriteKind::ItemMut` is), each its own write: a helper may leave one to an allowed
+        // callee and make the other itself. A helper writing the value's own attributes writes
+        // those, as `obj.attr.x = v` does.
+        if let Some((class, attr)) = &origin.typed_field {
             let obj_params = match &origin.param {
                 Some((p, Some(path))) if path == attr => 1u64 << p,
                 _ => 0,
             };
             // The method's body runs at the call itself (no function iterating its generator
             // in between).
-            let at_call = param == 0 && lead.len() == 1 && changes_receiver(index, site, bc, facts);
-            out.push(IndirectWrite {
-                param,
-                origin,
-                through: Through::Field,
-                class,
-                attr,
-                obj_params,
-                kind: if at_call {
-                    WriteKind::ContainerMut
-                } else {
-                    WriteKind::IndirectHelper
-                },
-            });
+            let at_call = param == 0 && lead.len() == 1 && binds_existing_receiver(index, site, bc);
+            let kinds = [
+                (
+                    paths.contains(""),
+                    WriteKind::ContainerMut,
+                    WriteKind::IndirectHelper,
+                ),
+                (
+                    paths.contains(crate::ELEMENTS_PATH) && ownership,
+                    WriteKind::ItemMut,
+                    WriteKind::IndirectItemMut,
+                ),
+            ];
+            for (changed, own, through_helper) in kinds {
+                if changed {
+                    out.push(IndirectWrite {
+                        param,
+                        origin,
+                        through: Through::Field,
+                        class,
+                        attr,
+                        obj_params,
+                        kind: if at_call { own } else { through_helper },
+                    });
+                }
+            }
         }
         if callee.typed_params >> param & 1 == 0 {
             for class in origin.instance_classes() {
