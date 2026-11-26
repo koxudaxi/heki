@@ -294,7 +294,11 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 - Every name in a contract but `import-boundaries`, whose names are
   [module patterns](#import-boundaries), is a dotted pattern. It matches the full name or any dotted suffix
   (`DataModel.fields` matches `pkg.model.DataModel.fields`, not `pkg.BigModel.fields`), and it
-  may be a glob (`*`, `?`, `[...]`, `{a,b}`).
+  may be a glob (`*`, `?`, `[...]`, `{a,b}`). An alternative may be empty, as in a shell's brace
+  expansion: `pkg.run:outer{,.*}` names `outer` and every scope nested in it (`outer.<locals>.inner`,
+  a class defined in it, their methods), where `pkg.run:outer` names `outer` alone. It works
+  wherever a configured text is a glob, module patterns, `exclude`, and `per-file-ignores`
+  included.
 - A glob's `*` spans dots (`pkg.parser.*` covers the functions of every module under
   `pkg.parser`), except in the last segment of a target, which names the attribute, function,
   method, or class: `pkg.*._*` names the private members of everything in `pkg`, and no function
@@ -716,6 +720,23 @@ allowed-readers = ["pkg.parser.index.*"]
 | unset | set | accesses by the forbidden functions |
 | set | set | accesses by the forbidden functions, except the allowed ones |
 
+- Which keys need a function's nested scopes named:
+  - `scopes` and `allowed-callees` of an effect boundary name a function, class, or module and
+    everything nested in it: `pkg.run:outer` covers `outer.<locals>.inner`, and `outer{,.*}` adds
+    nothing.
+  - `allowed-writers`, `allowed-readers`, `allowed-callers`, `forbidden-*`, `exempt-methods`, and
+    the `invalidation` functions name the functions they match and no others. With `attribution =
+    "call-graph"` (the default) a lambda, a comprehension, a generator expression, and a nested
+    `def` that only runs inside the function are judged where the function is, so `allowed-*`
+    naming `outer` covers them; a nested `def` that is handed on (returned, stored, passed) is a
+    function of its own and needs its own entry, and `forbidden-*` names only the functions it
+    matches. With `attribution = "lexical"` a lambda, comprehension, or generator expression
+    still belongs to its function, and every nested `def` is judged by itself.
+  - `targets` name the function, method, or class they match; a nested function is a target only
+    where an entry names it.
+
+  So `outer{,.*}` is needed in `allowed-*` and `forbidden-*` only for nested `def`s that
+  `attribution` does not attribute to `outer`, and in `targets` for nested definitions.
 - An access counts as one by a forbidden function when the function that is reported, a private
   helper it hands the access through, or the function making the access is forbidden (with
   `attribution = "lexical"`, the function holding the access).

@@ -1,6 +1,7 @@
 //! Environment resolution, `RuntimeProfile`, and Ruff/`t-linter`-compatible `heki` configuration.
 
 mod declared;
+pub mod glob;
 pub mod problem;
 mod schema;
 mod stdlib;
