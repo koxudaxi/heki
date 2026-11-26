@@ -28,7 +28,7 @@ use crate::names_module_literally;
 use crate::selection::RuleSelection;
 use heki_diagnostics::Diagnostic;
 use heki_effect::{FuncKey, ProjectDecls, ProjectIndex};
-use heki_env::{EffectBoundaryRule, HekiConfig, ReadOwnerRule, WriteOwnerRule};
+use heki_env::{EffectBoundaryRule, HekiConfig, ReadOwnerRule, WriteOwnerRule, with_defaults};
 use rustc_hash::{FxHashMap, FxHashSet};
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -387,9 +387,18 @@ impl Entry {
     /// Declared after the contracts `cfg` has of its kind.
     fn declare_in(&self, cfg: &mut HekiConfig) {
         match self {
-            Self::Write(e) => cfg.write_owners.push(e.clone()),
-            Self::Read(e) => cfg.read_owners.push(e.clone()),
-            Self::Boundary(e) => cfg.effect_boundaries.push(e.clone()),
+            Self::Write(e) => {
+                let e = with_defaults(e, cfg.write_owners_defaults.as_ref());
+                cfg.write_owners.push(e);
+            }
+            Self::Read(e) => {
+                let e = with_defaults(e, cfg.read_owners_defaults.as_ref());
+                cfg.read_owners.push(e);
+            }
+            Self::Boundary(e) => {
+                let e = with_defaults(e, cfg.effect_boundaries_defaults.as_ref());
+                cfg.effect_boundaries.push(e);
+            }
         }
     }
 

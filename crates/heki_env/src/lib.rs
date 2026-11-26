@@ -1,11 +1,13 @@
 //! Environment resolution, `RuntimeProfile`, and Ruff/`t-linter`-compatible `heki` configuration.
 
 mod declared;
+mod defaults;
 pub mod problem;
 mod schema;
 mod stdlib;
 
 pub use declared::{Declared, EntryPoint, normalize_distribution, requirement_name};
+pub use defaults::with_defaults;
 pub use problem::{Docs, Explain, Problem, Setting};
 pub use stdlib::is_stdlib_module;
 
@@ -486,6 +488,16 @@ pub struct HekiConfig {
     pub invalidation: Vec<InvalidationRule>,
     pub effect_boundaries: Vec<EffectBoundaryRule>,
     pub import_boundaries: Vec<ImportBoundaryRule>,
+    /// The `<contract>-defaults` tables as written. The loaders have folded each into the tables
+    /// of its contract, so the contracts above hold the effective values. A table a tool adds
+    /// to the configuration afterwards takes them through [`with_defaults`].
+    pub write_owners_defaults: Option<WriteOwnerRule>,
+    pub read_owners_defaults: Option<ReadOwnerRule>,
+    pub call_owners_defaults: Option<CallOwnerRule>,
+    pub readonly_returns_defaults: Option<ReadOnlyReturnRule>,
+    pub invalidation_defaults: Option<InvalidationRule>,
+    pub effect_boundaries_defaults: Option<EffectBoundaryRule>,
+    pub import_boundaries_defaults: Option<ImportBoundaryRule>,
     pub imports: ImportsConfig,
     pub ecosystem: Vec<EcosystemOverride>,
     /// The version `project.requires-python` of the project's `pyproject.toml` selects
@@ -708,7 +720,29 @@ impl ConfigLayout {
     /// A `pyproject.toml` holds its own project metadata. Any other file takes it from the
     /// project's `pyproject.toml` at `root`, so the same file gives the same configuration
     /// wherever it sits.
+    ///
+    /// A `<contract>-defaults` table gives the keys its contract's tables leave out: the
+    /// contracts of the configuration returned are the expanded tables, and its errors name the
+    /// file as written.
     pub fn parse(self, path: &Path, text: &str, root: &Path) -> Result<HekiConfig, ConfigError> {
+        let written = self.read(path, text, root)?;
+        if !written.declares_defaults() {
+            return Ok(written);
+        }
+        Ok(HekiConfig {
+            write_owners_defaults: written.write_owners_defaults,
+            read_owners_defaults: written.read_owners_defaults,
+            call_owners_defaults: written.call_owners_defaults,
+            readonly_returns_defaults: written.readonly_returns_defaults,
+            invalidation_defaults: written.invalidation_defaults,
+            effect_boundaries_defaults: written.effect_boundaries_defaults,
+            import_boundaries_defaults: written.import_boundaries_defaults,
+            ..self.read(path, &defaults::expand(self, text), root)?
+        })
+    }
+
+    /// The configuration of `text` as written: the defaults tables are read, not yet applied.
+    fn read(self, path: &Path, text: &str, root: &Path) -> Result<HekiConfig, ConfigError> {
         let doc = toml_edit::Document::parse(text).map_err(|e| ConfigError::Syntax {
             path: path.to_path_buf(),
             position: e.span().map(|s| problem::line_column(text, s.start)),
@@ -1044,6 +1078,13 @@ impl HekiConfig {
         "invalidation",
         "effect-boundaries",
         "import-boundaries",
+        "write-owners-defaults",
+        "read-owners-defaults",
+        "call-owners-defaults",
+        "readonly-returns-defaults",
+        "invalidation-defaults",
+        "effect-boundaries-defaults",
+        "import-boundaries-defaults",
         "imports",
         "ecosystem",
     ];
@@ -1058,6 +1099,17 @@ impl HekiConfig {
         "invalidation",
         "import-boundaries",
     ];
+
+    /// Whether a `<contract>-defaults` table is written.
+    fn declares_defaults(&self) -> bool {
+        self.write_owners_defaults.is_some()
+            || self.read_owners_defaults.is_some()
+            || self.call_owners_defaults.is_some()
+            || self.readonly_returns_defaults.is_some()
+            || self.invalidation_defaults.is_some()
+            || self.effect_boundaries_defaults.is_some()
+            || self.import_boundaries_defaults.is_some()
+    }
 
     /// Whether a contract is declared: a table of one of [`Self::CONTRACT_KEYS`].
     pub fn declares_contracts(&self) -> bool {
@@ -1497,6 +1549,13 @@ writes-in-order = { arg = 0, param = "data", sorted-by = "sort_keys" }
             invalidation: Vec::new(),
             effect_boundaries: Vec::new(),
             import_boundaries: Vec::new(),
+            write_owners_defaults: Some(WriteOwnerRule::default()),
+            read_owners_defaults: Some(ReadOwnerRule::default()),
+            call_owners_defaults: Some(CallOwnerRule::default()),
+            readonly_returns_defaults: Some(ReadOnlyReturnRule::default()),
+            invalidation_defaults: Some(InvalidationRule::default()),
+            effect_boundaries_defaults: Some(EffectBoundaryRule::default()),
+            import_boundaries_defaults: Some(ImportBoundaryRule::default()),
             imports: ImportsConfig::default(),
             ecosystem: Vec::new(),
             requires_python: None,
