@@ -72,8 +72,9 @@ object of a class a target covers (`field.__dict__["_cache"] = v`, `vars(field).
 contract or in any other `write-owners` contract (`writes `pkg.model.Field._cache` (as a `__dict__` item), a
 `__dict__` key no target names`), so a new key needs a target first. A target names the keys its
 attribute pattern matches, and an entry target names its container; a key another contract names is
-judged by that contract alone, and a contract allowing every writer (`allowed-writers = ["*"]`)
-lists keys any function may write. A computed key, a plain attribute store (`field._cache = v`,
+judged by that contract alone, a contract with only `forbidden-writers` allows no writer and names
+no key, and a contract allowing every writer (`allowed-writers = ["*"]`) lists keys any function
+may write. A computed key, a plain attribute store (`field._cache = v`,
 `setattr`), and a write in a helper that does not see the object's class are not such writes. A
 target can also name one entry of the container an attribute holds, `Class.attr["key"]`: it matches
 the writes of that key (`field.extras["init"] = v`, `field.extras[INIT]` with a string constant,

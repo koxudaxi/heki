@@ -4708,3 +4708,103 @@ allowed-callees = ["pkg.model.trusted"]
         ["pkg.model.Field.extras[\"init\"]"]
     );
 }
+
+const FORBIDDEN_ONLY_MODEL: &str = "\
+class Field:
+    def __init__(self) -> None:
+        self.cache: dict[str, int] = {}
+";
+
+const FORBIDDEN_ONLY_WRITES: &str = "\
+from pkg.model import Field
+
+
+def write_keys(field: Field) -> None:
+    field.__dict__[\"_new\"] = 1
+    field.__dict__[\"new\"] = 1
+    field.__dict__[\"exact_private\"] = 1
+    field.__dict__[\"listed_key\"] = 1
+";
+
+fn forbidden_only_project(name: &str, forbidding: &str) -> Project {
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n\
+             [[tool.heki.write-owners]]\nname = \"field-cache\"\n\
+             targets = [\"pkg.model.Field.cache\"]\nallowed-writers = [\"pkg.store:*\"]\n\
+             unlisted-dict-keys = \"report\"\n\n\
+             [[tool.heki.write-owners]]\nname = \"listed\"\n\
+             targets = [\"pkg.model.Field.listed_*\"]\nallowed-writers = [\"pkg.store:*\"]\n\n\
+             {forbidding}"
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", FORBIDDEN_ONLY_MODEL)
+    .write("pkg/other.py", FORBIDDEN_ONLY_WRITES)
+    .write(
+        "pkg/store.py",
+        "from pkg.model import Field\n\n\ndef remember(field: Field) -> None:\n    field.__dict__[\"cache\"] = {}\n",
+    );
+    p
+}
+
+/// A contract that only forbids writers (`forbidden-writers` without `allowed-writers`) judges no
+/// other writer, so its targets, a glob or an exact key, do not list the `__dict__` keys they
+/// match for another contract with `unlisted-dict-keys = "report"`. A contract allowing writers
+/// still lists the keys its glob matches.
+#[test]
+fn a_target_of_a_forbid_only_contract_lists_no_dict_key() {
+    let u = "pkg/other.py";
+    let forbid = |targets: &str| {
+        format!(
+            "[[tool.heki.write-owners]]\nname = \"host-private\"\n\
+             targets = [{targets}]\nforbidden-writers = [\"pkg.concern:*\"]\n"
+        )
+    };
+    let p = forbidden_only_project("forbid_only_glob", &forbid("\"pkg.model.Field._[!_]*\""));
+    let diags = diagnostics(&p, &[]);
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(u, 5, "MUT201", "write_keys", "Field._new"),
+            d(u, 6, "MUT201", "write_keys", "Field.new"),
+            d(u, 7, "MUT201", "write_keys", "Field.exact_private"),
+            d(u, 8, "MUT201", "write_keys", "pkg.model.Field.listed_*"),
+        ]
+    );
+    assert_eq!(
+        message_at(&diags, u, 5),
+        "`write_keys` writes `pkg.model.Field._new` (as a `__dict__` item), a `__dict__` key no target names, outside the write owners of `field-cache`"
+    );
+    // The same project without the forbidding contract reports the same keys.
+    let p = forbidden_only_project("forbid_only_none", "");
+    assert_eq!(found(&diagnostics(&p, &[])), found(&diags));
+    // An exact target of a forbid-only contract names nothing either.
+    let p = forbidden_only_project(
+        "forbid_only_exact",
+        &forbid("\"pkg.model.Field.exact_private\""),
+    );
+    assert_eq!(found(&diagnostics(&p, &[])), found(&diags));
+    // A contract with allowed writers lists its exact key, and a glob of it its keys.
+    let allowing = "[[tool.heki.write-owners]]\nname = \"private\"\n\
+                    targets = [\"pkg.model.Field._[!_]*\", \"pkg.model.Field.exact_private\"]\n\
+                    allowed-writers = [\"pkg.store:*\"]\n";
+    let p = forbidden_only_project("forbid_only_allowing", allowing);
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![
+            d(u, 5, "MUT201", "write_keys", "pkg.model.Field._[!_]*"),
+            d(u, 6, "MUT201", "write_keys", "Field.new"),
+            d(
+                u,
+                7,
+                "MUT201",
+                "write_keys",
+                "pkg.model.Field.exact_private"
+            ),
+            d(u, 8, "MUT201", "write_keys", "pkg.model.Field.listed_*"),
+        ]
+    );
+}
