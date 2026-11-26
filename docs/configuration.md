@@ -528,6 +528,7 @@ The call side of `write-owners`.
 | `references` | `"ignore"` | `"ignore"`, `"calls"`, `"calls-and-bases"`, or `"reads"`: whether a reference handing a target on to be called later counts as a call of it (`[decide]`, `return decide`, `partial(decide)`, `field(default_factory=Rule)`, `obj.callback = self.decide`), with `"calls-and-bases"` a class statement naming a class target among its bases too (`class Derived(Base)`), and with `"reads"` every other use of a target's value as well (`Keys.of(...)`, `Code.OK`, `isinstance(x, Keys)`, `case Keys():`, `tuple[Keys, int]`). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 | `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
+| `targets-call-each-other` | `"allow"` | `"allow"` or `"report"`: whether a target may call the other targets of the contract. `"report"` judges each target like the one target of a contract with the same keys, so one contract listing independent targets reports what one contract per target reports for every call whose candidates all belong to one target. A call that may reach several targets (`obj.reset()` on `obj: Base` with `A.reset` and `B.reset` listed) is judged once for each target it may reach, with only that target guarded, and is reported when any of those judgements reports it; no contract of one target judges that call whole. |
 | `allowed-protocols` | `[]` | As in `write-owners`, for a read or a call through the protocol. |
 | `protocol-subclasses` | `true` | As in `write-owners`. |
 
@@ -537,7 +538,11 @@ The call side of `write-owners`.
 - Bound-method aliases (`replace = dt.replace_reference`) and `getattr(dt, "replace_reference")`
   with a constant name are followed.
 - The targets of a contract may call each other: a call of the guarded operation is checked where
-  it is made, so what the operation does inside is part of it.
+  it is made, so what the operation does inside is part of it. That suits a contract whose targets
+  make up one operation. For a contract listing independent targets, set `targets-call-each-other =
+  "report"`: a target is then allowed to call itself only, and every call of another target of the
+  contract is judged like a call of the one-target contract (a call of `pkg.core.a` by the target
+  `pkg.core.c` is reported unless `allowed-callers` names `c`).
 - With `references = "calls"`, a target handed on is reported where it is named ("`f` hands on
   `pkg.core.decide`"; a name an import or the module body binds, read in the scope binding it, at
   the statement handing it on; a name a class body, a function, a lambda, or a comprehension
