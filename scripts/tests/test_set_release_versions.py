@@ -65,20 +65,72 @@ def test_every_version_a_build_reads_is_written(checkout: Path, capsys) -> None:
     assert {name: text for name, text in after.items() if name.startswith("crates/")} == {
         name: text for name, text in before.items() if name.startswith("crates/")
     }
-    written = "Cargo.toml, pyproject.toml, Cargo.lock, uv.lock, README.md, adoption.md"
+    written = "Cargo.toml, pyproject.toml, Cargo.lock, uv.lock, README.md, adoption.md, index.md"
     assert capsys.readouterr().out == f"9.8.7: wrote {written}.\n"
 
 
 def test_the_precommit_examples_pin_the_release_tag(checkout: Path) -> None:
-    expected = {name: [CHECKOUT_VERSION] for name in release.PRECOMMIT_DOCS}
-    assert release.precommit_revs(checkout) == expected
+    pinned = release.precommit_revs(checkout)
+    assert set(pinned) == set(release.PRECOMMIT_DOCS)
+    assert all(pinned.values())
+    assert {v for revs in pinned.values() for v in revs} == {CHECKOUT_VERSION}
     release.main(["0.1.2", "--root", str(checkout)])
-    assert release.precommit_revs(checkout) == {name: ["0.1.2"] for name in release.PRECOMMIT_DOCS}
+    assert release.precommit_revs(checkout) == {
+        name: ["0.1.2"] * len(revs) for name, revs in pinned.items()
+    }
 
 
 def test_the_repository_pins_its_own_release_in_the_precommit_examples() -> None:
     version = release.manifest_versions(ROOT)[release.WORKSPACE_VERSION]
-    assert release.precommit_revs(ROOT) == {name: [version] for name in release.PRECOMMIT_DOCS}
+    assert {v for revs in release.precommit_revs(ROOT).values() for v in revs} == {version}
+
+
+def test_the_commands_pin_the_release(checkout: Path) -> None:
+    pinned = release.package_pins(checkout)
+    assert set(pinned) == set(release.PACKAGE_PIN_DOCS)
+    assert all(pinned.values())
+    assert {v for pins in pinned.values() for v in pins} == {CHECKOUT_VERSION}
+    release.main(["0.2.0-rc.1", "--root", str(checkout)])
+    assert release.package_pins(checkout) == {
+        name: ["0.2.0-rc.1"] * len(pins) for name, pins in pinned.items()
+    }
+
+
+def test_the_repository_pins_its_own_release_in_the_commands() -> None:
+    version = release.manifest_versions(ROOT)[release.WORKSPACE_VERSION]
+    assert {v for pins in release.package_pins(ROOT).values() for v in pins} == {version}
+
+
+@pytest.mark.parametrize(
+    ("text", "pins"),
+    [
+        ("$ uvx heki==0.6.0 check", ["0.6.0"]),
+        ("additional_dependencies: [heki==0.2.0-rc.1]", ["0.2.0-rc.1"]),
+        ("pin it (`heki==0.6.0`).", ["0.6.0"]),
+        ("ends a sentence: heki==0.6.0.", ["0.6.0"]),
+        ("pyheki==1.0 and my.heki==1.0 and heki-pre-commit==1.0", []),
+    ],
+)
+def test_a_pin_is_heki_and_a_version(text: str, pins: list[str]) -> None:
+    assert [m["value"] for m in release.PACKAGE_PIN.finditer(text)] == pins
+
+
+def test_another_hooks_rev_stays(checkout: Path) -> None:
+    other = "  - repo: https://github.com/astral-sh/ruff-pre-commit\n    rev: v0.8.0\n"
+    readme = checkout / "README.md"
+    readme.write_text(readme.read_text(encoding="utf-8") + other, encoding="utf-8")
+    release.main(["0.1.2", "--root", str(checkout)])
+    assert readme.read_text(encoding="utf-8").endswith(other)
+    assert release.precommit_revs(checkout)["README.md"] == ["0.1.2"]
+
+
+def test_a_page_without_its_pin_fails_before_anything_is_written(checkout: Path) -> None:
+    index = checkout / "docs" / "index.md"
+    index.write_text(index.read_text(encoding="utf-8").replace("heki==", "heki "), encoding="utf-8")
+    before = texts(checkout)
+    with pytest.raises(SystemExit, match=re.escape("docs/index.md `heki==` pin: expected a line")):
+        release.main(["9.8.7", "--root", str(checkout)])
+    assert texts(checkout) == before
 
 
 def test_a_pre_release_version_is_written(checkout: Path) -> None:
@@ -285,7 +337,7 @@ def edit(root: Path, name: str, old: str, new: str) -> None:
             "README.md",
             "    rev: v{v}",
             "    rev:  v{v}",
-            "README.md pre-commit example: expected one line matching",
+            "README.md pre-commit example: expected a line matching",
         ),
         (
             "crates/heki_kb/Cargo.toml",

@@ -18,7 +18,7 @@ use heki_effect::{
     func_qualname, is_stub,
 };
 use heki_ir::IrFunction;
-use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
+use heki_kb::{EffectiveEcosystemKb, EffectiveSoundnessKb, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
 use std::cell::RefCell;
@@ -345,6 +345,49 @@ pub struct InspectReport {
     pub callers: CallersInfo,
     pub reports: Vec<Report>,
     pub contracts: Vec<ContractRole>,
+    pub registered: Vec<RegisteredContext>,
+}
+
+/// A registration that may reach the function with one of its parameters bound to the
+/// registering object, under the condition the name a lookup selects the function by meets
+/// (`heki_effect::dispatch`). Advisory: no other fact, report, or fix assumes it.
+#[derive(Debug, Clone, Serialize)]
+pub struct RegisteredContext {
+    pub param: String,
+    pub index: u8,
+    /// The registering object's class, the parameter's type under the context.
+    #[serde(rename = "type")]
+    pub class: String,
+    /// The factory call of the registration, in the function registering.
+    pub registration: Site,
+    pub condition: Condition,
+    /// The call of the registered slot of the table's row.
+    pub called_at: Site,
+    /// The lookup by name, and the call of what it finds.
+    pub selected_at: Site,
+    pub invoked_at: Site,
+    /// What the function changes of the parameter under the context: its `changes.params`
+    /// record with the parameter of that type (empty: no change).
+    pub changes: Vec<ParamChangeInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Site {
+    pub function: String,
+    pub path: String,
+    pub line: u32,
+    pub column: u32,
+}
+
+/// The name looked up equals the function's name.
+#[derive(Debug, Clone, Serialize)]
+pub struct Condition {
+    /// The expression the name is computed from, in the values the row's call passes, or the
+    /// constant.
+    pub selector: String,
+    pub equals: String,
+    /// The name is not a constant: other names may select other functions, or none.
+    pub others_open: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -584,6 +627,8 @@ pub struct InspectInputs<'a> {
     pub index: &'a ProjectIndex,
     pub decls: &'a ProjectDecls,
     pub kb: &'a EffectiveEcosystemKb,
+    /// Layer 1, for summarizing a module again under a registration context.
+    pub soundness: Option<&'a EffectiveSoundnessKb>,
     /// The project root, absolute.
     pub root: &'a Path,
     /// Whether an ownership contract is declared (`retains.kept`, `returns.new_object`).
@@ -648,6 +693,8 @@ struct Builder<'a, 'i> {
     units: FxHashMap<&'a Path, &'a ModuleUnit<'i>>,
     /// The positions in [`InspectInputs::reports`] of the diagnostics of each file.
     reports_by_file: FxHashMap<&'a Path, Vec<usize>>,
+    /// The registration contexts of the project, joined on the first report that asks.
+    contexts: std::cell::OnceCell<Vec<heki_effect::dispatch::Context>>,
 }
 
 /// How many project functions each call site of one file may run, by caller and position.
@@ -790,6 +837,7 @@ impl<'a, 'i> Inspector<'a, 'i> {
                 .map(|u| (u.input.path.as_path(), u))
                 .collect(),
             reports_by_file,
+            contexts: std::cell::OnceCell::new(),
         })
     }
 
@@ -842,6 +890,7 @@ impl<'a, 'i> Inspector<'a, 'i> {
         let shown: Vec<&Diagnostic> = reports.iter().map(|r| &r.diagnostic).collect();
         let contracts = inputs.contracts.of(key, &shown);
         let purity = purity(b, key, summary, &effects, &changes, function.stub);
+        let registered = self.registered(key, &params);
         InspectReport {
             version: INSPECT_VERSION,
             heki: env!("CARGO_PKG_VERSION"),
@@ -860,7 +909,104 @@ impl<'a, 'i> Inspector<'a, 'i> {
             callers: callers.info,
             reports,
             contracts,
+            registered,
         }
+    }
+
+    /// The registration contexts reaching `key`, each with the change record of its parameter
+    /// under the context (one analysis per parameter and class).
+    fn registered(&self, key: &FuncKey, params: &[String]) -> Vec<RegisteredContext> {
+        let b = &self.0;
+        let (index, decls) = (b.inputs.index, b.inputs.decls);
+        let all = b
+            .contexts
+            .get_or_init(|| heki_effect::dispatch::contexts(index, decls));
+        let mut under: Vec<((u8, &str), Vec<ParamChangeInfo>)> = Vec::new();
+        let mut out = Vec::new();
+        for c in all.iter().filter(|c| c.handler == *key) {
+            let premise = (c.param, c.class.as_str());
+            let changes = match under.iter().find(|(p, _)| *p == premise) {
+                Some((_, changes)) => changes.clone(),
+                None => {
+                    let changes = self.changes_under(key, c, params);
+                    under.push((premise, changes.clone()));
+                    changes
+                }
+            };
+            let site = |function: &FuncKey, span: Span| {
+                let at = b.location(
+                    index.file_of(function).expect("a summarized function"),
+                    span,
+                );
+                Site {
+                    function: function.fqn(),
+                    path: at.path,
+                    line: at.line,
+                    column: at.column,
+                }
+            };
+            out.push(RegisteredContext {
+                param: param_name(c.param, params),
+                index: c.param,
+                class: c.class.clone(),
+                registration: site(&c.registered_in, c.registration),
+                condition: Condition {
+                    selector: c.selector.clone(),
+                    equals: c.equals.clone(),
+                    others_open: c.others_open,
+                },
+                called_at: site(&c.called_in, c.called_at),
+                selected_at: site(&c.selected_in, c.selected_at),
+                invoked_at: site(&c.invoked_in, c.invoked_at),
+                changes,
+            });
+        }
+        out
+    }
+
+    /// The `changes.params` record of the context's parameter in an index where it has the
+    /// context's type.
+    fn changes_under(
+        &self,
+        key: &FuncKey,
+        c: &heki_effect::dispatch::Context,
+        params: &[String],
+    ) -> Vec<ParamChangeInfo> {
+        let inputs = self.0.inputs;
+        let path = inputs.index.file_of(key).expect("a summarized function");
+        let unit = self
+            .0
+            .unit(path)
+            .expect("the file of an inspected function");
+        let scratch = (inputs.index).with_param_type(
+            &unit.input,
+            inputs.kb,
+            inputs.soundness,
+            key,
+            c.param,
+            &c.class,
+        );
+        let scratch_inputs = InspectInputs {
+            index: &scratch,
+            decls: inputs.decls,
+            kb: inputs.kb,
+            soundness: inputs.soundness,
+            root: inputs.root,
+            ownership: inputs.ownership,
+            units: inputs.units,
+            rel_of: inputs.rel_of,
+            text_of: inputs.text_of,
+            reports: Vec::new(),
+            contracts: inputs.contracts,
+            errors: Vec::new(),
+        };
+        let under = Inspector::new(&scratch_inputs);
+        let summary = scratch.summary(key).expect("a summarized function");
+        let local = scratch.local_summary(key).expect("a summarized function");
+        let changes = changes(&under.0, key, summary, local, params);
+        (changes.params.into_iter())
+            .filter(|p| p.index == c.param)
+            .collect()
     }
 }
 

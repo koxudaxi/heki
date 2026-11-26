@@ -77,7 +77,8 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
           DATE: ${{ steps.release.outputs.date }}
         run: uv run --no-project --python 3.14 scripts/set_release_versions.py "$VERSION" --changelog "$DATE"
-      # The pre-commit pins the release writes into the pages are also in the combined documentation.
+      # The pins the release writes into the pages (pre-commit `rev:`, `heki==`) are also in the
+      # combined documentation.
       - name: Rebuild the combined documentation
         run: uv run --no-project --python 3.14 scripts/build_llms_txt.py
       - name: Create the patch

@@ -1072,12 +1072,17 @@ impl<'e, 'a> Engine<'e, 'a> {
         let is_static = f.has_decorator(&["staticmethod"]);
         let is_classmethod = f.has_decorator(&["classmethod"]);
         for (i, p) in f.params.iter().enumerate() {
+            // A registration context types the parameter it binds the registering object to as
+            // that object's class, whatever the annotation says. It binds a named parameter
+            // only: `*args` and `**kwargs` keep their annotations.
+            let seeded = (cx.seeded_param(f, i)).filter(|_| !p.is_vararg && !p.is_kwarg);
             let fact = match &self.owner {
                 Some(owner) if i == 0 && !is_static => Fact::Known(if is_classmethod {
                     Ty::Class(owner.clone())
                 } else {
                     Ty::inst(owner.as_str())
                 }),
+                _ if seeded.is_some() => seeded.map_or(Fact::Unknown, Fact::Known),
                 _ => match p
                     .annotation
                     .as_deref()
