@@ -651,3 +651,46 @@ def add(repo: Repo, k: str, flag: bool) -> list[str]:
         vec![("add".to_owned(), "heuristic".to_owned(), open)]
     );
 }
+
+/// A protocol call with two project implementations, one of them cached, has two callees, so no
+/// one function is its result; its targets are still not every implementation, so "Every
+/// implementation" is open next to "Same object".
+#[test]
+fn mut114_a_protocol_call_with_two_implementations_leaves_every_implementation_open() {
+    let p = Project::new("mut114_incomplete_two_callees");
+    p.write(
+        "cases.py",
+        r#"import functools
+from typing import Protocol
+
+
+class Repo(Protocol):
+    def items(self, k: str) -> list[str]: ...
+
+
+class CachedRepo:
+    @functools.lru_cache(maxsize=None)
+    def items(self, k: str) -> list[str]:
+        return [k, "id"]
+
+
+class PlainRepo:
+    def items(self, k: str) -> list[str]:
+        return [k]
+
+
+def add(repo: Repo, k: str) -> list[str]:
+    xs = repo.items(k)
+    xs.append("x")
+    return xs
+"#,
+    );
+    let open = vec![
+        "Same object: not-the-result-on-every-path".to_owned(),
+        "Every implementation: incomplete-targets".to_owned(),
+    ];
+    assert_eq!(
+        open_premise_reports(&p),
+        vec![("add".to_owned(), "heuristic".to_owned(), open)]
+    );
+}

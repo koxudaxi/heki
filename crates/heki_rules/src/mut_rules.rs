@@ -3659,7 +3659,7 @@ enum MustResult<'k> {
     Unset,
     /// On every path, the result of a direct call resolved to this one function; `complete`
     /// when each such call has as its targets every implementation it can run
-    /// ([`Mut202Fn::single_callee`]).
+    /// ([`Mut202Fn::call_result`]).
     Of { callee: &'k FuncKey, complete: bool },
     /// Something else on some path; `complete` is false when a path is the result of a call that
     /// does not have every implementation as its targets, so a join with another value keeps
@@ -3770,10 +3770,7 @@ impl<'a> Mut202Fn<'a> {
                     };
                     let value = match &inst.kind {
                         InstKind::Copy { .. } => MustResult::Unset,
-                        _ => self.single_callee(inst).map_or(
-                            MustResult::OTHER,
-                            |(callee, complete)| MustResult::Of { callee, complete },
-                        ),
+                        _ => self.call_result(inst),
                     };
                     state.insert(dst, value);
                 }
@@ -3809,20 +3806,28 @@ impl<'a> Mut202Fn<'a> {
         })
     }
 
-    /// The one project function the call instruction `inst` resolves to, and whether that is
-    /// every implementation the call can run ([`TypeCtx::inst_targets_complete`]: no protocol
-    /// receiver, base heki knows nothing of, unresolved member of a union, or name the project
-    /// binds to another object, R1, R2, R5).
-    fn single_callee(&self, inst: &'a Inst) -> Option<(&'a FuncKey, bool)> {
+    /// What the call instruction `inst` is the result of: the one project function it resolves
+    /// to, or other when it resolves to several or to one with no summary. Whether the targets
+    /// are every implementation the call can run is decided once for every project call
+    /// ([`TypeCtx::inst_targets_complete`]: no protocol receiver, base heki knows nothing of,
+    /// unresolved member of a union, or name the project binds to another object, R1, R2, R5).
+    /// An instruction that is no call with a project callee gives nothing open.
+    fn call_result(&self, inst: &'a Inst) -> MustResult<'a> {
         let shape = self.shape();
-        let call = site_call(&|v| shape.inst(v), self.sites, inst, false)?;
-        let callees = call.site?.project_callees();
-        let bc = callees.first().filter(|_| callees.len() == 1)?;
-        self.cx.index.summary(&bc.callee)?;
-        let complete = self
-            .tcx
-            .inst_targets_complete(&inst.kind, |v| self.types.get(&v));
-        Some((&bc.callee, complete))
+        let callees = site_call(&|v| shape.inst(v), self.sites, inst, false)
+            .and_then(|call| call.site)
+            .map_or(&[][..], |site| site.project_callees());
+        let complete = callees.is_empty()
+            || self
+                .tcx
+                .inst_targets_complete(&inst.kind, |v| self.types.get(&v));
+        match callees {
+            [bc] if self.cx.index.summary(&bc.callee).is_some() => MustResult::Of {
+                callee: &bc.callee,
+                complete,
+            },
+            _ => MustResult::Other { complete },
+        }
     }
 
     /// `MUT114`'s exact claim at `inst`, which changes `changed`, a value from the cached
