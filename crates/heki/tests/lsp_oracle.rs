@@ -4723,11 +4723,18 @@ fn steps_captured_parameters() -> Vec<Step> {
 /// callee, while its final summary stays the same: the writes the boundary and the owner
 /// contract count are decided from the helpers' own changes (`EFF201`, `MUT201`). A change of
 /// an entry of the field's value is one of the field too, unless only the allowed callee makes
-/// it.
+/// it; an attribute write on an entry is one only while the helper does not know the entry's
+/// class, which an annotation alone changes (the helper changes the same paths of its
+/// parameter either way).
 fn steps_indirect_helpers() -> Vec<Step> {
     let changing = RACK_OPS.replace("    empty(xs)\n", "    xs.append(1)\n    empty(xs)\n");
     let entry = RACK_OPS.replace("    empty(xs)\n", "    xs[0].append(1)\n    empty(xs)\n");
     let allowed_entry = RACK_OPS.replace("    xs.clear()\n", "    xs[0].clear()\n");
+    let untyped_attr = RACK_OPS.replace("    empty(xs)\n", "    xs[0].label = 1\n    empty(xs)\n");
+    let typed_attr = format!(
+        "from pkg.rack import Rack\n\n\n{}",
+        untyped_attr.replace("def refill(xs):", "def refill(xs: list[Rack]):")
+    );
     let writes = &[
         ("pkg/rack_view.py", "EFF201"),
         ("pkg/rack_view.py", "MUT201"),
@@ -4759,6 +4766,21 @@ fn steps_indirect_helpers() -> Vec<Step> {
             ("pkg/rack_view.py", "EFF201"),
             ("pkg/rack_view.py", "MUT201"),
         ]),
+        Step::new(
+            "the helper sets an attribute of an entry whose class it does not know",
+            vec![Action::Save("pkg/rack_ops.py", untyped_attr)],
+        )
+        .present(writes),
+        Step::new(
+            "the helper types the entries: the attribute is their class's",
+            vec![Action::Save("pkg/rack_ops.py", typed_attr)],
+        )
+        .absent(writes),
+        Step::new(
+            "the helper is back to its first form",
+            vec![save("pkg/rack_ops.py", RACK_OPS)],
+        )
+        .absent(writes),
     ]
 }
 

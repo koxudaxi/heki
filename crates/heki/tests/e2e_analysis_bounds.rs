@@ -1,7 +1,7 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
 //! narrowing through phis, the passes of the type inference and of the classes of merged values,
 //! the closure cells child scopes read, the entries of a contract target's container through
-//! views and aliases, the stores of the cells a comprehension's assignment
+//! views and aliases, and through items and attributes a helper handed it reaches, the stores of the cells a comprehension's assignment
 //! expressions bind and the reads seeing them, the iterables child scopes receive from the
 //! functions creating them, the fixpoint joining the stores of attributes, the names its
 //! functions store and read, the stores through namespaces and `setattr`, the classes whose code
@@ -1076,6 +1076,53 @@ fn a_long_chain_of_in_place_operators_gives_the_display_back() {
         .map(|d| d["qualname"].as_str().unwrap())
         .collect();
     assert_eq!(reported, vec!["extend"], "{found:#?}");
+}
+
+/// A helper handed a `write-owners` target's container of entries of unknown class, with a long
+/// chain of values each an attribute or an item of the one before (`e{i + 1} = e{i}.child if
+/// flags[i] else e{i}[0]`), each with an attribute written (`MUT201` at the call): every
+/// value's entries are one closure over the chain, each value expanded once, not one walk per
+/// path or per write.
+#[test]
+fn entries_down_a_long_chain_of_items_and_attributes_are_one_closure() {
+    let config = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n\
+                  [[tool.heki.write-owners]]\nname = \"box\"\ntargets = [\"m.Holder.box\"]\n\
+                  allowed-writers = [\"m.Holder.*\"]\n";
+    let links = 800;
+    let found = check_linear(links, |links| {
+        let mut lines = vec![
+            "class Holder:".to_owned(),
+            "    def __init__(self) -> None:".to_owned(),
+            "        self.box: list = []".to_owned(),
+            String::new(),
+            String::new(),
+            "def fill(rows: list, flags: list[bool]) -> None:".to_owned(),
+            "    e0 = rows[0]".to_owned(),
+        ];
+        for i in 0..links {
+            lines.push(format!(
+                "    e{} = e{i}.child if flags[{i}] else e{i}[0]",
+                i + 1
+            ));
+            lines.push(format!("    e{}.mark = {i}", i + 1));
+        }
+        lines.extend([
+            String::new(),
+            String::new(),
+            "def use(holder: Holder) -> None:".to_owned(),
+            "    fill(holder.box, [])".to_owned(),
+        ]);
+        let p = Project::new(&format!("bounds_entry_attr_chain_{links}"));
+        p.write("pyproject.toml", config)
+            .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    });
+    let reported: Vec<(&str, u64)> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT201")
+        .map(|d| (d["qualname"].as_str().unwrap(), d["line"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(reported, vec![("use", 2 * links as u64 + 11)], "{found:#?}");
 }
 
 /// A function with a long chain of entries of a `write-owners` target's container that a loop

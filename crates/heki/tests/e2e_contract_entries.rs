@@ -2,7 +2,8 @@
 //! a helper changing an entry of the container it is handed (`box["k"].add(v)`, through a local
 //! alias of the entry) writes the target at the call, the entries a loop takes from `values()`
 //! or `items()` of the container are its entries, and an alias of an object's `__dict__` that a
-//! nested function captures keeps its object.
+//! nested function captures keeps its object. An attribute write on an entry of a known class is
+//! that class's write, not one of the container, also in a helper handed the container.
 
 mod common;
 
@@ -449,4 +450,227 @@ fn a_dict_alias_a_nested_function_captures_keeps_its_object() {
         message_at(&diags, u, 30).contains("writes `pkg.model.Node._cache` (as a `__dict__` item)"),
         "{diags:#?}"
     );
+}
+
+// ================================================================== an entry of a known class
+
+const ENTRY_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201", "EFF201"]
+
+[[tool.heki.write-owners]]
+name = "field-set"
+targets = ["pkg.model.Model.fields", "pkg.model.Model.groups", "pkg.model.Model.by_name"]
+allowed-writers = ["pkg.model:Model.__init__"]
+
+[[tool.heki.write-owners]]
+name = "field-name"
+targets = ["pkg.model.Field.name"]
+allowed-writers = ["pkg.model:Field.__init__", "pkg.model:Field.rename", "pkg.model:rename"]
+
+[[tool.heki.effect-boundaries]]
+name = "passes"
+scopes = ["pkg.passes:*"]
+write-universe = ["pkg.model.Model.fields", "pkg.model.Model.groups"]
+"#;
+
+const ENTRY_MODEL: &str = r#"class Field:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.tags: list[str] = []
+
+    def rename(self, name: str) -> None:
+        self.name = name
+
+
+class Model:
+    def __init__(self, fields: list[Field], groups: list[list[str]]) -> None:
+        self.fields = fields
+        self.groups = groups
+        self.by_name: dict[str, Field] = {}
+
+
+def rename(field: Field, name: str) -> None:
+    field.name = name
+
+
+def rename_any(field, name):
+    field.name = name
+"#;
+
+const ENTRY_HELPERS: &str = r#"from pkg.model import Field, Model, rename, rename_any
+
+
+def rename_all(fields: list[Field]) -> None:
+    for field in fields:
+        rename(field, field.name + "_")
+
+
+def set_attr_all(fields: list[Field]) -> None:
+    for field in fields:
+        field.name = "x"
+
+
+def set_first(fields: list[Field]) -> None:
+    fields[0].name = "x"
+
+
+def rename_by_method(fields: list[Field]) -> None:
+    for field in fields:
+        field.rename("x")
+
+
+def tag_all(fields: list[Field]) -> None:
+    for field in fields:
+        field.tags.append("x")
+
+
+def rename_any_all(fields: list[Field]) -> None:
+    for field in fields:
+        rename_any(field, "x")
+
+
+def rename_of(model: Model) -> None:
+    for field in model.fields:
+        rename(field, field.name + "_")
+
+
+def set_attr_untyped(fields: list) -> None:
+    for field in fields:
+        field.name = "x"
+
+
+def rename_untyped_all(fields: list) -> None:
+    for field in fields:
+        rename_any(field, "x")
+
+
+def rename_typed_of_untyped(fields: list) -> None:
+    for field in fields:
+        rename(field, "x")
+
+
+def clear_groups(groups: list[list[str]]) -> None:
+    for group in groups:
+        group.clear()
+
+
+def set_values(by_name: dict[str, Field]) -> None:
+    for field in by_name.values():
+        field.name = "x"
+
+
+def set_copies(fields: list[Field], groups: list[list[str]]) -> None:
+    for field in list(fields):
+        field.name = "x"
+    for group in list(groups):
+        group.clear()
+
+
+def set_comprehension(fields: list[Field], groups: list[list[str]]) -> None:
+    [setattr(field, "name", "x") for field in fields]
+    [group.clear() for group in groups]
+
+
+def use(model: Model) -> None:
+    for field in model.fields:
+        rename(field, field.name + "_")
+    for field in model.fields:
+        field.name = "x"
+    model.fields[0].name = "x"
+    rename_of(model)
+    rename_all(model.fields)
+    set_attr_all(model.fields)
+    set_first(model.fields)
+    rename_by_method(model.fields)
+    tag_all(model.fields)
+    rename_any_all(model.fields)
+    rename_typed_of_untyped(model.fields)
+    set_attr_untyped(model.fields)
+    rename_untyped_all(model.fields)
+    clear_groups(model.groups)
+    set_values(model.by_name)
+    set_copies(model.fields, model.groups)
+    set_comprehension(model.fields, model.groups)
+"#;
+
+const ENTRY_PASSES: &str = r#"from pkg.model import Model
+from pkg.use import clear_groups, rename_all, set_attr_all, set_attr_untyped
+
+
+def pass_rename(model: Model) -> None:
+    rename_all(model.fields)
+    set_attr_all(model.fields)
+
+
+def pass_untyped(model: Model) -> None:
+    set_attr_untyped(model.fields)
+    clear_groups(model.groups)
+"#;
+
+#[test]
+fn an_attribute_write_on_an_entry_of_a_known_class_is_that_class_write() {
+    let p = Project::new("entries_known_class");
+    p.write("pyproject.toml", ENTRY_CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/model.py", ENTRY_MODEL)
+        .write("pkg/use.py", ENTRY_HELPERS)
+        .write("pkg/passes.py", ENTRY_PASSES);
+    let diags = diagnostics(&p);
+    let (u, s) = ("pkg/use.py", "pkg/passes.py");
+    assert_eq!(
+        found(&diags),
+        vec![
+            // The boundary's universe and the container's owners agree with the helper's calls
+            // in `use`: only the entries of unknown class, or changed in place, write the
+            // container.
+            d(s, 11, "EFF201", "pass_untyped"),
+            d(s, 11, "MUT201", "pass_untyped"),
+            d(s, 12, "EFF201", "pass_untyped"),
+            d(s, 12, "MUT201", "pass_untyped"),
+            // An attribute write on an entry of a known class is that class's write, judged by
+            // the contracts of `Field.name`: in the helper itself (also on the entries of a
+            // `values()` view, of a shallow copy, and in a comprehension), at its call of a
+            // helper that does not type the entry, and directly. Through `rename` and
+            // `Field.rename`, which those contracts allow, it is no report.
+            d(u, 11, "MUT201", "set_attr_all"),
+            d(u, 15, "MUT201", "set_first"),
+            d(u, 30, "MUT201", "rename_any_all"),
+            d(u, 60, "MUT201", "set_values"),
+            d(u, 65, "MUT201", "set_copies"),
+            d(u, 71, "MUT201", "set_comprehension"),
+            d(u, 79, "MUT201", "use"),
+            d(u, 80, "MUT201", "use"),
+            // A helper handed the container writes it only where an entry's class is unknown
+            // (directly or through a helper that does not type it either) or the entry, itself
+            // a container, changes in place (also an entry of a shallow copy, and in a
+            // comprehension).
+            d(u, 89, "MUT201", "use"),
+            d(u, 90, "MUT201", "use"),
+            d(u, 91, "MUT201", "use"),
+            d(u, 93, "MUT201", "use"),
+            d(u, 94, "MUT201", "use"),
+        ]
+    );
+    assert!(
+        message_at(&diags, u, 30).contains(
+            "writes `pkg.model.Field.name` (through a helper) via `pkg.model.rename_any`"
+        ),
+        "{diags:#?}"
+    );
+    assert!(
+        message_at(&diags, u, 89).contains(
+            "writes `pkg.model.Model.fields` (inside an item, through a helper) via \
+             `pkg.use.set_attr_untyped`"
+        ),
+        "{diags:#?}"
+    );
+    for line in [93, 94] {
+        assert!(
+            message_at(&diags, u, line).contains("writes `pkg.model.Model.groups`"),
+            "{diags:#?}"
+        );
+    }
 }
