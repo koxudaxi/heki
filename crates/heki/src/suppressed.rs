@@ -7,21 +7,35 @@ use heki_ast::LineIndex;
 use heki_diagnostics::{BaselineVersion, SuppressionForm, baseline_key};
 use heki_rules::project::{Hidden, ParsedFile, Project};
 use rustc_hash::FxHashMap;
+use schemars::JsonSchema;
 use serde::Serialize;
 use std::path::Path;
 
 /// The version of the document; it changes only when a field is removed or changes meaning.
 const SCHEMA_VERSION: u32 = 1;
 
-#[derive(Serialize)]
+/// The file `heki check --report-suppressed` writes.
+#[derive(Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 struct Document {
+    /// The version of the file: 1.
+    #[schemars(extend("const" = 1))]
     schema_version: u32,
+    /// The reports the inline suppressions hid, sorted by file, function, code, target, and
+    /// position.
     suppressed: Vec<Entry>,
 }
 
+/// The JSON Schema of the file, as `docs/schemas/report-suppressed-1.json` publishes it.
+pub(crate) fn schema() -> serde_json::Value {
+    heki_env::published_schema::<Document>("report-suppressed-1", "heki check --report-suppressed")
+}
+
 /// One report an inline suppression hid.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 struct Entry {
+    /// The code of the rule whose report was hidden.
     code: String,
     /// Relative to the project root, with forward slashes.
     file: String,
@@ -29,18 +43,26 @@ struct Entry {
     function: Option<String>,
     /// The target of the report's Ratchet baseline key, which the baseline counts it under.
     target: String,
+    /// The line of the hidden report.
     line: u32,
+    /// The byte column of the hidden report.
     column: u32,
+    /// The suppression that hid it.
     directive: Directive,
 }
 
 /// The suppression that hid a report.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 struct Directive {
     /// `heki-ignore` (names rules), `heki-ignore-bare`, `noqa-code` (names rules), or `noqa-bare`.
+    #[schemars(extend("enum" = ["heki-ignore", "heki-ignore-bare", "noqa-code", "noqa-bare"]))]
     kind: &'static str,
+    /// The file of the comment, relative to the project root, with forward slashes.
     file: String,
+    /// The line of the comment.
     line: u32,
+    /// The byte column of the comment.
     column: u32,
 }
 

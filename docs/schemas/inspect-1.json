@@ -1,0 +1,1786 @@
+{
+  "$defs": {
+    "AllowedExample": {
+      "additionalProperties": false,
+      "description": "A public project function that does what a contract report shows from a place its contract\nallows, and the file defining it (the report's help names it).",
+      "properties": {
+        "fqn": {
+          "description": "Dotted fully qualified name (`pkg.store.Store.add`).",
+          "type": "string"
+        },
+        "path": {
+          "description": "The file that defines it, as reports print paths.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fqn",
+        "path"
+      ],
+      "type": "object"
+    },
+    "CallerEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "awaited": {
+          "description": "Whether the call is awaited.",
+          "type": "boolean"
+        },
+        "candidates": {
+          "description": "How many functions the call may run.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "depth": {
+          "description": "The level: 1 for a direct caller.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fqn": {
+          "description": "The caller.",
+          "type": "string"
+        },
+        "in_loop": {
+          "description": "Whether the call is in a loop.",
+          "type": "boolean"
+        },
+        "line": {
+          "description": "The line of the call.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "The file of the call, relative to the project root.",
+          "type": "string"
+        },
+        "role": {
+          "description": "What the caller does with the result: `call`, `property`, `iterate`, `return`, or `through`.",
+          "enum": [
+            "call",
+            "property",
+            "iterate",
+            "return",
+            "through"
+          ],
+          "type": "string"
+        },
+        "via": {
+          "description": "The function it calls, for a caller above the direct ones.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "fqn",
+        "depth",
+        "via",
+        "path",
+        "line",
+        "role",
+        "awaited",
+        "in_loop",
+        "candidates"
+      ],
+      "type": "object"
+    },
+    "CallersInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "description": "How many callers there are.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "depth": {
+          "description": "How many levels of callers are listed.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "entries": {
+          "description": "The callers, nearest first.",
+          "items": {
+            "$ref": "#/$defs/CallerEntry"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "description": "Whether `entries` lists fewer than there are.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "count",
+        "depth",
+        "truncated",
+        "entries"
+      ],
+      "type": "object"
+    },
+    "Candidate": {
+      "additionalProperties": false,
+      "description": "A function to choose from: its name, where it is defined, and its kind.",
+      "properties": {
+        "fqn": {
+          "description": "The fully qualified name.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "The kind of function: `method` (the name has a class) or `function`.",
+          "enum": [
+            "method",
+            "function"
+          ],
+          "type": "string"
+        },
+        "line": {
+          "description": "The line of its definition; none when heki could not find it.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The file, relative to the project root; none when no file of the project defines it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "fqn",
+        "kind",
+        "line",
+        "path"
+      ],
+      "type": "object"
+    },
+    "Certainty": {
+      "description": "Whether a report can be wrong about the code (ADR-018). A report's claim is a conjunction of\npremises (its rule page lists them under \"What a report states\").",
+      "oneOf": [
+        {
+          "const": "exact",
+          "description": "Every premise of the claim was established, under the assumptions R1-R5, and the rule's\nreports were checked on the measurement corpus with none wrong: a wrong one is a bug.",
+          "type": "string"
+        },
+        {
+          "const": "heuristic",
+          "description": "A premise of the claim may be unknown, which does not stop the report: it can be wrong\nabout the code.",
+          "type": "string"
+        }
+      ]
+    },
+    "Changes": {
+      "additionalProperties": false,
+      "properties": {
+        "class_attrs": {
+          "description": "The attributes of classes it writes; none when heki does not follow typed writes.",
+          "items": {
+            "$ref": "#/$defs/ClassAttrWrite"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "class_attrs_needs": {
+          "description": "Why `class_attrs` is none: what turns the analysis on.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "globals": {
+          "description": "The module globals and closure variables it changes.",
+          "items": {
+            "$ref": "#/$defs/GlobalChange"
+          },
+          "type": "array"
+        },
+        "invalidates": {
+          "description": "What it invalidates under an `invalidation` contract.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "params": {
+          "description": "What the function changes of its parameters.",
+          "items": {
+            "$ref": "#/$defs/ParamChangeInfo"
+          },
+          "type": "array"
+        },
+        "self_attrs": {
+          "description": "The attributes of `self` it changes.",
+          "items": {
+            "$ref": "#/$defs/SelfAttrChange"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "params",
+        "self_attrs",
+        "invalidates",
+        "class_attrs",
+        "class_attrs_needs",
+        "globals"
+      ],
+      "type": "object"
+    },
+    "ClassAttrWrite": {
+      "additionalProperties": false,
+      "properties": {
+        "attr": {
+          "description": "The attribute.",
+          "type": "string"
+        },
+        "class": {
+          "description": "The qualified name of the class.",
+          "type": "string"
+        },
+        "entries_only": {
+          "description": "Whether every write changes one of `keys`: none changes the container as a whole\n(`extras.clear()` next to `extras[\"init\"] = v` does).",
+          "type": "boolean"
+        },
+        "fresh": {
+          "description": "Whether the written object is new in the function.",
+          "type": "boolean"
+        },
+        "keys": {
+          "description": "The entries of the attribute's container the function's own and passed item writes\nchange: `\"init\"` for a constant key, the parameter's name for a key its callers pass\n(`key`), `?` for a key heki cannot tell.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "description": "How it is written: `direct_attr`, `attr_delete`, `container_mut`, `alias_container_mut`, `set_attr`, `dict_direct`, `indirect_helper`, `item_mut`, or `indirect_item_mut`.",
+          "enum": [
+            "direct_attr",
+            "attr_delete",
+            "container_mut",
+            "alias_container_mut",
+            "set_attr",
+            "dict_direct",
+            "indirect_helper",
+            "item_mut",
+            "indirect_item_mut"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "class",
+        "attr",
+        "kind",
+        "fresh"
+      ],
+      "type": "object"
+    },
+    "Condition": {
+      "additionalProperties": false,
+      "description": "The name looked up equals the function's name.",
+      "properties": {
+        "equals": {
+          "description": "The name the function is selected by.",
+          "type": "string"
+        },
+        "others_open": {
+          "description": "The name is not a constant: other names may select other functions, or none.",
+          "type": "boolean"
+        },
+        "selector": {
+          "description": "The expression the name is computed from, in the values the row's call passes, or the\nconstant.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "selector",
+        "equals",
+        "others_open"
+      ],
+      "type": "object"
+    },
+    "ContractRole": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "description": "The contract table: `write-owners`, `read-owners`, `call-owners`, `effect-boundaries`, `readonly-returns`, `invalidation`, `import-boundaries`, or `ecosystem`.",
+          "enum": [
+            "write-owners",
+            "read-owners",
+            "call-owners",
+            "effect-boundaries",
+            "readonly-returns",
+            "invalidation",
+            "import-boundaries",
+            "ecosystem"
+          ],
+          "type": "string"
+        },
+        "name": {
+          "description": "The name of the contract.",
+          "type": "string"
+        },
+        "roles": {
+          "description": "What the function is in the contract, for instance `allowed-writer` or `reported`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "roles"
+      ],
+      "type": "object"
+    },
+    "Docs": {
+      "description": "The page of the documentation, or the section of one, that explains it.",
+      "enum": [
+        "https://heki.koxudaxi.dev/",
+        "https://heki.koxudaxi.dev/getting-started/",
+        "https://heki.koxudaxi.dev/configuration/",
+        "https://heki.koxudaxi.dev/coding-agents/",
+        "https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental",
+        "https://heki.koxudaxi.dev/coding-agents/#install-the-skill",
+        "https://heki.koxudaxi.dev/llms.txt",
+        "https://heki.koxudaxi.dev/configuration/#where-heki-finds-the-configuration",
+        "https://heki.koxudaxi.dev/configuration/#which-tables-hold-the-settings",
+        "https://heki.koxudaxi.dev/configuration/#module-names-follow-the-source-roots",
+        "https://heki.koxudaxi.dev/configuration/#top-level-settings",
+        "https://heki.koxudaxi.dev/configuration/#the-default-target-version",
+        "https://heki.koxudaxi.dev/configuration/#requiring-a-heki-version",
+        "https://heki.koxudaxi.dev/configuration/#which-files-are-checked",
+        "https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint",
+        "https://heki.koxudaxi.dev/configuration/#contracts",
+        "https://heki.koxudaxi.dev/configuration/#write-owners",
+        "https://heki.koxudaxi.dev/configuration/#read-owners",
+        "https://heki.koxudaxi.dev/configuration/#call-owners",
+        "https://heki.koxudaxi.dev/configuration/#effect-boundaries",
+        "https://heki.koxudaxi.dev/configuration/#readonly-returns",
+        "https://heki.koxudaxi.dev/configuration/#invalidation",
+        "https://heki.koxudaxi.dev/configuration/#import-boundaries",
+        "https://heki.koxudaxi.dev/configuration/#imports-toolhekiimports",
+        "https://heki.koxudaxi.dev/configuration/#ecosystem-knowledge-toolhekiecosystem",
+        "https://heki.koxudaxi.dev/rules/",
+        "https://heki.koxudaxi.dev/adoption/#ratchet-baselines",
+        "https://heki.koxudaxi.dev/adoption/#effect-snapshots-mut103",
+        "https://heki.koxudaxi.dev/fixes/#how-fix-applies-fixes",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-check",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-server",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-rule",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-snapshot",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-assumptions",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-inspect",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-recommend",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-skill-install",
+        "https://heki.koxudaxi.dev/cli-reference/#heki-version",
+        "https://heki.koxudaxi.dev/coding-agents/#what-a-function-does-heki-inspect-experimental"
+      ],
+      "type": "string"
+    },
+    "EffectInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "blocking": {
+          "description": "Whether it blocks the event loop.",
+          "type": "boolean"
+        },
+        "chain": {
+          "description": "The calls from the function to the effect.",
+          "items": {
+            "$ref": "#/$defs/Hop"
+          },
+          "type": "array"
+        },
+        "direct": {
+          "description": "Whether the function has it itself, not only through a callee.",
+          "type": "boolean"
+        },
+        "effect": {
+          "description": "The effect, by its name in the catalogs (`blocking_net`).",
+          "type": "string"
+        },
+        "guards": {
+          "description": "The tests that decide whether the effect happens.",
+          "items": {
+            "$ref": "#/$defs/GuardInfo"
+          },
+          "type": "array"
+        },
+        "once_per": {
+          "description": "The parameters the effect happens once per item of; none when it does not.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "runs": {
+          "description": "When the body runs: `called`, `awaited`, `iterated`, or `result_iterated`.",
+          "enum": [
+            "called",
+            "awaited",
+            "iterated",
+            "result_iterated"
+          ],
+          "type": "string"
+        },
+        "via_subclasses": {
+          "description": "The subclasses whose methods have the effect.",
+          "items": {
+            "$ref": "#/$defs/SubclassChain"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "effect",
+        "blocking",
+        "direct",
+        "runs",
+        "guards",
+        "once_per",
+        "chain",
+        "via_subclasses"
+      ],
+      "type": "object"
+    },
+    "Entry": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/InspectReport"
+        },
+        {
+          "$ref": "#/$defs/InspectError"
+        }
+      ],
+      "description": "One element of the JSON output: a report, or the error object of a symbol."
+    },
+    "ErrorBody": {
+      "additionalProperties": false,
+      "description": "What a symbol that names no single function got instead.",
+      "properties": {
+        "candidates": {
+          "description": "With `kind` `ambiguous`: the functions the symbol may name.",
+          "items": {
+            "$ref": "#/$defs/Candidate"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "docs": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Docs"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The page of the documentation that explains it."
+        },
+        "errors": {
+          "description": "With `kind` `unknown`: the files heki could not analyze.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "functions": {
+          "description": "With `kind` `module`: the top-level functions of the module.",
+          "items": {
+            "$ref": "#/$defs/Candidate"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "help": {
+          "description": "What to do about it, one step per entry.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "description": "`invalid` (the symbol does not parse), `outside_project` (it names a file heki did not\ncheck), `unknown`, `ambiguous`, `class`, or `module`.",
+          "enum": [
+            "invalid",
+            "outside_project",
+            "unknown",
+            "ambiguous",
+            "class",
+            "module"
+          ],
+          "type": "string"
+        },
+        "message": {
+          "description": "What is wrong with the symbol.",
+          "type": "string"
+        },
+        "methods": {
+          "description": "With `kind` `class`: the methods of the class.",
+          "items": {
+            "$ref": "#/$defs/Candidate"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "suggestions": {
+          "description": "With `kind` `unknown`: the functions with similar names.",
+          "items": {
+            "$ref": "#/$defs/Candidate"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "truncated": {
+          "description": "Whether the list the failure carries is cut short.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "docs",
+        "help",
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    },
+    "FunctionInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "abstract": {
+          "description": "Whether it is abstract.",
+          "type": "boolean"
+        },
+        "async": {
+          "description": "Whether it is `async def`.",
+          "type": "boolean"
+        },
+        "class": {
+          "description": "The qualified name of its class; none for a function outside a class.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "decorators": {
+          "description": "Its decorators, as written.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "definitions": {
+          "description": "The first line of every definition (`if ...: def f` / `else: def f`).",
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "driven_synchronously": {
+          "description": "Whether a caller drives the coroutine to its end without an event loop.",
+          "type": "boolean"
+        },
+        "end_line": {
+          "description": "The last line of the first definition.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fqn": {
+          "description": "The fully qualified name.",
+          "type": "string"
+        },
+        "generator": {
+          "description": "Whether it is a generator.",
+          "type": "boolean"
+        },
+        "kind": {
+          "description": "`module_body`, `nested`, `cached_property`, `property`, `classmethod`, `staticmethod`, `method`, or `function`.",
+          "enum": [
+            "module_body",
+            "nested",
+            "cached_property",
+            "property",
+            "classmethod",
+            "staticmethod",
+            "method",
+            "function"
+          ],
+          "type": "string"
+        },
+        "line": {
+          "description": "The first line of the first definition.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "module": {
+          "description": "The module that defines it.",
+          "type": "string"
+        },
+        "offloaded_by": {
+          "description": "The call that runs it in a thread or process pool; none when no call does.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "params": {
+          "description": "Its parameters, in order.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "path": {
+          "description": "The file, relative to the project root.",
+          "type": "string"
+        },
+        "qualname": {
+          "description": "The name within the module.",
+          "type": "string"
+        },
+        "stub": {
+          "description": "Whether only a stub file declares it.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "fqn",
+        "module",
+        "qualname",
+        "path",
+        "line",
+        "end_line",
+        "definitions",
+        "kind",
+        "async",
+        "generator",
+        "abstract",
+        "stub",
+        "class",
+        "decorators",
+        "params",
+        "offloaded_by",
+        "driven_synchronously"
+      ],
+      "type": "object"
+    },
+    "GlobalChange": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/Location",
+          "description": "Where the change is."
+        },
+        "cell_of": {
+          "description": "The function whose variable the closure cell is (`None`: a module global).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "chain": {
+          "description": "The calls from the function to the change.",
+          "items": {
+            "$ref": "#/$defs/Hop"
+          },
+          "type": "array"
+        },
+        "direct": {
+          "description": "Whether the function changes it itself, not only through a callee.",
+          "type": "boolean"
+        },
+        "name": {
+          "description": "The global or closure variable.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "cell_of",
+        "direct",
+        "chain",
+        "at"
+      ],
+      "type": "object"
+    },
+    "GuardInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "attr": {
+          "description": "The attribute of the parameter the test is about; none for the parameter itself.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "classes": {
+          "description": "`isinstance`: the classes tested.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "has": {
+          "description": "`hasattr`: the attribute tested.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "holds": {
+          "description": "Whether the effect happens when the test holds.",
+          "type": "boolean"
+        },
+        "param": {
+          "description": "The parameter the test is about.",
+          "type": "string"
+        },
+        "test": {
+          "description": "`truthy`, `is_none`, `isinstance`, `hasattr`, or `catalog`.",
+          "enum": [
+            "truthy",
+            "is_none",
+            "isinstance",
+            "hasattr",
+            "catalog"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "param",
+        "attr",
+        "test",
+        "classes",
+        "has",
+        "holds"
+      ],
+      "type": "object"
+    },
+    "Hop": {
+      "additionalProperties": false,
+      "description": "One hop of a call chain: the call at `path:line` of the hop before it (the function itself\nfor the first) calls `calls`, one of `candidates` the call may run.",
+      "properties": {
+        "calls": {
+          "description": "The function the call runs, or the first of its candidates.",
+          "type": "string"
+        },
+        "candidates": {
+          "description": "How many functions the call may run.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "line": {
+          "description": "The line of the call.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "The file of the call, relative to the project root.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "calls",
+        "candidates"
+      ],
+      "type": "object"
+    },
+    "InspectError": {
+      "additionalProperties": false,
+      "description": "The object `heki inspect --output-format json` prints for a symbol that names no single\nfunction (an array of reports and these objects for `-`).",
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/ErrorBody",
+          "description": "Why the symbol names no function."
+        },
+        "query": {
+          "description": "The symbol, as it was given.",
+          "type": "string"
+        },
+        "version": {
+          "const": 1,
+          "description": "The version of this object: 1.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "error",
+        "query",
+        "version"
+      ],
+      "type": "object"
+    },
+    "InspectReport": {
+      "additionalProperties": false,
+      "properties": {
+        "callers": {
+          "$ref": "#/$defs/CallersInfo",
+          "description": "The functions that call it."
+        },
+        "changes": {
+          "$ref": "#/$defs/Changes",
+          "description": "What the function changes."
+        },
+        "complete": {
+          "description": "Whether every file of the project was analyzed: false when `errors` is not empty.",
+          "type": "boolean"
+        },
+        "contracts": {
+          "description": "The roles the function has in the declared contracts.",
+          "items": {
+            "$ref": "#/$defs/ContractRole"
+          },
+          "type": "array"
+        },
+        "effects": {
+          "description": "The effects the function has, directly or through the functions it calls.",
+          "items": {
+            "$ref": "#/$defs/EffectInfo"
+          },
+          "type": "array"
+        },
+        "errors": {
+          "description": "The files heki could not read or parse.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "function": {
+          "$ref": "#/$defs/FunctionInfo",
+          "description": "What the function is."
+        },
+        "heki": {
+          "description": "The version of heki that wrote the report.",
+          "type": "string"
+        },
+        "only_reads": {
+          "$ref": "#/$defs/OnlyReads",
+          "description": "The container parameters the function only reads."
+        },
+        "purity": {
+          "$ref": "#/$defs/Purity",
+          "description": "Whether the function is pure, and why heki cannot tell."
+        },
+        "query": {
+          "description": "The symbol, as it was given.",
+          "type": "string"
+        },
+        "registered": {
+          "description": "The registrations that may reach the function with a parameter bound to the registering object.",
+          "items": {
+            "$ref": "#/$defs/RegisteredContext"
+          },
+          "type": "array"
+        },
+        "reports": {
+          "description": "The reports of `heki check` in the function, and with `--callers` those above it.",
+          "items": {
+            "$ref": "#/$defs/Report"
+          },
+          "type": "array"
+        },
+        "resolved_from": {
+          "description": "How the symbol named the function: `name` (a dotted suffix), `glob`, `suffix`, or `line` (`path.py:LINE`); none for an exact fully qualified name.",
+          "enum": [
+            "name",
+            "glob",
+            "suffix",
+            "line",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retains": {
+          "$ref": "#/$defs/Retains",
+          "description": "What the function keeps."
+        },
+        "returns": {
+          "$ref": "#/$defs/Returns",
+          "description": "What the function returns."
+        },
+        "root": {
+          "description": "The project root, as `heki check` prints paths.",
+          "type": "string"
+        },
+        "version": {
+          "description": "The version of this object: 1.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "heki",
+        "root",
+        "query",
+        "resolved_from",
+        "complete",
+        "errors",
+        "function",
+        "purity",
+        "effects",
+        "changes",
+        "retains",
+        "only_reads",
+        "returns",
+        "callers",
+        "reports",
+        "contracts",
+        "registered"
+      ],
+      "type": "object"
+    },
+    "Location": {
+      "additionalProperties": false,
+      "properties": {
+        "column": {
+          "description": "The byte column.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "line": {
+          "description": "The line.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "The file, relative to the project root.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "column"
+      ],
+      "type": "object"
+    },
+    "OnlyReads": {
+      "additionalProperties": false,
+      "description": "The parameters annotated with a mutable container (`list`, `dict`, `set`, their `typing`\nforms, `MutableSequence`, `MutableMapping`, `MutableSet`), and what the function does with\nthem (`heki_effect::ContainerParams`).",
+      "properties": {
+        "bound_once": {
+          "description": "Those whose name the function binds once (`if p is None: p = []` aside).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "containers": {
+          "description": "The parameters annotated with a mutable container.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "params": {
+          "description": "Those the function only reads: it and every function it hands one to neither change it\nin place nor keep it (store, capture, yield, or return it), and every call it is handed\nto resolves to such a function or to a library call Layer 1 lists as reading it.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "read_only_uses": {
+          "description": "Those whose every use in the function's own body the read-only type (`Sequence`,\n`Mapping`, `AbstractSet`) allows.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "reads": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "description": "By parameter the function only reads, annotated or not, the kinds of read that reach its\nobject here and in the functions it is handed to (`heki_effect::ReadKinds`): `item\naccess`, `iteration`, ..., then the methods called by name.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "containers",
+        "params",
+        "read_only_uses",
+        "bound_once",
+        "reads"
+      ],
+      "type": "object"
+    },
+    "OriginsInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "elements_of": {
+          "description": "The parameters whose items it may be.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "held": {
+          "description": "Whether it may be an object something else holds.",
+          "type": "boolean"
+        },
+        "new": {
+          "description": "Whether it may be a new object.",
+          "type": "boolean"
+        },
+        "params": {
+          "description": "The parameters it may be.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "new",
+        "held",
+        "params",
+        "elements_of"
+      ],
+      "type": "object"
+    },
+    "ParamChangeInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Location"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where the change is; none when it is in a callee."
+        },
+        "chain": {
+          "description": "The calls from the function to the change.",
+          "items": {
+            "$ref": "#/$defs/Hop"
+          },
+          "type": "array"
+        },
+        "direct": {
+          "description": "Whether the function changes it itself, not only through a callee.",
+          "type": "boolean"
+        },
+        "index": {
+          "description": "The position of the parameter.",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "param": {
+          "description": "The parameter.",
+          "type": "string"
+        },
+        "slots": {
+          "description": "The keys or attributes changed, as `a` or `[\"k\"]`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "what": {
+          "description": "`\"\"`: the object itself; `a`: its attribute `a`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "param",
+        "index",
+        "what",
+        "slots",
+        "direct",
+        "chain",
+        "at"
+      ],
+      "type": "object"
+    },
+    "Purity": {
+      "additionalProperties": false,
+      "properties": {
+        "assumes": {
+          "description": "The assumptions the verdict rests on.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "because": {
+          "description": "Why the verdict is `unknown`: `unresolved_calls`, `untracked_writes`, or `no_body`; for `impure`, the effects found.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "unknown_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UnknownAt"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The first entry of `unknown_reach`, whatever the verdict."
+        },
+        "unknown_reach": {
+          "$ref": "#/$defs/UnknownReach",
+          "description": "The functions heki cannot follow."
+        },
+        "verdict": {
+          "description": "`pure`, `impure`, or `unknown`.",
+          "enum": [
+            "pure",
+            "impure",
+            "unknown"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "verdict",
+        "because",
+        "unknown_at",
+        "unknown_reach",
+        "assumes"
+      ],
+      "type": "object"
+    },
+    "RegisteredContext": {
+      "additionalProperties": false,
+      "description": "A registration that may reach the function with one of its parameters bound to the\nregistering object, under the condition the name a lookup selects the function by meets\n(`heki_effect::dispatch`). Advisory: no other fact, report, or fix assumes it.",
+      "properties": {
+        "called_at": {
+          "$ref": "#/$defs/Site",
+          "description": "The call of the registered slot of the table's row."
+        },
+        "changes": {
+          "description": "What the function changes of the parameter under the context: its `changes.params`\nrecord with the parameter of that type (empty: no change).",
+          "items": {
+            "$ref": "#/$defs/ParamChangeInfo"
+          },
+          "type": "array"
+        },
+        "condition": {
+          "$ref": "#/$defs/Condition"
+        },
+        "index": {
+          "description": "The position of that parameter.",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "invoked_at": {
+          "$ref": "#/$defs/Site"
+        },
+        "param": {
+          "description": "The parameter bound to the registering object.",
+          "type": "string"
+        },
+        "registration": {
+          "$ref": "#/$defs/Site",
+          "description": "The factory call of the registration, in the function registering."
+        },
+        "selected_at": {
+          "$ref": "#/$defs/Site",
+          "description": "The lookup by name, and the call of what it finds."
+        },
+        "type": {
+          "description": "The registering object's class, the parameter's type under the context.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "param",
+        "index",
+        "type",
+        "registration",
+        "condition",
+        "called_at",
+        "selected_at",
+        "invoked_at",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "RelatedLocation": {
+      "additionalProperties": false,
+      "description": "Related jump location (e.g., each hop in an `EFF101` or `MUT201` call chain for LSP).",
+      "properties": {
+        "column": {
+          "description": "The 1-based byte column.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "line": {
+          "description": "The 1-based line.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "description": "What the location is: the call of a hop, for instance.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The file, as reports print paths.",
+          "type": "string"
+        },
+        "span": {
+          "$ref": "#/$defs/Span",
+          "description": "Byte span in `path` (the LSP server converts it with the file's own text)."
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "column",
+        "span",
+        "message"
+      ],
+      "type": "object"
+    },
+    "Report": {
+      "additionalProperties": false,
+      "description": "A diagnostic of `heki check` with what the baseline makes of it and where it is.",
+      "properties": {
+        "allowed_examples": {
+          "description": "The public project functions that do what a contract report shows from a place its\ncontract allows, at most three, by fully qualified name: its help names them. Empty for the other\nreports and when there is none; written to JSON only when not empty.",
+          "items": {
+            "$ref": "#/$defs/AllowedExample"
+          },
+          "type": "array"
+        },
+        "baseline": {
+          "description": "`allowed` / `regression` with a baseline, `None` without.",
+          "enum": [
+            "allowed",
+            "regression",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "blocker": {
+          "description": "What keeps the rewrite of an `OPT` report from being safe; none otherwise.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "certainty": {
+          "$ref": "#/$defs/Certainty",
+          "description": "The certainty of the report, written by every output format: its rule's, or heuristic\nwhere the report did not establish a premise its rule's exact reports have (an `OPT`\nreport whose rewrite is not proven)."
+        },
+        "column": {
+          "description": "The 1-based byte column of the report.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "evidence": {
+          "description": "What shows the claim holds, when the rule keeps it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fix": {
+          "description": "The edits of the report's fix, as byte spans of `path`; none when the report has no fix.",
+          "items": {
+            "$ref": "#/$defs/TextEdit"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "help": {
+          "description": "What to do about it (`= help:` in the full output); `None` when the rule has no advice\nfor the report.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "line": {
+          "description": "The 1-based line of the report.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "description": "One sentence saying what happens, without advice.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The file, as `heki check` prints paths: relative to the working directory, with forward\nslashes.",
+          "type": "string"
+        },
+        "qualname": {
+          "description": "The qualified name of the function the report is in; empty at module level.",
+          "type": "string"
+        },
+        "related": {
+          "description": "The other places the report is about: the hops of a call chain, a definition.",
+          "items": {
+            "$ref": "#/$defs/RelatedLocation"
+          },
+          "type": "array"
+        },
+        "rule_code": {
+          "description": "The code of the rule that reports (`EFF101`).",
+          "type": "string"
+        },
+        "rule_slug": {
+          "description": "The name of the rule (`async-blocking-call`).",
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity",
+          "description": "The severity of the report, from its rule or the configuration."
+        },
+        "sites": {
+          "description": "Distinct violation sites the diagnostic stands for (at least 1): a contract report at the\ncaller of a private helper covers every write, read, or call inside it, and an effect\nboundary report every forbidden site its scope function reaches. Ratchet baselines count\nsites, so a second violation behind a recorded report is a regression. Written to JSON\nonly when above 1.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "span": {
+          "$ref": "#/$defs/Span",
+          "description": "The byte span of the reported code in `path`."
+        },
+        "target": {
+          "description": "What the report is about: the call, name, or module it names.",
+          "type": "string"
+        },
+        "where": {
+          "description": "`in` the function, or in a caller and `through` it.",
+          "enum": [
+            "in",
+            "through"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "column",
+        "span",
+        "qualname",
+        "rule_code",
+        "rule_slug",
+        "target",
+        "severity",
+        "certainty",
+        "message",
+        "help",
+        "evidence",
+        "blocker",
+        "related",
+        "fix",
+        "baseline",
+        "where"
+      ],
+      "type": "object"
+    },
+    "Retains": {
+      "additionalProperties": false,
+      "properties": {
+        "kept": {
+          "description": "The parameters it keeps (stores, captures, yields, or returns); none without an ownership contract.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "kept_needs": {
+          "description": "Why `kept` is none: what turns the analysis on.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stored": {
+          "description": "The parameters the function stores.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "stored",
+        "kept",
+        "kept_needs"
+      ],
+      "type": "object"
+    },
+    "Returns": {
+      "additionalProperties": false,
+      "properties": {
+        "iterated_effects": {
+          "description": "The effects iterating the returned object has.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "description": "`generator`, `coroutine`, or `value`.",
+          "enum": [
+            "generator",
+            "coroutine",
+            "value"
+          ],
+          "type": "string"
+        },
+        "new_object": {
+          "description": "Whether it is a new object: `own`, `copy`, or `no`; none without an ownership contract.",
+          "enum": [
+            "own",
+            "copy",
+            "no",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origins": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OriginsInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where the returned object comes from; none when heki does not know."
+        },
+        "self_attrs": {
+          "description": "The attributes of `self` it returns.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "shared_with": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SharedWith"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The producer whose read-only object it returns; none otherwise."
+        }
+      },
+      "required": [
+        "kind",
+        "origins",
+        "new_object",
+        "shared_with",
+        "self_attrs",
+        "iterated_effects"
+      ],
+      "type": "object"
+    },
+    "SelfAttrChange": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Location"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where the change is; none when it is in a callee."
+        },
+        "attr": {
+          "description": "The attribute.",
+          "type": "string"
+        },
+        "chain": {
+          "description": "The calls from the function to the change.",
+          "items": {
+            "$ref": "#/$defs/Hop"
+          },
+          "type": "array"
+        },
+        "direct": {
+          "description": "Whether the function changes it itself, not only through a callee.",
+          "type": "boolean"
+        },
+        "key": {
+          "description": "The constant key changed within the attribute; none for the attribute itself.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "attr",
+        "key",
+        "direct",
+        "chain",
+        "at"
+      ],
+      "type": "object"
+    },
+    "Severity": {
+      "description": "Diagnostic severity override (matches `t-linter` / `ty`).",
+      "enum": [
+        "error",
+        "warning"
+      ],
+      "type": "string"
+    },
+    "SharedWith": {
+      "additionalProperties": false,
+      "properties": {
+        "chain": {
+          "description": "The calls from the function to it.",
+          "items": {
+            "$ref": "#/$defs/Hop"
+          },
+          "type": "array"
+        },
+        "producer": {
+          "description": "The function that produces the read-only object.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "producer",
+        "chain"
+      ],
+      "type": "object"
+    },
+    "Site": {
+      "additionalProperties": false,
+      "properties": {
+        "column": {
+          "description": "The byte column.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "function": {
+          "description": "The function the site is in.",
+          "type": "string"
+        },
+        "line": {
+          "description": "The line.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "The file, relative to the project root.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "function",
+        "path",
+        "line",
+        "column"
+      ],
+      "type": "object"
+    },
+    "Span": {
+      "additionalProperties": false,
+      "description": "Byte-offset span in the original Python source file.",
+      "properties": {
+        "end": {
+          "description": "The offset after the last byte.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start": {
+          "description": "The offset of the first byte.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "SubclassChain": {
+      "additionalProperties": false,
+      "properties": {
+        "chain": {
+          "description": "The calls from the function to the effect through it.",
+          "items": {
+            "$ref": "#/$defs/Hop"
+          },
+          "type": "array"
+        },
+        "class": {
+          "description": "The subclass.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "class",
+        "chain"
+      ],
+      "type": "object"
+    },
+    "TextEdit": {
+      "additionalProperties": false,
+      "description": "Minimal byte-span text edit (preserves formatting and comments).",
+      "properties": {
+        "replacement": {
+          "description": "The text that takes their place.",
+          "type": "string"
+        },
+        "span": {
+          "$ref": "#/$defs/Span",
+          "description": "The bytes to replace."
+        }
+      },
+      "required": [
+        "span",
+        "replacement"
+      ],
+      "type": "object"
+    },
+    "UnknownAt": {
+      "additionalProperties": false,
+      "properties": {
+        "chain": {
+          "description": "The calls from the function to it.",
+          "items": {
+            "$ref": "#/$defs/Hop"
+          },
+          "type": "array"
+        },
+        "fqn": {
+          "description": "The function heki cannot follow.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fqn",
+        "chain"
+      ],
+      "type": "object"
+    },
+    "UnknownReach": {
+      "additionalProperties": false,
+      "description": "The functions heki cannot follow (calls it cannot resolve, or a body only a stub declares)\namong the function and the callees whose facts run in it, nearest first.",
+      "properties": {
+        "entries": {
+          "description": "At most [`MAX_UNKNOWN`].",
+          "items": {
+            "$ref": "#/$defs/UnknownAt"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "description": "More functions are reached than `entries` lists.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entries",
+        "truncated"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://heki.koxudaxi.dev/schemas/inspect-1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/Entry"
+    },
+    {
+      "items": {
+        "$ref": "#/$defs/Entry"
+      },
+      "type": "array"
+    }
+  ],
+  "description": "`heki inspect` prints one report or error, or with `-` an array of them.",
+  "title": "heki inspect --output-format json"
+}

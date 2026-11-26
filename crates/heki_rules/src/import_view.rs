@@ -9,6 +9,7 @@ use heki_effect::code_kind::{CodeKind, code_kind};
 use heki_effect::imports::{ImportForm, ImportGraph, ImportSite, ModuleRef, Spelling, Target};
 use heki_ir::walk::Answer;
 use rustc_hash::FxHashMap;
+use schemars::JsonSchema;
 use serde::Serialize;
 use std::fmt::Write as _;
 use std::path::Path;
@@ -16,19 +17,29 @@ use std::path::Path;
 /// The version of the JSON object of `heki inspect --imports --output-format json`.
 pub const IMPORTS_VERSION: u32 = 1;
 
-#[derive(Debug, Serialize)]
+/// The object of `heki inspect --imports --output-format json`.
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct ImportsReport {
+    /// The version of this object: 1.
+    #[schemars(extend("const" = 1))]
     pub version: u32,
+    /// The module name or glob the report was asked about.
     pub query: String,
+    /// The project modules the query names, one report each.
     pub modules: Vec<ModuleReport>,
 }
 
 /// One project module.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct ModuleReport {
+    /// The dotted name of the module.
     pub module: String,
+    /// The file, relative to the project root, with forward slashes.
     pub path: String,
     /// `package`, `package_test`, `development`, or `open` ([`CodeKind`]).
+    #[schemars(with = "String", extend("enum" = ["package", "package_test", "development", "open"]))]
     pub kind: CodeKind,
     /// `None`: heki has no import facts of the module (a typing stub, whose imports never
     /// run, or a file it could not read).
@@ -39,11 +50,15 @@ pub struct ModuleReport {
 }
 
 /// One import site.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct SiteReport {
+    /// The line of the import.
     pub line: u32,
+    /// The byte column of the import.
     pub column: u32,
-    /// `import`, `from`, `star`, or `by_name`.
+    /// `import`, `from`, `star`, `by_name`, or `maybe_by_name`.
+    #[schemars(extend("enum" = ["import", "from", "star", "by_name", "maybe_by_name"]))]
     pub form: &'static str,
     /// The name a `from` import takes from its module.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,16 +68,20 @@ pub struct SiteReport {
     /// How the site names its modules: `absolute`, `relative` to its own module (`from . import
     /// b`, `importlib.import_module(".b", __package__)`), or `mixed` (a by-name import given
     /// both kinds of names); `None` when heki cannot name them.
+    #[schemars(extend("enum" = ["absolute", "relative", "mixed", null]))]
     pub spelling: Option<&'static str>,
     /// `body`, `lazy`, `function`, `type-checking`; `None` when heki cannot tell.
+    #[schemars(extend("enum" = ["body", "lazy", "function", "type-checking", null]))]
     pub timing: Option<&'static str>,
     /// A handler takes a failure of the import: a missing module or any import error.
     pub guarded: bool,
+    /// The import runs whenever its function does: no condition guards it.
     pub unconditional: bool,
     /// The module the site certainly loads.
     pub target: Option<String>,
     /// `project`, `stdlib`, or `third-party`, of `target`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("enum" = ["project", "stdlib", "third-party"]))]
     pub group: Option<&'static str>,
     /// Other modules the site may load instead or as well: the submodule of a `from` import
     /// heki cannot decide, each module a by-name import may name (`pkg.plugins.*` for the
@@ -75,9 +94,13 @@ pub struct SiteReport {
     pub missing: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+/// What loading a module loads while it loads.
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct Loads {
+    /// The project modules.
     pub project: Vec<String>,
+    /// The modules outside the project.
     pub external: Vec<String>,
 }
 

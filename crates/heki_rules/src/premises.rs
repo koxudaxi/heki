@@ -32,7 +32,8 @@ use serde::Serialize;
 use std::ops::ControlFlow;
 
 /// One premise of an exact claim.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct Premise {
     /// The name the rule pages give it, unique in the table.
     pub name: &'static str,

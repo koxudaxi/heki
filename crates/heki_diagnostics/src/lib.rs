@@ -25,37 +25,49 @@ fn report_path<S: serde::Serializer>(path: &Path, serializer: S) -> Result<S::Ok
 }
 
 /// Related jump location (e.g., each hop in an `EFF101` or `MUT201` call chain for LSP).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct RelatedLocation {
+    /// The file, as reports print paths.
     #[serde(serialize_with = "report_path")]
+    #[schemars(with = "String")]
     pub path: PathBuf,
+    /// The 1-based line.
     pub line: u32,
+    /// The 1-based byte column.
     pub column: u32,
     /// Byte span in `path` (the LSP server converts it with the file's own text).
     pub span: Span,
+    /// What the location is: the call of a hop, for instance.
     pub message: String,
 }
 
 /// A public project function that does what a contract report shows from a place its contract
 /// allows, and the file defining it (the report's help names it).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct AllowedExample {
     /// Dotted fully qualified name (`pkg.store.Store.add`).
     pub fqn: String,
+    /// The file that defines it, as reports print paths.
     #[serde(serialize_with = "report_path")]
+    #[schemars(with = "String")]
     pub path: PathBuf,
 }
 
 /// Minimal byte-span text edit (preserves formatting and comments).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct TextEdit {
+    /// The bytes to replace.
     pub span: Span,
+    /// The text that takes their place.
     pub replacement: String,
 }
 
 /// Whether a report can be wrong about the code (ADR-018). A report's claim is a conjunction of
 /// premises (its rule page lists them under "What a report states").
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Certainty {
     /// Every premise of the claim was established, under the assumptions R1-R5, and the rule's
@@ -103,17 +115,29 @@ impl Certainty {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct Diagnostic {
+    /// The file, as `heki check` prints paths: relative to the working directory, with forward
+    /// slashes.
     #[serde(serialize_with = "report_path")]
+    #[schemars(with = "String")]
     pub path: PathBuf,
+    /// The 1-based line of the report.
     pub line: u32,
+    /// The 1-based byte column of the report.
     pub column: u32,
+    /// The byte span of the reported code in `path`.
     pub span: Span,
+    /// The qualified name of the function the report is in; empty at module level.
     pub qualname: String,
+    /// The code of the rule that reports (`EFF101`).
     pub rule_code: String,
+    /// The name of the rule (`async-blocking-call`).
     pub rule_slug: String,
+    /// What the report is about: the call, name, or module it names.
     pub target: String,
+    /// The severity of the report, from its rule or the configuration.
     pub severity: Severity,
     /// The certainty of the report, written by every output format: its rule's, or heuristic
     /// where the report did not establish a premise its rule's exact reports have (an `OPT`
@@ -125,9 +149,13 @@ pub struct Diagnostic {
     /// for the report.
     #[serde(default)]
     pub help: Option<String>,
+    /// What shows the claim holds, when the rule keeps it.
     pub evidence: Option<String>,
+    /// What keeps the rewrite of an `OPT` report from being safe; none otherwise.
     pub blocker: Option<String>,
+    /// The other places the report is about: the hops of a call chain, a definition.
     pub related: Vec<RelatedLocation>,
+    /// The edits of the report's fix, as byte spans of `path`; none when the report has no fix.
     pub fix: Option<Vec<TextEdit>>,
     /// Distinct violation sites the diagnostic stands for (at least 1): a contract report at the
     /// caller of a private helper covers every write, read, or call inside it, and an effect
@@ -1022,32 +1050,86 @@ impl heki_env::Explain for BaselineError {
 }
 
 /// On-disk shape: `version`, then `[[entries]]` sorted by key (minimal git diffs).
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
 struct BaselineFile {
-    /// Absent (or 1) in files written before baselines counted sites ([`BaselineVersion`]).
+    /// The format of the file. Absent (or 1) in files written before baselines counted sites
+    /// ([`BaselineVersion`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     version: Option<u32>,
+    /// The reports the baseline allows, sorted by path, qualified name, rule code, and target.
     #[serde(default)]
     entries: Vec<BaselineEntry>,
 }
 
 /// The entry of a group names no file or function. One written before a group was keyed by its
 /// modules names those of the import closing the cycle its report showed.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
 struct BaselineEntry {
+    /// The file of the report, relative to the project root with forward slashes; left out for a
+    /// group of modules.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     path: String,
+    /// The qualified name of the function the report is in; left out at module level and for a
+    /// group of modules.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     qualname: String,
+    /// The code of the rule that reports (`EFF101`).
     rule_code: String,
+    /// What the report is about, as the report names it.
     target: String,
+    /// How many reports the entry allows.
     count: u32,
     /// How many of `count` were heuristic: left out when none were, and in files written before
     /// version 3.
     #[serde(default, skip_serializing_if = "is_zero")]
     heuristic: u32,
+}
+
+/// The JSON Schema of a baseline file of `version`, for its contents read as JSON (the file is
+/// TOML, and a TOML parser gives the same values). Each version keeps the meaning its files
+/// were written with: version 1 counts diagnostics and has no `version`, or 1; version 2 counts
+/// sites; version 3 also counts the heuristic ones.
+pub fn baseline_schema(version: BaselineVersion) -> serde_json::Value {
+    let number = version.number();
+    let mut schema = heki_env::published_schema::<BaselineFile>(
+        &format!("baseline-{number}"),
+        &format!("heki Ratchet baseline, version {number}"),
+    );
+    let (version_note, count_note) = match version {
+        BaselineVersion::V1 => (
+            "Absent or 1: the counts are diagnostics.",
+            "How many diagnostics the entry allows.",
+        ),
+        BaselineVersion::V2 => (
+            "2: the counts are violation sites.",
+            "How many violation sites the entry allows.",
+        ),
+        BaselineVersion::V3 => (
+            "3: the counts are violation sites, and `heuristic` says how many of them were heuristic.",
+            "How many violation sites the entry allows.",
+        ),
+    };
+    schema["properties"]["version"] = serde_json::json!({
+        "description": version_note,
+        "const": number,
+        "type": "integer",
+    });
+    if version != BaselineVersion::V1 {
+        schema["required"] = serde_json::json!(["entries", "version"]);
+    }
+    let entry = &mut schema["$defs"]["BaselineEntry"]["properties"];
+    entry["count"]["description"] = count_note.into();
+    if !version.records_heuristic() {
+        entry
+            .as_object_mut()
+            .expect("an entry has properties")
+            .remove("heuristic");
+    }
+    schema
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)] // `skip_serializing_if` passes a reference.

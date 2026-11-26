@@ -1,0 +1,65 @@
+{
+  "$defs": {
+    "SnapshotEntry": {
+      "additionalProperties": false,
+      "description": "The normalized summary of one public function.",
+      "properties": {
+        "escapes_params": {
+          "description": "The parameters that escape: the function stores, captures, yields, or returns them. Left\nout when there are none.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "mutates_params": {
+          "description": "The parameters the function changes in place, directly or through the functions it\ncalls. Left out when there are none.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "mutates_self_attrs": {
+          "description": "The attributes of `self` the function changes, as `attr` or `attr[\"key\"]`. Left out when\nthere are none.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "transitive_exec_effects": {
+          "description": "The names of the effects the function has, directly or through the functions it calls.\nLeft out when there are none.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$id": "https://heki.koxudaxi.dev/schemas/summary-snapshot-1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Normalized summaries keyed by `module:qualname`.",
+  "properties": {
+    "functions": {
+      "additionalProperties": {
+        "$ref": "#/$defs/SnapshotEntry"
+      },
+      "description": "The summary of every public function, by `module:qualname`.",
+      "type": "object"
+    },
+    "version": {
+      "const": 1,
+      "description": "The version of the file: 1.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "functions"
+  ],
+  "title": "heki snapshot, the summary snapshot file",
+  "type": "object"
+}

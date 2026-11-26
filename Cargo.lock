@@ -547,6 +547,7 @@ dependencies = [
  "proc-macro2",
  "rayon",
  "rustc-hash",
+ "schemars",
  "serde",
  "serde_json",
  "syn 3.0.10",
@@ -561,6 +562,7 @@ dependencies = [
  "ruff_python_ast",
  "ruff_python_parser",
  "ruff_text_size",
+ "schemars",
  "serde",
  "thiserror",
 ]
@@ -572,6 +574,7 @@ dependencies = [
  "anstyle",
  "heki_ast",
  "heki_env",
+ "schemars",
  "serde",
  "serde_json",
  "thiserror",
@@ -598,6 +601,7 @@ name = "heki_env"
 version = "0.9.0"
 dependencies = [
  "globset",
+ "schemars",
  "serde",
  "serde_json",
  "strsim",
