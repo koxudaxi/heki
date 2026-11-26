@@ -1642,8 +1642,9 @@ impl<'a> Extractor<'a> {
     }
 
     /// [`Self::may_params`]: a monotone fixpoint over copies, in-place container operators
-    /// ([`Self::same_object`]), and phis, from the parameters and the reads of the enclosing
-    /// functions' parameters ([`Self::captured_bit`]).
+    /// ([`Self::same_object`]), the items of displays an assignment only unpacks, each its
+    /// element ([`Self::unpacked`]), and phis, from the parameters and the reads of the
+    /// enclosing functions' parameters ([`Self::captured_bit`]).
     fn build_may_params(&mut self) {
         for (i, p) in self.f.params.iter().enumerate().take(64) {
             *self.may_params.entry(p.var).or_default() |= 1u64 << i;
@@ -1667,7 +1668,9 @@ impl<'a> Extractor<'a> {
                 }
                 self.pos = (bb.id, 0);
                 for inst in &bb.insts {
-                    if let Some((dst, src)) = self.same_object(&inst.kind) {
+                    let unpacked = |dst| self.unpacked.get(&dst).map(|elem| (dst, *elem));
+                    let same = self.same_object(&inst.kind);
+                    if let Some((dst, src)) = same.or_else(|| inst.kind.dst().and_then(unpacked)) {
                         let bits = self.may_params.get(&src).copied().unwrap_or(0);
                         changed |= or_bits(&mut self.may_params, dst, bits);
                     }
@@ -4862,7 +4865,10 @@ impl<'a> Extractor<'a> {
                 && !unpacked.contains_key(&v)
                 && !self.holds_no_operand_part(v)
             {
-                out.extend(inst.kind.operands());
+                match self.read_out_of(&inst.kind) {
+                    Some(read) => out.push(read),
+                    None => out.extend(inst.kind.operands()),
+                }
             }
         };
         let (answers, returned) = rec.resolve(
@@ -5116,12 +5122,34 @@ impl<'a> Extractor<'a> {
         self.built(v) == Built::Atomic
     }
 
+    /// The one operand the result of `kind` is read out of when no other operand can be part of
+    /// it: the object of an attribute read, the iterable or the iterator of an iteration step,
+    /// and the object of an item looked up by a builtin type's own lookup, which gives an item
+    /// the object holds and never the key: every class the object may be (R2) runs `object`'s
+    /// or a builtin type's `__getitem__` and `__missing__` ([`invokes::interpreter_own`]). A
+    /// project class's `__getitem__` may return its key.
+    fn read_out_of(&self, kind: &InstKind) -> Option<VarId> {
+        match kind {
+            InstKind::AttrLoad { obj, .. }
+            | InstKind::MakeIter { iterable: obj, .. }
+            | InstKind::IterNext { iter: obj, .. } => Some(*obj),
+            InstKind::SubscriptLoad { obj, .. } => invokes::interpreter_own(
+                self.cx.project,
+                self.types.get(obj),
+                &["__getitem__", "__missing__"],
+                false,
+            )
+            .then_some(*obj),
+            _ => None,
+        }
+    }
+
     /// Whether `var` may hold what a call in [`Self::maybe_new`] returned, or a part of it:
-    /// through copies and the one operand of an attribute read, an item, or an iteration step;
-    /// anything else past the first step, a phi, or a definition with operands may. The
-    /// resolution leaves out the operands of a value that holds no part of them
-    /// ([`Self::holds_no_operand_part`]), which is asked only after the visit: it reads the
-    /// callees the visit records.
+    /// through copies and the value an attribute read, an item, or an iteration step reads its
+    /// result out of ([`Self::read_out_of`]); anything else past the first step, a phi, or a
+    /// definition with operands may. The resolution leaves out the operands of a value that
+    /// holds no part of them ([`Self::holds_no_operand_part`]), which is asked only after the
+    /// visit: it reads the callees the visit records.
     fn may_hold_or_read_new(&self, var: VarId) -> bool {
         if self.maybe_new.is_empty() {
             return false;
@@ -5134,15 +5162,10 @@ impl<'a> Extractor<'a> {
             }
             match self.defs.get(&cur).map(|i| &i.kind) {
                 Some(InstKind::Copy { src, .. }) => cur = *src,
-                Some(
-                    InstKind::AttrLoad { obj: next, .. }
-                    | InstKind::SubscriptLoad { obj: next, .. }
-                    | InstKind::MakeIter { iterable: next, .. }
-                    | InstKind::IterNext { iter: next, .. },
-                ) => cur = *next,
-                Some(kind) => {
-                    return self.maybe_new.contains(&cur) || !kind.operands().is_empty();
-                }
+                Some(kind) => match self.read_out_of(kind) {
+                    Some(next) => cur = next,
+                    None => return self.maybe_new.contains(&cur) || !kind.operands().is_empty(),
+                },
                 None => return true,
             }
         }

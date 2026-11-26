@@ -60,12 +60,86 @@ def publish_parent(part: Node) -> None:
 
 def parent_of(part: Node) -> "Node | None":
     return part.parent
+
+
+class Registry:
+    def __getitem__(self, key: Node) -> Node:
+        return key
+
+
+REGISTRY = Registry()
+INDEX: dict[Node, int] = {}
+LAST: object = None
+
+
+def _save(node: Node) -> None:
+    global LAST
+    kept, _ = (node, None)
+    LAST = kept
+
+
+def _unpack(node: Node) -> None:
+    kept, rest = (node, None)
+    print(rest)
+
+
+class Recording(type):
+    def __new__(mcs, name, bases, ns):
+        def __setattr__(self, attr, value):
+            OLD.append(value)
+            object.__setattr__(self, attr, value)
+
+        ns["__setattr__"] = __setattr__
+        return super().__new__(mcs, name, bases, ns)
+
+
+OPTIONS = {"metaclass": Recording}
+
+
+class Holder(**{"metaclass": Recording}):
+    def __init__(self) -> None:
+        self.child: Node | None = None
+
+
+class OptionsHolder(**OPTIONS):
+    def __init__(self) -> None:
+        self.child: Node | None = None
+
+
+class MergedHolder(**{**OPTIONS}):
+    def __init__(self) -> None:
+        self.child: Node | None = None
+
+
+class Tagging:
+    def __init_subclass__(cls, tag: str = "", **kw: object) -> None:
+        super().__init_subclass__(**kw)
+        cls.tag = tag
+
+
+class TaggedHolder(Tagging, **{"tag": "x"}):
+    def __init__(self) -> None:
+        self.child: Node | None = None
+
+
+class EmptyHolder(**{}):
+    def __init__(self) -> None:
+        self.child: Node | None = None
 "#;
 
 /// The scope functions; the expected reports are in the test.
 const PASSES: &str = r#"from pkg.model import (
+    INDEX,
     OLD,
+    REGISTRY,
+    EmptyHolder,
+    Holder,
+    MergedHolder,
     Node,
+    OptionsHolder,
+    TaggedHolder,
+    _save,
+    _unpack,
     make_linked,
     make_plain,
     make_relayed,
@@ -319,6 +393,72 @@ def keeps_a_string_of_a_value_read_back(node: Node) -> Node:
     OLD.append(f"parent: {part.parent}")
     copied.flag = True
     return copied
+
+
+def keeps_what_a_custom_subscript_reads_back(node: Node) -> Node:
+    copied, part = Node(), Node()
+    part.parent = copied
+    OLD.append(REGISTRY[part])
+    copied.flag = True
+    return copied
+
+
+def keeps_items_of_builtin_dicts_keyed_by_the_holder(node: Node) -> Node:
+    copied, part = Node(), Node()
+    part.parent = copied
+    OLD.append(INDEX[part])
+    counts = dict(INDEX)
+    OLD.append(counts[part])
+    copied.flag = True
+    return copied
+
+
+def hands_to_a_helper_storing_an_unpacked_item(node: Node) -> Node:
+    copied = Node()
+    _save(copied)
+    copied.flag = True
+    return copied
+
+
+def hands_to_a_helper_only_unpacking(node: Node) -> Node:
+    copied = Node()
+    _unpack(copied)
+    copied.flag = True
+    return copied
+
+
+def links_into_a_holder_with_an_unpacked_metaclass(node: Node) -> Node:
+    copied = Node()
+    holder = Holder()
+    holder.child = copied
+    copied.flag = True
+    return copied
+
+
+def links_into_a_holder_with_unpacked_options(node: Node) -> Node:
+    copied = Node()
+    holder = OptionsHolder()
+    holder.child = copied
+    copied.flag = True
+    return copied
+
+
+def links_into_a_holder_with_merged_options(node: Node) -> Node:
+    copied = Node()
+    holder = MergedHolder()
+    holder.child = copied
+    copied.flag = True
+    return copied
+
+
+def links_into_holders_with_known_keywords(node: Node) -> Node:
+    copied = Node()
+    tagged = TaggedHolder()
+    tagged.child = copied
+    empty = EmptyHolder()
+    empty.child = copied
+    copied.flag = True
+    return copied
 "#;
 
 const CONFIG: &str = r#"[project]
@@ -415,6 +555,30 @@ fn objects_linked_to_one_another_stay_new_until_one_is_kept() {
         // A project class's operator may return what it reads out of its operand.
         at("keeps_what_an_operator_reads_back", "copied.flag = True"),
         at("keeps_what_a_comparison_reads_back", "copied.flag = True"),
+        // A project class's `__getitem__` may return the key it is handed.
+        at(
+            "keeps_what_a_custom_subscript_reads_back",
+            "copied.flag = True",
+        ),
+        // The helper stores the item it unpacks out of a display of its parameter.
+        at(
+            "hands_to_a_helper_storing_an_unpacked_item",
+            "copied.flag = True",
+        ),
+        // A metaclass from an unpacked mapping, or from a mapping whose keys are not known,
+        // may install a `__setattr__`.
+        at(
+            "links_into_a_holder_with_an_unpacked_metaclass",
+            "copied.flag = True",
+        ),
+        at(
+            "links_into_a_holder_with_unpacked_options",
+            "copied.flag = True",
+        ),
+        at(
+            "links_into_a_holder_with_merged_options",
+            "copied.flag = True",
+        ),
     ];
     expected.sort();
     assert_eq!(found, expected);

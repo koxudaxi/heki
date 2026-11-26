@@ -653,8 +653,9 @@ pub struct ClassDecl {
     /// The resolved `metaclass=` of the class statement.
     pub metaclass: Option<String>,
     /// The class statement names a metaclass other than `type` and `abc.ABCMeta`, also one heki
-    /// cannot resolve, or has a base heki names no class for ([`is_unknown_base`]), whose
-    /// metaclass is unknown ([`ProjectDecls::has_custom_metaclass`]).
+    /// cannot resolve, or has a base heki names no class for ([`is_unknown_base`]) or unpacks
+    /// a mapping of keywords whose keys heki does not know (`**options`), whose metaclass is
+    /// unknown ([`ProjectDecls::has_custom_metaclass`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub custom_metaclass: bool,
     /// The `frozen=` keyword of the class statement (`class C(Base, frozen=False)`).
@@ -6652,7 +6653,9 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
         let metaclass_text = keyword("metaclass");
         let metaclass = metaclass_text.and_then(|m| decls.resolve_dotted(m, false));
         // `type` is no name the module binds: it stays the builtin unless the module rebinds it.
+        // A mapping of keywords heki does not read (`**options`) may pass `metaclass`.
         let custom_metaclass = unknown_base
+            || keyword("**").is_some()
             || metaclass_text.is_some_and(|text| {
                 !matches!(
                     metaclass.as_deref().unwrap_or(text),

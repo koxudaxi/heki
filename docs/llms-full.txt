@@ -1597,24 +1597,31 @@ With `fresh-objects = "allow"`, a write is no violation when it constructs the o
 - the object was allocated in the same call chain: by calling its class, by `object.__new__`
   (`object.__new__(Node)`), by a copy, or by a project function returning a new object;
 - nothing can hold it yet: no store, `yield`, closure, or call that may keep it ran before the
-  write.
+  write, except a store into another new object that links the two (below).
 
 New objects stored in one another stay new: an attribute store of a new object into another
 object the function made, of a class whose attribute write runs no code (no `__setattr__`,
-property, or other descriptor of the name; for a pydantic model, no `model_config`, `Config`, or
-class keyword on any class the object may be, since `validate_assignment` runs the model's
-validators), links the two
+property, or other descriptor of the name, no metaclass other than `type` or `abc.ABCMeta`, and
+no mapping of class keywords heki cannot read, which may pass one; for a pydantic model, no
+`model_config`, `Config`, or class keyword on any class the object may be, since
+`validate_assignment` runs the model's validators), links the holder to the object it stores
 (`copied, part = Node(), Node(); part.parent = copied; copied.flag = True` constructs `copied`).
-The group stays new until one of its objects is stored anywhere else, yielded, captured, or
-handed to a call that may keep it, and so does a value read out of one of them (an attribute, an
-item, an iteration step, what a call over it returns, and what an operator over it returns
-unless the operator is `object`'s or a builtin type's: `-part` may run a `Node.__neg__`
-returning `self.parent`), which may be another:
-`old.append(part.parent)` ends `copied`'s freshness, as does a helper handed `part`, which may
-store what it reads out of it. A project function's result that holds itself through the objects
-it links (`made.part = part; part.parent = made`) is new at a call until a value read out of it
-is stored. A store into an object the function did not make, or into one of its own that was
-kept before, still ends the freshness of what it stores.
+Links are directed: keeping an object keeps what it holds, through any number of links, but not
+the objects that hold it. With only `part.parent = copied`, storing `part` anywhere else,
+yielding it, capturing it, or handing it to a call that may keep it ends the freshness of both,
+while storing `copied` ends only `copied`'s. Keeping a value read out of an object keeps what
+that object holds, as the value may be one of them: an attribute, an item, an iteration step,
+what a call over it returns, what a lookup with it as the key returns unless the lookup is a
+builtin type's own (a project `__getitem__` may return its key), and what an operator over it
+returns unless the result holds nothing: a `bool`, number, or string that `object`'s or a
+builtin type's own special methods give (`-part.count`, `part.count < 3`, `not part.flag`,
+`f"{part.parent!r}"`). `-part` may run a `Node.__neg__` returning `self.parent`, and
+`(part,) + ()` is a tuple holding `part`, so `old.append(part.parent)`, `old.append(-part)`,
+and `old.append((part,) + ())` end `copied`'s freshness, as does a helper handed `part`, which
+may store what it reads out of it. A project function's result that holds itself through the
+objects it links (`made.part = part; part.parent = made`) is new at a call until a value read
+out of it is stored. A store into an object the function did not make, or into one of its own
+that was kept before, still ends the freshness of what it stores.
 
 A shallow copy's containers are the original's: only rebinding its attributes constructs it.
 
@@ -13636,9 +13643,13 @@ default): the object was allocated in the same call chain, by calling its class,
 project function that returns such an object (at a call leaving an optional parameter at a
 default without elements, such as `None`, the paths returning an element of it return
 nothing) or returns the one it is handed, and nothing else can hold it yet: no store into
-another object, a container, a global, or a closure, no `yield`, and no call that may keep it
-ran before the write. A project function keeps an object it stores, yields, or hands to code
-heki does not follow or to a function that keeps it; reading or writing it keeps nothing. A
+an object the function did not make, a container, a global, or a closure, no `yield`, and no
+call that may keep it ran before the write. An attribute store into another new object of a
+class whose attribute write runs no code links the holder to it instead: the object stays new
+until it, an object holding it, or a value read out of one is kept (see
+[configuration](https://heki.koxudaxi.dev/configuration/#write-owners)). A project function keeps an object it
+stores, yields, or hands to code heki does not follow or to a function that keeps it; reading
+or writing it keeps nothing. A
 store made only where tests of the function's parameters pass (`if register:`) keeps nothing at a
 call whose arguments fail them (`register=False`, or a default the call leaves). Writes
 that a helper makes to a new object its caller hands it count as well. A shallow copy shares its
