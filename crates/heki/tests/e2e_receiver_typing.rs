@@ -1,7 +1,7 @@
 //! Receiver typing end to end through the real binary: which writes and reads of guarded
 //! attributes (`MUT201` / `MUT203`) heki sees through receivers whose class comes from
-//! annotations, the items of containers, return types, flow, structural typing, the closure
-//! cells of enclosing functions, and `type(obj)`.
+//! annotations, the items of containers, return types, what calling a `Callable[..., T]` gives,
+//! flow, structural typing, the closure cells of enclosing functions, and `type(obj)`.
 
 mod common;
 
@@ -2071,4 +2071,269 @@ fn class_object_annotations_construct_call_and_read_their_class() {
         ("Builder.own_class", "MUT203"),
     ]);
     assert_eq!(reported(&p, &[], "pkg/uses.py"), expected);
+}
+
+/// Factories annotated with the callable they return, an attribute and a property holding one,
+/// and aliases of the types they give, in another module than the calls.
+const CALLABLE_FACTORIES: &str = r#"from __future__ import annotations
+
+import typing
+from collections.abc import Callable
+from typing import Annotated, Any, Optional, TypeVar, Union
+
+from pkg.model import Model, Ref
+
+T = TypeVar("T")
+M = TypeVar("M", bound=Model)
+MaybeModel = Optional[Model]
+Models = list[Model]
+
+
+def model_factory() -> Callable[..., Model]: ...
+
+
+def model_maker() -> typing.Callable[[str], "Model"]: ...
+
+
+def bound_factory() -> Callable[..., M]: ...
+
+
+def list_factory() -> Callable[..., Models]: ...
+
+
+def nested_factory() -> Callable[..., Callable[..., Model]]: ...
+
+
+def _load() -> Any: ...
+
+
+FACTORY: Callable[..., Model] = _load()
+
+
+def maybe_factory() -> Callable[..., Model | None]: ...
+
+
+def optional_factory() -> Callable[..., Optional[Model]]: ...
+
+
+def union_none_factory() -> Callable[..., Union[Model, None]]: ...
+
+
+def alias_factory() -> Callable[..., MaybeModel]: ...
+
+
+def either_factory() -> Callable[..., Model | Ref]: ...
+
+
+def either_callable() -> Callable[..., Model] | Callable[..., Ref]: ...
+
+
+def annotated_factory() -> Callable[..., Annotated[Model, "made"]]: ...
+
+
+def annotated_none_factory() -> Callable[..., Annotated[Model | None, "maybe"]]: ...
+
+
+def typevar_factory() -> Callable[..., T]: ...
+
+
+def any_factory() -> Callable[..., Any]: ...
+
+
+def object_factory() -> Callable[..., object]: ...
+
+
+def bare_factory() -> Callable: ...
+
+
+class Settings:
+    factory: Callable[..., Model]
+    maybe: Callable[..., Model | None]
+
+    @property
+    def maker(self) -> Callable[[str], Model]: ...
+"#;
+
+/// Calls of the values the factories return. Each function writes `Model.fields` on what the
+/// call gives: reported when the call gives a `Model`.
+const CALLABLE_CALLS: &str = r#"from __future__ import annotations
+
+from collections.abc import Callable
+
+from pkg.factories import (
+    FACTORY,
+    MaybeModel,
+    Models,
+    Settings,
+    alias_factory,
+    annotated_factory,
+    annotated_none_factory,
+    any_factory,
+    bare_factory,
+    bound_factory,
+    either_callable,
+    either_factory,
+    list_factory,
+    maybe_factory,
+    model_factory,
+    model_maker,
+    nested_factory,
+    object_factory,
+    optional_factory,
+    typevar_factory,
+    union_none_factory,
+)
+from pkg.model import Model
+
+
+class LocalModel(Model):
+    pass
+
+
+class Builder:
+    def _model_class(self) -> Callable[..., Model]:
+        return LocalModel
+
+    def __init__(self) -> None:
+        self.model = self._model_class()()
+
+    def built(self) -> None:
+        self.model.fields = []
+
+
+def function_factory() -> None:
+    model_factory()().fields = []
+
+
+def typing_callable() -> None:
+    model_maker()("x").fields = []
+
+
+def parameter(make: Callable[[str], Model]) -> None:
+    make("x").fields = []
+
+
+def local_value() -> None:
+    make = model_factory()
+    made = make()
+    made.fields = []
+
+
+def bound_typevar() -> None:
+    bound_factory()().fields = []
+
+
+def alias_items() -> None:
+    list_factory()()[0].fields = []
+
+
+def imported_alias(make: Callable[..., Models]) -> None:
+    make()[0].fields = []
+
+
+def nested() -> None:
+    nested_factory()()().fields = []
+
+
+def annotated() -> None:
+    annotated_factory()().fields = []
+
+
+def imported_global() -> None:
+    FACTORY().fields = []
+
+
+def attribute(s: Settings) -> None:
+    s.factory().fields = []
+
+
+def property_value(s: Settings) -> None:
+    s.maker("x").fields = []
+
+
+def maybe_none() -> None:
+    maybe_factory()().fields = []
+
+
+def optional() -> None:
+    optional_factory()().fields = []
+
+
+def union_none() -> None:
+    union_none_factory()().fields = []
+
+
+def optional_alias() -> None:
+    alias_factory()().fields = []
+
+
+def imported_optional_alias(make: Callable[..., MaybeModel]) -> None:
+    make().fields = []
+
+
+def either() -> None:
+    either_factory()().fields = []
+
+
+def either_of_two_callables() -> None:
+    either_callable()().fields = []
+
+
+def annotated_none() -> None:
+    annotated_none_factory()().fields = []
+
+
+def unbound_typevar() -> None:
+    typevar_factory()().fields = []
+
+
+def any_result() -> None:
+    any_factory()().fields = []
+
+
+def object_result() -> None:
+    object_factory()().fields = []
+
+
+def bare_callable() -> None:
+    bare_factory()().fields = []
+
+
+def attribute_maybe(s: Settings) -> None:
+    s.maybe().fields = []
+"#;
+
+/// A call of a value annotated `Callable[..., T]` (or `Callable[[...], T]`) gives a `T` when `T`
+/// is one class: a factory method of the class itself, a function, a parameter, a global, an
+/// attribute, and a property of another module, a type variable bound to a class, an alias of a
+/// container of one class (in the module or imported), `Annotated[T, ...]`, and another
+/// `Callable`. The call stays of no known class when `T` may be `None` (`| None`, `Optional`,
+/// `Union[..., None]`, inside `Annotated`, an alias of such a type in the module or imported), is
+/// a union of classes, an unbound type variable, `Any` or `object`, for a bare `Callable`, and
+/// for either of two callables giving different classes.
+#[test]
+fn calling_a_callable_value_gives_the_one_class_it_returns() {
+    let p = Project::new("callable_results");
+    p.write("pyproject.toml", CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/model.py", MODEL)
+        .write("pkg/store.py", STORE)
+        .write("pkg/factories.py", CALLABLE_FACTORIES)
+        .write("pkg/callables.py", CALLABLE_CALLS);
+    let expected = pairs(&[
+        ("Builder.built", "MUT201"),
+        ("function_factory", "MUT201"),
+        ("typing_callable", "MUT201"),
+        ("parameter", "MUT201"),
+        ("local_value", "MUT201"),
+        ("bound_typevar", "MUT201"),
+        ("alias_items", "MUT201"),
+        ("imported_alias", "MUT201"),
+        ("nested", "MUT201"),
+        ("annotated", "MUT201"),
+        ("imported_global", "MUT201"),
+        ("attribute", "MUT201"),
+        ("property_value", "MUT201"),
+    ]);
+    assert_eq!(reported(&p, &[], "pkg/callables.py"), expected);
 }
