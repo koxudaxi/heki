@@ -730,3 +730,25 @@ fn each_site_says_how_it_names_its_modules() {
         assert!(out.contains(line), "{line}\n{out}");
     }
 }
+
+/// A call that may import a module by name (a method named like `import_module` on an object of
+/// unknown class, a name that may be bound to `importlib.import_module`) is a site whose
+/// modules are open and which loads nothing certainly.
+#[test]
+fn a_call_that_may_import_by_name_is_a_site_with_open_modules() {
+    let p = Project::new("imports_maybe_by_name");
+    p.write("app/__init__.py", "").write(
+        "app/load.py",
+        "import importlib\n\n\ndef through(loader):\n    return loader.import_module(\"json\")\n\n\ndef either(flag):\n    load = importlib.import_module if flag else print\n    return load(\"json\")\n",
+    );
+    let (code, report, err) = imports(&p, "app.load", &[]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        sites(&report, "app.load"),
+        strings(&[
+            "1 import body always -> importlib",
+            "5 maybe_by_name function in through always -> -",
+            "10 maybe_by_name function in either always -> -",
+        ])
+    );
+}

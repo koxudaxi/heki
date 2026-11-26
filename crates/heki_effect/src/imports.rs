@@ -80,6 +80,17 @@ pub enum ImportForm {
     /// A call importing a module by name (`importlib.import_module`, `__import__`:
     /// `heki_kb::EcosystemEntry::loads_module`).
     ByName,
+    /// A call that may be one importing a module by name: `loader.import_module(name)` on an
+    /// object of unknown class, or a call of a name that may be bound to `importlib.import_module`
+    /// or `__import__` on some path. Its modules are open; it adds no edge to the import graph.
+    MaybeByName,
+}
+
+impl ImportForm {
+    /// Whether the site is a call that imports a module by name, or may be one.
+    pub fn is_by_name(&self) -> bool {
+        matches!(self, Self::ByName | Self::MaybeByName)
+    }
 }
 
 /// How an import site writes the names of the modules it imports.

@@ -174,6 +174,7 @@ fn site_report(
         ImportForm::From(name) => ("from", Some(name.clone())),
         ImportForm::Star => ("star", None),
         ImportForm::ByName => ("by_name", None),
+        ImportForm::MaybeByName => ("maybe_by_name", None),
     };
     let certain = target.certain();
     let mut may_load = Vec::new();

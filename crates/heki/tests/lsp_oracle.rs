@@ -111,6 +111,12 @@ forbidden-imports = ["pkg.imp_heavy"]
 reach = "import-time"
 
 [[tool.heki.import-boundaries]]
+name = "private"
+importers = ["pkg.imp_priv"]
+forbidden-imports = ["pkg.imp_privmod:_*", "pkg.imp_banned"]
+unresolved = "report"
+
+[[tool.heki.import-boundaries]]
 name = "copied"
 importers = ["pkg.imp_rt.*"]
 allowed-imports = ["<stdlib>"]
@@ -6678,6 +6684,47 @@ fn steps_import_boundaries() -> Vec<Step> {
             vec![save("pkg/imp_rt/a.py", "from . import b\n")],
         )
         .absent(&[("pkg/imp_rt/a.py", "IMP201")]),
+        Step::new(
+            "a module imports a public name of a module that forbids its private names",
+            vec![
+                Action::Create(
+                    "pkg/imp_privmod.py",
+                    "def _hidden():\n    pass\n\n\ndef shown():\n    pass\n".to_owned(),
+                ),
+                Action::Create(
+                    "pkg/imp_priv.py",
+                    "from pkg.imp_privmod import shown\n".to_owned(),
+                ),
+            ],
+        )
+        .absent(&[("pkg/imp_priv.py", "IMP201")]),
+        Step::new(
+            "the import takes a private name",
+            vec![save(
+                "pkg/imp_priv.py",
+                "from pkg.imp_privmod import _hidden\n",
+            )],
+        )
+        .present(&[("pkg/imp_priv.py", "IMP201")]),
+        Step::new(
+            "a method of an object of unknown class may import a module by name",
+            vec![save(
+                "pkg/imp_priv.py",
+                "def load(loader):\n    return loader.import_module(\"pkg.imp_privmod\")\n",
+            )],
+        )
+        .present(&[("pkg/imp_priv.py", "IMP202")])
+        .absent(&[("pkg/imp_priv.py", "IMP201")]),
+        Step::new(
+            "a relative import climbs past the top-level package",
+            vec![save("pkg/imp_priv.py", "from .. import outside\n")],
+        )
+        .present(&[("pkg/imp_priv.py", "IMP202")]),
+        Step::new(
+            "the import stays inside the package",
+            vec![save("pkg/imp_priv.py", "from . import imp_privmod\n")],
+        )
+        .absent(&[("pkg/imp_priv.py", "IMP202")]),
     ]
 }
 

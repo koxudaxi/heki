@@ -1021,7 +1021,7 @@ pub enum RuleConfigError {
     },
     /// A `module:name` in an import contract list that takes none, or with an empty part.
     #[error(
-        "invalid name `{pattern}` in {context} (a module and a name of it, `module:name`, only in `allowed-imports` and the imported side of `ignored-imports`)"
+        "invalid name `{pattern}` in {context} (a module and a name of it, `module:name`, only in `allowed-imports`, `forbidden-imports` and the imported side of `ignored-imports`)"
     )]
     ImportName {
         pattern: String,
