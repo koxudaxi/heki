@@ -1720,7 +1720,7 @@ def _set(value: bool, field: Field) -> None:
 
 PARTIALS = {"require": partial(_require), "noop": partial(_noop)}
 KEYWORDS = {"require": partial(_require, deep=True)}
-MIXED = {"noop": _noop, "require": partial(_require)}
+MIXED = {"require": partial(_require), "noop": _noop}
 LISTED = [partial(_noop), partial(_require)]
 NOOPS = {"noop": partial(_noop), "other": partial(_noop)}
 POSITIONS = {"require": partial(_set, True)}

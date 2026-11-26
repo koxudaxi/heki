@@ -1043,6 +1043,10 @@ mod tests {
             g.join(&partial(&f, Held::Positions)),
             Some(partial(&either, Held::Positions))
         );
+        assert_eq!(
+            partial(&f, Held::Nothing).join(&g),
+            Some(partial(&either, Held::Nothing))
+        );
         let nested = partial(&partial(&f, Held::Nothing), Held::Nothing);
         assert_eq!(nested.join(&partial(&g, Held::Nothing)), None);
         assert_eq!(list(Elem::Of(f.clone())).depth(), 2);
