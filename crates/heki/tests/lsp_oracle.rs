@@ -2665,6 +2665,140 @@ fn steps_argument_lists() -> Vec<Step> {
     ]
 }
 
+/// A call target naming every callee by its argument list: a call of a parameter passing a
+/// `Final` string of another module is reported while the string matches the target's glob,
+/// until that module binds the name to another string, and again when it binds it back.
+fn steps_callee_globs() -> Vec<Step> {
+    let config = format!(
+        "{CONFIG}\n[[tool.heki.call-owners]]\nname = \"backend-module\"\ntargets = ['*(module=\"pkg.backend.*\")']\nforbidden-callers = [\"pkg.glob_use:*\"]\n"
+    );
+    let names = |value: &str| format!("from typing import Final\n\nBACKEND: Final = \"{value}\"\n");
+    let using = "from pkg.backend_names import BACKEND\n\n\ndef build(factory):\n    return factory(module=BACKEND)\n";
+    vec![
+        Step::new(
+            "a call of a parameter passes a string the glob matches",
+            vec![
+                Action::Configure(config),
+                Action::Create("pkg/backend_names.py", names("pkg.backend.dataclass")),
+                Action::Create("pkg/glob_use.py", using.to_owned()),
+            ],
+        )
+        .present(&[("pkg/glob_use.py", "MUT204")]),
+        Step::new(
+            "the other module binds the name to another string",
+            vec![save("pkg/backend_names.py", &names("pkg.frontend"))],
+        )
+        .absent(&[("pkg/glob_use.py", "MUT204")]),
+        Step::new(
+            "it binds a string the glob matches again",
+            vec![save("pkg/backend_names.py", &names("pkg.backend.msgspec"))],
+        )
+        .present(&[("pkg/glob_use.py", "MUT204")]),
+        Step::new(
+            "the files and the contracts are restored",
+            vec![
+                Action::Delete("pkg/glob_use.py"),
+                Action::Delete("pkg/backend_names.py"),
+                Action::Configure(CONFIG.to_owned()),
+            ],
+        )
+        .absent(&[("pkg/glob_use.py", "MUT204")]),
+    ]
+}
+
+/// A call target naming every callee, below a boundary scope and a private helper's caller in
+/// another module: editing only the string a helper passes to a parameter's call changes no
+/// summary, yet the scope's `EFF201` and the caller's `MUT204` follow it.
+fn steps_unbound_helpers() -> Vec<Step> {
+    let config = format!(
+        "{CONFIG}\n[[tool.heki.effect-boundaries]]\nname = \"no-backend\"\nscopes = [\"pkg.ub_scope.run\"]\nforbid = [\"calls\"]\ncall-targets = ['*(module=\"pkg.backend.*\")']\n\n[[tool.heki.call-owners]]\nname = \"backend-calls\"\ntargets = ['*(module=\"pkg.backend.*\")']\nforbidden-callers = [\"pkg.ub_scope:*\"]\n"
+    );
+    let helper = |value: &str| {
+        format!(
+            "def _make(factory):\n    return factory(module=\"{value}\")\n\n\ndef build(factory):\n    return factory(module=\"{value}\")\n"
+        )
+    };
+    let scope = "from pkg.ub_helper import _make, build\n\n\ndef run(factory):\n    return build(factory)\n\n\ndef make(factory):\n    return _make(factory)\n";
+    const REPORTS: &[(&str, &str)] =
+        &[("pkg/ub_scope.py", "EFF201"), ("pkg/ub_scope.py", "MUT204")];
+    vec![
+        Step::new(
+            "helpers of another module pass a string the glob matches",
+            vec![
+                Action::Configure(config),
+                Action::Create("pkg/ub_helper.py", helper("pkg.backend.dataclass")),
+                Action::Create("pkg/ub_scope.py", scope.to_owned()),
+            ],
+        )
+        .present(REPORTS),
+        Step::new(
+            "the helpers pass another string",
+            vec![save("pkg/ub_helper.py", &helper("pkg.frontend"))],
+        )
+        .absent(REPORTS),
+        Step::new(
+            "they pass a string the glob matches again",
+            vec![save("pkg/ub_helper.py", &helper("pkg.backend.msgspec"))],
+        )
+        .present(REPORTS),
+        Step::new(
+            "the files and the contracts are restored",
+            vec![
+                Action::Delete("pkg/ub_scope.py"),
+                Action::Delete("pkg/ub_helper.py"),
+                Action::Configure(CONFIG.to_owned()),
+            ],
+        )
+        .absent(REPORTS),
+    ]
+}
+
+/// A call target with a module part naming a name the package binds to a class of another
+/// module: a read of it through the package object is reported while the package imports the
+/// class, not once the package stops binding it, and again when it binds it back.
+fn steps_module_members() -> Vec<Step> {
+    let config = format!(
+        "{CONFIG}\n[[tool.heki.call-owners]]\nname = \"root-kind\"\ntargets = [\"pkg.rexp:Kind\"]\nforbidden-callers = [\"pkg.rexp_use:*\"]\nreferences = \"reads\"\n"
+    );
+    let reexport = "from pkg.rexp.enums import Kind as Kind\n";
+    let using = "import pkg.rexp\n\n\ndef first():\n    return pkg.rexp.Kind.A\n";
+    vec![
+        Step::new(
+            "a function reads the package's name through the package object",
+            vec![
+                Action::Configure(config),
+                Action::Create("pkg/rexp/__init__.py", reexport.to_owned()),
+                Action::Create(
+                    "pkg/rexp/enums.py",
+                    "import enum\n\n\nclass Kind(enum.Enum):\n    A = 1\n".to_owned(),
+                ),
+                Action::Create("pkg/rexp_use.py", using.to_owned()),
+            ],
+        )
+        .present(&[("pkg/rexp_use.py", "MUT204")]),
+        Step::new(
+            "the package stops binding the name",
+            vec![save("pkg/rexp/__init__.py", "")],
+        )
+        .absent(&[("pkg/rexp_use.py", "MUT204")]),
+        Step::new(
+            "it imports the class again",
+            vec![save("pkg/rexp/__init__.py", reexport)],
+        )
+        .present(&[("pkg/rexp_use.py", "MUT204")]),
+        Step::new(
+            "the files and the contracts are restored",
+            vec![
+                Action::Delete("pkg/rexp_use.py"),
+                Action::Delete("pkg/rexp/enums.py"),
+                Action::Delete("pkg/rexp/__init__.py"),
+                Action::Configure(CONFIG.to_owned()),
+            ],
+        )
+        .absent(&[("pkg/rexp_use.py", "MUT204")]),
+    ]
+}
+
 /// Step 4: `MUT108` (opt-in, enabled in the project's configuration). The frozen-ness of a class
 /// comes from a decorator in another module, and the in-place change from a helper in a third.
 /// The helper then moves the change of the field to a function of its own and back while its
@@ -7423,6 +7557,9 @@ sessions!(editing, Session::start, {
     class_bodies: steps_class_bodies,
     bases_and_attribution: steps_bases_and_attribution,
     argument_lists: steps_argument_lists,
+    callee_globs: steps_callee_globs,
+    unbound_helpers: steps_unbound_helpers,
+    module_members: steps_module_members,
     environment: steps_environment,
     outside_targets: steps_outside_targets,
     glob_members: steps_glob_members,
