@@ -156,6 +156,10 @@ fn untyped_key(attr: &str) -> String {
     format!(".{attr}")
 }
 
+/// The same key for the stores under a name heki cannot read through such a receiver
+/// ([`StoresElsewhere::untyped_unnamed`]): no attribute is named `.` after the dot.
+const UNTYPED_UNNAMED_KEY: &str = "..";
+
 /// Most visits of one storing function in the fixpoint of [`record`]: the first finds the
 /// values of the stores reading nothing being decided, each next one a value a read gave since.
 const VISITS: u32 = 4;
@@ -663,6 +667,7 @@ struct Foreign {
     attrs: BTreeMap<String, BTreeMap<String, ForeignStore>>,
     unnamed: BTreeSet<String>,
     untyped: BTreeSet<String>,
+    untyped_unnamed: bool,
 }
 
 /// What the stores of a function do to one name of another module.
@@ -727,11 +732,13 @@ impl Foreign {
                 .collect(),
             unnamed: self.unnamed,
             untyped_attrs: self.untyped,
+            untyped_unnamed: self.untyped_unnamed,
         };
         let any = !(out.globals.is_empty()
             && out.attrs.is_empty()
             && out.unnamed.is_empty()
-            && out.untyped_attrs.is_empty());
+            && out.untyped_attrs.is_empty()
+            && !out.untyped_unnamed);
         any.then_some(out)
     }
 }
@@ -2735,7 +2742,13 @@ impl<'c, 'f> Classifier<'c, 'f> {
             AttrName::KeyOf(sources) => Some(sources),
             _ => None,
         };
-        for holder in self.holders(obj) {
+        let holders = self.holders(obj);
+        if holders.is_empty()
+            && let Some(foreign) = out.foreign.as_deref_mut()
+        {
+            foreign.untyped_unnamed = true;
+        }
+        for holder in holders {
             match holder {
                 Holder::Own { class, own_self } => {
                     let restores = own_self && value.is_some_and(|v| self.holds_state(v));
@@ -3150,6 +3163,9 @@ pub(super) struct Elsewhere {
     /// The attributes some module stores through a receiver of no class heki knows
     /// ([`StoresElsewhere::untyped_attrs`]).
     untyped_attrs: FxHashSet<String>,
+    /// Some module stores under a name heki cannot read through such a receiver
+    /// ([`StoresElsewhere::untyped_unnamed`]).
+    untyped_unnamed: bool,
 }
 
 /// What other modules store into a module: its globals and the attributes of its classes, by
@@ -3219,6 +3235,9 @@ impl Elsewhere {
         out.extend(self.unnamed.symmetric_difference(&after.unnamed).cloned());
         let untyped = (self.untyped_attrs).symmetric_difference(&after.untyped_attrs);
         out.extend(untyped.map(|attr| untyped_key(attr)));
+        if self.untyped_unnamed != after.untyped_unnamed {
+            out.insert(UNTYPED_UNNAMED_KEY.to_owned());
+        }
         for module in self.held.keys().chain(after.held.keys()) {
             if self.held.get(module) != after.held.get(module) {
                 out.insert(module.clone());
@@ -3280,6 +3299,7 @@ impl ProjectDecls {
             };
             out.untyped_attrs
                 .extend(stores.untyped_attrs.iter().cloned());
+            out.untyped_unnamed |= stores.untyped_unnamed;
             for (fqn, t) in &stores.globals {
                 let fqn = self.canonical(fqn);
                 let Some((module, rest)) = owner(&fqn, m) else {
@@ -3395,11 +3415,14 @@ impl ProjectDecls {
         (self.elsewhere.attrs.get(class)).is_some_and(|attrs| attrs.contains_key(attr))
     }
 
-    /// Whether some module stores `attr` through a receiver of no class heki knows
-    /// ([`StoresElsewhere::untyped_attrs`]).
+    /// Whether some module stores `attr`, by name or under a name heki cannot read, through a
+    /// receiver of no class heki knows ([`StoresElsewhere::untyped_attrs`],
+    /// [`StoresElsewhere::untyped_unnamed`]). Which instances such a receiver holds is not
+    /// decided, so the second leaves every attribute of every class open.
     pub(super) fn attr_stored_untyped(&self, attr: &str) -> bool {
         self.read(|k| note(&mut k.grown_globals, &untyped_key(attr)));
-        self.elsewhere.untyped_attrs.contains(attr)
+        self.read(|k| note(&mut k.grown_globals, UNTYPED_UNNAMED_KEY));
+        self.elsewhere.untyped_attrs.contains(attr) || self.elsewhere.untyped_unnamed
     }
 
     /// What the module's code stores in `attr` of the instances of the canonical class `class`

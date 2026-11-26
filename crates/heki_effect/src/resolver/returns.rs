@@ -377,8 +377,9 @@ impl ProjectDecls {
     /// ([`Self::instance_family`]) stores the attribute only through `self` in its own methods,
     /// never a value that may be `None` ([`super::ClassDecl::unowned_attrs`]). A store from
     /// another module, a store anywhere through a receiver of no class heki knows, which may be
-    /// such an instance ([`super::StoresElsewhere::untyped_attrs`]), and a getter of the name
-    /// leave it open. The answer is kept per class and attribute for the life of the indexes, so
+    /// such an instance ([`super::StoresElsewhere::untyped_attrs`]), a store under a name heki
+    /// cannot read through such a receiver ([`super::StoresElsewhere::untyped_unnamed`]), and a
+    /// getter of the name leave it open. The answer is kept per class and attribute for the life of the indexes, so
     /// the calls of a getter walk the family once.
     pub(crate) fn held_attr(&self, class: &str, attr: &str) -> Option<Ty> {
         self.read(|k| note(&mut k.property_names, attr));

@@ -896,3 +896,87 @@ fn a_method_gives_the_class_every_definition_the_call_may_run_returns() {
         ]
     );
 }
+
+const UNNAMED_MODELS: &str = r#"from pathlib import Path
+
+
+class Database:
+    def query(self) -> str:
+        return Path("x").read_text()
+
+
+class Other:
+    def query(self) -> str:
+        return ""
+"#;
+
+const UNNAMED_SERVICES: &str = r#"from pkg.models import Database
+
+
+class Held:
+    def __init__(self) -> None:
+        self._db = Database()
+
+    def db(self):
+        return self._db
+"#;
+
+const UNNAMED_CALLERS: &str = r#"from pkg.services import Held
+
+
+def read(h: Held) -> str:
+    return h.db().query()
+"#;
+
+const UNNAMED_TYPED: &str = r#"from pkg.models import Other
+from pkg.services import Held
+
+
+def tag(h: Held) -> None:
+    setattr(h, "_note", Other())
+"#;
+
+const UNNAMED_UNTYPED: &str = r#"from pkg.models import Other
+
+
+def replace(h, name) -> None:
+    setattr(h, name, Other())
+
+
+def wire(h) -> None:
+    replace(h, "_db")
+"#;
+
+/// A store under a name heki cannot read through a receiver of no known class (`setattr(h,
+/// name, Other())`, `h` without an annotation) may replace the attribute a getter returns, so
+/// no getter of any class returns the class `__init__` binds
+/// ([`StoresElsewhere::untyped_unnamed`]); a constant name on a typed receiver stores only
+/// that attribute.
+#[test]
+fn a_store_under_an_unknown_name_through_an_untyped_receiver_opens_the_getters() {
+    let p = Project::new("return_facts_unnamed_store");
+    p.write("pyproject.toml", METHOD_BOUNDARY)
+        .write("pkg/__init__.py", "")
+        .write("pkg/models.py", UNNAMED_MODELS)
+        .write("pkg/services.py", UNNAMED_SERVICES)
+        .write("pkg/callers.py", UNNAMED_CALLERS);
+    let messages = |p: &Project| -> Vec<String> {
+        let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
+        assert!(code == 0 || code == 1, "exit {code}: {stdout}{stderr}");
+        let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+        diags
+            .iter()
+            .map(|d| d["message"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let class_inferred = vec![
+        "`read` reaches blocking_fs (`pathlib.Path.read_text` via `pkg.models.Database.query`), \
+         which effect boundary `fs` forbids"
+            .to_owned(),
+    ];
+    assert_eq!(messages(&p), class_inferred);
+    p.write("pkg/typed.py", UNNAMED_TYPED);
+    assert_eq!(messages(&p), class_inferred);
+    p.write("pkg/untyped.py", UNNAMED_UNTYPED);
+    assert_eq!(messages(&p), Vec::<String>::new());
+}

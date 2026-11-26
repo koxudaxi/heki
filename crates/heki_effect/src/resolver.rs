@@ -502,6 +502,12 @@ pub struct StoresElsewhere {
     /// instance of any class ([`ProjectDecls::held_attr`]).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub untyped_attrs: BTreeSet<String>,
+    /// It stores under a name heki cannot read through a receiver heki types as no project
+    /// class and no project module (`setattr(obj, name, v)` with `obj` a parameter without an
+    /// annotation): such a store may bind any attribute of an instance of any class
+    /// ([`ProjectDecls::held_attr`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub untyped_unnamed: bool,
 }
 
 /// What a module's stores bind one name of another module to.
