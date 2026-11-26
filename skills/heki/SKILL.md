@@ -45,8 +45,8 @@ Run `heki`, or `uv run heki` when the project lists it as a development dependen
   changes, keeps, and returns, when a report or question is about it.
 - `heki check --generate-prompt "<question>"` (experimental): a prompt with the configuration,
   rules, and reports, when a report or its fix is unclear.
-- [Contracts](https://heki.koxudaxi.dev/configuration/#contracts), when the user wants heki to
-  enforce who may write, read, or call something, or what a scope must not reach.
+- [references/contracts.md](references/contracts.md), before you draft or change a contract: thin
+  walls, old violations in a baseline, never in `allowed-*`.
 
 [references/output.md](references/output.md) lists the JSON fields, and
 [references/troubleshooting.md](references/troubleshooting.md) says what to do when a command

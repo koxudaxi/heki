@@ -297,6 +297,37 @@ fn the_skill_the_page_and_the_marketplace_point_at_each_other() {
     );
 }
 
+/// The protocol for drafting contracts is installed with the skill, linked from `SKILL.md`, and
+/// says what keeps agent-drafted contracts valid.
+#[test]
+fn the_contracts_reference_is_linked_and_installed() {
+    let (_, body) = skill();
+    assert!(
+        body.contains("[references/contracts.md](references/contracts.md)"),
+        "{body}"
+    );
+    let reference = repo_file(&format!("{SKILL_DIR}/references/contracts.md"));
+    for words in [
+        "Keep contracts thin",
+        "`MUT103` snapshots",
+        "`heki recommend`",
+        "`heki inspect --imports",
+        "fail-on = \"warning\"",
+        "--update-baseline",
+        "Never add an old or undesired writer",
+        "Never weaken a wall silently",
+    ] {
+        assert!(reference.contains(words), "{words}");
+    }
+    let p = Project::new("skill_contracts_reference");
+    let (code, _, stderr) = p.heki(&["skill", "install", "--agent", "codex"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        p.read(".agents/skills/heki/references/contracts.md"),
+        reference
+    );
+}
+
 /// Every file below `dir`, relative to it, with its bytes.
 fn tree(dir: &Path) -> BTreeMap<String, Vec<u8>> {
     fn walk(dir: &Path, rel: &str, out: &mut BTreeMap<String, Vec<u8>>) {

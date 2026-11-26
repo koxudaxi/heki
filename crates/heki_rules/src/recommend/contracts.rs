@@ -1979,6 +1979,11 @@ impl Section {
         (writes, reads, boundaries)
     }
 
+    /// Whether the report shows a block.
+    pub(super) fn has_candidates(&self) -> bool {
+        !self.blocks.is_empty()
+    }
+
     /// The blocks the report shows.
     pub(super) fn advice(&self) -> Vec<ContractAdvice> {
         (self.blocks.iter())

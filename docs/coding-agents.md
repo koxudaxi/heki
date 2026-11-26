@@ -155,6 +155,52 @@ change, and an agent cannot move a wall to make a report go away.
 contracts' reports: record today's findings in the baseline first, so that only new ones fail.
 The [starter recipe](adoption.md#walls-for-a-team-or-a-coding-agent) has the whole file.
 
+### Keep the walls thin
+
+Three layers carry the checks, and only the last one is written by hand:
+
+1. The default rules report the bugs that need no declaration.
+2. [`MUT103` snapshots](adoption.md#effect-snapshots-mut103) report a change of a public function's effects.
+3. A dedicated `heki.toml` holds the core boundaries the team wants enforced, and nothing else.
+
+A contract list nobody can review stops protecting anything. Declare a wall when breaking it is a
+decision for the maintainers, not when the code happens to keep it today.
+
+### Draft walls over legacy code
+
+`heki recommend` lists the contracts the code already keeps. They are invariants of today, not
+architectural intent, and an agent that copies every one of them, or every existing writer,
+caller, or import into an `allowed-*` list, writes today's debt into the architecture. Declare the
+wall the team wants, and record what already crosses it in a [Ratchet baseline](adoption.md#ratchet-baselines),
+so that the old violations can only shrink and a new one fails at once.
+
+1. The agent inspects the code with `heki recommend`, `heki inspect`, and `heki inspect
+   --imports`.
+2. It proposes a thin ideal wall in `heki.toml`, with `fail-on = "warning"` and a `message` that
+   says what to write instead. The old and undesired writers, readers, callers, and imports stay
+   out of `allowed-*`.
+3. The maintainer approves the change to `heki.toml`, which is protected by `CODEOWNERS`.
+4. The violations that exist today go to the baseline:
+   `heki check --baseline heki-baseline.toml --update-baseline`.
+
+The agent presents the change as a small diff: what each wall protects, why, and how many old
+violations enter the baseline. It never widens an `allowed-*` list, loosens `forbid`, grows the
+baseline, or adds a suppression without the maintainer's approval. The
+[Agent Skill](#agent-skill-experimental) carries this protocol in `references/contracts.md`, and
+`heki check --generate-prompt` repeats it in its guidance.
+
+### Review a contract change from an agent
+
+Before approving a pull request that adds or changes contracts:
+
+1. No `allowed-*` list holds a legacy workaround: every entry is a function or module that should
+   write, read, call, or import the target.
+2. Every `message` says what to write instead, so that an agent can act on it.
+3. `heki.toml`, the baseline, and the CI configuration are protected by `CODEOWNERS`.
+4. The baseline did not grow, and no new `# heki: ignore[...]` or `# noqa` hides a report: compare
+   the `heki check --report-suppressed <PATH>` file of the pull request with the base branch's
+   ([Auditing inline suppressions](adoption.md#auditing-inline-suppressions)).
+
 ### A Stop hook for Claude Code
 
 A [Stop hook](https://code.claude.com/docs/en/hooks) runs when Claude Code is about to end its turn.
@@ -267,7 +313,7 @@ $ heki check --output-format-json-schema generate-prompt
 | Configuration | the project root, the configuration file, the target version, the source roots (with the packages of flat workspace members), the rule selection in effect (`select`, `extend-select`, `ignore`, `per-file-ignores`, `lint.heuristic`, `fail-on`), the baseline, and the declared contracts as TOML |
 | Rules that apply | each rule the run applies: its code, name, certainty, activation, and the first paragraph of its "What a report states" |
 | Diagnostics | the diagnostics of the run in the `concise` form (with a baseline, the reports it does not allow), up to 16 KiB of lines, with a note counting the rest, and the files heki could not analyze |
-| How to answer | fix at the root cause, do not suppress, check `heuristic` reports, rely on proven fixes only, how a contract is written, and what the answer holds |
+| How to answer | fix at the root cause, do not suppress, never weaken a contract or grow a baseline to pass, check `heuristic` reports, rely on proven fixes only, how a contract is written (a thin wall, old violations in a baseline), and what the answer holds |
 
 - A word after the option is the question: put the paths before it.
 - The prompt comes from the analysis `heki check` runs with the same options and configuration.
@@ -292,7 +338,8 @@ runs: `heki check --output-format json` on the project, the diagnostics the edit
 acting on them, and only the fixes heki proves safe. `heki inspect` and
 `heki check --generate-prompt` are for when a function or a diagnostic is in question. Its
 `SKILL.md` links this page, and its `references/` hold the output fields, what to do when a
-command does not behave as expected, and a playbook for adopting heki in a repository.
+command does not behave as expected, a playbook for adopting heki in a repository, and the
+protocol for drafting and changing contracts.
 
 The skill is experimental: its wording, when agents load it, and the install commands can change
 as the agents evolve.
