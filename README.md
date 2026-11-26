@@ -26,7 +26,7 @@ such as which functions may change a field or reach I/O.
 [![CI](https://github.com/koxudaxi/heki/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/koxudaxi/heki/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/koxudaxi/heki/blob/main/LICENSE)
 
-⚡ Try it in your project's root, without installing: `uvx heki==0.8.0 check`. Then follow
+⚡ Try it in your project's root, without installing: `uvx heki==0.9.0 check`. Then follow
 [Try it in 5 minutes](#try-it-in-5-minutes).
 
 ---
@@ -128,7 +128,7 @@ $ uvx heki check            # run without installing
 
 ### Try it in 5 minutes
 
-1. In your project's root (the directory with `pyproject.toml`), run `uvx heki==0.8.0 check`. An
+1. In your project's root (the directory with `pyproject.toml`), run `uvx heki==0.9.0 check`. An
    exact error, like the first example above, fails the run (exit code 1). Warnings, like the
    second, are printed but don't fail it unless you pass `--fail-on warning`.
 
@@ -138,11 +138,11 @@ $ uvx heki check            # run without installing
    heki's tests:
 
     ```console
-    $ uvx heki==0.8.0 check
+    $ uvx heki==0.9.0 check
     All checks passed (4 file(s)).
     ...
     hint: `heki recommend` (experimental) lists the rules and contracts that fit this project, and what heki could not see
-    $ uvx heki==0.8.0 recommend
+    $ uvx heki==0.9.0 recommend
     heki recommend (experimental) on .: 4 file(s), 10 function(s)
     ...
     What heki cannot see (no report either way)
@@ -163,7 +163,7 @@ $ uvx heki check            # run without installing
 3. Keep it running with the [pre-commit hook](https://heki.koxudaxi.dev/adoption/#pre-commit) and
    a CI step. If the project has findings today, record them in a
    [Ratchet baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) so only new ones
-   fail: `uvx heki==0.8.0 check --baseline heki-baseline.toml --update-baseline`, then
+   fail: `uvx heki==0.9.0 check --baseline heki-baseline.toml --update-baseline`, then
    `baseline = "heki-baseline.toml"` in `[tool.heki]`. The
    [starter recipes](https://heki.koxudaxi.dev/adoption/#starter-recipes) have these setups ready
    to copy.
@@ -171,7 +171,7 @@ $ uvx heki check            # run without installing
 > [!WARNING]
 > 🧪 **Pre-release.** Rules, configuration keys, diagnostics, and output formats can change
 > between releases without a deprecation period, and the release notes list every change. Pin the
-> version (`heki==0.8.0`, and the hook's `rev`) so upgrades happen only when you choose. The
+> version (`heki==0.9.0`, and the hook's `rev`) so upgrades happen only when you choose. The
 > default rules are exact and ready for pull request checks. Heuristic rules, including the
 > contract rules, can be wrong about the code. Every output labels their reports, and they count
 > as warnings. `heki recommend`, `heki inspect`, `heki skill`, and `heki check --generate-prompt`
@@ -308,14 +308,14 @@ and what it must prove.
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/koxudaxi/heki-pre-commit
-    rev: v0.8.0
+    rev: v0.9.0
     hooks:
       - id: heki
 ```
 
 ```yaml
 # A step of a GitHub Actions job that has uv
-- run: uvx heki==0.8.0 check
+- run: uvx heki==0.9.0 check
 ```
 
 The hook runs `heki check --touched` on the staged files, so old findings in other files don't
