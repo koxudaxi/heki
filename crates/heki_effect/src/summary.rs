@@ -2869,7 +2869,9 @@ impl<'a> Extractor<'a> {
             AttrName::KeyOf(sources) => {
                 return self.computed_name(&owner, Adds::UnlessKeysOf(sources), kind, span);
             }
-            AttrName::Unknown => return self.computed_name(&owner, Adds::Any, kind, span),
+            AttrName::Built { .. } | AttrName::Unknown => {
+                return self.computed_name(&owner, Adds::Any, kind, span);
+            }
         };
         for attr in attrs {
             if removes && owner.is_self {

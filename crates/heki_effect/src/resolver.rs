@@ -508,6 +508,24 @@ pub struct StoresElsewhere {
     /// ([`ProjectDecls::held_attr`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub untyped_unnamed: bool,
+    /// The names it stores under, here or in its own module, through a receiver that may be a
+    /// class object: one heki does not establish as an instance (`Child.__setattr__ = hook`,
+    /// `setattr(cls, name, hook)` in a class method, `target.__setattr__ = hook` with `target` a
+    /// parameter without an annotation). Such a store may bind what Python looks up on the
+    /// instances of a class ([`ProjectDecls::bound_after_body`]); one through an instance does
+    /// not, as Python looks special methods up on the type.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub on_classes: BTreeSet<StoredName>,
+}
+
+/// A name a store binds ([`StoresElsewhere::on_classes`]), as far as heki reads it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum StoredName {
+    /// The one a string constant gives.
+    Named(String),
+    /// One built at run time that starts with `head` and ends with `tail`, which do not overlap
+    /// (`stores::AttrName::Built`); both are empty for a name heki cannot read.
+    Built { head: String, tail: String },
 }
 
 /// What a module's stores bind one name of another module to.
@@ -637,6 +655,12 @@ pub struct ClassDecl {
     /// The class's decorators (resolved heads) with the `frozen=` each passes: a decorator
     /// function carrying a `dataclass_transform` builds the class.
     pub decorators: Vec<(String, Option<bool>)>,
+    /// The class's decorators that may change the class object: those the table does not say
+    /// keep attribute access (`decorators::Decorator::keeps_attribute_access`), by the fqn the
+    /// module gives each, `*` for one heki cannot name or one called with arguments
+    /// ([`ProjectDecls::reshaped`]).
+    #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
+    pub unknown_decorators: Box<[String]>,
     /// The resolved `metaclass=` of the class statement.
     pub metaclass: Option<String>,
     /// The class statement names a metaclass other than `type` and `abc.ABCMeta`, also one heki
@@ -898,6 +922,14 @@ pub struct FunctionDecl {
     /// the property, gives the argument, or that object of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returns_param: Option<(u8, Option<String>)>,
+    /// Every definition changes the object its first parameter is handed at most by storing
+    /// its attributes by name: it reads and stores the parameter's attributes, compares it,
+    /// tests it, and hands it back, and nothing else takes it ([`changes_first_param_by_name`]).
+    /// A class decorator or an `__init_subclass__` that does binds on a class only what the
+    /// stores through a value that may be a class object record (`StoresElsewhere::on_classes`,
+    /// [`ProjectDecls::reshaped`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub changes_first_param_by_name: bool,
     /// The fqn an import binds when every `return` of every definition returns what that import
     /// binds, a module or an object of one ([`returned_import`]): an import in the function
     /// (`from pkg import ops` then `return ops`, which breaks an import cycle) or one of the
@@ -4123,8 +4155,10 @@ impl ProjectDecls {
     /// code instead of changing the instance's own attribute: a class along its MRO defines
     /// `__setattr__` or `__delattr__`, binds `attr` to a property (`ClassDecl::properties`), or
     /// has a metaclass other than `type` ([`Self::has_custom_metaclass`]), which may install a
-    /// descriptor.
+    /// descriptor; or `__setattr__` or `__delattr__` may be bound on a class along it after its
+    /// body ([`Self::bound_after_body`]).
     pub fn attr_write_runs_code(&self, class: &str, attr: &str) -> bool {
+        let names = ["__setattr__", "__delattr__"];
         self.has_custom_metaclass(class)
             || self.mro(class).into_iter().any(|c| {
                 self.read(|k| note(&mut k.class_facts, &c));
@@ -4132,15 +4166,69 @@ impl ProjectDecls {
                     decl.properties.contains(attr)
                         || decl.members.contains("__setattr__")
                         || decl.members.contains("__delattr__")
+                        || self.bound_after_body(&c, decl, &names)
                 })
             })
     }
 
+    /// Whether one of `names` may be bound on the class object `c` (a project class, `decl`)
+    /// otherwise than its body binds it, once the body has run. Its own facts and those of the
+    /// classes along its MRO and below it decide what Python looks up on an instance only while
+    /// nothing changes the class: code heki does not read may change it ([`Self::reshaped`]), and
+    /// a store elsewhere may bind one of `names` on it when its name may be that one and its
+    /// receiver may be a class object ([`Self::bound_on_classes`]). A constant name decides, a
+    /// name built at run time is ruled out when the constant text at its ends already differs
+    /// (`f"__attr_{name}"` is never `__setattr__`), and one heki cannot read may be any. A
+    /// receiver heki establishes as an instance (`self`, what a class call makes, a parameter
+    /// annotated with a class other than `type`) binds nothing Python looks a special method up
+    /// on, and any other may be the class (`Child.__setattr__ = hook`, `setattr(cls, name, hook)`
+    /// in a function the class is handed to).
+    fn bound_after_body(&self, c: &str, decl: &ClassDecl, names: &[&str]) -> bool {
+        names.iter().any(|n| self.bound_on_classes(n)) || self.reshaped(c, decl)
+    }
+
+    /// Whether code heki does not read may bind any name on the class object `c` (a project
+    /// class, `decl`) once its body has run: a decorator that may change it
+    /// (`ClassDecl::unknown_decorators`: one the table does not say keeps attribute access, or
+    /// a project function that does more with the class it is handed than store its attributes
+    /// by name and hand it back: [`FunctionDecl::changes_first_param_by_name`]), or an
+    /// `__init_subclass__` of its own that may so change the subclass Python calls it with,
+    /// which a value of a class above it may be (R2).
+    pub(crate) fn reshaped(&self, c: &str, decl: &ClassDecl) -> bool {
+        let hands_back = |f: &FunctionDecl| {
+            f.changes_first_param_by_name && f.returns_param.as_ref() == Some(&(0, None))
+        };
+        let decorator_keeps = |fqn: &String| {
+            fqn != "*"
+                && matches!(
+                    self.symbol(&self.canonical(fqn)),
+                    Symbol::Function(_, f) if hands_back(f)
+                )
+        };
+        !decl.unknown_decorators.iter().all(decorator_keeps)
+            || (decl.members.contains("__init_subclass__")
+                && !(self.own_method(c, "__init_subclass__"))
+                    .and_then(|k| self.function_decl(&k))
+                    .is_some_and(|f| f.changes_first_param_by_name))
+    }
+
+    /// [`Self::bound_after_body`] on some class a value of `class` may be under R2
+    /// ([`Self::value_classes`]).
+    fn bound_after_bodies(&self, class: &str, names: &[&str]) -> bool {
+        self.value_classes(class).iter().any(|c| {
+            self.read(|k| note(&mut k.class_facts, c));
+            self.class(c)
+                .is_some_and(|d| self.bound_after_body(c, d, names))
+        })
+    }
+
     /// Whether `class` is a project class and every class a value of it may be under R2
-    /// ([`Self::value_classes`], each once) is a project class that binds none of `names` and
-    /// has no metaclass heki does not know, and every base of one outside the project is a plain
-    /// base or one `known_base` accepts: the classes whose code runs on such a value are the
-    /// project's, which heki reads, and those `known_base` stands for.
+    /// ([`Self::value_classes`], each once) is a project class that binds none of `names`, in
+    /// its body or after it ([`Self::bound_after_body`]), and has no metaclass heki does not
+    /// know, and every base of one outside the project is a plain base or one `known_base`
+    /// accepts: the classes whose code runs on such a value are the project's, which heki
+    /// reads, as their bodies and the code heki reads leave them, and those `known_base` stands
+    /// for.
     pub fn binds_none_of(
         &self,
         class: &str,
@@ -4156,6 +4244,7 @@ impl ProjectDecls {
                 self.class(c).is_some_and(|d| {
                     !d.custom_metaclass
                         && names.iter().all(|n| !d.members.contains(*n))
+                        && !self.bound_after_body(c, d, names)
                         && d.bases.iter().all(|b| {
                             let base = self.canonical(b);
                             self.is_project_class(&base) || known(&base)
@@ -4170,8 +4259,9 @@ impl ProjectDecls {
     /// anything that may be a descriptor (`ClassDecl::code_attrs`), or has a metaclass heki does
     /// not know, and every class outside the project is a plain base or one whose `__setattr__`
     /// the ecosystem catalog says stores on the instance (`catalog_stores`: R3,
-    /// `pydantic.BaseModel`). A strict form of [`Self::attr_write_runs_code`]'s question, for an
-    /// exact claim.
+    /// `pydantic.BaseModel`); and nothing may bind a hook on one after its body
+    /// ([`Self::bound_after_body`]). A strict form of [`Self::attr_write_runs_code`]'s question,
+    /// for an exact claim.
     pub fn attr_store_on_instance(
         &self,
         class: &str,
@@ -4228,7 +4318,7 @@ impl ProjectDecls {
         read.declared
             && !read.runs_hook(true)
             && read.code_binders.is_empty()
-            && self.binds_none_of(class, &[], catalog_stores)
+            && self.binds_none_of(class, &["__getattribute__", "__getattr__"], catalog_stores)
     }
 
     /// The project classes whose bodies may supply an attribute of a value of the class `class`
@@ -4459,6 +4549,7 @@ impl ProjectDecls {
                 let read = self.attr_read(&class, attr);
                 read.binders.is_empty()
                     && !read.runs_hook(false)
+                    && !self.bound_after_bodies(&class, &["__getattribute__"])
                     && (read.bases_known || self.binds_none_of(&class, &[], catalog_stores))
             })
     }
@@ -6550,6 +6641,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
     // Definitions sharing a qualname (a property's setter, conditional definitions) must agree.
     let mut returned_params: FxHashMap<&str, Option<(u8, Option<String>)>> = FxHashMap::default();
     let mut returned_imports: FxHashMap<&str, Option<Box<str>>> = FxHashMap::default();
+    let mut first_param_by_name: FxHashMap<&str, bool> = FxHashMap::default();
     let import_targets: FxHashMap<Span, String> = semantic
         .imports
         .iter()
@@ -6562,6 +6654,8 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
         .iter()
         .filter(|f| is_summarized_function(f))
     {
+        *first_param_by_name.entry(&f.qualname).or_insert(true) &=
+            changes_first_param_by_name(f, &decls);
         let returned = returned_param(f, &decls);
         returned_params
             .entry(&f.qualname)
@@ -6653,6 +6747,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
             is_abstract: crate::is_abstract_method(&f.decorators),
             property_type: getter_types.get(f.qualname.as_str()).cloned(),
             returns_param: returned_params[f.qualname.as_str()].clone(),
+            changes_first_param_by_name: first_param_by_name[f.qualname.as_str()],
             returned_import: returned_imports[f.qualname.as_str()].clone(),
             returns: None,
             state_of_self: false,
@@ -6684,6 +6779,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
     decls.path_changes = (!path_changes.is_empty()).then(|| Box::new(path_changes));
     attr_displays(input, &mut decls);
     code_attrs(input, &mut decls);
+    class_decorators(input, &mut decls);
     for (class, attr) in class_attrs_rebound(input, &decls) {
         if let Some(c) = decls.classes.get_mut(&class) {
             c.rebound_attrs.insert(attr);
@@ -6965,6 +7061,34 @@ const FIELD_SPECIFIERS: &[&str] = &[
     "attr.field",
     "attrs.field",
 ];
+
+/// `ClassDecl::unknown_decorators` of the module's classes. A decorator is known by the object
+/// its head is bound to where the class statement runs, as a function's is
+/// ([`ModuleDecls::decorator_symbol`]); one the table does not name is kept by the fqn the
+/// module's runtime names give it, which the project's declarations decide.
+fn class_decorators(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
+    let found: Vec<(String, Box<[String]>)> = (input.ir.functions.iter())
+        .filter(|body| body.is_class_body && !body.decorators.is_empty())
+        .map(|body| {
+            let unknown = (body.decorators.iter())
+                .filter(|d| !decorators::is(d, decls, |k| k.keeps_attribute_access))
+                .map(|d| {
+                    let (head, _) = decorator_parts(d);
+                    (!d.contains('('))
+                        .then(|| decls.resolve_dotted(head, false))
+                        .flatten()
+                        .unwrap_or_else(|| "*".to_owned())
+                })
+                .collect();
+            (body.qualname.clone(), unknown)
+        })
+        .collect();
+    for (qualname, unknown) in found {
+        if let Some(c) = decls.classes.get_mut(&qualname) {
+            c.unknown_decorators = unknown;
+        }
+    }
+}
 
 /// `ClassDecl::code_attrs` of the module's classes, from their bodies.
 fn code_attrs(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
@@ -7325,6 +7449,61 @@ fn handed_back_param(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Option<
         })
     };
     returned.filter(|(_, attr)| attr.as_deref().is_none_or(|a| !stores(a)))
+}
+
+/// [`FunctionDecl::changes_first_param_by_name`] of one definition: every use of what its first
+/// parameter may hold (through copies, phis, and the calls [`decl_same_object`] knows hand it
+/// back) is an attribute load, a comparison, a `return`, a store of one of its attributes
+/// (`cls.registry = {}`), which the stores through a value that may be a class object record by
+/// name (`ProjectDecls::bound_on_classes`), or a store of it into a global, an attribute, an
+/// item, or a display (`REGISTRY[cls.__name__] = cls`), from which code changing it later loads
+/// it as a value heki does not establish as an instance. A deletion of one of its attributes, a
+/// store or deletion of one of its items, a call taking it (a method called on it, `setattr`,
+/// another function handed it, which may be code heki does not read), a closure cell holding
+/// it, and a `yield` of it may change it, or let code that does not load it change it.
+fn changes_first_param_by_name(f: &IrFunction, decls: &ModuleDecls) -> bool {
+    let Some(first) = f.params.first().filter(|p| !p.is_vararg && !p.is_kwarg) else {
+        return false;
+    };
+    let insts = || f.blocks.iter().flat_map(|b| &b.insts);
+    let defs: FxHashMap<VarId, &InstKind> = insts()
+        .filter_map(|i| Some((i.kind.dst()?, &i.kind)))
+        .collect();
+    // What each value is handed on to as itself: a copy, a phi, a call handing it back.
+    let mut handed_to: FxHashMap<VarId, Vec<VarId>> = FxHashMap::default();
+    for bb in &f.blocks {
+        for phi in &bb.phis {
+            for (_, v) in &phi.incoming {
+                handed_to.entry(*v).or_default().push(phi.dst);
+            }
+        }
+        for inst in &bb.insts {
+            if let (Some(src), Some(dst)) =
+                (decl_same_object(&inst.kind, &defs, decls), inst.kind.dst())
+            {
+                handed_to.entry(src).or_default().push(dst);
+            }
+        }
+    }
+    let mut held: FxHashSet<VarId> = FxHashSet::default();
+    let budget = Budget::unmetered("heki_effect::resolver::leaves_first_param");
+    let next = |v: VarId, out: &mut Vec<VarId>| out.extend(handed_to.get(&v).into_iter().flatten());
+    // Unmetered: the walk ends, visiting each variable of the function once.
+    let _ = reach(&budget, [first.var], next, |v| {
+        held.insert(v);
+        Visit::<()>::Expand
+    });
+    insts().all(|inst| match &inst.kind {
+        InstKind::AttrLoad { .. }
+        | InstKind::Compare { .. }
+        | InstKind::StoreGlobal { .. }
+        | InstKind::AllocBuiltin { .. }
+        | InstKind::DictLiteral { .. } => true,
+        InstKind::AttrStore { .. } => true,
+        InstKind::SubscriptStore { obj, .. } => !held.contains(obj),
+        kind if decl_same_object(kind, &defs, decls).is_some() => true,
+        kind => kind.operands().iter().all(|v| !held.contains(v)),
+    })
 }
 
 /// The value whose object the instruction `kind` of a function of the module `decls` describes

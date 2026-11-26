@@ -403,6 +403,292 @@ fn mut115_leaves_open_each_premise_heki_cannot_establish() {
     }
 }
 
+/// The class whose instance a copy holds, the holder, and the change below the copy. `HOOK` is
+/// a `__setattr__` that runs code once a shape binds it on the class; it stores nothing itself,
+/// as a store under a name heki cannot read through a value that may be a class object may be
+/// one into any class (the `unnamed_store_elsewhere` shape).
+const HELD_CHANGE: &str = r#"
+
+class Holder:
+    def __init__(self) -> None:
+        self.child = Child()
+
+
+def changed(h: Holder) -> None:
+    c = copy.copy(h)
+    c.child.x = 2
+"#;
+
+const HOOK: &str = r#"def hook(self, name, value):
+    print(name, value)
+
+
+"#;
+
+const PLAIN_CHILD: &str = r#"
+
+class Child:
+    def __init__(self) -> None:
+        self.x = 1
+"#;
+
+/// `(project, files besides pkg/child.py, pkg/child.py before the holder, exact)`.
+type Shape = (
+    &'static str,
+    &'static [(&'static str, &'static str)],
+    &'static str,
+    bool,
+);
+
+/// A hook bound on the class after its body leaves the claim open, wherever it is bound; a class
+/// nothing changes, or that only a decorator known to keep attribute access changes, keeps it.
+const BOUND_AFTER_BODY: &[Shape] = &[
+    (
+        "decorator",
+        &[],
+        "import copy\n\n\ndef register(cls):\n    cls.__setattr__ = hook\n    return cls\n\n\n@register\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n",
+        false,
+    ),
+    (
+        "decorator_elsewhere",
+        &[(
+            "pkg/hooks.py",
+            "def hook(self, name, value):\n    print(name, value)\n\n\ndef register(cls):\n    cls.__setattr__ = hook\n    return cls\n",
+        )],
+        "import copy\n\nfrom pkg.hooks import register\n\n\n@register\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n",
+        false,
+    ),
+    (
+        "library_decorator",
+        &[],
+        "import copy\n\nimport attrs\n\n\n@attrs.define\nclass Child:\n    x: int = 1\n",
+        false,
+    ),
+    (
+        "called_library_decorator",
+        &[],
+        "import copy\n\nimport attrs\n\n\n@attrs.define(slots=False)\nclass Child:\n    x: int = 1\n",
+        false,
+    ),
+    (
+        "decorator_handing_on",
+        &[],
+        "import abc\nimport copy\n\n\ndef register(cls):\n    abc.update_abstractmethods(cls)\n    return cls\n\n\n@register\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n",
+        false,
+    ),
+    (
+        "setattr_after",
+        &[],
+        "import copy\n\n\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n\n\nsetattr(Child, \"__setattr__\", hook)\n",
+        false,
+    ),
+    (
+        "store_after",
+        &[],
+        "import copy\n\n\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n\n\nChild.__setattr__ = hook\n",
+        false,
+    ),
+    (
+        "store_elsewhere",
+        &[(
+            "pkg/patch.py",
+            "from pkg.child import Child\n\n\ndef hook(self, name, value):\n    print(name, value)\n\n\nChild.__setattr__ = hook\n",
+        )],
+        "import copy\n\n\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n",
+        false,
+    ),
+    (
+        "helper_handed_the_class",
+        &[],
+        "import copy\n\n\ndef install(target):\n    target.__setattr__ = hook\n\n\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n\n\ninstall(Child)\n",
+        false,
+    ),
+    (
+        "computed_name_in_a_class_method",
+        &[],
+        "import copy\n\nNAME = \"__set\" + \"attr__\"\n\n\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n\n    @classmethod\n    def install(cls):\n        setattr(cls, NAME, hook)\n\n\nChild.install()\n",
+        false,
+    ),
+    (
+        "unknown_name_in_a_class_method",
+        &[],
+        "import copy\n\n\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n\n    @classmethod\n    def install(cls, name, f):\n        setattr(cls, name, f)\n\n\nChild.install(\"__setattr__\", hook)\n",
+        false,
+    ),
+    (
+        "concatenated_name",
+        &[],
+        "import copy\n\n\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n\n\nsetattr(Child, \"__set\" + \"attr__\", hook)\n",
+        false,
+    ),
+    (
+        "fstring_name",
+        &[(
+            "pkg/patch.py",
+            "def install(target, kind, f):\n    setattr(target, f\"__{kind}attr__\", f)\n",
+        )],
+        "import copy\n",
+        false,
+    ),
+    (
+        "percent_name",
+        &[(
+            "pkg/patch.py",
+            "def install(target, kind, f):\n    setattr(target, \"__%sattr__\" % kind, f)\n",
+        )],
+        "import copy\n",
+        false,
+    ),
+    (
+        "format_name",
+        &[(
+            "pkg/patch.py",
+            "def install(target, kind, f):\n    setattr(target, \"__{}attr__\".format(kind), f)\n",
+        )],
+        "import copy\n",
+        false,
+    ),
+    (
+        "unknown_name_on_a_type",
+        &[(
+            "pkg/patch.py",
+            "def install(target: type, name, f):\n    setattr(target, name, f)\n",
+        )],
+        "import copy\n",
+        false,
+    ),
+    (
+        "init_subclass_computed_name",
+        &[],
+        "import copy\n\nNAME = \"__set\" + \"attr__\"\n\n\nclass Base:\n    def __init_subclass__(cls, **kwargs):\n        super().__init_subclass__(**kwargs)\n        setattr(cls, NAME, hook)\n\n\nclass Child(Base):\n    def __init__(self) -> None:\n        self.x = 1\n",
+        false,
+    ),
+    (
+        "init_subclass_storing_the_hook",
+        &[],
+        "import copy\n\n\nclass Base:\n    def __init_subclass__(cls, **kwargs):\n        super().__init_subclass__(**kwargs)\n        cls.__setattr__ = hook\n\n\nclass Child(Base):\n    def __init__(self) -> None:\n        self.x = 1\n",
+        false,
+    ),
+    (
+        "init_subclass_helper",
+        &[],
+        "import copy\n\n\ndef install(target):\n    target.__setattr__ = hook\n\n\nclass Base:\n    def __init_subclass__(cls, **kwargs):\n        super().__init_subclass__(**kwargs)\n        install(cls)\n\n\nclass Child(Base):\n    def __init__(self) -> None:\n        self.x = 1\n",
+        false,
+    ),
+    (
+        "unnamed_store_elsewhere",
+        &[(
+            "pkg/fill.py",
+            "def fill(target, values):\n    for name, value in values.items():\n        setattr(target, name, value)\n",
+        )],
+        "import copy\n",
+        false,
+    ),
+    ("no_hook", &[], "import copy\n", true),
+    (
+        "built_names_of_no_hook",
+        &[(
+            "pkg/patch.py",
+            "def install(target, name, value):\n    key = f\"__attr_{name}\"\n    alias = key\n    setattr(target, alias, value)\n    setattr(target, str(name) + \"_changed\", value)\n    setattr(target, \"%s_x%%\" % name, value)\n    setattr(target, \"%(name)-4s_y\" % {\"name\": name}, value)\n    setattr(target, \"{:{w}}_display{{}}\".format(name, w=3), value)\n    setattr(target, \"get_\" + name + \"_now\", value)\n    setattr(target, \"plain\".format(), value)\n    setattr(target, f\"{name}\" f\"_{name}_cached\", value)\n    setattr(target, f\"{name}\" \"_kept\", value)\n    for key in (\"alpha\", \"beta\"):\n        setattr(target, key, value)\n",
+        )],
+        "import copy\n",
+        true,
+    ),
+    (
+        "built_name_on_self",
+        &[],
+        "import copy\n\n\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n\n    def keep(self, n, v):\n        setattr(self, f\"__attr_{n}\", v)\n",
+        true,
+    ),
+    (
+        "unknown_name_on_instances",
+        &[(
+            "pkg/fill.py",
+            "import argparse\nimport types\n\nimport pkg\n\n\ndef fill(target: argparse.Namespace, values):\n    ns = types.SimpleNamespace()\n    for name, value in values.items():\n        setattr(ns, name, value)\n        setattr(target, name, value)\n        setattr(pkg, name, value)\n\n\nclass Logged:\n    def __setattr__(self, name, value):\n        print(name)\n        super().__setattr__(name, value)\n",
+        )],
+        "import copy\n",
+        true,
+    ),
+    (
+        "dataclass",
+        &[],
+        "import copy\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Child:\n    x: int = 1\n",
+        true,
+    ),
+    (
+        "frozen_dataclass",
+        &[],
+        "import copy\nimport dataclasses\n\n\n@dataclasses.dataclass(frozen=True)\nclass Child:\n    x: int = 1\n",
+        true,
+    ),
+    (
+        "known_decorators",
+        &[],
+        "import copy\nimport functools\nfrom typing import final\n\n\n@final\n@functools.total_ordering\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n\n    def __lt__(self, other):\n        return False\n",
+        true,
+    ),
+    (
+        "decorator_reading_the_class",
+        &[],
+        "import copy\n\nREGISTRY = {}\n\n\ndef register(cls):\n    print(cls.__name__)\n    REGISTRY[cls.__name__] = cls\n    return cls\n\n\n@register\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n",
+        true,
+    ),
+    (
+        "init_subclass_registering",
+        &[],
+        "import copy\n\nREGISTRY = {}\n\n\nclass Base:\n    def __init_subclass__(cls, **kwargs):\n        super().__init_subclass__(**kwargs)\n        REGISTRY[cls.__name__] = cls\n\n\nclass Child(Base):\n    def __init__(self) -> None:\n        self.x = 1\n",
+        true,
+    ),
+    (
+        "init_subclass_storing_attributes",
+        &[],
+        "import copy\n\n\nclass Base:\n    def __init_subclass__(cls, **kwargs):\n        super().__init_subclass__(**kwargs)\n        cls.keys = (\"kind\",)\n\n\nclass Child(Base):\n    def __init__(self) -> None:\n        self.x = 1\n",
+        true,
+    ),
+    (
+        "decorator_storing_attributes",
+        &[],
+        "import copy\n\n\ndef register(cls):\n    cls.registered = True\n    return cls\n\n\n@register\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n",
+        true,
+    ),
+    (
+        "unrelated_name",
+        &[],
+        "import copy\n\n\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n\n\nsetattr(Child, \"other\", 3)\n",
+        true,
+    ),
+];
+
+#[test]
+fn mut115_leaves_open_a_hook_bound_on_the_class_after_its_body() {
+    for (name, files, child, exact) in BOUND_AFTER_BODY {
+        let p = Project::new(&format!("mut115_after_body_{name}"));
+        p.write("pkg/__init__.py", "");
+        for (path, text) in *files {
+            p.write(path, text);
+        }
+        let hook = if child.contains("hook") { HOOK } else { "" };
+        let plain = if child.contains("class Child") {
+            ""
+        } else {
+            PLAIN_CHILD
+        };
+        let source = format!("{hook}{child}{plain}{HELD_CHANGE}");
+        p.write("pkg/child.py", &source);
+        let line = source
+            .lines()
+            .position(|l| l == "    c.child.x = 2")
+            .unwrap()
+            + 1;
+        let diags = diagnostics(&p);
+        assert_eq!(
+            claims(&diags, "pkg/child.py"),
+            vec![(line as u64, *exact)],
+            "{name}: {diags:#?}"
+        );
+    }
+}
+
 /// A comprehension over the copy only iterates it, as a `for` loop does, also before 3.12, where
 /// it is a function of its own called with the copy: the copy reaches no other code, so the
 /// change below it is a change of what the copied value holds.

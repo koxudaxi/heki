@@ -52,9 +52,14 @@ Its premises:
   run (R2, R5). Established.
 - **Plain write**: the write is one of two kinds. It may rebind or delete the attribute with a
   plain store: no property, descriptor, `__setattr__`, `__delattr__`, or metaclass heki does not
-  know in a class the instance may be, and every base a project class or a plain one. Or it may
-  change in place the builtin list, dict, or set the attribute holds by its type, through a
-  changing method or an item store that no project subclass of the container replaces.
+  know in a class the instance may be, no `__setattr__` or `__delattr__` bound on one after its
+  body (by a store through a value that may be a class object under that name, a name built at
+  run time that may be it, or one heki cannot read, as for `MUT115`; a decorator heki does not
+  know to keep attribute access; or an `__init_subclass__` that does more with the class than
+  read it and store its attributes by name), and every base a project class or a plain one. Or
+  it may change in place the builtin list, dict, or set the attribute holds by its type,
+  through a changing method or an item store that no project subclass of the container
+  replaces.
   Established.
 - **Kept to the return**: no point from the write to the method's normal return may remove or
   replace the kept value, exception edges into handlers included. The write's own instruction

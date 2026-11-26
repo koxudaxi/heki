@@ -747,7 +747,7 @@ pub const READS_ON_EVERY_PATH: Premise = Premise {
 
 pub const PLAIN_WRITE: Premise = Premise {
     name: "Plain write",
-    states: "the write rebinds or deletes the attribute with a plain store (no property, descriptor, `__setattr__`, `__delattr__`, or metaclass in a class the instance may be, and every base a project class or a plain one), or changes in place the builtin list, dict, or set the attribute holds by its type through a changing method or an item store that no project subclass replaces",
+    states: "the write rebinds or deletes the attribute with a plain store (no property, descriptor, `__setattr__`, `__delattr__`, or metaclass in a class the instance may be, none of those hooks bound on one after its body, and every base a project class or a plain one), or changes in place the builtin list, dict, or set the attribute holds by its type through a changing method or an item store that no project subclass replaces",
     decided_in: &[
         "heki_rules::mut_rules::kept_values::plain_write",
         "heki_effect::cache_flow::in_place_change",

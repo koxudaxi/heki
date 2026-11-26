@@ -599,6 +599,72 @@ fn mut101_and_mut107_stay_quiet_on_classes_a_metaclass_may_give_descriptors() {
     assert_eq!(lines(&p, "MUT107"), vec![at(54, "Plain.turn_on")]);
 }
 
+// ======================================== MUT101: a hook bound on the class after its body
+
+/// A class whose write `MUT101` reports, then what the rest of the project does with it.
+const PLAIN_SWITCH: &str = r#"from functools import cached_property
+
+
+def hook(self, name, value):
+    print(name, value)
+
+
+class Plain:
+    def __init__(self):
+        self._attr_is_on = False
+
+    @cached_property
+    def is_on(self):
+        return self._attr_is_on
+
+    def __hash__(self):
+        return hash(self._attr_is_on)
+
+    def turn_on(self):
+        self._attr_is_on = True
+"#;
+
+/// A `__setattr__` or `__delattr__` bound on a class after its body, through the class object
+/// or a value that may be one, makes the write run code, also under a name built at run time
+/// whose ends may be the hook's; a built name that is never a hook's, and a store under any name
+/// through an instance, bind nothing Python looks up on the class.
+#[test]
+fn mut101_stays_quiet_once_a_hook_may_be_bound_on_the_class_after_its_body() {
+    let shapes: &[(&str, &str, bool)] = &[
+        ("nothing", "", true),
+        ("store", "\n\nPlain.__setattr__ = hook\n", false),
+        (
+            "concatenated_name",
+            "\n\nsetattr(Plain, \"__del\" + \"attr__\", hook)\n",
+            false,
+        ),
+        (
+            "unknown_name",
+            "\n\ndef install(target, name, f):\n    setattr(target, name, f)\n",
+            false,
+        ),
+        (
+            "built_name_of_no_hook",
+            "\n\ndef install(target, name, f):\n    setattr(target, f\"__attr_{name}\", f)\n",
+            true,
+        ),
+        (
+            "unknown_name_on_an_instance",
+            "\n\nimport types\n\n\ndef fill(values):\n    ns = types.SimpleNamespace()\n    for name, value in values.items():\n        setattr(ns, name, value)\n",
+            true,
+        ),
+    ];
+    for (name, after, reported) in shapes {
+        let p = Project::new(&format!("regr_mut101_after_body_{name}"));
+        p.write("switch.py", &format!("{PLAIN_SWITCH}{after}"));
+        let expected = match reported {
+            true => vec![at(20, "Plain.turn_on")],
+            false => Vec::new(),
+        };
+        assert_eq!(lines(&p, "MUT101"), expected, "{name}");
+    }
+}
+
 // ================================================ MUT101 / MUT107: writes that run code
 
 /// A store or delete of `self.<attr>` that is no plain store: a metaclass given through the bases
