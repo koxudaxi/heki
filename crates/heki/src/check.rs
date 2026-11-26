@@ -434,14 +434,14 @@ impl Touched {
         &self,
         diags: &[Diagnostic],
         key_path: &dyn Fn(&Path) -> String,
-        version: BaselineVersion,
+        baseline: &RatchetBaseline,
     ) -> BaselineView<'_> {
         BaselineView {
             touched: self,
             keys: diags
                 .iter()
                 .filter(|d| self.touches(d))
-                .map(|d| heki_diagnostics::baseline_key(d, key_path(&d.path), version))
+                .map(|d| baseline.key_of(d, key_path(&d.path)))
                 .collect(),
         }
     }
@@ -899,7 +899,7 @@ fn report(
         // `--touched` run judges only the stale entries in view. Every report is on a file the run
         // covers. An entry is judged by a run covering its file: one of a group, of no one
         // file, by a run over the whole project, whose root its empty path names.
-        let in_view = touched.map(|t| t.baseline_view(&diags, &key_path, baseline.version));
+        let in_view = touched.map(|t| t.baseline_view(&diags, &key_path, baseline));
         let shown = |key: &BaselineKey, within: &[BaselineKey]| {
             in_view.as_ref().is_none_or(|v| v.shows(key, within))
         };
@@ -912,7 +912,7 @@ fn report(
         if !args.update_baseline {
             let run = analyzed.rules_run();
             let checked = project.files.iter().map(|f| f.rel.as_str()).collect();
-            let withheld = baseline_counts(&analyzed.withheld, &key_path, baseline.version);
+            let withheld = baseline.counts_of(&analyzed.withheld, &key_path);
             // A report withheld because `lint.heuristic` is off still matches its entry.
             let judged =
                 (cmp.stale_entries.iter()).filter(|e| covered(&e.key) && shown(&e.key, &e.within));
@@ -1441,6 +1441,7 @@ mod tests {
             allowed_examples: Vec::new(),
             group: false,
             key_target: None,
+            key_module: None,
         }
     }
 

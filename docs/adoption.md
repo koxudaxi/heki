@@ -105,6 +105,16 @@ heki 0.5.0 and earlier cannot read:
 A version this heki does not know is an error, and so is a file listing one entry twice (a hand
 merge of two baselines).
 
+### Import names
+
+An [`IMP201`](rules/import-boundary-violation.md) report of `from m import n`, where `n` is a name
+of `m`, has the target `m.n`, and its entry holds the name, so another name of the same module is a
+new report. An entry of the module, as heki 0.5.0 and earlier wrote it, keeps covering the names of
+its module that have no entry of their own, with the same count, and `--update-baseline` rewrites
+it per name. Only a heki that keys these reports by name reads the rewritten entries: the file
+has `version = 3`, which heki 0.5.0 and earlier cannot read, so every heki that reads the
+baseline must be newer before a rewritten baseline is committed.
+
 ### Import cycle groups
 
 An [`IMP101`](rules/import-cycle.md) entry records a group of modules that import each other, and

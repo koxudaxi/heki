@@ -172,6 +172,12 @@ pub struct Diagnostic {
     /// entry. Written by no output format.
     #[serde(skip)]
     pub key_target: Option<String>,
+    /// For a report of a name a `from` import takes from a module (`IMP201`, whose `target` is
+    /// `m.n`), the module `m`: a baseline entry of the module, as baselines keyed these reports
+    /// before they named the import, covers the names it has no entry for, until
+    /// `--update-baseline` rewrites it per name. Written by no output format.
+    #[serde(skip)]
+    pub key_module: Option<String>,
 }
 
 /// Why a heuristic report of an exact rule is not exact.
@@ -1109,6 +1115,38 @@ impl RatchetBaseline {
         out
     }
 
+    /// The key this baseline holds the report `d` under: its own, or, for a report of a name an
+    /// import takes (`Diagnostic::key_module`) that this baseline has no entry for, the entry of
+    /// the module, as baselines wrote it before reports named the import.
+    pub fn key_of(&self, d: &Diagnostic, path: String) -> BaselineKey {
+        let key = baseline_key(d, path, self.version);
+        match &d.key_module {
+            Some(module) if !self.counts.contains_key(&key) => {
+                let of_module = BaselineKey {
+                    target: module.clone(),
+                    ..key.clone()
+                };
+                if self.counts.contains_key(&of_module) {
+                    of_module
+                } else {
+                    key
+                }
+            }
+            _ => key,
+        }
+    }
+
+    /// The counts of `diags` per key of this baseline ([`Self::key_of`]), in its unit.
+    pub fn counts_of(
+        &self,
+        diags: &[Diagnostic],
+        key_path: &dyn Fn(&Path) -> String,
+    ) -> BTreeMap<BaselineKey, Tally> {
+        counted_by(diags, key_path, self.version.unit(), &|d, path| {
+            self.key_of(d, path)
+        })
+    }
+
     /// What a check against this baseline reports of `diags`: every diagnostic of a key whose
     /// count (in the baseline's unit) grew past its entry. `key_path` gives the baseline path of
     /// a diagnostic's file. Returns the comparison the counts were kept by.
@@ -1117,9 +1155,9 @@ impl RatchetBaseline {
         diags: &mut Vec<Diagnostic>,
         key_path: &dyn Fn(&Path) -> String,
     ) -> RatchetComparison {
-        let cmp = self.compare(&baseline_counts(diags, key_path, self.version));
+        let cmp = self.compare(&self.counts_of(diags, key_path));
         let regressed: BTreeSet<&BaselineKey> = cmp.regressions.iter().map(|r| &r.key).collect();
-        diags.retain(|d| regressed.contains(&baseline_key(d, key_path(&d.path), self.version)));
+        diags.retain(|d| regressed.contains(&self.key_of(d, key_path(&d.path))));
         cmp
     }
 
@@ -1236,9 +1274,20 @@ pub fn baseline_counts(
     key_path: &dyn Fn(&Path) -> String,
     version: BaselineVersion,
 ) -> BTreeMap<BaselineKey, Tally> {
+    counted_by(diags, key_path, version.unit(), &|d, path| {
+        baseline_key(d, path, version)
+    })
+}
+
+fn counted_by(
+    diags: &[Diagnostic],
+    key_path: &dyn Fn(&Path) -> String,
+    unit: CountUnit,
+    key: &dyn Fn(&Diagnostic, String) -> BaselineKey,
+) -> BTreeMap<BaselineKey, Tally> {
     let mut out: BTreeMap<BaselineKey, Tally> = BTreeMap::new();
     for d in diags {
-        let count = match version.unit() {
+        let count = match unit {
             CountUnit::Sites => d.sites.max(1),
             CountUnit::Diagnostics => 1,
         };
@@ -1247,9 +1296,7 @@ pub fn baseline_counts(
         } else {
             0
         };
-        let tally = out
-            .entry(baseline_key(d, key_path(&d.path), version))
-            .or_default();
+        let tally = out.entry(key(d, key_path(&d.path))).or_default();
         *tally = *tally + Tally { count, heuristic };
     }
     out
@@ -1299,6 +1346,7 @@ mod tests {
             allowed_examples: Vec::new(),
             group: false,
             key_target: None,
+            key_module: None,
         }
     }
 
