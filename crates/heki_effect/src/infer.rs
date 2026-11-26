@@ -3026,9 +3026,11 @@ impl<'e, 'a> Engine<'e, 'a> {
         }
     }
 
-    /// What calling method `method` on a value of type `recv` returns: the return annotation of
-    /// the definition the receiver's MRO finds first (`Self` bound to the receiver), as for a
-    /// type checker; past the project classes, what the ecosystem knowledge base says of the
+    /// What calling method `method` on a value of type `recv` returns: on an instance, what the
+    /// return facts of every definition the call may run agree on
+    /// ([`TypeCtx::dispatched_return`]), else the return annotation of the definition the
+    /// receiver's MRO finds first (`Self` bound to the receiver), as for a type checker; past the
+    /// project classes, what the ecosystem knowledge base says of the
     /// method of the first external base: a copy (`model_copy`, `list.copy`) and a fluent
     /// builder (`return_type = "Self"`) have their receiver's type.
     fn member_call(&self, recv: &Ty, method: &str, call: Passed<'_>) -> Option<Ty> {
@@ -3075,6 +3077,12 @@ impl<'e, 'a> Engine<'e, 'a> {
             }
             if decl.returned_import.is_some() {
                 return decl.declared_return(cx.project).map(|t| decl.call_type(t));
+            }
+            if !skip_self
+                && matches!(recv, Ty::Inst(_))
+                && let Some(t) = cx.dispatched_return(class, method, decl, &self_ty)
+            {
+                return Some(t);
             }
             return decl
                 .return_type

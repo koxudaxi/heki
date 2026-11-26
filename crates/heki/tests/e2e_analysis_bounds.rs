@@ -720,6 +720,72 @@ fn the_classes_storing_into_a_deep_subclass_chain_are_walked_once() {
     assert_eq!(blocking(check_linear(SCALE, shape)), 1);
 }
 
+/// A getter returning an attribute of `self` that `__init__` binds after a long chain of
+/// branches, on a class with a few dozen subclasses and called from a thousand functions, and the
+/// same getter on a class with two thousand subclasses: the classes whose code may store into
+/// the attribute are walked once per class and attribute (`ProjectDecls::held_attr`), the
+/// branches once per store (`may_be_none`), and past `DISPATCH_CLASS_LIMIT` subclasses the
+/// definitions a call may run are not listed.
+#[test]
+fn getters_returning_an_attribute_of_self_decide_its_class_once() {
+    let shape = |k: usize| {
+        let (branches, callers, subclasses) = (125 * k, 125 * k, 250 * k);
+        let mut lines = vec![
+            "import time".to_owned(),
+            String::new(),
+            String::new(),
+            "class Waiter:".to_owned(),
+            "    def wait(self) -> None:".to_owned(),
+            "        time.sleep(1)".to_owned(),
+        ];
+        for (class, children) in [("Few", 40), ("Many", subclasses)] {
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("class {class}:"),
+                "    def __init__(self, flags) -> None:".to_owned(),
+                "        waiter = Waiter()".to_owned(),
+            ]);
+            for i in 0..branches {
+                lines.push(format!("        if flags[{i}]:"));
+                lines.push("            waiter = Waiter()".to_owned());
+            }
+            lines.extend([
+                "        self._waiter = waiter".to_owned(),
+                String::new(),
+                "    def waiter(self):".to_owned(),
+                "        return self._waiter".to_owned(),
+            ]);
+            for i in 0..children {
+                lines.extend([
+                    String::new(),
+                    String::new(),
+                    format!("class {class}{i}({class}):"),
+                    "    pass".to_owned(),
+                ]);
+            }
+            for i in 0..callers {
+                lines.extend([
+                    String::new(),
+                    String::new(),
+                    format!("async def use_{class}{i}(node: {class}) -> None:"),
+                    "    node.waiter().wait()".to_owned(),
+                ]);
+            }
+        }
+        let p = Project::new(&format!("bounds_held_attr_{k}"));
+        p.write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let found = check_linear(SCALE, shape);
+    let blocking: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF101")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(blocking, ["use_Few0"]);
+}
+
 /// A function binding `names` variables in turn `bindings` times in all, each binding followed
 /// by a generator expression reading every variable: closure cells bound many times, each read
 /// by as many scopes. The values are of a wide container type, so that joining them costs more

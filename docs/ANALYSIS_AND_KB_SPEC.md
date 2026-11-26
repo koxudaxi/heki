@@ -788,9 +788,25 @@ two classes, `None` on a path, or a parameter, an attribute, or a display give n
 instance's attribute holds what the whole project stores there, which pass 1 does not see). A
 class of another module is the name an annotation would name, so `declared_ty` drops it when
 the project binds that name to no class, and the fact says nothing once another module rebinds
-a global the function reads (`ReturnFact::ty_globals`: the class's name). A method call reads
-only the annotation of the definition the receiver's MRO finds, so this types calls of
-functions. A module constant the module
+a global the function reads (`ReturnFact::ty_globals`: the class's name). A method whose every
+return gives the same attribute of its receiver (`return self._db`, also of an `async def`:
+`ReturnFact::self_attr`, the walk `FunctionDecl::returns_param` makes) returns what the whole
+project stores there, which pass 2 decides (`ProjectDecls::held_attr`): the attribute's Priority
+3 type when it is an instance of one class and every class whose code may store into the
+instance stores it only through `self` in its own methods. A store through another receiver of
+the class, from another module, or through a receiver of no class heki knows anywhere in the
+project (`app.db = v`, `StoresElsewhere::untyped_attrs`, which may be such an instance), a store
+of a value the `None` constant reaches (`Database(url) if url else None`), and an annotation of
+the attribute allowing `None` leave it open (`ClassDecl::unowned_attrs`); a value an annotation
+allowing `None` types elsewhere (a parameter `db: Database | None`) is the class it names, as
+for every receiver. A call of a method on an instance (`TypeCtx::dispatched_return`) gives what
+every definition it may run gives, when they agree: the one the MRO finds and every override of
+a project subclass, which must be all an instance may run
+(`ProjectDecls::instance_targets_complete`, at most `DISPATCH_CLASS_LIMIT` classes), each by its
+fact or else its annotation. Without a fact of the definition the MRO finds, or when they
+disagree, the call takes that definition's annotation, as for a type checker, which holds every
+override to it; the fact of one definition says nothing of another. A call through `super()`
+and a property read take the annotation. A module constant the module
 body binds once, outside a loop, to a value that names a file (`ModuleDecls::file_constants`,
 `names_a_file`) names it where a function or another module reads it
 (`TypeCtx::names_file_constant`), unless another module rebinds it.

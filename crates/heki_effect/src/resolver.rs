@@ -496,6 +496,18 @@ pub struct StoresElsewhere {
     /// (`setattr(cfg, name, v)`, `vars(obj).update(other)`).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub unnamed: BTreeSet<String>,
+    /// The attributes, by name, it stores through a receiver heki types as no project class and
+    /// no project module (`app.db = v` with `app` a parameter without an annotation, `C.db = v`
+    /// on a class object), here or in its own module: such a store may bind the attribute of an
+    /// instance of any class ([`ProjectDecls::held_attr`]).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub untyped_attrs: BTreeSet<String>,
+    /// It stores under a name heki cannot read through a receiver heki types as no project
+    /// class and no project module (`setattr(obj, name, v)` with `obj` a parameter without an
+    /// annotation): such a store may bind any attribute of an instance of any class
+    /// ([`ProjectDecls::held_attr`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub untyped_unnamed: bool,
 }
 
 /// What a module's stores bind one name of another module to.
@@ -513,6 +525,10 @@ pub struct StoredElsewhere {
     /// (`cfg.HANDLERS[kind] = run`, `obj.items.append(x)`): its items join what they add.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changed: Option<Added>,
+    /// A store binds a value that may be `None`, which `ty` leaves out: also a store of `None`
+    /// alone is one into the name ([`ProjectDecls::held_attr`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub none: bool,
 }
 
 /// A module's global and attribute types decided without what reading them gives, where they
@@ -588,6 +604,13 @@ pub struct ClassDecl {
     /// attribute holds a value the operator changes in place ([`ProjectDecls::join_family`]).
     #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
     pub in_place_attrs: Box<[Box<str>]>,
+    /// The attributes the module's code may bind otherwise than to an instance through `self`
+    /// in a method of the class, sorted: a store through another receiver of the class (another
+    /// instance, `cls()` in a class method, a parameter annotated with the class), a store of a
+    /// value that may be `None`, or an annotation of the class that allows `None`. Their value
+    /// is no class the class's own methods alone decide ([`ProjectDecls::held_attr`]).
+    #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
+    pub unowned_attrs: Box<[Box<str>]>,
     /// The only stores heki cannot name are those `__setstate__` makes from its state, which
     /// restore what an instance held when pickle or copy took the state
     /// ([`ProjectDecls::restores_hold`]).
@@ -948,12 +971,7 @@ impl FunctionDecl {
     /// none of its own (`-> ModuleType`, none).
     pub(crate) fn declared_return(&self, project: &ProjectDecls) -> Option<Ty> {
         let declared = self
-            .returns
-            .as_ref()
-            .and_then(|r| {
-                let rebound = r.ty_globals.iter().any(|g| project.rebound_elsewhere(g));
-                r.ty.as_ref().filter(|_| !rebound)
-            })
+            .inferred_return(project)
             .or(self.return_type.as_ref())
             .and_then(|t| project.declared_ty(t))
             .and_then(|t| t.bind_self(None));
@@ -970,6 +988,14 @@ impl FunctionDecl {
         } else {
             declared
         }
+    }
+
+    /// What every return gives past the annotation ([`ReturnFact::ty`]), while no other module
+    /// rebinds a global it was inferred from ([`ReturnFact::ty_globals`]).
+    pub(crate) fn inferred_return(&self, project: &ProjectDecls) -> Option<&Ty> {
+        let r = self.returns.as_deref()?;
+        let rebound = r.ty_globals.iter().any(|g| project.rebound_elsewhere(g));
+        r.ty.as_ref().filter(|_| !rebound)
     }
 
     pub(crate) fn call_type(&self, returned: Ty) -> Ty {
@@ -1357,6 +1383,7 @@ impl ModuleDecls {
             class.adds_unnamed_attrs = false;
             class.restores_state = false;
             class.in_place_attrs = Box::default();
+            class.unowned_attrs = Box::default();
             class.attr_capacities.clear();
         }
         for function in out.functions.values_mut() {
@@ -1643,6 +1670,30 @@ fn split_top_level(text: &str, sep: char) -> Vec<&str> {
     }
     out.push(text[start..].trim());
     out
+}
+
+/// Whether the annotation `text` allows `None` (`T | None`, `Optional[T]`, `Union[T, None]`,
+/// also inside `Annotated`, `Final`, `ClassVar`, and quotes), which the type it names
+/// ([`ModuleDecls::resolve_annotation_ty`]) leaves out.
+fn annotation_allows_none(text: &str) -> bool {
+    let t = unquote(text);
+    let parts = split_top_level(t, '|');
+    if parts.len() > 1 {
+        return parts.iter().any(|p| unquote(p) == "None");
+    }
+    let Some((head, inner)) = subscript(t) else {
+        return t == "None";
+    };
+    match head.rsplit('.').next().unwrap_or(head) {
+        "Optional" => true,
+        "Union" => split_top_level(inner, ',')
+            .iter()
+            .any(|p| unquote(p) == "None"),
+        "Annotated" | "Final" | "ClassVar" | "Required" | "NotRequired" | "ReadOnly" => {
+            annotation_allows_none(first_arg(inner))
+        }
+        _ => false,
+    }
 }
 
 /// `Head[inner]` -> `(Head, inner)`.
@@ -2303,6 +2354,9 @@ pub struct ProjectDecls {
     /// The answers of [`Self::stored_attr_type`] so far, by class and attribute; cleared with
     /// the indexes.
     attr_joins: KeptAnswers<(String, String), Option<Ty>>,
+    /// The answers of [`Self::held_attr`] so far, by class and attribute; cleared with the
+    /// indexes.
+    held_attrs: KeptAnswers<(String, String), Option<Ty>>,
     /// The answers of [`Self::capacity`] so far; cleared with the indexes.
     capacities: KeptAnswers<CapacityOf, CapacityOf>,
     /// The answers of [`Self::star_binding`] so far, by module and name; cleared with the
@@ -2627,6 +2681,7 @@ impl ProjectDecls {
             .clear();
         self.class_constants.clear();
         self.attr_joins.clear();
+        self.held_attrs.clear();
         self.capacities.clear();
         self.star_bindings.clear();
         self.catalog_attributes.clear();
@@ -7193,7 +7248,18 @@ fn external_defines(kb: &EffectiveEcosystemKb, base: &str, name: &str) -> bool {
 /// `cached_property` is none: a read after the first returns what the instance holds, which an
 /// assignment can replace.
 fn returned_param(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Option<String>)> {
-    if f.kind != FunctionKind::Sync || !decorators::keeps_returned_value(&f.decorators, decls) {
+    (f.kind == FunctionKind::Sync)
+        .then(|| handed_back_param(f, decls))
+        .flatten()
+}
+
+/// What every `return` of one definition, a function or a coroutine function, hands back of its
+/// parameters, as [`returned_param`] decides it without excluding a coroutine: awaiting the
+/// coroutine gives what the body returns (`ReturnFact::self_attr`).
+fn handed_back_param(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Option<String>)> {
+    if !matches!(f.kind, FunctionKind::Sync | FunctionKind::Async)
+        || !decorators::keeps_returned_value(&f.decorators, decls)
+    {
         return None;
     }
     let defs: FxHashMap<VarId, &InstKind> = f
@@ -8450,12 +8516,16 @@ fn complete_decls(
     }
     // Classes come from the semantic model, IR classes and methods from the IR of the same
     // AST, so every IR class is declared; one that is not gets no attribute types.
+    let mut optional_attrs: Vec<(&str, &str)> = Vec::new();
     for f in &input.ir.functions {
         if f.is_class_body {
             // Class-body annotations (`fields: list[Field]`, dataclass / pydantic fields).
             for ann in &f.local_annotations {
                 if ann.target.contains('.') {
                     continue;
+                }
+                if annotation_allows_none(&ann.annotation) {
+                    optional_attrs.push((&f.qualname, &ann.target));
                 }
                 if let Some(t) = cx.module.resolve_annotation_ty(&ann.annotation)
                     && let Some(class) = decls.classes.get_mut(&f.qualname)
@@ -8481,16 +8551,31 @@ fn complete_decls(
         }
         let prefix = format!("{}.", self_param.name);
         for ann in &f.local_annotations {
-            if let Some(attr) = ann.target.strip_prefix(&prefix)
-                && !attr.contains('.')
-                && let Some(t) = cx.module.resolve_annotation_ty(&ann.annotation)
+            let attr = ann.target.strip_prefix(&prefix);
+            let Some(attr) = attr.filter(|a| !a.contains('.')) else {
+                continue;
+            };
+            if annotation_allows_none(&ann.annotation)
+                && let Some(owner) = &f.owner_class_qualname
             {
+                optional_attrs.push((owner, attr));
+            }
+            if let Some(t) = cx.module.resolve_annotation_ty(&ann.annotation) {
                 class.attr_types.insert(attr.to_owned(), t);
             }
         }
     }
     // After the annotations, which type every store of the attributes they declare.
     stores::record(input, project, kb, &mut decls);
+    for (qualname, attr) in optional_attrs {
+        if let Some(class) = decls.classes.get_mut(qualname) {
+            let mut unowned: Vec<Box<str>> = std::mem::take(&mut class.unowned_attrs).into();
+            unowned.push(Box::from(attr));
+            unowned.sort_unstable();
+            unowned.dedup();
+            class.unowned_attrs = unowned.into_boxed_slice();
+        }
+    }
     crate::capacity::record(input, &cx, &mut decls);
     decls
 }
