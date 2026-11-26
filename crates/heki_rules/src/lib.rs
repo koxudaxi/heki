@@ -581,7 +581,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "EFF109",
         slug: "lock-reacquired-while-held",
         family: RuleFamily::Eff,
-        certainty: Certainty::Heuristic,
+        certainty: Certainty::Exact,
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,

@@ -15,10 +15,18 @@
 //! return _LIB`), which heki does not evaluate. Neither is a lock some function of the module
 //! releases without holding it: another thread gives that lock back as a signal (a handoff),
 //! so taking it again waits for that thread, by design.
+//!
+//! A report is exact when its premises (`crate::premises::of_rule`) are established: the
+//! lock's class is one no project class changes the acquisition of ([`non_reentrant`]), and the
+//! reported call attempts the acquisition whenever it returns, through every implementation
+//! of each call on the way ([`heki_effect::ProjectIndex::site_must_take`]). Held and Same lock
+//! hold for every report: an acquisition is reported only where the lock is held on every path
+//! and both sides name it the same way.
 
 use crate::{CheckContext, ModuleUnit, SitesBySpan};
 use heki_ast::Span;
 use heki_diagnostics::{Diagnostic, RelatedLocation};
+use heki_effect::ProjectDecls;
 use heki_effect::held;
 use heki_effect::locks::{self, LockSteps, ObjRef, SiteLock, Taken};
 use heki_effect::ownership;
@@ -80,27 +88,30 @@ fn handoffs(
         }
         let key = CheckContext::key(unit, f);
         let steps = lock_steps(cx, tcx, sites, f, &key);
-        let entry = held::at_entry(&steps.shape, steps.locks.taken.len(), |b, i| {
-            steps.locks.changes.get(&(b, i))
-        });
-        let reached = entry
-            .into_iter()
-            .enumerate()
-            .filter_map(|(b, s)| Some((BlockId(b as u32), s?)));
-        for (bb, mut state) in reached {
-            for i in 0..f.block(bb).insts.len() {
-                if let Some(lock) = steps.locks.releases.get(&(bb, i))
-                    && !state
-                        .ones()
-                        .any(|k| steps.locks.taken.item(k).lock == *lock)
-                {
-                    out.extend(handoff_key(f, lock));
-                }
-                state.apply(steps.locks.changes.get(&(bb, i)));
-            }
+        for lock in locks::unheld_releases(&steps.shape, &steps.locks) {
+            out.extend(handoff_key(f, &lock));
         }
     }
     out
+}
+
+/// The methods by which code takes and gives back a lock, each with whether it is looked up by
+/// name (a special method of a `with` is looked up on the class).
+const LOCK_METHODS: &[(&str, bool)] = &[
+    ("acquire", true),
+    ("release", true),
+    ("__enter__", false),
+    ("__exit__", false),
+    ("__aenter__", false),
+    ("__aexit__", false),
+];
+
+/// Non-reentrant: no class a lock of the catalog class `class` may be (R2) changes how it is
+/// taken or given back, so it is the catalog's non-reentrant lock.
+fn non_reentrant(decls: &ProjectDecls, class: &str) -> bool {
+    LOCK_METHODS
+        .iter()
+        .all(|(method, by_name)| decls.method_not_overridden(class, method, *by_name))
 }
 
 pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
@@ -166,8 +177,12 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
             }
             for (i, inst) in f.block(bb).insts.iter().enumerate() {
                 if !state.is_empty() {
-                    let own = steps.locks.takes.get(&(bb, i));
-                    for (lock, chain) in retakes(cx, unit, sites, &key, &state_of, own, inst) {
+                    let own = steps.locks.takes.get(&(bb, i)).map(|lock| {
+                        let taken = &steps.locks.taken;
+                        let k = (0..taken.len()).find(|k| taken.span(*k) == inst.span);
+                        (lock, k.map_or("", |k| taken.item(k).class.as_str()))
+                    });
+                    for (lock, retake) in retakes(cx, unit, sites, &key, &state_of, own, inst) {
                         if handoff_key(f, &lock).is_some_and(|k| signals.contains(&k)) {
                             continue;
                         }
@@ -181,7 +196,12 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
                         };
                         if reported.insert((inst.span, lock.clone())) {
                             let held = (steps.locks.taken.span(k), steps.locks.taken.item(k));
-                            report(cx, unit, f, &key, inst.span, held, chain, out);
+                            let exact = retake.on_every_return
+                                && non_reentrant(cx.decls, &held.1.class)
+                                && non_reentrant(cx.decls, &retake.class);
+                            let d = report(cx, unit, f, &key, inst.span, held, retake.chain, out);
+                            d.certainty =
+                                crate::premises::tier("EFF109", exact).at_most(d.certainty);
                         }
                     }
                 }
@@ -226,9 +246,19 @@ fn lock_steps<'f>(
     }
 }
 
-/// The locks `inst` takes, with the calls to where it takes each (empty for its own
-/// acquisition), while `state`'s locks may be held: its own acquisition, and those its call
-/// sites' callees make.
+/// One way `inst` takes a lock again ([`retakes`]).
+struct Retake {
+    /// The calls to where it takes the lock: empty for its own acquisition.
+    chain: Vec<heki_effect::CallHop>,
+    /// The lock's catalog class there.
+    class: String,
+    /// `inst` attempts the acquisition whenever it returns ([`ProjectIndex::site_must_take`]):
+    /// always for its own; `chain` is then that way.
+    on_every_return: bool,
+}
+
+/// The locks `inst` takes while `state`'s locks may be held: its own acquisition, and those
+/// its call sites' callees make.
 #[allow(clippy::too_many_arguments)]
 fn retakes(
     cx: &CheckContext<'_>,
@@ -236,19 +266,38 @@ fn retakes(
     sites: &SitesBySpan<'_>,
     key: &FuncKey,
     holder: &HolderState<'_>,
-    own: Option<&ObjRef>,
+    own: Option<(&ObjRef, &str)>,
     inst: &Inst,
-) -> Vec<(ObjRef, Vec<heki_effect::CallHop>)> {
+) -> Vec<(ObjRef, Retake)> {
     let mut out = Vec::new();
-    if let Some(lock) = own {
-        out.push((lock.clone(), Vec::new()));
+    if let Some((lock, class)) = own {
+        let retake = Retake {
+            chain: Vec::new(),
+            class: class.to_owned(),
+            on_every_return: true,
+        };
+        out.push((lock.clone(), retake));
     }
     if anchors_call_site(&inst.kind) {
         for site in sites.at(&key.qualname, inst.span) {
             for found in cx.index.site_locks(&unit.input.path, site) {
-                if !holder.guards(cx, &found) {
-                    out.push((found.lock, found.chain));
+                if holder.guards(cx, &found) {
+                    continue;
                 }
+                let must = cx.index.site_must_take(&unit.input.path, site, &found.lock);
+                let retake = match must {
+                    Some(taken) => Retake {
+                        chain: heki_effect::owned_chain(&taken.chain),
+                        class: taken.class,
+                        on_every_return: true,
+                    },
+                    None => Retake {
+                        chain: found.chain,
+                        class: found.class,
+                        on_every_return: false,
+                    },
+                };
+                out.push((found.lock, retake));
             }
         }
     }
@@ -300,7 +349,7 @@ impl HolderState<'_> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn report(
+fn report<'d>(
     cx: &CheckContext<'_>,
     unit: &ModuleUnit<'_>,
     f: &IrFunction,
@@ -308,8 +357,8 @@ fn report(
     span: Span,
     (taken, held): (Span, &Taken),
     chain: Vec<heki_effect::CallHop>,
-    out: &mut Vec<Diagnostic>,
-) {
+    out: &'d mut Vec<Diagnostic>,
+) -> &'d mut Diagnostic {
     let name = held.lock.name_in(f);
     let line = unit.lines.line_col(taken.start).0;
     let class = &held.class;
@@ -367,4 +416,5 @@ fn report(
         ));
     }
     d.related = related;
+    d
 }

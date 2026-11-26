@@ -123,6 +123,7 @@ pub const EVERY_RETURN: Premise = Premise {
         "heki_ir::facts::paths::Paths::on_every_return",
         "heki_effect::paths::with_paths",
         "heki_effect::callgraph::site_must_chain",
+        "heki_effect::ProjectIndex::site_must_take",
     ],
 };
 
@@ -155,6 +156,7 @@ pub const EVERY_IMPLEMENTATION: Premise = Premise {
         "heki_effect::resolver::TypeCtx::inst_targets_complete",
         "heki_effect::resolver::ProjectDecls::lookup_rebound",
         "heki_effect::callgraph::site_must_chain",
+        "heki_effect::ProjectIndex::site_must_take",
     ],
 };
 
@@ -815,6 +817,35 @@ pub const UNNAMED: Premise = Premise {
     decided_in: &["heki_rules::mut_rules::lost_changes::changes"],
 };
 
+pub const NON_REENTRANT: Premise = Premise {
+    name: "Non-reentrant",
+    states: "the lock is an instance of a class the catalog or the configuration flags as non-reentrant, by the value inferred or an annotation (R2, R3), and no project class a value of it may be binds how it is taken or given back (`acquire`, `release`, `__enter__`, `__exit__`, `__aenter__`, `__aexit__`)",
+    decided_in: &[
+        "heki_effect::locks::lock_class",
+        "heki_rules::eff_rules::lock_retaken::non_reentrant",
+    ],
+};
+
+pub const HELD: Premise = Premise {
+    name: "Held",
+    states: "a `with` over the lock, or an awaited or blocking `acquire()`, holds it on every path to the reported call or inner acquisition, and nothing the holder runs on the way gives it back or binds its name",
+    decided_in: &[
+        "heki_effect::held::at_entry",
+        "heki_effect::locks::lock_steps",
+        "heki_effect::ProjectIndex::site_rebinds",
+    ],
+};
+
+pub const SAME_LOCK: Premise = Premise {
+    name: "Same lock",
+    states: "both sides name the lock the same way through the arguments of each call (an attribute of a parameter, a module global, a closure variable), and no function on the way may bind that name or give a lock back under it",
+    decided_in: &[
+        "heki_effect::locks::ObjRef::through",
+        "heki_effect::locks::may_rebind",
+        "heki_effect::locks::may_give_back",
+    ],
+};
+
 /// Every premise of the table, once.
 /// The premises of a `readonly-parameter` suggestion of `heki recommend`
 /// ([`crate::recommend::types`]), in order: the claim is the first four ("the function only
@@ -939,6 +970,9 @@ pub const ALL: &[&Premise] = &[
     &KEPT_TO_THE_RETURN,
     &READS_THE_PROPERTY,
     &RUNS_THE_WRITER,
+    &NON_REENTRANT,
+    &HELD,
+    &SAME_LOCK,
 ];
 
 const MUT101_CLAIM: &[&Premise] = &[
@@ -1156,6 +1190,13 @@ const OPT_SCAN: &[&Premise] = &[
 pub fn of_rule(code: &str) -> &'static [&'static Premise] {
     match code {
         "EFF101" => &[&EVERY_RETURN, &EVERY_IMPLEMENTATION, &WAITS],
+        "EFF109" => &[
+            &NON_REENTRANT,
+            &HELD,
+            &SAME_LOCK,
+            &EVERY_IMPLEMENTATION,
+            &EVERY_RETURN,
+        ],
         "EFF103" => &[
             &ORIGIN,
             &EVERY_ITERATION,

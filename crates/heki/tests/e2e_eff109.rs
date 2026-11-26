@@ -1569,3 +1569,225 @@ fn eff109_reads_the_tests_of_functions_on_the_way() {
         ]
     );
 }
+
+/// `(line, certainty)` of every `EFF109` diagnostic of `path`.
+fn tiers(diags: &[Value], path: &str) -> Vec<(u64, String)> {
+    diags
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF109" && d["path"] == path)
+        .map(|d| {
+            let line = d["line"].as_u64().unwrap();
+            (line, d["certainty"].as_str().unwrap().to_owned())
+        })
+        .collect()
+}
+
+fn tier(line: u64, certainty: &str) -> (u64, String) {
+    (line, certainty.to_owned())
+}
+
+/// The exact tier: a retake of the function's own lock, a helper (also awaited, also two
+/// calls deep) taking it on every return, against a helper with a branch around the lock, a
+/// method a subclass overrides without it, a decorated helper, and a lock class a project class
+/// derives from.
+const TIERS: &str = r#"import asyncio
+import functools
+import threading
+
+
+def logged(fn):
+    @functools.wraps(fn)
+    def inner(*args, **kwargs):
+        return fn(*args, **kwargs)
+    return inner
+
+
+class Store:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.items: list[int] = []
+
+    def size(self) -> int:
+        with self._lock:
+            return len(self.items)
+
+    def outer_size(self) -> int:
+        return self.size() + 1
+
+    def maybe_size(self, flag: bool) -> int:
+        if flag:
+            return 0
+        with self._lock:
+            return len(self.items)
+
+    @logged
+    def wrapped_size(self) -> int:
+        with self._lock:
+            return len(self.items)
+
+    def again(self) -> None:
+        with self._lock:
+            with self._lock:
+                pass
+
+    def add(self, flag: bool) -> int:
+        with self._lock:
+            self.items.append(1)
+            a = self.size()
+            b = self.outer_size()
+            c = self.maybe_size(flag)
+            d = self.wrapped_size()
+            return a + b + c + d
+
+
+class Base:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    def count(self) -> int:
+        with self._lock:
+            return 1
+
+    def run(self) -> int:
+        with self._lock:
+            return self.count()
+
+
+class Quiet(Base):
+    def count(self) -> int:
+        return 0
+
+
+class Agents:
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+
+    async def update(self) -> None:
+        async with self._lock:
+            pass
+
+    async def beat(self) -> None:
+        async with self._lock:
+            await self.update()
+"#;
+
+#[test]
+fn eff109_is_exact_only_where_every_premise_is_established() {
+    let p = Project::new("eff109_tiers");
+    p.write("tiers.py", TIERS);
+    let diags = diagnostics(&p, SELECT);
+    assert_eq!(
+        tiers(&diags, "tiers.py"),
+        vec![
+            tier(38, "exact"),
+            tier(44, "exact"),
+            tier(45, "exact"),
+            tier(46, "heuristic"),
+            tier(47, "heuristic"),
+            tier(61, "heuristic"),
+            tier(79, "exact"),
+        ],
+        "{diags:#?}"
+    );
+    // The exact report through two calls shows the way it takes the lock on every return.
+    let deep = at(&diags, "tiers.py", 45);
+    assert_eq!(
+        related(deep),
+        vec![
+            (
+                "tiers.py".into(),
+                42,
+                "`Store.add` takes `self._lock` here".into()
+            ),
+            (
+                "tiers.py".into(),
+                45,
+                "`Store.add` calls `tiers.Store.outer_size`".into()
+            ),
+            (
+                "tiers.py".into(),
+                23,
+                "`Store.outer_size` calls `tiers.Store.size`".into()
+            ),
+            (
+                "tiers.py".into(),
+                19,
+                "`Store.size` takes the lock again here".into()
+            ),
+        ],
+        "{deep:#?}"
+    );
+}
+
+/// A project class deriving from `asyncio.Lock` binds `acquire`, so under R2 a value of
+/// `asyncio.Lock` may take it otherwise: no report on such a lock is exact.
+#[test]
+fn eff109_is_heuristic_for_a_lock_class_the_project_derives_from() {
+    let p = Project::new("eff109_derived_lock");
+    p.write(
+        "board.py",
+        r#"import asyncio
+
+
+class Traced(asyncio.Lock):
+    async def acquire(self) -> bool:
+        return await super().acquire()
+
+
+class Board:
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+
+    async def update(self) -> None:
+        async with self._lock:
+            pass
+
+    async def beat(self) -> None:
+        async with self._lock:
+            await self.update()
+"#,
+    );
+    let diags = diagnostics(&p, SELECT);
+    assert_eq!(
+        tiers(&diags, "board.py"),
+        vec![tier(19, "heuristic")],
+        "{diags:#?}"
+    );
+}
+
+/// A helper in another module that gives its caller's lock back before taking it again does not
+/// wait for itself, and a call after it no longer holds the lock: neither is reported.
+#[test]
+fn eff109_leaves_a_lock_a_helper_gives_back() {
+    let p = Project::new("eff109_gives_back");
+    p.write("locks.py", "import threading\n\nLOCK = threading.Lock()\n");
+    p.write(
+        "store.py",
+        r#"from helpers import pause
+from locks import LOCK
+
+
+def size() -> int:
+    with LOCK:
+        return 1
+
+
+def add() -> int:
+    with LOCK:
+        pause()
+        return size()
+"#,
+    );
+    p.write(
+        "helpers.py",
+        r#"from locks import LOCK
+
+
+def pause() -> None:
+    LOCK.release()
+    LOCK.acquire()
+"#,
+    );
+    let diags = diagnostics(&p, SELECT);
+    assert_eq!(found(&diags), vec![], "{diags:#?}");
+}

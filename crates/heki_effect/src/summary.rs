@@ -377,6 +377,15 @@ fn class_bodies_run_by<'m>(ir: &'m ModuleIr, f: &'m IrFunction) -> Vec<&'m IrFun
     out
 }
 
+/// Whether `kind` may take a lock: a `with` item or an `acquire()` (`locks::lock_step` decides).
+fn may_take_lock(kind: &InstKind) -> bool {
+    match kind {
+        InstKind::EnterWith { .. } => true,
+        InstKind::MethodCall { method, .. } => method == "acquire",
+        _ => false,
+    }
+}
+
 /// The class body the instruction runs, when it is a `class` statement.
 fn class_body_made(ir: &ModuleIr, kind: &InstKind) -> Option<FunctionId> {
     match kind {
@@ -937,6 +946,9 @@ struct Extractor<'a> {
     thread_locks: OnceCell<guarded::LockPoints>,
     /// The blocks acquiring each lock (`locks::BlockTests::common`).
     lock_blocks: std::collections::BTreeMap<ObjRef, BTreeSet<BlockId>>,
+    /// The points that may take a lock (a `with`, an `acquire()`) every normal return has
+    /// passed (filled with [`Self::must_run`], `LockAcquire::on_every_return`).
+    takes_on_every_return: FxHashSet<(BlockId, usize)>,
     /// The tests of state on every path to each block (`EFF109`).
     state_tests: OnceCell<locks::BlockTests>,
     guards: LocalGuards,
@@ -1379,6 +1391,7 @@ impl<'a> Extractor<'a> {
             capacity_walks: RefCell::default(),
             around: OnceCell::new(),
             lock_blocks: std::collections::BTreeMap::new(),
+            takes_on_every_return: FxHashSet::default(),
             lock_held: OnceCell::new(),
             thread_locks: OnceCell::new(),
             state_tests: OnceCell::new(),
@@ -3111,6 +3124,9 @@ impl<'a> Extractor<'a> {
             self.kept_value_points();
         }
         self.self_container_changes();
+        if self.opt_in.locks {
+            self.lock_gives_back();
+        }
         self.lock_owner_tests();
         if self.opt_in.guarded {
             self.guarded_facts();
@@ -5283,7 +5299,7 @@ impl<'a> Extractor<'a> {
         let index_in_block = index;
         self.store_escapes(kind);
         if self.opt_in.locks {
-            self.lock_acquired(bb, kind, span);
+            self.lock_acquired((bb, index), kind, span);
         }
         if self.opt_in.locks || self.opt_in.exclusive {
             self.name_rebound(kind);
@@ -5680,7 +5696,7 @@ impl<'a> Extractor<'a> {
     /// A non-reentrant lock `kind` takes (`LockFacts::acquires`), with the guards on the
     /// function's inputs (the tests of state on every path to it are added once every
     /// acquisition is known, [`Self::lock_owner_tests`]).
-    fn lock_acquired(&mut self, bb: BlockId, kind: &InstKind, span: Span) {
+    fn lock_acquired(&mut self, (bb, index): (BlockId, usize), kind: &InstKind, span: Span) {
         // A branch on a constant never takes the lock its dead side would.
         if !matches!(
             kind,
@@ -5702,8 +5718,40 @@ impl<'a> Extractor<'a> {
         };
         let guards = self.guards.occurrence(&self.guard_inputs(), bb);
         self.lock_blocks.entry(lock.clone()).or_default().insert(bb);
-        let acq = locks::own_acquisition(self.key, self.path, class, span, guards);
+        let every = self.takes_on_every_return.contains(&(bb, index));
+        let acq = locks::own_acquisition(self.key, self.path, (class, span), guards, every);
         locks::add_acquisition(&mut self.summary.lock_facts_mut().acquires, lock, acq);
+    }
+
+    /// The locks the function gives back where its own acquisitions do not hold them
+    /// (`LockFacts::gives_back`), which it then takes on no return.
+    fn lock_gives_back(&mut self) {
+        let releases = (self.f.blocks.iter().flat_map(|b| &b.insts))
+            .any(|i| matches!(&i.kind, InstKind::MethodCall { method, .. } if method == "release"));
+        if !releases {
+            return;
+        }
+        let def = |v: VarId| self.defs.get(&v).copied();
+        let steps = locks::lock_steps(
+            self.cx,
+            self.f,
+            self.key,
+            &self.types,
+            &def,
+            &self.live,
+            &|_| Vec::new(),
+        );
+        let given = locks::unheld_releases(self.shape, &steps);
+        if given.is_empty() {
+            return;
+        }
+        let facts = self.summary.lock_facts_mut();
+        for lock in given {
+            if let Some(acq) = facts.acquires.get_mut(&lock) {
+                acq.on_every_return = false;
+            }
+            facts.gives_back.insert(lock);
+        }
     }
 
     /// A module global or a closure variable `kind` binds or deletes (`LockFacts::rebinds`;
@@ -8126,9 +8174,10 @@ impl<'a> Extractor<'a> {
         self.f.params.iter().any(|p| p.var == v)
     }
 
-    /// [`Self::must_run`], [`Self::class_runs`], and [`MustExec::never_returns`], from the path
-    /// facts of the function with what the catalog and the project's declarations know: the
-    /// members of modules and the context managers whose exit never suppresses an exception.
+    /// [`Self::must_run`], [`Self::class_runs`], [`Self::takes_on_every_return`], and
+    /// [`MustExec::never_returns`], from the path facts of the function with what the catalog
+    /// and the project's declarations know: the members of modules and the context managers
+    /// whose exit never suppresses an exception.
     fn path_facts(&mut self) {
         let f = self.f;
         let ir = self.cx.ir();
@@ -8139,17 +8188,25 @@ impl<'a> Extractor<'a> {
         } else {
             BTreeMap::new()
         };
+        let locks = self.opt_in.locks;
+        let mut takes = FxHashSet::default();
         let (must_run, class_runs, never_returns, must_reads) =
             crate::with_paths(self.cx, f, &self.types, owner, |paths, _| {
                 let mut must_run = FxHashMap::default();
                 let mut class_runs: FxHashMap<FunctionId, OnEveryReturn> = FxHashMap::default();
                 for bb in &f.blocks {
                     for (index, inst) in bb.insts.iter().enumerate() {
+                        let at = (bb.id, index);
+                        if locks
+                            && may_take_lock(&inst.kind)
+                            && every(paths.on_every_return(at, Progress::Called))
+                        {
+                            takes.insert(at);
+                        }
                         let class_body = class_body_made(ir, &inst.kind);
                         if class_body.is_none() && !crate::anchors_call_site(&inst.kind) {
                             continue;
                         }
-                        let at = (bb.id, index);
                         let called = paths.on_every_return(at, Progress::Called);
                         let run = OnEveryReturn {
                             called: every(called),
@@ -8206,6 +8263,7 @@ impl<'a> Extractor<'a> {
         }
         self.must_run = must_run;
         self.class_runs = class_runs;
+        self.takes_on_every_return = takes;
         if never_returns && self.opt_in.must_effects {
             self.summary.must_exec = Some(Box::new(MustExec {
                 never_returns,
