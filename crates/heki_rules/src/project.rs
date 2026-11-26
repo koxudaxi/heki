@@ -747,7 +747,7 @@ impl ProjectEnv {
         let root = opts.root();
         let config_file = opts.config_file_at(&root);
         let cfg = match &config_file {
-            Some(path) => HekiConfig::load_from_file(path)?,
+            Some(path) => HekiConfig::load_from_file(path, &root)?,
             None => HekiConfig::default(),
         };
         let runtime = match opts.target_version.or(cfg.target_version.as_deref()) {

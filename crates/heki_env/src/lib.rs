@@ -697,10 +697,14 @@ impl ConfigLayout {
         }
     }
 
-    /// The configuration in `text`, the contents of `path`. A setting is never ignored: an
-    /// unknown key, a `[tool.heki]` table outside a `pyproject.toml`, and a setting at the top
-    /// level of a `pyproject.toml` are errors.
-    pub fn parse(self, path: &Path, text: &str) -> Result<HekiConfig, ConfigError> {
+    /// The configuration in `text`, the contents of `path`, of the project rooted at `root`. A
+    /// setting is never ignored: an unknown key, a `[tool.heki]` table outside a
+    /// `pyproject.toml`, and a setting at the top level of a `pyproject.toml` are errors.
+    ///
+    /// A `pyproject.toml` holds its own project metadata. Any other file takes it from the
+    /// project's `pyproject.toml` at `root`, so the same file gives the same configuration
+    /// wherever it sits.
+    pub fn parse(self, path: &Path, text: &str, root: &Path) -> Result<HekiConfig, ConfigError> {
         let doc = toml_edit::Document::parse(text).map_err(|e| ConfigError::Syntax {
             path: path.to_path_buf(),
             position: e.span().map(|s| problem::line_column(text, s.start)),
@@ -737,18 +741,21 @@ impl ConfigLayout {
             }
             Self::TopLevel => {
                 let cfg: HekiConfig = toml::from_str(text).map_err(toml_error)?;
-                let dir = path.parent().unwrap_or(Path::new(""));
-                let pyproject = dir.join("pyproject.toml");
-                let sibling = sibling_pyproject(&pyproject);
+                let pyproject = root.join("pyproject.toml");
+                let project_metadata = project_pyproject(&pyproject);
                 HekiConfig {
-                    requires_python: (sibling.as_ref())
+                    requires_python: (project_metadata.as_ref())
                         .and_then(|(wrapper, _)| wrapper.requires_python()),
-                    project_name: sibling
+                    project_name: project_metadata
                         .as_ref()
                         .and_then(|(wrapper, _)| wrapper.project_name()),
-                    declared: sibling.as_ref().and_then(|(_, table)| Declared::of(table)),
-                    workspaces: (sibling.map(|(wrapper, _)| wrapper).unwrap_or_default())
-                        .workspaces(&pyproject),
+                    declared: project_metadata
+                        .as_ref()
+                        .and_then(|(_, table)| Declared::of(table)),
+                    workspaces: (project_metadata
+                        .map(|(wrapper, _)| wrapper)
+                        .unwrap_or_default())
+                    .workspaces(&pyproject),
                     ..cfg
                 }
                 .with_source_roots(path)
@@ -829,9 +836,8 @@ impl WorkspaceMembers {
     }
 }
 
-/// The `pyproject.toml` next to a `heki.toml`-style file, read as heki reads its own and as a
-/// table; any problem with that file only loses what heki infers from it.
-fn sibling_pyproject(pyproject: &Path) -> Option<(PyProjectWrapper, toml::Table)> {
+/// The project's `pyproject.toml`, read as heki reads its own and as a table; any problem with that file only loses what heki infers from it.
+fn project_pyproject(pyproject: &Path) -> Option<(PyProjectWrapper, toml::Table)> {
     let text = std::fs::read_to_string(pyproject).ok()?;
     Some((toml::from_str(&text).ok()?, toml::from_str(&text).ok()?))
 }
@@ -1060,14 +1066,15 @@ impl HekiConfig {
             && self.import_boundaries.is_empty())
     }
 
-    /// Load an explicit configuration file ([`ConfigLayout`]): the `[tool.heki]` table of a
-    /// `pyproject.toml` (empty config when absent), the top-level keys of any other file.
-    pub fn load_from_file(path: &Path) -> Result<Self, ConfigError> {
+    /// Load a configuration file ([`ConfigLayout`]) of the project rooted at `root`: the
+    /// `[tool.heki]` table of a `pyproject.toml` (empty config when absent), the top-level keys of
+    /// any other file.
+    pub fn load_from_file(path: &Path, root: &Path) -> Result<Self, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|cause| ConfigError::Io {
             path: path.to_path_buf(),
             cause,
         })?;
-        ConfigLayout::of(path).parse(path, &text)
+        ConfigLayout::of(path).parse(path, &text, root)
     }
 
     /// The file a project rooted at `root` reads its configuration from: the first of
@@ -1333,12 +1340,12 @@ import-probes = "report"
         std::fs::create_dir_all(&dir).unwrap();
         let py = dir.join("pyproject.toml");
         std::fs::write(&py, "[tool.heki.lint]\nrelax-async-in-tests = false\n").unwrap();
-        let cfg = HekiConfig::load_from_file(&py).unwrap();
+        let cfg = HekiConfig::load_from_file(&py, &dir).unwrap();
         assert_eq!(cfg.lint.relax_async_in_tests, Some(false));
         let heki = dir.join("custom.toml");
         std::fs::write(&heki, "target-version = \"py313\"\n").unwrap();
         assert_eq!(
-            HekiConfig::load_from_file(&heki)
+            HekiConfig::load_from_file(&heki, &dir)
                 .unwrap()
                 .target_version
                 .as_deref(),
@@ -1346,7 +1353,7 @@ import-probes = "report"
         );
         std::fs::write(&heki, "target-version = [\n").unwrap();
         assert!(matches!(
-            HekiConfig::load_from_file(&heki),
+            HekiConfig::load_from_file(&heki, &dir),
             Err(ConfigError::Syntax { .. })
         ));
         std::fs::remove_dir_all(&dir).unwrap();

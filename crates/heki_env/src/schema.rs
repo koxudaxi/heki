@@ -476,7 +476,8 @@ mod tests {
                     "lint" | "imports" => format!("[{}]\n{line}\n", t.path),
                     contract => format!("[[{contract}]]\n{line}\n"),
                 };
-                let parsed = ConfigLayout::TopLevel.parse(Path::new("heki.toml"), &text);
+                let parsed =
+                    ConfigLayout::TopLevel.parse(Path::new("heki.toml"), &text, Path::new(""));
                 assert!(parsed.is_ok(), "{text}: {parsed:?}");
             }
         }
