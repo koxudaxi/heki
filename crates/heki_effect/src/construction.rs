@@ -74,6 +74,10 @@ struct State {
     handed: Vec<(u64, u64)>,
 }
 
+/// What the call of a hand-over (site, callee index, tests known) tells: the callee and the
+/// call's tests.
+pub(crate) type HandedTo<'a> = dyn Fn(u32, u16, &[InputGuard]) -> (FuncKey, CallTests) + 'a;
+
 /// What may be kept on some path: the union of the states joined.
 impl Join for State {
     fn join(&mut self, other: &Self) -> bool {
@@ -164,7 +168,7 @@ impl Recorder {
         may_params: &FxHashMap<VarId, u64>,
         param_of: &dyn Fn(VarId) -> Option<u8>,
         element_of: &dyn Fn(VarId) -> u64,
-        handed_to: &dyn Fn(u32, u16, &[InputGuard]) -> (FuncKey, CallTests),
+        handed_to: &HandedTo<'_>,
         returns: bool,
     ) -> (Vec<NewArg>, ReturnsNew) {
         // Without an allocation, only parameters can be asked about, and nothing is returned

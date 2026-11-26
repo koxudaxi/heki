@@ -8,16 +8,15 @@
 
 use crate::fresh::FreshReturn;
 use crate::guards;
+use crate::guards::given_at_call;
 use crate::iterations;
 use crate::scc::tarjan_scc;
-use crate::guards::given_at_call;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallCycle, CallHop, CallSite, CallTarget, CallTests,
     CellChange, Construction, Delivery, EffectSummary, EntryKey, Facts, FuncKey, LocalOrigins,
     MayGiven, NewArg, NewCond, NewKind, Origins, ProjectIndex, ProtectedReturn, ReturnsNew, Runner,
-    Shared, SharedChain,
-    SharedLine, SharedState, SiteRole, Slot, TypedFieldWrite, TypedFieldWriteSite,
-    UnresolvedWriteSite, WriteKind, cache_flow,
+    Shared, SharedChain, SharedLine, SharedState, SiteRole, Slot, TypedFieldWrite,
+    TypedFieldWriteSite, UnresolvedWriteSite, WriteKind, cache_flow,
 };
 use heki_ast::Span;
 use heki_kb::ExecEffectKind;
@@ -2095,14 +2094,17 @@ fn records_write(bc: &BoundCallee, facts: &EffectSummary, w: &IndirectWrite<'_>)
 /// argument; in either case where the call runs.
 fn keep_bound(s: &mut EffectSummary, site: &CallSite, bc: &BoundCallee, callee: &EffectSummary) {
     let runs = runs_at_call(callee, site);
-    let kept = if runs { callee.retains_params } else { u64::MAX };
+    let kept = if runs {
+        callee.retains_params
+    } else {
+        u64::MAX
+    };
     if (callee.retains_given.is_none() || !runs) && site.guards.is_empty() {
         s.keep_params(bound_params(kept, bc), &MayGiven::given(Vec::new()));
         return;
     }
     let at = CallTests::of_call(&bc.params, &site.guards);
-    for (p, o) in (bc.params.iter().enumerate().take(64)).filter(|(p, _)| kept & (1u64 << p) != 0)
-    {
+    for (p, o) in (bc.params.iter().enumerate().take(64)).filter(|(p, _)| kept & (1u64 << p) != 0) {
         let given = match u8::try_from(p) {
             Ok(p) if runs => callee.retained_given(p),
             _ => MayGiven::given(Vec::new()),

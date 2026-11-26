@@ -36,11 +36,10 @@ use crate::{
     CallSite, CallTarget, CallTests, CellChange, Construction, ContainerParams, ContractClass,
     Contracts, Dispatch, EffectSummary, EntryKey, FileSummary, FuncKey, GuardSubject, HandedState,
     Implementers, InputGuard, Items, KeptFacts, ListedCache, MayGiven, ModuleInput, MustExec,
-    NewArg, NewCond, NewFrom,
-    NewKind, OnEveryReturn, OptInFacts, PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner,
-    SharedLine, SharedState, SharedStateFacts, SiteRole, Slot, TypedFieldReadSite,
-    TypedFieldWriteSite, UnawaitedHandoff, Unresolved, UnresolvedAccessSite, UnresolvedWriteSite,
-    WriteKind,
+    NewArg, NewCond, NewFrom, NewKind, OnEveryReturn, OptInFacts, PerItem, ProjectDecls, ReadKind,
+    ReturnsNew, Runner, SharedLine, SharedState, SharedStateFacts, SiteRole, Slot,
+    TypedFieldReadSite, TypedFieldWriteSite, UnawaitedHandoff, Unresolved, UnresolvedAccessSite,
+    UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, KeySet, Use};

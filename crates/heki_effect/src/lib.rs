@@ -611,7 +611,12 @@ pub enum ArgView {
 /// of [`GivenChains`]). One pointer: most facts have none.
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct MayGiven(Option<Box<Vec<Vec<InputGuard>>>>);
+pub struct MayGiven(Option<Box<Alternatives>>);
+
+/// The boxed alternatives of a [`MayGiven`], so it stays one pointer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+struct Alternatives(Vec<Vec<InputGuard>>);
 
 impl MayGiven {
     /// The fact arises where the tests `tests` hold.
@@ -622,7 +627,7 @@ impl MayGiven {
     }
 
     pub fn alternatives(&self) -> &[Vec<InputGuard>] {
-        self.0.as_deref().map_or(&[], Vec::as_slice)
+        self.0.as_deref().map_or(&[], |a| a.0.as_slice())
     }
 
     /// The fact never arises.
@@ -643,10 +648,9 @@ impl MayGiven {
         if tests.len() > MAX_GIVEN_TESTS {
             tests.clear();
         }
-        let within = |small: &[InputGuard], large: &[InputGuard]| {
-            small.iter().all(|t| large.contains(t))
-        };
-        let all = self.0.get_or_insert_with(Box::default);
+        let within =
+            |small: &[InputGuard], large: &[InputGuard]| small.iter().all(|t| large.contains(t));
+        let all = &mut self.0.get_or_insert_with(Box::default).0;
         if all.iter().any(|a| within(a, &tests)) {
             return;
         }
@@ -654,7 +658,7 @@ impl MayGiven {
         all.push(tests);
         all.sort();
         if all.len() > MAX_GIVEN_CHAINS {
-            **all = vec![Vec::new()];
+            *all = vec![Vec::new()];
         }
     }
 

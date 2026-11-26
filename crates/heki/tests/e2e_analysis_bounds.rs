@@ -7732,7 +7732,10 @@ fn copy_stored_under_flags(flags: usize, one_if: bool) -> String {
         "KEPT: list[Node] = []".to_owned(),
         String::new(),
         String::new(),
-        format!("def copy_kept(node: Node, *, {}) -> Node:", typed.join(", ")),
+        format!(
+            "def copy_kept(node: Node, *, {}) -> Node:",
+            typed.join(", ")
+        ),
         "    copied = copy.deepcopy(node)".to_owned(),
     ];
     if one_if {
@@ -7771,9 +7774,7 @@ fn a_store_under_more_tests_than_the_bounds_keeps_whatever_is_passed() {
              scopes = [\"m:scope\"]\nwrite-universe = [\"Node.flag\"]\n",
         )
         .write("m.py", &copy_stored_under_flags(flags, one_if));
-        check(&p)
-            .iter()
-            .any(|d| d["rule_code"] == "EFF201")
+        check(&p).iter().any(|d| d["rule_code"] == "EFF201")
     };
     for one_if in [false, true] {
         assert!(!reported(4, one_if), "{one_if}");

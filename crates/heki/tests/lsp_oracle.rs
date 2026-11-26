@@ -146,7 +146,7 @@ allowed-writers = ["pkg.rack_ops.empty"]
 
 [[tool.heki.effect-boundaries]]
 name = "copy-pass"
-scopes = ["pkg.copy_pass"]
+scopes = ["pkg.copy_pass", "pkg.guarded_build"]
 write-universe = ["Ticket.flag"]
 "#;
 
@@ -329,8 +329,8 @@ const FRESH_OPS: &str = "from pkg.model import Registry\n\nKEPT = []\n\n\ndef _f
 const FRESH_BUILD: &str = "from pkg.fresh_ops import _fill\nfrom pkg.model import Registry\n\n\ndef build():\n    r = Registry()\n    _fill(r)\n    return r\n";
 // A maker storing what it makes, and a helper storing what it is handed, only when a flag their
 // callers in another module leave false is true.
-const GUARDED_KEEPS: &str = "from pkg.model import Registry\n\nKEPT = []\n\n\ndef make(keep=False):\n    r = Registry()\n    if keep:\n        KEPT.append(r)\n    return r\n\n\ndef hold(r: Registry, keep=False):\n    if keep:\n        KEPT.append(r)\n";
-const GUARDED_BUILD: &str = "from pkg.fresh_ops import _fill\nfrom pkg.guarded_keeps import hold, make\nfrom pkg.model import Registry\n\n\ndef build_made():\n    r = make()\n    _fill(r)\n    return r\n\n\ndef build_held():\n    r = Registry()\n    hold(r)\n    _fill(r)\n    return r\n";
+const GUARDED_KEEPS: &str = "import copy\n\nfrom pkg.copy_ops import Ticket\n\nKEPT = []\n\n\ndef make(t: Ticket, keep=False) -> Ticket:\n    c = copy.copy(t)\n    if keep:\n        KEPT.append(c)\n    return c\n\n\ndef hold(t: Ticket, keep=False):\n    if keep:\n        KEPT.append(t)\n";
+const GUARDED_BUILD: &str = "import copy\n\nfrom pkg.copy_ops import Ticket, mark\nfrom pkg.guarded_keeps import hold, make\n\n\ndef build_made(t: Ticket):\n    c = make(t)\n    mark(c)\n    return c\n\n\ndef build_held(t: Ticket):\n    c = copy.copy(t)\n    hold(c)\n    mark(c)\n    return c\n";
 // A copy helper returning an element of an optional table or a copy, a public helper marking
 // its parameter, and one returning its parameter, in another module than the boundary's scope
 // using them on copies.
@@ -3535,7 +3535,7 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
                 GUARDED_KEEPS.replace("if keep:", "if not keep:"),
             )],
         )
-        .present(&[("pkg/guarded_build.py", "MUT201")]),
+        .present(&[("pkg/guarded_build.py", "EFF201")]),
         Step::new(
             "the maker stores whatever it is passed, the holder only when the flag is true",
             vec![Action::Save(
@@ -3543,12 +3543,12 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
                 GUARDED_KEEPS.replacen("    if keep:\n        KEPT", "    KEPT", 1),
             )],
         )
-        .present(&[("pkg/guarded_build.py", "MUT201")]),
+        .present(&[("pkg/guarded_build.py", "EFF201")]),
         Step::new(
             "both store only when the flag is true again",
             vec![save("pkg/guarded_keeps.py", GUARDED_KEEPS)],
         )
-        .absent(&[("pkg/guarded_build.py", "MUT201")]),
+        .absent(&[("pkg/guarded_build.py", "EFF201")]),
     ]
 }
 
