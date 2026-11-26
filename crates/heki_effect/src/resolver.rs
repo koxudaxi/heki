@@ -596,10 +596,11 @@ pub struct StoresElsewhere {
     pub untyped_unnamed: bool,
     /// The names it stores under, here or in its own module, through a receiver that may be a
     /// class object: one heki does not establish as an instance (`Child.__setattr__ = hook`,
-    /// `setattr(cls, name, hook)` in a class method, `target.__setattr__ = hook` with `target` a
-    /// parameter without an annotation). Such a store may bind what Python looks up on the
-    /// instances of a class ([`ProjectDecls::bound_after_body`]); one through an instance does
-    /// not, as Python looks special methods up on the type.
+    /// `setattr(cls, "__setattr__", hook)` in a class method, `target.__setattr__ = hook` with
+    /// `target` a parameter without an annotation). Such a store may bind what Python looks up on
+    /// the instances of a class ([`ProjectDecls::bound_after_body`]); one through an instance does
+    /// not, as Python looks special methods up on the type. A store under a name of unknown value
+    /// is not listed (R1: a special method is installed under its own name).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub on_classes: BTreeSet<StoredName>,
 }
@@ -610,7 +611,7 @@ pub enum StoredName {
     /// The one a string constant gives.
     Named(String),
     /// One built at run time that starts with `head` and ends with `tail`, which do not overlap
-    /// (`stores::AttrName::Built`); both are empty for a name heki cannot read.
+    /// and are not both empty (`stores::AttrName::Built`).
     Built { head: String, tail: String },
 }
 
@@ -4478,13 +4479,15 @@ impl ProjectDecls {
     /// classes along its MRO and below it decide what Python looks up on an instance only while
     /// nothing changes the class: code heki does not read may change it ([`Self::reshaped`]), and
     /// a store elsewhere may bind one of `names` on it when its name may be that one and its
-    /// receiver may be a class object ([`Self::bound_on_classes`]). A constant name decides, a
-    /// name built at run time is ruled out when the constant text at its ends already differs
-    /// (`f"__attr_{name}"` is never `__setattr__`), and one heki cannot read may be any. A
-    /// receiver heki establishes as an instance (`self`, what a class call makes, a parameter
-    /// annotated with a class other than `type`) binds nothing Python looks a special method up
-    /// on, and any other may be the class (`Child.__setattr__ = hook`, `setattr(cls, name, hook)`
-    /// in a function the class is handed to).
+    /// receiver may be a class object ([`Self::bound_on_classes`]). A constant name decides, and
+    /// a name built at run time is ruled out when the constant text at its ends already differs
+    /// (`f"__attr_{name}"` is never `__setattr__`). A name of unknown value (a parameter, a key of
+    /// `vars()` or of a mapping, a value read from data) binds none of `names`: R1 takes a
+    /// special method to be installed under its own name, which gives up `setattr(cls, computed,
+    /// hook)` installing `__setattr__`. A receiver heki establishes as an instance (`self`, what a
+    /// class call makes, a parameter annotated with a class other than `type`) binds nothing
+    /// Python looks a special method up on, and any other may be the class (`Child.__setattr__ =
+    /// hook`, `setattr(cls, "__setattr__", hook)` in a function the class is handed to).
     fn bound_after_body(&self, c: &str, decl: &ClassDecl, names: &[&str]) -> bool {
         names.iter().any(|n| self.bound_on_classes(n)) || self.reshaped(c, decl)
     }
@@ -7083,7 +7086,7 @@ fn structural_decls(input: &ModuleInput<'_>, kb: &EffectiveEcosystemKb) -> Modul
         .filter(|f| is_summarized_function(f))
     {
         *first_param_by_name.entry(&f.qualname).or_insert(true) &=
-            changes_first_param_by_name(f, &decls);
+            changes_first_param_by_name(f, input, &decls);
         let returned = returned_param(f, &decls);
         returned_params
             .entry(&f.qualname)
@@ -7296,35 +7299,62 @@ fn foreign_grown_globals(
 }
 
 /// The attributes the function of `ix` stores or deletes by name through a call, by receiver
-/// (`setattr(obj, "attr", v)`, `delattr(obj, "attr")`, `object.__setattr__(obj, "attr", v)`,
-/// `obj.__setattr__("attr", v)`, also `builtins.setattr`), as [`stores::attr_op`] recognizes
-/// them before inference: a builtin read by its name where the module does not bind it
-/// (`imports` are the module's runtime imports), and a name given by a string literal.
-/// `obj.attr = v` and `del obj.attr` are instructions of their own.
+/// ([`attr_call_ops`]: a name given by a string literal). `obj.attr = v` and `del obj.attr` are
+/// instructions of their own.
 fn attr_calls<'f>(
     input: &ModuleInput<'_>,
     ix: &FnIndex<'f>,
     imports: &BTreeMap<String, String>,
 ) -> Vec<(VarId, String)> {
-    const SPELLINGS: &[&str] = &["setattr", "delattr", "__setattr__", "__delattr__"];
-    let calls: Vec<(&InstKind, VarId)> = ix
-        .f
-        .blocks
-        .iter()
-        .flat_map(|b| &b.insts)
-        .filter_map(|i| match &i.kind {
-            InstKind::Call {
-                callee,
-                callee_var: Some(v),
+    attr_call_ops(input, ix, imports)
+        .into_iter()
+        .filter_map(|(_, op)| match op {
+            stores::AttrOp::Store {
+                obj,
+                name: stores::AttrName::Named(attr),
                 ..
-            } if SPELLINGS.contains(&callee.rsplit('.').next().unwrap_or(callee)) => {
-                Some((&i.kind, *v))
             }
-            InstKind::MethodCall { method, recv, .. } if SPELLINGS.contains(&method.as_str()) => {
-                Some((&i.kind, *recv))
-            }
+            | stores::AttrOp::Delete {
+                obj,
+                name: stores::AttrName::Named(attr),
+            } => Some((obj, attr.into_owned())),
             _ => None,
         })
+        .collect()
+}
+
+/// The variable naming the function of a call spelled as one that may store or delete an
+/// attribute ([`attr_call_ops`] reads the ones that do): the callee of `setattr(...)`, the
+/// receiver of `obj.__setattr__(...)`.
+fn attr_call_callee(kind: &InstKind) -> Option<VarId> {
+    const SPELLINGS: &[&str] = &["setattr", "delattr", "__setattr__", "__delattr__"];
+    match kind {
+        InstKind::Call {
+            callee,
+            callee_var: Some(v),
+            ..
+        } if SPELLINGS.contains(&callee.rsplit('.').next().unwrap_or(callee)) => Some(*v),
+        InstKind::MethodCall { method, recv, .. } if SPELLINGS.contains(&method.as_str()) => {
+            Some(*recv)
+        }
+        _ => None,
+    }
+}
+
+/// The calls of the function of `ix` that store or delete an attribute, each with what it does
+/// (`setattr(obj, "attr", v)`, `delattr(obj, name)`, `object.__setattr__(obj, "attr", v)`,
+/// `obj.__setattr__("attr", v)`, also `builtins.setattr`), as [`stores::attr_op`] recognizes
+/// them before inference: a builtin read by its name where the module does not bind it
+/// (`imports` are the module's runtime imports), and a name given by a string literal, any
+/// other name being unknown.
+fn attr_call_ops<'f>(
+    input: &ModuleInput<'_>,
+    ix: &FnIndex<'f>,
+    imports: &BTreeMap<String, String>,
+) -> Vec<(&'f InstKind, stores::AttrOp<'f>)> {
+    let insts = ix.f.blocks.iter().flat_map(|b| &b.insts);
+    let calls: Vec<(&InstKind, VarId)> = insts
+        .filter_map(|i| Some((&i.kind, attr_call_callee(&i.kind)?)))
         .collect();
     if calls.is_empty() {
         return Vec::new();
@@ -7351,20 +7381,7 @@ fn attr_calls<'f>(
     };
     calls
         .iter()
-        .filter_map(
-            |(kind, _)| match stores::attr_op(kind, |v| vals.get(&v), literal)? {
-                stores::AttrOp::Store {
-                    obj,
-                    name: stores::AttrName::Named(attr),
-                    ..
-                }
-                | stores::AttrOp::Delete {
-                    obj,
-                    name: stores::AttrName::Named(attr),
-                } => Some((obj, attr.into_owned())),
-                _ => None,
-            },
-        )
+        .filter_map(|(kind, _)| Some((*kind, stores::attr_op(kind, |v| vals.get(&v), literal)?)))
         .collect()
 }
 
@@ -7880,17 +7897,22 @@ fn handed_back_param(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Option<
     returned.filter(|(_, attr)| attr.as_deref().is_none_or(|a| !stores(a)))
 }
 
-/// [`FunctionDecl::changes_first_param_by_name`] of one definition: every use of what its first
-/// parameter may hold (through copies, phis, and the calls [`decl_same_object`] knows hand it
-/// back) is an attribute load, a comparison, a `return`, a store of one of its attributes
-/// (`cls.registry = {}`), which the stores through a value that may be a class object record by
-/// name (`ProjectDecls::bound_on_classes`), or a store of it into a global, an attribute, an
-/// item, or a display (`REGISTRY[cls.__name__] = cls`), from which code changing it later loads
-/// it as a value heki does not establish as an instance. A deletion of one of its attributes, a
-/// store or deletion of one of its items, a call taking it (a method called on it, `setattr`,
-/// another function handed it, which may be code heki does not read), a closure cell holding
-/// it, and a `yield` of it may change it, or let code that does not load it change it.
-fn changes_first_param_by_name(f: &IrFunction, decls: &ModuleDecls) -> bool {
+/// [`FunctionDecl::changes_first_param_by_name`] of one definition of the module `input`: every
+/// use of what its first parameter may hold (through copies, phis, and the calls
+/// [`decl_same_object`] knows hand it back) is an attribute load, a comparison, a `return`, a
+/// store of one of its attributes (`cls.registry = {}`, `setattr(cls, name, value)`:
+/// [`attr_call_ops`]), which the stores through a value that may be a class object record by
+/// the name they may bind (`ProjectDecls::bound_on_classes`), or a store of it into a global, an
+/// attribute, an item, or a display (`REGISTRY[cls.__name__] = cls`), from which code changing
+/// it later loads it as a value heki does not establish as an instance. A deletion of one of its
+/// attributes, a store or deletion of one of its items, another call taking it (a method called
+/// on it, another function handed it, which may be code heki does not read), a closure cell
+/// holding it, and a `yield` of it may change it, or let code that does not load it change it.
+fn changes_first_param_by_name(
+    f: &IrFunction,
+    input: &ModuleInput<'_>,
+    decls: &ModuleDecls,
+) -> bool {
     let Some(first) = f.params.first().filter(|p| !p.is_vararg && !p.is_kwarg) else {
         return false;
     };
@@ -7922,6 +7944,20 @@ fn changes_first_param_by_name(f: &IrFunction, decls: &ModuleDecls) -> bool {
         held.insert(v);
         Visit::<()>::Expand
     });
+    // Read only once a call spelled as one takes what the parameter holds.
+    let store_calls: OnceCell<Vec<&InstKind>> = OnceCell::new();
+    let stores_attr = |kind: &InstKind| {
+        attr_call_callee(kind).is_some()
+            && (store_calls.get_or_init(|| {
+                let ix = FnIndex::new(f, &input.ir.constants);
+                (attr_call_ops(input, &ix, &decls.imports).into_iter())
+                    .filter(|(_, op)| matches!(op, stores::AttrOp::Store { .. }))
+                    .map(|(call, _)| call)
+                    .collect()
+            }))
+            .iter()
+            .any(|call| std::ptr::eq(*call, kind))
+    };
     insts().all(|inst| match &inst.kind {
         InstKind::AttrLoad { .. }
         | InstKind::Compare { .. }
@@ -7931,7 +7967,7 @@ fn changes_first_param_by_name(f: &IrFunction, decls: &ModuleDecls) -> bool {
         InstKind::AttrStore { .. } => true,
         InstKind::SubscriptStore { obj, .. } => !held.contains(obj),
         kind if decl_same_object(kind, &defs, decls).is_some() => true,
-        kind => kind.operands().iter().all(|v| !held.contains(v)),
+        kind => kind.operands().iter().all(|v| !held.contains(v)) || stores_attr(kind),
     })
 }
 

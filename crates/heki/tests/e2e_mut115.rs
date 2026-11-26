@@ -404,9 +404,7 @@ fn mut115_leaves_open_each_premise_heki_cannot_establish() {
 }
 
 /// The class whose instance a copy holds, the holder, and the change below the copy. `HOOK` is
-/// a `__setattr__` that runs code once a shape binds it on the class; it stores nothing itself,
-/// as a store under a name heki cannot read through a value that may be a class object may be
-/// one into any class (the `unnamed_store_elsewhere` shape).
+/// a `__setattr__` that runs code once a shape binds it on the class.
 const HELD_CHANGE: &str = r#"
 
 class Holder:
@@ -421,6 +419,7 @@ def changed(h: Holder) -> None:
 
 const HOOK: &str = r#"def hook(self, name, value):
     print(name, value)
+    object.__setattr__(self, name, value)
 
 
 "#;
@@ -441,7 +440,9 @@ type Shape = (
 );
 
 /// A hook bound on the class after its body leaves the claim open, wherever it is bound; a class
-/// nothing changes, or that only a decorator known to keep attribute access changes, keeps it.
+/// nothing changes, or that only a decorator known to keep attribute access changes, keeps it. A
+/// store under a name of unknown value binds no hook (R1: a special method is installed under
+/// its own name), also when the name it is handed is one (`unknown_name_in_a_class_method`).
 const BOUND_AFTER_BODY: &[Shape] = &[
     (
         "decorator",
@@ -504,16 +505,22 @@ const BOUND_AFTER_BODY: &[Shape] = &[
         false,
     ),
     (
-        "computed_name_in_a_class_method",
+        "constant_name_in_a_class_method",
+        &[],
+        "import copy\n\nNAME = \"__setattr__\"\n\n\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n\n    @classmethod\n    def install(cls):\n        setattr(cls, NAME, hook)\n\n\nChild.install()\n",
+        false,
+    ),
+    (
+        "name_built_in_another_scope",
         &[],
         "import copy\n\nNAME = \"__set\" + \"attr__\"\n\n\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n\n    @classmethod\n    def install(cls):\n        setattr(cls, NAME, hook)\n\n\nChild.install()\n",
-        false,
+        true,
     ),
     (
         "unknown_name_in_a_class_method",
         &[],
         "import copy\n\n\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n\n    @classmethod\n    def install(cls, name, f):\n        setattr(cls, name, f)\n\n\nChild.install(\"__setattr__\", hook)\n",
-        false,
+        true,
     ),
     (
         "concatenated_name",
@@ -555,12 +562,12 @@ const BOUND_AFTER_BODY: &[Shape] = &[
             "def install(target: type, name, f):\n    setattr(target, name, f)\n",
         )],
         "import copy\n",
-        false,
+        true,
     ),
     (
-        "init_subclass_computed_name",
+        "init_subclass_constant_name",
         &[],
-        "import copy\n\nNAME = \"__set\" + \"attr__\"\n\n\nclass Base:\n    def __init_subclass__(cls, **kwargs):\n        super().__init_subclass__(**kwargs)\n        setattr(cls, NAME, hook)\n\n\nclass Child(Base):\n    def __init__(self) -> None:\n        self.x = 1\n",
+        "import copy\n\nNAME = \"__setattr__\"\n\n\nclass Base:\n    def __init_subclass__(cls, **kwargs):\n        super().__init_subclass__(**kwargs)\n        setattr(cls, NAME, hook)\n\n\nclass Child(Base):\n    def __init__(self) -> None:\n        self.x = 1\n",
         false,
     ),
     (
@@ -582,7 +589,7 @@ const BOUND_AFTER_BODY: &[Shape] = &[
             "def fill(target, values):\n    for name, value in values.items():\n        setattr(target, name, value)\n",
         )],
         "import copy\n",
-        false,
+        true,
     ),
     ("no_hook", &[], "import copy\n", true),
     (
@@ -650,6 +657,60 @@ const BOUND_AFTER_BODY: &[Shape] = &[
         &[],
         "import copy\n\n\ndef register(cls):\n    cls.registered = True\n    return cls\n\n\n@register\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n",
         true,
+    ),
+    (
+        "descriptor_slot_name",
+        &[(
+            "pkg/props.py",
+            "class cached_property:\n    def __init__(self, func):\n        self.func = func\n        self.slot_name = f\"_cache_{func.__name__}\" if func else func\n\n    def __set__(self, obj, value):\n        setattr(obj, self.slot_name, value)\n\n    def __get__(self, obj, owner=None):\n        value = self.func(obj)\n        object.__setattr__(obj, self.func.__name__, value)\n        return value\n",
+        )],
+        "import copy\n",
+        true,
+    ),
+    (
+        "defaults_from_a_mapping",
+        &[(
+            "pkg/transport.py",
+            "def establish_connection(conninfo, defaults):\n    for name, default_value in defaults.items():\n        if getattr(conninfo, name, None) is None:\n            setattr(conninfo, name, default_value)\n    return conninfo\n",
+        )],
+        "import copy\n",
+        true,
+    ),
+    (
+        "name_read_from_data",
+        &[(
+            "pkg/options.py",
+            "def handle_src(option, opt_str, value, parser):\n    setattr(parser.values, option.dest, value)\n\n\nclass Animation:\n    def __init__(self, obj, attribute, value):\n        self.obj = obj\n        self.attribute = attribute\n        self.value = value\n\n    def __call__(self):\n        setattr(self.obj, self.attribute, self.value)\n",
+        )],
+        "import copy\n",
+        true,
+    ),
+    (
+        "class_attributes_restored",
+        &[(
+            "pkg/testing.py",
+            "def isolated(cls, values):\n    saved = {name: getattr(cls, name) for name in values}\n    for name, value in values.items():\n        setattr(cls, name, value)\n    for name in saved:\n        setattr(cls, name, saved[name])\n",
+        )],
+        "import copy\n",
+        true,
+    ),
+    (
+        "init_subclass_setattr_by_name",
+        &[],
+        "import copy\n\n\nclass Base:\n    def __init_subclass__(cls, **kwargs):\n        super().__init_subclass__(**kwargs)\n        if (old := cls.__dict__.get(\"old\")) is not None:\n            setattr(cls, \"new\", old)\n\n\nclass Child(Base):\n    def __init__(self) -> None:\n        self.x = 1\n",
+        true,
+    ),
+    (
+        "decorator_filling_the_class",
+        &[],
+        "import copy\n\nTABLE = {\"kind\": \"child\"}\n\n\ndef register(cls):\n    for name, value in TABLE.items():\n        setattr(cls, name, value)\n    return cls\n\n\n@register\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n",
+        true,
+    ),
+    (
+        "decorator_setattr_hook",
+        &[],
+        "import copy\n\n\ndef register(cls):\n    setattr(cls, \"__setattr__\", hook)\n    return cls\n\n\n@register\nclass Child:\n    def __init__(self) -> None:\n        self.x = 1\n",
+        false,
     ),
     (
         "unrelated_name",

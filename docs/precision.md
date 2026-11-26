@@ -96,7 +96,14 @@ cost estimate such as "(N+1)", and no advice (that goes into the help).
 Exact claims hold in every run consistent with seven assumptions
 ([ARCHITECTURE.md, section 3.4](https://github.com/koxudaxi/heki/blob/main/ARCHITECTURE.md)):
 
-- **R1**: the functions and classes on a call chain are not replaced at run time.
+- **R1**: the functions and classes on a call chain are not replaced at run time. A special
+  method bound on a class after its body (`__setattr__`, `__delattr__`, `__getattribute__`,
+  `__getattr__`, a copy hook) is bound under its own name: a store under a constant name (a
+  string literal, or a module or class name bound once to one), or under a name the storing
+  function builds with constant text that can still spell it, may bind it, and a store under a
+  name of unknown value (a parameter, a loop variable over `dir()`, `vars()`, or a mapping's keys,
+  a value read from data, a module name bound to a built string) is taken to bind none. This
+  gives up `setattr(cls, name, hook)` binding `__setattr__` through such a `name`.
 - **R2**: a value annotated `C` is an instance of `C` or of a project subclass. A premise that
   goes through a method call holds only when every implementation in such a subclass has it.
   A value annotated with a nominal container ABC (`Sequence`, `Mapping`, `Set`, and their mutable

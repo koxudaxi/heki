@@ -412,8 +412,14 @@ first, then a convention the code follows, then a contract.
      plain words. *Rejected*: "data-sized" as part of the exact claim (a complete size evaluator
      does not exist, so every bound heki cannot read would be a false report); reporting a fixed
      count with its count ("on each of 50 iterations"), true but not worth the line.
-  5. **Assumptions R1–R7** ([ARCHITECTURE.md §3.4](../ARCHITECTURE.md)): static bindings,
-     annotations (R2), the catalog, imports as configured, the checked files as the project
+  5. **Assumptions R1–R7** ([ARCHITECTURE.md §3.4](../ARCHITECTURE.md)): static bindings
+     (R1: also a special method bound on a class after its body is bound under its own name, a
+     constant or a name built with constant text that can still spell it; a store under a name
+     of unknown value, such as a parameter or a key of `vars()`, binds none, which gives up
+     `setattr(cls, name, hook)` binding `__setattr__` through such a `name`; *rejected*: such
+     a name as any name, which opens every class of a project that has one
+     `setattr(obj, name, value)` through an untyped receiver, a descriptor's `__set__` or a loop
+     over a mapping's items), annotations (R2), the catalog, imports as configured, the checked files as the project
      (R5: a receiver typed by a `Protocol` stays unresolved, as its implementers are never a
      complete set), and a library call's argument as a waiting value unless heki establishes
      otherwise (R6: a catalog entry that waits lists the values for which it returns at once),

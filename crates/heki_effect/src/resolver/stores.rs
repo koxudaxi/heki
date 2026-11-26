@@ -167,8 +167,8 @@ fn on_classes_key(name: &str) -> String {
     format!(":{name}")
 }
 
-/// The same key for the stores under a name built at run time or one heki cannot read through
-/// such a receiver ([`StoredName::Built`]).
+/// The same key for the stores under a name built at run time through such a receiver
+/// ([`StoredName::Built`]).
 const ON_CLASSES_BUILT_KEY: &str = "::";
 
 /// Most visits of one storing function in the fixpoint of [`record`]: the first finds the
@@ -2764,7 +2764,9 @@ impl<'c, 'f> Classifier<'c, 'f> {
     }
 
     /// Note a store under `name` through `obj` when `obj` may be a class object
-    /// ([`StoresElsewhere::on_classes`]).
+    /// ([`StoresElsewhere::on_classes`]). A name of unknown value (a parameter, a key of a
+    /// namespace or a mapping, a value read from data) is not noted, as R1 takes a special
+    /// method to be bound under its own name.
     fn on_class(&self, out: &mut Sink<'_>, obj: VarId, name: &AttrName<'_>) {
         let Some(foreign) = out
             .foreign
@@ -2772,10 +2774,6 @@ impl<'c, 'f> Classifier<'c, 'f> {
             .filter(|_| self.may_be_class(obj))
         else {
             return;
-        };
-        let built = |head: &str, tail: &str| StoredName::Built {
-            head: head.to_owned(),
-            tail: tail.to_owned(),
         };
         match name {
             AttrName::Named(n) => {
@@ -2785,11 +2783,12 @@ impl<'c, 'f> Classifier<'c, 'f> {
                 (foreign.on_classes).extend(names.iter().cloned().map(StoredName::Named));
             }
             AttrName::Built { head, tail } => {
-                foreign.on_classes.insert(built(head, tail));
+                foreign.on_classes.insert(StoredName::Built {
+                    head: head.clone(),
+                    tail: tail.clone(),
+                });
             }
-            AttrName::KeyOf(_) | AttrName::Unknown => {
-                foreign.on_classes.insert(built("", ""));
-            }
+            AttrName::KeyOf(_) | AttrName::Unknown => {}
         }
     }
 
@@ -2802,9 +2801,9 @@ impl<'c, 'f> Classifier<'c, 'f> {
     /// may implement. A project module is none.
     fn may_be_class(&self, obj: VarId) -> bool {
         let selfs = self.s.selfs.as_ref();
-        let instance_first = !CLASS_FIRST_METHODS.contains(&self.s.f.name.as_str());
-        if instance_first && selfs.is_some_and(|(_, selfs)| selfs.contains(&obj)) {
-            return false;
+        if selfs.is_some_and(|(_, selfs)| selfs.contains(&obj)) {
+            // Inference types the first parameter of every method as an instance.
+            return CLASS_FIRST_METHODS.contains(&self.s.f.name.as_str());
         }
         let project = self.cx.project;
         let holds_classes = |o: &Obj| {
@@ -3413,8 +3412,8 @@ pub(super) struct Elsewhere {
     /// The constant names some module stores under through a receiver that may be a class
     /// object ([`StoresElsewhere::on_classes`]).
     on_classes: FxHashSet<String>,
-    /// The `head` and `tail` of the names built at run time, or that heki cannot read, some
-    /// module stores under through such a receiver ([`StoredName::Built`]).
+    /// The `head` and `tail` of the names built at run time some module stores under through
+    /// such a receiver ([`StoredName::Built`]).
     on_classes_built: FxHashSet<(String, String)>,
 }
 
@@ -3689,9 +3688,9 @@ impl ProjectDecls {
     }
 
     /// Whether some module may store `name` through a receiver that may be a class object
-    /// ([`StoresElsewhere::on_classes`]): under `name` itself, under a name built at run time
-    /// that starts and ends as `name` does, with room for both ends, or under one heki cannot
-    /// read (both ends empty).
+    /// ([`StoresElsewhere::on_classes`]): under `name` itself, or under a name built at run time
+    /// that starts and ends as `name` does, with room for both ends. A store under a name of
+    /// unknown value binds none of the names asked about here (`Classifier::on_class`).
     pub(super) fn bound_on_classes(&self, name: &str) -> bool {
         self.read(|k| note(&mut k.grown_globals, &on_classes_key(name)));
         self.read(|k| note(&mut k.grown_globals, ON_CLASSES_BUILT_KEY));

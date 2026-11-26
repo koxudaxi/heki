@@ -626,8 +626,9 @@ class Plain:
 
 /// A `__setattr__` or `__delattr__` bound on a class after its body, through the class object
 /// or a value that may be one, makes the write run code, also under a name built at run time
-/// whose ends may be the hook's; a built name that is never a hook's, and a store under any name
-/// through an instance, bind nothing Python looks up on the class.
+/// whose ends may be the hook's; a built name that is never a hook's, a name of unknown value
+/// (R1: a special method is installed under its own name), and a store under any name through
+/// an instance bind nothing Python looks up on the class.
 #[test]
 fn mut101_stays_quiet_once_a_hook_may_be_bound_on_the_class_after_its_body() {
     let shapes: &[(&str, &str, bool)] = &[
@@ -641,7 +642,17 @@ fn mut101_stays_quiet_once_a_hook_may_be_bound_on_the_class_after_its_body() {
         (
             "unknown_name",
             "\n\ndef install(target, name, f):\n    setattr(target, name, f)\n",
-            false,
+            true,
+        ),
+        (
+            "descriptor_slot_name",
+            "\n\nclass slot:\n    def __init__(self, name):\n        self.slot_name = name\n\n    def __set__(self, obj, value):\n        setattr(obj, self.slot_name, value)\n",
+            true,
+        ),
+        (
+            "defaults_from_a_mapping",
+            "\n\ndef establish(conninfo, defaults):\n    for name, value in defaults.items():\n        setattr(conninfo, name, value)\n",
+            true,
         ),
         (
             "built_name_of_no_hook",
