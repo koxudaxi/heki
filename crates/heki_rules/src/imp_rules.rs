@@ -22,7 +22,7 @@ use crate::mut_rules::{contract_places, mode, reports_unresolved};
 use crate::patterns::PartIndex;
 use crate::{CheckContext, GLOB_CHARACTERS, NamePart, RuleConfigError, RuleSelection};
 use heki_diagnostics::{Diagnostic, RelatedLocation};
-use heki_effect::imports::{ImportForm, ImportGraph, ImportSite, ModuleRef, Target, Timing};
+use heki_effect::imports::{ImportForm, ImportGraph, ImportSite, ModuleRef, Named, Target, Timing};
 use heki_env::{HekiConfig, ImportBoundaryRule};
 use heki_ir::walk::{Answer, Budget, Visit, reach_breadth_first};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -67,6 +67,9 @@ struct Imported<'n> {
     name: &'n str,
     /// One of the project's modules (`<project>`).
     project: bool,
+    /// The name a `from` import of this module takes (`n` of `from name import n`), when the
+    /// import takes a name of the module and not a submodule.
+    taken: Option<&'n str>,
 }
 
 impl<'n> Imported<'n> {
@@ -74,19 +77,55 @@ impl<'n> Imported<'n> {
         Self {
             name: graph.name(m),
             project: matches!(m, ModuleRef::Project(_)),
+            taken: None,
+        }
+    }
+
+    /// The module as the import `site` takes it: with the name of a `from` import of it.
+    fn at(self, site: &'n ImportSite) -> Self {
+        Self {
+            taken: taken_name(site, self.name),
+            ..self
         }
     }
 }
 
-/// A module pattern: a whole module name or a glob (`*` spans dots), or a group.
+/// The name that `from module import name` takes from `module`, when `site` is that import. Its
+/// target is then `module.name`: a name of the module, or a submodule that heki cannot tell from
+/// one.
+fn taken_name<'s>(site: &'s ImportSite, module: &str) -> Option<&'s str> {
+    match (&site.form, &site.modules) {
+        (ImportForm::From(name), Answer::Known(named)) => {
+            matches!(&named[..], [Named::Module(m)] if m == module).then_some(name.as_str())
+        }
+        _ => None,
+    }
+}
+
+/// A module pattern: a whole module name or a glob (`*` spans dots), or a group, or a name of
+/// a module (`module:name`), which only `from module import name` imports.
 #[derive(Debug, Clone)]
 enum ImportPattern {
     Module(NamePart),
     Group(Group),
+    Name { module: NamePart, name: NamePart },
 }
 
 impl ImportPattern {
-    fn new(text: &str, context: &'static str) -> Result<Self, RuleConfigError> {
+    /// `names`: the list may name a name of a module (`allowed-imports`, `ignored-imports`).
+    fn new(text: &str, context: &'static str, names: bool) -> Result<Self, RuleConfigError> {
+        if let Some((module, name)) = text.split_once(':') {
+            if !names || module.is_empty() || name.is_empty() || name.contains(':') {
+                return Err(RuleConfigError::ImportName {
+                    pattern: text.to_owned(),
+                    context,
+                });
+            }
+            return Ok(Self::Name {
+                module: NamePart::new(module, text, context)?,
+                name: NamePart::new(name, text, context)?,
+            });
+        }
         if text.starts_with('<') {
             return (Group::NAMES.iter())
                 .find(|(name, _)| *name == text)
@@ -103,6 +142,17 @@ impl ImportPattern {
         match self {
             Self::Module(part) => part.is_match(module.name),
             Self::Group(group) => Group::of(module) == *group,
+            Self::Name { .. } => self.names(module),
+        }
+    }
+
+    /// Whether the pattern is a name of a module that the import of `module` takes.
+    fn names(&self, module: Imported<'_>) -> bool {
+        match self {
+            Self::Name { module: part, name } => {
+                module.taken.is_some_and(|taken| name.is_match(taken)) && part.is_match(module.name)
+            }
+            Self::Module(_) | Self::Group(_) => false,
         }
     }
 
@@ -116,7 +166,8 @@ impl ImportPattern {
                     literal.starts_with(head) || head.starts_with(literal)
                 }
             },
-            Self::Group(_) => true,
+            // A name of a module that starts with `head` may be imported.
+            Self::Group(_) | Self::Name { .. } => true,
         }
     }
 
@@ -130,7 +181,7 @@ impl ImportPattern {
                     && part.text().ends_with('*')
                     && head.starts_with(literal)
             }
-            Self::Group(_) => false,
+            Self::Group(_) | Self::Name { .. } => false,
         }
     }
 }
@@ -162,7 +213,7 @@ impl Imports {
     fn groups(&self) -> impl Iterator<Item = Group> + '_ {
         self.patterns.iter().filter_map(|p| match p {
             ImportPattern::Group(group) => Some(*group),
-            ImportPattern::Module(_) => None,
+            ImportPattern::Module(_) | ImportPattern::Name { .. } => None,
         })
     }
 }
@@ -358,7 +409,7 @@ impl<'c> ImportContracts<'c> {
                             context,
                         });
                     }
-                    let pattern = ImportPattern::new(text, context)?;
+                    let pattern = ImportPattern::new(text, context, side == Side::Allowed)?;
                     if let ImportPattern::Module(part) = &pattern {
                         imports.push((part.clone(), (c, side)));
                     }
@@ -375,7 +426,7 @@ impl<'c> ImportContracts<'c> {
                         pattern: text.clone(),
                         context,
                     })?;
-                let imported = ImportPattern::new(imported, context)?;
+                let imported = ImportPattern::new(imported, context, true)?;
                 ignored.push((
                     module_part(importer, context)?,
                     IgnoredPair {
@@ -461,7 +512,9 @@ impl<'c> ImportContracts<'c> {
         let group = Group::of(module);
         let named = |imports: &Imports, side: Side| {
             imports.is_set()
-                && (imports.groups().any(|g| g == group) || matched.contains(&(c, side)))
+                && (imports.groups().any(|g| g == group)
+                    || matched.contains(&(c, side))
+                    || imports.patterns.iter().any(|p| p.names(module)))
         };
         let allowed =
             named(&contract.allowed, Side::Allowed) || matched.contains(&(c, Side::Relative));
@@ -476,10 +529,29 @@ impl<'c> ImportContracts<'c> {
 
     /// Whether contract `c` accepts the import of `module` by `importer` (`ignored-imports`).
     fn ignores(&self, c: usize, importer: &str, module: Imported<'_>) -> bool {
+        self.ignores_by(c, importer, |p| p.matches(module))
+    }
+
+    /// Whether an `ignored-imports` pair of contract `c` for `importer` has an imported side
+    /// that `accepts`.
+    fn ignores_by(
+        &self,
+        c: usize,
+        importer: &str,
+        accepts: impl Fn(&ImportPattern) -> bool,
+    ) -> bool {
         let (index, pairs) = &self.ignored;
         let mut ids = Vec::new();
         index.find(importer, &mut ids);
-        (ids.into_iter().map(|i| &pairs[i])).any(|p| p.contract == c && p.imported.matches(module))
+        (ids.into_iter().map(|i| &pairs[i])).any(|p| p.contract == c && accepts(&p.imported))
+    }
+
+    /// Whether contract `c` names the name that the import of `module` takes, as an allowed
+    /// import or as an accepted one of `importer`: the import is the contract's own, whatever
+    /// it takes the module to be (a submodule or a name of it).
+    fn names_taken(&self, c: usize, importer: &str, module: Imported<'_>) -> bool {
+        (self.contracts[c].allowed.patterns.iter()).any(|p| p.names(module))
+            || self.ignores_by(c, importer, |p| p.names(module))
     }
 
     /// Why an import of `module` written in `importer` breaks contract `c`, unless it accepts
@@ -730,7 +802,7 @@ impl<'r, 'g> Run<'r, '_, 'g> {
             contracts.judge(c, importer, module, absolute(i), loading)
         };
         let one = |module: ModuleRef, i: usize, loading: bool| {
-            judge(Imported::of(graph, module), i, loading)
+            judge(Imported::of(graph, module).at(site), i, loading)
         };
         match target {
             Target::Module(module) => match one(*module, 0, !walked) {
@@ -744,7 +816,12 @@ impl<'r, 'g> Run<'r, '_, 'g> {
                 let imported = Imported {
                     name: submodule,
                     project: matches!(package, ModuleRef::Project(_)),
+                    taken: None,
                 };
+                // A name the contract names is allowed whether it is a submodule or not.
+                if contracts.names_taken(c, importer, Imported::of(graph, *package).at(site)) {
+                    return Verdict::Fine;
+                }
                 match judge(imported, 0, true) {
                     Some(why) => Verdict::Open(
                         OpenImport::Submodule {
@@ -845,7 +922,10 @@ impl<'r, 'g> Run<'r, '_, 'g> {
                     let Some(t) = target.certain().filter(|_| contract.counts(site.timing)) else {
                         continue;
                     };
-                    if contracts.ignores(c, from_name, Imported::of(graph, t)) {
+                    let imported = Imported::of(graph, t).at(site);
+                    if contracts.ignores(c, from_name, imported)
+                        || contracts.names_taken(c, from_name, imported)
+                    {
                         continue;
                     }
                     for w in graph.parents(t).into_iter().chain([t]) {
@@ -952,9 +1032,17 @@ impl<'r, 'g> Run<'r, '_, 'g> {
             [] => None,
             _ => target.certain().map(|t| graph.name(t)),
         };
+        let mut module_key = None;
         let (code, target, message) = match verdict {
             Verdict::Fine => return,
-            Verdict::Breaks(broken) => {
+            Verdict::Breaks(mut broken) => {
+                // `from m import n` imports the name `n` of `m`: the report names it.
+                if let ([(module, _)], None) = (&mut broken[..], first)
+                    && let Some(taken) = taken_name(site, module)
+                {
+                    module_key = Some(module.clone());
+                    *module = format!("{module}.{taken}");
+                }
                 let names: Vec<String> = broken.iter().map(|(n, _)| n.clone()).collect();
                 let message = match first {
                     Some(first) if first != names[0] => format!(
@@ -1003,6 +1091,7 @@ impl<'r, 'g> Run<'r, '_, 'g> {
         ) {
             d.related = related;
             d.contracts = contract_places([c]);
+            d.key_module = module_key;
         }
     }
 

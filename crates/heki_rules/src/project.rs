@@ -1445,6 +1445,7 @@ fn suppression_report(
         allowed_examples: Vec::new(),
         group: false,
         key_target: None,
+        key_module: None,
     })
 }
 

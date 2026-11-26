@@ -2078,10 +2078,10 @@ or a glob whose `*` spans dots, never a suffix (`pkg.*` names `pkg.facts` and
 | `name` | `""` | The contract's name in reports. |
 | `importers` | every module | The modules judged. |
 | `exempt-importers` | `[]` | Modules of `importers` that are not judged. |
-| `allowed-imports` | `[]` | The modules the importers may import: every other import is reported, but those of `relative-imports`. |
+| `allowed-imports` | `[]` | The modules the importers may import: every other import is reported, but those of `relative-imports`. `"pkg.db:Session"` allows one name of a module: only `from pkg.db import Session` imports it (a glob may stand in either part), and another name of `pkg.db` is still reported. |
 | `forbidden-imports` | `[]` | When set, only imports of these modules are reported, less the allowed ones, as in [Allowed and forbidden functions](https://heki.koxudaxi.dev/configuration/#allowed-and-forbidden-functions). A contract setting none of `allowed-imports`, `forbidden-imports`, and `relative-imports` allows no imports. |
 | `relative-imports` | `[]` | The modules the importers may import only through a relative import ([Relative imports only](https://heki.koxudaxi.dev/configuration/#relative-imports-only)). |
-| `ignored-imports` | `[]` | `"importer -> imported"` pairs of module patterns whose imports the contract accepts (`"pkg.cli -> pkg.db"`). |
+| `ignored-imports` | `[]` | `"importer -> imported"` pairs of module patterns whose imports the contract accepts (`"pkg.cli -> pkg.db"`; `"pkg.cli -> pkg.db:Session"` accepts one name of the module, as in `allowed-imports`). With `reach`, an import accepted or allowed by a name is not followed. |
 | `type-checking` | `"ignore"` | `"ignore"` or `"report"`: whether the imports under `if TYPE_CHECKING:`, which never run, count. |
 | `reach` | `"statement"` | `"statement"`: each import of an importer is judged. `"import-time"`: every module loading an importer loads while it loads. `"all"`: every module a chain of imports that run leads to. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the imports whose module heki cannot name are reported under [`IMP202`](https://heki.koxudaxi.dev/rules/unresolved-guarded-import/). |
@@ -2785,6 +2785,16 @@ heki 0.5.0 and earlier cannot read:
 
 A version this heki does not know is an error, and so is a file listing one entry twice (a hand
 merge of two baselines).
+
+### Import names
+
+An [`IMP201`](https://heki.koxudaxi.dev/rules/import-boundary-violation/) report of `from m import n`, where `n` is a name
+of `m`, has the target `m.n`, and its entry holds the name, so another name of the same module is a
+new report. An entry of the module, as heki 0.5.0 and earlier wrote it, keeps covering the names of
+its module that have no entry of their own, with the same count, and `--update-baseline` rewrites
+it per name. Only a heki that keys these reports by name reads the rewritten entries: the file
+has `version = 3`, which heki 0.5.0 and earlier cannot read, so every heki that reads the
+baseline must be newer before a rewritten baseline is committed.
 
 ### Import cycle groups
 
@@ -8670,7 +8680,9 @@ What an import loads is decided as Python decides it:
 - `import a.b.c` imports `a.b.c`. It loads `a` and `a.b` first, but it is no import of them.
 - `from a.b import c` imports the submodule `a.b.c` when the package `a.b` has it and binds no
   name `c` before importing it, and `a.b` otherwise: `from pkg import parse` imports the
-  function when `pkg/__init__.py` re-exports it (`from .parse import parse`).
+  function when `pkg/__init__.py` re-exports it (`from .parse import parse`). A report of the
+  import of a name names it, `a.b.c`: a baseline entry holds the name, so another name of `a.b`
+  is a new report.
 - Relative imports are made absolute from the importing module.
 - `importlib.import_module("pkg.db")` and `__import__("pkg.db")` with a constant name, or a name
   heki establishes, import that module. With several possible names, the call is reported only
@@ -8680,6 +8692,11 @@ What an import loads is decided as Python decides it:
 A module pattern is a whole module name or a glob whose `*` spans dots (`pkg.backend.*` names
 every module below `pkg.backend`, not `pkg.backend` itself), or a group: `<stdlib>`,
 `<project>`, `<third-party>`.
+
+`allowed-imports` and the imported side of an `ignored-imports` pair also take one name of a
+module, `module:name` (`"pkg.model.names:Resolver"`; a glob may stand in either part). Only
+`from pkg.model.names import Resolver` is that import; another name of the module is reported as
+before. With `reach`, an import allowed or accepted by a name is not followed.
 
 A module of `relative-imports` is allowed when the import names it relative to the importer
 (`from . import b`, `from .b import f`, `importlib.import_module(".b", __package__)`), and

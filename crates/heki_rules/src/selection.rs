@@ -560,6 +560,7 @@ mod tests {
             allowed_examples: Vec::new(),
             group: false,
             key_target: None,
+            key_module: None,
         };
         let selection = RuleSelection {
             enabled: BTreeSet::from(["OPT110", "OPT111"]),
