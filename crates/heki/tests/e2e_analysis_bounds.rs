@@ -6344,6 +6344,55 @@ fn stores_into_containers_a_constructor_made_are_decided_once() {
     assert_eq!(writes(&check_linear(2_048, shape)), 1);
 }
 
+/// Constructions of a class whose `__init__`, through a base's that `super().__init__()`
+/// reaches, hands the instance to a helper, under each of thousands of branches: what a
+/// construction of the class keeps of its instance is decided once for the function, and each
+/// construction hands its object to the one `__init__`, so the work grows with the function; the
+/// write before the object is kept constructs it and is allowed, the one after it is reported.
+#[test]
+fn constructions_handing_their_instance_on_are_decided_once() {
+    let shape = |branches: usize| {
+        let mut lines: Vec<String> = [
+            "class Base:",
+            "    def __init__(self):",
+            "        self.attr = 0",
+            "        self.setup()",
+            "    def setup(self):",
+            "        self.ready = True",
+            "class Model(Base):",
+            "    def __init__(self):",
+            "        super().__init__()",
+            "KEPT = []",
+            "def build(flags):",
+            "    m = Model()",
+        ]
+        .map(str::to_owned)
+        .into();
+        for i in 0..branches {
+            lines.push(format!("    if flags[{i}]:"));
+            lines.push(format!("        m.y{i} = Model()"));
+        }
+        lines.extend([
+            "    m.attr = 1".to_owned(),
+            "    KEPT.append(m)".to_owned(),
+            "    m.attr = 2".to_owned(),
+            "    return m".to_owned(),
+        ]);
+        let p = Project::new(&format!("bounds_construction_hands_on_{branches}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n\
+             [[tool.heki.write-owners]]\nname = \"attrs\"\ntargets = [\"m.Base.attr\"]\n\
+             allowed-writers = [\"m.Base.*\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let writes = |found: &[Value]| found.iter().filter(|d| d["rule_code"] == "MUT201").count();
+    assert_eq!(writes(&check(&shape(8))), 1);
+    assert_eq!(writes(&check_linear(2_048, shape)), 1);
+}
+
 /// A constructor binding a list to an attribute through a chain of thousands of names, each
 /// bound to the one before: the walk from the store back to the list visits each copy once, on
 /// the constructor's budget, so the list is still the instance's own and the write before it is

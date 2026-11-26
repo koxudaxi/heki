@@ -472,6 +472,9 @@ pub enum InstKind {
         index: VarId,
         key_const: Option<String>,
         value: VarId,
+        /// The index is a slice (`a[i:j] = v`), which `list.__setitem__` fills by iterating the
+        /// value.
+        is_slice: bool,
     },
     SubscriptDelete {
         obj: VarId,

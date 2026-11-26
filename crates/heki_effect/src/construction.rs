@@ -50,6 +50,10 @@ pub(crate) enum Escape {
     /// Handed to a project callee's parameter (the call site and callee indexes of the
     /// function, the parameter): kept only if the callee keeps it.
     Handed(u32, u16, u8),
+    /// The object a constructor call makes, handed to the first parameter of the `__init__` the
+    /// call runs (the call site and callee indexes): kept from the allocation on, only if that
+    /// `__init__` keeps it.
+    Initialized(u32, u16),
     /// Stored as an attribute of the object this variable holds, by a write that runs no code: a
     /// link when that object is one the function made on every path, kept by what keeps it.
     Into(VarId),
@@ -117,7 +121,7 @@ pub(crate) type ReadsOf<'a> = dyn Fn(VarId, &mut Vec<VarId>) + 'a;
 pub(crate) type HandedTo<'a> = dyn Fn(u32, u16, &[InputGuard]) -> (FuncKey, CallTests) + 'a;
 
 /// The kind of the builtin container an attribute of a new instance of a project class holds,
-/// one its constructor made and nothing else holds (`ProjectDecls::constructor_container`).
+/// one its constructor made and nothing else holds (`ProjectDecls::constructor`).
 pub(crate) type MadeContainer<'a> = dyn Fn(&str, &str) -> Option<ContainerKind> + 'a;
 
 /// What may be kept on some path: the union of the states joined.
@@ -165,7 +169,8 @@ impl Roots<'_> {
     }
 }
 
-/// An action of the data flow at one position, applied in this order: queries, escapes, kills.
+/// An action of the data flow at one position, applied in this order: queries, escapes, kills,
+/// and what the call making an object keeps of it ([`Escape::Initialized`]).
 enum Action {
     Query(usize),
     Escape(Kept),
@@ -499,12 +504,16 @@ impl Recorder {
                 Escape::Definite | Escape::Into(_) | Escape::Added(..) => {
                     stored(&mut keeps, *var, known, &mut out);
                 }
-                Escape::Handed(s, c, p) => {
+                Escape::Handed(s, c, _) | Escape::Initialized(s, c) => {
+                    let p = match how {
+                        Escape::Handed(_, _, p) => *p,
+                        _ => 0,
+                    };
                     let (allocs, params) = roots.masks(*var);
                     if allocs | params != 0 {
                         let (callee, at) = handed_to(*s, *c, known);
                         let by = Some(keeps.id(Keep {
-                            by: KeptBy::Callee(callee, *p),
+                            by: KeptBy::Callee(callee, p),
                             at,
                         }));
                         out.push(Kept { allocs, params, by });
@@ -530,7 +539,13 @@ impl Recorder {
                     );
                 }
             }
-            actions.extend(out.into_iter().map(|k| (*pos, 1, Action::Escape(k))));
+            // What the call making an object keeps of it applies after the allocation.
+            let phase = if matches!(how, Escape::Initialized(..)) {
+                3
+            } else {
+                1
+            };
+            actions.extend(out.into_iter().map(|k| (*pos, phase, Action::Escape(k))));
         }
         // A write of an attribute of an object that may be one holding a container keeps the
         // container: a later read of the attribute may give another value.

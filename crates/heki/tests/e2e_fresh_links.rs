@@ -1534,3 +1534,276 @@ fn containers_the_constructor_made_hold_what_is_added() {
     expected.sort();
     assert_eq!(found, expected);
 }
+
+/// Constructors that keep the instance they make: an `__init__` storing `self` somewhere older,
+/// or handing it to a helper that does, its own or a base's reached through
+/// `super().__init__()` in another module, makes an object another part of the program holds, so
+/// a write to it is the class's write. A decorated `__init__` may run anything, and so may a base
+/// `__init__` another module rebinds, which also leaves the containers of the class unknown, as
+/// a star import that may bind `list` does. A slice store into a container iterates what it
+/// stores, which may run a project `__iter__` keeping it, and reading the instance's namespace
+/// by name may rebind any attribute. A helper keeping nothing, a base that only stores
+/// attributes, and an item store leave the object new.
+const KEEPING_BASE: &str = r#"REGISTRY: list[object] = []
+
+
+class Base:
+    def __init__(self) -> None:
+        self.flag = False
+        REGISTRY.append(self)
+
+
+class PlainBase:
+    def __init__(self) -> None:
+        self.flag = False
+
+
+class ReboundBase:
+    def __init__(self) -> None:
+        self.flag = False
+"#;
+
+const KEEPING_REBIND: &str = r#"from pkg.base import REGISTRY, ReboundBase
+
+
+def _publishing_init(self) -> None:
+    self.flag = False
+    REGISTRY.append(self)
+
+
+ReboundBase.__init__ = _publishing_init
+"#;
+
+const KEEPING_COMPAT: &str = r#"import builtins
+
+SHARED: builtins.list[object] = []
+
+
+def list() -> builtins.list[object]:
+    return SHARED
+"#;
+
+const KEEPING_STARRED: &str = r#"from pkg.compat import *
+
+
+class Starred:
+    def __init__(self) -> None:
+        self.flag = False
+        self.children = list()
+"#;
+
+const KEEPING_MODEL: &str = r#"import functools
+
+from pkg.base import REGISTRY, Base, PlainBase, ReboundBase
+
+
+def traced(init):
+    @functools.wraps(init)
+    def wrapper(self, *args, **kwargs):
+        REGISTRY.append(self)
+        init(self, *args, **kwargs)
+
+    return wrapper
+
+
+class Node:
+    def __init__(self) -> None:
+        self.flag = False
+
+    def __iter__(self):
+        REGISTRY.append(self)
+        return iter(())
+
+
+class Published:
+    def __init__(self) -> None:
+        self.flag = False
+        REGISTRY.append(self)
+
+
+class Derived(Base):
+    def __init__(self) -> None:
+        super().__init__()
+        self.flag = False
+
+
+class Setup:
+    def __init__(self) -> None:
+        self.flag = False
+        self._setup()
+
+    def _setup(self) -> None:
+        self.ready = True
+
+
+class Handing:
+    def __init__(self) -> None:
+        self.flag = False
+        self._keep()
+
+    def _keep(self) -> None:
+        REGISTRY.append(self)
+
+
+class Traced:
+    @traced
+    def __init__(self) -> None:
+        self.flag = False
+
+
+class Quiet(PlainBase):
+    def __init__(self) -> None:
+        super().__init__()
+        self.ready = True
+
+
+class Holder:
+    def __init__(self) -> None:
+        self.flag = False
+        self.children: list[object] = []
+
+
+class Reboundish(ReboundBase):
+    def __init__(self) -> None:
+        super().__init__()
+        self.children: list[object] = []
+"#;
+
+const KEEPING_PASSES: &str = r#"from pkg.base import REGISTRY
+from pkg.model import Derived, Handing, Holder, Node, Published, Quiet, Reboundish, Setup, Traced
+from pkg.starred import Starred
+
+
+def publishes_itself() -> Published:
+    n = Published()
+    n.flag = True
+    return n
+
+
+def base_publishes() -> Derived:
+    d = Derived()
+    d.flag = True
+    return d
+
+
+def helper_keeps_it() -> Handing:
+    h = Handing()
+    h.flag = True
+    return h
+
+
+def decorated_constructor() -> Traced:
+    t = Traced()
+    t.flag = True
+    return t
+
+
+def appends_under_a_rebound_base() -> Reboundish:
+    h = Reboundish()
+    part = Node()
+    h.children.append(part)
+    part.flag = True
+    return h
+
+
+def appends_to_a_starred_list() -> Starred:
+    h = Starred()
+    part = Node()
+    h.children.append(part)
+    part.flag = True
+    return h
+
+
+def slice_store() -> Holder:
+    h = Holder()
+    part = Node()
+    h.children[:] = part
+    part.flag = True
+    return h
+
+
+def through_getattr_dict() -> Holder:
+    h = Holder()
+    getattr(h, "__dict__")["children"] = REGISTRY
+    part = Node()
+    h.children.append(part)
+    part.flag = True
+    return h
+
+
+def through_getattribute_dict() -> Holder:
+    h = Holder()
+    object.__getattribute__(h, "__dict__")["children"] = REGISTRY
+    part = Node()
+    h.children.append(part)
+    part.flag = True
+    return h
+
+
+def setup_keeps_nothing() -> Setup:
+    s = Setup()
+    s.flag = True
+    return s
+
+
+def plain_base() -> Quiet:
+    q = Quiet()
+    q.flag = True
+    return q
+
+
+def appends_to_its_own_list() -> Holder:
+    h = Holder()
+    part = Node()
+    h.children.append(part)
+    part.flag = True
+    h.flag = True
+    return h
+
+
+def item_store() -> Holder:
+    h = Holder()
+    part = Node()
+    h.children[0] = part
+    part.flag = True
+    return h
+"#;
+
+const KEEPING_CONFIG: &str = r#"[project]
+name = "t"
+requires-python = ">=3.12"
+
+[[tool.heki.write-owners]]
+name = "flags"
+targets = ["Node.flag", "Published.flag", "Derived.flag", "Handing.flag", "Traced.flag", "Setup.flag", "Quiet.flag", "Holder.flag"]
+allowed-writers = ["pkg.model.*"]
+fresh-objects = "allow"
+"#;
+
+#[test]
+fn constructors_keeping_the_instance_they_make() {
+    let p = Project::new("fresh_links_keeping");
+    p.write("pyproject.toml", KEEPING_CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/base.py", KEEPING_BASE)
+        .write("pkg/rebind.py", KEEPING_REBIND)
+        .write("pkg/compat.py", KEEPING_COMPAT)
+        .write("pkg/starred.py", KEEPING_STARRED)
+        .write("pkg/model.py", KEEPING_MODEL)
+        .write("pkg/passes.py", KEEPING_PASSES);
+    let found = reports(&diagnostics(&p), KEEPING_PASSES);
+    let at = |func: &str, line: &str| (func.to_owned(), line.to_owned());
+    let mut expected = vec![
+        at("publishes_itself", "n.flag = True"),
+        at("base_publishes", "d.flag = True"),
+        at("helper_keeps_it", "h.flag = True"),
+        at("decorated_constructor", "t.flag = True"),
+        at("appends_under_a_rebound_base", "part.flag = True"),
+        at("appends_to_a_starred_list", "part.flag = True"),
+        at("slice_store", "part.flag = True"),
+        at("through_getattr_dict", "part.flag = True"),
+        at("through_getattribute_dict", "part.flag = True"),
+    ];
+    expected.sort();
+    assert_eq!(found, expected);
+}
