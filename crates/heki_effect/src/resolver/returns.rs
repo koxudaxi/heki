@@ -10,8 +10,8 @@
 //! a function returning one gets no fact.
 
 use super::{
-    Callee, ModuleDecls, ProjectDecls, Ty, TypeCtx, Val, complete_decls, is_generator_function,
-    is_summarized_function, keeps_body_result,
+    Callee, FunctionDecl, ModuleDecls, ProjectDecls, Ty, TypeCtx, Val, complete_decls,
+    is_generator_function, is_summarized_function, keeps_body_result, note,
 };
 use crate::infer::{Called, HandedArgs, Inferred, MAX_HANDED_CALLS};
 use crate::partial::Partial;
@@ -46,6 +46,11 @@ pub struct ReturnFact {
     /// ([`super::FunctionDecl::declared_return`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ty_globals: Vec<String>,
+    /// For a method, the attribute of its receiver every return gives (`return self._db`, also
+    /// awaited of an `async def`): what a call on an instance gives is the one class the stores
+    /// of that attribute bind, which the whole project decides ([`ProjectDecls::held_attr`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_attr: Option<Box<str>>,
 }
 
 /// Items whose number the data decides ([`ReturnFact::items`], [`CallItems`]).
@@ -314,6 +319,88 @@ impl TypeCtx<'_> {
     }
 }
 
+impl TypeCtx<'_> {
+    /// What calling `method` on an instance of the project class `class` gives by the return
+    /// facts of the definitions the call may run: `found`, the one the MRO finds, and the
+    /// override of every project subclass ([`ProjectDecls::method_targets`]), when they are every
+    /// definition an instance may run ([`ProjectDecls::instance_targets_complete`]). Each gives
+    /// its fact ([`FunctionDecl::inferred_return`], or the class of the attribute it returns,
+    /// [`ProjectDecls::held_attr`]) or else its annotation, `Self` bound to `self_ty`; the call
+    /// gives what they agree on. A type checker holds every override to the annotation of the
+    /// definition it overrides, which `None` leaves the call; the fact of one definition says
+    /// nothing of another. Without a fact of `found`, what they agree on is its annotation.
+    pub(crate) fn dispatched_return(
+        &self,
+        class: &str,
+        method: &str,
+        found: &FunctionDecl,
+        self_ty: &Ty,
+    ) -> Option<Ty> {
+        let fact = found.returns.as_deref()?;
+        if fact.self_attr.is_none() && fact.ty.is_none() {
+            return None;
+        }
+        let project = self.project;
+        let callee = project.method_targets(class, method, false, self.kb);
+        let Callee::Project(keys, _) = &callee else {
+            return None;
+        };
+        let decls: Vec<&FunctionDecl> = (keys.iter())
+            .map(|k| project.function_decl(k))
+            .collect::<Option<_>>()?;
+        if !project.instance_targets_complete(class, method, &callee, self.kb) {
+            return None;
+        }
+        let mut each: Vec<Ty> = Vec::with_capacity(decls.len());
+        for d in decls {
+            if d.reads_as_property() || d.returned_import.is_some() {
+                return None;
+            }
+            let attr = d.returns.as_deref().and_then(|r| r.self_attr.as_deref());
+            let returned = match (attr, d.inferred_return(project)) {
+                (Some(attr), _) => project.held_attr(class, attr)?,
+                (None, Some(t)) => project.declared_ty(t)?,
+                (None, None) => project.declared_ty(d.return_type.as_ref()?)?,
+            };
+            each.push(d.call_type(returned.bind_self(Some(self_ty))?));
+        }
+        let first = each.pop()?;
+        each.iter().all(|t| *t == first).then_some(first)
+    }
+}
+
+impl ProjectDecls {
+    /// The class of the value reading `attr` on an instance of the project class `class` gives,
+    /// when the class's own methods decide it: its Priority 3 type ([`Self::member_type`]: an
+    /// annotation, or the join of the stores where `__init__` or `__post_init__` establishes it)
+    /// is an instance of one class, and every class whose code may store into such an instance
+    /// ([`Self::instance_family`]) stores the attribute only through `self` in its own methods,
+    /// never a value that may be `None` ([`super::ClassDecl::unowned_attrs`]). A store from
+    /// another module, a store anywhere through a receiver of no class heki knows, which may be
+    /// such an instance ([`super::StoresElsewhere::untyped_attrs`]), and a getter of the name
+    /// leave it open. The answer is kept per class and attribute for the life of the indexes, so
+    /// the calls of a getter walk the family once.
+    pub(crate) fn held_attr(&self, class: &str, attr: &str) -> Option<Ty> {
+        self.read(|k| note(&mut k.property_names, attr));
+        if self.property_names.contains(attr) || self.attr_stored_untyped(attr) {
+            return None;
+        }
+        let class = self.canonical(class);
+        let key = (class.clone(), attr.to_owned());
+        self.kept(&self.held_attrs, key, || {
+            for c in self.instance_family(&class) {
+                let decl = self.class(&c)?;
+                let unowned = (decl.unowned_attrs.binary_search_by(|a| (**a).cmp(attr))).is_ok();
+                if unowned || self.attr_stored_elsewhere(&c, attr) {
+                    return None;
+                }
+            }
+            let t = self.declared_ty(&self.member_type(&class, attr, false)?)?;
+            matches!(t, Ty::Inst(_)).then_some(t)
+        })
+    }
+}
+
 /// The items a call of the project functions `keys` gives: those every one returns
 /// (`returned`), when they agree.
 fn project_items(
@@ -412,8 +499,15 @@ pub(super) fn record_return_facts(
     for q in ruled_out {
         candidates.remove(q);
     }
+    let mut decided: FxHashMap<&str, ReturnFact> = FxHashMap::default();
+    // Written with the other facts once they are decided: what a call of a method gives depends
+    // on the project's stores and subclasses, which the module's own declarations do not see.
+    for (qualname, attr) in returned_self_attrs(input, decls) {
+        decided.entry(qualname).or_default().self_attr = Some(attr);
+    }
     let typed = typed_candidates(input, decls, kb);
     if candidates.is_empty() && typed.is_empty() {
+        write_return_facts(decls, decided);
         return;
     }
     let own = ProjectDecls::new([decls.clone()]);
@@ -424,7 +518,6 @@ pub(super) fn record_return_facts(
         inferred: RefCell::default(),
         types: RefCell::default(),
     };
-    let mut decided: FxHashMap<&str, ReturnFact> = FxHashMap::default();
     for (qualname, items) in facts.in_passes() {
         decided.entry(qualname).or_default().items = Some(items);
     }
@@ -435,11 +528,50 @@ pub(super) fn record_return_facts(
             fact.ty_globals = facts.globals_read(decls, definitions);
         }
     }
+    write_return_facts(decls, decided);
+}
+
+fn write_return_facts(decls: &mut ModuleDecls, decided: FxHashMap<&str, ReturnFact>) {
     for (qualname, fact) in decided {
         if let Some(d) = decls.functions.get_mut(qualname) {
             d.returns = Some(Box::new(fact));
         }
     }
+}
+
+/// The methods of the module whose every definition returns the same attribute of the instance
+/// it is called on ([`ReturnFact::self_attr`]: `return self._db`, through copies, which
+/// [`super::handed_back_param`] decides), by qualname.
+fn returned_self_attrs<'f>(
+    input: &'f ModuleInput<'_>,
+    decls: &ModuleDecls,
+) -> Vec<(&'f str, Box<str>)> {
+    let mut each: FxHashMap<&str, Option<Box<str>>> = FxHashMap::default();
+    for f in input
+        .ir
+        .functions
+        .iter()
+        .filter(|f| is_summarized_function(f))
+    {
+        let on_instance = (decls.functions.get(&f.qualname))
+            .is_some_and(|d| d.is_method && !d.is_staticmethod && !d.is_classmethod);
+        let attr = match on_instance.then(|| super::handed_back_param(f, decls)) {
+            Some(Some((0, Some(attr)))) => Some(Box::from(attr)),
+            _ => None,
+        };
+        each.entry(&f.qualname)
+            .and_modify(|a| {
+                if *a != attr {
+                    *a = None;
+                }
+            })
+            .or_insert(attr);
+    }
+    let mut out: Vec<(&str, Box<str>)> = (each.into_iter())
+        .filter_map(|(qualname, attr)| Some((qualname, attr?)))
+        .collect();
+    out.sort_unstable();
+    out
 }
 
 /// One definition whose returned values may say more than its annotation: the values, and what

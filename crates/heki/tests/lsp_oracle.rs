@@ -755,6 +755,15 @@ const MADE_MEMBER_FACTORY: &str =
     "from pkg import made_models\n\n\ndef make_member():\n    return made_models.Waiter()\n";
 const MADE_MEMBER_USE: &str = "from pkg.made_member import make_member\n\n\nasync def serve_member() -> None:\n    make_member().wait()\n";
 const MADE_MEMBER_REBINDING: &str = "from pkg import made_models\n\n\ndef swap() -> None:\n    made_models.Waiter = made_models.Quiet\n";
+// A method returning an attribute of `self` that `__init__` binds to a class of a third module
+// (`ReturnFact::self_attr`, `ProjectDecls::held_attr`): a store from another file (of another
+// class in a subclass, through a receiver of the class, through a receiver of no known class)
+// drops the class.
+const HELD_ATTR: &str = "from pkg.made_models import Waiter\n\n\nclass Holder:\n    def __init__(self) -> None:\n        self._waiter = Waiter()\n\n    def waiter(self):\n        return self._waiter\n";
+const HELD_ATTR_USE: &str = "from pkg.held_attr import Holder\n\n\nasync def serve_held(h: Holder) -> None:\n    h.waiter().wait()\n";
+const HELD_ATTR_SUBCLASS: &str = "from pkg.held_attr import Holder\nfrom pkg.made_models import Quiet\n\n\nclass QuietHolder(Holder):\n    def __init__(self) -> None:\n        super().__init__()\n        self._waiter = Quiet()\n";
+const HELD_ATTR_SWAP: &str = "from pkg.held_attr import Holder\nfrom pkg.made_models import Waiter\n\n\ndef renew(h: Holder) -> None:\n    h._waiter = Waiter()\n";
+const HELD_ATTR_UNTYPED: &str = "def clear(h) -> None:\n    h._waiter = None\n";
 // Functions values hold, defined in one module and called in others: the closure a factory
 // returns (`ReturnFact::ty`), a named tuple's field (`ClassDecl::init_fields`), and a
 // `staticmethod(partial(...))` class attribute (`NamedAttr::body_partial`).
@@ -1653,12 +1662,14 @@ fn steps_exact_effects() -> Vec<Step> {
 
 /// A call of a factory in another file gives what every return of the factory gives
 /// (`ReturnFact::ty`): a connection on the file a module constant names, one in memory, or, on a
-/// path heki cannot decide, a connection in an unknown state; and, for a factory without a
-/// return annotation, an instance of the class of a third module that every return constructs,
-/// while every return constructs that one and it is a class.
+/// path heki cannot decide, a connection in an unknown state; for a factory without a return
+/// annotation, an instance of the class of a third module that every return constructs, while
+/// every return constructs that one and it is a class; and for a method returning an attribute
+/// of `self`, the class the class's own methods bind it to, while no other file stores into it.
 fn steps_returned_types() -> Vec<Step> {
     const MADE: &[(&str, &str)] = &[("pkg/made_use.py", "EFF101")];
     const MEMBER: &[(&str, &str)] = &[("pkg/made_member_use.py", "EFF101")];
+    const HELD: &[(&str, &str)] = &[("pkg/held_attr_use.py", "EFF101")];
     const EXACT: &[(&str, &str)] = &[("pkg/factory_use.py", "EFF101")];
     const HEURISTIC: &[(&str, &str)] = &[("pkg/factory_use.py", "EFF101 [heuristic]")];
     const NEITHER: &[(&str, &str)] = &[
@@ -1733,6 +1744,53 @@ fn steps_returned_types() -> Vec<Step> {
             vec![Action::Delete("pkg/made_member_rebinding.py")],
         )
         .present(MEMBER),
+        Step::new(
+            "a method returns an attribute of self that __init__ binds to the waiting class",
+            vec![
+                Action::Create("pkg/held_attr.py", HELD_ATTR.to_owned()),
+                Action::Create("pkg/held_attr_use.py", HELD_ATTR_USE.to_owned()),
+            ],
+        )
+        .present(HELD),
+        Step::new(
+            "a subclass in another file stores another class there",
+            vec![Action::Create(
+                "pkg/held_attr_subclass.py",
+                HELD_ATTR_SUBCLASS.to_owned(),
+            )],
+        )
+        .absent(HELD),
+        Step::new(
+            "the subclass is removed",
+            vec![Action::Delete("pkg/held_attr_subclass.py")],
+        )
+        .present(HELD),
+        Step::new(
+            "another file stores the same class through a receiver of the class",
+            vec![Action::Create(
+                "pkg/held_attr_swap.py",
+                HELD_ATTR_SWAP.to_owned(),
+            )],
+        )
+        .absent(HELD),
+        Step::new(
+            "that store is removed",
+            vec![Action::Delete("pkg/held_attr_swap.py")],
+        )
+        .present(HELD),
+        Step::new(
+            "another file stores the attribute through a receiver of no known class",
+            vec![Action::Create(
+                "pkg/held_attr_untyped.py",
+                HELD_ATTR_UNTYPED.to_owned(),
+            )],
+        )
+        .absent(HELD),
+        Step::new(
+            "that store is removed",
+            vec![Action::Delete("pkg/held_attr_untyped.py")],
+        )
+        .present(HELD),
     ]
 }
 

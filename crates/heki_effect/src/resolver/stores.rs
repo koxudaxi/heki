@@ -149,6 +149,13 @@ impl Recorder {
 /// The `DeclKeys::class_facts` key of whether project code calls `__setstate__` itself.
 pub(super) const SETSTATE_KEY: &str = "__setstate__";
 
+/// The key of the declarations' read log ([`super::DeclKeys::grown_globals`]) an answer of
+/// [`ProjectDecls::attr_stored_untyped`] notes: the attribute after a dot, which no fqn starts
+/// with.
+fn untyped_key(attr: &str) -> String {
+    format!(".{attr}")
+}
+
 /// Most visits of one storing function in the fixpoint of [`record`]: the first finds the
 /// values of the stores reading nothing being decided, each next one a value a read gave since.
 const VISITS: u32 = 4;
@@ -265,6 +272,9 @@ struct Joins {
     any_global: bool,
     /// The names a store rebinds to what an in-place operator gives on their own value.
     in_place: BTreeSet<StoreTarget>,
+    /// The attributes a store binds otherwise than through `self` in a method of their class,
+    /// or to a value that may be `None` ([`ClassDecl::unowned_attrs`]).
+    unowned: BTreeSet<StoreTarget>,
     /// What changes in place add to the objects of names the code changes through a load
     /// typed by the name alone (a global read through the module's own object): joined into
     /// their type once it is established.
@@ -293,6 +303,9 @@ impl Join for Joins {
         for target in &other.in_place {
             grew |= self.in_place.insert(target.clone());
         }
+        for target in &other.unowned {
+            grew |= self.unowned.insert(target.clone());
+        }
         for (target, added) in &other.added {
             grew |= self.add(target.clone(), added);
         }
@@ -306,6 +319,7 @@ impl Join for Joins {
             + self.adding.len()
             + self.restoring.len()
             + self.in_place.len()
+            + self.unowned.len()
             + self.added.len()
     }
 }
@@ -341,8 +355,10 @@ impl Joins {
                 out.push(Key::Class(class.clone()));
             }
         }
-        // What reading an attribute gives does not depend on whether a store adds one.
+        // What reading an attribute gives does not depend on whether a store adds one, or on
+        // where its stores are.
         self.adding.extend(other.adding.iter().cloned());
+        self.unowned.extend(other.unowned.iter().cloned());
         for class in &other.restoring {
             if self.restoring.insert(class.clone()) {
                 out.push(Key::Class(class.clone()));
@@ -399,6 +415,12 @@ impl Joins {
             restoring: self.restoring.difference(&self.any).cloned().collect(),
             ..Decided::default()
         };
+        for target in &self.unowned {
+            if let StoreTarget::Attr(class, attr) = target {
+                let attrs = out.unowned.entry(class.clone()).or_default();
+                attrs.insert(attr.clone());
+            }
+        }
         for target in &self.in_place {
             if let StoreTarget::Attr(class, attr) = target {
                 let declared = decls
@@ -456,6 +478,7 @@ struct Decided {
     adding: BTreeSet<String>,
     restoring: BTreeSet<String>,
     in_place: BTreeMap<String, BTreeSet<String>>,
+    unowned: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Decided {
@@ -488,6 +511,11 @@ impl Decided {
         for (qualname, attrs) in self.in_place {
             if let Some(class) = decls.classes.get_mut(&qualname) {
                 class.in_place_attrs = attrs.into_iter().map(Box::from).collect();
+            }
+        }
+        for (qualname, attrs) in self.unowned {
+            if let Some(class) = decls.classes.get_mut(&qualname) {
+                class.unowned_attrs = attrs.into_iter().map(Box::from).collect();
             }
         }
     }
@@ -634,6 +662,7 @@ struct Foreign {
     globals: BTreeMap<String, ForeignStore>,
     attrs: BTreeMap<String, BTreeMap<String, ForeignStore>>,
     unnamed: BTreeSet<String>,
+    untyped: BTreeSet<String>,
 }
 
 /// What the stores of a function do to one name of another module.
@@ -646,6 +675,8 @@ struct ForeignStore {
     /// What the function's changes in place of the object the name holds add to it
     /// ([`StoringFn::changed`]).
     changed: Option<Added>,
+    /// A store binds a value that may be `None`.
+    none: bool,
 }
 
 impl ForeignStore {
@@ -668,11 +699,14 @@ impl Foreign {
     fn into_decl(self) -> Option<StoresElsewhere> {
         let stored = |s: ForeignStore| {
             let ty = s.stored.elsewhere();
-            (ty.is_some() || s.in_place || s.changed.is_some()).then_some(StoredElsewhere {
-                ty,
-                in_place: s.in_place,
-                changed: s.changed,
-            })
+            (ty.is_some() || s.in_place || s.changed.is_some() || s.none).then_some(
+                StoredElsewhere {
+                    ty,
+                    in_place: s.in_place,
+                    changed: s.changed,
+                    none: s.none,
+                },
+            )
         };
         let out = StoresElsewhere {
             globals: self
@@ -692,8 +726,12 @@ impl Foreign {
                 .filter(|(_, attrs)| !attrs.is_empty())
                 .collect(),
             unnamed: self.unnamed,
+            untyped_attrs: self.untyped,
         };
-        let any = !(out.globals.is_empty() && out.attrs.is_empty() && out.unnamed.is_empty());
+        let any = !(out.globals.is_empty()
+            && out.attrs.is_empty()
+            && out.unnamed.is_empty()
+            && out.untyped_attrs.is_empty());
         any.then_some(out)
     }
 }
@@ -2587,25 +2625,74 @@ impl<'c, 'f> Classifier<'c, 'f> {
     /// A store of `value` in the attribute `attr` of what `obj` holds.
     fn named(&self, out: &mut Sink<'_>, obj: VarId, attr: &str, value: VarId) {
         let global = self.global_value(attr, value, self.unfixed.dynamic);
-        self.store_through(out, obj, attr, self.types.stored(value), global);
+        let stored = StoredValue {
+            ty: self.types.stored(value),
+            may_be_none: self.may_be_none(value),
+        };
+        self.store_through(out, obj, attr, stored, global);
     }
 
-    /// A store of a value of type `value` in the attribute `attr` of what `obj` holds;
-    /// `global` is what it binds when `obj` is the module itself.
+    /// Whether `value` may be `None`, which its type leaves out: the `None` constant reaches it
+    /// through copies and branches (`Database(url) if url else None`). A value typed by an
+    /// annotation allowing `None` is the class it names, as everywhere receivers are typed. Past
+    /// the budget it may be.
+    fn may_be_none(&self, value: VarId) -> bool {
+        let shape = &self.s.shape;
+        let f = self.s.f;
+        let next = |v: VarId, out: &mut Vec<VarId>| match shape.def(v) {
+            Def::Phi(b, i) => {
+                let phi = &f.blocks[b.0 as usize].phis[i as usize];
+                out.extend(phi.incoming.iter().map(|(_, x)| *x));
+            }
+            Def::Inst(..) => {
+                if let Some(InstKind::Copy { src, .. }) = shape.inst(v).map(|i| &i.kind) {
+                    out.push(*src);
+                }
+            }
+            Def::Param | Def::None => {}
+        };
+        let visit = |v: VarId| match shape.inst(v).map(|i| &i.kind) {
+            Some(InstKind::Const {
+                literal: heki_ir::ConstLiteral::None,
+                ..
+            }) => Visit::Stop(()),
+            _ => Visit::Expand,
+        };
+        reach(&self.budget, [value], next, visit) != Answer::Known(None)
+    }
+
+    /// A store of a value `value` in the attribute `attr` of what `obj` holds; `global` is
+    /// what it binds when `obj` is the module itself. A receiver of no class heki knows may be
+    /// an instance of any class ([`StoresElsewhere::untyped_attrs`]).
     fn store_through(
         &self,
         out: &mut Sink<'_>,
         obj: VarId,
         attr: &str,
-        value: Option<Option<&Ty>>,
+        value: StoredValue<'_>,
         global: Option<Option<Ty>>,
     ) {
         let module = self.cx.module_name();
-        for holder in self.holders(obj) {
+        let holders = self.holders(obj);
+        if holders.is_empty()
+            && let Some(foreign) = out.foreign.as_deref_mut()
+        {
+            foreign.untyped.insert(attr.to_owned());
+        }
+        let StoredValue {
+            ty: value,
+            may_be_none,
+        } = value;
+        // A store of `None` itself binds no type.
+        let may_be_none = may_be_none || value.is_none();
+        for holder in holders {
             match holder {
                 Holder::Own { class, own_self } => {
                     let target = StoreTarget::Attr(class.to_owned(), attr.to_owned());
                     let establishing = own_self && self.s.at_init;
+                    if !own_self || may_be_none {
+                        out.own.unowned.insert(target.clone());
+                    }
                     out.own.store(target, establishing, value);
                 }
                 Holder::Module(m) if m == module => {
@@ -2630,6 +2717,7 @@ impl<'c, 'f> Classifier<'c, 'f> {
                             .entry(attr.to_owned())
                             .or_default();
                         stored.stored.add(value);
+                        stored.none |= may_be_none;
                     }
                 }
             }
@@ -2845,6 +2933,14 @@ struct Sink<'s> {
     foreign: Option<&'s mut Foreign>,
 }
 
+/// What a store binds ([`Classifier::store_through`]).
+struct StoredValue<'t> {
+    /// As [`Inferred::stored`] gives it.
+    ty: Option<Option<&'t Ty>>,
+    /// The value may be `None`, which `ty` leaves out ([`Classifier::may_be_none`]).
+    may_be_none: bool,
+}
+
 /// [`ModuleDecls::exports`]: the module's `__all__`, when the module body binds it once, on
 /// every path that finishes it ([`LastBindings::always_runs`]: where it stays unbound, a star
 /// import binds every public name), to a tuple of string literals
@@ -3051,6 +3147,9 @@ pub(super) struct Elsewhere {
     attrs: FxHashMap<String, FxHashMap<String, StoredElsewhere>>,
     unnamed: FxHashSet<String>,
     held: FxHashMap<String, FxHashSet<StoreTarget>>,
+    /// The attributes some module stores through a receiver of no class heki knows
+    /// ([`StoresElsewhere::untyped_attrs`]).
+    untyped_attrs: FxHashSet<String>,
 }
 
 /// What other modules store into a module: its globals and the attributes of its classes, by
@@ -3118,6 +3217,8 @@ impl Elsewhere {
             }
         }
         out.extend(self.unnamed.symmetric_difference(&after.unnamed).cloned());
+        let untyped = (self.untyped_attrs).symmetric_difference(&after.untyped_attrs);
+        out.extend(untyped.map(|attr| untyped_key(attr)));
         for module in self.held.keys().chain(after.held.keys()) {
             if self.held.get(module) != after.held.get(module) {
                 out.insert(module.clone());
@@ -3128,9 +3229,15 @@ impl Elsewhere {
 }
 
 impl StoredElsewhere {
+    /// Whether every store binds `None`, which adds nothing to the name's type.
+    fn binds_none_alone(&self) -> bool {
+        self.none && self.ty.is_none() && !self.in_place && self.changed.is_none()
+    }
+
     /// Join what another module's stores bind.
     fn join(&mut self, other: &StoredElsewhere) {
         self.in_place |= other.in_place;
+        self.none |= other.none;
         if let Some(added) = &other.changed {
             join_added(&mut self.changed, added);
         }
@@ -3171,6 +3278,8 @@ impl ProjectDecls {
             let Some(stores) = m.stores_elsewhere.as_deref() else {
                 continue;
             };
+            out.untyped_attrs
+                .extend(stores.untyped_attrs.iter().cloned());
             for (fqn, t) in &stores.globals {
                 let fqn = self.canonical(fqn);
                 let Some((module, rest)) = owner(&fqn, m) else {
@@ -3184,7 +3293,9 @@ impl ProjectDecls {
                 let class = self.canonical(class);
                 for (module, _) in owner(&class, m).into_iter() {
                     let into = touched.entry(module).or_default();
-                    into.attrs.extend(attrs.keys().cloned());
+                    // A store of `None` alone binds nothing a read of the name gives.
+                    let binding = attrs.iter().filter(|(_, t)| !t.binds_none_alone());
+                    into.attrs.extend(binding.map(|(attr, _)| attr.clone()));
                     let joins = out.attrs.entry(class.clone()).or_default();
                     for (attr, t) in attrs {
                         joins.entry(attr.clone()).or_default().join(t);
@@ -3275,6 +3386,20 @@ impl ProjectDecls {
         self.read(|k| note(&mut k.grown_globals, fqn));
         self.read(|k| note(&mut k.grown_globals, &m.module_name));
         self.elsewhere.globals.contains_key(fqn) || self.elsewhere.unnamed.contains(&m.module_name)
+    }
+
+    /// Whether another module stores into `attr` of the instances of the canonical class
+    /// `class` through a receiver of the class, by name.
+    pub(super) fn attr_stored_elsewhere(&self, class: &str, attr: &str) -> bool {
+        self.read(|k| note(&mut k.grown_globals, class));
+        (self.elsewhere.attrs.get(class)).is_some_and(|attrs| attrs.contains_key(attr))
+    }
+
+    /// Whether some module stores `attr` through a receiver of no class heki knows
+    /// ([`StoresElsewhere::untyped_attrs`]).
+    pub(super) fn attr_stored_untyped(&self, attr: &str) -> bool {
+        self.read(|k| note(&mut k.grown_globals, &untyped_key(attr)));
+        self.elsewhere.untyped_attrs.contains(attr)
     }
 
     /// What the module's code stores in `attr` of the instances of the canonical class `class`

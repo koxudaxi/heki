@@ -4,7 +4,9 @@
 //! factory annotated with a base class that returns a subclass gives the subclass. A function
 //! without a return annotation whose every return is a call giving an instance of one class (a
 //! construction of a library class, of a class of its module or of another module) gives an
-//! instance of that class, unless another module rebinds the name it calls. A module constant
+//! instance of that class, unless another module rebinds the name it calls; a method does so for
+//! a call on an instance when every definition the call may run agrees, also one returning an
+//! attribute of `self` that only the class's own methods bind to one class. A module constant
 //! that names a file (`ModuleDecls::file_constants`) names it wherever it is read, unless another
 //! module rebinds it.
 
@@ -489,4 +491,408 @@ fn a_rebinding_of_the_member_a_factory_calls_drops_the_class_it_returns() {
     );
     p.write("pkg/swapping.py", MEMBER_REBINDING);
     assert_eq!(messages(&p), Vec::<String>::new());
+}
+
+const METHOD_BOUNDARY: &str = r#"[project]
+name = "returns"
+version = "0"
+requires-python = ">=3.11"
+
+[tool.heki.lint]
+select = ["EFF201"]
+
+[[tool.heki.effect-boundaries]]
+name = "fs"
+scopes = ["pkg.callers:*"]
+forbid = ["blocking-fs"]
+"#;
+
+const METHOD_MODELS: &str = r#"from pathlib import Path
+
+
+class Store:
+    def save(self) -> None:
+        Path("x").write_text("x")
+
+
+class Database:
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+    def query(self) -> str:
+        return Path(self.url).read_text()
+
+    async def fetch(self) -> str:
+        return Path(self.url).read_text()
+
+
+class Other:
+    def save(self) -> None:
+        pass
+
+    def query(self) -> str:
+        return ""
+"#;
+
+const SERVICES: &str = r#"from typing import Union
+
+from pkg.models import Database, Other, Store
+
+
+class Factory:
+    def make(self):
+        return Store()
+
+
+class Held:
+    def __init__(self, url: str) -> None:
+        self._db = Database(url)
+
+    def db(self):
+        return self._db
+
+
+class Pool:
+    def __init__(self, url: str) -> None:
+        if url:
+            self._db = Database(url)
+        else:
+            self._db = Database("default")
+
+    async def get_db(self):
+        return self._db
+
+
+class StoredOutside:
+    def __init__(self) -> None:
+        self._db = Database("x")
+
+    def db(self):
+        return self._db
+
+
+def reset(s: StoredOutside) -> None:
+    s._db = Database("y")
+
+
+class Swapped:
+    def __init__(self) -> None:
+        self._db = Database("x")
+
+    def swap(self) -> None:
+        self._db = Other()
+
+    def db(self):
+        return self._db
+
+
+class Closed:
+    def __init__(self) -> None:
+        self._db = Database("x")
+
+    def close(self) -> None:
+        self._db = None
+
+    def db(self):
+        return self._db
+
+
+class Given:
+    def __init__(self, db) -> None:
+        self._db = db
+
+    def db(self):
+        return self._db
+
+
+class Overridden:
+    def make(self):
+        return Store()
+
+
+class OverridingSub(Overridden):
+    def make(self):
+        return Other()
+
+
+class Optional:
+    def __init__(self) -> None:
+        self._db: Database | None = Database("x")
+
+    def db(self):
+        return self._db
+
+
+class Maybe:
+    def __init__(self, url: str) -> None:
+        self._db = Database(url) if url else None
+
+    def db(self):
+        return self._db
+
+
+class Public:
+    def __init__(self) -> None:
+        self.conn = Database("x")
+
+    def get(self):
+        return self.conn
+
+
+class Base:
+    def __init__(self) -> None:
+        self._db = Database("x")
+
+    def db(self):
+        return self._db
+
+
+class ClosedElsewhere:
+    def __init__(self) -> None:
+        self._db = Database("x")
+
+    def db(self):
+        return self._db
+
+
+class Unioned:
+    def __init__(self) -> None:
+        self._db: "Union[Database, None]" = Database("x")
+
+    def db(self):
+        return self._db
+
+
+class Shaped:
+    def make(self):
+        return Store()
+
+
+class PropertySub(Shaped):
+    @property
+    def make(self):
+        return Store
+
+
+class Crowded:
+    def make(self):
+        return Store()
+
+
+class Crowded0(Crowded):
+    def make(self):
+        return Store()
+
+
+class Crowded1(Crowded):
+    def make(self):
+        return Store()
+
+
+class Crowded2(Crowded):
+    def make(self):
+        return Store()
+
+
+class Crowded3(Crowded):
+    def make(self):
+        return Store()
+
+
+class Crowded4(Crowded):
+    def make(self):
+        return Store()
+
+
+class Crowded5(Crowded):
+    def make(self):
+        return Store()
+
+
+class Crowded6(Crowded):
+    def make(self):
+        return Store()
+
+
+class Crowded7(Crowded):
+    def make(self):
+        return Store()
+
+
+class Crowded8(Crowded):
+    def make(self):
+        return Store()
+"#;
+
+const SUBCLASSES: &str = r#"from pkg.models import Database, Other
+from pkg.services import Base, Held
+
+
+class SameSub(Held):
+    def __init__(self) -> None:
+        super().__init__("sub")
+        self._db = Database("sub")
+
+
+class OtherSub(Base):
+    def __init__(self) -> None:
+        super().__init__()
+        self._db = Other()
+"#;
+
+const WIRING: &str = r#"from pkg.services import ClosedElsewhere
+
+
+def configure(app) -> None:
+    app.conn = object()
+
+
+def close(c: ClosedElsewhere) -> None:
+    c._db = None
+"#;
+
+const METHOD_CALLERS: &str = r#"from pkg.services import (
+    Base,
+    Closed,
+    ClosedElsewhere,
+    Crowded,
+    Factory,
+    Given,
+    Held,
+    Maybe,
+    Optional,
+    Overridden,
+    Pool,
+    Public,
+    Shaped,
+    StoredOutside,
+    Swapped,
+    Unioned,
+)
+
+
+def tp_method_constructs(f: Factory) -> None:
+    f.make().save()
+
+
+def tp_attribute_of_self(h: Held) -> str:
+    return h.db().query()
+
+
+async def tp_awaited_getter(p: Pool) -> str:
+    db = await p.get_db()
+    return await db.fetch()
+
+
+def tn_stored_outside_the_class(s: StoredOutside) -> str:
+    return s.db().query()
+
+
+def tn_another_class(s: Swapped) -> str:
+    return s.db().query()
+
+
+def tn_none(c: Closed) -> str:
+    return c.db().query()
+
+
+def tn_unknown(g: Given) -> str:
+    return g.db().query()
+
+
+def tn_overridden(o: Overridden) -> None:
+    o.make().save()
+
+
+def tn_annotated_optional(o: Optional) -> str:
+    return o.db().query()
+
+
+def tn_maybe_none(m: Maybe) -> str:
+    return m.db().query()
+
+
+def tn_written_through_an_untyped_receiver(p: Public) -> str:
+    return p.get().query()
+
+
+def tn_subclass_of_another_file(b: Base) -> str:
+    return b.db().query()
+
+
+def tn_none_from_another_file(c: ClosedElsewhere) -> str:
+    return c.db().query()
+
+
+def tn_annotated_union_with_none(u: Unioned) -> str:
+    return u.db().query()
+
+
+def tn_overridden_by_a_property(s: Shaped) -> None:
+    s.make().save()
+
+
+def tn_past_the_override_limit(c: Crowded) -> None:
+    c.make().save()
+"#;
+
+/// A method without a return annotation gives a call on an instance the class every definition
+/// the call may run returns (`TypeCtx::dispatched_return`): a construction, or an attribute of
+/// `self` that only the class's own methods bind, to one class (`ProjectDecls::held_attr`), also
+/// awaited of an `async def` getter and with a subclass in another file binding the same class.
+/// A store outside the class (also of `None` alone from another file), of another class, of
+/// `None`, or of an unknown value, an override
+/// returning another class or by a property, more overrides than `CHA_CANDIDATE_LIMIT`, an
+/// annotation allowing `None`, a store through a receiver of no known class, and a subclass in
+/// another file binding another class leave the call unresolved.
+#[test]
+fn a_method_gives_the_class_every_definition_the_call_may_run_returns() {
+    let p = Project::new("return_facts_methods");
+    p.write("pyproject.toml", METHOD_BOUNDARY)
+        .write("pkg/__init__.py", "")
+        .write("pkg/models.py", METHOD_MODELS)
+        .write("pkg/services.py", SERVICES)
+        .write("pkg/subclasses.py", SUBCLASSES)
+        .write("pkg/wiring.py", WIRING)
+        .write("pkg/callers.py", METHOD_CALLERS);
+    let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let mut reports: Vec<(u64, String)> = diags
+        .iter()
+        .map(|d| {
+            assert_eq!(d["path"], "pkg/callers.py", "{d}");
+            (
+                d["line"].as_u64().unwrap(),
+                d["message"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    reports.sort();
+    let reaches = |line: u64, f: &str, via: &str| {
+        (
+            line,
+            format!("`{f}` reaches blocking_fs ({via}), which effect boundary `fs` forbids"),
+        )
+    };
+    assert_eq!(
+        reports,
+        [
+            reaches(
+                22,
+                "tp_method_constructs",
+                "`pathlib.Path.write_text` via `pkg.models.Store.save`"
+            ),
+            reaches(
+                26,
+                "tp_attribute_of_self",
+                "`pathlib.Path.read_text` via `pkg.models.Database.query`"
+            ),
+            reaches(
+                31,
+                "tp_awaited_getter",
+                "`pathlib.Path.read_text` via `pkg.models.Database.fetch`"
+            ),
+        ]
+    );
 }
